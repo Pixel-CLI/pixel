@@ -106,6 +106,25 @@ impl<T> Envelope<T> {
     }
 }
 
+/// Convenience specialization for `Envelope<serde_json::Value>`: the result
+/// payload, or `Value::Null` when absent (failure envelopes carry no result).
+/// This is the successor to the old ad-hoc `Response::data` field — callers
+/// that previously read `resp.data` now read `resp.data()`.
+impl Envelope<serde_json::Value> {
+    pub fn data(&self) -> &serde_json::Value {
+        self.result.as_ref().unwrap_or(&serde_json::Value::Null)
+    }
+
+    /// The error message string, or a fallback when the envelope carries no
+    /// error. Successor to the old `Response::error: Option<String>` field.
+    pub fn error_message(&self) -> String {
+        self.error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| "unknown error".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

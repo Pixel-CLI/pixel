@@ -10,18 +10,23 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, open_regular_bounded};
 use pixel_index::indexset::{IndexSet, IndexSetError};
 use pixel_graph::{EdgeKind, EdgeRow, GraphStore, SymbolKind, SymbolRow};
+use pixel_proto::{Envelope, ErrorCode, PixelError};
 
 pub const GRAPH_DB_FILE: &str = "graph.db";
 /// Increment whenever the daemon request/response contract changes in a way
-/// that an older process cannot safely serve to a newer CLI.
-pub const PROTOCOL_VERSION: u64 = 6;
+/// that an older process cannot safely serve to a newer CLI. Bumped from 6
+/// to 7 with the Envelope v2 migration: the wire shape changed from
+/// `{ok, error, data}` to the full `Envelope` (`ok, op, protocol, requestId,
+/// snapshot, epistemics, budget, result, error, warnings`), gated by
+/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`.
+pub const PROTOCOL_VERSION: u64 = 7;
 
 // ---------------------------------------------------------------------------
 // errors
@@ -57,107 +62,46 @@ impl From<std::io::Error> for ServeError {
 }
 
 // ---------------------------------------------------------------------------
-// wire types
+// wire types — now derived from pixel-proto (the single contract crate)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum Request {
-    Ping,
-    /// Transcript-corpus operation, served only by a recall daemon (a repo
-    /// daemon answers it with an "unsupported" error). `action` selects the
-    /// recall op ("search" | "ask"); `params` is its argument object.
-    Recall {
-        action: String,
-        #[serde(default)]
-        params: Value,
-    },
-    Search {
-        pattern: String,
-        #[serde(default)]
-        json: bool,
-        #[serde(default)]
-        limit: Option<usize>,
-        #[serde(default)]
-        offset: Option<usize>,
-        /// Repo-relative path prefixes to restrict the search to (rg-style
-        /// multi-path invocations). None/empty = whole repo.
-        #[serde(default)]
-        paths: Option<Vec<String>>,
-    },
-    /// Sniper target list: task description in, closed prioritized file
-    /// list (P0/P1/P2) out.
-    Targets {
-        task: String,
-        #[serde(default)]
-        limit: Option<usize>,
-    },
-    Symbol {
-        name: String,
-    },
-    Context {
-        uid: String,
-        #[serde(default)]
-        budget_tokens: Option<usize>,
-    },
-    Impact {
-        uid_or_name: String,
-        direction: String,
-        #[serde(default)]
-        depth: Option<u32>,
-    },
-    Uses {
-        uid_or_name: String,
-        /// "callers" | "callees"
-        role: String,
-        #[serde(default)]
-        offset: Option<usize>,
-    },
-    Trace {
-        from: String,
-        to: String,
-    },
-    Processes {
-        #[serde(default)]
-        offset: Option<usize>,
-    },
-    Clusters {
-        #[serde(default)]
-        offset: Option<usize>,
-    },
-    Changes {
-        #[serde(default)]
-        base: Option<String>,
-        #[serde(default)]
-        offset: Option<usize>,
-    },
-    Graph {},
-    Status {},
-    Shutdown,
+/// The daemon request type. Re-exported from `pixel_proto::Op` so the daemon,
+/// CLI, and MCP surfaces all share one enum — per PLAN.md A1, this kills the
+/// N-touchpoint op-registration problem (adding an op is one variant here,
+/// not edits across 4+ crates).
+pub use pixel_proto::Op as Request;
+
+/// The daemon response type: a `pixel_proto::Envelope<serde_json::Value>`.
+/// Success → `Envelope::success(op_name, result)`; failure →
+/// `Envelope::failure(op_name, error)`. The old ad-hoc `{ok, error, data}`
+/// struct is gone; `resp.data()` reads the envelope's `result` field.
+pub type Response = Envelope<Value>;
+
+/// Classify a daemon read-op error string into the best-fit `ErrorCode`.
+/// The message is always preserved verbatim in the envelope's `error.message`;
+/// the code is for programmatic handling. Most read-op failures are
+/// "you asked for something that doesn't exist or is malformed" →
+/// `InvalidInput`; index/graph state failures map to the pixel-specific
+/// codes. Refined per-op as typed errors land in later milestones.
+fn classify_error(msg: &str) -> ErrorCode {
+    let lower = msg.to_lowercase();
+    if lower.contains("index") && (lower.contains("build") || lower.contains("rebuild")) {
+        ErrorCode::IndexBuilding
+    } else if lower.contains("not indexed") || lower.contains("no index") {
+        ErrorCode::NotIndexed
+    } else if lower.contains("ambiguous") {
+        ErrorCode::Ambiguous
+    } else {
+        ErrorCode::InvalidInput
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Response {
-    pub ok: bool,
-    pub error: Option<String>,
-    pub data: Value,
-}
-
-impl Response {
-    pub fn ok(data: Value) -> Self {
-        Response {
-            ok: true,
-            error: None,
-            data,
-        }
-    }
-    pub fn err(msg: impl Into<String>) -> Self {
-        Response {
-            ok: false,
-            error: Some(msg.into()),
-            data: Value::Null,
-        }
-    }
+/// Build a failure envelope from a plain error string (the shape `dispatch`
+/// returns). Used by `handle` and the daemon transport for pre-parse errors.
+pub fn failure_response(op: &str, msg: impl Into<String>) -> Response {
+    let msg = msg.into();
+    let code = classify_error(&msg);
+    Envelope::failure(op, PixelError::new(code, msg))
 }
 
 // ---------------------------------------------------------------------------
@@ -274,9 +218,10 @@ impl Service {
     }
 
     pub fn handle(&mut self, req: Request) -> Response {
+        let op_name = req.op_name();
         match self.dispatch(req) {
-            Ok(v) => Response::ok(v),
-            Err(e) => Response::err(e),
+            Ok(v) => Envelope::success(op_name, v),
+            Err(msg) => failure_response(op_name, msg),
         }
     }
 
@@ -406,7 +351,7 @@ impl Service {
     /// instead of erroring — a scoping request must never die on a broken
     /// graph build.
     fn op_targets(&mut self, task: &str, limit: Option<usize>) -> Result<Value, String> {
-        use crate::targets as engine;
+        use pixel_rank as engine;
         use pixel_graph::targets as graph_targets;
 
         let started = Instant::now();
@@ -1436,7 +1381,7 @@ mod tests {
         let resp = svc.handle(Request::Ping);
         assert!(resp.ok);
         assert_eq!(
-            resp.data.get("protocol_version").and_then(Value::as_u64),
+            resp.data().get("protocol_version").and_then(Value::as_u64),
             Some(super::PROTOCOL_VERSION)
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -1469,7 +1414,7 @@ mod tests {
         });
         assert!(first.ok && second.ok);
         let edge_uids = |response: &Response| {
-            response.data["edges"]
+            response.data()["edges"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1481,9 +1426,9 @@ mod tests {
         assert_eq!(first_uids.len(), 20);
         assert_eq!(second_uids.len(), 5);
         assert!(first_uids.is_disjoint(&second_uids));
-        assert_eq!(first.data["next_offset"].as_u64(), Some(20));
-        assert!(second.data["next_offset"].is_null());
-        assert_eq!(second.data["total_edges"].as_u64(), Some(25));
+        assert_eq!(first.data()["next_offset"].as_u64(), Some(20));
+        assert!(second.data()["next_offset"].is_null());
+        assert_eq!(second.data()["total_edges"].as_u64(), Some(25));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1517,7 +1462,7 @@ mod tests {
         });
         assert!(first.ok && second.ok, "first={first:?} second={second:?}");
         let symbol_uids = |response: &Response| {
-            response.data["symbols"]
+            response.data()["symbols"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1529,9 +1474,9 @@ mod tests {
         assert_eq!(first_uids.len(), 20);
         assert_eq!(second_uids.len(), 5);
         assert!(first_uids.is_disjoint(&second_uids));
-        assert_eq!(first.data["next_offset"].as_u64(), Some(20));
-        assert!(second.data["next_offset"].is_null());
-        assert_eq!(second.data["symbols_total"].as_u64(), Some(25));
+        assert_eq!(first.data()["next_offset"].as_u64(), Some(20));
+        assert!(second.data()["next_offset"].is_null());
+        assert_eq!(second.data()["symbols_total"].as_u64(), Some(25));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1561,7 +1506,7 @@ mod tests {
         });
         assert!(sym.ok, "symbol lookup: {:?}", sym);
         let uid = sym
-            .data
+            .data()
             .get("symbols")
             .and_then(Value::as_array)
             .and_then(|a| a.first())
@@ -1576,7 +1521,7 @@ mod tests {
             budget_tokens: Some(50),
         });
         assert!(resp.ok, "context: {:?}", resp);
-        let serialized = serde_json::to_string(&resp.data).unwrap();
+        let serialized = serde_json::to_string(resp.data()).unwrap();
         let tokens = pixel_context::estimate_tokens(&serialized);
         assert!(
             tokens <= 50,
@@ -1584,7 +1529,7 @@ mod tests {
             serialized.len()
         );
         // Text must be empty or very small when budget < overhead.
-        let text = resp.data.get("text").and_then(Value::as_str).unwrap_or("");
+        let text = resp.data().get("text").and_then(Value::as_str).unwrap_or("");
         assert!(
             text.is_empty() || pixel_context::estimate_tokens(text) <= 50,
             "text should be empty or tiny when budget is 50, got {} tokens",
@@ -1592,7 +1537,7 @@ mod tests {
         );
         // budgeted flag must be set so callers know the cap applied.
         assert_eq!(
-            resp.data.get("budgeted").and_then(Value::as_bool),
+            resp.data().get("budgeted").and_then(Value::as_bool),
             Some(true),
             "budgeted flag must be true when a budget is set"
         );
@@ -1621,7 +1566,7 @@ mod tests {
             name: "alpha".into(),
         });
         let uid = sym
-            .data
+            .data()
             .get("symbols")
             .and_then(Value::as_array)
             .and_then(|a| a.first())
@@ -1636,7 +1581,7 @@ mod tests {
             budget_tokens: Some(500),
         });
         assert!(resp.ok, "context: {:?}", resp);
-        let serialized = serde_json::to_string(&resp.data).unwrap();
+        let serialized = serde_json::to_string(resp.data()).unwrap();
         let tokens = pixel_context::estimate_tokens(&serialized);
         assert!(
             tokens <= 500,
@@ -1676,17 +1621,17 @@ mod tests {
             offset: None,
         });
         assert!(resp.ok, "search: {:?}", resp);
-        let matches = resp.data.get("matches").and_then(Value::as_array).unwrap();
+        let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
         // Default limit is 100; 120 matching files must return one full page
         // with an exact continuation offset.
         assert_eq!(
-            resp.data.get("limit").and_then(Value::as_u64),
+            resp.data().get("limit").and_then(Value::as_u64),
             Some(100),
             "default limit must be reported"
         );
         assert_eq!(matches.len(), 100, "default limit must cap matches");
         assert_eq!(
-            resp.data.get("next_offset").and_then(Value::as_u64),
+            resp.data().get("next_offset").and_then(Value::as_u64),
             Some(100)
         );
         // Now request a tiny limit: must truncate.
@@ -1698,9 +1643,9 @@ mod tests {
             offset: None,
         });
         assert!(resp.ok);
-        let matches = resp.data.get("matches").and_then(Value::as_array).unwrap();
+        let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
         let truncated = resp
-            .data
+            .data()
             .get("truncated")
             .and_then(Value::as_bool)
             .unwrap_or(false);
@@ -1716,15 +1661,15 @@ mod tests {
             offset: Some(5),
         });
         assert!(resp.ok);
-        let second_page = resp.data.get("matches").and_then(Value::as_array).unwrap();
+        let second_page = resp.data().get("matches").and_then(Value::as_array).unwrap();
         assert_eq!(second_page.len(), 5);
         assert!(
             first_page.iter().all(|item| !second_page.contains(item)),
             "offset page must not repeat prior matches"
         );
-        assert_eq!(resp.data.get("offset").and_then(Value::as_u64), Some(5));
+        assert_eq!(resp.data().get("offset").and_then(Value::as_u64), Some(5));
         assert_eq!(
-            resp.data.get("next_offset").and_then(Value::as_u64),
+            resp.data().get("next_offset").and_then(Value::as_u64),
             Some(10)
         );
 

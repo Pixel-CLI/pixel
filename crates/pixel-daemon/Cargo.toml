@@ -8,6 +8,8 @@ license.workspace = true
 pixel-index = { path = "../pixel-index" }
 pixel-graph = { path = "../pixel-graph" }
 pixel-context = { path = "../pixel-context" }
+pixel-rank = { path = "../pixel-rank" }
+pixel-proto = { path = "../pixel-proto" }
 pixel-recall = { path = "../pixel-recall", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

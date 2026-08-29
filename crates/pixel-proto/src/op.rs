@@ -92,6 +92,32 @@ pub enum Op {
     Shutdown,
 }
 
+impl Op {
+    /// The wire tag name for this variant — the value serde emits under the
+    /// `"op"` field (`"ping"`, `"search"`, `"targets"`, …). Used to populate
+    /// the response envelope's `op` field so every response self-describes
+    /// which op it answers.
+    pub fn op_name(&self) -> &'static str {
+        match self {
+            Op::Ping => "ping",
+            Op::Recall { .. } => "recall",
+            Op::Search { .. } => "search",
+            Op::Targets { .. } => "targets",
+            Op::Symbol { .. } => "symbol",
+            Op::Context { .. } => "context",
+            Op::Impact { .. } => "impact",
+            Op::Uses { .. } => "uses",
+            Op::Trace { .. } => "trace",
+            Op::Processes { .. } => "processes",
+            Op::Clusters { .. } => "clusters",
+            Op::Changes { .. } => "changes",
+            Op::Graph {} => "graph",
+            Op::Status {} => "status",
+            Op::Shutdown => "shutdown",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +187,34 @@ mod tests {
     fn shutdown_serializes_as_bare_tag() {
         let value = serde_json::to_value(Op::Shutdown).unwrap();
         assert_eq!(value, json!({"op": "shutdown"}));
+    }
+
+    #[test]
+    fn op_name_matches_serde_tag() {
+        // Every variant's op_name() must equal the "op" field serde emits,
+        // so the response envelope's op field is always consistent with the
+        // request that triggered it.
+        let cases: &[(Op, &str)] = &[
+            (Op::Ping, "ping"),
+            (Op::Recall { action: "x".into(), params: json!(null) }, "recall"),
+            (Op::Search { pattern: "".into(), json: false, limit: None, offset: None, paths: None }, "search"),
+            (Op::Targets { task: "".into(), limit: None }, "targets"),
+            (Op::Symbol { name: "".into() }, "symbol"),
+            (Op::Context { uid: "".into(), budget_tokens: None }, "context"),
+            (Op::Impact { uid_or_name: "".into(), direction: "".into(), depth: None }, "impact"),
+            (Op::Uses { uid_or_name: "".into(), role: "".into(), offset: None }, "uses"),
+            (Op::Trace { from: "".into(), to: "".into() }, "trace"),
+            (Op::Processes { offset: None }, "processes"),
+            (Op::Clusters { offset: None }, "clusters"),
+            (Op::Changes { base: None, offset: None }, "changes"),
+            (Op::Graph {}, "graph"),
+            (Op::Status {}, "status"),
+            (Op::Shutdown, "shutdown"),
+        ];
+        for (op, expected) in cases {
+            assert_eq!(op.op_name(), *expected);
+            let serialized = serde_json::to_value(op).unwrap();
+            assert_eq!(serialized["op"].as_str(), Some(*expected));
+        }
     }
 }

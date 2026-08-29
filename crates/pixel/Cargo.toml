@@ -17,6 +17,7 @@ pixel-index = { path = "../pixel-index" }
 pixel-graph = { path = "../pixel-graph" }
 pixel-recall = { path = "../pixel-recall" }
 pixel-daemon = { path = "../pixel-daemon" }
+pixel-rank = { path = "../pixel-rank" }
 pixel-session = { path = "../pixel-session" }
 clap = { version = "4.5", features = ["derive"] }
 serde = "1"

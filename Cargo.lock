@@ -2419,6 +2419,7 @@ dependencies = [
  "pixel-daemon",
  "pixel-graph",
  "pixel-index",
+ "pixel-rank",
  "pixel-recall",
  "pixel-session",
  "regex",
@@ -2441,6 +2442,8 @@ dependencies = [
  "pixel-context",
  "pixel-graph",
  "pixel-index",
+ "pixel-proto",
+ "pixel-rank",
  "pixel-recall",
  "rusqlite",
  "serde",
@@ -2496,6 +2499,15 @@ dependencies = [
 name = "pixel-proto"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pixel-rank"
+version = "0.1.0"
+dependencies = [
+ "pixel-graph",
  "serde",
  "serde_json",
 ]

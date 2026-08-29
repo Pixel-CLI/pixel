@@ -14,8 +14,9 @@ use pixel_recall::store::RecallStore;
 use pixel_recall::vector::VectorStore;
 use serde_json::{Value, json};
 
-use crate::api::{PROTOCOL_VERSION, Request, Response, ServeError};
+use crate::api::{PROTOCOL_VERSION, Request, Response, ServeError, failure_response};
 use crate::daemon::Corpus;
+use pixel_proto::Envelope;
 
 pub struct RecallService {
     root: PathBuf,
@@ -274,19 +275,20 @@ impl Corpus for RecallService {
     }
 
     fn handle(&mut self, req: Request) -> Response {
+        let op_name = req.op_name();
         match req {
-            Request::Ping => Response::ok(json!({
+            Request::Ping => Envelope::success(op_name, json!({
                 "pong": true,
                 "root": self.root.display().to_string(),
                 "corpus": "recall",
                 "protocol_version": PROTOCOL_VERSION,
             })),
-            Request::Shutdown => Response::ok(json!({"shutting_down": true})),
+            Request::Shutdown => Envelope::success(op_name, json!({"shutting_down": true})),
             Request::Recall { action, params } => match self.op(&action, params) {
-                Ok(data) => Response::ok(data),
-                Err(e) => Response::err(e),
+                Ok(data) => Envelope::success(op_name, data),
+                Err(e) => failure_response(op_name, e),
             },
-            _ => Response::err(
+            _ => failure_response(op_name,
                 "this daemon serves the transcript corpus; repository ops go to a repo daemon"
                     .to_string(),
             ),

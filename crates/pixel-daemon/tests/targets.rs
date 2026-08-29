@@ -53,7 +53,7 @@ fn run_targets(dir: &Path, task: &str) -> serde_json::Value {
         limit: Some(10),
     });
     assert!(resp.ok, "targets op failed: {:?}", resp.error);
-    resp.data
+    resp.data().clone()
 }
 
 #[test]
@@ -125,6 +125,6 @@ fn targets_rejects_empty_task() {
         limit: None,
     });
     assert!(!resp.ok);
-    assert!(resp.error.unwrap().contains("no searchable keywords"));
+    assert!(resp.error.unwrap().message.contains("no searchable keywords"));
     std::fs::remove_dir_all(&dir).ok();
 }

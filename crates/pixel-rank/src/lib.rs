@@ -1,11 +1,18 @@
-//! Sniper-target engine — task text in, closed prioritized file list out.
+//! `pixel-rank` — the pure fusion core for `pixel targets` and (later) ranked
+//! `search`/`resolve`.
 //!
-//! Pure fusion core: the `op_targets` service op gathers `SignalInputs` from
-//! the trigram index and the code graph, this module tokenizes the task,
-//! fuses the per-signal ranked lists with reciprocal-rank fusion (mirroring
-//! `pixel-recall`'s hybrid channel fusion), and assigns P0/P1/P2 tiers.
-//! Everything here is deterministic: total orders everywhere, ties broken by
-//! path ascending, scores rounded for byte-stable JSON.
+//! Task text in, closed prioritized file list out. The `op_targets` service
+//! op in `pixel-daemon` gathers `SignalInputs` from the trigram index and the
+//! code graph; this crate tokenizes the task, fuses the per-signal ranked
+//! lists with reciprocal-rank fusion (mirroring `pixel-recall`'s hybrid
+//! channel fusion), and assigns P0/P1/P2 tiers. Everything here is
+//! deterministic: total orders everywhere, ties broken by path ascending,
+//! scores rounded for byte-stable JSON.
+//!
+//! No I/O, no daemon, no index — pure functions over caller-supplied
+//! `SignalInputs`. Per `PLAN.md`'s crate table this holds "the pure fusion
+//! core (port of serve/targets.rs): signal registry + weighted RRF (K=60),
+//! P0/P1/P2 tiering; slots for recency/churn/session signals."
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 

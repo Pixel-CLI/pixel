@@ -312,7 +312,7 @@ fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
         .ok()?;
     let ping = roundtrip(&mut stream, &Request::Ping)?;
     if !ping.ok
-        || ping.data.get("protocol_version").and_then(Value::as_u64) != Some(PROTOCOL_VERSION)
+        || ping.data().get("protocol_version").and_then(Value::as_u64) != Some(PROTOCOL_VERSION)
     {
         // Old daemons must not serve stale schemas to a newer CLI. They all
         // understand Shutdown; close them and use the current in-process
@@ -344,9 +344,9 @@ fn execute(path: &Path, req: Request, no_daemon: bool) -> Result<Value, String> 
 
 fn unwrap_response(resp: Response) -> Result<Value, String> {
     if resp.ok {
-        Ok(resp.data)
+        Ok(resp.data().clone())
     } else {
-        Err(resp.error.unwrap_or_else(|| "unknown error".into()))
+        Err(resp.error_message())
     }
 }
 
@@ -1033,7 +1033,7 @@ fn run() -> Result<(), String> {
                     .unwrap_or_default();
                 (paths, kws)
             } else {
-                let q = pixel_daemon::targets::tokenize_task(&problem).unwrap_or_default();
+                let q = pixel_rank::tokenize_task(&problem).unwrap_or_default();
                 (files.clone(), q.keywords)
             };
             if target_paths.is_empty() {

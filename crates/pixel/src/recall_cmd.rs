@@ -307,7 +307,7 @@ fn try_recall_daemon(action: &str, params: serde_json::Value) -> Option<serde_js
         params,
     };
     let resp = crate::try_daemon(&root, &req)?;
-    if resp.ok { Some(resp.data) } else { None }
+    if resp.ok { Some(resp.data().clone()) } else { None }
 }
 
 fn print_daemon_result(data: &serde_json::Value, json: bool) {
