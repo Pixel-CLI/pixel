@@ -21,6 +21,39 @@ use crate::resolve::{
 };
 use crate::store::{EdgeKind, GraphStore};
 
+/// Extract concepts for a file and insert them, linking each to the smallest
+/// enclosing symbol (by line range) when one exists. `symbol_ids` are the ids
+/// of the file's symbols in `start_line` order.
+fn insert_concepts(
+    store: &GraphStore,
+    file_id: i64,
+    rel: &str,
+    content: &[u8],
+    symbol_ids: &[i64],
+    symbol_lines: &[(u32, u32)],
+) -> Result<(), BoxErr> {
+    let concepts = crate::concept::extract_concepts(rel, content);
+    for mut c in concepts {
+        c.owner_symbol_id = symbol_lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (s, e))| *s <= c.start_line && c.end_line <= *e)
+            .min_by_key(|(_, (s, e))| e - s)
+            .map(|(i, _)| symbol_ids[i]);
+        store.insert_concept(
+            file_id,
+            c.kind,
+            &c.raw,
+            &c.norm,
+            &c.detail,
+            c.start_line,
+            c.end_line,
+            c.owner_symbol_id,
+        )?;
+    }
+    Ok(())
+}
+
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 /// `meta` key under which the build-time freshness signature is stored.
@@ -163,6 +196,7 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
         let file_id = store.replace_file(&e.rel, &e.blob_oid, e.fx.lang)?;
         path_to_id.insert(e.rel.clone(), file_id);
         let mut ids = Vec::with_capacity(e.fx.symbols.len());
+        let mut lines = Vec::with_capacity(e.fx.symbols.len());
         for s in &e.fx.symbols {
             let uid = format!("{}#{}#{}", e.rel, s.qualified, s.kind.as_str());
             let id = store.insert_symbol(
@@ -176,8 +210,16 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
                 &s.sig,
             )?;
             ids.push(id);
+            lines.push((s.start_line, s.end_line));
         }
         sym_ids.push(ids);
+        // Engine 1: concept pass alongside symbol extraction.
+        let content = inputs
+            .iter()
+            .find(|(rel, _)| rel == &e.rel)
+            .map(|(_, c)| c.as_slice())
+            .unwrap_or_default();
+        insert_concepts(&store, file_id, &e.rel, content, &sym_ids[sym_ids.len() - 1], &lines)?;
     }
 
     // Pass 2: imports (resolved against the full file list) + pending calls.
@@ -352,6 +394,7 @@ pub fn update_file(root: &Path, db_path: &Path, rel: &str) -> Result<(), BoxErr>
     let file_id = store.replace_file(rel, &blob_oid, fx.lang)?;
 
     let mut ids = Vec::with_capacity(fx.symbols.len());
+    let mut lines = Vec::with_capacity(fx.symbols.len());
     for s in &fx.symbols {
         let uid = format!("{rel}#{}#{}", s.qualified, s.kind.as_str());
         let id = store.insert_symbol(
@@ -365,7 +408,10 @@ pub fn update_file(root: &Path, db_path: &Path, rel: &str) -> Result<(), BoxErr>
             &s.sig,
         )?;
         ids.push(id);
+        lines.push((s.start_line, s.end_line));
     }
+    // Engine 1: refresh concepts in the same transaction as symbol refresh.
+    insert_concepts(&store, file_id, rel, &content, &ids, &lines)?;
 
     let all_paths: Vec<String> = store.files()?.into_iter().map(|f| f.path).collect();
     let path_to_id: HashMap<String, i64> = {
@@ -400,6 +446,26 @@ pub fn update_file(root: &Path, db_path: &Path, rel: &str) -> Result<(), BoxErr>
     // Keep the freshness signature in sync so a later cold open does not
     // needlessly rebuild after this incremental update.
     store.meta_set(FRESHNESS_KEY, &freshness_signature(root))?;
+    Ok(())
+}
+
+/// Concepts-only refresh for a file that is NOT a graph language (e.g. a
+/// `.svelte`/`.vue`/`.html`/`.json`/`.yaml`/`.css` file the symbol graph
+/// ignores). Ensures the file row exists, then replaces its concepts in one
+/// transaction. No-op for files outside the concept gate.
+pub fn update_concepts(root: &Path, db_path: &Path, rel: &str) -> Result<(), BoxErr> {
+    if crate::concept::concept_lang_of(rel).is_none() {
+        return Ok(());
+    }
+    let mut store = GraphStore::open(db_path)?;
+    let abs = root.join(rel);
+    let Some(content) = read_source_file(&abs) else {
+        store.remove_file(rel)?;
+        return Ok(());
+    };
+    let concepts = crate::concept::extract_concepts(rel, &content);
+    let file_id = store.replace_file(rel, &format!("{:016x}", xxh3_64(&content)), "concept")?;
+    store.replace_concepts(file_id, &concepts)?;
     Ok(())
 }
 

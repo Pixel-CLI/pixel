@@ -31,6 +31,10 @@ impl std::error::Error for StoreError {}
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// Bump whenever the concept extractor's output shape changes; forces a
+/// one-time concept rebuild via the `concepts_version` meta key.
+pub const CONCEPTS_VERSION: &str = "1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SymbolKind {
@@ -176,6 +180,21 @@ pub struct EdgeRow {
     pub receiver: Option<String>,
 }
 
+/// One stored concept row (Engine 1). `owner_symbol_id` links the concept to
+/// the smallest enclosing symbol when one exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConceptRow {
+    pub id: i64,
+    pub file_id: i64,
+    pub kind: crate::concept::ConceptKind,
+    pub raw: String,
+    pub norm: String,
+    pub detail: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub owner_symbol_id: Option<i64>,
+}
+
 pub struct GraphStore {
     conn: Connection,
 }
@@ -251,6 +270,11 @@ impl GraphStore {
                 params![id],
             )?;
             tx.execute(
+                "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
+                params![id],
+            )?;
+            tx.execute("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
+            tx.execute(
                 "UPDATE files SET blob_oid = ?2, lang = ?3 WHERE id = ?1",
                 params![id, blob_oid, lang],
             )?;
@@ -285,6 +309,11 @@ impl GraphStore {
                 "DELETE FROM unresolved_calls WHERE file_id = ?1",
                 params![id],
             )?;
+            tx.execute(
+                "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
+                params![id],
+            )?;
+            tx.execute("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
             tx.execute("DELETE FROM files WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
@@ -367,6 +396,242 @@ impl GraphStore {
         )?;
         Ok(())
     }
+
+    // --- concept write path (Engine 1) ---
+
+    /// Delete every concept row (and its inverted words) for a file. Called
+    /// inside the same transaction as symbol refresh.
+    pub fn delete_concepts_for_file(&self, file_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
+            params![file_id],
+        )?;
+        self.conn.execute("DELETE FROM concepts WHERE file_id = ?1", params![file_id])?;
+        Ok(())
+    }
+
+    /// Insert one concept row plus its inverted words. `owner_symbol_id` is
+    /// the smallest enclosing symbol's id when one exists, else `None`.
+    pub fn insert_concept(
+        &self,
+        file_id: i64,
+        kind: crate::concept::ConceptKind,
+        raw: &str,
+        norm: &str,
+        detail: &str,
+        start_line: u32,
+        end_line: u32,
+        owner_symbol_id: Option<i64>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO concepts
+               (file_id, kind, raw, norm, detail, start_line, end_line, owner_symbol_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                file_id,
+                kind.as_str(),
+                raw,
+                norm,
+                detail,
+                start_line,
+                end_line,
+                owner_symbol_id
+            ],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        for word in crate::concept::concept_words(norm) {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO concept_words (word, concept_id) VALUES (?1, ?2)",
+                params![word, id],
+            )?;
+        }
+        Ok(id)
+    }
+
+    /// Replace a file's concepts in one transaction (used by the concepts-only
+    /// refresh path for non-graph files).
+    pub fn replace_concepts(
+        &mut self,
+        file_id: i64,
+        concepts: &[crate::concept::RawConcept],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM concept_words WHERE concept_id IN (SELECT id FROM concepts WHERE file_id = ?1)",
+            params![file_id],
+        )?;
+        tx.execute("DELETE FROM concepts WHERE file_id = ?1", params![file_id])?;
+        for c in concepts {
+            tx.execute(
+                "INSERT INTO concepts
+                   (file_id, kind, raw, norm, detail, start_line, end_line, owner_symbol_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    file_id,
+                    c.kind.as_str(),
+                    c.raw,
+                    c.norm,
+                    c.detail,
+                    c.start_line,
+                    c.end_line,
+                    c.owner_symbol_id
+                ],
+            )?;
+            let id = tx.last_insert_rowid();
+            for word in crate::concept::concept_words(&c.norm) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO concept_words (word, concept_id) VALUES (?1, ?2)",
+                    params![word, id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    // --- concept read path (Engine 1) ---
+
+    /// T0 exact-norm probe: all concepts whose normalized form equals `norm`.
+    pub fn concepts_by_norm(&self, norm: &str, limit: u32) -> Result<Vec<ConceptRow>> {
+        let sql = format!(
+            "SELECT {} FROM concepts WHERE norm = ?1 ORDER BY kind, id LIMIT ?2",
+            Self::CONCEPT_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![norm, limit], Self::row_to_concept)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// T1/T2 word-intersection: concepts that contain ALL of `words` in their
+    /// inverted index, optionally restricted to a kind. `words` must be
+    /// non-empty. Returns up to `limit` rows.
+    pub fn concepts_by_words(
+        &self,
+        words: &[&str],
+        kind: Option<crate::concept::ConceptKind>,
+        limit: u32,
+    ) -> Result<Vec<ConceptRow>> {
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut sql = format!(
+            "SELECT {} FROM concepts c WHERE c.id IN (
+                 SELECT concept_id FROM concept_words WHERE word = ?1
+             )",
+            Self::CONCEPT_COLS
+        );
+        let mut p: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(words[0])];
+        for w in &words[1..] {
+            sql.push_str(" AND c.id IN (SELECT concept_id FROM concept_words WHERE word = ?)");
+            p.push(Box::new(*w));
+        }
+        if let Some(k) = kind {
+            sql.push_str(" AND c.kind = ?");
+            p.push(Box::new(k.as_str()));
+        }
+        sql.push_str(" ORDER BY c.kind, c.id LIMIT ?");
+        p.push(Box::new(limit));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_concept)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// T1/T2 word-intersection with OR fallback: concepts containing ANY of
+    /// `words`, restricted to a kind. Used when the AND query returns nothing.
+    pub fn concepts_by_any_word(
+        &self,
+        words: &[&str],
+        kind: Option<crate::concept::ConceptKind>,
+        limit: u32,
+    ) -> Result<Vec<ConceptRow>> {
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; words.len()].join(",");
+        let mut sql = format!(
+            "SELECT {} FROM concepts c WHERE c.id IN (
+                 SELECT concept_id FROM concept_words WHERE word IN ({placeholders})
+             )",
+            Self::CONCEPT_COLS
+        );
+        let mut p: Vec<Box<dyn rusqlite::ToSql>> =
+            words.iter().map(|w| Box::new(*w) as Box<dyn rusqlite::ToSql>).collect();
+        if let Some(k) = kind {
+            sql.push_str(" AND c.kind = ?");
+            p.push(Box::new(k.as_str()));
+        }
+        sql.push_str(" ORDER BY c.kind, c.id LIMIT ?");
+        p.push(Box::new(limit));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), Self::row_to_concept)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// T1 kind-directed: concepts of a given kind whose words intersect the
+    /// query words (AND semantics, OR fallback handled by the caller).
+    pub fn concepts_by_kind_words(
+        &self,
+        kind: crate::concept::ConceptKind,
+        words: &[&str],
+        limit: u32,
+    ) -> Result<Vec<ConceptRow>> {
+        self.concepts_by_words(words, Some(kind), limit)
+    }
+
+    /// T3 trigram fallback: concepts whose normalized form contains `needle`
+    /// as a substring (case-insensitive via LIKE). Low confidence by design.
+    pub fn concepts_like(&self, needle: &str, limit: u32) -> Result<Vec<ConceptRow>> {
+        let sql = format!(
+            "SELECT {} FROM concepts WHERE norm LIKE ?1 ORDER BY kind, id LIMIT ?2",
+            Self::CONCEPT_COLS
+        );
+        let pattern = format!("%{}%", needle.to_lowercase());
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![pattern, limit], Self::row_to_concept)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Concepts owned by a symbol (used to attach owner info to matches).
+    pub fn concepts_by_owner(&self, symbol_id: i64) -> Result<Vec<ConceptRow>> {
+        let sql = format!(
+            "SELECT {} FROM concepts WHERE owner_symbol_id = ?1 ORDER BY kind, id",
+            Self::CONCEPT_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![symbol_id], Self::row_to_concept)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Total concept count (for `index_state`).
+    pub fn concept_count(&self) -> Result<u64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM concepts", [], |r| r.get(0))?)
+    }
+
+    /// The stored concept extractor version, if any.
+    pub fn concepts_version(&self) -> Result<Option<String>> {
+        self.meta_get("concepts_version")
+    }
+
+    fn row_to_concept(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConceptRow> {
+        Ok(ConceptRow {
+            id: r.get(0)?,
+            file_id: r.get(1)?,
+            kind: crate::concept::ConceptKind::parse(&r.get::<_, String>(2)?),
+            raw: r.get(3)?,
+            norm: r.get(4)?,
+            detail: r.get(5)?,
+            start_line: r.get(6)?,
+            end_line: r.get(7)?,
+            owner_symbol_id: r.get(8)?,
+        })
+    }
+
+    const CONCEPT_COLS: &'static str =
+        "id, file_id, kind, raw, norm, detail, start_line, end_line, owner_symbol_id";
 
     // --- read path (analyses own these) ---
 
@@ -628,6 +893,26 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS concepts (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  raw TEXT NOT NULL,
+  norm TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  start_line INTEGER NOT NULL DEFAULT 0,
+  end_line INTEGER NOT NULL DEFAULT 0,
+  owner_symbol_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_concepts_norm ON concepts(norm);
+CREATE INDEX IF NOT EXISTS idx_concepts_kind_norm ON concepts(kind, norm);
+CREATE INDEX IF NOT EXISTS idx_concepts_file ON concepts(file_id);
+CREATE TABLE IF NOT EXISTS concept_words (
+  word TEXT NOT NULL,
+  concept_id INTEGER NOT NULL,
+  PRIMARY KEY (word, concept_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_concept_words_concept ON concept_words(concept_id);
 ";
 
 /// Idempotent schema migrations for graphs created before a column existed.
@@ -655,6 +940,23 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute(
             "ALTER TABLE imports ADD COLUMN bindings TEXT NOT NULL DEFAULT ''",
             [],
+        )?;
+    }
+    // Engine 1: stamp the concept extractor version so a change to the
+    // extractor forces a one-time concept rebuild (the graph itself is a
+    // cache; concepts are rebuilt alongside it).
+    if conn
+        .query_row(
+            "SELECT COUNT(*) FROM meta WHERE key = 'concepts_version'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        == 0
+    {
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('concepts_version', ?1)",
+            [CONCEPTS_VERSION],
         )?;
     }
     Ok(())

@@ -1,15 +1,21 @@
 [package]
-name = "pixel-rank"
+name = "pixel-facts"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
 
 [dependencies]
-pixel-graph = { path = "../pixel-graph" }
 pixel-git = { path = "../pixel-git" }
-pixel-session = { path = "../pixel-session" }
+pixel-index = { path = "../pixel-index" }
+pixel-proto = { path = "../pixel-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

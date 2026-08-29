@@ -19,6 +19,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+pub mod rerank;
+pub mod signals;
+
 use pixel_graph::split_ident_words;
 use pixel_graph::targets::SymbolHit;
 

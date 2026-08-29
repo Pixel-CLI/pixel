@@ -1317,6 +1317,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "hf-hub"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2423,6 +2429,7 @@ dependencies = [
  "pixel-git",
  "pixel-graph",
  "pixel-index",
+ "pixel-ops",
  "pixel-rank",
  "pixel-recall",
  "pixel-session",
@@ -2446,12 +2453,30 @@ dependencies = [
  "pixel-context",
  "pixel-graph",
  "pixel-index",
+ "pixel-ops",
  "pixel-proto",
  "pixel-rank",
  "pixel-recall",
  "rusqlite",
  "serde",
  "serde_json",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "pixel-facts"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "pixel-git",
+ "pixel-index",
+ "pixel-proto",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
  "xxhash-rust",
 ]
 
@@ -2479,6 +2504,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "unicode-normalization",
  "xxhash-rust",
 ]
 
@@ -2502,6 +2528,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "pixel-install"
+version = "0.1.0"
+dependencies = [
+ "pixel-daemon",
+ "pixel-index",
+ "pixel-proto",
+ "pixel-session",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "pixel-ops"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "libc",
+ "pixel-git",
+ "pixel-proto",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "pixel-proto"
 version = "0.1.0"
 dependencies = [
@@ -2513,9 +2571,13 @@ dependencies = [
 name = "pixel-rank"
 version = "0.1.0"
 dependencies = [
+ "pixel-git",
  "pixel-graph",
+ "pixel-session",
  "serde",
  "serde_json",
+ "thiserror",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -3562,6 +3624,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f"
+dependencies = [
+ "tinyvec_macros",
+]
+
+[[package]]
+name = "tinyvec_macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
 name = "tokenizers"
 version = "0.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3867,6 +3944,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-normalization-alignments"
