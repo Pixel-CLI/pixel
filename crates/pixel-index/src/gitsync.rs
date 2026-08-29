@@ -21,6 +21,12 @@ pub fn rev_parse_head(root: &Path) -> Option<String> {
     GitRunner::new(root).rev_parse_head()
 }
 
+/// Current branch name (`git symbolic-ref --short HEAD`). `None` when not a
+/// git repo, in detached HEAD state, or on any git failure.
+pub fn current_branch(root: &Path) -> Option<String> {
+    GitRunner::new(root).current_branch()
+}
+
 /// Tracked files (repo-relative, NUL-safe). Empty outside a git repo.
 pub fn ls_files(root: &Path) -> Vec<String> {
     GitRunner::new(root).ls_files()

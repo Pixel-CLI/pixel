@@ -18,7 +18,7 @@ use pixel_index::shard::Shard;
 use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtractor};
 use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service};
 use pixel_daemon::daemon;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[derive(Parser)]
 #[command(
@@ -266,6 +266,168 @@ enum Command {
     Sniper {
         #[command(subcommand)]
         cmd: sniper_cmd::SniperCmd,
+    },
+    // -----------------------------------------------------------------
+    // M2 — safe git mutation ops (pixel-ops)
+    // -----------------------------------------------------------------
+    /// Show repo state: HEAD, branch, dirty files, fingerprints.
+    Inspect {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Restrict the snapshot to these repo-relative paths.
+        #[arg(long = "files")]
+        files: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Review working-tree changes (staged, unstaged, untracked, conflicted).
+    Review {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Pagination cursor (opaque).
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Cap output bytes.
+        #[arg(long)]
+        byte_cap: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Commit history with detail levels and byte caps.
+    History {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Ref to log (default HEAD).
+        #[arg(long = "ref")]
+        ref_: Option<String>,
+        /// Max commits (capped at 100).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// compact (oid+subject) or full (oid+author+date+subject+body).
+        #[arg(long, default_value = "compact")]
+        detail: String,
+        /// Pagination cursor (skip N commits).
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Cap output bytes.
+        #[arg(long)]
+        byte_cap: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Structured diff between two refs (or ref → working tree).
+    Diff {
+        from: String,
+        /// Optional target ref; if omitted, diff to working tree.
+        to: Option<String>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Restrict diff to these paths.
+        #[arg(long)]
+        paths: Vec<String>,
+        /// Cap diff text bytes.
+        #[arg(long)]
+        byte_cap: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stage files, commit, and optionally push (crash-safe, idempotent).
+    Publish {
+        /// Commit message.
+        #[arg(short = 'm', long = "message")]
+        message: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Files to stage (repo-relative).
+        #[arg(long = "files")]
+        files: Vec<String>,
+        /// Also push after committing.
+        #[arg(long)]
+        push: bool,
+        /// Amend the current commit instead of creating a new one.
+        #[arg(long)]
+        amend: bool,
+        /// Reject if HEAD does not match this OID.
+        #[arg(long)]
+        expected_head: Option<String>,
+        /// Idempotency / recovery key.
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Leased push to a remote (crash-safe, idempotent).
+    Push {
+        remote: String,
+        refspec: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        force_with_lease: bool,
+        /// Idempotency / recovery key.
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Publish + push in one op (commit then leased push).
+    Ship {
+        /// Commit message.
+        #[arg(short = 'm', long = "message")]
+        message: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Files to stage (repo-relative).
+        #[arg(long = "files")]
+        files: Vec<String>,
+        remote: String,
+        refspec: String,
+        /// Idempotency / recovery key.
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a new branch from HEAD (or --from <ref>).
+    Branch {
+        name: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Base ref (default HEAD).
+        #[arg(long)]
+        from: Option<String>,
+        /// Idempotency / recovery key.
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fast-forward merge to a target OID (refuses non-ff + dirty intersection).
+    Update {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Reject if HEAD does not match this OID.
+        #[arg(long)]
+        expected_head: String,
+        /// Fast-forward target OID.
+        #[arg(long)]
+        target_oid: String,
+        /// Idempotency / recovery key.
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fetch from a remote (idempotent).
+    Sync {
+        remote: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Optional refspec.
+        #[arg(long)]
+        refspec: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1366,6 +1528,195 @@ fn run() -> Result<(), String> {
         },
         Command::Recall { cmd } => recall_cmd::run_recall(cmd),
         Command::Sniper { cmd } => sniper_cmd::run_sniper(cmd),
+        // -------------------------------------------------------------
+        // M2 — safe git mutation ops (pixel-ops)
+        // -------------------------------------------------------------
+        Command::Inspect { path, files, json } => {
+            let root = discover_root(&path)?;
+            let mut data = pixel_ops::inspect::inspect(&root)?;
+            if !files.is_empty() {
+                // Filter the dirty/clean lists to the requested paths.
+                if let Some(dirty) = data.get_mut("dirty").and_then(Value::as_array_mut) {
+                    dirty.retain(|d| {
+                        d.get("path")
+                            .and_then(Value::as_str)
+                            .is_some_and(|p| files.iter().any(|f| f == p))
+                    });
+                }
+                if let Some(clean) = data.get_mut("clean").and_then(Value::as_array_mut) {
+                    clean.retain(|c| {
+                        c.as_str().is_some_and(|p| files.iter().any(|f| f == p))
+                    });
+                }
+                data["dirty_count"] = json!(
+                    data.get("dirty").and_then(Value::as_array).map(Vec::len).unwrap_or(0)
+                );
+                data["clean_count"] = json!(
+                    data.get("clean").and_then(Value::as_array).map(Vec::len).unwrap_or(0)
+                );
+            }
+            print_data(&data, json)
+        }
+        Command::Review {
+            path,
+            cursor,
+            byte_cap,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let data = pixel_ops::review::review(
+                &root,
+                cursor.as_deref(),
+                byte_cap,
+            )?;
+            print_data(&data, json)
+        }
+        Command::History {
+            path,
+            ref_,
+            limit,
+            detail,
+            cursor,
+            byte_cap,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let data = pixel_ops::history::history(
+                &root,
+                ref_.as_deref(),
+                limit,
+                &detail,
+                cursor.as_deref(),
+                byte_cap,
+            )?;
+            print_data(&data, json)
+        }
+        Command::Diff {
+            from,
+            to,
+            path,
+            paths,
+            byte_cap,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let paths_opt = if paths.is_empty() {
+                None
+            } else {
+                Some(paths.as_slice())
+            };
+            let data = pixel_ops::diff::diff(
+                &root,
+                &from,
+                to.as_deref(),
+                paths_opt,
+                byte_cap,
+            )?;
+            print_data(&data, json)
+        }
+        Command::Publish {
+            message,
+            path,
+            files,
+            push,
+            amend,
+            expected_head,
+            request_id,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let opts = pixel_ops::publish::PublishOptions {
+                message,
+                files,
+                expected_head,
+                expected_fingerprints: std::collections::BTreeMap::new(),
+                push,
+                amend,
+                request_id,
+            };
+            let data = pixel_ops::publish::publish(&root, &opts, None)?;
+            print_data(&data, json)
+        }
+        Command::Push {
+            remote,
+            refspec,
+            path,
+            force_with_lease,
+            request_id,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let opts = pixel_ops::push::PushOptions {
+                remote,
+                refspec,
+                request_id,
+                force_with_lease,
+            };
+            let data = pixel_ops::push::push(&root, &opts, None)?;
+            print_data(&data, json)
+        }
+        Command::Ship {
+            message,
+            path,
+            files,
+            remote,
+            refspec,
+            request_id,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let data = pixel_ops::ship::ship(
+                &root,
+                &message,
+                &files,
+                &remote,
+                &refspec,
+                &request_id,
+            )?;
+            print_data(&data, json)
+        }
+        Command::Branch {
+            name,
+            path,
+            from,
+            request_id,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let opts = pixel_ops::branch::BranchOptions {
+                name,
+                from,
+                request_id,
+            };
+            let data = pixel_ops::branch::branch(&root, &opts)?;
+            print_data(&data, json)
+        }
+        Command::Update {
+            path,
+            expected_head,
+            target_oid,
+            request_id,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let opts = pixel_ops::update::UpdateOptions {
+                expected_head,
+                target_oid,
+                request_id,
+            };
+            let data = pixel_ops::update::update(&root, &opts)?;
+            print_data(&data, json)
+        }
+        Command::Sync {
+            remote,
+            path,
+            refspec,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let data = pixel_ops::sync::sync(&root, &remote, refspec.as_deref())?;
+            print_data(&data, json)
+        }
     }
 }
 

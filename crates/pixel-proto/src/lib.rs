@@ -15,10 +15,10 @@ pub mod op;
 pub mod snapshot;
 pub mod warning;
 
-pub use budget::Budget;
+pub use budget::{Budget, BudgetInfo};
 pub use envelope::{ENVELOPE_PROTOCOL_VERSION, Envelope};
 pub use epistemics::Epistemics;
 pub use error::{ErrorCode, PixelError};
 pub use op::Op;
-pub use snapshot::{Snapshot, SnapshotToken};
+pub use snapshot::{Snapshot, SnapshotInfo, SnapshotToken};
 pub use warning::Warning;

@@ -17,7 +17,7 @@ use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, open_regular_bounded};
 use pixel_index::indexset::{IndexSet, IndexSetError};
 use pixel_graph::{EdgeKind, EdgeRow, GraphStore, SymbolKind, SymbolRow};
-use pixel_proto::{Envelope, ErrorCode, PixelError};
+use pixel_proto::{Envelope, ErrorCode, PixelError, SnapshotInfo};
 
 pub const GRAPH_DB_FILE: &str = "graph.db";
 /// Increment whenever the daemon request/response contract changes in a way
@@ -219,9 +219,41 @@ impl Service {
 
     pub fn handle(&mut self, req: Request) -> Response {
         let op_name = req.op_name();
+        // Ops that return repo state attach a `snapshot` envelope field so
+        // callers can correlate the answer with the exact working-tree state
+        // it was computed against (HEAD, branch, dirty file list).
+        let attach_snapshot = matches!(
+            op_name,
+            "inspect" | "review" | "diff" | "status" | "changes"
+        );
         match self.dispatch(req) {
-            Ok(v) => Envelope::success(op_name, v),
+            Ok(v) => {
+                let mut env = Envelope::success(op_name, v);
+                if attach_snapshot {
+                    env = env.with_snapshot(self.repo_snapshot());
+                }
+                env
+            }
             Err(msg) => failure_response(op_name, msg),
+        }
+    }
+
+    /// Build an Envelope v2 `SnapshotInfo` from the current working-tree
+    /// state: HEAD oid, branch name, and the list of dirty (modified /
+    /// staged / untracked) repo-relative paths. `token` is left `None`
+    /// here — pixel-ops computes the validated snapshot token separately.
+    fn repo_snapshot(&self) -> SnapshotInfo {
+        let head = pixel_index::gitsync::rev_parse_head(&self.root);
+        let branch = pixel_index::gitsync::current_branch(&self.root);
+        let dirty: Vec<String> = pixel_index::gitsync::status_porcelain(&self.root)
+            .into_iter()
+            .map(|(_xy, path)| path)
+            .collect();
+        SnapshotInfo {
+            token: None,
+            head,
+            branch,
+            dirty,
         }
     }
 
@@ -264,6 +296,96 @@ impl Service {
             Request::Changes { base, offset } => self.op_changes(base.as_deref(), offset),
             Request::Graph {} => self.op_graph(),
             Request::Status {} => self.op_status(),
+            Request::Resolve { .. } => Err("resolve: not yet wired".to_string()),
+            Request::History { .. } => Err("history: not yet wired".to_string()),
+            Request::Lifecycle { .. } => Err("lifecycle: not yet wired".to_string()),
+            Request::Excavate { .. } => Err("excavate: not yet wired".to_string()),
+            Request::Reconcile { .. } => Err("reconcile: not yet wired".to_string()),
+            Request::Journal { .. } => Err("journal: not yet wired".to_string()),
+            Request::Inspect { .. } => {
+                pixel_ops::inspect::inspect(&self.root)
+            }
+            Request::Review { cursor, byte_cap } => {
+                pixel_ops::review::review(&self.root, cursor.as_deref(), byte_cap)
+            }
+            Request::Diff { from, to, paths, byte_cap } => {
+                pixel_ops::diff::diff(&self.root, &from, to.as_deref(), paths.as_deref(), byte_cap)
+            }
+            Request::HistoryOp { ref_name, limit, detail, cursor, byte_cap } => {
+                pixel_ops::history::history(
+                    &self.root,
+                    ref_name.as_deref(),
+                    limit,
+                    detail.as_deref().unwrap_or("compact"),
+                    cursor.as_deref(),
+                    byte_cap,
+                )
+            }
+            Request::Publish {
+                message,
+                files,
+                expected_head,
+                push,
+                amend,
+                request_id,
+            } => {
+                let opts = pixel_ops::publish::PublishOptions {
+                    message,
+                    files,
+                    expected_head,
+                    expected_fingerprints: std::collections::BTreeMap::new(),
+                    push: push.unwrap_or(false),
+                    amend: amend.unwrap_or(false),
+                    request_id,
+                };
+                pixel_ops::publish::publish(&self.root, &opts, None)
+            }
+            Request::Push {
+                remote,
+                refspec,
+                force_with_lease,
+                request_id,
+            } => {
+                let opts = pixel_ops::push::PushOptions {
+                    remote,
+                    refspec,
+                    request_id,
+                    force_with_lease: force_with_lease.unwrap_or(false),
+                };
+                pixel_ops::push::push(&self.root, &opts, None)
+            }
+            Request::Ship {
+                message,
+                files,
+                remote,
+                refspec,
+                request_id,
+            } => {
+                pixel_ops::ship::ship(&self.root, &message, &files, &remote, &refspec, &request_id)
+            }
+            Request::BranchOp { name, from, request_id } => {
+                let opts = pixel_ops::branch::BranchOptions {
+                    name,
+                    from,
+                    request_id,
+                };
+                pixel_ops::branch::branch(&self.root, &opts)
+            }
+            Request::Update {
+                expected_head,
+                target_oid,
+                request_id,
+            } => {
+                let opts = pixel_ops::update::UpdateOptions {
+                    expected_head,
+                    target_oid,
+                    request_id,
+                };
+                pixel_ops::update::update(&self.root, &opts)
+            }
+            Request::Sync { remote, refspec } => {
+                pixel_ops::sync::sync(&self.root, &remote, refspec.as_deref())
+            }
         }
     }
 

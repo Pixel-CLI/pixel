@@ -24,6 +24,17 @@ impl GitRunner {
         Some(s.chars().take(40).collect())
     }
 
+    /// Current branch name (`git symbolic-ref --short HEAD`). `None` when
+    /// not a git repo, in detached HEAD state, or on any git failure.
+    pub fn current_branch(&self) -> Option<String> {
+        let out = self.run_opt(&["symbolic-ref", "--short", "HEAD"])?;
+        let s = String::from_utf8_lossy(&out).trim().to_string();
+        if s.is_empty() {
+            return None;
+        }
+        Some(s)
+    }
+
     /// Tracked files (repo-relative, NUL-safe). Empty outside a git repo.
     pub fn ls_files(&self) -> Vec<String> {
         let Some(out) = self.run_opt(&["ls-files", "-z"]) else {

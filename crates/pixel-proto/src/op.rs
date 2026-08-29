@@ -95,6 +95,149 @@ pub enum Op {
     },
     Graph {},
     Status {},
+    /// Engine 1: concept-index resolution. `resolve "<phrase>"` returns a
+    /// cascade-ranked match list (T0 exact-unique → T1 kind-directed → T2
+    /// word intersection → T3 trigram), each tier short-circuiting, with
+    /// explicit confidence.
+    Resolve {
+        phrase: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// M3 / Engine 2: history-wide fact + diff search. `scope` selects
+    /// "message" | "path" | "diff" | "all" (default "all").
+    History {
+        query: String,
+        #[serde(default)]
+        facet: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// Engine 2: lifecycle of a path or token — first-seen, last-changed,
+    /// removed-in, present-at-HEAD.
+    Lifecycle {
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
+    },
+    /// Engine 2: history-wide discovery ("excavate"). `phrase` may be empty
+    /// to list the ingest checkpoint/state only.
+    Excavate {
+        #[serde(default)]
+        phrase: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+        #[serde(default)]
+        to: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// Engine 4: one-call deterministic branch sync. `strategy` is
+    /// "report" (default) or "rebase-if-clean" (explicit opt-in).
+    Reconcile {
+        #[serde(default)]
+        strategy: Option<String>,
+        #[serde(default)]
+        push: Option<String>,
+    },
+    /// M5: journal a session event into the session db (fire-and-forget).
+    Journal {
+        kind: String,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        detail: Option<String>,
+    },
+    // -- M2: git ops -----------------------------------------------------
+    /// Repo state snapshot: HEAD, branch, dirty files, fingerprints.
+    Inspect {
+        #[serde(default)]
+        files: Option<Vec<String>>,
+    },
+    /// Show working-tree changes as structured items (staged, unstaged,
+    /// untracked, conflicted).
+    Review {
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        byte_cap: Option<usize>,
+    },
+    /// Structured diff between two refs or working tree.
+    Diff {
+        from: String,
+        #[serde(default)]
+        to: Option<String>,
+        #[serde(default)]
+        paths: Option<Vec<String>>,
+        #[serde(default)]
+        byte_cap: Option<usize>,
+    },
+    /// Commit history (git log) with detail levels and byte caps. Named
+    /// `HistoryOp` to avoid clashing with the M3 `History` (history-wide
+    /// fact + diff search) variant.
+    HistoryOp {
+        #[serde(default)]
+        ref_name: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        detail: Option<String>,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        byte_cap: Option<usize>,
+    },
+    /// Stage files, commit, and optionally push. Crash-safe via journal.
+    Publish {
+        message: String,
+        files: Vec<String>,
+        #[serde(default)]
+        expected_head: Option<String>,
+        #[serde(default)]
+        push: Option<bool>,
+        #[serde(default)]
+        amend: Option<bool>,
+        request_id: String,
+    },
+    /// Leased push with crash-safe journaling.
+    Push {
+        remote: String,
+        refspec: String,
+        #[serde(default)]
+        force_with_lease: Option<bool>,
+        request_id: String,
+    },
+    /// Publish + push in one op (convenience wrapper).
+    Ship {
+        message: String,
+        files: Vec<String>,
+        remote: String,
+        refspec: String,
+        request_id: String,
+    },
+    /// Create a new branch from HEAD or a base ref. Named `BranchOp` to
+    /// avoid clashing with any future `Branch` variant.
+    BranchOp {
+        name: String,
+        #[serde(default)]
+        from: Option<String>,
+        request_id: String,
+    },
+    /// Fast-forward merge with expectedHead + targetOid.
+    Update {
+        expected_head: String,
+        target_oid: String,
+        request_id: String,
+    },
+    /// Explicit-refspec fetch (idempotent).
+    Sync {
+        remote: String,
+        #[serde(default)]
+        refspec: Option<String>,
+    },
     Shutdown,
 }
 
@@ -119,6 +262,22 @@ impl Op {
             Op::Changes { .. } => "changes",
             Op::Graph {} => "graph",
             Op::Status {} => "status",
+            Op::Resolve { .. } => "resolve",
+            Op::History { .. } => "history",
+            Op::Lifecycle { .. } => "lifecycle",
+            Op::Excavate { .. } => "excavate",
+            Op::Reconcile { .. } => "reconcile",
+            Op::Journal { .. } => "journal",
+            Op::Inspect { .. } => "inspect",
+            Op::Review { .. } => "review",
+            Op::Diff { .. } => "diff",
+            Op::HistoryOp { .. } => "history_op",
+            Op::Publish { .. } => "publish",
+            Op::Push { .. } => "push",
+            Op::Ship { .. } => "ship",
+            Op::BranchOp { .. } => "branch_op",
+            Op::Update { .. } => "update",
+            Op::Sync { .. } => "sync",
             Op::Shutdown => "shutdown",
         }
     }
@@ -198,6 +357,67 @@ mod tests {
     }
 
     #[test]
+    fn resolve_round_trips() {
+        let op = Op::Resolve { phrase: "the form".into(), limit: Some(5) };
+        let value = serde_json::to_value(&op).unwrap();
+        assert_eq!(value["op"], "resolve");
+        assert_eq!(value["phrase"], "the form");
+        assert_eq!(value["limit"], 5);
+        let back: Op = serde_json::from_value(value).unwrap();
+        assert_eq!(back, op);
+    }
+
+    #[test]
+    fn reconcile_round_trips_with_defaults() {
+        let op: Op = serde_json::from_value(json!({"op": "reconcile"})).unwrap();
+        assert_eq!(op, Op::Reconcile { strategy: None, push: None });
+    }
+
+    #[test]
+    fn inspect_round_trips_with_defaults() {
+        let op: Op = serde_json::from_value(json!({"op": "inspect"})).unwrap();
+        assert_eq!(op, Op::Inspect { files: None });
+    }
+
+    #[test]
+    fn publish_round_trips() {
+        let op = Op::Publish {
+            message: "fix bug".into(),
+            files: vec!["src/a.rs".into(), "src/b.rs".into()],
+            expected_head: Some("abc123".into()),
+            push: Some(true),
+            amend: Some(false),
+            request_id: "req-1".into(),
+        };
+        let value = serde_json::to_value(&op).unwrap();
+        assert_eq!(value["op"], "publish");
+        assert_eq!(value["message"], "fix bug");
+        assert_eq!(value["files"], json!(["src/a.rs", "src/b.rs"]));
+        assert_eq!(value["expected_head"], "abc123");
+        assert_eq!(value["push"], true);
+        assert_eq!(value["amend"], false);
+        assert_eq!(value["request_id"], "req-1");
+        let back: Op = serde_json::from_value(value).unwrap();
+        assert_eq!(back, op);
+    }
+
+    #[test]
+    fn update_round_trips() {
+        let op = Op::Update {
+            expected_head: "abc123".into(),
+            target_oid: "def456".into(),
+            request_id: "req-2".into(),
+        };
+        let value = serde_json::to_value(&op).unwrap();
+        assert_eq!(value["op"], "update");
+        assert_eq!(value["expected_head"], "abc123");
+        assert_eq!(value["target_oid"], "def456");
+        assert_eq!(value["request_id"], "req-2");
+        let back: Op = serde_json::from_value(value).unwrap();
+        assert_eq!(back, op);
+    }
+
+    #[test]
     fn op_name_matches_serde_tag() {
         // Every variant's op_name() must equal the "op" field serde emits,
         // so the response envelope's op field is always consistent with the
@@ -217,6 +437,22 @@ mod tests {
             (Op::Changes { base: None, offset: None }, "changes"),
             (Op::Graph {}, "graph"),
             (Op::Status {}, "status"),
+            (Op::Resolve { phrase: "".into(), limit: None }, "resolve"),
+            (Op::History { query: "".into(), facet: None, limit: None }, "history"),
+            (Op::Lifecycle { path: None, token: None }, "lifecycle"),
+            (Op::Excavate { phrase: None, path: None, from: None, to: None, limit: None }, "excavate"),
+            (Op::Reconcile { strategy: None, push: None }, "reconcile"),
+            (Op::Journal { kind: "".into(), path: None, detail: None }, "journal"),
+            (Op::Inspect { files: None }, "inspect"),
+            (Op::Review { cursor: None, byte_cap: None }, "review"),
+            (Op::Diff { from: "".into(), to: None, paths: None, byte_cap: None }, "diff"),
+            (Op::HistoryOp { ref_name: None, limit: None, detail: None, cursor: None, byte_cap: None }, "history_op"),
+            (Op::Publish { message: "".into(), files: vec![], expected_head: None, push: None, amend: None, request_id: "".into() }, "publish"),
+            (Op::Push { remote: "".into(), refspec: "".into(), force_with_lease: None, request_id: "".into() }, "push"),
+            (Op::Ship { message: "".into(), files: vec![], remote: "".into(), refspec: "".into(), request_id: "".into() }, "ship"),
+            (Op::BranchOp { name: "".into(), from: None, request_id: "".into() }, "branch_op"),
+            (Op::Update { expected_head: "".into(), target_oid: "".into(), request_id: "".into() }, "update"),
+            (Op::Sync { remote: "".into(), refspec: None }, "sync"),
             (Op::Shutdown, "shutdown"),
         ];
         for (op, expected) in cases {

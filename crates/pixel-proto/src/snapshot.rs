@@ -64,9 +64,9 @@ impl<'de> Deserialize<'de> for SnapshotToken {
     }
 }
 
-/// The envelope's `snapshot` field: `{token, head, branch, dirty}`. `token`
-/// is optional because not every read op needs one yet (e.g. a pure lookup
-/// against a warm graph might not touch the working tree at all).
+/// The envelope's `snapshot` field (v1): `{token, head, branch, dirty}` where
+/// `dirty` is a simple boolean. Retained for backward compatibility — the
+/// Envelope v2 `snapshot` field now carries [`SnapshotInfo`] instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Snapshot {
     #[serde(default)]
@@ -77,6 +77,25 @@ pub struct Snapshot {
     pub branch: Option<String>,
     #[serde(default)]
     pub dirty: bool,
+}
+
+/// Envelope v2 `snapshot` field: `{token, head, branch, dirty}`.
+///
+/// Unlike the v1 [`Snapshot`], `token` is a plain `Option<String>` (the
+/// daemon may populate it with a raw hex digest before a `SnapshotToken` is
+/// validated), and `dirty` is `Vec<String>` — the list of repo-relative paths
+/// with uncommitted changes — so callers can show *which* files are dirty,
+/// not merely *whether* any are.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SnapshotInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirty: Vec<String>,
 }
 
 #[cfg(test)]
@@ -120,5 +139,40 @@ mod tests {
     fn deserialize_rejects_malformed_token() {
         let result: Result<SnapshotToken, _> = serde_json::from_str("\"not-a-token\"");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn snapshot_info_omits_none_fields_and_empty_dirty() {
+        let info = SnapshotInfo {
+            token: None,
+            head: Some("abc123".into()),
+            branch: None,
+            dirty: vec![],
+        };
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"head": "abc123"})
+        );
+    }
+
+    #[test]
+    fn snapshot_info_serializes_dirty_file_list() {
+        let info = SnapshotInfo {
+            token: Some("abcdef012345".into()),
+            head: Some("deadbeef".into()),
+            branch: Some("main".into()),
+            dirty: vec!["src/a.rs".into(), "README.md".into()],
+        };
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "token": "abcdef012345",
+                "head": "deadbeef",
+                "branch": "main",
+                "dirty": ["src/a.rs", "README.md"],
+            })
+        );
     }
 }

@@ -12,10 +12,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::budget::Budget;
+use crate::budget::BudgetInfo;
 use crate::epistemics::Epistemics;
 use crate::error::PixelError;
-use crate::snapshot::Snapshot;
+use crate::snapshot::SnapshotInfo;
 use crate::warning::Warning;
 
 /// Schema version of this envelope crate's wire contract. Distinct from
@@ -31,12 +31,12 @@ pub struct Envelope<T> {
     pub protocol: u32,
     #[serde(default, rename = "requestId", skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    #[serde(default)]
-    pub snapshot: Option<Snapshot>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epistemics: Option<Epistemics>,
-    #[serde(default)]
-    pub budget: Option<Budget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<BudgetInfo>,
     #[serde(default)]
     pub result: Option<T>,
     #[serde(default)]
@@ -85,7 +85,7 @@ impl<T> Envelope<T> {
         self
     }
 
-    pub fn with_snapshot(mut self, snapshot: Snapshot) -> Self {
+    pub fn with_snapshot(mut self, snapshot: SnapshotInfo) -> Self {
         self.snapshot = Some(snapshot);
         self
     }
@@ -95,13 +95,36 @@ impl<T> Envelope<T> {
         self
     }
 
-    pub fn with_budget(mut self, budget: Budget) -> Self {
+    pub fn with_budget(mut self, budget: BudgetInfo) -> Self {
         self.budget = Some(budget);
         self
     }
 
     pub fn with_warnings(mut self, warnings: Vec<Warning>) -> Self {
         self.warnings = warnings;
+        self
+    }
+
+    /// Set all three Envelope v2 metadata fields at once: `snapshot`,
+    /// `epistemics`, and `budget`. Each argument is `Option`-al — passing
+    /// `None` leaves that field untouched. This is the convenience helper
+    /// for daemon call sites that want to attach all repo-state metadata
+    /// in one chained call instead of three separate `with_*` calls.
+    pub fn with_metadata(
+        mut self,
+        snapshot: Option<SnapshotInfo>,
+        epistemics: Option<Epistemics>,
+        budget: Option<BudgetInfo>,
+    ) -> Self {
+        if let Some(s) = snapshot {
+            self.snapshot = Some(s);
+        }
+        if let Some(e) = epistemics {
+            self.epistemics = Some(e);
+        }
+        if let Some(b) = budget {
+            self.budget = Some(b);
+        }
         self
     }
 }
@@ -129,7 +152,6 @@ impl Envelope<serde_json::Value> {
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
-    use crate::snapshot::SnapshotToken;
     use serde_json::json;
 
     /// Golden snapshot (M0 gate from `PLAN.md`: "golden envelope snapshots
@@ -144,14 +166,19 @@ mod tests {
             json!({"pong": true}),
         )
         .with_request_id("req-1")
-        .with_snapshot(Snapshot {
-            token: Some(SnapshotToken::parse("abcdef012345").unwrap()),
+        .with_snapshot(SnapshotInfo {
+            token: Some("abcdef012345".into()),
             head: Some("deadbeefcafefeed0000000000000000deadbee".into()),
             branch: Some("main".into()),
-            dirty: false,
+            dirty: vec!["src/a.rs".into()],
         })
-        .with_epistemics(Epistemics::default())
-        .with_budget(Budget {
+        .with_epistemics(Epistemics {
+            closed_world: true,
+            lower_bound: false,
+            basis: "index".into(),
+            staleness_ms: Some(120),
+        })
+        .with_budget(BudgetInfo {
             byte_cap: 1024,
             used: 10,
             truncated: false,
@@ -168,19 +195,18 @@ mod tests {
                 "token": "abcdef012345",
                 "head": "deadbeefcafefeed0000000000000000deadbee",
                 "branch": "main",
-                "dirty": false,
+                "dirty": ["src/a.rs"],
             },
             "epistemics": {
                 "closed_world": true,
                 "lower_bound": false,
-                "basis": [],
-                "staleness_ms": 0,
+                "basis": "index",
+                "staleness_ms": 120,
             },
             "budget": {
                 "byteCap": 1024,
                 "used": 10,
                 "truncated": false,
-                "cursor": null,
             },
             "result": {"pong": true},
             "error": null,
@@ -202,9 +228,6 @@ mod tests {
             "op": "push",
             "protocol": 1,
             "requestId": "req-2",
-            "snapshot": null,
-            "epistemics": null,
-            "budget": null,
             "result": null,
             "error": {
                 "code": "NON_FAST_FORWARD",
@@ -227,5 +250,102 @@ mod tests {
         let envelope: Envelope<serde_json::Value> = Envelope::success("status", json!(null));
         let value = serde_json::to_value(&envelope).unwrap();
         assert!(value.get("warnings").is_none());
+    }
+
+    /// Envelope v2: when snapshot/epistemics/budget are `None` they are
+    /// omitted entirely from the serialized JSON (not `null`), preserving
+    /// backward compat with v1 clients that don't know about these fields.
+    #[test]
+    fn v2_fields_omitted_when_none() {
+        let envelope: Envelope<serde_json::Value> = Envelope::success("search", json!({"hits": 0}));
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert!(value.get("snapshot").is_none());
+        assert!(value.get("epistemics").is_none());
+        assert!(value.get("budget").is_none());
+    }
+
+    /// Envelope v2: all three metadata fields serialize with the correct
+    /// shapes and casing when populated, including `dirty` as a file list
+    /// and `staleness_ms` as an optional integer.
+    #[test]
+    fn v2_fields_serialize_with_correct_shapes() {
+        let envelope: Envelope<serde_json::Value> = Envelope::success("inspect", json!({"head": "abc"}))
+            .with_snapshot(SnapshotInfo {
+                token: None,
+                head: Some("abc123".into()),
+                branch: Some("feature/x".into()),
+                dirty: vec!["src/main.rs".into(), "README.md".into()],
+            })
+            .with_epistemics(Epistemics {
+                closed_world: false,
+                lower_bound: true,
+                basis: "graph".into(),
+                staleness_ms: None,
+            })
+            .with_budget(BudgetInfo {
+                byte_cap: 8192,
+                used: 4096,
+                truncated: true,
+                cursor: Some("page-2".into()),
+            });
+
+        let value = serde_json::to_value(&envelope).unwrap();
+
+        // snapshot: token omitted (None), dirty is a file list
+        assert_eq!(value["snapshot"]["head"], "abc123");
+        assert_eq!(value["snapshot"]["branch"], "feature/x");
+        assert!(value["snapshot"].get("token").is_none());
+        assert_eq!(
+            value["snapshot"]["dirty"],
+            json!(["src/main.rs", "README.md"])
+        );
+
+        // epistemics: staleness_ms omitted (None)
+        assert_eq!(value["epistemics"]["closed_world"], false);
+        assert_eq!(value["epistemics"]["lower_bound"], true);
+        assert_eq!(value["epistemics"]["basis"], "graph");
+        assert!(value["epistemics"].get("staleness_ms").is_none());
+
+        // budget: cursor present, byteCap is camelCase
+        assert_eq!(value["budget"]["byteCap"], 8192);
+        assert_eq!(value["budget"]["used"], 4096);
+        assert_eq!(value["budget"]["truncated"], true);
+        assert_eq!(value["budget"]["cursor"], "page-2");
+    }
+
+    /// Envelope v2: `with_metadata` sets all three fields in one call.
+    #[test]
+    fn with_metadata_sets_all_three() {
+        let envelope: Envelope<serde_json::Value> = Envelope::success("diff", json!({}))
+            .with_metadata(
+                Some(SnapshotInfo {
+                    token: None,
+                    head: Some("abc".into()),
+                    branch: None,
+                    dirty: vec![],
+                }),
+                Some(Epistemics::default()),
+                Some(BudgetInfo {
+                    byte_cap: 100,
+                    used: 50,
+                    truncated: false,
+                    cursor: None,
+                }),
+            );
+
+        assert!(envelope.snapshot.is_some());
+        assert!(envelope.epistemics.is_some());
+        assert!(envelope.budget.is_some());
+    }
+
+    /// Envelope v2: `with_metadata` with all `None` leaves fields untouched.
+    #[test]
+    fn with_metadata_none_leaves_untouched() {
+        let envelope: Envelope<serde_json::Value> = Envelope::success("ping", json!({}))
+            .with_metadata(None, None, None);
+
+        assert!(envelope.snapshot.is_none());
+        assert!(envelope.epistemics.is_none());
+        assert!(envelope.budget.is_none());
     }
 }

@@ -10,15 +10,21 @@ use serde::{Deserialize, Serialize};
 ///
 /// The default is the common case: a complete, fresh answer with nothing
 /// left out and no staleness — `closed_world: true`, `lower_bound: false`,
-/// an empty `basis`, and `staleness_ms: 0`. Ops that could not close the
+/// an empty `basis`, and `staleness_ms: None`. Ops that could not close the
 /// world (e.g. graph resolution gave up) must override this explicitly
 /// rather than rely on the default.
+///
+/// Envelope v2 shape: `basis` is a single descriptive `String` (e.g.
+/// `"graph"` or `"index"`) and `staleness_ms` is `Option<u64>` — `None`
+/// means "not stale / unknown", a present value is the measured staleness.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Epistemics {
     pub closed_world: bool,
     pub lower_bound: bool,
-    pub basis: Vec<String>,
-    pub staleness_ms: u64,
+    #[serde(default)]
+    pub basis: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staleness_ms: Option<u64>,
 }
 
 impl Default for Epistemics {
@@ -26,8 +32,8 @@ impl Default for Epistemics {
         Epistemics {
             closed_world: true,
             lower_bound: false,
-            basis: Vec::new(),
-            staleness_ms: 0,
+            basis: String::new(),
+            staleness_ms: None,
         }
     }
 }
@@ -42,7 +48,7 @@ mod tests {
         assert!(epistemics.closed_world);
         assert!(!epistemics.lower_bound);
         assert!(epistemics.basis.is_empty());
-        assert_eq!(epistemics.staleness_ms, 0);
+        assert_eq!(epistemics.staleness_ms, None);
     }
 
     #[test]
@@ -53,8 +59,27 @@ mod tests {
             serde_json::json!({
                 "closed_world": true,
                 "lower_bound": false,
-                "basis": [],
-                "staleness_ms": 0,
+                "basis": "",
+            })
+        );
+    }
+
+    #[test]
+    fn staleness_ms_serializes_when_present() {
+        let epistemics = Epistemics {
+            closed_world: false,
+            lower_bound: true,
+            basis: "graph".into(),
+            staleness_ms: Some(5_000),
+        };
+        let value = serde_json::to_value(&epistemics).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "closed_world": false,
+                "lower_bound": true,
+                "basis": "graph",
+                "staleness_ms": 5000,
             })
         );
     }
