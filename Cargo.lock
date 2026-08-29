@@ -2408,7 +2408,10 @@ name = "pixel-bench"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "pixel-daemon",
  "pixel-index",
+ "pixel-proto",
+ "tempfile",
 ]
 
 [[package]]

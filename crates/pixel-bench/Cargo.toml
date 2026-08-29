@@ -10,7 +10,14 @@ pixel-index = { path = "../pixel-index" }
 
 [dev-dependencies]
 criterion = { workspace = true }
+pixel-daemon = { path = "../pixel-daemon" }
+pixel-proto = { path = "../pixel-proto" }
+tempfile = "3"
 
 [[bench]]
 name = "gram_extraction"
+harness = false
+
+[[bench]]
+name = "m1_latency"
 harness = false
