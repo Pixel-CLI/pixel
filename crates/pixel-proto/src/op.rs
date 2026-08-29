@@ -40,6 +40,12 @@ pub enum Op {
         /// multi-path invocations). None/empty = whole repo.
         #[serde(default)]
         paths: Option<Vec<String>>,
+        /// `"code"` enables ranked output: matches are reranked by file-level
+        /// signals (filename match, symbol-name match, content density) via
+        /// pixel-rank's RRF, without changing the hit set. Default (None or
+        /// any other value) preserves the existing path/line order.
+        #[serde(default)]
+        scope: Option<String>,
     },
     /// Sniper target list: task description in, closed prioritized file
     /// list (P0/P1/P2) out.
@@ -137,6 +143,7 @@ mod tests {
             limit: Some(50),
             offset: None,
             paths: Some(vec!["src".into()]),
+            scope: None,
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(
@@ -148,6 +155,7 @@ mod tests {
                 "limit": 50,
                 "offset": null,
                 "paths": ["src"],
+                "scope": null,
             })
         );
     }
@@ -197,7 +205,7 @@ mod tests {
         let cases: &[(Op, &str)] = &[
             (Op::Ping, "ping"),
             (Op::Recall { action: "x".into(), params: json!(null) }, "recall"),
-            (Op::Search { pattern: "".into(), json: false, limit: None, offset: None, paths: None }, "search"),
+            (Op::Search { pattern: "".into(), json: false, limit: None, offset: None, paths: None, scope: None }, "search"),
             (Op::Targets { task: "".into(), limit: None }, "targets"),
             (Op::Symbol { name: "".into() }, "symbol"),
             (Op::Context { uid: "".into(), budget_tokens: None }, "context"),

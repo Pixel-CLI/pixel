@@ -3,12 +3,12 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Command;
 
 use serde::Serialize;
 
 use crate::impact::processes_for_symbol;
 use crate::store::{EdgeKind, GraphStore};
+use pixel_git::GitRunner;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -104,13 +104,18 @@ fn overlaps(ranges: &[(u32, u32)], start: u32, end: u32) -> bool {
 /// commit oid, branch/tag name, or a rev expression (`HEAD~1`, `main@{1}`),
 /// but it must never be parsed by git as an option: anything starting with
 /// `-` is rejected to block option injection (e.g. `--output=/etc/passwd`).
+///
+/// Now delegates to `pixel_git::validate_ref`, which is the single shared
+/// validator (and accepts mid-string dashes like `fix-bug`). The production
+/// path (`detect`) uses `GitRunner::diff_unified0` which validates inline;
+/// this wrapper is retained so the existing test
+/// (`validate_base_ref_rejects_leading_dash`) continues to exercise the
+/// contract without depending on pixel-git's internal error type.
+#[cfg(test)]
 fn validate_base_ref(r: &str) -> Result<&str, BoxError> {
-    if r.starts_with('-') {
-        return Err(format!("invalid base ref {r:?}: must not start with '-'").into());
-    }
-    if r.is_empty() {
-        return Err("invalid base ref: empty".into());
-    }
+    pixel_git::validate_ref(r).map_err(|e| -> BoxError {
+        format!("invalid base ref {r:?}: {e}").into()
+    })?;
     Ok(r)
 }
 
@@ -120,25 +125,9 @@ pub fn detect(
     base_ref: Option<&str>,
 ) -> Result<ChangesReport, BoxError> {
     let base = base_ref.unwrap_or("HEAD").to_string();
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(root).arg("diff").arg("--unified=0");
-    if let Some(r) = base_ref {
-        let r = validate_base_ref(r)?;
-        // `--end-of-options` (git >= 2.36) makes git treat the next token
-        // strictly as a rev/path, never an option — defense in depth on top
-        // of the leading-dash rejection above.
-        cmd.arg("--end-of-options").arg(r);
-    }
-    cmd.arg("--").arg(".");
-    let out = cmd.output()?;
-    if !out.status.success() {
-        return Err(format!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )
-        .into());
-    }
-    let diff = String::from_utf8_lossy(&out.stdout).into_owned();
+    let runner = GitRunner::new(root);
+    let diff_bytes = runner.diff_unified0(base_ref)?;
+    let diff = String::from_utf8_lossy(&diff_bytes).into_owned();
     let file_diffs = parse_diff(&diff);
 
     let mut symbols: Vec<ChangedSymbol> = Vec::new();

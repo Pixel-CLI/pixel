@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 crc32fast = { workspace = true }
+pixel-git = { path = "../pixel-git" }
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 ignore = "0.4.33"

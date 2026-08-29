@@ -243,7 +243,8 @@ impl Service {
                 limit,
                 offset,
                 paths,
-            } => self.op_search(&pattern, limit, offset, paths.as_deref()),
+                scope,
+            } => self.op_search(&pattern, limit, offset, paths.as_deref(), scope.as_deref()),
             Request::Targets { task, limit } => self.op_targets(&task, limit),
             Request::Symbol { name } => self.op_symbol(&name),
             Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
@@ -274,6 +275,7 @@ impl Service {
         limit: Option<usize>,
         offset: Option<usize>,
         paths: Option<&[String]>,
+        scope: Option<&str>,
     ) -> Result<Value, String> {
         // Default row limit and byte cap protect against broad patterns
         // (`.*`, short literals that hit every file) returning unbounded
@@ -288,10 +290,19 @@ impl Service {
         let row_limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         let offset = offset.unwrap_or(0);
 
-        let (matches, stats) = self
+        let (mut matches, stats) = self
             .index
             .search_page_in(pattern, offset, Some(row_limit), paths)
             .map_err(|e| e.to_string())?;
+
+        // `--scope code`: rerank matches by file-level signals via pixel-rank's
+        // RRF, WITHOUT changing the hit set. The hit set (set of (path, line)
+        // pairs) is preserved exactly; only the order changes. This is the M1
+        // ranked-search gate per PLAN.md.
+        let ranked = scope == Some("code");
+        if ranked {
+            matches = rank_search_matches(&matches, pattern, &self.graph);
+        }
 
         // Render matches until either the row limit or the byte cap is hit.
         let mut arr: Vec<Value> = Vec::with_capacity(matches.len().min(row_limit));
@@ -336,6 +347,7 @@ impl Service {
             "limit": row_limit,
             "byte_cap": BYTE_CAP,
             "match_count": arr.len(),
+            "ranked": ranked,
             "stats": {
                 "candidates": stats.candidates,
                 "scanned_all": stats.scanned_all,
@@ -1337,6 +1349,149 @@ fn to_val<T: Serialize>(t: T) -> Value {
     serde_json::to_value(t).unwrap_or(Value::Null)
 }
 
+// ---------------------------------------------------------------------------
+// ranked search — `--scope code` reranking via pixel-rank's RRF
+// ---------------------------------------------------------------------------
+
+/// Rerank search matches by file-level signals WITHOUT changing the hit set.
+///
+/// The hit set (set of (path, line) pairs from the index) is preserved
+/// exactly — only the order changes. Per PLAN.md's M1 gate: "identical hit
+/// sets; order may differ deliberately due to ranking."
+///
+/// Signals (same RRF family as `targets`, K=60):
+/// - **Filename**: the search pattern appears in the file's basename.
+///   Weight 3.0 (matches `targets`'s filename signal).
+/// - **Symbol**: the search pattern matches a symbol name in that file
+///   (via the graph, if available). Weight 2.5.
+/// - **Content density**: files with more matches rank higher. Weight 1.5.
+///
+/// Files are ranked by fused RRF score; within a file, matches keep their
+/// original line-number order (stable, deterministic). Graph failure
+/// degrades to filename + content density only (same graceful-degradation
+/// pattern as `op_targets`).
+fn rank_search_matches(
+    matches: &[pixel_index::verify::MatchLine],
+    pattern: &str,
+    graph: &Option<GraphStore>,
+) -> Vec<pixel_index::verify::MatchLine> {
+    use std::collections::BTreeMap;
+
+    // Group matches by file, preserving within-file line order.
+    let mut by_file: BTreeMap<String, Vec<pixel_index::verify::MatchLine>> = BTreeMap::new();
+    for m in matches {
+        by_file.entry(m.path.clone()).or_default().push(m.clone());
+    }
+    let files: Vec<String> = by_file.keys().cloned().collect();
+    if files.is_empty() {
+        return Vec::new();
+    }
+
+    // --- Signal 1: filename match ---
+    // Files whose basename contains the pattern (case-insensitive) rank first.
+    let pat_lower = pattern.to_lowercase();
+    let mut filename_rank: Vec<(usize, String)> = files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| {
+            let basename = std::path::Path::new(f)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            !pat_lower.is_empty() && basename.contains(&pat_lower)
+        })
+        .map(|(i, f)| (i, f.clone()))
+        .collect();
+    // Sort by filename match strength: exact basename match > substring.
+    filename_rank.sort_by(|a, b| {
+        let ba = std::path::Path::new(&a.1)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let bb = std::path::Path::new(&b.1)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        bb.len().cmp(&ba.len()).then_with(|| a.1.cmp(&b.1))
+    });
+
+    // --- Signal 2: symbol match (graph, if available) ---
+    let symbol_rank: Vec<String> = if let Some(store) = graph {
+        // For each file, check if any symbol name contains the pattern.
+        let mut hits: Vec<(String, usize)> = files
+            .iter()
+            .filter_map(|f| {
+                let file = store.file_by_path(f).ok().flatten()?;
+                let syms = store.symbols_in_file(file.id).ok()?;
+                let count = syms
+                    .iter()
+                    .filter(|s| {
+                        let name_lc = s.name.to_lowercase();
+                        name_lc.contains(&pat_lower)
+                    })
+                    .count();
+                if count > 0 { Some((f.clone(), count)) } else { None }
+            })
+            .collect();
+        hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        hits.into_iter().map(|(f, _)| f).collect()
+    } else {
+        Vec::new()
+    };
+
+    // --- Signal 3: content density (match count per file) ---
+    let mut density_rank: Vec<(String, usize)> = files
+        .iter()
+        .map(|f| (f.clone(), by_file.get(f).map(|v| v.len()).unwrap_or(0)))
+        .collect();
+    density_rank.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    // --- RRF fusion (K=60, same as targets) ---
+    const K: f64 = 60.0;
+    const W_FILENAME: f64 = 3.0;
+    const W_SYMBOL: f64 = 2.5;
+    const W_CONTENT: f64 = 1.5;
+
+    let rrf_score = |rank: usize, weight: f64| -> f64 {
+        weight / (K + rank as f64 + 1.0)
+    };
+
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    for (rank, (_, f)) in filename_rank.iter().enumerate() {
+        *scores.entry(f.clone()).or_default() += rrf_score(rank, W_FILENAME);
+    }
+    for (rank, f) in symbol_rank.iter().enumerate() {
+        *scores.entry(f.clone()).or_default() += rrf_score(rank, W_SYMBOL);
+    }
+    for (rank, (f, _)) in density_rank.iter().enumerate() {
+        *scores.entry(f.clone()).or_default() += rrf_score(rank, W_CONTENT);
+    }
+
+    // Sort files by fused score desc, then path asc (deterministic tie-break,
+    // same convention as `targets`).
+    let mut file_order: Vec<(String, f64)> = files
+        .iter()
+        .map(|f| {
+            let s = scores.get(f).copied().unwrap_or(0.0);
+            (f.clone(), s)
+        })
+        .collect();
+    file_order.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    // Emit matches in file order, preserving within-file line order.
+    let mut out: Vec<pixel_index::verify::MatchLine> = Vec::with_capacity(matches.len());
+    for (f, _) in file_order {
+        if let Some(file_matches) = by_file.remove(&f) {
+            out.extend(file_matches);
+        }
+    }
+    out
+}
+
 fn es<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
@@ -1619,6 +1774,7 @@ mod tests {
             json: true,
             limit: None,
             offset: None,
+            scope: None,
         });
         assert!(resp.ok, "search: {:?}", resp);
         let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
@@ -1641,6 +1797,7 @@ mod tests {
             json: true,
             limit: Some(5),
             offset: None,
+            scope: None,
         });
         assert!(resp.ok);
         let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
@@ -1659,6 +1816,7 @@ mod tests {
             json: true,
             limit: Some(5),
             offset: Some(5),
+            scope: None,
         });
         assert!(resp.ok);
         let second_page = resp.data().get("matches").and_then(Value::as_array).unwrap();
@@ -1671,6 +1829,101 @@ mod tests {
         assert_eq!(
             resp.data().get("next_offset").and_then(Value::as_u64),
             Some(10)
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `search --scope code` must preserve the hit set (same (path, line)
+    /// pairs as unranked) while reranking by file-level signals. A file
+    /// whose basename matches the pattern should rank ahead of a file with
+    /// the same match count but no filename/symbol signal.
+    #[test]
+    fn search_scope_code_preserves_hit_set_and_reranks() {
+        let root = tmpdir("search-scope-code");
+        // login.rs: basename matches "login", defines `login` symbol.
+        std::fs::write(
+            root.join("login.rs"),
+            "pub fn login(user: &str) -> bool { !user.is_empty() }\n",
+        )
+        .unwrap();
+        // caller.rs: contains "login" in content but not in filename/symbol.
+        std::fs::write(
+            root.join("caller.rs"),
+            "use crate::login::login;\npub fn go() { login(\"a\"); }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+
+        // Unranked: path/line order → caller.rs before login.rs (alphabetical).
+        let unranked = svc.handle(Request::Search {
+            paths: None,
+            pattern: "login".into(),
+            json: true,
+            limit: Some(50),
+            offset: None,
+            scope: None,
+        });
+        assert!(unranked.ok, "unranked: {:?}", unranked.error);
+        assert_eq!(
+            unranked.data().get("ranked").and_then(Value::as_bool),
+            Some(false)
+        );
+        let unranked_matches = unranked.data().get("matches").and_then(Value::as_array).unwrap();
+        let unranked_set: std::collections::HashSet<(String, u64)> = unranked_matches
+            .iter()
+            .map(|m| {
+                (
+                    m["path"].as_str().unwrap().to_string(),
+                    m["line"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+
+        // Ranked: same hit set, but login.rs should rank first (filename +
+        // symbol signal), ahead of caller.rs.
+        let ranked = svc.handle(Request::Search {
+            paths: None,
+            pattern: "login".into(),
+            json: true,
+            limit: Some(50),
+            offset: None,
+            scope: Some("code".into()),
+        });
+        assert!(ranked.ok, "ranked: {:?}", ranked.error);
+        assert_eq!(
+            ranked.data().get("ranked").and_then(Value::as_bool),
+            Some(true)
+        );
+        let ranked_matches = ranked.data().get("matches").and_then(Value::as_array).unwrap();
+        let ranked_set: std::collections::HashSet<(String, u64)> = ranked_matches
+            .iter()
+            .map(|m| {
+                (
+                    m["path"].as_str().unwrap().to_string(),
+                    m["line"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+
+        // Hit set must be identical (M1 parity gate).
+        assert_eq!(
+            unranked_set, ranked_set,
+            "ranked search must preserve the hit set exactly"
+        );
+
+        // login.rs must rank first (filename + symbol signal beats content-only).
+        let first_path = ranked_matches
+            .first()
+            .and_then(|m| m["path"].as_str())
+            .unwrap_or("");
+        assert_eq!(
+            first_path, "login.rs",
+            "filename+symbol signal must rank login.rs first, got {first_path}"
         );
 
         let _ = std::fs::remove_dir_all(&root);

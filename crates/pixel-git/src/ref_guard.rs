@@ -8,12 +8,19 @@ use crate::error::GitError;
 /// Reject anything that is not a plain hex object id or simple ref name —
 /// in particular anything starting with `-` (option injection).
 ///
-/// Ported exactly from `pixel-cli::rescue_cmd::validate_ref`.
+/// Originally ported from `pixel-cli::rescue_cmd::validate_ref`, which
+/// rejected `-` *anywhere* in the string (not just as the first character)
+/// because the allowed-charset filter omitted `-` entirely. That was a
+/// pre-existing defect: ordinary branch names like `fix-bug` or
+/// `feature/my-branch` failed validation. Now that pixel-git is the single
+/// validator all call sites use (M1 wiring), the charset includes `-` so
+/// mid-string dashes are accepted; the leading-dash option-injection guard
+/// is preserved.
 pub fn validate_ref(r: &str) -> Result<(), GitError> {
     let ok = !r.is_empty()
         && !r.starts_with('-')
         && r.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '~' | '^'));
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '~' | '^' | '-'));
     if ok {
         Ok(())
     } else {
@@ -52,18 +59,20 @@ mod tests {
         assert!(validate_ref("v1.2.3").is_ok());
     }
 
-    /// Documents a real over-restrictiveness bug inherited verbatim from
-    /// `pixel-cli::rescue_cmd::validate_ref`: `-` is only rejected as the
-    /// *first* character (anti flag-injection), but the allowed-charset
-    /// filter below it does not include `-` at all, so it is also rejected
-    /// mid-string — meaning a completely ordinary branch name like
-    /// `feature/my-branch` or `fix-bug` fails validation today. This is a
-    /// pre-existing defect in the ported logic, kept intentionally per the
-    /// "port exactly" spec; see the crate-level ref-injection audit notes.
+    /// Regression for the over-restrictiveness bug inherited from
+    /// `pixel-cli::rescue_cmd::validate_ref`: the original rejected `-`
+    /// anywhere in the string (not just leading), so ordinary branch names
+    /// like `feature/my-branch` or `fix-bug` failed validation. Now that
+    /// pixel-git is the single validator (M1 wiring), mid-string dashes are
+    /// accepted; only a *leading* dash (option injection) is rejected.
     #[test]
-    fn known_gap_rejects_dash_inside_an_otherwise_ordinary_ref_name() {
-        assert!(validate_ref("feature/my-branch").is_err());
-        assert!(validate_ref("fix-bug").is_err());
+    fn accepts_dash_inside_an_otherwise_ordinary_ref_name() {
+        assert!(validate_ref("feature/my-branch").is_ok());
+        assert!(validate_ref("fix-bug").is_ok());
+        assert!(validate_ref("release-1.0-rc").is_ok());
+        // Leading dash is still rejected (option injection).
+        assert!(validate_ref("-x").is_err());
+        assert!(validate_ref("--upload-pack=/bin/sh").is_err());
     }
 
     #[test]

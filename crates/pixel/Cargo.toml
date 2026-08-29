@@ -15,6 +15,7 @@ fastembed = ["pixel-recall/fastembed"]
 [dependencies]
 pixel-index = { path = "../pixel-index" }
 pixel-graph = { path = "../pixel-graph" }
+pixel-git = { path = "../pixel-git" }
 pixel-recall = { path = "../pixel-recall" }
 pixel-daemon = { path = "../pixel-daemon" }
 pixel-rank = { path = "../pixel-rank" }

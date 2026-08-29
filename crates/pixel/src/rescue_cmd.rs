@@ -11,57 +11,35 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
 
 use serde_json::{Value, json};
+use pixel_git::GitRunner;
 
 // ---------------------------------------------------------------------------
-// git plumbing (all refs validated; paths always after `--`)
+// git plumbing — now delegated to pixel_git::GitRunner (single wrapper,
+// timeout + output-cap enforced, refs validated consistently).
 // ---------------------------------------------------------------------------
-
-fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .map_err(|e| format!("spawn git: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
 
 /// Reject anything that is not a plain hex object id or simple ref name —
-/// in particular anything starting with `-` (option injection).
+/// in particular anything starting with `-` (option injection). Delegates
+/// to `pixel_git::validate_ref` (the single shared validator), which now
+/// accepts mid-string dashes like `fix-bug`.
 fn validate_ref(r: &str) -> Result<(), String> {
-    let ok = !r.is_empty()
-        && !r.starts_with('-')
-        && r.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '~' | '^'));
-    if ok {
-        Ok(())
-    } else {
-        Err(format!("invalid git ref {r:?}"))
-    }
+    pixel_git::validate_ref(r).map_err(|e| format!("invalid git ref {r:?}: {e}"))
 }
 
+/// Blob oid of `path` as it exists in `commit`. `commit` is validated via
+/// `pixel_git::validate_ref` (the original wrapper passed it unvalidated to
+/// `git rev-parse` — a ref-injection gap, now closed).
 fn blob_oid(root: &Path, commit: &str, path: &str) -> Option<String> {
-    git(root, &["rev-parse", &format!("{commit}:{path}")])
-        .ok()
-        .map(|s| s.trim().to_string())
+    GitRunner::new(root).rev_parse_at(commit, path)
 }
 
 /// Working-tree dirty map: path -> porcelain status (e.g. " M", "??").
 fn dirty_map(root: &Path) -> Result<BTreeMap<String, String>, String> {
-    let out = git(root, &["status", "--porcelain", "-z"])?;
     let mut map = BTreeMap::new();
-    for entry in out.split('\0').filter(|e| e.len() > 3) {
-        let (status, path) = entry.split_at(3);
-        map.insert(path.to_string(), status.trim().to_string());
+    for (xy, path) in GitRunner::new(root).status_porcelain() {
+        map.insert(path, xy.trim().to_string());
     }
     Ok(map)
 }
@@ -92,19 +70,13 @@ pub fn plan(
     let mut targets: Vec<Value> = Vec::new();
 
     for path in target_paths {
-        let log = git(
-            root,
-            &[
-                "log",
-                "--follow",
-                "-n",
-                &depth.to_string(),
-                "--format=%H%x1f%ct%x1f%s",
-                "--",
-                path,
-            ],
-        )
-        .unwrap_or_default();
+        let runner = GitRunner::new(root);
+        let log_rows = runner.log_follow(path, depth).unwrap_or_default();
+        let log = log_rows
+            .into_iter()
+            .map(|(oid, ct, subject)| format!("{oid}\u{1f}{ct}\u{1f}{subject}"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let head_blob = blob_oid(root, "HEAD", path);
         let mut versions: Vec<VersionRow> = Vec::new();
@@ -236,11 +208,10 @@ pub fn apply(
     opts: &ApplyOptions,
 ) -> Result<Value, String> {
     validate_ref(oid)?;
-    git(
-        root,
-        &["rev-parse", "--verify", "-q", &format!("{oid}^{{commit}}")],
-    )
-    .map_err(|_| format!("{oid} is not a commit in this repository"))?;
+    let runner = GitRunner::new(root);
+    runner
+        .rev_verify_commit(oid)
+        .map_err(|_| format!("{oid} is not a commit in this repository"))?;
     if files.is_empty() {
         return Err("--apply requires at least one --file".to_string());
     }
@@ -263,21 +234,16 @@ pub fn apply(
     }
 
     if opts.stash_first && !dirty_planned.is_empty() {
-        let mut args: Vec<String> = vec![
-            "stash".into(),
-            "push".into(),
-            "-m".into(),
-            "gitpixel rescue backup".into(),
-            "--".into(),
-        ];
-        args.extend(dirty_planned.iter().map(|s| (*s).clone()));
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        git(root, &arg_refs)?;
+        let paths: Vec<String> = dirty_planned.iter().map(|s| (*s).clone()).collect();
+        runner
+            .stash_push_paths("pixel rescue backup", &paths)
+            .map_err(|e| e.to_string())?;
     }
 
     let mut results: Vec<Value> = Vec::new();
     for path in files {
-        let content = git(root, &["show", &format!("{oid}:{path}")])
+        let content = runner
+            .show_blob_string(oid, path)
             .map_err(|e| format!("{path} does not exist at {oid}: {e}"))?;
         let abs = root.join(path);
         let was_dirty = dirty.contains_key(path);
@@ -285,35 +251,29 @@ pub fn apply(
         if opts.merge && was_dirty && !opts.stash_first {
             // Deterministic 3-way merge: ours = working tree (in-progress
             // work), base = HEAD's version, theirs = the rescued version.
-            let base = git(root, &["show", &format!("HEAD:{path}")]).unwrap_or_default();
+            let base = runner
+                .show_blob_string("HEAD", path)
+                .unwrap_or_default();
             let tmp_base = abs.with_extension("gpx-rescue-base");
             let tmp_theirs = abs.with_extension("gpx-rescue-theirs");
             std::fs::write(&tmp_base, &base).map_err(|e| e.to_string())?;
             std::fs::write(&tmp_theirs, &content).map_err(|e| e.to_string())?;
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args([
-                    "merge-file",
-                    "-L",
+            let status = runner
+                .merge_file_with_labels(
+                    &abs,
+                    &tmp_base,
+                    &tmp_theirs,
                     "in-progress",
-                    "-L",
                     "HEAD",
-                    "-L",
                     &format!("rescue:{}", &oid[..7.min(oid.len())]),
-                ])
-                .arg(path)
-                .arg(&tmp_base)
-                .arg(&tmp_theirs)
-                .output()
+                )
                 .map_err(|e| format!("spawn git merge-file: {e}"))?;
             std::fs::remove_file(&tmp_base).ok();
             std::fs::remove_file(&tmp_theirs).ok();
-            let code = out.status.code().unwrap_or(-1);
+            let code = status.code().unwrap_or(-1);
             if code < 0 {
                 return Err(format!(
-                    "merge-file failed for {path}: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
+                    "merge-file failed for {path}"
                 ));
             }
             results.push(json!({

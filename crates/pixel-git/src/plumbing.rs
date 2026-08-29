@@ -6,6 +6,8 @@
 //! is interpolated (see the ref-injection gap audit in the crate-level docs
 //! / final report).
 
+use std::path::Path;
+
 use crate::error::GitError;
 use crate::ref_guard::{end_of_options, validate_ref};
 use crate::runner::GitRunner;
@@ -149,6 +151,73 @@ impl GitRunner {
     /// `git stash push -m <message>`.
     pub fn stash_push(&self, message: &str) -> Result<(), GitError> {
         self.run(&["stash", "push", "-m", message]).map(|_| ())
+    }
+
+    /// `git stash push -m <message> -- <paths>`. Stashes only the named
+    /// paths (port of `pixel-cli::rescue_cmd::apply`'s stash-first branch).
+    /// Paths are placed after `--` so they're never parsed as options.
+    pub fn stash_push_paths(&self, message: &str, paths: &[String]) -> Result<(), GitError> {
+        let mut args: Vec<String> = vec![
+            "stash".into(),
+            "push".into(),
+            "-m".into(),
+            message.into(),
+            "--".into(),
+        ];
+        args.extend(paths.iter().cloned());
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.run(&arg_refs).map(|_| ())
+    }
+
+    /// `git rev-parse --verify -q <oid>^{commit}` — confirms `oid` resolves
+    /// to a commit in this repo. Port of `pixel-cli::rescue_cmd::apply`'s
+    /// commit-existence check. `oid` is validated via `validate_ref` first.
+    pub fn rev_verify_commit(&self, oid: &str) -> Result<(), GitError> {
+        validate_ref(oid)?;
+        let spec = format!("{oid}^{{commit}}");
+        self.run(&["rev-parse", "--verify", "-q", &spec]).map(|_| ())
+    }
+
+    /// `git show <oid>:<path>` returning the blob content as a String.
+    /// `oid` is validated via `validate_ref`. Port of
+    /// `pixel-cli::rescue_cmd::apply`'s content-restore path. Errors carry
+    /// a redacted stderr.
+    pub fn show_blob_string(&self, oid: &str, path: &str) -> Result<String, GitError> {
+        validate_ref(oid)?;
+        let spec = format!("{oid}:{path}");
+        let out = self.run(&["show", end_of_options(), &spec])?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// `git merge-file -L <label1> -L <label2> -L <label3> <current> <base> <other>`.
+    /// Returns the exit status: 0 = clean merge, positive = conflict count
+    /// (markers left in `current`), negative = real failure. Port of
+    /// `pixel-cli::rescue_cmd::apply`'s 3-way merge branch, including the
+    /// cosmetic `-L` diff3 labels.
+    pub fn merge_file_with_labels(
+        &self,
+        current: &Path,
+        base: &Path,
+        other: &Path,
+        label_ours: &str,
+        label_base: &str,
+        label_theirs: &str,
+    ) -> Result<std::process::ExitStatus, GitError> {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(self.root())
+            .arg("merge-file")
+            .arg("-L")
+            .arg(label_ours)
+            .arg("-L")
+            .arg(label_base)
+            .arg("-L")
+            .arg(label_theirs)
+            .arg(current)
+            .arg(base)
+            .arg(other)
+            .status()
+            .map_err(GitError::from)
     }
 }
 
@@ -299,5 +368,53 @@ mod tests {
         runner.stash_push("test stash").expect("stash push");
         let content = std::fs::read_to_string(root.join("s.txt")).unwrap();
         assert_eq!(content, "tracked");
+    }
+
+    #[test]
+    fn rev_verify_commit_rejects_flag_injection() {
+        let root = tmpdir("plumbing-revverify");
+        init_repo(&root);
+        std::fs::write(root.join("v.txt"), b"v").unwrap();
+        git(&root, &["add", "v.txt"]);
+        git(&root, &["commit", "-q", "-m", "v1"]);
+        let runner = GitRunner::new(&root);
+        let head = runner.rev_parse_head().unwrap();
+        assert!(runner.rev_verify_commit(&head).is_ok());
+        // Flag injection rejected by validate_ref before reaching git.
+        assert!(runner.rev_verify_commit("--upload-pack=/bin/sh").is_err());
+    }
+
+    #[test]
+    fn show_blob_string_returns_content_and_rejects_injection() {
+        let root = tmpdir("plumbing-showstr");
+        init_repo(&root);
+        std::fs::write(root.join("c.txt"), b"content here").unwrap();
+        git(&root, &["add", "c.txt"]);
+        git(&root, &["commit", "-q", "-m", "c1"]);
+        let runner = GitRunner::new(&root);
+        let head = runner.rev_parse_head().unwrap();
+        let content = runner.show_blob_string(&head, "c.txt").expect("blob string");
+        assert_eq!(content, "content here");
+        // Flag injection rejected.
+        assert!(runner.show_blob_string("--output=/tmp/evil", "c.txt").is_err());
+    }
+
+    #[test]
+    fn stash_push_paths_stashes_only_named_files() {
+        let root = tmpdir("plumbing-stashpaths");
+        init_repo(&root);
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        std::fs::write(root.join("b.txt"), b"b").unwrap();
+        git(&root, &["add", "a.txt", "b.txt"]);
+        git(&root, &["commit", "-q", "-m", "ab"]);
+        std::fs::write(root.join("a.txt"), b"a-dirty").unwrap();
+        std::fs::write(root.join("b.txt"), b"b-dirty").unwrap();
+        let runner = GitRunner::new(&root);
+        runner
+            .stash_push_paths("partial", &["a.txt".to_string()])
+            .expect("stash push paths");
+        // a.txt stashed (clean), b.txt still dirty
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "b-dirty");
     }
 }

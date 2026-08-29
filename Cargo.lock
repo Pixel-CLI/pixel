@@ -2417,6 +2417,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "pixel-daemon",
+ "pixel-git",
  "pixel-graph",
  "pixel-index",
  "pixel-rank",
@@ -2463,6 +2464,7 @@ name = "pixel-graph"
 version = "0.1.0"
 dependencies = [
  "ignore",
+ "pixel-git",
  "rayon",
  "rusqlite",
  "serde",
@@ -2486,6 +2488,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "memmap2",
+ "pixel-git",
  "proptest",
  "rayon",
  "regex",

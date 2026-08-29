@@ -84,6 +84,12 @@ enum Command {
         /// Skip the daemon even if one is running.
         #[arg(long)]
         no_daemon: bool,
+        /// Ranking scope: `code` reranks matches by file-level signals
+        /// (filename match, symbol match, content density) via pixel-rank's
+        /// RRF without changing the hit set. Default: unranked (path/line
+        /// order).
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// Sniper target list: task description in, closed prioritized file list
     /// out (P0 = start here, P1 = likely, P2 = droppable). Writes the
@@ -659,6 +665,7 @@ fn run_search(
     limit: Option<usize>,
     offset: usize,
     no_daemon: bool,
+    scope: Option<String>,
 ) -> Result<(), String> {
     let groups = group_by_root(&paths)?;
     let multi_root = groups.len() > 1;
@@ -666,7 +673,7 @@ fn run_search(
         let whole_repo = rels.iter().any(String::is_empty);
         let req_paths = if whole_repo { None } else { Some(rels) };
         run_search_one(
-            &pattern, &root, req_paths, multi_root, json, stats, limit, offset, no_daemon,
+            &pattern, &root, req_paths, multi_root, json, stats, limit, offset, no_daemon, scope.clone(),
         )?;
     }
     Ok(())
@@ -683,6 +690,7 @@ fn run_search_one(
     limit: Option<usize>,
     offset: usize,
     no_daemon: bool,
+    scope: Option<String>,
 ) -> Result<(), String> {
     // Fast path via daemon/service (index auto-built if missing).
     let data = execute(
@@ -693,6 +701,7 @@ fn run_search_one(
             limit,
             offset: Some(offset),
             paths: req_paths,
+            scope,
         },
         no_daemon,
     )?;
@@ -892,7 +901,8 @@ fn run() -> Result<(), String> {
             limit,
             offset,
             no_daemon,
-        } => run_search(pattern, paths, json, stats, limit, offset, no_daemon),
+            scope,
+        } => run_search(pattern, paths, json, stats, limit, offset, no_daemon, scope),
         Command::Targets {
             task,
             path,
