@@ -2449,6 +2449,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pixel-git"
+version = "0.1.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "pixel-graph"
 version = "0.1.0"
 dependencies = [
@@ -2483,6 +2490,14 @@ dependencies = [
  "serde",
  "serde_json",
  "xxhash-rust",
+]
+
+[[package]]
+name = "pixel-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
