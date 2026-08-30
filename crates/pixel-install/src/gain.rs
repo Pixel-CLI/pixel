@@ -106,6 +106,35 @@ pub fn resolve_state_root() -> PathBuf {
     Path::new(&home).join(".local").join("state").join("pixel")
 }
 
+/// Resolve the **legacy** `usable-git` tool's global gain-ledger state root:
+/// `PIXEL_LEGACY_STATE_ROOT` (test-only override) > `XDG_STATE_HOME` >
+/// `~/.local/state`, joined with `usable-git` — the legacy tool's own
+/// state-root convention (see `usable-git/packages/usable-git/src/gain/
+/// ledger.ts`'s `ledgerDirectory`, which joins the same XDG-resolved root
+/// with a hardcoded `"usable-git"` subdirectory, not the caller's repo).
+///
+/// Deliberately does **not** honor `PIXEL_STATE_ROOT`: that variable names
+/// pixel's own state root and would make this indistinguishable from
+/// [`resolve_state_root`], defeating the point of resolving the *other*
+/// tool's directory.
+pub fn resolve_legacy_state_root() -> PathBuf {
+    if let Ok(root) = std::env::var("PIXEL_LEGACY_STATE_ROOT")
+        && !root.is_empty()
+    {
+        return PathBuf::from(root);
+    }
+    if let Ok(root) = std::env::var("XDG_STATE_HOME")
+        && !root.is_empty()
+    {
+        return PathBuf::from(root).join("usable-git");
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    Path::new(&home)
+        .join(".local")
+        .join("state")
+        .join("usable-git")
+}
+
 impl GainLedger {
     /// Open (creating if needed) the ledger under the env-resolved state root.
     pub fn open() -> Result<GainLedger> {
@@ -125,6 +154,14 @@ impl GainLedger {
 
     pub fn path(&self) -> &Path {
         &self.file
+    }
+
+    /// The state-root directory this ledger (and its salt file) live under.
+    /// Exposed for callers that need to report or clean up the ledger's
+    /// containing directory rather than just the ledger file itself (e.g.
+    /// `pixel doctor`'s ledger check).
+    pub fn directory(&self) -> &Path {
+        &self.directory
     }
 
     /// The salt, creating it (0600) on first use.
@@ -378,8 +415,37 @@ fn iso_now() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // RFC3339-ish UTC timestamp (second precision is sufficient for a ledger).
-    format!("{secs}")
+    rfc3339_utc(secs)
+}
+
+/// Format `secs` (Unix epoch seconds, UTC) as a genuine RFC3339 UTC
+/// timestamp, e.g. `"2026-08-30T12:34:56Z"` (second precision, which is
+/// sufficient for a ledger). Hand-rolled with no `chrono`/date dependency,
+/// using Howard Hinnant's `civil_from_days` algorithm for the proleptic
+/// Gregorian calendar (public domain: http://howardhinnant.github.io/date_algorithms.html).
+fn rfc3339_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Howard Hinnant's `civil_from_days`: converts a day count since
+/// 1970-01-01 (proleptic Gregorian, days may be negative for pre-epoch
+/// dates though this ledger never needs that) into `(year, month, day)`.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468; // shift epoch from 1970-01-01 to 0000-03-01
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 fn set_mode(path: &Path, mode: u32) {

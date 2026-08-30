@@ -61,10 +61,7 @@ pub fn skip_path(path: &str) -> bool {
 fn is_minified_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     // foo.min.js / foo.min.css / foo.bundle.min.js etc.
-    if let Some(dot) = lower.rfind(".min.") {
-        return true;
-    }
-    false
+    lower.rfind(".min.").is_some()
 }
 
 /// Big SVGs: heuristic on name — a `.svg` with a long basename is usually an

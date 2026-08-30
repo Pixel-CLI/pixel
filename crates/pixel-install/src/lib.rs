@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+pub mod capabilities;
 pub mod doctor;
 pub mod install;
 pub mod gain;

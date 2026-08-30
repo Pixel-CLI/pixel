@@ -218,7 +218,11 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         let events = ledger.read().map_err(|e| e.to_string())?;
         Ok(DoctorCheckDetail {
             summary: format!("gain ledger readable ({} events)", events.len()),
-            detail: Some(serde_json::json!({ "events": events.len(), "path": ledger.path().display().to_string() })),
+            detail: Some(serde_json::json!({
+                "events": events.len(),
+                "path": ledger.path().display().to_string(),
+                "directory": ledger.directory().display().to_string(),
+            })),
         })
     }));
 

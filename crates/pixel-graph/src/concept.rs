@@ -353,12 +353,23 @@ fn walk_ts_concepts(w: &mut TsWalker, node: Node, depth: usize) {
             w.push_ui_text(text, node);
         }
         "jsx_attribute" => {
-            if let Some(name) = field_text(w, node, "name")
-                && ATTR_NAMES.contains(&name.trim())
-                && let Some(value) = node.child_by_field_name("value")
-            {
-                let text = strip_quotes(&w.text(value));
-                w.push_attr_text(name.trim().to_string(), text, node);
+            // NOTE: this tree-sitter-typescript grammar does NOT expose
+            // `name`/`value` fields on `jsx_attribute` (verified against the
+            // actual parse tree) — the attribute name is always the first
+            // child (a `property_identifier` or `jsx_namespace_name`), and
+            // the value, when present, is the first `string` child (a
+            // `jsx_expression_container` value like `placeholder={x}` is not
+            // a static string and is intentionally skipped). Using
+            // `child_by_field_name` here silently finds nothing, which is
+            // why attr_text extraction previously never fired.
+            if let Some(name_node) = node.child(0) {
+                let name = w.text(name_node);
+                if ATTR_NAMES.contains(&name.trim())
+                    && let Some(value_node) = each_child(node).into_iter().find(|c| c.kind() == "string")
+                {
+                    let text = strip_quotes(&w.text(value_node));
+                    w.push_attr_text(name.trim().to_string(), text, node);
+                }
             }
         }
         "jsx_opening_element" | "jsx_self_closing_element" => {
@@ -813,29 +824,65 @@ fn extract_css(content: &[u8]) -> Vec<RawConcept> {
 
 // --- file-path-derived routes --------------------------------------------
 
+/// True when `path` has `dir` as a path segment, whether at the start of the
+/// (repo-relative, no leading slash) path or nested under a prefix. Plain
+/// `path.contains("/dir/")` misses the very common case where `dir` IS the
+/// top-level segment (e.g. a repo-root `app/api/orders/route.ts`, which
+/// contains no leading slash before `app/` at all).
+fn has_dir_segment(path: &str, dir: &str) -> bool {
+    path.starts_with(&format!("{dir}/")) || path.contains(&format!("/{dir}/"))
+}
+
+/// Derive the URL-ish route path from a file-path-derived route file, e.g.
+/// `app/api/orders/route.ts` -> `/api/orders`, `routes/orders/+server.ts` ->
+/// `/orders`. Falls back to the whole path when the anchor segment isn't
+/// found (should not happen given the caller already matched on it).
+fn derive_route_path(path: &str, anchor: &str) -> String {
+    let after = path
+        .rsplit_once(&format!("/{anchor}/"))
+        .map(|(_, rest)| rest)
+        .or_else(|| path.strip_prefix(&format!("{anchor}/")))
+        .unwrap_or(path);
+    let dir = after.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    if dir.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{dir}")
+    }
+}
+
 /// Next.js `app/**/route.ts` + method exports, `pages/api/**`, and SvelteKit
 /// `+server.ts` — one route concept per HTTP method. Call-derived routes
 /// (`app.get('/x')`, `fetch('/api/…')`) come from the TS walker instead.
 fn path_routes(path: &str, content: &[u8]) -> Vec<RawConcept> {
     let mut out = Vec::new();
-    let is_next_route = path.contains("/app/")
+    let is_next_route = has_dir_segment(path, "app")
         && (path.ends_with("/route.ts")
             || path.ends_with("/route.js")
             || path.ends_with("/route.tsx")
             || path.ends_with("/route.jsx"));
-    let is_pages_api = path.contains("/pages/api/");
-    let is_sveltekit = path.contains("/routes/")
+    let is_pages_api = has_dir_segment(path, "pages/api");
+    let is_sveltekit = has_dir_segment(path, "routes")
         && (path.ends_with("+server.ts") || path.ends_with("+server.js"));
     if is_next_route || is_sveltekit {
+        let anchor = if is_sveltekit { "routes" } else { "app" };
+        let route_path = derive_route_path(path, anchor);
         let text = String::from_utf8_lossy(content);
         for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
             if text.contains(&format!("function {method}"))
                 || text.contains(&format!("const {method}"))
             {
+                // Include the derived URL path in raw/norm (not just the
+                // method name) so the endpoint's path text is actually
+                // indexed into concept_words — otherwise a phrase like
+                // "orders endpoint" could never resolve to this route, since
+                // only `detail` carried the path and `detail` is never
+                // normalized or indexed.
+                let raw = format!("{method} {route_path}");
                 out.push(RawConcept {
                     kind: ConceptKind::Route,
-                    raw: method.to_string(),
-                    norm: normalize(method),
+                    raw: raw.clone(),
+                    norm: normalize(&raw),
                     detail: format!("{method} {path}"),
                     start_line: 0,
                     end_line: 0,

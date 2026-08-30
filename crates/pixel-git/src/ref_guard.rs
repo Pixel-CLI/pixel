@@ -16,11 +16,22 @@ use crate::error::GitError;
 /// validator all call sites use (M1 wiring), the charset includes `-` so
 /// mid-string dashes are accepted; the leading-dash option-injection guard
 /// is preserved.
+///
+/// The charset also includes `@`, `{`, and `}` so reflog/at-expressions like
+/// `main@{1}` and `HEAD@{1}` (and bare `@` as shorthand for `HEAD`) validate
+/// successfully — these are ordinary, non-flag rev expressions that git
+/// itself accepts, and `pixel-graph::changes` documents `main@{1}` as a
+/// supported example. `:` is deliberately NOT included: the `<oid>:<path>`
+/// spec form used by `pixel-git::plumbing::rev_parse_at`/`show_blob_string`
+/// validates only the `oid`/`commit` portion via `validate_ref` *before*
+/// appending `:{path}` to build the spec, so the colon and path never pass
+/// through this validator and don't need to be in the allowed charset.
 pub fn validate_ref(r: &str) -> Result<(), GitError> {
     let ok = !r.is_empty()
         && !r.starts_with('-')
-        && r.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '~' | '^' | '-'));
+        && r.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '~' | '^' | '-' | '@' | '{' | '}')
+        });
     if ok {
         Ok(())
     } else {
@@ -78,6 +89,35 @@ mod tests {
     #[test]
     fn accepts_40_hex_oid() {
         assert!(validate_ref("abcdef0123456789abcdef0123456789abcdef01").is_ok());
+    }
+
+    /// Regression for the over-strictness bug: the allowed charset omitted
+    /// `@`, `{`, `}`, so ordinary reflog/at-expressions like `main@{1}` and
+    /// `HEAD@{1}` were rejected even though git accepts them and
+    /// `pixel-graph::changes`'s own doc comment advertises `main@{1}` as a
+    /// supported example.
+    #[test]
+    fn accepts_at_expressions() {
+        assert!(validate_ref("main@{1}").is_ok());
+        assert!(validate_ref("HEAD@{1}").is_ok());
+        assert!(validate_ref("@").is_ok());
+    }
+
+    #[test]
+    fn accepts_relative_and_remote_refs() {
+        assert!(validate_ref("HEAD~1").is_ok());
+        assert!(validate_ref("HEAD^").is_ok());
+        assert!(validate_ref("origin/main").is_ok());
+    }
+
+    /// Widening the charset for `@`/`{`/`}` must not reopen the flag
+    /// injection hole: a leading `-` is still rejected regardless of what
+    /// other now-allowed characters follow it.
+    #[test]
+    fn still_rejects_leading_dash_and_empty_after_widening_charset() {
+        assert!(validate_ref("-x").is_err());
+        assert!(validate_ref("--upload-pack=/bin/sh").is_err());
+        assert!(validate_ref("").is_err());
     }
 
     #[test]

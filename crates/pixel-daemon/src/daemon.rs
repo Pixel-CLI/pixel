@@ -28,11 +28,17 @@ const CONNECTION_DEADLINE: Duration = Duration::from_secs(5);
 /// single-threaded daemon indefinitely.
 const MAX_REQUESTS_PER_CONN: u32 = 64;
 
-/// $TMPDIR/gitpixel-<xxh3-of-canonical-root>.sock
+/// $TMPDIR/pixel-<xxh3-of-canonical-root>.sock
+///
+/// Deliberately distinct from the legacy gitpixel tool's `gitpixel-*.sock`
+/// prefix: the two daemons speak incompatible response envelopes (gitpixel's
+/// `{ok,error,data}` vs pixel's `{op,protocol,...}`), so an old gitpixel
+/// daemon and this one must bind to different socket paths and coexist
+/// independently rather than collide on the same one.
 pub fn socket_path(root: &Path) -> PathBuf {
     let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let h = xxhash_rust::xxh3::xxh3_64(canon.to_string_lossy().as_bytes());
-    std::env::temp_dir().join(format!("gitpixel-{h:016x}.sock"))
+    std::env::temp_dir().join(format!("pixel-{h:016x}.sock"))
 }
 
 pub fn pid_path(root: &Path) -> PathBuf {
@@ -89,7 +95,24 @@ impl Corpus for Service {
 /// error.
 pub fn run(root: &Path) -> Result<(), ServeError> {
     let service = Service::open(root)?;
+    spawn_facts_ingest(root);
     run_corpus(service)
+}
+
+/// Spawn a low-priority background thread that ticks the facts ingest
+/// (history.db) until fresh, then idles. Queries never block on it: the
+/// ingest shares the WAL-mode connection and yields every tick budget.
+fn spawn_facts_ingest(root: &Path) {
+    let root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let mut store = match pixel_facts::FactsStore::open(&root) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let opts = pixel_facts::ingest::IngestOptions::default();
+        // Tick until fresh (bounded by the tick budget each call), then stop.
+        let _ = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts);
+    });
 }
 
 /// Run any corpus daemon in the foreground.
@@ -145,7 +168,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     }
 
     eprintln!(
-        "gitpixel daemon: root={} socket={}",
+        "pixel daemon: root={} socket={}",
         root.display(),
         sock.display()
     );
@@ -191,7 +214,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
         }
 
         if last_activity.elapsed() >= IDLE_TIMEOUT {
-            eprintln!("gitpixel daemon: idle timeout, exiting");
+            eprintln!("pixel daemon: idle timeout, exiting");
             break;
         }
     }

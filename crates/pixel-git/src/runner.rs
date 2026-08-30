@@ -15,7 +15,35 @@ use crate::redact::redact;
 /// Matches usable-git's `runner.ts` default (`defaultTimeoutMs = 120_000`).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Matches usable-git's `runner.ts` default (`defaultMaxOutputBytes = 1_048_576`).
+/// Only appropriate for calls whose output is inherently small and bounded
+/// (a single OID, a branch name, a blob size) — see `ENUMERATION_MAX_OUTPUT_BYTES`
+/// and `BLOB_MAX_OUTPUT_BYTES` for calls whose legitimate output can be much
+/// larger than 1 MiB.
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576;
+
+/// Cap for calls that enumerate repo-wide path lists (`ls-files`, `status
+/// --porcelain`, `diff --name-status`, `diff --unified=0`). A real repo can
+/// legitimately produce enumeration output well past 1 MiB — tens of
+/// thousands of tracked files, or a large untracked tree — and treating
+/// that overflow as "empty" is a correctness/safety bug, not graceful
+/// degradation: it has previously caused the index to appear empty above
+/// ~25k files and, far worse, caused `pixel rescue --apply`'s dirty-file
+/// guard to see a large untracked tree, overflow `status --porcelain`, and
+/// silently conclude "nothing is dirty" — overwriting uncommitted work with
+/// no strategy flag given. 64 MiB is generous enough that legitimate
+/// enumeration output essentially never hits it, while still bounding
+/// worst-case memory use.
+pub const ENUMERATION_MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Cap for blob-content reads (`show_blob`, `show_blob_string`). Must stay
+/// equal to `pixel_index::index::MAX_FILE_BYTES` (currently 4 MiB) — that
+/// constant is the contract for "this file is small enough to index", and a
+/// blob-read cap smaller than it silently drops indexable files (observed:
+/// files between 1 MiB and 4 MiB were dropped from the index even though
+/// `MAX_FILE_BYTES` said they should be kept). pixel-git does not depend on
+/// pixel-index, so this value is duplicated rather than shared — if either
+/// constant changes, update the other to match.
+pub const BLOB_MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GitOptions {
@@ -57,6 +85,22 @@ impl GitRunner {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// A runner over the same root and timeout, with `max_output_bytes`
+    /// overridden. Lets individual plumbing calls (enumeration vs. blob
+    /// reads vs. small fixed-shape output) pick the cap appropriate to their
+    /// own worst-case legitimate output size, instead of every call sharing
+    /// one construction-time default that is too small for some call sites
+    /// and unnecessarily large for others.
+    pub fn with_max_output_bytes(&self, max_output_bytes: Option<usize>) -> Self {
+        Self {
+            root: self.root.clone(),
+            options: GitOptions {
+                timeout: self.options.timeout,
+                max_output_bytes,
+            },
+        }
     }
 
     /// Runs `git -C <root> <args>`, enforcing the configured timeout and

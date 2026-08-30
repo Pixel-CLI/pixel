@@ -1,10 +1,25 @@
 //! `publish` — stage files, commit, and optionally push.
 //!
-//! Crash-safe: runs under repository lock + operation journal. Every phase
-//! is journaled durably. On crash recovery, `begin` returns Resume/Replay
-//! so the operation can restart or replay the terminal result.
+//! Crash-safe: runs under repository lock + operation journal, AND under a
+//! separate publish-recovery snapshot store. These are two distinct durable
+//! state machines (mirroring usable-git's `operation-journal.ts` +
+//! `publish-recovery.ts`):
 //!
-//! Phases: started → index_staged → commit_observed → (push_started) → terminal
+//!   * The journal tracks coarse phase (`started → index_staged →
+//!     commit_observed → [push_started] → terminal`) for idempotent
+//!     resume/replay keyed by `request_id`.
+//!   * The recovery store holds a byte-exact snapshot of `.git/index` (plus
+//!     `pre_head`) captured *before* anything is mutated. Its mere presence
+//!     on disk means "we are in an ambiguous window where we cannot prove
+//!     whether `git add`/`git commit` fully applied" — so any resume that
+//!     finds a recovery record restores the exact pre-operation snapshot
+//!     (never touching the worktree) and fails with `GIT_FAILED`, rather
+//!     than guessing by re-running `git add`/`git commit` (which is exactly
+//!     how a naive resume can silently discard a user's own staged work).
+//!
+//! Phase order for a fresh run (matches usable-git's crash matrix exactly):
+//!   journal:started → recovery:snapshotted → journal:index_staged →
+//!   recovery:commit_started → journal:commit_observed → journal:terminal
 //!
 //! The probe hook allows the crash matrix to inject failures at each phase.
 
@@ -14,9 +29,11 @@ use serde_json::{json, Value};
 
 use pixel_git::GitRunner;
 
-use crate::durable::{sha256_hex, state_root};
+use crate::durable::state_root;
+use crate::fingerprint;
 use crate::journal::{BeginOutcome, JournalOperation, JournalPhase, OperationJournal};
 use crate::lock::RepositoryLock;
+use crate::recovery::{self, PublishRecoveryState, PublishRecoveryStore, RecoveryPhase};
 
 /// Options for a publish operation.
 #[derive(Debug, Clone)]
@@ -47,7 +64,7 @@ pub fn publish(
 pub fn publish_with_state(
     root: &Path,
     opts: &PublishOptions,
-    mut probe: Option<PublishProbe>,
+    probe: Option<PublishProbe>,
     state_root: &Path,
 ) -> Result<Value, String> {
     let runner = GitRunner::new(root);
@@ -65,19 +82,31 @@ pub fn publish_with_state(
     )?;
 
     match outcome {
-        BeginOutcome::Replay(result) => return Ok(result),
+        BeginOutcome::Replay(result) => Ok(result),
         BeginOutcome::Resume { phase, .. } => {
-            // Resume from the appropriate phase.
-            return resume_publish(root, opts, &journal, phase, &runner);
+            resume_publish(root, opts, &journal, phase, &runner, state_root)
         }
-        BeginOutcome::Start => {} // Fresh start.
+        BeginOutcome::Start => run_body(root, opts, &journal, &runner, state_root, probe),
     }
+}
 
-    // Acquire lock.
-    let mut lock = RepositoryLock::acquire_with_state_root(
-        &common_dir(root),
-        state_root,
-    ).map_err(|_| "repository is busy".to_string())?;
+/// The full mutation body: acquire the lock, snapshot, stage, commit,
+/// optionally push, and complete the journal. Used both for a fresh start
+/// and for resuming from `JournalPhase::Started` with no pending recovery
+/// record (i.e. the crash happened before any durable recovery state was
+/// written, so there is no ambiguity to resolve).
+fn run_body(
+    root: &Path,
+    opts: &PublishOptions,
+    journal: &OperationJournal,
+    runner: &GitRunner,
+    state_root: &Path,
+    mut probe: Option<PublishProbe>,
+) -> Result<Value, String> {
+    let repo_key = repo_key(root);
+
+    let mut lock = RepositoryLock::acquire_with_state_root(&common_dir(root), state_root)
+        .map_err(|_| "repository is busy".to_string())?;
 
     // Probe: journal:started
     if let Some(p) = probe.as_mut() {
@@ -87,7 +116,7 @@ pub fn publish_with_state(
         })?;
     }
 
-    // Verify expected state (STALE_STATE check).
+    // STALE_STATE: expected HEAD.
     let current_head = runner.rev_parse_head();
     if let Some(expected) = &opts.expected_head {
         if current_head.as_deref() != Some(expected.as_str()) {
@@ -97,6 +126,48 @@ pub fn publish_with_state(
                 expected, current_head
             ));
         }
+    }
+
+    // STALE_STATE: expected fingerprints for the files being published —
+    // catches concurrent modification of exactly the files this request
+    // believes it is publishing.
+    for (path, expected_fp) in &opts.expected_fingerprints {
+        let actual_fp = fingerprint::fingerprint_path(root, path);
+        if &actual_fp != expected_fp {
+            let _ = lock.release();
+            return Err(format!(
+                "STALE_STATE: fingerprint mismatch for {path}: expected {expected_fp}, got {actual_fp}"
+            ));
+        }
+    }
+
+    // Snapshot BEFORE mutating anything: byte-exact `.git/index` + pre-HEAD.
+    // This is the sole basis for exact restoration if a crash lands
+    // anywhere before the commit is durably observed.
+    let recovery_store = PublishRecoveryStore::with_state_root(state_root.to_path_buf());
+    let mut recovery_state = PublishRecoveryState {
+        schema_version: 1,
+        request_id: opts.request_id.clone(),
+        repo_key: repo_key.clone(),
+        phase: RecoveryPhase::Snapshotted,
+        pre_head: current_head.clone(),
+        files: opts.files.clone(),
+        owned_index_checksum: recovery::index_checksum(root),
+        mode: Some(if opts.amend { "amend".to_string() } else { "append".to_string() }),
+        resolved_message: Some(opts.message.clone()),
+        pre_index_hex: recovery::capture_index_snapshot(root),
+    };
+    recovery_store.write(&recovery_state).map_err(|e| {
+        let _ = lock.release();
+        e
+    })?;
+
+    // Probe: recovery:snapshotted
+    if let Some(p) = probe.as_mut() {
+        p("recovery:snapshotted").map_err(|e| {
+            let _ = lock.release();
+            e
+        })?;
     }
 
     // Stage files.
@@ -113,15 +184,25 @@ pub fn publish_with_state(
     // Journal: index_staged
     journal.transition(&opts.request_id, &repo_key, JournalPhase::IndexStaged, None)?;
 
-    // Probe: recovery:snapshotted / journal:index_staged
+    // Probe: journal:index_staged
     if let Some(p) = probe.as_mut() {
-        p("recovery:snapshotted").map_err(|e| {
+        p("journal:index_staged").map_err(|e| {
             let _ = lock.release();
             e
         })?;
     }
+
+    // Advance the recovery record's phase (the snapshot bytes themselves
+    // never change — only the marker of how far we got).
+    recovery_state.phase = RecoveryPhase::CommitStarted;
+    recovery_store.write(&recovery_state).map_err(|e| {
+        let _ = lock.release();
+        e
+    })?;
+
+    // Probe: recovery:commit_started
     if let Some(p) = probe.as_mut() {
-        p("journal:index_staged").map_err(|e| {
+        p("recovery:commit_started").map_err(|e| {
             let _ = lock.release();
             e
         })?;
@@ -130,22 +211,13 @@ pub fn publish_with_state(
     // Commit — scope to requested files with pathspec to avoid sweeping
     // unrelated staged files into the commit.
     let commit_mode = if opts.amend { "--amend" } else { "--no-edit" };
-    let mut commit_args: Vec<String> = vec!["commit".into(), commit_mode.into(), "-m".into(), opts.message.clone()];
-    // Add pathspec to scope the commit to only the requested files.
+    let mut commit_args: Vec<String> =
+        vec!["commit".into(), commit_mode.into(), "-m".into(), opts.message.clone()];
     if !opts.files.is_empty() {
         commit_args.push("--".into());
         commit_args.extend(opts.files.iter().cloned());
     }
     let arg_refs: Vec<&str> = commit_args.iter().map(String::as_str).collect();
-
-    // Probe: recovery:commit_started (before git commit runs)
-    if let Some(p) = probe.as_mut() {
-        p("recovery:commit_started").map_err(|e| {
-            let _ = lock.release();
-            e
-        })?;
-    }
-
     runner.run(&arg_refs).map_err(|e| {
         let _ = lock.release();
         format!("git commit: {e}")
@@ -159,6 +231,11 @@ pub fn publish_with_state(
         JournalPhase::CommitObserved,
         Some(json!({"head": new_head})),
     )?;
+
+    // The commit is durably observed — the ambiguous window is over.
+    // Drop the recovery record; any crash from here on resumes safely
+    // without it (the commit already exists, nothing to roll back).
+    recovery_store.remove(&repo_key, &opts.request_id);
 
     // Probe: journal:commit_observed
     if let Some(p) = probe.as_mut() {
@@ -210,24 +287,46 @@ fn resume_publish(
     journal: &OperationJournal,
     phase: JournalPhase,
     runner: &GitRunner,
+    state_root: &Path,
 ) -> Result<Value, String> {
     let repo_key = repo_key(root);
+    let recovery_store = PublishRecoveryStore::with_state_root(state_root.to_path_buf());
+
     match phase {
         JournalPhase::Started => {
-            // Journal record exists at "started" but no git mutation happened.
-            // Continue the operation from after begin — don't call publish()
-            // again (that would re-enter begin and loop). Instead, re-run
-            // the operation body with the existing journal.
-            continue_publish_after_begin(root, opts, journal, runner)
+            if let Some(state) = recovery_store.read(&repo_key, &opts.request_id) {
+                // A recovery record exists: we cannot prove whether `git
+                // add` (or, transitively, `git commit`) ran to completion
+                // before the crash. Restore the exact pre-operation
+                // snapshot and refuse to guess.
+                recovery::restore_snapshot(root, &state)?;
+                recovery_store.remove(&repo_key, &opts.request_id);
+                return Err(format!(
+                    "GIT_FAILED: crash detected mid-mutation at recovery phase {:?}; local state restored to the pre-operation snapshot",
+                    state.phase
+                ));
+            }
+            // No recovery record — the crash happened before anything
+            // durable was written. Safe to run the operation fresh.
+            run_body(root, opts, journal, runner, state_root, None)
         }
         JournalPhase::IndexStaged => {
-            // Index was staged but commit didn't happen. Roll back the
-            // index and re-stage + commit.
-            runner.run(&["reset", "--quiet", "HEAD"]).map_err(|e| format!("git reset: {e}"))?;
-            continue_publish_after_begin(root, opts, journal, runner)
+            // The index was staged (and possibly committed) before the
+            // crash; a recovery record must exist (it is always written
+            // before staging begins). Restore from it rather than blindly
+            // `git reset` + re-stage + re-commit — that is precisely the
+            // pattern that can silently discard the user's own staged
+            // work if the reset sweeps away state a recovery snapshot
+            // would have preserved.
+            if let Some(state) = recovery_store.read(&repo_key, &opts.request_id) {
+                recovery::restore_snapshot(root, &state)?;
+                recovery_store.remove(&repo_key, &opts.request_id);
+            }
+            Err("GIT_FAILED: crash detected at index_staged; cannot safely determine whether the commit ran to completion — local state has been restored to the pre-operation snapshot".to_string())
         }
         JournalPhase::CommitObserved => {
-            // Commit already happened. Verify and complete.
+            // Commit already happened; nothing ambiguous remains.
+            recovery_store.remove(&repo_key, &opts.request_id);
             let new_head = runner.rev_parse_head();
             let result = json!({
                 "head": new_head,
@@ -238,8 +337,9 @@ fn resume_publish(
             Ok(result)
         }
         JournalPhase::PushStarted => {
-            // Push may or may not have happened. Check if remote matches.
-            // For safety, report as NETWORK_AMBIGUITY.
+            // Push may or may not have happened. For safety, report as
+            // NETWORK_AMBIGUITY rather than risk a double-push or a lost
+            // push.
             Err("NETWORK_AMBIGUITY: push may have started, cannot safely retry".to_string())
         }
         JournalPhase::Terminal => {
@@ -257,85 +357,6 @@ fn resume_publish(
     }
 }
 
-/// Continue a publish operation after the journal has been begun (phase
-/// = Started). This re-runs staging + commit + optional push without
-/// re-entering `begin()`, avoiding infinite recursion on resume.
-fn continue_publish_after_begin(
-    root: &Path,
-    opts: &PublishOptions,
-    journal: &OperationJournal,
-    runner: &GitRunner,
-) -> Result<Value, String> {
-    let repo_key = repo_key(root);
-    let state_root = state_root();
-
-    let mut lock = RepositoryLock::acquire_with_state_root(
-        &common_dir(root),
-        &state_root,
-    ).map_err(|_| "repository is busy".to_string())?;
-
-    // Verify expected state.
-    let current_head = runner.rev_parse_head();
-    if let Some(expected) = &opts.expected_head {
-        if current_head.as_deref() != Some(expected.as_str()) {
-            let _ = lock.release();
-            return Err(format!("STALE_STATE: expected head {}, got {:?}", expected, current_head));
-        }
-    }
-
-    // Stage files.
-    if !opts.files.is_empty() {
-        let mut args: Vec<String> = vec!["add".into(), "--".into()];
-        args.extend(opts.files.iter().cloned());
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        runner.run(&arg_refs).map_err(|e| {
-            let _ = lock.release();
-            format!("git add: {e}")
-        })?;
-    }
-
-    journal.transition(&opts.request_id, &repo_key, JournalPhase::IndexStaged, None)?;
-
-    // Commit — scoped to requested files.
-    let commit_mode = if opts.amend { "--amend" } else { "--no-edit" };
-    let mut commit_args: Vec<String> = vec!["commit".into(), commit_mode.into(), "-m".into(), opts.message.clone()];
-    if !opts.files.is_empty() {
-        commit_args.push("--".into());
-        commit_args.extend(opts.files.iter().cloned());
-    }
-    let arg_refs: Vec<&str> = commit_args.iter().map(String::as_str).collect();
-    runner.run(&arg_refs).map_err(|e| {
-        let _ = lock.release();
-        format!("git commit: {e}")
-    })?;
-
-    let new_head = runner.rev_parse_head();
-    journal.transition(
-        &opts.request_id,
-        &repo_key,
-        JournalPhase::CommitObserved,
-        Some(json!({"head": new_head})),
-    )?;
-
-    // Push if requested.
-    if opts.push {
-        journal.transition(&opts.request_id, &repo_key, JournalPhase::PushStarted, None)?;
-        runner.run(&["push"]).map_err(|e| {
-            let _ = lock.release();
-            format!("git push: {e}")
-        })?;
-    }
-
-    let result = json!({
-        "head": new_head,
-        "published": true,
-        "pushed": opts.push,
-    });
-    journal.complete(&opts.request_id, &repo_key, result.clone())?;
-    let _ = lock.release();
-    Ok(result)
-}
-
 fn repo_key(root: &Path) -> String {
     root.canonicalize()
         .unwrap_or_else(|_| root.to_path_buf())
@@ -348,6 +369,7 @@ fn common_dir(root: &Path) -> String {
 }
 
 fn publish_input_hash(opts: &PublishOptions) -> String {
+    use crate::durable::sha256_hex;
     let mut input = format!("{}\u{0}{}\u{0}{}\u{0}{}",
         opts.message,
         opts.files.join(","),
@@ -462,5 +484,45 @@ mod tests {
 
         let err = publish(dir.path(), &opts, None).unwrap_err();
         assert!(err.contains("STALE_STATE"));
+    }
+
+    #[test]
+    fn publish_stale_fingerprint_rejected() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("a.txt"), b"original").unwrap();
+
+        let mut expected_fingerprints = std::collections::BTreeMap::new();
+        expected_fingerprints.insert("a.txt".to_string(), "0".repeat(64));
+
+        let opts = PublishOptions {
+            message: "stale fingerprint".to_string(),
+            files: vec!["a.txt".to_string()],
+            expected_head: None,
+            expected_fingerprints,
+            push: false,
+            amend: false,
+            request_id: format!("stale-fp-{}", uuid::Uuid::new_v4()),
+        };
+
+        let err = publish(dir.path(), &opts, None).unwrap_err();
+        assert!(err.contains("STALE_STATE"), "expected STALE_STATE, got: {err}");
+    }
+
+    #[test]
+    fn recovery_record_cleaned_up_after_success() {
+        let dir = tempdir().unwrap();
+        let state_dir = tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+
+        let opts = make_opts("cleanup test", &["a.txt"]);
+        publish_with_state(dir.path(), &opts, None, state_dir.path()).unwrap();
+
+        let store = PublishRecoveryStore::with_state_root(state_dir.path().to_path_buf());
+        assert!(
+            !store.has_pending(&repo_key(dir.path())),
+            "recovery record must not linger after a successful publish",
+        );
     }
 }

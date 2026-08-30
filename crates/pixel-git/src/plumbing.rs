@@ -10,7 +10,7 @@ use std::path::Path;
 
 use crate::error::GitError;
 use crate::ref_guard::{end_of_options, validate_ref};
-use crate::runner::GitRunner;
+use crate::runner::{BLOB_MAX_OUTPUT_BYTES, ENUMERATION_MAX_OUTPUT_BYTES, GitRunner};
 
 impl GitRunner {
     /// HEAD commit OID, truncated to 40 hex chars. `None` when not a git
@@ -36,8 +36,17 @@ impl GitRunner {
     }
 
     /// Tracked files (repo-relative, NUL-safe). Empty outside a git repo.
+    ///
+    /// Uses `ENUMERATION_MAX_OUTPUT_BYTES` rather than the (much smaller)
+    /// construction-time default: a repo with tens of thousands of tracked
+    /// files can legitimately exceed 1 MiB of `ls-files -z` output, and
+    /// treating that overflow as "no files" previously emptied the index
+    /// outright above roughly 25k files.
     pub fn ls_files(&self) -> Vec<String> {
-        let Some(out) = self.run_opt(&["ls-files", "-z"]) else {
+        let Some(out) = self
+            .with_max_output_bytes(Some(ENUMERATION_MAX_OUTPUT_BYTES))
+            .run_opt(&["ls-files", "-z"])
+        else {
             return Vec::new();
         };
         out.split(|&b| b == 0)
@@ -49,10 +58,16 @@ impl GitRunner {
     /// Blob content of `path` as it exists in commit `oid`
     /// (`git show --end-of-options oid:path`). `None` on any git failure,
     /// missing path at that commit, or an invalid `oid`.
+    ///
+    /// Uses `BLOB_MAX_OUTPUT_BYTES` (kept equal to
+    /// `pixel_index::index::MAX_FILE_BYTES`) rather than the small
+    /// construction-time default, so a file within the size the index
+    /// considers indexable is never silently dropped here.
     pub fn show_blob(&self, oid: &str, rel: &str) -> Option<Vec<u8>> {
         validate_ref(oid).ok()?;
         let spec = format!("{oid}:{rel}");
-        self.run_opt(&["show", end_of_options(), &spec])
+        self.with_max_output_bytes(Some(BLOB_MAX_OUTPUT_BYTES))
+            .run_opt(&["show", end_of_options(), &spec])
     }
 
     /// Size of a committed blob without materializing it.
@@ -66,14 +81,29 @@ impl GitRunner {
     /// `git diff --name-status --no-renames -z <from> <to>` as
     /// (status, path). Statuses are single chars: A, M, D, T, etc. Empty on
     /// any git failure or if either ref is invalid.
+    ///
+    /// Uses `ENUMERATION_MAX_OUTPUT_BYTES`: a diff spanning tens of
+    /// thousands of paths can exceed 1 MiB of `--name-status` output, and
+    /// that must not silently read back as "nothing changed".
     pub fn diff_name_status(&self, from: &str, to: &str) -> Vec<(char, String)> {
-        if validate_ref(from).is_err() || validate_ref(to).is_err() {
-            return Vec::new();
-        }
-        let Some(out) = self.run_opt(&["diff", "--name-status", "--no-renames", "-z", from, to])
-        else {
-            return Vec::new();
-        };
+        self.diff_name_status_or_err(from, to).unwrap_or_default()
+    }
+
+    /// Same output as `diff_name_status`, but propagates a `GitError`
+    /// instead of silently degrading to an empty result on any failure —
+    /// including output-cap overflow or an invalid ref. Required by any
+    /// safety-critical caller that decides whether a set of "changed paths"
+    /// intersects the working tree's dirty files before proceeding with a
+    /// fast-forward/rebase (e.g. `pixel-ops::update`, `pixel-ops::reconcile`):
+    /// an undetermined changed-path set must abort that decision, never be
+    /// silently read as "nothing changed" (which would let a mutation
+    /// proceed as if no dirty file were ever at risk).
+    pub fn diff_name_status_or_err(&self, from: &str, to: &str) -> Result<Vec<(char, String)>, GitError> {
+        validate_ref(from)?;
+        validate_ref(to)?;
+        let out = self
+            .with_max_output_bytes(Some(ENUMERATION_MAX_OUTPUT_BYTES))
+            .run(&["diff", "--name-status", "--no-renames", "-z", from, to])?;
         let mut fields = out.split(|&b| b == 0).filter(|s| !s.is_empty());
         let mut result = Vec::new();
         while let Some(status) = fields.next() {
@@ -81,34 +111,61 @@ impl GitRunner {
             let c = status.first().copied().unwrap_or(b'M') as char;
             result.push((c, String::from_utf8_lossy(path).into_owned()));
         }
-        result
+        Ok(result)
     }
 
     /// `git status --porcelain -z --untracked-files=all --no-renames` as
-    /// (XY, path). Untracked files appear with XY `"??"`.
+    /// (XY, path). Untracked files appear with XY `"??"`. Empty on any git
+    /// failure (including cap overflow) — safe for callers where "status
+    /// unknown" degrading to "nothing changed" only costs staleness (e.g.
+    /// the search index's dirty overlay). A caller for whom that
+    /// degradation would be unsafe (e.g. deciding whether it is safe to
+    /// overwrite a file) MUST use `status_porcelain_or_err` instead so an
+    /// undetermined status aborts rather than reading as clean.
     pub fn status_porcelain(&self) -> Vec<(String, String)> {
-        let Some(out) = self.run_opt(&[
-            "status",
-            "--porcelain",
-            "-z",
-            "--untracked-files=all",
-            "--no-renames",
-        ]) else {
-            return Vec::new();
-        };
-        out.split(|&b| b == 0)
+        self.status_porcelain_or_err().unwrap_or_default()
+    }
+
+    /// Same as `status_porcelain`, but propagates a `GitError` instead of
+    /// silently degrading to an empty result on any failure — including
+    /// output-cap overflow. Required by any safety-critical caller that
+    /// decides whether it is safe to overwrite working-tree content:
+    /// `status_porcelain`'s "empty on failure" behavior previously let
+    /// `pixel rescue --apply` conclude "nothing is dirty" (and overwrite an
+    /// actually-dirty file with no strategy flag given) whenever a large
+    /// untracked tree pushed `status --porcelain` output past the output
+    /// cap. Uses `ENUMERATION_MAX_OUTPUT_BYTES` so a legitimately large
+    /// untracked tree does not trip this either.
+    pub fn status_porcelain_or_err(&self) -> Result<Vec<(String, String)>, GitError> {
+        let out = self
+            .with_max_output_bytes(Some(ENUMERATION_MAX_OUTPUT_BYTES))
+            .run(&[
+                "status",
+                "--porcelain",
+                "-z",
+                "--untracked-files=all",
+                "--no-renames",
+            ])?;
+        Ok(out
+            .split(|&b| b == 0)
             .filter(|s| s.len() > 3)
             .map(|entry| {
                 let xy = String::from_utf8_lossy(&entry[0..2]).into_owned();
                 let path = String::from_utf8_lossy(&entry[3..]).into_owned();
                 (xy, path)
             })
-            .collect()
+            .collect())
     }
 
     /// `git diff --unified=0 [--end-of-options <base_ref>] -- .`, validating
     /// `base_ref` via `validate_ref` first when given (port of
     /// `pixel-graph::changes::detect`'s diff invocation).
+    ///
+    /// Uses `ENUMERATION_MAX_OUTPUT_BYTES`: a diff over many changed files
+    /// can exceed 1 MiB, and unlike most enumeration calls this one already
+    /// propagates a hard error on overflow rather than degrading to
+    /// "empty" — raising the cap keeps that error from firing on
+    /// legitimately large (not just pathological) diffs.
     pub fn diff_unified0(&self, base_ref: Option<&str>) -> Result<Vec<u8>, GitError> {
         let mut args: Vec<&str> = vec!["diff", "--unified=0"];
         if let Some(r) = base_ref {
@@ -118,7 +175,8 @@ impl GitRunner {
         }
         args.push("--");
         args.push(".");
-        self.run(&args)
+        self.with_max_output_bytes(Some(ENUMERATION_MAX_OUTPUT_BYTES))
+            .run(&args)
     }
 
     /// `git log --follow -n <depth> --format=%H%x1f%ct%x1f%s -- <path>`,
@@ -193,10 +251,19 @@ impl GitRunner {
     /// `oid` is validated via `validate_ref`. Port of
     /// `pixel-cli::rescue_cmd::apply`'s content-restore path. Errors carry
     /// a redacted stderr.
+    ///
+    /// Uses `BLOB_MAX_OUTPUT_BYTES` (kept equal to
+    /// `pixel_index::index::MAX_FILE_BYTES`) rather than the small
+    /// construction-time default. Previously capped at 1 MiB, this made
+    /// `rescue --apply` hard-fail on files over 1 MiB with a misleading
+    /// "does not exist at <oid>" error even though the file existed and was
+    /// well within the size the index itself considers restorable.
     pub fn show_blob_string(&self, oid: &str, path: &str) -> Result<String, GitError> {
         validate_ref(oid)?;
         let spec = format!("{oid}:{path}");
-        let out = self.run(&["show", end_of_options(), &spec])?;
+        let out = self
+            .with_max_output_bytes(Some(BLOB_MAX_OUTPUT_BYTES))
+            .run(&["show", end_of_options(), &spec])?;
         Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
@@ -427,5 +494,174 @@ mod tests {
         // a.txt stashed (clean), b.txt still dirty
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a");
         assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "b-dirty");
+    }
+
+    // -----------------------------------------------------------------
+    // Regression coverage for the output-cap bug: every enumeration call
+    // used to share the 1 MiB `DEFAULT_MAX_OUTPUT_BYTES` cap, so any repo
+    // whose `ls-files`/`status --porcelain`/`diff --name-status` output
+    // crossed that threshold silently read back as *empty* rather than
+    // erroring — the exact defect class this module now guards against via
+    // `ENUMERATION_MAX_OUTPUT_BYTES` / `BLOB_MAX_OUTPUT_BYTES`.
+    // -----------------------------------------------------------------
+
+    /// A directory-name prefix long enough to make each enumerated path
+    /// (well under the ~255-byte per-component filesystem limit) push total
+    /// `-z`-delimited output past the *old* 1 MiB default cap with only a
+    /// few thousand files, so these tests stay fast.
+    fn long_component(tag: &str) -> String {
+        format!("{tag}-{}", "x".repeat(240))
+    }
+
+    #[test]
+    fn ls_files_survives_enumeration_output_past_the_old_1mib_cap() {
+        let root = tmpdir("plumbing-lsfiles-big");
+        init_repo(&root);
+        let dir = long_component("tracked");
+        std::fs::create_dir_all(root.join(&dir)).unwrap();
+        const N: usize = 5300; // ~5300 * ~250 bytes ≈ 1.3 MiB of `ls-files -z` output
+        for i in 0..N {
+            std::fs::write(root.join(&dir).join(format!("f{i:05}.txt")), b"x").unwrap();
+        }
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "big tracked tree"]);
+
+        let runner = GitRunner::new(&root);
+        let files = runner.ls_files();
+        assert_eq!(
+            files.len(),
+            N,
+            "ls_files must return every tracked file even when output exceeds the old 1 MiB cap \
+             (previously silently returned an empty Vec above that threshold)"
+        );
+    }
+
+    #[test]
+    fn status_porcelain_survives_enumeration_output_past_the_old_1mib_cap() {
+        let root = tmpdir("plumbing-status-big");
+        init_repo(&root);
+        std::fs::write(root.join("tracked.txt"), b"hello").unwrap();
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+
+        let dir = long_component("untracked");
+        std::fs::create_dir_all(root.join(&dir)).unwrap();
+        const N: usize = 5300; // pushes `status --porcelain -z` past the old 1 MiB cap
+        for i in 0..N {
+            std::fs::write(root.join(&dir).join(format!("g{i:05}.txt")), b"y").unwrap();
+        }
+
+        let runner = GitRunner::new(&root);
+        let status = runner.status_porcelain();
+        let untracked = status.iter().filter(|(xy, _)| xy == "??").count();
+        assert_eq!(
+            untracked, N,
+            "status_porcelain must report every untracked file even when output exceeds the old \
+             1 MiB cap (previously silently returned an empty Vec, which made a dirty working \
+             tree with a large untracked tree look completely clean)"
+        );
+
+        let strict = runner
+            .status_porcelain_or_err()
+            .expect("status_porcelain_or_err must also survive the same large untracked tree");
+        assert_eq!(strict.iter().filter(|(xy, _)| xy == "??").count(), N);
+    }
+
+    #[test]
+    fn status_porcelain_or_err_propagates_failure_instead_of_reading_as_clean() {
+        // Outside a git repo, `git status` fails outright. The strict
+        // variant MUST surface that as an error (never as "nothing is
+        // dirty"), which is the exact contract `pixel::rescue_cmd::apply`'s
+        // dirty-file guard now depends on.
+        let root = tmpdir("plumbing-status-not-a-repo");
+        let runner = GitRunner::new(&root);
+        assert!(
+            runner.status_porcelain_or_err().is_err(),
+            "status_porcelain_or_err must error, not silently report an empty (\"clean\") status"
+        );
+        // The lenient variant is still allowed to degrade to empty for
+        // non-safety-critical callers (e.g. the search index's dirty
+        // overlay), which only costs staleness, not data loss.
+        assert_eq!(runner.status_porcelain(), Vec::new());
+    }
+
+    #[test]
+    fn diff_name_status_survives_enumeration_output_past_the_old_1mib_cap() {
+        let root = tmpdir("plumbing-diffns-big");
+        init_repo(&root);
+        std::fs::write(root.join("seed.txt"), b"seed").unwrap();
+        git(&root, &["add", "seed.txt"]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        let from = GitRunner::new(&root).rev_parse_head().unwrap();
+
+        let dir = long_component("added");
+        std::fs::create_dir_all(root.join(&dir)).unwrap();
+        const N: usize = 5300;
+        for i in 0..N {
+            std::fs::write(root.join(&dir).join(format!("h{i:05}.txt")), b"z").unwrap();
+        }
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "big add"]);
+        let to = GitRunner::new(&root).rev_parse_head().unwrap();
+
+        let runner = GitRunner::new(&root);
+        let diff = runner.diff_name_status(&from, &to);
+        let added = diff.iter().filter(|(status, _)| *status == 'A').count();
+        assert_eq!(
+            added, N,
+            "diff_name_status must report every added path even when output exceeds the old \
+             1 MiB cap (previously silently returned an empty Vec, which would empty the delta \
+             layer above a large enough change set)"
+        );
+    }
+
+    #[test]
+    fn show_blob_and_show_blob_string_survive_files_between_the_old_1mib_and_new_4mib_cap() {
+        let root = tmpdir("plumbing-blob-big");
+        init_repo(&root);
+        // ~2 MiB file: over the old 1 MiB default cap, comfortably under
+        // the new 4 MiB blob cap (kept equal to `pixel_index::index::MAX_FILE_BYTES`).
+        let needle = "UNIQUE_NEEDLE_TOKEN_2MIB";
+        let mut content = vec![b'a'; 2 * 1024 * 1024];
+        content.extend_from_slice(needle.as_bytes());
+        std::fs::write(root.join("big.txt"), &content).unwrap();
+        git(&root, &["add", "big.txt"]);
+        git(&root, &["commit", "-q", "-m", "add 2mib file"]);
+
+        let runner = GitRunner::new(&root);
+        let head = runner.rev_parse_head().unwrap();
+
+        let blob = runner
+            .show_blob(&head, "big.txt")
+            .expect("show_blob must not drop a ~2 MiB file (previously capped at 1 MiB)");
+        assert_eq!(blob.len(), content.len());
+        assert!(String::from_utf8_lossy(&blob).contains(needle));
+
+        let blob_string = runner
+            .show_blob_string(&head, "big.txt")
+            .expect("show_blob_string must not drop a ~2 MiB file (previously capped at 1 MiB)");
+        assert!(blob_string.contains(needle));
+    }
+
+    #[test]
+    fn show_blob_string_reports_output_too_large_for_files_over_the_blob_cap() {
+        let root = tmpdir("plumbing-blob-toolarge");
+        init_repo(&root);
+        // ~5 MiB file: over the 4 MiB blob cap. Must surface as a real
+        // `GitError::OutputTooLarge`, not a misleading "does not exist".
+        let content = vec![b'a'; 5 * 1024 * 1024];
+        std::fs::write(root.join("huge.txt"), &content).unwrap();
+        git(&root, &["add", "huge.txt"]);
+        git(&root, &["commit", "-q", "-m", "add 5mib file"]);
+
+        let runner = GitRunner::new(&root);
+        let head = runner.rev_parse_head().unwrap();
+        let err = runner
+            .show_blob_string(&head, "huge.txt")
+            .expect_err("a file over the blob cap must error, not silently succeed or truncate");
+        assert!(
+            matches!(err, GitError::OutputTooLarge { .. }),
+            "expected OutputTooLarge, got {err:?}"
+        );
     }
 }

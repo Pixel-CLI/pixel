@@ -2,9 +2,9 @@
 //!
 //! `ErrorCode` reproduces usable-git's 18-value `errorCodeSchema`
 //! (`reference/usable-git/packages/usable-git/src/contracts/v1.ts`) verbatim,
-//! plus 3 pixel-specific codes for states usable-git never had to model
+//! plus 4 pixel-specific codes for states usable-git never had to model
 //! (background index build in progress, ambiguous symbol resolution, no
-//! index present yet).
+//! index present yet, and a name/uid/path lookup that came up empty).
 
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,10 @@ pub enum ErrorCode {
     /// No index exists yet for this repository (never built, or explicitly
     /// removed) and the operation requires one.
     NotIndexed,
+    /// A name/uid/path lookup came up empty (e.g. "no symbol named X", "no
+    /// symbol with uid X"). Distinguishes "you asked about something that
+    /// doesn't exist" from a malformed request (`InvalidInput`).
+    NotFound,
 }
 
 /// A single operation error: `{code, message, details?, ambiguity?}`.
@@ -111,8 +115,9 @@ mod tests {
             (ErrorCode::IndexBuilding, "\"INDEX_BUILDING\""),
             (ErrorCode::Ambiguous, "\"AMBIGUOUS\""),
             (ErrorCode::NotIndexed, "\"NOT_INDEXED\""),
+            (ErrorCode::NotFound, "\"NOT_FOUND\""),
         ];
-        assert_eq!(cases.len(), 21, "expected 18 usable-git codes + 3 pixel codes");
+        assert_eq!(cases.len(), 22, "expected 18 usable-git codes + 4 pixel codes");
         for (code, expected) in cases {
             let serialized = serde_json::to_string(code).unwrap();
             assert_eq!(&serialized, expected, "serialize({code:?})");

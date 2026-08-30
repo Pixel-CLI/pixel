@@ -138,6 +138,15 @@ impl Envelope<serde_json::Value> {
         self.result.as_ref().unwrap_or(&serde_json::Value::Null)
     }
 
+    /// Consuming counterpart to [`Envelope::data`]: takes ownership of the
+    /// result payload instead of cloning it. Same null-fallback behavior —
+    /// `Value::Null` when the envelope carries no result (e.g. a failure
+    /// envelope) — but avoids a deep clone of the JSON tree for call sites
+    /// that already own the envelope and don't need it afterward.
+    pub fn into_data(self) -> serde_json::Value {
+        self.result.unwrap_or(serde_json::Value::Null)
+    }
+
     /// The error message string, or a fallback when the envelope carries no
     /// error. Successor to the old `Response::error: Option<String>` field.
     pub fn error_message(&self) -> String {

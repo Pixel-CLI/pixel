@@ -13,7 +13,7 @@
 //! --name-only` fallback), session events, and the error sink, then calls
 //! the pure scorer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pixel_git::GitRunner;
 use pixel_session::store::Store;
@@ -157,10 +157,29 @@ pub fn score_signals(
         *combined.entry(p.clone()).or_default() += w;
     }
 
+    // PLAN.md and SignalBundle's own doc comment require activity/session to
+    // be "normalized over the candidate set" — the max used as the 1.0
+    // denominator must come from a candidate, not from some unrelated file
+    // that happens to have high raw churn/session weight (e.g. a hot file
+    // outside the current tier/candidate set from the 90-day git scan or a
+    // stale session event on a path nobody is looking at). Without this
+    // filter, `normalize` divides by that unrelated file's value and every
+    // real candidate's normalized signal collapses toward 0, silently
+    // neutering the reranker.
+    let candidate_set: HashSet<&str> = candidates.iter().map(String::as_str).collect();
+    let activity: HashMap<String, f64> = activity
+        .into_iter()
+        .filter(|(p, _)| candidate_set.contains(p.as_str()))
+        .collect();
+    let combined: HashMap<String, f64> = combined
+        .into_iter()
+        .filter(|(p, _)| candidate_set.contains(p.as_str()))
+        .collect();
+
     SignalBundle {
         activity: normalize(&activity),
         session: normalize(&combined),
-        session_reasons: session_reasons(session_events, opts.now_ms),
+        session_reasons: session_reasons(session_events, opts.now_ms, opts.session_window_ms),
         error_reasons,
     }
 }
@@ -199,28 +218,57 @@ pub fn compute_signals(
 }
 
 /// `Σ exp(-age_days/14)` per file over commits in the last 90 days, from a
-/// one-shot `git log --since=90.days --name-only --format=%ct`. Empty on any
-/// git failure (graceful degradation outside a repo).
+/// one-shot `git log --since=90.days --name-only --format=%x00%ct`. Empty on
+/// any git failure (graceful degradation outside a repo).
+///
+/// The format string is prefixed with a NUL byte (`%x00`) as an unambiguous
+/// per-commit record separator. A naive `"\n\n"` split (matching git's
+/// visual "timestamp, blank line, file list" layout) is wrong: git does
+/// *not* insert a blank line between one commit's file list and the next
+/// commit's timestamp line, only between a commit's own timestamp and its
+/// file list. Splitting on `"\n\n"` therefore misaligns every block after
+/// the first — the previous commit's last filename ends up as the next
+/// block's "timestamp" line, fails to parse as an integer, and the whole
+/// block (including the real timestamp on the following line) is silently
+/// dropped. That bug previously made this function return an empty map for
+/// every real multi-commit (or even single-commit) repository. NUL never
+/// appears in a commit timestamp or a tracked file path, so splitting on it
+/// is unambiguous regardless of git's blank-line formatting.
 pub fn activity_from_git_log(
     runner: &GitRunner,
     now_ms: i64,
     half_life_days: f64,
 ) -> HashMap<String, f64> {
     let mut activity: HashMap<String, f64> = HashMap::new();
-    let Some(out) = runner.run_opt(&["log", "--since=90.days", "--name-only", "--format=%ct"]) else {
+    let Some(out) = runner.run_opt(&[
+        "log",
+        "--since=90.days",
+        "--name-only",
+        "--format=%x00%ct",
+    ]) else {
         return activity;
     };
     let text = String::from_utf8_lossy(&out);
-    for block in text.split("\n\n") {
-        let mut lines = block.lines();
+    for block in text.split('\0') {
+        let mut lines = block.lines().filter(|l| !l.trim().is_empty());
         let Some(first) = lines.next() else { continue };
-        let Ok(ts) = first.trim().parse::<i64>() else { continue };
+        let Ok(ts_secs) = first.trim().parse::<i64>() else { continue };
+        // `%ct` is git's commit time in *seconds* since epoch; every other
+        // timestamp in this module (`now_ms`, `SessionEvent::ts_ms`,
+        // `ErrorRecord::last_ts`) is milliseconds. Without this conversion,
+        // `now_ms - ts_secs` is off by a factor of ~1000 (git's seconds
+        // value is ~1e9 while `now_ms` is ~1e12), which inflates every
+        // commit's apparent age to tens of thousands of days regardless of
+        // how recent it actually was — `exp(-age_days/14)` then underflows
+        // to 0.0 for every file, silently zeroing out the entire git-log
+        // activity fallback in production.
+        let ts_ms = ts_secs * 1000;
         for file in lines {
             let file = file.trim();
             if file.is_empty() {
                 continue;
             }
-            let age_days = (now_ms as f64 - ts as f64) / 86_400_000.0;
+            let age_days = (now_ms as f64 - ts_ms as f64) / 86_400_000.0;
             if age_days >= 0.0 {
                 *activity.entry(file.to_string()).or_default() += (-age_days / half_life_days).exp();
             }
@@ -331,14 +379,15 @@ fn normalize(map: &HashMap<String, f64>) -> HashMap<String, f64> {
     map.iter().map(|(k, v)| (k.clone(), v / max)).collect()
 }
 
-/// Human-readable session reasons, newest first, within the 24h window.
-fn session_reasons(events: &[SessionEvent], now_ms: i64) -> Vec<String> {
+/// Human-readable session reasons, newest first, within `window_ms`.
+fn session_reasons(events: &[SessionEvent], now_ms: i64, window_ms: i64) -> Vec<String> {
     let mut reasons: Vec<(i64, String)> = Vec::new();
     for e in events {
-        let age_min = (now_ms - e.ts_ms) as f64 / 60_000.0;
-        if age_min < 0.0 || age_min > 24.0 * 60.0 {
+        let age_ms = now_ms - e.ts_ms;
+        if age_ms < 0 || age_ms > window_ms {
             continue;
         }
+        let age_min = age_ms as f64 / 60_000.0;
         let kind = match e.kind {
             SessionEventKind::Read => "read",
             SessionEventKind::Edit => "edited",

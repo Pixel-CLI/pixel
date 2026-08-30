@@ -53,7 +53,7 @@ fn run_targets(dir: &Path, task: &str) -> serde_json::Value {
         limit: Some(10),
     });
     assert!(resp.ok, "targets op failed: {:?}", resp.error);
-    resp.data().clone()
+    resp.into_data()
 }
 
 #[test]

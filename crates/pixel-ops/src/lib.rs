@@ -15,6 +15,7 @@ pub mod lock;
 pub mod snapshot;
 pub mod durable;
 pub mod recovery;
+pub mod fingerprint;
 pub mod inspect;
 pub mod review;
 pub mod history;

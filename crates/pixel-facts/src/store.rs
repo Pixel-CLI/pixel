@@ -120,7 +120,16 @@ impl FactsStore {
         let pixel_dir = root.join(".pixel");
         std::fs::create_dir_all(&pixel_dir)?;
         let path = pixel_dir.join(HISTORY_DB_FILE);
-        let conn = Self::open_conn(&path)?;
+        let conn = match Self::open_conn(&path) {
+            Ok(c) => c,
+            Err(_) => {
+                // Corrupt or schema-mismatched: derived data, safe to rebuild.
+                for suffix in ["", "-wal", "-shm"] {
+                    let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+                }
+                Self::open_conn(&path)?
+            }
+        };
         Ok(FactsStore {
             conn,
             runner: GitRunner::new(&root),
@@ -324,7 +333,7 @@ CREATE TABLE IF NOT EXISTS poison_paths (
 
 CREATE TABLE IF NOT EXISTS ingest_jobs (
   id INTEGER PRIMARY KEY,
-  phase TEXT NOT NULL,
+  phase TEXT NOT NULL UNIQUE,
   cursor TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL,

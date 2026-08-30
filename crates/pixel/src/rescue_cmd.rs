@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde_json::{Value, json};
-use pixel_git::GitRunner;
+use pixel_git::{GitError, GitRunner};
 
 // ---------------------------------------------------------------------------
 // git plumbing — now delegated to pixel_git::GitRunner (single wrapper,
@@ -36,9 +36,23 @@ fn blob_oid(root: &Path, commit: &str, path: &str) -> Option<String> {
 }
 
 /// Working-tree dirty map: path -> porcelain status (e.g. " M", "??").
+///
+/// Uses `status_porcelain_or_err`, NOT `status_porcelain`: this map decides
+/// whether `apply` may overwrite a file, so an undetermined status (git
+/// error, timeout, or output-cap overflow from e.g. a large untracked tree)
+/// must abort the operation, never be silently read as "nothing is dirty".
+/// The latter previously let `--apply` overwrite an actually-dirty file
+/// with no strategy flag given, whenever a large untracked tree pushed
+/// `status --porcelain` past the output cap.
 fn dirty_map(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let entries = GitRunner::new(root).status_porcelain_or_err().map_err(|e| {
+        format!(
+            "could not determine working-tree status, refusing to proceed \
+             (would otherwise risk treating dirty files as clean): {e}"
+        )
+    })?;
     let mut map = BTreeMap::new();
-    for (xy, path) in GitRunner::new(root).status_porcelain() {
+    for (xy, path) in entries {
         map.insert(path, xy.trim().to_string());
     }
     Ok(map)
@@ -242,18 +256,35 @@ pub fn apply(
 
     let mut results: Vec<Value> = Vec::new();
     for path in files {
-        let content = runner
-            .show_blob_string(oid, path)
-            .map_err(|e| format!("{path} does not exist at {oid}: {e}"))?;
+        let content = runner.show_blob_string(oid, path).map_err(|e| match e {
+            // A real git failure reading `oid:path` (non-zero exit from
+            // `git show`) is the one case that actually means "does not
+            // exist at this commit" — every other error means the read
+            // was never completed, and saying so would be misleading.
+            GitError::NonZeroExit { .. } => format!("{path} does not exist at {oid}: {e}"),
+            GitError::OutputTooLarge { cap, .. } => format!(
+                "{path} at {oid} is larger than the {cap}-byte limit `rescue --apply` can \
+                 restore; it was not modified"
+            ),
+            GitError::Timeout { .. } => {
+                format!("timed out reading {path} at {oid}; it was not modified")
+            }
+            other => format!("failed to read {path} at {oid}: {other}"),
+        })?;
         let abs = root.join(path);
         let was_dirty = dirty.contains_key(path);
 
         if opts.merge && was_dirty && !opts.stash_first {
             // Deterministic 3-way merge: ours = working tree (in-progress
             // work), base = HEAD's version, theirs = the rescued version.
-            let base = runner
-                .show_blob_string("HEAD", path)
-                .unwrap_or_default();
+            // Must propagate failure rather than `.unwrap_or_default()`:
+            // silently treating an unreadable HEAD blob as an empty base
+            // turns a normal 3-way merge into a whole-file conflict against
+            // the in-progress edits, with no warning that anything went
+            // wrong.
+            let base = runner.show_blob_string("HEAD", path).map_err(|e| {
+                format!("failed to read HEAD version of {path} for 3-way merge: {e}")
+            })?;
             let tmp_base = abs.with_extension("gpx-rescue-base");
             let tmp_theirs = abs.with_extension("gpx-rescue-theirs");
             std::fs::write(&tmp_base, &base).map_err(|e| e.to_string())?;
@@ -298,4 +329,192 @@ pub fn apply(
         "files": results,
         "note": "working tree only — index and HEAD untouched; undo with `git checkout -- <file>` (or `git stash pop` if --stash-first was used)",
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "pixel-rescue-cmd-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                % 1_000_000
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    fn init_repo(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "commit.gpgsign", "false"]);
+    }
+
+    fn no_strategy() -> ApplyOptions {
+        ApplyOptions {
+            merge: false,
+            stash_first: false,
+            allow_dirty: false,
+        }
+    }
+
+    /// CRITICAL regression test for the data-loss bug: `apply`'s dirty-file
+    /// guard used to call `status_porcelain` (empty-on-any-failure,
+    /// including 1 MiB output-cap overflow), so a large enough *untracked*
+    /// tree made a genuinely dirty tracked file look clean — and `apply`
+    /// would overwrite it with no strategy flag given. `dirty_map` now uses
+    /// `status_porcelain_or_err`, which must abort the whole operation
+    /// instead of silently proceeding as if the tree were clean.
+    #[test]
+    fn apply_refuses_dirty_file_even_with_a_large_untracked_tree_present() {
+        let root = tmpdir("apply-large-untracked");
+        init_repo(&root);
+        std::fs::write(root.join("f.txt"), b"committed content\n").unwrap();
+        git(&root, &["add", "f.txt"]);
+        git(&root, &["commit", "-q", "-m", "add f"]);
+        let head = GitRunner::new(&root).rev_parse_head().unwrap();
+
+        // Dirty the tracked file — in-progress work that must never be
+        // silently overwritten.
+        std::fs::write(root.join("f.txt"), b"DIRTY IN-PROGRESS EDIT\n").unwrap();
+
+        // A large untracked tree: previously pushed `status --porcelain -z`
+        // past the 1 MiB output cap, which made `dirty_map` see an empty
+        // (i.e. "clean") working tree.
+        let dir = format!("untracked-{}", "x".repeat(240));
+        std::fs::create_dir_all(root.join(&dir)).unwrap();
+        for i in 0..5300 {
+            std::fs::write(root.join(&dir).join(format!("g{i:05}.txt")), b"z").unwrap();
+        }
+
+        let result = apply(&root, &head, &["f.txt".to_string()], &no_strategy());
+        assert!(
+            result.is_err(),
+            "apply must refuse to overwrite a dirty file, even when a large untracked tree is \
+             present and no strategy flag was given; got: {result:?}"
+        );
+        let content = std::fs::read_to_string(root.join("f.txt")).unwrap();
+        assert_eq!(
+            content, "DIRTY IN-PROGRESS EDIT\n",
+            "the dirty file must be left completely untouched by the refused apply"
+        );
+    }
+
+    /// With a strategy flag (`--allow-dirty`), the same large-untracked-tree
+    /// scenario must still correctly detect the dirty file and proceed only
+    /// because the user explicitly authorized it — proving the guard now
+    /// evaluates real status rather than merely happening to fail closed.
+    #[test]
+    fn apply_allow_dirty_overwrites_when_explicitly_authorized_with_large_untracked_tree() {
+        let root = tmpdir("apply-large-untracked-allow");
+        init_repo(&root);
+        std::fs::write(root.join("f.txt"), b"committed content\n").unwrap();
+        git(&root, &["add", "f.txt"]);
+        git(&root, &["commit", "-q", "-m", "add f"]);
+        let head = GitRunner::new(&root).rev_parse_head().unwrap();
+
+        std::fs::write(root.join("f.txt"), b"DIRTY IN-PROGRESS EDIT\n").unwrap();
+
+        let dir = format!("untracked-{}", "x".repeat(240));
+        std::fs::create_dir_all(root.join(&dir)).unwrap();
+        for i in 0..5300 {
+            std::fs::write(root.join(&dir).join(format!("g{i:05}.txt")), b"z").unwrap();
+        }
+
+        let opts = ApplyOptions {
+            merge: false,
+            stash_first: false,
+            allow_dirty: true,
+        };
+        let result = apply(&root, &head, &["f.txt".to_string()], &opts)
+            .expect("apply with --allow-dirty must succeed when explicitly authorized");
+        assert_eq!(result["files"][0]["action"], "overwritten");
+        let content = std::fs::read_to_string(root.join("f.txt")).unwrap();
+        assert_eq!(content, "committed content\n");
+    }
+
+    /// Regression test for the blob output cap: `rescue --apply` used to
+    /// hard-fail on any file over 1 MiB with a misleading "does not exist
+    /// at <oid>" error, even though the file existed. A ~1.5 MiB file must
+    /// now restore correctly.
+    #[test]
+    fn apply_restores_a_file_over_the_old_1mib_cap() {
+        let root = tmpdir("apply-1-5mib-file");
+        init_repo(&root);
+        let good_content = {
+            let mut v = vec![b'g'; 1024 * 1024 + 512 * 1024]; // ~1.5 MiB
+            v.extend_from_slice(b"GOOD_VERSION_MARKER");
+            v
+        };
+        std::fs::write(root.join("big.txt"), &good_content).unwrap();
+        git(&root, &["add", "big.txt"]);
+        git(&root, &["commit", "-q", "-m", "good version"]);
+        let good_oid = GitRunner::new(&root).rev_parse_head().unwrap();
+
+        // A later, "bad" version — apply will roll back to `good_oid`.
+        let bad_content = {
+            let mut v = vec![b'b'; 1024 * 1024 + 512 * 1024];
+            v.extend_from_slice(b"BAD_VERSION_MARKER");
+            v
+        };
+        std::fs::write(root.join("big.txt"), &bad_content).unwrap();
+        git(&root, &["add", "big.txt"]);
+        git(&root, &["commit", "-q", "-m", "bad version"]);
+
+        let result = apply(&root, &good_oid, &["big.txt".to_string()], &no_strategy())
+            .unwrap_or_else(|e| {
+                panic!(
+                    "apply must restore a ~1.5 MiB file (previously misreported as \
+                     \"does not exist\" above the old 1 MiB blob cap): {e}"
+                )
+            });
+        assert_eq!(result["files"][0]["action"], "restored");
+        let restored = std::fs::read(root.join("big.txt")).unwrap();
+        assert_eq!(restored, good_content);
+    }
+
+    /// A file genuinely over the (raised) blob cap must fail with an
+    /// accurate, actionable error — never the misleading "does not exist"
+    /// message a blanket `map_err` used to produce for every failure mode.
+    #[test]
+    fn apply_reports_an_accurate_error_for_a_file_over_the_blob_cap() {
+        let root = tmpdir("apply-over-cap");
+        init_repo(&root);
+        let content = vec![b'a'; 5 * 1024 * 1024]; // over the 4 MiB blob cap
+        std::fs::write(root.join("huge.txt"), &content).unwrap();
+        git(&root, &["add", "huge.txt"]);
+        git(&root, &["commit", "-q", "-m", "huge"]);
+        let oid = GitRunner::new(&root).rev_parse_head().unwrap();
+
+        let err = apply(&root, &oid, &["huge.txt".to_string()], &no_strategy())
+            .expect_err("a file over the blob cap must not silently succeed");
+        assert!(
+            !err.contains("does not exist"),
+            "error for an over-cap file must not claim the file does not exist: {err}"
+        );
+        assert!(
+            err.contains("limit") || err.contains("larger"),
+            "error should explain the size limit was exceeded: {err}"
+        );
+    }
 }

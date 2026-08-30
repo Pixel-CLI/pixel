@@ -1,0 +1,381 @@
+//! Rescue-v2 (`excavate`) integration tests against a real git fixture that
+//! reproduces PLAN.md's canonical Scenario 1 ("dropped-svelte"): a feature
+//! file is added, modified, then deleted in favor of an unrelated
+//! replacement — and the deleting commit's SUBJECT deliberately never
+//! mentions the feature, so a naive subject-substring heuristic would miss
+//! it. Also covers the `commits.reach` bitmask (branch-only / stash-only
+//! content) and confirms diff-content-overlap suspect detection over the
+//! weaker subject-substring approach it replaces.
+
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+use pixel_facts::ingest::{IngestOptions, ingest_until_fresh};
+use pixel_facts::store::FactsStore;
+use tempfile::TempDir;
+
+const PHRASE: &str = "legacy widget renderer";
+
+fn git(root: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .output()
+        .expect("git command");
+    if !out.status.success() {
+        panic!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// Builds the "dropped-svelte" fixture:
+///   commit 1 (main): add src/Widget.svelte containing the PHRASE
+///   commit 2 (main): modify Widget.svelte, keep the PHRASE (a real edit —
+///                     the line carrying the phrase is rewritten, so both
+///                     added+removed sides mention it; this must NOT be
+///                     flagged suspect)
+///   commit 3 (main): delete Widget.svelte, add Widget.tsx as a replacement
+///                     that does NOT contain the phrase. Subject line is
+///                     deliberately neutral ("swap to typed component") —
+///                     no mention of "widget", "legacy", or "renderer" — so
+///                     subject-substring suspect detection would miss it
+///                     entirely, but diff-overlap must still catch it.
+///   branch `feature/only-here`: one commit off main's tip containing a
+///                     phrase ("branch only marker") that exists nowhere on
+///                     main, to prove history-wide reach isn't scoped to the
+///                     checked-out branch.
+///   stash: one stash entry containing a phrase ("stash only marker") that
+///                     exists nowhere in any commit reachable from a branch.
+///   working tree: Widget.tsx is left with an uncommitted edit, to exercise
+///                     the dirty-file safety gate elsewhere in the suite.
+fn make_dropped_svelte_repo() -> TempDir {
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path();
+
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+
+    fs::create_dir_all(root.join("src")).unwrap();
+
+    // Commit 1: add Widget.svelte with the phrase.
+    fs::write(
+        root.join("src/Widget.svelte"),
+        "<script>\n  // legacy widget renderer\n  export let items = [];\n</script>\n",
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "Add Widget.svelte"]);
+
+    // Commit 2: modify the phrase-bearing line itself (real edit, phrase kept).
+    fs::write(
+        root.join("src/Widget.svelte"),
+        "<script>\n  // legacy widget renderer (v2, still used everywhere)\n  export let items = [];\n  export let title = '';\n</script>\n",
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "Extend Widget.svelte with a title prop"]);
+
+    // Commit 3: delete Widget.svelte, add an unrelated Widget.tsx. Subject
+    // deliberately says nothing about widget/legacy/renderer.
+    fs::remove_file(root.join("src/Widget.svelte")).unwrap();
+    fs::write(
+        root.join("src/Widget.tsx"),
+        "export function Widget(props: { items: unknown[] }) {\n  return null;\n}\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "swap to typed component"]);
+
+    // Branch reachable only via a non-checked-out ref.
+    git(root, &["branch", "feature/only-here"]);
+    git(root, &["checkout", "-q", "feature/only-here"]);
+    fs::write(root.join("src/branch_only.txt"), "branch only marker\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "content that lives only on a branch"]);
+    git(root, &["checkout", "-q", "main"]);
+
+    // Stash entry reachable only via refs/stash.
+    fs::write(root.join("src/stash_only.txt"), "stash only marker\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["stash", "push", "-q", "-m", "wip stash marker"]);
+
+    // Leave uncommitted work in the tree (dirty-gate exercise elsewhere).
+    fs::write(
+        root.join("src/Widget.tsx"),
+        "export function Widget(props: { items: unknown[] }) {\n  // uncommitted local tweak\n  return null;\n}\n",
+    )
+    .unwrap();
+
+    dir
+}
+
+fn ingest(root: &Path) -> FactsStore {
+    let mut store = FactsStore::open(root).expect("open store");
+    ingest_until_fresh(&mut store, &IngestOptions::default()).expect("ingest until fresh");
+    store
+}
+
+// ---------------------------------------------------------------------------
+// Deleted-file discovery + last-good selection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn excavate_finds_deleted_file_content_by_phrase() {
+    let dir = make_dropped_svelte_repo();
+    let store = ingest(dir.path());
+
+    let result = store
+        .excavate(Some(PHRASE), None, None, None, 50)
+        .expect("excavate");
+
+    assert!(
+        !result.candidates.is_empty(),
+        "excavate must find candidates for a phrase that only exists in a deleted file"
+    );
+    assert!(
+        result
+            .candidates
+            .iter()
+            .any(|c| c.path == "src/Widget.svelte"),
+        "candidates must include the deleted src/Widget.svelte, got: {:#?}",
+        result.candidates
+    );
+    // At least one candidate is explicitly marked as coming from a path
+    // that's gone from HEAD.
+    assert!(
+        result.candidates.iter().any(|c| c.deleted_from_head),
+        "at least one candidate must be flagged deleted_from_head"
+    );
+}
+
+#[test]
+fn excavate_last_good_survives_deletion_from_head() {
+    let dir = make_dropped_svelte_repo();
+    let store = ingest(dir.path());
+
+    let result = store
+        .excavate(Some(PHRASE), None, None, None, 50)
+        .expect("excavate");
+
+    let last_good = result
+        .last_good
+        .as_ref()
+        .expect("last_good must be set even though src/Widget.svelte is deleted from HEAD");
+
+    assert_eq!(
+        last_good.path, "src/Widget.svelte",
+        "last_good must point at the deleted file's own path"
+    );
+    assert!(
+        last_good.phrase_present,
+        "last_good candidate must have phrase_present=true"
+    );
+    // last_good should be commit 2 (the newest commit where the phrase is
+    // still present after the commit), not commit 1 or the deleting commit 3.
+    assert_eq!(
+        last_good.subject, "Extend Widget.svelte with a title prop",
+        "last_good must resolve to the newest surviving version, not the add \
+         or the delete: got subject {:?}",
+        last_good.subject
+    );
+}
+
+#[test]
+fn excavate_plan_encodes_oid_path_restorable_when_absent_from_head() {
+    let dir = make_dropped_svelte_repo();
+    let store = ingest(dir.path());
+
+    let result = store
+        .excavate(Some(PHRASE), None, None, None, 50)
+        .expect("excavate");
+
+    let last_good = result.last_good.as_ref().expect("last_good present");
+    let expected_source = format!("{}:{}", last_good.oid, last_good.path);
+    assert!(
+        result.plan.contains(&expected_source),
+        "plan must contain a \"<oid>:<path>\" source for the last_good \
+         candidate so it is restorable even though the path is absent from \
+         HEAD; plan={:?}",
+        result.plan
+    );
+
+    // The plan source's oid:path must actually be resolvable via `git show`,
+    // proving the restore payload is real and not just a synthesized string.
+    let show = Command::new("git")
+        .arg("show")
+        .arg(&expected_source)
+        .current_dir(dir.path())
+        .output()
+        .expect("git show");
+    assert!(
+        show.status.success(),
+        "git show {expected_source} must succeed: {show:?}"
+    );
+    let content = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        content.to_lowercase().contains(&PHRASE.to_lowercase()),
+        "content restored from the plan source must contain the phrase"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Suspect detection: diff-content-overlap, not subject-substring
+// ---------------------------------------------------------------------------
+
+#[test]
+fn excavate_flags_the_deleting_commit_suspect_via_diff_overlap_not_subject() {
+    let dir = make_dropped_svelte_repo();
+    let store = ingest(dir.path());
+
+    let result = store
+        .excavate(Some(PHRASE), None, None, None, 50)
+        .expect("excavate");
+
+    let delete_commit = result
+        .candidates
+        .iter()
+        .find(|c| c.subject == "swap to typed component")
+        .expect("the deleting commit must be a candidate (its diff removed phrase-bearing text)");
+
+    // Sanity: the subject genuinely does not mention the phrase or any of
+    // its words, so a subject-substring heuristic (the predecessor approach
+    // in pixel/src/rescue_cmd.rs) would never flag this commit.
+    let subject_lc = delete_commit.subject.to_lowercase();
+    for word in ["widget", "legacy", "renderer", "svelte"] {
+        assert!(
+            !subject_lc.contains(word),
+            "fixture invariant broken: subject must not leak the word {word:?}"
+        );
+    }
+
+    assert!(
+        delete_commit.suspect,
+        "the deleting commit must be flagged suspect via diff-content overlap \
+         even though its subject says nothing about the feature: {:#?}",
+        delete_commit
+    );
+    assert!(
+        !delete_commit.phrase_present,
+        "the deleting commit removed the phrase, so phrase_present must be false for it"
+    );
+}
+
+#[test]
+fn excavate_does_not_flag_a_same_commit_reformat_as_suspect() {
+    let dir = make_dropped_svelte_repo();
+    let store = ingest(dir.path());
+
+    let result = store
+        .excavate(Some(PHRASE), None, None, None, 50)
+        .expect("excavate");
+
+    // Commit 2 rewrites the phrase-bearing line (removes the old line, adds
+    // a new one that still contains the phrase). Diff-overlap detection must
+    // NOT call this "suspect" — the phrase was never actually lost.
+    let modify_commit = result
+        .candidates
+        .iter()
+        .find(|c| c.subject == "Extend Widget.svelte with a title prop")
+        .expect("the modifying commit must be a candidate");
+
+    assert!(
+        !modify_commit.suspect,
+        "a commit that removes-then-re-adds the phrase on the same line must \
+         not be flagged suspect: {:#?}",
+        modify_commit
+    );
+    assert!(
+        modify_commit.phrase_present,
+        "the modifying commit kept the phrase, so phrase_present must be true"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// History-wide reach: branch-only and stash-only content
+// ---------------------------------------------------------------------------
+
+#[test]
+fn excavate_finds_content_reachable_only_via_a_non_checked_out_branch() {
+    let dir = make_dropped_svelte_repo();
+    let store = ingest(dir.path());
+
+    // Confirm main (the checked-out branch at ingest time) never had this
+    // content — it only exists on feature/only-here.
+    let head_log = git(dir.path(), &["log", "--all", "--oneline"]);
+    assert!(
+        head_log.contains("content that lives only on a branch"),
+        "fixture sanity: the branch-only commit must exist in --all history"
+    );
+
+    let result = store
+        .excavate(Some("branch only marker"), None, None, None, 50)
+        .expect("excavate");
+
+    assert!(
+        !result.candidates.is_empty(),
+        "excavate must find content that exists only on a non-checked-out \
+         branch — history-wide reach must not be scoped to the current branch"
+    );
+    assert!(
+        result
+            .candidates
+            .iter()
+            .any(|c| c.path == "src/branch_only.txt"),
+        "candidates must include src/branch_only.txt, got: {:#?}",
+        result.candidates
+    );
+}
+
+#[test]
+fn excavate_finds_content_reachable_only_via_stash() {
+    let dir = make_dropped_svelte_repo();
+    let store = ingest(dir.path());
+
+    let stash_list = git(dir.path(), &["stash", "list"]);
+    assert!(
+        !stash_list.trim().is_empty(),
+        "fixture sanity: a stash entry must exist"
+    );
+
+    let result = store
+        .excavate(Some("stash only marker"), None, None, None, 50)
+        .expect("excavate");
+
+    assert!(
+        !result.candidates.is_empty(),
+        "excavate must find content that exists only in the stash"
+    );
+    assert!(
+        result
+            .candidates
+            .iter()
+            .any(|c| c.path == "src/stash_only.txt"),
+        "candidates must include src/stash_only.txt, got: {:#?}",
+        result.candidates
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dirty-file safety gate stays intact around the fixture's uncommitted edit
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fixture_leaves_widget_tsx_dirty_for_the_apply_safety_gate() {
+    let dir = make_dropped_svelte_repo();
+    let status = git(dir.path(), &["status", "--porcelain"]);
+    assert!(
+        status.lines().any(|l| l.ends_with("src/Widget.tsx")),
+        "fixture must leave src/Widget.tsx dirty so the gated-apply safety \
+         invariants (refuse-without-a-strategy-flag) have something real to \
+         refuse against: status={status:?}"
+    );
+}

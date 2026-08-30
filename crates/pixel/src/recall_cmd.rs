@@ -307,7 +307,7 @@ fn try_recall_daemon(action: &str, params: serde_json::Value) -> Option<serde_js
         params,
     };
     let resp = crate::try_daemon(&root, &req)?;
-    if resp.ok { Some(resp.data().clone()) } else { None }
+    if resp.ok { Some(resp.into_data()) } else { None }
 }
 
 fn print_daemon_result(data: &serde_json::Value, json: bool) {
@@ -1075,7 +1075,7 @@ fn run_status(json: bool) -> Result<(), String> {
         db_bytes as f64 / 1_048_576.0
     );
     if stats.is_empty() {
-        println!("empty — run `gitpixel recall index` first");
+        println!("empty — run `pixel recall index` first");
         return Ok(());
     }
     for a in &stats {
@@ -1095,7 +1095,7 @@ fn run_status(json: bool) -> Result<(), String> {
         unsegmented
     );
     if vectors.meta.model_id.is_empty() {
-        println!("semantic: no vectors yet — run `gitpixel recall setup` then `gitpixel recall embed`");
+        println!("semantic: no vectors yet — run `pixel recall setup` then `pixel recall embed`");
     } else {
         println!(
             "semantic: {} vector segment(s), model {}, embed backlog {}",

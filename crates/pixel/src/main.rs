@@ -429,6 +429,131 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    // -----------------------------------------------------------------
+    // M3/M4 — engines (resolve, history, lifecycle, excavate, reconcile)
+    // -----------------------------------------------------------------
+    /// Engine 1: resolve a phrase to code via the concept index.
+    Resolve {
+        phrase: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// M3: history-wide fact + diff search.
+    HistorySearch {
+        query: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// message | path | diff | all
+        #[arg(long, default_value = "all")]
+        facet: String,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Engine 2: lifecycle of a path or token.
+    Lifecycle {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Repo-relative path to inspect.
+        #[arg(long)]
+        file: Option<String>,
+        /// Token to inspect.
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Engine 2: history-wide discovery (rescue v2).
+    Excavate {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Phrase to search for in diff text.
+        #[arg(long)]
+        phrase: Option<String>,
+        /// Restrict to a repo-relative path.
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Engine 4: one-call deterministic branch sync.
+    Reconcile {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// report (default) | rebase-if-clean
+        #[arg(long, default_value = "report")]
+        strategy: String,
+        /// auto (default) | none
+        #[arg(long, default_value = "auto")]
+        push: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// M5: journal a session event (fire-and-forget).
+    Journal {
+        kind: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Repo-relative path the event concerns.
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long)]
+        detail: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    // -----------------------------------------------------------------
+    // M5/M6 — install / doctor / migrate / hook
+    // -----------------------------------------------------------------
+    /// Idempotent install: register the pixel MCP server, hooks, agent-config.
+    Install {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Health check: install state, daemon, index/graph/facts freshness.
+    Doctor {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Clean-cut state migration: drop .gitpixel/, rebuild .pixel/ fresh.
+    Migrate {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hook entrypoints (guard, session-start) invoked by Claude hooks.
+    Hook {
+        #[command(subcommand)]
+        cmd: HookCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookCmd {
+    /// `pixel hook guard "$@"` — targets enforcement guard.
+    Guard {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// `pixel hook session-start` — emit capability block from op registry.
+    SessionStart {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -512,7 +637,7 @@ fn execute(path: &Path, req: Request, no_daemon: bool) -> Result<Value, String> 
 
 fn unwrap_response(resp: Response) -> Result<Value, String> {
     if resp.ok {
-        Ok(resp.data().clone())
+        Ok(resp.into_data())
     } else {
         Err(resp.error_message())
     }
@@ -521,7 +646,7 @@ fn unwrap_response(resp: Response) -> Result<Value, String> {
 fn announce_graph_build(data: &Value) {
     if let Some(info) = data.get("graph_build") {
         let ms = info.get("build_ms").and_then(Value::as_u64).unwrap_or(0);
-        eprintln!("gitpixel: built graph.db on first use ({ms} ms)");
+        eprintln!("pixel: built graph.db on first use ({ms} ms)");
     }
 }
 
@@ -765,7 +890,7 @@ fn extractor_for_shard(shard: &Shard) -> Result<Box<dyn GramExtractor>, String> 
         )));
     }
     Err(format!(
-        "index built with unsupported extractor {id:?}; re-run `gitpixel index`"
+        "index built with unsupported extractor {id:?}; re-run `pixel index`"
     ))
 }
 
@@ -1120,7 +1245,7 @@ fn run() -> Result<(), String> {
             finish_graph_cmd(data, json, pretty_targets)?;
             if !no_manifest {
                 eprintln!(
-                    "targets manifest active: {} — scoping enforced; run `gitpixel targets --clear` when the task ends",
+                    "targets manifest active: {} — scoping enforced; run `pixel targets --clear` when the task ends",
                     manifest_path.display()
                 );
             }
@@ -1717,6 +1842,173 @@ fn run() -> Result<(), String> {
             let data = pixel_ops::sync::sync(&root, &remote, refspec.as_deref())?;
             print_data(&data, json)
         }
+        // -------------------------------------------------------------
+        // M3/M4 — engines
+        // -------------------------------------------------------------
+        Command::Resolve {
+            phrase,
+            path,
+            limit,
+            json,
+        } => {
+            let data = execute(
+                &path,
+                Request::Resolve {
+                    phrase,
+                    limit,
+                },
+                false,
+            )?;
+            print_data(&data, json)
+        }
+        Command::HistorySearch {
+            query,
+            path,
+            facet,
+            limit,
+            json,
+        } => {
+            let data = execute(
+                &path,
+                Request::History {
+                    query,
+                    facet: Some(facet),
+                    limit,
+                },
+                false,
+            )?;
+            print_data(&data, json)
+        }
+        Command::Lifecycle {
+            path,
+            file,
+            token,
+            json,
+        } => {
+            let data = execute(
+                &path,
+                Request::Lifecycle {
+                    path: file,
+                    token,
+                },
+                false,
+            )?;
+            print_data(&data, json)
+        }
+        Command::Excavate {
+            path,
+            phrase,
+            file,
+            from,
+            to,
+            limit,
+            json,
+        } => {
+            let data = execute(
+                &path,
+                Request::Excavate {
+                    phrase,
+                    path: file,
+                    from,
+                    to,
+                    limit,
+                },
+                false,
+            )?;
+            print_data(&data, json)
+        }
+        Command::Reconcile {
+            path,
+            strategy,
+            push,
+            json,
+        } => {
+            let data = execute(
+                &path,
+                Request::Reconcile {
+                    strategy: Some(strategy),
+                    push: Some(push),
+                },
+                false,
+            )?;
+            print_data(&data, json)
+        }
+        Command::Journal {
+            kind,
+            path,
+            file,
+            detail,
+            json,
+        } => {
+            let data = execute(
+                &path,
+                Request::Journal {
+                    kind,
+                    path: file,
+                    detail,
+                },
+                false,
+            )?;
+            print_data(&data, json)
+        }
+        // -------------------------------------------------------------
+        // M5/M6 — install / doctor / migrate / hook
+        // -------------------------------------------------------------
+        Command::Install { json } => {
+            let report = pixel_install::install::install(
+                &pixel_install::install::InstallOptions::default(),
+            )
+            .map_err(|e| e.to_string())?;
+            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
+        }
+        Command::Doctor { path, json } => {
+            let root = discover_root(&path)?;
+            let report = pixel_install::doctor::doctor(&pixel_install::doctor::DoctorOptions {
+                repo_root: Some(root),
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
+            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
+        }
+        Command::Migrate { path, json } => {
+            let root = discover_root(&path)?;
+            let report = pixel_install::install::migrate(&root).map_err(|e| e.to_string())?;
+            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
+        }
+        Command::Hook { cmd } => match cmd {
+            HookCmd::Guard { path } => {
+                let root = discover_root(&path)?;
+                // Targets enforcement guard: emit the active manifest if any.
+                let manifest = root
+                    .join(pixel_index::index::SHARD_DIR)
+                    .join("targets.json");
+                if manifest.exists() {
+                    let body = std::fs::read_to_string(&manifest).map_err(|e| e.to_string())?;
+                    write_stdout(&body)?;
+                }
+                Ok(())
+            }
+            HookCmd::SessionStart { path } => {
+                let _ = discover_root(&path)?;
+                // Emit the capability block from the live op registry.
+                let ops: Vec<&str> = [
+                    "ping", "search", "targets", "symbol", "context", "impact", "uses",
+                    "trace", "processes", "clusters", "changes", "graph", "status",
+                    "resolve", "history", "lifecycle", "excavate", "reconcile", "journal",
+                    "inspect", "review", "diff", "history_op", "publish", "push", "ship",
+                    "branch_op", "update", "sync",
+                ]
+                .to_vec();
+                let block = serde_json::json!({
+                    "pixel": {
+                        "capabilities": ops,
+                        "protocol_version": PROTOCOL_VERSION,
+                    }
+                });
+                write_stdout(&serde_json::to_string_pretty(&block).map_err(|e| e.to_string())?)?;
+                Ok(())
+            }
+        },
     }
 }
 
@@ -1724,7 +2016,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("gitpixel: {e}");
+            eprintln!("pixel: {e}");
             ExitCode::FAILURE
         }
     }

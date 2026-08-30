@@ -201,7 +201,12 @@ fn kind_for_head_noun(noun: &str) -> Vec<ConceptKind> {
     }
 }
 
-/// True when `word` is a 3-digit HTTP status code (400–599).
+/// True when `word` is a 3-digit HTTP status code (100–599 — the same range
+/// the extractor accepts; PLAN.md Engine 1 does not restrict this to
+/// client/server error codes only, and neither does `push_status`/
+/// `push_res_status`/`push_abort_status`, so narrowing it here would make
+/// "the 204 response" or "301 redirect" unresolvable even though the concept
+/// itself was correctly extracted).
 fn is_status_code(word: &str) -> bool {
     if word.len() != 3 {
         return false;
@@ -209,7 +214,7 @@ fn is_status_code(word: &str) -> bool {
     word.chars().all(|c| c.is_ascii_digit())
         && word
             .parse::<i64>()
-            .map(|n| (400..=599).contains(&n))
+            .map(|n| (100..=599).contains(&n))
             .unwrap_or(false)
 }
 
@@ -262,17 +267,37 @@ pub fn resolve(
     if !tokens.is_empty() {
         tiers_attempted.push(Tier::T1);
         let mut t1_rows: Vec<ConceptRow> = Vec::new();
+        // "Match remaining tokens" per PLAN.md: the head noun is a
+        // classifier word ("button", "endpoint", "error") that is not
+        // expected to literally appear in the target concept's own text, so
+        // it must be stripped before the word-intersection query below —
+        // leaving it in made T1 require e.g. a UI text to literally contain
+        // the word "button" for "submit button" to match, which it almost
+        // never does, silently degrading nearly every multi-word phrase to
+        // T2/T3. Falls back to the full token set for a bare single-word
+        // phrase like "form", where the head noun IS the content to match.
+        let remaining: Vec<&str> = if tokens.len() > 1 {
+            tokens[..tokens.len() - 1]
+                .iter()
+                .map(String::as_str)
+                .collect()
+        } else {
+            tokens.iter().map(String::as_str).collect()
+        };
         if let Some(h) = &head
             && is_status_code(h)
         {
-            let word_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            // The status code digits ARE the content to match; other words
+            // ("error", "the") are noise a status concept's norm never
+            // contains (its norm is just the bare digits), so search on the
+            // code alone rather than on `remaining`.
+            let word_refs = [h.as_str()];
             t1_rows.extend(
                 store.concepts_by_kind_words(ConceptKind::Status, &word_refs, limit as u32)?,
             );
         } else if let Some(h) = &head {
-            let word_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
             for kind in kind_for_head_noun(h) {
-                t1_rows.extend(store.concepts_by_kind_words(kind, &word_refs, limit as u32)?);
+                t1_rows.extend(store.concepts_by_kind_words(kind, &remaining, limit as u32)?);
             }
         }
         if !t1_rows.is_empty() {
@@ -311,10 +336,11 @@ pub fn resolve(
         }
     }
 
-    // T3: trigram fallback (substring LIKE, low confidence).
+    // T3: trigram fallback (verified matches via real character-trigram
+    // overlap, low confidence).
     if !norm.is_empty() {
         tiers_attempted.push(Tier::T3);
-        let rows = store.concepts_like(&norm, limit as u32)?;
+        let rows = trigram_fallback(store, &norm, limit as u32)?;
         if !rows.is_empty() {
             return finish(
                 store,
@@ -461,6 +487,96 @@ fn symbol_name(store: &GraphStore, symbol_id: i64) -> Result<Option<String>, Sto
             |r| r.get::<_, String>(0),
         )
         .ok())
+}
+
+// ---------------------------------------------------------------------------
+// T3 trigram fallback
+// ---------------------------------------------------------------------------
+
+/// Bound on how many concept rows a T3 scan will consider, to keep
+/// worst-case cost sane on large repos. `store.concepts_like` previously did
+/// a naive `LIKE '%needle%'` substring scan under the name "trigram
+/// fallback" — real, but not actually trigram-based, so it could not
+/// tolerate even a single typo (PLAN.md's stated purpose for this tier:
+/// "fuzzier falls to the trigram index"). This scans `concepts.norm`
+/// directly and scores by real character-trigram overlap instead.
+///
+/// This is a crate-local MVP, not the shared trigram index gitpixel/
+/// pixel-index builds over raw file content: pixel-graph does not depend on
+/// pixel-index (same kind of dependency constraint documented above for the
+/// `Reranker` trait vs. pixel-rank), so a genuine trigram *index* belongs at
+/// the daemon/pixel-index integration layer, not here. A bounded linear scan
+/// with real trigram scoring is a correct, honest last-resort tier in the
+/// meantime — it just doesn't scale to a huge concept table the way an
+/// actual inverted trigram index would.
+const TRIGRAM_SCAN_CAP: u32 = 20_000;
+/// Minimum overlap coefficient to accept a T3 candidate. A query that is a
+/// literal substring of the target scores 1.0 automatically (every trigram
+/// of a short query survives inside a longer superstring), so this floor
+/// only screens out near-unrelated norms while still tolerating a
+/// misspelling or two.
+const TRIGRAM_MIN_OVERLAP: f64 = 0.34;
+
+fn trigram_set(s: &str) -> std::collections::HashSet<(char, char, char)> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = std::collections::HashSet::new();
+    if chars.len() < 3 {
+        return out;
+    }
+    for w in chars.windows(3) {
+        out.insert((w[0], w[1], w[2]));
+    }
+    out
+}
+
+/// Overlap coefficient `|A ∩ B| / min(|A|, |B|)`, so a short query fully
+/// contained in a longer target still scores 1.0 (the substring case),
+/// while otherwise rewarding real character-level similarity.
+fn trigram_overlap(
+    a: &std::collections::HashSet<(char, char, char)>,
+    b: &std::collections::HashSet<(char, char, char)>,
+) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(b).count();
+    inter as f64 / a.len().min(b.len()) as f64
+}
+
+/// T3: rank a bounded scan of concept rows by character-trigram overlap
+/// against `norm`. Falls back to the plain substring scan for queries under
+/// 3 chars (too short to form a single trigram, so overlap is meaningless).
+fn trigram_fallback(store: &GraphStore, norm: &str, limit: u32) -> Result<Vec<ConceptRow>, StoreError> {
+    let query_grams = trigram_set(norm);
+    if query_grams.is_empty() {
+        return store.concepts_like(norm, limit);
+    }
+    let sql = "SELECT id, file_id, kind, raw, norm, detail, start_line, end_line, owner_symbol_id
+               FROM concepts LIMIT ?1";
+    let mut stmt = store.conn().prepare(sql)?;
+    let mut scored: Vec<(f64, ConceptRow)> = stmt
+        .query_map(params![TRIGRAM_SCAN_CAP], |r| {
+            Ok(ConceptRow {
+                id: r.get(0)?,
+                file_id: r.get(1)?,
+                kind: ConceptKind::parse(&r.get::<_, String>(2)?),
+                raw: r.get(3)?,
+                norm: r.get(4)?,
+                detail: r.get(5)?,
+                start_line: r.get(6)?,
+                end_line: r.get(7)?,
+                owner_symbol_id: r.get(8)?,
+            })
+        })?
+        .filter_map(|row: rusqlite::Result<ConceptRow>| row.ok())
+        .filter_map(|row| {
+            let score = trigram_overlap(&query_grams, &trigram_set(&row.norm));
+            (score >= TRIGRAM_MIN_OVERLAP).then_some((score, row))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
+    scored.truncate(limit as usize);
+    Ok(scored.into_iter().map(|(_, row)| row).collect())
 }
 
 fn index_state(store: &GraphStore) -> Result<IndexState, StoreError> {

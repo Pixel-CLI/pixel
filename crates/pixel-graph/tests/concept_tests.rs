@@ -1,0 +1,273 @@
+//! Integration tests for pixel-graph concept extraction + resolve cascade.
+
+use std::fs;
+
+use pixel_graph::concept::{
+    ConceptKind, extract_concepts,
+};
+use pixel_graph::concept_resolve::{
+    Confidence, ResolveOptions, Tier, resolve,
+};
+use pixel_graph::store::GraphStore;
+use tempfile::TempDir;
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+/// A TSX file with JSX text, a form, a route, and a string literal.
+const TSX_CONTENT: &str = r#"
+import { useForm } from "react-hook-form";
+
+export default function ContactPage() {
+  const form = useForm();
+  return (
+    <form onSubmit={form.handleSubmit(onSubmit)}>
+      <label htmlFor="email">Email Address</label>
+      <input
+        type="email"
+        name="email"
+        placeholder="Enter your email here"
+        aria-label="Email field"
+      />
+      <button type="submit">Submit the form</button>
+    </form>
+  );
+}
+
+async function onSubmit() {
+  await fetch("/api/contact", { method: "POST" });
+}
+"#;
+
+/// Build a GraphStore in a temp dir, insert one file, extract + store concepts.
+fn make_store_with_concepts() -> (TempDir, GraphStore, i64) {
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("graph.db");
+    let mut store = GraphStore::open(&db_path).expect("open graph store");
+
+    // Write the TSX file to disk so we can reference it.
+    let file_rel = "src/ContactPage.tsx";
+    let abs = dir.path().join(file_rel);
+    fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    fs::write(&abs, TSX_CONTENT).unwrap();
+
+    // Insert the file row.
+    let file_id = store
+        .replace_file(file_rel, "fake-oid", "tsx")
+        .expect("replace_file");
+
+    // Extract concepts from the file content.
+    let concepts = extract_concepts(file_rel, TSX_CONTENT.as_bytes());
+    assert!(!concepts.is_empty(), "extraction should produce concepts");
+
+    // Store them.
+    store
+        .replace_concepts(file_id, &concepts)
+        .expect("replace_concepts");
+
+    (dir, store, file_id)
+}
+
+// ---------------------------------------------------------------------------
+// extraction tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn extract_concepts_finds_ui_text() {
+    let concepts = extract_concepts("src/ContactPage.tsx", TSX_CONTENT.as_bytes());
+    let ui_texts: Vec<_> = concepts
+        .iter()
+        .filter(|c| c.kind == ConceptKind::UiText)
+        .collect();
+    assert!(
+        !ui_texts.is_empty(),
+        "should extract ui_text concepts from JSX text"
+    );
+    // "Email Address" and "Submit the form" are JSX text nodes.
+    let all_raw: Vec<String> = concepts.iter().map(|c| c.raw.clone()).collect();
+    let joined = all_raw.join(" ");
+    assert!(
+        joined.contains("Email Address") || joined.contains("email address"),
+        "should find 'Email Address' JSX text"
+    );
+}
+
+#[test]
+fn extract_concepts_finds_form_concept() {
+    let concepts = extract_concepts("src/ContactPage.tsx", TSX_CONTENT.as_bytes());
+    let forms: Vec<_> = concepts
+        .iter()
+        .filter(|c| c.kind == ConceptKind::Form)
+        .collect();
+    assert!(
+        !forms.is_empty(),
+        "should extract at least one form concept (<form> + useForm)"
+    );
+}
+
+#[test]
+fn extract_concepts_finds_route_concept() {
+    let concepts = extract_concepts("src/ContactPage.tsx", TSX_CONTENT.as_bytes());
+    let routes: Vec<_> = concepts
+        .iter()
+        .filter(|c| c.kind == ConceptKind::Route)
+        .collect();
+    assert!(
+        !routes.is_empty(),
+        "should extract a route concept from fetch('/api/contact')"
+    );
+    // The route raw should mention /api/contact.
+    let found = routes
+        .iter()
+        .any(|r| r.raw.contains("/api/contact"));
+    assert!(found, "route concept should contain /api/contact");
+}
+
+#[test]
+fn extract_concepts_finds_attr_text() {
+    let concepts = extract_concepts("src/ContactPage.tsx", TSX_CONTENT.as_bytes());
+    let attrs: Vec<_> = concepts
+        .iter()
+        .filter(|c| c.kind == ConceptKind::AttrText)
+        .collect();
+    assert!(
+        !attrs.is_empty(),
+        "should extract attr_text from placeholder/aria-label"
+    );
+    // "Enter your email here" is a placeholder.
+    let found = attrs.iter().any(|a| a.raw.contains("Enter your email"));
+    assert!(found, "should find placeholder attr_text");
+}
+
+#[test]
+fn extract_concepts_skips_unsupported_extensions() {
+    let concepts = extract_concepts("readme.md", b"# Hello\nWorld");
+    assert!(concepts.is_empty(), "unsupported extensions produce no concepts");
+}
+
+#[test]
+fn extract_concepts_skips_oversized_files() {
+    let huge = vec![b'a'; 2 * 1024 * 1024]; // > 1MB
+    let concepts = extract_concepts("src/big.tsx", &huge);
+    assert!(concepts.is_empty(), "files > 1MB should produce no concepts");
+}
+
+// ---------------------------------------------------------------------------
+// resolve cascade tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_exact_match_t0() {
+    let (_dir, store, _file_id) = make_store_with_concepts();
+
+    // "submit the form" is a JSX text node — its normalized form should be
+    // an exact T0 match.
+    let outcome = resolve(
+        &store,
+        "submit the form",
+        &ResolveOptions::default(),
+    )
+    .expect("resolve");
+
+    assert!(
+        outcome.confidence != Confidence::Unresolved,
+        "should resolve 'submit the form'"
+    );
+    assert!(
+        outcome.tier.is_some(),
+        "should have a tier"
+    );
+    assert!(
+        !outcome.matches.is_empty(),
+        "should have at least one match"
+    );
+}
+
+#[test]
+fn resolve_the_form_finds_form_concept() {
+    let (_dir, store, _file_id) = make_store_with_concepts();
+
+    // "the form" — article stripped, head noun "form" maps to ConceptKind::Form.
+    let outcome = resolve(&store, "the form", &ResolveOptions::default()).expect("resolve");
+
+    assert!(
+        outcome.confidence != Confidence::Unresolved,
+        "'the form' should resolve, got {:?}",
+        outcome.confidence
+    );
+    // T1 kind-directed should fire (head noun "form" → ConceptKind::Form).
+    if outcome.tier == Some(Tier::T1) {
+        // At least one match should be a form concept.
+        let has_form = outcome
+            .matches
+            .iter()
+            .any(|m| m.kind == ConceptKind::Form);
+        assert!(has_form, "T1 'the form' should match a form concept");
+    }
+    // Even if it fell to T0 or T2, we should have matches.
+    assert!(
+        !outcome.matches.is_empty(),
+        "'the form' should produce matches"
+    );
+}
+
+#[test]
+fn resolve_word_intersection_t2() {
+    let (_dir, store, _file_id) = make_store_with_concepts();
+
+    // "email field" — "email" and "field" as words. The head noun "field"
+    // maps to UiText+AttrText (T1). If T1 finds nothing, T2 word intersection
+    // should find concepts containing "email".
+    let outcome = resolve(&store, "email field", &ResolveOptions::default()).expect("resolve");
+
+    assert!(
+        outcome.confidence != Confidence::Unresolved,
+        "'email field' should resolve via word intersection"
+    );
+    assert!(
+        !outcome.matches.is_empty(),
+        "should have matches for 'email field'"
+    );
+}
+
+#[test]
+fn resolve_unresolved_for_nonexistent_phrase() {
+    let (_dir, store, _file_id) = make_store_with_concepts();
+
+    let outcome = resolve(
+        &store,
+        "nonexistent xyzzy phrase",
+        &ResolveOptions::default(),
+    )
+    .expect("resolve");
+
+    assert_eq!(
+        outcome.confidence,
+        Confidence::Unresolved,
+        "nonexistent phrase should be unresolved"
+    );
+    assert!(outcome.matches.is_empty(), "no matches for unresolved");
+    assert!(
+        !outcome.tiers_attempted.is_empty(),
+        "should record tiers attempted"
+    );
+}
+
+#[test]
+fn resolve_carries_index_state() {
+    let (_dir, store, _file_id) = make_store_with_concepts();
+
+    let outcome = resolve(&store, "form", &ResolveOptions::default()).expect("resolve");
+
+    assert!(outcome.index_state.concepts > 0, "should report concept count");
+    assert!(
+        outcome.index_state.concepts_version.is_some(),
+        "should report concepts_version"
+    );
+    assert!(outcome.index_state.fresh, "should be fresh with concepts");
+    assert!(
+        outcome.inputs_digest != 0,
+        "should carry a non-zero inputs_digest"
+    );
+}

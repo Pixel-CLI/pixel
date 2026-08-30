@@ -8,6 +8,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
@@ -51,12 +53,22 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RewriteOutcome {
     pub path: PathBuf,
-    /// True if the file existed and was rewritten.
+    /// True if the file existed and was rewritten. In dry-run mode this
+    /// reflects what WOULD happen; no write is performed.
     pub rewritten: bool,
     /// True if the file already carried the managed markers (idempotent re-run).
     pub already_managed: bool,
     /// Number of stale GitNexus / codebase-memory blocks removed.
     pub stale_blocks_removed: usize,
+    /// True if the resulting content actually differs from what is on disk
+    /// today (i.e. a real write would change something). Always computed,
+    /// even in dry-run mode.
+    pub would_change: bool,
+    /// Path to the timestamped backup written before the destructive
+    /// rewrite, if the file existed and its content was about to change.
+    /// Never set in dry-run mode (nothing is written).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<PathBuf>,
 }
 
 /// Outcome of scrubbing one settings.json.
@@ -66,27 +78,71 @@ pub struct ScrubOutcome {
     pub existed: bool,
     /// Number of MCP-server entries removed (usable-git/gitpixel/sniper).
     pub mcp_servers_removed: usize,
-    /// Number of hook entries pointing at the old guard removed.
+    /// Number of old-guard-hook references removed or repointed: either a
+    /// (never actually observed in practice) top-level `hooks.<old-name>`
+    /// key, or — the real case — a nested `hooks.<Event>[].hooks[].command`
+    /// string rewritten from the old guard filename to the new one.
     pub guard_hooks_removed: usize,
+    /// Path to the timestamped backup written before the destructive
+    /// rewrite, if anything was actually removed. Never set in dry-run mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<PathBuf>,
 }
 
-/// The agent-config files `pixel install` manages, in a stable order.
-/// Returns only paths that exist on disk.
+/// The Markdown-style agent-config files `pixel install` manages with
+/// managed-marker rewriting, in a stable order. Returns only paths that
+/// exist on disk.
+///
+/// Deliberately excludes `.claude/settings.json`: that file is JSON, not
+/// Markdown, and is handled separately by [`scrub_settings_json`] /
+/// `pixel_install::install::register_mcp_server`. It must never be run
+/// through [`rewrite_agent_config`], which writes HTML-comment managed
+/// markers into the file body — doing so would corrupt settings.json into
+/// invalid JSON.
 pub fn find_agent_configs(home: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for rel in [
-        "CLAUDE.md",
-        "AGENTS.md",
-        ".claude/CLAUDE.md",
-        ".claude/AGENTS.md",
-        ".claude/settings.json",
-    ] {
+    for rel in ["CLAUDE.md", "AGENTS.md", ".claude/CLAUDE.md", ".claude/AGENTS.md"] {
         let p = home.join(rel);
         if p.is_file() {
             out.push(p);
         }
     }
     out
+}
+
+/// Back up `path` to a timestamped sibling file before a destructive
+/// rewrite — but only if the file exists AND its current content differs
+/// from `new_content`. This skips no-op backups on idempotent re-installs
+/// where nothing would actually change.
+///
+/// Returns the backup path if one was written, or `None` if the file did
+/// not exist yet or its content is already identical to `new_content`.
+pub fn backup_if_changing(path: &Path, new_content: &[u8]) -> io::Result<Option<PathBuf>> {
+    let current = match fs::read(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if current == new_content {
+        return Ok(None);
+    }
+    static BACKUP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = BACKUP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    let backup_name = format!("{file_name}.pixel-bak.{nanos}-{seq}");
+    let backup_path = match path.parent() {
+        Some(parent) => parent.join(backup_name),
+        None => PathBuf::from(backup_name),
+    };
+    fs::write(&backup_path, &current)?;
+    Ok(Some(backup_path))
 }
 
 /// Wrap `managed` between the managed markers, replacing any existing managed
@@ -100,7 +156,18 @@ pub fn apply_managed_markers(original: &str, managed: &str) -> String {
     if let Some(start) = cleaned.find(MANAGED_BEGIN) {
         let head = &cleaned[..start];
         let tail = match cleaned.find(MANAGED_END) {
-            Some(end) => &cleaned[end + MANAGED_END.len()..],
+            Some(end) => {
+                let after = &cleaned[end + MANAGED_END.len()..];
+                // `block` already supplies exactly one trailing newline after
+                // MANAGED_END. The single newline immediately following the
+                // OLD end marker is that same canonical newline, not user
+                // content — strip exactly one so it isn't duplicated on every
+                // re-install (previously this grew the file by one byte per
+                // `pixel install` run: 295, 296, 297, ... forever). Anything
+                // beyond that first newline is genuine trailing content and
+                // is preserved untouched.
+                after.strip_prefix('\n').unwrap_or(after)
+            }
             None => "",
         };
         let mut out = String::with_capacity(head.len() + block.len() + tail.len());
@@ -118,25 +185,78 @@ pub fn apply_managed_markers(original: &str, managed: &str) -> String {
     }
 }
 
-/// Remove lines/blocks that reference the stale GitNexus / codebase-memory
-/// tooling. Returns the cleaned text and the number of blocks removed.
+/// Remove Markdown *sections* that are genuinely GitNexus/codebase-memory
+/// generated blocks — bounded by a header line (`#`, `##`, ... followed by a
+/// space) that itself contains a stale-block marker, through to (but
+/// excluding) the next header at the same or shallower nesting depth (or
+/// EOF). Returns the cleaned text and the number of blocks removed.
+///
+/// Deliberately does **not** delete a bare incidental mention of these words
+/// inside otherwise-unrelated prose. This replaces a prior, confirmed
+/// false-positive: naive whole-line substring deletion would have deleted a
+/// real, hand-authored rule line in a real `~/.claude/CLAUDE.md` —
+/// `"...override every other discovery protocol (codebase-memory, gitnexus,
+/// generic exploration)."` — which merely *lists* those tools among others
+/// it deprioritizes and is not itself a GitNexus block. Only a genuine
+/// section header announcing a GitNexus-authored block triggers removal,
+/// matching how a real generated block actually looks (e.g. this very
+/// project's own `# GitNexus — Code Intelligence` section, a full H1 with
+/// several subsections) — and removes the section as one clean unit instead
+/// of leaving other, non-matching lines of that same section behind as
+/// orphaned, mangled content.
 pub fn strip_stale_blocks(text: &str) -> (String, usize) {
-    let mut removed = 0usize;
+    let lines: Vec<&str> = text.lines().collect();
     let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
-        if STALE_BLOCK_MARKERS.iter().any(|m| line.contains(m)) {
+    let mut removed = 0usize;
+    let mut i = 0usize;
+    while i < lines.len() {
+        if let Some(depth) = stale_block_header_depth(lines[i]) {
             removed += 1;
+            i += 1;
+            while i < lines.len() {
+                if header_depth(lines[i]).is_some_and(|d| d <= depth) {
+                    break;
+                }
+                i += 1;
+            }
             continue;
         }
-        out.push_str(line);
+        out.push_str(lines[i]);
         out.push('\n');
+        i += 1;
     }
     (out, removed)
 }
 
+/// If `line` is a Markdown header that also contains a stale-block marker,
+/// return its header depth (1 for `#`, 2 for `##`, ...). Otherwise `None`.
+fn stale_block_header_depth(line: &str) -> Option<usize> {
+    let depth = header_depth(line)?;
+    STALE_BLOCK_MARKERS
+        .iter()
+        .any(|m| line.contains(m))
+        .then_some(depth)
+}
+
+/// If `line` is a Markdown header (one or more leading `#`, immediately
+/// followed by a space or end-of-line), return its depth. Otherwise `None`.
+fn header_depth(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = &trimmed[hashes..];
+    (rest.is_empty() || rest.starts_with(' ')).then_some(hashes)
+}
+
 /// Rewrite one agent-config file with the managed block. Creates the file if
 /// it does not exist. Returns the outcome.
-pub fn rewrite_agent_config(path: &Path, managed: &str) -> Result<RewriteOutcome> {
+///
+/// When `dry_run` is true, computes the exact same outcome (including
+/// `stale_blocks_removed` and `would_change`) but performs no filesystem
+/// writes and creates no directories or backups.
+pub fn rewrite_agent_config(path: &Path, managed: &str, dry_run: bool) -> Result<RewriteOutcome> {
     let original = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
@@ -145,6 +265,20 @@ pub fn rewrite_agent_config(path: &Path, managed: &str) -> Result<RewriteOutcome
     let already_managed = original.contains(MANAGED_BEGIN);
     let (cleaned, stale_blocks_removed) = strip_stale_blocks(&original);
     let rewritten = apply_managed_markers(&cleaned, managed);
+    let would_change = rewritten != original;
+
+    if dry_run {
+        return Ok(RewriteOutcome {
+            path: path.to_path_buf(),
+            rewritten: false,
+            already_managed,
+            stale_blocks_removed,
+            would_change,
+            backup_path: None,
+        });
+    }
+
+    let backup_path = backup_if_changing(path, rewritten.as_bytes())?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -154,6 +288,8 @@ pub fn rewrite_agent_config(path: &Path, managed: &str) -> Result<RewriteOutcome
         rewritten: true,
         already_managed,
         stale_blocks_removed,
+        would_change,
+        backup_path,
     })
 }
 
@@ -166,7 +302,16 @@ pub const DEPRECATED_GUARD_HOOKS: &[&str] = &["gitpixel-targets-guard"];
 
 /// Remove deprecated MCP-server entries and old-guard hook entries from a
 /// Claude `settings.json`. Returns the scrub outcome.
-pub fn scrub_settings_json(path: &Path) -> Result<ScrubOutcome> {
+///
+/// When `dry_run` is true, computes the same removal counts but performs no
+/// write and no backup.
+///
+/// `remove_mcp_servers` gates ONLY the deprecated-MCP-server removal: the
+/// caller should pass `false` when pixel's own MCP server has not been
+/// confirmed runnable yet, so this never leaves the user with zero working
+/// MCP retrieval tools. The guard-hook command rewrite is unrelated and
+/// always runs regardless of this flag.
+pub fn scrub_settings_json(path: &Path, dry_run: bool, remove_mcp_servers: bool) -> Result<ScrubOutcome> {
     let existed = path.is_file();
     if !existed {
         return Ok(ScrubOutcome {
@@ -174,6 +319,7 @@ pub fn scrub_settings_json(path: &Path) -> Result<ScrubOutcome> {
             existed: false,
             mcp_servers_removed: 0,
             guard_hooks_removed: 0,
+            backup_path: None,
         });
     }
     let raw = fs::read_to_string(path)?;
@@ -184,9 +330,10 @@ pub fn scrub_settings_json(path: &Path) -> Result<ScrubOutcome> {
         })?;
 
     let mut mcp_servers_removed = 0usize;
-    if let Some(servers) = value
-        .get_mut("mcpServers")
-        .and_then(serde_json::Value::as_object_mut)
+    if remove_mcp_servers
+        && let Some(servers) = value
+            .get_mut("mcpServers")
+            .and_then(serde_json::Value::as_object_mut)
     {
         for name in DEPRECATED_MCP_SERVERS {
             if servers.remove(*name).is_some() {
@@ -200,16 +347,32 @@ pub fn scrub_settings_json(path: &Path) -> Result<ScrubOutcome> {
         .get_mut("hooks")
         .and_then(serde_json::Value::as_object_mut)
     {
+        // Legacy defensive check: if `hooks` ever literally carried a
+        // top-level key named after the old guard hook, remove it. In
+        // practice real Claude settings never shape hooks this way (event
+        // names like "PreToolUse"/"SessionStart" are the only top-level
+        // keys), so this is expected to be a no-op — the real fix is the
+        // nested command rewrite below.
         for name in DEPRECATED_GUARD_HOOKS {
             if hooks.remove(*name).is_some() {
                 guard_hooks_removed += 1;
             }
         }
+        // The real fix: the old guard hook is referenced as a `command`
+        // string nested inside `hooks.<Event>[].hooks[]` (confirmed against
+        // a real `~/.claude/settings.json`, e.g. under `PreToolUse`).
+        // Repoint every such command at the new guard hook filename in
+        // place, preserving the entry's matcher/timeout/everything else —
+        // never delete the entry, since deleting would also drop unrelated
+        // fields co-located on the same hook object.
+        guard_hooks_removed += rewrite_guard_hook_commands(hooks);
     }
 
-    if mcp_servers_removed > 0 || guard_hooks_removed > 0 {
-        let serialized = serde_json::to_string_pretty(&value)?;
-        fs::write(path, format!("{serialized}\n"))?;
+    let mut backup_path = None;
+    if !dry_run && (mcp_servers_removed > 0 || guard_hooks_removed > 0) {
+        let serialized = format!("{}\n", serde_json::to_string_pretty(&value)?);
+        backup_path = backup_if_changing(path, serialized.as_bytes())?;
+        fs::write(path, serialized)?;
     }
 
     Ok(ScrubOutcome {
@@ -217,5 +380,88 @@ pub fn scrub_settings_json(path: &Path) -> Result<ScrubOutcome> {
         existed: true,
         mcp_servers_removed,
         guard_hooks_removed,
+        backup_path,
     })
+}
+
+/// Rewrite every hook `command` string anywhere under `hooks.<Event>[]`
+/// that references the old guard-hook filename, repointing it at the new
+/// filename **in place** — preserving the entry's matcher, timeout, and
+/// every other field untouched. Returns the number of command strings
+/// rewritten.
+fn rewrite_guard_hook_commands(hooks: &mut serde_json::Map<String, serde_json::Value>) -> usize {
+    let mut rewritten = 0usize;
+    for entries in hooks.values_mut() {
+        let Some(entries) = entries.as_array_mut() else {
+            continue;
+        };
+        for entry in entries {
+            let Some(inner) = entry.get_mut("hooks").and_then(serde_json::Value::as_array_mut) else {
+                continue;
+            };
+            for hook in inner {
+                let Some(hook_obj) = hook.as_object_mut() else {
+                    continue;
+                };
+                let Some(command) = hook_obj.get("command").and_then(|c| c.as_str()).map(str::to_string)
+                else {
+                    continue;
+                };
+                if command.contains(OLD_GUARD_HOOK) {
+                    let new_command = command.replace(OLD_GUARD_HOOK, GUARD_HOOK);
+                    hook_obj.insert("command".to_string(), serde_json::Value::String(new_command));
+                    rewritten += 1;
+                }
+            }
+        }
+    }
+    rewritten
+}
+
+/// Merge a pixel-authored hook entry into an existing `hooks.<Event>` JSON
+/// value, replacing only a **prior pixel-authored entry** for that same
+/// event (identified by `pixel_marker`, a substring unique to pixel's own
+/// command — e.g. `"hook session-start"`) and preserving every other entry
+/// verbatim, however many other tools have registered there.
+///
+/// This is the fix for a real, confirmed bug: naively doing
+/// `obj.insert("SessionStart", [pixel_entry])` would silently destroy every
+/// pre-existing `SessionStart` entry other tools configured (observed
+/// directly against a real `~/.claude/settings.json` carrying three
+/// unrelated `SessionStart` matcher groups). Merging by marker keeps
+/// re-installs idempotent (pixel's own entry is replaced, not duplicated)
+/// without touching anyone else's configuration.
+///
+/// `existing` is the current `hooks.<Event>` value if any. Real Claude
+/// settings always shape this as an array; a non-array value is preserved
+/// by wrapping it rather than discarded, since that's still "someone's
+/// configuration" even if malformed.
+pub fn merge_hook_entry(
+    existing: Option<&serde_json::Value>,
+    pixel_marker: &str,
+    pixel_entry: serde_json::Value,
+) -> serde_json::Value {
+    let mut entries: Vec<serde_json::Value> = match existing {
+        Some(serde_json::Value::Array(arr)) => arr.clone(),
+        Some(other) => vec![other.clone()],
+        None => Vec::new(),
+    };
+    entries.retain(|entry| !hook_entry_matches_marker(entry, pixel_marker));
+    entries.push(pixel_entry);
+    serde_json::Value::Array(entries)
+}
+
+fn hook_entry_matches_marker(entry: &serde_json::Value, marker: &str) -> bool {
+    entry
+        .get("hooks")
+        .and_then(serde_json::Value::as_array)
+        .map(|hooks| {
+            hooks.iter().any(|hook| {
+                hook.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.contains(marker))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }

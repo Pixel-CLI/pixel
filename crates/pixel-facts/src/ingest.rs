@@ -133,12 +133,34 @@ pub fn ingest_tick(store: &mut FactsStore, options: &IngestOptions) -> Result<Ti
     })
 }
 
-/// Convenience: run ticks until fresh or the caller gives up.
+/// Wall-clock safety net for `ingest_until_fresh`: even with every phase
+/// guaranteeing forward progress per tick, an unbounded `loop` waiting on a
+/// condition is a footgun on its own — if some future change reintroduces a
+/// no-progress tick, this turns a silent hang into an explicit error instead
+/// of a livelock indistinguishable from a slow legitimate ingest.
+pub const MAX_INGEST_UNTIL_FRESH_WALL_CLOCK: Duration = Duration::from_secs(600);
+
+/// Convenience: run ticks until fresh or the caller gives up. Bounded by
+/// `MAX_INGEST_UNTIL_FRESH_WALL_CLOCK` — see its doc comment.
 pub fn ingest_until_fresh(store: &mut FactsStore, options: &IngestOptions) -> Result<TickReport> {
+    let mut n = 0u64;
+    let start = Instant::now();
+    let dbg = std::env::var("PIXEL_FACTS_DEBUG_TICKS").is_ok();
     loop {
         let report = ingest_tick(store, options)?;
+        n += 1;
+        if dbg {
+            eprintln!("tick {n}: {:?}", report);
+        }
         if report.fresh {
             return Ok(report);
+        }
+        if start.elapsed() >= MAX_INGEST_UNTIL_FRESH_WALL_CLOCK {
+            return Err(crate::store::FactsError::Msg(format!(
+                "ingest_until_fresh did not converge after {n} ticks / {:?} — last report: {:?}",
+                start.elapsed(),
+                report
+            )));
         }
     }
 }
@@ -160,20 +182,42 @@ fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
         .filter(|o| !known.contains(*o))
         .cloned()
         .collect();
+    let dbg = std::env::var("PIXEL_FACTS_DEBUG_TICKS").is_ok();
+    if dbg {
+        eprintln!("phase_a: oids={} known={} pending={}", oids.len(), known.len(), pending.len());
+    }
     store_phase_a_cursor(store, &pending)?;
     if pending.is_empty() {
         complete_phase_a(store)?;
         return Ok(true);
     }
+    // Guaranteed-progress (do-while) loop: the deadline is a soft yield
+    // target, not a license to do zero work. Checking it BEFORE the first
+    // batch (as a plain `while`) would let setup cost alone (refresh_refs +
+    // enumerate_all_commits + known_oids — five git subprocess spawns) eat
+    // the entire tick budget under load, so the batch body never runs, no
+    // commit is ever inserted, and every subsequent tick repeats the exact
+    // same expensive-but-fruitless enumeration forever. That is the same
+    // defect class this crate exists to prevent (usable-git's ingest budget
+    // checked only at loop-tops): at least one batch must always land.
     let mut idx = 0usize;
-    while idx < pending.len() && Instant::now() < *deadline {
+    loop {
         let batch_end = (idx + PHASE_A_BATCH).min(pending.len());
         let batch = &pending[idx..batch_end];
         let (commits, reach) = fetch_phase_a_batch(store, batch)?;
+        if dbg {
+            eprintln!("phase_a: batch [{idx}..{batch_end}) fetched {} parsed commits", commits.len());
+        }
         insert_phase_a_batch(store, &commits, &reach)?;
         idx = batch_end;
+        if idx >= pending.len() || Instant::now() >= *deadline {
+            break;
+        }
     }
     let done = idx >= pending.len();
+    if dbg {
+        eprintln!("phase_a: idx={idx} pending.len()={} done={done}", pending.len());
+    }
     if done {
         complete_phase_a(store)?;
     } else {
@@ -287,11 +331,7 @@ fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Branches + remotes + tags via a single rev-list of all heads/remotes/tags.
-    let ref_args: Vec<String> = vec!["refs/heads".into(), "refs/remotes".into(), "refs/tags".into()];
-    let mut args = vec!["rev-list", "--reverse"];
-    for r in &ref_args {
-        args.push(r);
-    }
+    let args = vec!["rev-list", "--reverse", "--branches", "--remotes", "--tags"];
     if let Ok(out) = runner.run(&args) {
         let reach = REACH_BRANCH | REACH_REMOTE | REACH_TAG;
         for oid in split_nul_lines(&out) {
@@ -360,7 +400,14 @@ fn known_oids(store: &FactsStore) -> std::collections::HashSet<String> {
 /// Fetch one batch of phase-A commit metadata via `git log -z --no-walk`.
 /// Uses the NUL-separated format from usable-git's sound parser.
 fn fetch_phase_a_batch(store: &FactsStore, oids: &[String]) -> Result<(Vec<PhaseACommit>, Vec<String>)> {
-    let runner = store.runner();
+    // Higher cap than the default 1MiB: a 200-commit metadata batch with long
+    // messages / many changed paths can exceed it. This is bounded by the
+    // PHASE_A_BATCH commit count, not by diff text (phase A has no diff text).
+    let opts = GitOptions {
+        timeout: Some(Duration::from_secs(120)),
+        max_output_bytes: Some(BATCH_OUTPUT_CAP_BYTES),
+    };
+    let runner = pixel_git::GitRunner::with_options(store.root(), opts);
     let mut args: Vec<&str> = vec![
         "log",
         "-z",
@@ -527,12 +574,10 @@ fn emit_path_grams(ins: &mut rusqlite::Statement, path: &str, change_id: i64) ->
 
 /// Returns (phaseB_done, poisoned_this).
 fn phase_b(store: &mut FactsStore, deadline: &Instant) -> Result<(bool, u64)> {
-    if phase_b_done(store) {
-        return Ok((true, 0));
-    }
+    // Phase B is "complete" when no commit remains to be blob-measured. This is
+    // re-evaluated every tick, so new commits (ref moves, incremental) get
+    // measured naturally. Cursor = last commit id measured.
     let mut poisoned = 0u64;
-    // Phase B walks commits whose diff text has not been skipped, measuring
-    // blob sizes and learning poison. Cursor = the commit id to start from.
     let mut cursor: i64 = phase_b_cursor(store);
     loop {
         let next = next_phase_b_commit(store, cursor);
@@ -545,30 +590,18 @@ fn phase_b(store: &mut FactsStore, deadline: &Instant) -> Result<(bool, u64)> {
         };
         let poisoned_batch = measure_commit_blobs(store, cid)?;
         poisoned += poisoned_batch;
-        // checkpoint cursor
-        store
-            .conn()
-            .execute(
-                "UPDATE ingest_jobs SET cursor = ?1, updated_at = ?2 WHERE phase = 'B'",
-                params![cid.to_string(), now_iso()],
-            )?;
+        // checkpoint cursor (upsert: the B row may not exist on first tick)
+        store.conn().execute(
+            "INSERT INTO ingest_jobs (phase, cursor, status, created_at, updated_at)
+             VALUES ('B', ?1, 'running', ?2, ?2)
+             ON CONFLICT (phase) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at",
+            params![cid.to_string(), now_iso()],
+        )?;
         cursor = cid;
         if Instant::now() >= *deadline {
             return Ok((false, poisoned));
         }
     }
-}
-
-fn phase_b_done(store: &FactsStore) -> bool {
-    let status: Option<String> = store
-        .conn()
-        .query_row(
-            "SELECT status FROM ingest_jobs WHERE phase = 'B'",
-            [],
-            |r| r.get(0),
-        )
-        .ok();
-    matches!(status.as_deref(), Some("done"))
 }
 
 fn phase_b_cursor(store: &FactsStore) -> i64 {
@@ -698,14 +731,22 @@ fn phase_c(store: &mut FactsStore, deadline: &Instant) -> Result<(bool, u64, u64
     }
     let mut poisoned = 0u64;
     let mut skipped = 0u64;
+    // Same guaranteed-progress (do-while) shape as phase_a: the deadline is
+    // checked AFTER a batch runs, never before the first one, so a tick
+    // whose earlier phases (A/B) already consumed most of the shared budget
+    // still lands at least one phase-C batch instead of looping forever with
+    // zero forward progress.
     let mut idx = 0usize;
-    while idx < pending.len() && Instant::now() < *deadline {
+    loop {
         let batch_end = (idx + PHASE_B_BATCH).min(pending.len());
         let batch = &pending[idx..batch_end];
         let (p, s) = ingest_diff_batch(store, batch)?;
         poisoned += p;
         skipped += s;
         idx = batch_end;
+        if idx >= pending.len() || Instant::now() >= *deadline {
+            break;
+        }
     }
     Ok((idx >= pending.len(), poisoned, skipped))
 }
@@ -750,6 +791,9 @@ fn ingest_diff_batch(store: &mut FactsStore, batch: &[i64]) -> Result<(u64, u64)
         max_output_bytes: Some(BATCH_OUTPUT_CAP_BYTES),
     };
     let runner = pixel_git::GitRunner::with_options(store.root(), opts);
+    // Pathspec excludes come AFTER the `--` separator so git treats them as
+    // pathspecs (never revisions/options). With only negative pathspecs git
+    // shows every file except the excluded ones — poison blobs never emitted.
     let mut args: Vec<String> = vec![
         "show".to_string(),
         "-U0".to_string(),
@@ -758,12 +802,13 @@ fn ingest_diff_batch(store: &mut FactsStore, batch: &[i64]) -> Result<(u64, u64)
         "--diff-filter=AMDRT".to_string(),
         "--find-renames".to_string(),
     ];
-    for ex in &plan.excludes {
-        args.push(ex.clone());
-    }
     args.push("--end-of-options".to_string());
     for oid in &oids {
         args.push(oid.clone());
+    }
+    args.push("--".to_string());
+    for ex in &plan.excludes {
+        args.push(ex.clone());
     }
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
@@ -771,8 +816,24 @@ fn ingest_diff_batch(store: &mut FactsStore, batch: &[i64]) -> Result<(u64, u64)
     match result {
         Ok(bytes) => {
             let commits = parse_phase_c(&bytes);
-            for c in commits {
-                insert_phase_c_commit(store, &c)?;
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for c in &commits {
+                seen.insert(c.oid.clone());
+                insert_phase_c_commit(store, c)?;
+            }
+            // `git show` prints NOTHING for a commit whose every changed path
+            // was excluded via pathspec — not even the `%x1e<oid>` marker. Such
+            // a commit is silently absent from `commits` above; left alone its
+            // diff_state would stay PENDING forever (this is exactly the class
+            // of "ingest never converges" bug this crate exists to prevent).
+            // It has nothing to index, so mark it explicitly, never silently.
+            for oid in &oids {
+                if !seen.contains(oid) {
+                    store.conn().execute(
+                        "UPDATE commits SET diff_state = ?1, skip_note = 'all-paths-skipped' WHERE oid = ?2 AND diff_state = ?3",
+                        params![DIFF_STATE_SKIPPED, oid, DIFF_STATE_PENDING],
+                    )?;
+                }
             }
             Ok((0, skip_ledger.len() as u64))
         }
@@ -800,6 +861,16 @@ fn ingest_diff_batch(store: &mut FactsStore, batch: &[i64]) -> Result<(u64, u64)
 
 /// Process one commit's diff with its own caps (single mode, no batch cap).
 fn ingest_diff_single(store: &mut FactsStore, oid: &str) -> Result<()> {
+    // Re-decide skips for this single commit so poison paths are still excluded.
+    let cid: Option<i64> = store
+        .conn()
+        .query_row("SELECT id FROM commits WHERE oid = ?1", [oid], |r| r.get(0))
+        .ok();
+    let mut touched: Vec<String> = Vec::new();
+    if let Some(cid) = cid {
+        touched = changed_paths_for_commit(store, cid)?;
+    }
+    let plan = decide_skips(store, &touched);
     let opts = GitOptions {
         timeout: Some(Duration::from_secs(60)),
         max_output_bytes: Some(COMMIT_TEXT_CAP_BYTES + FILE_TEXT_CAP_BYTES + 4096),
@@ -814,12 +885,29 @@ fn ingest_diff_single(store: &mut FactsStore, oid: &str) -> Result<()> {
         "--find-renames".to_string(),
         "--end-of-options".to_string(),
         oid.to_string(),
+        "--".to_string(),
     ];
+    for ex in &plan.excludes {
+        args.push(ex.clone());
+    }
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     match runner.run(&arg_refs) {
         Ok(bytes) => {
-            for c in parse_phase_c(&bytes) {
-                insert_phase_c_commit(store, &c)?;
+            let commits = parse_phase_c(&bytes);
+            let mut found = false;
+            for c in &commits {
+                if c.oid == oid {
+                    found = true;
+                }
+                insert_phase_c_commit(store, c)?;
+            }
+            // Same silent-absence case as the batch path: a commit whose every
+            // changed path was excluded produces no `%x1e<oid>` record at all.
+            if !found {
+                store.conn().execute(
+                    "UPDATE commits SET diff_state = ?1, skip_note = 'all-paths-skipped' WHERE oid = ?2 AND diff_state = ?3",
+                    params![DIFF_STATE_SKIPPED, oid, DIFF_STATE_PENDING],
+                )?;
             }
             Ok(())
         }
@@ -848,6 +936,18 @@ fn parse_phase_c(output: &[u8]) -> Vec<PhaseCCommit> {
         let mut current: Option<PhaseCFile> = None;
         for line in body.split('\n') {
             if line.starts_with("diff --git ") {
+                // Flush the previous file (with all its accumulated added/
+                // removed text) before starting the next one. Pushing a clone
+                // of `current` right here (before any content lines for THIS
+                // file have been seen) instead of on flush was the original
+                // bug: every subsequent `c.added`/`c.removed` mutation landed
+                // on `current` alone and was never reflected back into
+                // `files`, so every hunk was inserted with empty text and
+                // diff_grams never got a single posting — search/excavate over
+                // diff content silently returned nothing for real content.
+                if let Some(prev) = current.take() {
+                    files.push(prev);
+                }
                 // parse a/path b/path
                 let mut path = String::new();
                 if let Some(idx) = line.find(" b/") {
@@ -859,9 +959,6 @@ fn parse_phase_c(output: &[u8]) -> Vec<PhaseCCommit> {
                     removed: String::new(),
                     truncated: false,
                 });
-                if let Some(c) = &current {
-                    files.push(c.clone());
-                }
                 continue;
             }
             if let Some(c) = current.as_mut() {
@@ -874,6 +971,15 @@ fn parse_phase_c(output: &[u8]) -> Vec<PhaseCCommit> {
                 if line.starts_with("+++") || line.starts_with("---") {
                     continue;
                 }
+                // `added_len + removed_len` is already the file's total
+                // accumulated text so far — the cap check must compare against
+                // that total alone. The previous `buf.len() + added_len +
+                // removed_len` added `buf.len()` on top, double-counting
+                // whichever side `buf` aliases (it IS `c.added.len()` again on
+                // a '+' line, `c.removed.len()` again on a '-' line), so the
+                // effective cap was silently half of FILE_TEXT_CAP_BYTES for
+                // any file whose diff leans to one side — still a bound, but
+                // not the documented one.
                 let added_len = c.added.len();
                 let removed_len = c.removed.len();
                 let target = if line.starts_with('+') {
@@ -884,7 +990,17 @@ fn parse_phase_c(output: &[u8]) -> Vec<PhaseCCommit> {
                     None
                 };
                 if let Some(buf) = target {
-                    if buf.len() + added_len + removed_len >= FILE_TEXT_CAP_BYTES {
+                    // Predictive, not reactive: check whether THIS line's
+                    // write would cross the cap before writing it, not
+                    // whether the buffer already crossed it after a previous
+                    // write. A reactive check (comparing the pre-write total
+                    // to the cap) still lets one more line's worth of bytes
+                    // land past the boundary every time — exactly the
+                    // "budget checked but not enforced during the write"
+                    // defect class this crate exists to close. `+1` accounts
+                    // for the trailing '\n' this push always adds.
+                    let incoming = line.len().saturating_sub(1) + 1;
+                    if added_len + removed_len + incoming > FILE_TEXT_CAP_BYTES {
                         c.truncated = true;
                         continue;
                     }
@@ -892,6 +1008,11 @@ fn parse_phase_c(output: &[u8]) -> Vec<PhaseCCommit> {
                     buf.push('\n');
                 }
             }
+        }
+        // Flush the last file in the record (no trailing "diff --git" line
+        // follows it to trigger the flush above).
+        if let Some(last) = current.take() {
+            files.push(last);
         }
         commits.push(PhaseCCommit { oid, files });
     }

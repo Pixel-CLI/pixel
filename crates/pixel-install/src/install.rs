@@ -42,6 +42,9 @@ pub struct InstallReport {
     pub ok: bool,
     pub executable_path: String,
     pub home: String,
+    /// True if this report describes a dry run: every step below reflects
+    /// what WOULD happen, but no filesystem write occurred.
+    pub dry_run: bool,
     pub steps: Vec<InstallStep>,
     pub summary: InstallSummary,
 }
@@ -63,6 +66,11 @@ pub struct InstallOptions {
     /// The capability block emitted by the SessionStart hook, derived from the
     /// binary's actual op registry. If None, a default block is used.
     pub capability_block: Option<String>,
+    /// If true, compute and report every step's outcome exactly as a real
+    /// run would, but perform no filesystem writes: no settings.json edits,
+    /// no hook files, no agent-config rewrites, no backups, no directory
+    /// creation. Safe to run against a real `$HOME` to preview an install.
+    pub dry_run: bool,
 }
 
 impl Default for InstallOptions {
@@ -71,6 +79,7 @@ impl Default for InstallOptions {
             executable_path: None,
             home: None,
             capability_block: None,
+            dry_run: false,
         }
     }
 }
@@ -90,22 +99,37 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         .canonicalize()
         .unwrap_or_else(|_| executable_path.clone());
 
+    let dry_run = options.dry_run;
+    // Preflight: does this binary actually implement `<exe> mcp` as a real
+    // subcommand? Confirmed live against a real release build that it does
+    // NOT (`error: unrecognized subcommand 'mcp'`) — registering
+    // `{"command": exe, "args": ["mcp"]}` when that's true would install an
+    // MCP server entry that can never start. Gate both registering the new
+    // entry AND removing the old (working) usable-git/gitpixel/sniper
+    // entries on this check, so a binary without `mcp` wired up never
+    // leaves the user with zero working MCP retrieval tools.
+    let mcp_ready = binary_supports_mcp_subcommand(&exe);
     let mut steps = Vec::new();
 
     // 1. Register the pixel MCP server in settings.json.
-    steps.push(register_mcp_server(&home, &exe)?);
+    steps.push(register_mcp_server(&home, &exe, dry_run, mcp_ready)?);
 
     // 2. Remove deprecated MCP servers + old guard hooks from settings.json.
-    steps.push(scrub_deprecated(&home)?);
+    steps.push(scrub_deprecated(&home, dry_run, mcp_ready)?);
 
     // 3. Replace the old guard hook with `exec pixel hook guard "$@"`.
-    steps.push(install_guard_hook(&home, &exe)?);
+    steps.push(install_guard_hook(&home, &exe, dry_run)?);
 
     // 4. Install the SessionStart hook.
-    steps.push(install_session_start_hook(&home, &exe, options.capability_block.as_deref())?);
+    steps.push(install_session_start_hook(
+        &home,
+        &exe,
+        options.capability_block.as_deref(),
+        dry_run,
+    )?);
 
     // 5. Rewrite agent-config with managed markers.
-    steps.push(rewrite_agent_configs(&home, &exe)?);
+    steps.push(rewrite_agent_configs(&home, &exe, dry_run)?);
 
     let green = steps.iter().filter(|s| s.status == CheckStatus::Green).count();
     let yellow = steps.iter().filter(|s| s.status == CheckStatus::Yellow).count();
@@ -117,12 +141,68 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         ok,
         executable_path: exe.display().to_string(),
         home: home.display().to_string(),
+        dry_run,
         steps,
         summary: InstallSummary { green, yellow, red },
     })
 }
 
-fn register_mcp_server(home: &Path, exe: &Path) -> Result<InstallStep> {
+/// Probe whether the installed binary actually implements `pixel mcp` as a
+/// real subcommand, WITHOUT ever letting the probe block indefinitely: an
+/// MCP server is a long-lived stdio process, so if `mcp` really existed and
+/// somehow ignored `--help`, waiting on it forever is a real risk. This
+/// defends against that with a null stdin/stdout/stderr (so a read on stdin
+/// sees immediate EOF rather than blocking) plus an explicit wall-clock
+/// timeout that kills the child if it overruns.
+fn binary_supports_mcp_subcommand(exe: &Path) -> bool {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut child = match std::process::Command::new(exe)
+        .args(["mcp", "--help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+fn register_mcp_server(home: &Path, exe: &Path, dry_run: bool, mcp_ready: bool) -> Result<InstallStep> {
+    if !mcp_ready {
+        return Ok(InstallStep {
+            id: "mcp.pixel".into(),
+            status: CheckStatus::Red,
+            summary: "pixel MCP server NOT registered — `mcp` subcommand missing from this binary".into(),
+            detail: Some(format!(
+                "skipped writing {{\"command\": \"{}\", \"args\": [\"mcp\"]}} into mcpServers.pixel because \
+                 `{} mcp --help` failed (unrecognized subcommand). Registering it anyway would install an MCP \
+                 server entry that can never start. This is a blocker in crates/pixel/src/main.rs's CLI: the \
+                 `mcp` subcommand must exist and actually run an MCP server before `pixel install` can safely \
+                 register it.",
+                exe.display(),
+                exe.display(),
+            )),
+        });
+    }
     let settings = home.join(".claude").join("settings.json");
     let mut value = read_settings(&settings)?;
     let servers = value
@@ -148,58 +228,92 @@ fn register_mcp_server(home: &Path, exe: &Path) -> Result<InstallStep> {
             "args": ["mcp"],
         }),
     );
-    write_settings(&settings, &value)?;
-    let detail = if existing.is_some() {
-        Some("pixel MCP server already registered; updated command".into())
+    let backup_path = write_settings(&settings, &value, dry_run)?;
+    let action = if existing.is_some() {
+        "pixel MCP server already registered; updated command"
     } else {
-        Some("registered pixel MCP server".into())
+        "registered pixel MCP server"
     };
     Ok(InstallStep {
         id: "mcp.pixel".into(),
         status: CheckStatus::Green,
-        summary: "pixel MCP server registered".into(),
-        detail,
+        summary: dry_run_summary(dry_run, "pixel MCP server registered"),
+        detail: Some(with_backup_note(action.to_string(), backup_path)),
     })
 }
 
-fn scrub_deprecated(home: &Path) -> Result<InstallStep> {
+fn scrub_deprecated(home: &Path, dry_run: bool, mcp_ready: bool) -> Result<InstallStep> {
     let settings = home.join(".claude").join("settings.json");
-    let outcome = config::scrub_settings_json(&settings)?;
+    // Only remove the old (working) usable-git/gitpixel/sniper MCP server
+    // entries once pixel's own MCP server is confirmed capable of starting
+    // — otherwise this step would leave the user with zero working MCP
+    // retrieval tools. The guard-hook command rewrite is unrelated to MCP
+    // registration and always proceeds regardless.
+    let outcome = config::scrub_settings_json(&settings, dry_run, mcp_ready)?;
     let removed = outcome.mcp_servers_removed + outcome.guard_hooks_removed;
+    let mut summary = format!(
+        "removed {removed} deprecated MCP/hook entr{}",
+        if removed == 1 { "y" } else { "ies" }
+    );
+    if !mcp_ready {
+        summary.push_str(" (deprecated MCP servers kept: pixel's own MCP server isn't runnable yet)");
+    }
     Ok(InstallStep {
         id: "mcp.deprecated".into(),
         status: CheckStatus::Green,
-        summary: format!(
-            "removed {removed} deprecated MCP/hook entr{}",
-            if removed == 1 { "y" } else { "ies" }
-        ),
-        detail: Some(format!(
-            "mcp_servers_removed={} guard_hooks_removed={}",
-            outcome.mcp_servers_removed, outcome.guard_hooks_removed
+        summary: dry_run_summary(dry_run, &summary),
+        detail: Some(with_backup_note(
+            format!(
+                "mcp_servers_removed={} guard_hooks_removed={} mcp_ready={mcp_ready}",
+                outcome.mcp_servers_removed, outcome.guard_hooks_removed
+            ),
+            outcome.backup_path,
         )),
     })
 }
 
-fn install_guard_hook(home: &Path, exe: &Path) -> Result<InstallStep> {
+fn install_guard_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
-    fs::create_dir_all(&hooks_dir)?;
     let old = hooks_dir.join(config::OLD_GUARD_HOOK);
     let new = hooks_dir.join(config::GUARD_HOOK);
     let body = format!("#!/bin/sh\nexec {} hook guard \"$@\"\n", exe.display());
-    let mut replaced_old = false;
-    if old.exists() {
+    let replaced_old = old.exists();
+
+    if dry_run {
+        return Ok(InstallStep {
+            id: "hook.guard".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "guard hook installed"),
+            detail: Some(format!(
+                "would write {} (replaced_old={replaced_old})",
+                new.display()
+            )),
+        });
+    }
+
+    fs::create_dir_all(&hooks_dir)?;
+    let new_backup = config::backup_if_changing(&new, body.as_bytes())?;
+    // Deleting the old guard script is itself a destructive write: back up
+    // its current content before removing it, unconditionally (there is no
+    // "content unchanged" case for a deletion).
+    let old_backup = if replaced_old {
+        config::backup_if_changing(&old, &[])?
+    } else {
+        None
+    };
+    if replaced_old {
         let _ = fs::remove_file(&old);
-        replaced_old = true;
     }
     fs::write(&new, &body)?;
     set_executable(&new);
+    let backup_path = new_backup.or(old_backup);
     Ok(InstallStep {
         id: "hook.guard".into(),
         status: CheckStatus::Green,
         summary: "guard hook installed".into(),
-        detail: Some(format!(
-            "wrote {} (replaced_old={replaced_old})",
-            new.display()
+        detail: Some(with_backup_note(
+            format!("wrote {} (replaced_old={replaced_old})", new.display()),
+            backup_path,
         )),
     })
 }
@@ -208,15 +322,12 @@ fn install_session_start_hook(
     home: &Path,
     exe: &Path,
     capability_block: Option<&str>,
+    dry_run: bool,
 ) -> Result<InstallStep> {
     let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
-    fs::create_dir_all(&hooks_dir)?;
     let path = hooks_dir.join(config::SESSION_START_HOOK);
     let body = format!("#!/bin/sh\nexec {} hook session-start \"$@\"\n", exe.display());
-    fs::write(&path, &body)?;
-    set_executable(&path);
 
-    // Register the SessionStart hook in settings.json so Claude invokes it.
     let settings = home.join(".claude").join("settings.json");
     let mut value = read_settings(&settings)?;
     let hooks = value
@@ -234,48 +345,94 @@ fn install_session_start_hook(
             path: settings.clone(),
             reason: "hooks is not an object".into(),
         }))?;
-    obj.insert(
-        "SessionStart".to_string(),
-        serde_json::json!([{
-            "matcher": "SessionStart",
-            "hooks": [{
-                "type": "command",
-                "command": format!("{} hook session-start", exe.display()),
-            }],
-        }]),
-    );
-    write_settings(&settings, &value)?;
+    // Merge, never blind-overwrite: a real settings.json can already carry
+    // multiple unrelated SessionStart entries registered by other tools
+    // (e.g. separate matcher groups for "startup"/"resume"/"clear"). Replace
+    // only a prior *pixel-authored* entry (identified by its own command
+    // substring), so re-installs stay idempotent without destroying anyone
+    // else's hooks.
+    let existing_session_start = obj.get("SessionStart").cloned();
+    let pixel_command = format!("{} hook session-start", exe.display());
+    let merged = config::merge_hook_entry(existing_session_start.as_ref(), "hook session-start", serde_json::json!({
+        "matcher": "SessionStart",
+        "hooks": [{
+            "type": "command",
+            "command": pixel_command,
+        }],
+    }));
+    obj.insert("SessionStart".to_string(), merged);
 
     let _ = capability_block; // emitted by the hook itself from the op registry
+
+    if dry_run {
+        return Ok(InstallStep {
+            id: "hook.session-start".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "SessionStart hook installed"),
+            detail: Some(format!("would write {}", path.display())),
+        });
+    }
+
+    fs::create_dir_all(&hooks_dir)?;
+    let hook_backup = config::backup_if_changing(&path, body.as_bytes())?;
+    fs::write(&path, &body)?;
+    set_executable(&path);
+
+    let settings_backup = write_settings(&settings, &value, dry_run)?;
+    let backup_path = hook_backup.or(settings_backup);
+
     Ok(InstallStep {
         id: "hook.session-start".into(),
         status: CheckStatus::Green,
         summary: "SessionStart hook installed".into(),
-        detail: Some(format!("wrote {}", path.display())),
+        detail: Some(with_backup_note(format!("wrote {}", path.display()), backup_path)),
     })
 }
 
-fn rewrite_agent_configs(home: &Path, exe: &Path) -> Result<InstallStep> {
+fn rewrite_agent_configs(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let managed = format!(
         "pixel is the unified retrieval + git engine. Use `pixel <verb>` for\n\
          search, resolve, targets, history, and safe git ops.\n\
          Binary: {}\n",
         exe.display()
     );
+    let mut targets = config::find_agent_configs(home);
+    if targets.is_empty() {
+        // No CLAUDE.md/AGENTS.md exists anywhere pixel looks yet. Without
+        // this fallback, `find_agent_configs` (which only returns files
+        // that already exist) would return an empty list and this whole
+        // step would silently no-op — a brand-new machine would get zero
+        // pixel usage instructions written anywhere, forever. Ensure at
+        // least the canonical CLAUDE.md carries the managed block.
+        targets.push(home.join("CLAUDE.md"));
+    }
+
     let mut rewritten = 0usize;
     let mut stale_removed = 0usize;
-    for path in config::find_agent_configs(home) {
-        let outcome = config::rewrite_agent_config(&path, &managed)?;
-        if outcome.rewritten {
+    let mut backups: Vec<String> = Vec::new();
+    for path in targets {
+        let outcome = config::rewrite_agent_config(&path, &managed, dry_run)?;
+        if outcome.rewritten || (dry_run && outcome.would_change) {
             rewritten += 1;
         }
         stale_removed += outcome.stale_blocks_removed;
+        if let Some(b) = outcome.backup_path {
+            backups.push(b.display().to_string());
+        }
     }
+    let verb = if dry_run { "would rewrite" } else { "rewrote" };
     Ok(InstallStep {
         id: "agent-config".into(),
         status: CheckStatus::Green,
-        summary: format!("rewrote {rewritten} agent-config file(s)"),
-        detail: Some(format!("stale_blocks_removed={stale_removed}")),
+        summary: format!("{verb} {rewritten} agent-config file(s)"),
+        detail: Some(format!(
+            "stale_blocks_removed={stale_removed}{}",
+            if backups.is_empty() {
+                String::new()
+            } else {
+                format!(" backups={}", backups.join(","))
+            }
+        )),
     })
 }
 
@@ -287,13 +444,35 @@ fn read_settings(path: &Path) -> Result<serde_json::Value> {
     }
 }
 
-fn write_settings(path: &Path, value: &serde_json::Value) -> Result<()> {
+/// Serialize and write `value` to `path`, backing up any pre-existing,
+/// content-differing file first. In dry-run mode, performs no write, no
+/// backup, and no directory creation, and always returns `Ok(None)`.
+fn write_settings(path: &Path, value: &serde_json::Value, dry_run: bool) -> Result<Option<PathBuf>> {
+    let serialized = format!("{}\n", serde_json::to_string_pretty(value)?);
+    if dry_run {
+        return Ok(None);
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let serialized = serde_json::to_string_pretty(value)?;
-    fs::write(path, format!("{serialized}\n"))?;
-    Ok(())
+    let backup_path = config::backup_if_changing(path, serialized.as_bytes())?;
+    fs::write(path, serialized)?;
+    Ok(backup_path)
+}
+
+fn dry_run_summary(dry_run: bool, summary: &str) -> String {
+    if dry_run {
+        format!("[dry-run] would report: {summary}")
+    } else {
+        summary.to_string()
+    }
+}
+
+fn with_backup_note(detail: String, backup_path: Option<PathBuf>) -> String {
+    match backup_path {
+        Some(p) => format!("{detail} (backup={})", p.display()),
+        None => detail,
+    }
 }
 
 fn set_executable(path: &Path) {

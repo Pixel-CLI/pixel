@@ -58,11 +58,32 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
 
     if merge_base == opts.expected_head {
         // Fast-forward is possible.
-        // Check for dirty paths that would be overwritten.
-        let dirty = runner.status_porcelain();
+        // Check for dirty paths that would be overwritten. Uses
+        // `status_porcelain_or_err`, NOT `status_porcelain`: an
+        // undetermined status (git error, timeout, or output-cap overflow)
+        // must abort the fast-forward, never be silently read as "nothing
+        // is dirty" — that would let `git merge --ff-only` overwrite a
+        // genuinely dirty file with no way for the caller to have known.
+        let dirty = runner.status_porcelain_or_err().map_err(|e| {
+            let _ = lock.release();
+            format!(
+                "could not determine working-tree status, refusing to fast-forward \
+                 (would otherwise risk overwriting dirty files as if the tree were clean): {e}"
+            )
+        })?;
         if !dirty.is_empty() {
-            // Check if the ff would touch any dirty files.
-            let changes = runner.diff_name_status(&opts.expected_head, &opts.target_oid);
+            // Check if the ff would touch any dirty files. Same fail-closed
+            // reasoning: an undetermined changed-path set must not be read
+            // as "nothing changed".
+            let changes = runner
+                .diff_name_status_or_err(&opts.expected_head, &opts.target_oid)
+                .map_err(|e| {
+                    let _ = lock.release();
+                    format!(
+                        "could not determine which paths the fast-forward would change, \
+                         refusing to proceed while dirty files are present: {e}"
+                    )
+                })?;
             let changed_paths: std::collections::HashSet<String> = changes
                 .iter()
                 .map(|(_, p)| p.clone())

@@ -395,6 +395,29 @@ impl Store {
         Ok(())
     }
 
+    /// Record a generic event with an arbitrary kind string (for the Journal
+    /// op, which accepts any user-supplied kind rather than the fixed
+    /// `EventKind` enum). The kind is stored verbatim in the `events.kind`
+    /// column; optional `data` is JSON-serialized into `data_json`.
+    pub fn record_event_raw(
+        &self,
+        kind: &str,
+        data: Option<&serde_json::Value>,
+        run_id: Option<&str>,
+    ) -> Result<i64> {
+        let data_json = match data {
+            Some(v) => Some(serde_json::to_string(v)?),
+            None => None,
+        };
+        let id = self.conn.query_row(
+            "INSERT INTO events (ts, run_id, kind, data_json)
+             VALUES (?1, ?2, ?3, ?4) RETURNING id",
+            params![now_ms(), run_id, kind, data_json],
+            |r| r.get::<_, i64>(0),
+        )?;
+        Ok(id)
+    }
+
     pub fn record_raw_fallback(&self, source: &str, raw: &str, ts: Option<i64>) -> Result<i64> {
         let id = self.conn.query_row(
             "INSERT INTO raw_fallbacks (ts, source, raw) VALUES (?1, ?2, ?3) RETURNING id",

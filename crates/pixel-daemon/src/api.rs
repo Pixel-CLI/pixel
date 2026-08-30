@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, open_regular_bounded};
 use pixel_index::indexset::{IndexSet, IndexSetError};
+use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, GraphStore, SymbolKind, SymbolRow};
 use pixel_proto::{Envelope, ErrorCode, PixelError, SnapshotInfo};
 
@@ -79,18 +80,36 @@ pub type Response = Envelope<Value>;
 
 /// Classify a daemon read-op error string into the best-fit `ErrorCode`.
 /// The message is always preserved verbatim in the envelope's `error.message`;
-/// the code is for programmatic handling. Most read-op failures are
-/// "you asked for something that doesn't exist or is malformed" →
-/// `InvalidInput`; index/graph state failures map to the pixel-specific
-/// codes. Refined per-op as typed errors land in later milestones.
+/// the code is for programmatic handling.
+///
+/// Bug 6 fix: the previous version had 4 branches, 3 of which were dead code
+/// — no `Err(...)` path in this crate (or in the crates it wraps via
+/// `.map_err(|e| e.to_string())`) ever produces a message containing
+/// `"index"` + `"build"`/`"rebuild"`, `"not indexed"`/`"no index"`, or
+/// `"ambiguous"` (verified by grepping every `format!`/literal `Err` site in
+/// this workspace: `IndexBuilding`/`NotIndexed` are never surfaced as
+/// errors — `ensure_graph` builds lazily instead of failing when the graph
+/// is absent, and `IndexSet::open_or_build` does the same for the text
+/// index; the one "ambiguous" case, `resolve_symbol`'s multi-candidate
+/// result, is returned as `Ok(candidates_value(...))`, never an `Err`). So
+/// in practice every error fell through to `InvalidInput`, and a genuine
+/// not-found lookup (bad uid/name) was indistinguishable from a malformed
+/// request.
+///
+/// Fixed by routing the two *actually reachable* not-found message shapes
+/// (`resolve_symbol` and `op_context`, both in this file) to `NotFound`.
+/// Everything else — malformed regex, bad params, opaque messages
+/// forwarded from other crates — stays `InvalidInput`, which is the
+/// correct default for "the request itself was not satisfiable."
+///
+/// `IndexBuilding`/`NotIndexed`/`Ambiguous` remain defined in `ErrorCode`
+/// for ops that may legitimately need them later; this function just no
+/// longer pretends to reach them via string-sniffing when nothing produces
+/// a matching message today.
 fn classify_error(msg: &str) -> ErrorCode {
     let lower = msg.to_lowercase();
-    if lower.contains("index") && (lower.contains("build") || lower.contains("rebuild")) {
-        ErrorCode::IndexBuilding
-    } else if lower.contains("not indexed") || lower.contains("no index") {
-        ErrorCode::NotIndexed
-    } else if lower.contains("ambiguous") {
-        ErrorCode::Ambiguous
+    if lower.starts_with("no symbol named") || lower.starts_with("no symbol with uid") {
+        ErrorCode::NotFound
     } else {
         ErrorCode::InvalidInput
     }
@@ -217,6 +236,33 @@ impl Service {
         Ok((stats, started.elapsed().as_millis() as u64))
     }
 
+    /// Open a fresh, on-disk `GraphStore` handle purely for the search
+    /// ranking symbol signal (Bug 2 fix). Deliberately independent of
+    /// `self.graph`: that field is populated only as a side effect of some
+    /// OTHER op (`targets`, `symbol`, `impact`, ...) having called
+    /// `ensure_graph()` earlier in this same daemon process, so reading it
+    /// here would make ranking depend on which unrelated ops happened to
+    /// run first — the exact non-determinism this fixes (and it is always
+    /// `None` for `--no-daemon`/in-process CLI runs, since a fresh
+    /// `Service::open` never populates it). Basing the decision solely on
+    /// "does graph.db exist on disk" makes the same search call produce the
+    /// same ranking regardless of prior daemon activity or transport.
+    ///
+    /// This never builds or rebuilds the graph — mirrors `op_status`'s
+    /// existing pattern of opening the db directly without going through
+    /// `ensure_graph()`. A search must stay within its latency budget and
+    /// can never pay graph-build cost (which can take minutes on a large or
+    /// dirty repo); when no graph.db exists yet, ranking simply proceeds
+    /// without the symbol signal, same as today.
+    fn open_graph_for_ranking(&self) -> Option<GraphStore> {
+        let db = self.graph_db_path();
+        if db.exists() {
+            GraphStore::open(&db).ok()
+        } else {
+            None
+        }
+    }
+
     pub fn handle(&mut self, req: Request) -> Response {
         let op_name = req.op_name();
         // Ops that return repo state attach a `snapshot` envelope field so
@@ -296,12 +342,20 @@ impl Service {
             Request::Changes { base, offset } => self.op_changes(base.as_deref(), offset),
             Request::Graph {} => self.op_graph(),
             Request::Status {} => self.op_status(),
-            Request::Resolve { .. } => Err("resolve: not yet wired".to_string()),
-            Request::History { .. } => Err("history: not yet wired".to_string()),
-            Request::Lifecycle { .. } => Err("lifecycle: not yet wired".to_string()),
-            Request::Excavate { .. } => Err("excavate: not yet wired".to_string()),
-            Request::Reconcile { .. } => Err("reconcile: not yet wired".to_string()),
-            Request::Journal { .. } => Err("journal: not yet wired".to_string()),
+            Request::Resolve { phrase, limit } => self.op_resolve(&phrase, limit),
+            Request::History { query, facet, limit } => {
+                self.op_history(&query, facet.as_deref(), limit)
+            }
+            Request::Lifecycle { path, token } => self.op_lifecycle(path.as_deref(), token.as_deref()),
+            Request::Excavate { phrase, path, from, to, limit } => {
+                self.op_excavate(phrase.as_deref(), path.as_deref(), from.as_deref(), to.as_deref(), limit)
+            }
+            Request::Reconcile { strategy, push } => {
+                self.op_reconcile(strategy.as_deref(), push.as_deref())
+            }
+            Request::Journal { kind, path, detail } => {
+                self.op_journal(&kind, path.as_deref(), detail.as_deref())
+            }
             Request::Inspect { .. } => {
                 pixel_ops::inspect::inspect(&self.root)
             }
@@ -412,19 +466,71 @@ impl Service {
         let row_limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         let offset = offset.unwrap_or(0);
 
-        let (mut matches, stats) = self
-            .index
-            .search_page_in(pattern, offset, Some(row_limit), paths)
-            .map_err(|e| e.to_string())?;
+        // `scope` selects match ORDER, not a different data source. `None`/
+        // `""` is unranked path/line order; `"code"` (case-insensitive) is
+        // ranked via pixel-rank-family RRF (M1 gate per PLAN.md). Any other
+        // value used to fall through silently to unranked search (Bug 5) —
+        // a typo'd or unimplemented scope gave the caller zero signal their
+        // request wasn't honored.
+        let scope_normalized = scope.map(str::to_lowercase);
+        let ranked = match scope_normalized.as_deref() {
+            None | Some("") => false,
+            Some("code") => true,
+            Some(other) => {
+                return Err(format!(
+                    "unsupported search scope {other:?}; supported values are \"code\" \
+                     (rank matches by file-level signals) or omitting `scope` for unranked \
+                     path/line order"
+                ));
+            }
+        };
 
-        // `--scope code`: rerank matches by file-level signals via pixel-rank's
-        // RRF, WITHOUT changing the hit set. The hit set (set of (path, line)
-        // pairs) is preserved exactly; only the order changes. This is the M1
-        // ranked-search gate per PLAN.md.
-        let ranked = scope == Some("code");
-        if ranked {
-            matches = rank_search_matches(&matches, pattern, &self.graph);
-        }
+        let (matches, stats) = if ranked {
+            // Ranked search cannot simply rerank the (offset, limit)-sliced
+            // page the unranked branch fetches below: that page is sliced
+            // in PATH order BEFORE ranking exists, so (a) the single
+            // best-ranked match is invisible unless it happens to land
+            // inside that slice (e.g. an exact filename match sorting
+            // alphabetically last is never even fetched at `--limit 5`),
+            // and (b) `next_offset` walks pre-rank order while the emitted
+            // rows are in post-rank order — a page boundary and a rank
+            // reordering disagreeing means paging duplicates or drops rows
+            // (confirmed: 31 true matches paged via limit=40/offset=40
+            // previously yielded 31 rows but only 30 distinct).
+            //
+            // Fix: fetch one bounded candidate POOL (bounded by
+            // RANK_CANDIDATE_CAP — the same style of safety cap `row_limit`
+            // already enforces everywhere else in this function; never
+            // "fetch everything"), rank that whole pool ONCE, then serve
+            // `offset`/`row_limit` as a plain slice over the resulting
+            // stable array. Because the pool and its rank order are
+            // recomputed identically on every call against the same repo
+            // state (see `open_graph_for_ranking` for the accompanying
+            // determinism fix), `offset` now indexes one coherent sequence:
+            // paging through it can neither skip nor repeat a row.
+            const RANK_CANDIDATE_CAP: usize = MAX_LIMIT;
+            let (pool, pool_stats) = self
+                .index
+                .search_page_in(pattern, 0, Some(RANK_CANDIDATE_CAP), paths)
+                .map_err(|e| e.to_string())?;
+            let ranking_graph = self.open_graph_for_ranking();
+            let ranked_pool = rank_search_matches(&pool, pattern, &ranking_graph);
+
+            let start = offset.min(ranked_pool.len());
+            // More ranked rows remain beyond this page (independent of the
+            // byte cap, which is applied below). Folded into `stats.truncated`
+            // — the same meaning the unranked branch's `stats.truncated`
+            // already carries: "the candidate/index layer says this page
+            // isn't everything."
+            let more_beyond_page = start.saturating_add(row_limit) < ranked_pool.len();
+            let mut stats = pool_stats;
+            stats.truncated = stats.truncated || more_beyond_page;
+            (ranked_pool[start..].to_vec(), stats)
+        } else {
+            self.index
+                .search_page_in(pattern, offset, Some(row_limit), paths)
+                .map_err(|e| e.to_string())?
+        };
 
         // Render matches until either the row limit or the byte cap is hit.
         let mut arr: Vec<Value> = Vec::with_capacity(matches.len().min(row_limit));
@@ -1019,6 +1125,106 @@ impl Service {
             "graph": graph,
         }))
     }
+
+    // -- Engine 1 / M3 / M4 / M5 ops --------------------------------------
+
+    /// Engine 1: concept-index resolution cascade.
+    fn op_resolve(&mut self, phrase: &str, limit: Option<usize>) -> Result<Value, String> {
+        self.ensure_graph()?;
+        let store = self.graph.as_ref().ok_or("graph store unavailable")?;
+        let opts = pixel_graph::concept_resolve::ResolveOptions {
+            limit: limit.unwrap_or(8),
+            ..Default::default()
+        };
+        let outcome = pixel_graph::concept_resolve::resolve(store, phrase, &opts)
+            .map_err(|e| e.to_string())?;
+        serde_json::to_value(&outcome).map_err(|e| e.to_string())
+    }
+
+    /// M3 / Engine 2: history-wide fact + diff search.
+    fn op_history(
+        &mut self,
+        query: &str,
+        facet: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Value, String> {
+        let facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
+        let result = pixel_facts::search::search(
+            &facts,
+            query,
+            facet.unwrap_or("all").into(),
+            limit.unwrap_or(200),
+        )
+        .map_err(|e| e.to_string())?;
+        let mut value = serde_json::to_value(&result).map_err(|e| e.to_string())?;
+        value["index_state"] = serde_json::to_value(facts.index_state()).map_err(|e| e.to_string())?;
+        Ok(value)
+    }
+
+    /// Engine 2: lifecycle of a path or token.
+    fn op_lifecycle(
+        &mut self,
+        path: Option<&str>,
+        token: Option<&str>,
+    ) -> Result<Value, String> {
+        let facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
+        let result = match (path, token) {
+            (Some(p), _) => facts.path_lifecycle(p).map_err(|e| e.to_string())?,
+            (None, Some(t)) => facts.token_lifecycle(t).map_err(|e| e.to_string())?,
+            (None, None) => return Err("lifecycle requires a path or token".to_string()),
+        };
+        serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+
+    /// Engine 2: history-wide discovery (rescue v2).
+    fn op_excavate(
+        &mut self,
+        phrase: Option<&str>,
+        path: Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Value, String> {
+        let facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
+        let result = facts
+            .excavate(phrase, path, from, to, limit.unwrap_or(200))
+            .map_err(|e| e.to_string())?;
+        serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+
+    /// Engine 4: one-call deterministic branch sync (delegates to pixel-ops).
+    fn op_reconcile(
+        &mut self,
+        strategy: Option<&str>,
+        push: Option<&str>,
+    ) -> Result<Value, String> {
+        let opts = pixel_ops::reconcile::ReconcileOptions {
+            strategy: strategy.unwrap_or("report").to_string(),
+            push: push.unwrap_or("auto").to_string(),
+            request_id: String::new(),
+        };
+        pixel_ops::reconcile::reconcile(&self.root, &opts)
+    }
+
+    /// M5: journal a session event into the session db (fire-and-forget).
+    fn op_journal(
+        &mut self,
+        kind: &str,
+        path: Option<&str>,
+        detail: Option<&str>,
+    ) -> Result<Value, String> {
+        let store = pixel_session::store::Store::open(&self.root).map_err(|e| e.to_string())?;
+        let data = match (path, detail) {
+            (Some(p), Some(d)) => Some(json!({"path": p, "detail": d})),
+            (Some(p), None) => Some(json!({"path": p})),
+            (None, Some(d)) => Some(json!({"detail": d})),
+            (None, None) => None,
+        };
+        let id = store
+            .record_event_raw(kind, data.as_ref(), None)
+            .map_err(|e| e.to_string())?;
+        Ok(json!({"recorded": true, "id": id, "kind": kind}))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1524,7 +1730,17 @@ fn rank_search_matches(
         })
         .map(|(i, f)| (i, f.clone()))
         .collect();
-    // Sort by filename match strength: exact basename match > substring.
+    // Sort by filename match strength: an exact basename-stem match (e.g.
+    // `login.rs` for pattern "login") is its own top tier, ranked strictly
+    // above every substring-only match (e.g. `login_handler_extra_long.rs`,
+    // which merely mentions the pattern in a longer name). Within a tier, a
+    // shorter/more-specific basename outranks a longer one.
+    //
+    // Bug 4 fix: this previously sorted `bb.len().cmp(&ba.len())` —
+    // descending by length — so the LONGEST matching filename won, inverted
+    // from the "exact match > substring" intent stated above. E.g.
+    // `login_handler_extra_long.rs` (mere mention) outranked `login.rs`
+    // (the actual definition).
     filename_rank.sort_by(|a, b| {
         let ba = std::path::Path::new(&a.1)
             .file_name()
@@ -1534,7 +1750,20 @@ fn rank_search_matches(
             .file_name()
             .map(|s| s.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        bb.len().cmp(&ba.len()).then_with(|| a.1.cmp(&b.1))
+        let stem_a = std::path::Path::new(&a.1)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let stem_b = std::path::Path::new(&b.1)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let exact_a = stem_a == pat_lower;
+        let exact_b = stem_b == pat_lower;
+        exact_b
+            .cmp(&exact_a)
+            .then_with(|| ba.len().cmp(&bb.len()))
+            .then_with(|| a.1.cmp(&b.1))
     });
 
     // --- Signal 2: symbol match (graph, if available) ---
@@ -1569,6 +1798,30 @@ fn rank_search_matches(
     density_rank.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     // --- RRF fusion (K=60, same as targets) ---
+    // Bug 3 NOTE: these constants intentionally duplicate
+    // `pixel_rank::{RRF_K, W_FILENAME, W_SYMBOL, W_CONTENT}`
+    // (crates/pixel-rank/src/lib.rs) instead of importing them or calling a
+    // shared fusion primitive, because:
+    //   1. those items are private `const`s in pixel-rank, not `pub`, so
+    //      they cannot be referenced from here as-is; and
+    //   2. this fix's scope was restricted to `pixel-daemon/src/api.rs` +
+    //      `pixel-proto/src/error.rs` only — editing pixel-rank's lib.rs
+    //      was out of bounds for this pass to avoid colliding with
+    //      concurrently-running work on sibling crates.
+    // A clean extraction target already exists: `pixel_rank::lexical_rank`
+    // (lib.rs) has an inline loop — `for (list, w) in [(&s1, W_FILENAME),
+    // ...] { for (rank, path) ... scores += w / (RRF_K + rank + 1.0) }` —
+    // that is exactly this same "fuse N ranked path lists by weighted RRF"
+    // primitive. Extracting it into a `pub fn rrf_fuse(lists_with_weights:
+    // &[(&[String], f64)], k: f64) -> Vec<(String, f64)>` (or similar) in
+    // pixel-rank, and exporting the four constants below as `pub`, would
+    // let both `op_targets` and this function call one source of truth
+    // instead of duplicating the formula. Do that refactor before adding a
+    // 3rd/4th independent reimplementation of RRF fusion in this codebase.
+    // Until then, keep these four values byte-for-byte equal to
+    // pixel-rank's: RRF_K = 60.0, W_FILENAME = 3.0, W_SYMBOL = 2.5,
+    // W_CONTENT = 1.5 — a drift here silently changes search ranking out of
+    // sync with `targets` ranking.
     const K: f64 = 60.0;
     const W_FILENAME: f64 = 3.0;
     const W_SYMBOL: f64 = 2.5;
@@ -2046,6 +2299,261 @@ mod tests {
         assert_eq!(
             first_path, "login.rs",
             "filename+symbol signal must rank login.rs first, got {first_path}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug 1a + Bug 4 regression: ranked search must consider the FULL
+    /// bounded candidate pool, not just a path-order-sliced page, so a
+    /// filename-signal match that sorts after every other candidate in
+    /// plain path order still surfaces at a small `--limit`. Also pins the
+    /// exact-basename-stem > longer-substring tie-break (Bug 4): before the
+    /// fix, `bb.len().cmp(&ba.len())` sorted the LONGEST matching filename
+    /// first, so `zzz_needle.rs` would have outranked `needle.rs`.
+    #[test]
+    fn search_scope_code_ranks_globally_beyond_small_page_and_prefers_exact_filename() {
+        let root = tmpdir("search-scope-global-rank");
+        for i in 0..30 {
+            std::fs::write(
+                root.join(format!("f{i:02}.rs")),
+                format!("// needle mention {i}\n"),
+            )
+            .unwrap();
+        }
+        // Both sort AFTER all 30 `f*.rs` files alphabetically, so a
+        // path-order bounded probe at `--limit 3` never even reaches them
+        // pre-fix (candidates are visited in sorted path order and the
+        // probe stops as soon as `limit + 1` matches are found among the
+        // `f*.rs` files alone).
+        std::fs::write(root.join("needle.rs"), "pub fn other() { /* needle */ }\n").unwrap();
+        std::fs::write(
+            root.join("zzz_needle.rs"),
+            "pub fn another() { /* needle */ }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Search {
+            paths: None,
+            pattern: "needle".into(),
+            json: true,
+            limit: Some(3),
+            offset: None,
+            scope: Some("code".into()),
+        });
+        assert!(resp.ok, "ranked search: {:?}", resp.error);
+        let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
+        let paths: Vec<&str> = matches.iter().filter_map(|m| m["path"].as_str()).collect();
+        assert_eq!(
+            paths.len(),
+            3,
+            "expected a full page of 3 ranked matches, got {paths:?}"
+        );
+        assert_eq!(
+            &paths[..2],
+            &["needle.rs", "zzz_needle.rs"],
+            "exact filename match must surface first, substring match second, despite \
+             both sorting after every `f*.rs` file in plain path order; got {paths:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug 1b regression: walking every ranked page via `next_offset` must
+    /// cover every true match exactly once — no duplicates (previously
+    /// possible when a byte/row-limit page boundary disagreed with a rank
+    /// reordering computed only within that already-sliced page) and no
+    /// gaps.
+    #[test]
+    fn search_scope_code_pagination_has_no_duplicates_or_gaps() {
+        let root = tmpdir("search-scope-pagination");
+        const TOTAL: usize = 37;
+        for i in 0..TOTAL {
+            std::fs::write(
+                root.join(format!("file{i:03}.rs")),
+                format!("// banana occurrence {i}\n"),
+            )
+            .unwrap();
+        }
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let mut seen: Vec<String> = Vec::new();
+        let mut offset = Some(0usize);
+        let mut pages = 0;
+        while let Some(o) = offset {
+            let resp = svc.handle(Request::Search {
+                paths: None,
+                pattern: "banana".into(),
+                json: true,
+                limit: Some(5),
+                offset: Some(o),
+                scope: Some("code".into()),
+            });
+            assert!(resp.ok, "page at offset {o}: {:?}", resp.error);
+            let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
+            for m in matches {
+                seen.push(m["path"].as_str().unwrap().to_string());
+            }
+            offset = resp
+                .data()
+                .get("next_offset")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize);
+            pages += 1;
+            assert!(pages <= TOTAL, "pagination did not terminate: seen={seen:?}");
+        }
+
+        let unique: std::collections::HashSet<&String> = seen.iter().collect();
+        assert_eq!(
+            seen.len(),
+            unique.len(),
+            "ranked pagination must not repeat a row: {seen:?}"
+        );
+        assert_eq!(
+            unique.len(),
+            TOTAL,
+            "ranked pagination must cover every match exactly once: got {} of {TOTAL}: {seen:?}",
+            unique.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug 2 regression: the symbol-signal must be deterministic based on
+    /// "does graph.db exist on disk", never on whether some unrelated op
+    /// happened to warm `self.graph` earlier in this same daemon process.
+    #[test]
+    fn search_scope_code_ranking_is_deterministic_regardless_of_prior_daemon_activity() {
+        let root = tmpdir("search-scope-determinism");
+        // Defines a symbol literally named `needle` -- its rank depends
+        // entirely on the graph symbol signal (no filename hit).
+        std::fs::write(
+            root.join("b_defines.rs"),
+            "pub fn needle() -> bool { true }\n",
+        )
+        .unwrap();
+        // Sorts first alphabetically; mentions "needle" once in a comment
+        // -- same content-density score as the line inside `b_defines.rs`,
+        // no symbol, no filename signal.
+        std::fs::write(root.join("a_mentions.rs"), "// needle mentioned here\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        // Build graph.db via a throwaway Service so THIS test's Service
+        // starts with `graph: None` in memory while graph.db already
+        // exists on disk -- the `--no-daemon` / daemon-restart scenario
+        // Bug 2 describes.
+        {
+            let mut builder = Service::open(&root).unwrap();
+            let built = builder.handle(Request::Graph {});
+            assert!(built.ok, "graph build: {:?}", built.error);
+        }
+
+        let mut svc = Service::open(&root).unwrap();
+        let search = |svc: &mut Service| -> Vec<String> {
+            let resp = svc.handle(Request::Search {
+                paths: None,
+                pattern: "needle".into(),
+                json: true,
+                limit: Some(10),
+                offset: None,
+                scope: Some("code".into()),
+            });
+            assert!(resp.ok, "search: {:?}", resp.error);
+            resp.data()
+                .get("matches")
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .map(|m| m["path"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Call 1: `svc.graph` is still `None` in memory; only graph.db on
+        // disk. The symbol signal must already apply.
+        let first = search(&mut svc);
+        assert_eq!(
+            first.first().map(String::as_str),
+            Some("b_defines.rs"),
+            "symbol signal must apply from an on-disk graph.db even with no prior \
+             in-process graph activity on this Service, got {first:?}"
+        );
+
+        // Unrelated daemon activity that happens to populate `self.graph`.
+        let targets = svc.handle(Request::Targets {
+            task: "needle".into(),
+            limit: Some(5),
+        });
+        assert!(targets.ok, "targets: {:?}", targets.error);
+
+        // Call 2: identical repo, identical query -- must be byte-for-byte
+        // the same ranking as call 1, regardless of the intervening
+        // `targets` call.
+        let second = search(&mut svc);
+        assert_eq!(
+            first, second,
+            "ranking must not depend on unrelated prior daemon activity"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug 5 regression: an unrecognized `scope` value must be a clear
+    /// error, not a silent fallback to unranked search. Valid values stay
+    /// case-insensitive.
+    #[test]
+    fn search_rejects_unknown_scope_instead_of_silently_falling_back() {
+        let root = tmpdir("search-bad-scope");
+        std::fs::write(root.join("a.rs"), "// needle\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Search {
+            paths: None,
+            pattern: "needle".into(),
+            json: true,
+            limit: Some(5),
+            offset: None,
+            scope: Some("banana".into()),
+        });
+        assert!(!resp.ok, "unknown scope must fail, not silently succeed");
+        assert_eq!(
+            resp.error.as_ref().map(|e| e.code),
+            Some(pixel_proto::ErrorCode::InvalidInput)
+        );
+
+        let unranked = svc.handle(Request::Search {
+            paths: None,
+            pattern: "needle".into(),
+            json: true,
+            limit: Some(5),
+            offset: None,
+            scope: None,
+        });
+        assert!(unranked.ok, "no scope must remain valid: {:?}", unranked.error);
+
+        let upper = svc.handle(Request::Search {
+            paths: None,
+            pattern: "needle".into(),
+            json: true,
+            limit: Some(5),
+            offset: None,
+            scope: Some("CODE".into()),
+        });
+        assert!(upper.ok, "scope must be case-insensitive: {:?}", upper.error);
+        assert_eq!(
+            upper.data().get("ranked").and_then(Value::as_bool),
+            Some(true)
         );
 
         let _ = std::fs::remove_dir_all(&root);
