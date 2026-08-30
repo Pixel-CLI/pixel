@@ -3,10 +3,60 @@
 //! carry removed text). `last_good` = newest commit where the path exists with
 //! the phrase present. Plans carry `source: "<oid>:<path>"`.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
+use pixel_git::GitRunner;
+
 use crate::search::covering_hashes;
-use crate::store::{FactsStore, IndexState, Result, short_oid, subject_of};
+use crate::store::{FactsError, FactsStore, IndexState, Result, short_oid, subject_of};
+
+/// Diff-content suspect heuristic, shared with `pixel rescue`
+/// (`crates/pixel/src/rescue_cmd.rs`): returns the first search unit
+/// (phrase/keyword) that is present in `before` but absent from `after` —
+/// i.e. the change from `before` to `after` REMOVED phrase-bearing content.
+/// `None` means nothing phrase-bearing was removed. Matching is
+/// case-insensitive substring (same semantics as `search::relevance_of`,
+/// which backs excavate's own per-hunk `suspect` flag). This is the
+/// principled replacement for subject-line keyword matching: a commit is
+/// suspect because its CONTENT dropped the phrase, regardless of what the
+/// commit message says.
+pub fn phrase_removed_between(before: &str, after: &str, units: &[String]) -> Option<String> {
+    let before_lc = before.to_lowercase();
+    let after_lc = after.to_lowercase();
+    for u in units {
+        if u.is_empty() {
+            continue;
+        }
+        let needle = u.to_lowercase();
+        if before_lc.contains(&needle) && !after_lc.contains(&needle) {
+            return Some(u.clone());
+        }
+    }
+    None
+}
+
+/// Commit-set filter derived from an `[from..to]` rev range. Holds FULL
+/// commit oids (as stored in `commits.oid`); candidates are filtered before
+/// truncation so a narrowed query still fills up to `limit`.
+enum RangeFilter {
+    /// Only these commits are allowed (a `--to` bound, with or without
+    /// `--from`: ancestors of `to`, minus `from`'s proper ancestors).
+    Within(HashSet<String>),
+    /// Everything EXCEPT these commits is allowed (a lone `--from` bound:
+    /// `from`'s proper ancestors are excluded, `from` itself is included).
+    Excluding(HashSet<String>),
+}
+
+impl RangeFilter {
+    fn allows(&self, oid: &str) -> bool {
+        match self {
+            RangeFilter::Within(set) => set.contains(oid),
+            RangeFilter::Excluding(set) => !set.contains(oid),
+        }
+    }
+}
 
 /// One excavate candidate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,13 +144,19 @@ impl FactsStore {
         let phrase = phrase.unwrap_or("").to_string();
         let limit = limit.min(200);
 
+        // Resolve `[from..to]` into a concrete commit filter BEFORE querying.
+        // An unresolvable ref is a structured error, never a silently
+        // unfiltered answer (the flags used to be accepted and discarded).
+        let range = self.resolve_range(from, to)?;
+        let range = range.as_ref();
+
         let mut candidates: Vec<ExcavateCandidate> = if !phrase.is_empty() {
-            self.excavate_by_phrase(&phrase, path, from, to, limit)?
+            self.excavate_by_phrase(&phrase, path, range, limit)?
         } else if let Some(p) = path {
-            self.excavate_by_path(p, from, to, limit)?
+            self.excavate_by_path(p, range, limit)?
         } else {
             // No phrase and no path: list all changed paths (most recent first).
-            self.excavate_recent(from, to, limit)?
+            self.excavate_recent(range, limit)?
         };
 
         // last_good = newest commit where the path existed WITH the phrase
@@ -192,12 +248,76 @@ impl FactsStore {
         })
     }
 
+    /// Resolve `--from`/`--to` refs into a [`RangeFilter`] over full commit
+    /// oids, via the real git plumbing (`rev-parse --verify` + `rev-list`).
+    /// Bounds are INCLUSIVE on both ends: `from` = older bound, `to` = newer
+    /// bound, either may be absent. A ref that does not resolve to a commit
+    /// is a structured `FactsError::Msg` — never silence.
+    fn resolve_range(
+        &self,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<Option<RangeFilter>> {
+        if from.is_none() && to.is_none() {
+            return Ok(None);
+        }
+        let runner = GitRunner::new(self.root());
+        let resolve = |label: &str, r: &str| -> Result<String> {
+            pixel_git::validate_ref(r).map_err(|e| {
+                FactsError::Msg(format!("invalid --{label} ref {r:?}: {e}"))
+            })?;
+            let spec = format!("{r}^{{commit}}");
+            let out = runner
+                .run(&["rev-parse", "--verify", "--quiet", "--end-of-options", &spec])
+                .map_err(|_| {
+                    FactsError::Msg(format!(
+                        "--{label} ref {r:?} does not resolve to a commit in this repository"
+                    ))
+                })?;
+            Ok(String::from_utf8_lossy(&out).trim().to_string())
+        };
+        let rev_list = |args: &[&str]| -> Result<HashSet<String>> {
+            let out = runner.run(args).map_err(|e| {
+                FactsError::Msg(format!(
+                    "git rev-list failed while resolving --from/--to: {e}"
+                ))
+            })?;
+            Ok(String::from_utf8_lossy(&out)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect())
+        };
+        match (from, to) {
+            (Some(f), Some(t)) => {
+                let f_oid = resolve("from", f)?;
+                let t_oid = resolve("to", t)?;
+                let mut set = rev_list(&["rev-list", &format!("{f_oid}..{t_oid}")])?;
+                // Git's `a..b` excludes `a`; the CLI contract is inclusive
+                // of the older bound.
+                set.insert(f_oid);
+                Ok(Some(RangeFilter::Within(set)))
+            }
+            (None, Some(t)) => {
+                let t_oid = resolve("to", t)?;
+                Ok(Some(RangeFilter::Within(rev_list(&["rev-list", &t_oid])?)))
+            }
+            (Some(f), None) => {
+                let f_oid = resolve("from", f)?;
+                // Exclude `from`'s PROPER ancestors; `from` itself stays in.
+                let mut ancestors = rev_list(&["rev-list", &f_oid])?;
+                ancestors.remove(&f_oid);
+                Ok(Some(RangeFilter::Excluding(ancestors)))
+            }
+            (None, None) => unreachable!("early-returned above"),
+        }
+    }
+
     fn excavate_by_phrase(
         &self,
         phrase: &str,
         path: Option<&str>,
-        _from: Option<&str>,
-        _to: Option<&str>,
+        range: Option<&RangeFilter>,
         limit: usize,
     ) -> Result<Vec<ExcavateCandidate>> {
         let units = vec![phrase.to_string()];
@@ -263,6 +383,13 @@ impl FactsStore {
                     )
                     .ok();
             if let Some((oid, at, _author, message, hpath, added, removed, status, seq)) = row {
+                if let Some(rf) = range {
+                    // `commits.oid` is the full oid — filter BEFORE the
+                    // sort/truncate below so narrowing still fills `limit`.
+                    if !rf.allows(&oid) {
+                        continue;
+                    }
+                }
                 if let Some(p) = path {
                     if hpath != p {
                         continue;
@@ -322,7 +449,16 @@ impl FactsStore {
                 });
             }
         }
-        out.sort_by(|a, b| (&b.at, b.seq).cmp(&(&a.at, a.seq)));
+        // Suspect commits (diff-content proof the phrase was REMOVED here and
+        // not re-added) rank first — that's precisely what "find the deleted
+        // X" is asking for. Without this, a suspect buried under more-recent
+        // non-suspect noise (e.g. another file's prose mentioning the same
+        // identifier as plain text) forces the caller to read past false
+        // leads before reaching the deterministic answer this field already
+        // computed. Recency remains the tiebreaker within each group.
+        out.sort_by(|a, b| {
+            (b.suspect, &b.at, b.seq).cmp(&(a.suspect, &a.at, a.seq))
+        });
         out.truncate(limit);
         Ok(out)
     }
@@ -330,12 +466,15 @@ impl FactsStore {
     fn excavate_by_path(
         &self,
         path: &str,
-        _from: Option<&str>,
-        _to: Option<&str>,
+        range: Option<&RangeFilter>,
         limit: usize,
     ) -> Result<Vec<ExcavateCandidate>> {
         let deleted = self.paths_deleted_from_head()?;
         let deleted_from_head = deleted.iter().any(|d| d == path);
+        // With a range filter, the SQL LIMIT must not pre-truncate rows the
+        // filter would keep (`LIMIT -1` = unlimited in SQLite); truncation
+        // happens after filtering instead.
+        let sql_limit: i64 = if range.is_some() { -1 } else { limit as i64 };
         let mut stmt = self.conn().prepare(
             "SELECT c.oid, c.committed_at, c.message, f.status, f.path, c.id
              FROM file_changes f JOIN commits c ON c.id = f.commit_id
@@ -343,7 +482,7 @@ impl FactsStore {
              ORDER BY c.committed_at DESC, c.id DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(rusqlite::params![path, limit as i64], |r| {
+        let rows = stmt.query_map(rusqlite::params![path, sql_limit], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -356,6 +495,11 @@ impl FactsStore {
         let mut out = Vec::new();
         for row in rows {
             let (oid, at, message, status, p, seq) = row?;
+            if let Some(rf) = range {
+                if !rf.allows(&oid) {
+                    continue;
+                }
+            }
             out.push(ExcavateCandidate {
                 oid: short_oid(&oid),
                 path: p,
@@ -372,23 +516,24 @@ impl FactsStore {
                 seq,
             });
         }
+        out.truncate(limit);
         Ok(out)
     }
 
     fn excavate_recent(
         &self,
-        _from: Option<&str>,
-        _to: Option<&str>,
+        range: Option<&RangeFilter>,
         limit: usize,
     ) -> Result<Vec<ExcavateCandidate>> {
         let deleted = self.paths_deleted_from_head()?;
+        let sql_limit: i64 = if range.is_some() { -1 } else { limit as i64 };
         let mut stmt = self.conn().prepare(
             "SELECT c.oid, c.committed_at, c.message, f.status, f.path, c.id
              FROM file_changes f JOIN commits c ON c.id = f.commit_id
              ORDER BY c.committed_at DESC, c.id DESC
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map([limit as i64], |r| {
+        let rows = stmt.query_map([sql_limit], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -401,6 +546,11 @@ impl FactsStore {
         let mut out = Vec::new();
         for row in rows {
             let (oid, at, message, status, p, seq) = row?;
+            if let Some(rf) = range {
+                if !rf.allows(&oid) {
+                    continue;
+                }
+            }
             out.push(ExcavateCandidate {
                 oid: short_oid(&oid),
                 path: p.clone(),
@@ -415,6 +565,7 @@ impl FactsStore {
                 seq,
             });
         }
+        out.truncate(limit);
         Ok(out)
     }
 

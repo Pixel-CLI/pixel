@@ -1,12 +1,9 @@
-//! Integration tests for pixel-install: gain ledger, doctor, and install.
+//! Integration tests for pixel-install: doctor and install.
 
 use std::fs;
 
 use pixel_install::config::{MANAGED_BEGIN, MANAGED_END};
 use pixel_install::doctor::{DoctorOptions, doctor};
-use pixel_install::gain::{
-    GainEventInput, GainLedger, SOURCE_PIXEL,
-};
 use pixel_install::install::{InstallOptions, install};
 use tempfile::TempDir;
 
@@ -31,117 +28,6 @@ fn fake_pixel_exe(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// gain ledger tests
-// ---------------------------------------------------------------------------
-
-fn sample_event(client: &str, tokens: i64) -> GainEventInput {
-    GainEventInput {
-        operation: "search".into(),
-        client: client.into(),
-        transport: "stdio".into(),
-        result_code: "ok".into(),
-        envelope_bytes: 1200,
-        raw_equivalent_bytes: 8000,
-        agent_ops_raw: 5,
-        agent_ops_actual: 1,
-        git_subprocesses_raw: 4,
-        git_subprocesses_actual: 0,
-        duration_ms: 42,
-        tokens_saved: tokens,
-        source: SOURCE_PIXEL.into(),
-    }
-}
-
-#[test]
-fn gain_ledger_write_and_read() {
-    let dir = TempDir::new().expect("tempdir");
-    let state_root = dir.path();
-
-    let ledger = GainLedger::open_at(state_root).expect("open ledger");
-
-    // Initially empty.
-    let events = ledger.read().expect("read empty");
-    assert!(events.is_empty(), "fresh ledger should be empty");
-
-    // Append two events.
-    ledger
-        .append(&sample_event("repo-alpha", 500))
-        .expect("append 1");
-    ledger
-        .append(&sample_event("repo-alpha", 300))
-        .expect("append 2");
-
-    // Read back.
-    let events = ledger.read().expect("read after append");
-    assert_eq!(events.len(), 2, "should have 2 events");
-    assert_eq!(events[0].operation, "search");
-    assert_eq!(events[0].tokens_saved, 500);
-    assert_eq!(events[1].tokens_saved, 300);
-
-    // Both events should have the pixel source tag.
-    assert_eq!(events[0].source, SOURCE_PIXEL);
-    assert_eq!(events[1].source, SOURCE_PIXEL);
-
-    // Repository hashes should be non-empty and consistent.
-    assert!(!events[0].repository_hash.is_empty(), "repo hash should be set");
-    assert_eq!(
-        events[0].repository_hash, events[1].repository_hash,
-        "same client should produce same hash"
-    );
-}
-
-#[test]
-fn gain_ledger_read_for_repository_filters() {
-    let dir = TempDir::new().expect("tempdir");
-    let ledger = GainLedger::open_at(dir.path()).expect("open ledger");
-
-    ledger
-        .append(&sample_event("repo-alpha", 100))
-        .expect("append alpha");
-    ledger
-        .append(&sample_event("repo-beta", 200))
-        .expect("append beta");
-    ledger
-        .append(&sample_event("repo-alpha", 300))
-        .expect("append alpha 2");
-
-    let alpha = ledger
-        .read_for_repository("repo-alpha")
-        .expect("read for repo-alpha");
-    assert_eq!(alpha.len(), 2, "should have 2 events for repo-alpha");
-
-    let beta = ledger
-        .read_for_repository("repo-beta")
-        .expect("read for repo-beta");
-    assert_eq!(beta.len(), 1, "should have 1 event for repo-beta");
-}
-
-#[test]
-fn gain_ledger_reset_clears_file() {
-    let dir = TempDir::new().expect("tempdir");
-    let ledger = GainLedger::open_at(dir.path()).expect("open ledger");
-
-    ledger.append(&sample_event("repo", 10)).expect("append");
-    assert_eq!(ledger.read().unwrap().len(), 1);
-
-    ledger.reset().expect("reset");
-    assert!(ledger.read().unwrap().is_empty(), "ledger should be empty after reset");
-}
-
-#[test]
-fn gain_ledger_hash_repository_is_deterministic() {
-    let dir = TempDir::new().expect("tempdir");
-    let ledger = GainLedger::open_at(dir.path()).expect("open ledger");
-
-    let h1 = ledger.hash_repository("my-repo").expect("hash 1");
-    let h2 = ledger.hash_repository("my-repo").expect("hash 2");
-    assert_eq!(h1, h2, "same identity should produce same hash");
-
-    let h3 = ledger.hash_repository("other-repo").expect("hash 3");
-    assert_ne!(h1, h3, "different identities should produce different hashes");
-}
-
-// ---------------------------------------------------------------------------
 // doctor tests
 // ---------------------------------------------------------------------------
 
@@ -155,7 +41,7 @@ fn doctor_runs_and_returns_report() {
     let options = DoctorOptions {
         home: Some(home.to_path_buf()),
         executable_path: None, // uses current_exe
-        repo_root: None,
+        ..Default::default()
     };
 
     let report = doctor(&options).expect("doctor runs");
@@ -190,7 +76,6 @@ fn doctor_after_install_reports_green_mcp() {
     let install_opts = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
-        capability_block: None,
         dry_run: false,
     };
     install(&install_opts).expect("install");
@@ -198,7 +83,7 @@ fn doctor_after_install_reports_green_mcp() {
     let doc_opts = DoctorOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
-        repo_root: None,
+        ..Default::default()
     };
     let report = doctor(&doc_opts).expect("doctor after install");
 
@@ -230,7 +115,6 @@ fn install_creates_config_with_managed_markers() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
-        capability_block: None,
         dry_run: false,
     };
     let report = install(&options).expect("install");
@@ -267,7 +151,6 @@ fn install_is_idempotent() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
-        capability_block: None,
         dry_run: false,
     };
 
@@ -312,7 +195,6 @@ fn install_removes_deprecated_mcp_servers() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
-        capability_block: None,
         dry_run: false,
     };
     install(&options).expect("install");
@@ -336,7 +218,6 @@ fn install_leaves_settings_json_valid_after_install() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
-        capability_block: None,
         dry_run: false,
     };
     install(&options).expect("install");
@@ -408,7 +289,6 @@ Real project notes.
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
-        capability_block: None,
         dry_run: false,
     };
     let report = install(&options).expect("install");
@@ -485,7 +365,6 @@ fn dry_run_writes_nothing_on_a_clean_home() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
-        capability_block: None,
         dry_run: true,
     };
     let report = install(&options).expect("dry-run install");
@@ -534,7 +413,6 @@ fn install_removes_deprecated_mcp_servers_unconditionally() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
-        capability_block: None,
         dry_run: false,
     };
     let report = install(&options).expect("install");
@@ -569,7 +447,6 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
     let real_options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
-        capability_block: None,
         dry_run: false,
     };
     install(&real_options).expect("real install");
@@ -627,7 +504,6 @@ fn reinstall_backs_up_claude_md_only_when_content_actually_changes() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
-        capability_block: None,
         dry_run: false,
     };
     install(&options).expect("install 1");
@@ -720,7 +596,6 @@ fn install_against_realistic_settings_json_is_safe() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
-        capability_block: None,
         dry_run: false,
     };
     let report = install(&options).expect("install against realistic settings.json");
@@ -858,33 +733,24 @@ fn install_against_realistic_settings_json_is_safe() {
 }
 
 // ---------------------------------------------------------------------------
-// capabilities registry tests
+// capability advertisement — the SessionStart block is derived from the live
+// op registry in pixel-proto (`SESSION_CAPABILITIES`, tested exhaustively
+// there); the old hand-maintained duplicate registry in this crate is gone.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn capability_block_is_derived_from_the_live_op_registry() {
-    let block = pixel_install::capabilities::capability_block("v1");
-    let caps = block["pixel"]["capabilities"]
-        .as_array()
-        .expect("capabilities array")
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-
-    // A handful of well-known, always-expected capabilities must be present.
-    for expected in ["search", "targets", "publish", "push", "ship"] {
+fn session_capabilities_registry_is_live_and_excludes_internal_ops() {
+    let caps = pixel_proto::op::SESSION_CAPABILITIES;
+    for expected in ["search", "targets", "publish", "push", "ship", "resolve", "impact"] {
         assert!(
-            caps.contains(&expected.to_string()),
-            "expected capability {expected} missing from {caps:?}"
+            caps.contains(&expected),
+            "expected capability {expected} missing from SESSION_CAPABILITIES"
         );
     }
-    // Internal/control ops must never be advertised as agent-facing tools.
-    for internal in pixel_install::capabilities::INTERNAL_OP_NAMES {
-        assert!(
-            !caps.contains(&internal.to_string()),
-            "internal op {internal} must not be advertised as a capability"
-        );
-    }
+    assert!(
+        !caps.contains(&"shutdown"),
+        "internal shutdown op must not be advertised as a capability"
+    );
 }
 
 #[test]
@@ -900,7 +766,6 @@ fn reinstall_is_byte_for_byte_idempotent_on_managed_claude_md() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
-        capability_block: None,
         dry_run: false,
     };
     install(&options).expect("install 1");
@@ -921,7 +786,6 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
-        capability_block: None,
         dry_run: false,
     };
     install(&options).expect("install on fresh home");

@@ -326,6 +326,18 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "sync",
 ];
 
+/// The one-paragraph usage doctrine the SessionStart hook injects into every
+/// agent session. Lives beside `Op`/[`SESSION_CAPABILITIES`] so the doctrine
+/// string and the op registry travel together and `pixel doctor`'s
+/// scenario-consistency check can compare the installed rule text against
+/// exactly what the binary injects.
+///
+/// Must name every mandatory scenario: targets (mandatory first call,
+/// advisory fence — the guard warns on out-of-scope files rather than
+/// silently allowing drift), resolve, rescue/excavate, reconcile, and
+/// impact/changes (blast radius before edits).
+pub const SESSION_USAGE: &str = "pixel is the unified retrieval + git engine. Use `pixel <verb>` for search, resolve, targets, history, and safe git ops. Five mandatory scenarios: (1) `pixel targets \"<task>\"` — mandatory first call before the first file read (advisory fence: the guard warns on out-of-list files); (2) `pixel resolve \"<phrase>\"` before any free-text search; (3) `pixel rescue`/`pixel excavate` the moment code was working before; (4) `pixel reconcile` for any branch sync; (5) `pixel impact <symbol>` before editing any symbol and `pixel changes` before any edit batch — measure the blast radius before edits.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,6 +514,17 @@ mod tests {
             assert_eq!(op.op_name(), *expected);
             let serialized = serde_json::to_value(op).unwrap();
             assert_eq!(serialized["op"].as_str(), Some(*expected));
+        }
+    }
+
+    #[test]
+    fn session_usage_names_all_five_mandatory_scenarios() {
+        for scenario in ["targets", "resolve", "rescue", "reconcile", "impact", "changes"] {
+            assert!(
+                SESSION_USAGE.contains(scenario),
+                "SESSION_USAGE must name the mandatory scenario '{scenario}' — \
+                 an injected session that never hears about a scenario will never use it"
+            );
         }
     }
 

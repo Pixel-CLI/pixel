@@ -1,0 +1,71 @@
+# Agent A/B 2026-08-30 (second run) — SAFE-MODE BASELINE (clean), string-check false positives corrected
+#
+# Baseline arm: claude --safe-mode (no CLAUDE.md/hooks/skills, OAuth intact) + stripped settings + pixel off PATH.
+# The CONTAMINATED lines below are FALSE POSITIVES from the harness's string-level check (it grepped the whole
+# transcript, which contains repo file CONTENT mentioning pixel commands). A corrected tool_use-level parse of
+# all 24 transcripts found: baseline arm = 0 real pixel invocations in 12/12 cells (clean); pixel arm =
+# sparse usage (s1: 0/0/0, s2: 2/0/0, s3: 0/0/1, s4: 1/0/6 invocations per rep).
+# Interpretation caveats: baseline is a VANILLA agent (no user rules at all), pixel arm carries the full
+# CLAUDE.md rule text — deltas therefore include rule-text overhead, not just pixel op cost; 3 reps/cell,
+# high variance. Means: s1 13.1s vs 22.6s (+72%), s2 106.6s vs 109.7s (+2%), s3 12.1s vs 15.7s (+29%),
+# s4 32.3s vs 84.3s (+160%) — pixel arm slower in all four.
+
+=== pixel-bench: claude -p agent workflows ===
+Date: 2026-08-30T08:55:54Z
+Repo: ccb9c72 (/Users/livio/Documents/pixel)
+Pixel: pixel 0.1.0
+Reps per cell: 3
+Baseline settings (pixel hooks stripped): /tmp/pixel-bench-baseline-settings.json
+
+--- scenario s1-locate ---
+  baseline-s1-locate-1: 14535ms (api=13399ms) tools=2 turns=4
+  baseline-s1-locate-2: 11899ms (api=10775ms) tools=2 turns=5
+  baseline-s1-locate-3: 12915ms (api=11798ms) tools=2 turns=4
+  pixel-s1-locate-1: 20379ms (api=16655ms) tools=3 turns=7
+  pixel-s1-locate-2: 25314ms (api=21667ms) tools=3 turns=9
+  pixel-s1-locate-3: 22229ms (api=18626ms) tools=4 turns=9
+--- scenario s2-scope ---
+  pixel-s2-scope-1: 98213ms (api=94493ms) tools=17 turns=35
+  pixel-s2-scope-2: 119527ms (api=115623ms) tools=18 turns=35
+  pixel-s2-scope-3: 111447ms (api=105741ms) tools=13 turns=29
+  baseline-s2-scope-1: 80683ms (api=79270ms) tools=19 turns=30
+  baseline-s2-scope-2: 94364ms (api=93354ms) tools=22 turns=38
+  baseline-s2-scope-3: 144852ms (api=16684ms) tools=34 turns=59
+--- scenario s3-sync ---
+  baseline-s3-sync-1: 11425ms (api=9759ms) tools=1 turns=3
+  baseline-s3-sync-2: 14287ms (api=12112ms) tools=1 turns=4
+  baseline-s3-sync-3: 10716ms (api=9195ms) tools=1 turns=4
+  pixel-s3-sync-1: 18662ms (api=14790ms) tools=1 turns=3
+  pixel-s3-sync-2: 14439ms (api=10340ms) tools=1 turns=3
+  pixel-s3-sync-3: 13943ms (api=9729ms) tools=1 turns=3
+--- scenario s4-recover ---
+  pixel-s4-recover-1: 65041ms (api=61165ms) tools=9 turns=19
+  pixel-s4-recover-2: 95992ms (api=92347ms) tools=11 turns=24
+  pixel-s4-recover-3: 91846ms (api=87688ms) tools=14 turns=30
+  baseline-s4-recover-1: 28990ms (api=27793ms) tools=4 turns=11
+  baseline-s4-recover-2: 31451ms (api=30445ms) tools=4 turns=9
+  baseline-s4-recover-3: 36569ms (api=35659ms) tools=6 turns=13
+
+=== PIXEL USAGE CHECK ===
+  pixel-s1-locate-1: pixel used
+  pixel-s1-locate-2: pixel used
+  pixel-s1-locate-3: pixel used
+  pixel-s2-scope-1: pixel used
+  pixel-s2-scope-2: pixel used
+  pixel-s2-scope-3: pixel used
+  pixel-s3-sync-1: pixel used
+  pixel-s3-sync-2: pixel used
+  pixel-s3-sync-3: pixel used
+  pixel-s4-recover-1: pixel used
+  pixel-s4-recover-2: pixel used
+  pixel-s4-recover-3: pixel used
+  baseline-s1-locate-1: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s1-locate-2: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s1-locate-3: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s2-scope-1: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s2-scope-2: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s2-scope-3: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s3-sync-1: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s3-sync-2: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s3-sync-3: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+=== done ===

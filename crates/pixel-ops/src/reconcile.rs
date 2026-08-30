@@ -40,8 +40,25 @@ const REPORT_MAX_BYTES: usize = 256 * 1024;
 #[derive(Debug, Clone)]
 pub struct ReconcileOptions {
     pub strategy: String,    // "report" | "rebase-if-clean"
-    pub push: String,        // "auto" | "none"
+    pub push: String,        // "auto" | "none" ("never" accepted as an alias of "none")
     pub request_id: String,
+}
+
+/// Validate and normalize the `--push` value. Accepted: `"auto"` (push when
+/// safe), `"none"` (never push), and `"never"` as an explicit alias of
+/// `"none"` (older rule text documented it). Anything else is a structured
+/// error naming the accepted values — previously any unrecognized string
+/// (a typo like `--push always`, or the once-documented `never`) silently
+/// meant don't-push.
+fn validate_push_mode(push: &str) -> Result<&'static str, String> {
+    match push {
+        "auto" => Ok("auto"),
+        "none" | "never" => Ok("none"),
+        other => Err(format!(
+            "invalid push value {other:?}: accepted values are \"auto\" (push when safe) \
+             or \"none\" (never push; \"never\" is an accepted alias of \"none\")"
+        )),
+    }
 }
 
 pub fn reconcile(root: &Path, opts: &ReconcileOptions) -> Result<Value, String> {
@@ -61,9 +78,14 @@ pub fn reconcile_with_hooks(
     opts: &ReconcileOptions,
     mut pre_push_hook: Option<Box<dyn FnMut()>>,
 ) -> Result<Value, String> {
+    // Validate BEFORE any journal/lock/git work — a bad value must be a
+    // structured error, never a silent don't-push. The normalized mode is
+    // also what gets hashed, so "never" and "none" replay identically.
+    let push_mode = validate_push_mode(&opts.push)?;
+
     let runner = GitRunner::new(root);
     let repo_key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf()).display().to_string();
-    let input_hash = sha256_hex(&format!("{}\u{0}{}", opts.strategy, opts.push));
+    let input_hash = sha256_hex(&format!("{}\u{0}{}", opts.strategy, push_mode));
 
     let state_root = state_root();
     let journal = OperationJournal::with_state_root(state_root.clone());
@@ -194,7 +216,7 @@ pub fn reconcile_with_hooks(
             })
         }
         "ahead" => {
-            if opts.push == "auto" {
+            if push_mode == "auto" {
                 match attempt_lease_push_or_reclassify(&runner, &branch, &upstream_oid, &upstream) {
                     LeaseOutcome::Pushed => json!({
                         "state": "pushed",
@@ -288,7 +310,7 @@ pub fn reconcile_with_hooks(
                         match runner.run(&["rebase", &upstream]) {
                             Ok(_) => {
                                 let new_head = runner.rev_parse_head().unwrap_or_default();
-                                if opts.push == "auto" {
+                                if push_mode == "auto" {
                                     // Lease against `upstream_oid`, not
                                     // `new_head`: the rebase only rewrote
                                     // local history, the remote is still at

@@ -38,7 +38,7 @@ pub const GUARD_HOOK: &str = "pixel-targets-guard";
 pub const SESSION_START_HOOK: &str = "pixel-session-start";
 
 /// The canonical pixel usage-rule file (relative to home). This is the real,
-/// full rule text (the four mandatory scenarios, the doctrine, the git-op
+/// full rule text (the five mandatory scenarios, the doctrine, the git-op
 /// table) that `pixel install` embeds into the managed CLAUDE.md/AGENTS.md
 /// block — not the short 3-line summary. It lives outside the repo so the
 /// rules can be edited without a rebuild.

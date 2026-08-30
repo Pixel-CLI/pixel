@@ -113,7 +113,20 @@ pub fn build(root: &Path, extractor: &dyn GramExtractor) -> Result<BuildStats, I
     let started = std::time::Instant::now();
 
     let mut paths: Vec<PathBuf> = Vec::new();
-    for entry in ignore::WalkBuilder::new(root).hidden(true).build() {
+    // `hidden(false)`: dotfiles (`.github/`, `.claude/`, `.env.example`, …)
+    // are real, searchable project content and are indexed. With hidden
+    // entries no longer skipped wholesale, the `ignore` crate does NOT skip
+    // `.git/` on its own, so it (and our own `.pixel/` sidecar) must be
+    // pruned explicitly — object/pack data and daemon db/socket files must
+    // never be indexed.
+    for entry in ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            name != ".git" && name != SHARD_DIR
+        })
+        .build()
+    {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,

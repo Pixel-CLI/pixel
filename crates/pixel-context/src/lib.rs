@@ -60,7 +60,15 @@ pub struct FitResult {
     pub elided_items: usize,
 }
 
+/// The declared basis for every budget fit in this crate: token counts are
+/// a bytes/4 heuristic, NOT a real tokenizer. Responses that present a
+/// budget fit should carry this string (e.g. as `budget_basis`) so the
+/// approximation is declared rather than passed off as an exact token cap.
+pub const BUDGET_BASIS: &str = "chars/4 estimate (not a real tokenizer)";
+
 /// Rough token estimation: ~4 bytes per token (GPT/Claude average), ceiling.
+/// See [`BUDGET_BASIS`] — this is a heuristic, and anything surfacing its
+/// output as a "token" count must declare that.
 pub fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }

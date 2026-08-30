@@ -4,7 +4,7 @@
 
 The user works with LLM coding agents daily and hit the same wall in ~90% of sessions: things that are mechanically retrievable — "the form", a pasted label, a dropped feature in git history, a branch sync — burn seconds-to-minutes of LLM spelunking, and sometimes destroy work (`git checkout` over uncommitted changes). The doctrine for pixel:
 
-> **Regardless of what is asked, if it can be retrieved in 0ms with perfection and no LLM involved, it must be.** AI handles only genuine ambiguity (e.g. real merge conflicts).
+> **Regardless of what is asked, if it can be retrieved deterministically with stated certainty and no LLM involved, it must be.** AI handles only genuine ambiguity (e.g. real merge conflicts). Every op returns one of three outcomes: a complete deterministic answer, an explicitly-bounded partial answer (`lower_bound: true`, every cap named), or a structured ambiguity report. Tenets: **T1** — no performance/completeness claim without a checked-in benchmark artifact ("illustrative" baselines are doctrine violations); **T2** — every cap (LIMIT/truncation/exclusion/TTL/approximation) surfaces in the envelope as `lower_bound`/`truncated`/a warning (a silent cap is certainty theater — worse than using an LLM); **T3** — an op keeps MANDATORY status only while an A/B benchmark shows it non-inferior to the no-pixel baseline; measured-worse ops demote to ADVISORY until fixed and re-measured.
 
 A live audit of the three existing tools found:
 - **gitpixel** (Rust): solid index/graph/targets/rescue mechanics, but rescue/targets only see files that exist at HEAD (deleted code undiscoverable), no `log -S`/`--all`/reflog/stash reading, zero recency/churn/session ranking signals, search has no ranking at all, no string-literal/JSX/route extraction (so "the form" is unresolvable).
@@ -38,9 +38,12 @@ Decisions made with the user:
 ## Design — Part A: Architecture & unification
 
 ### A0. Doctrine
-Every operation returns exactly one of two things:
-1. A **complete deterministic answer**, served from pre-built state in <1ms where possible.
-2. A **structured ambiguity report** — the minimal machine-readable payload an LLM needs (conflict hunks with base/ours/theirs, ranked ties, missing-index notice). Never prose, never "go investigate".
+Every operation returns exactly one of three things (three-outcome contract):
+1. A **complete deterministic answer**, served from pre-built state — daemon service-time sub-millisecond where possible.
+2. An **explicitly-bounded partial answer** — `lower_bound: true`, with every cap that produced the bound named (LIMIT, truncation, exclusion, TTL, approximation). A partial answer that does not announce itself is a bug, not an answer (tenet T2).
+3. A **structured ambiguity report** — the minimal machine-readable payload an LLM needs (conflict hunks with base/ours/theirs, ranked ties, missing-index notice). Never prose, never "go investigate".
+
+Tenets: T1 — no performance/completeness claim without a checked-in benchmark artifact; T2 — every cap surfaces in the envelope; T3 — MANDATORY status is held only by ops measured non-inferior to baseline in an A/B benchmark, and lost (demoted to ADVISORY) when a measurement goes the other way.
 
 Corollaries: all indexes are caches (rebuildable, never migrated); all mutations are journaled and provably crash-safe; the daemon is an accelerator, never a correctness dependency (every read op has an in-process fallback with identical answers).
 
@@ -92,7 +95,7 @@ crates/
 State: per-repo `<repo>/.pixel/` (gitignored, pure cache — sockets live outside); machine `~/.local/state/pixel/` (gain ledger, snapshot store, recall corpus, error sink, `sock/<xxh3(root)>.sock`).
 
 ### A2. Unified op surface
-Flat verbs `pixel <verb>`, identical tool names on one MCP server named `pixel`. Housekeeping nested (`pixel daemon …`, `pixel hook …`, `pixel install|doctor|migrate`).
+Flat verbs `pixel <verb>`. Housekeeping nested (`pixel daemon …`, `pixel hook …`, `pixel install|doctor|migrate`). *(The original design also exposed the ops as one MCP server named `pixel`; that was dropped — pixel is deliberately CLI + hooks only, so no transport can bypass the guard hook.)*
 
 - **retrieve** (0ms path): `search` (ONE verb, `scope: code|history|concepts|all`; code = ranked trigram regex — fixes gitpixel's unranked output; history = facts FTS with first-seen/last-changed/removed-in; concepts = alias index), `resolve` (Engine 1), `symbol`, `uses`, `impact`, `trace`, `context`, `inspect`, `review` (**shows conflicted paths as structured conflict hunks** — reverses usable-git's filtering), `diff`, `history`.
 - **scope**: `targets` (manifest at `.pixel/targets.json`), `changes`, `clusters`, `processes`, `graph`.
@@ -109,7 +112,7 @@ Flat verbs `pixel <verb>`, identical tool names on one MCP server named `pixel`.
 
 **Mutations do NOT go through the daemon** — they execute in the client process under file lock + journal, preserving the crash-safety model that survived 960 trials; a daemon crash can never corrupt a mutation. Daemon watches `.git/HEAD` + refs as well as the worktree, so external git use can't cause silent staleness.
 
-Latency: daemon service <1ms for retrieve; MCP holds a persistent connection → sub-ms for the agent; CLI <5ms (spawn-dominated); no daemon → in-process fallback, daemon spawned for next time.
+Latency: daemon service <1ms for retrieve; CLI end-to-end is spawn-dominated — micro-measurement showed a bare process-spawn floor of roughly 17ms for the ~45MB binary (see `crates/pixel-bench/benches/m1_latency.rs` comments), so no sub-5ms CLI claim is made; no daemon → in-process fallback, daemon spawned for next time.
 
 **Search-scalability fix by construction** (kills the 69-minute-call class): (a) ingest is background + incremental in the daemon, never on the query path — queries return instantly with `lower_bound=true` + progress; (b) a `ByteMeter` threaded into writers, so budgets can't be "checked only at loop tops"; (c) content-based poison detection (size cap, max line length, entropy, generated-file heuristics) with recorded skip facts; (d) FTS explicit prefix config + query-side row/byte budgets.
 
@@ -217,7 +220,7 @@ Engine 3's activity/session plumbing first (smallest; unlocks the shared reranke
 
 ## Rollout / migration (clean cut, no shims)
 
-1. `pixel install` (idempotent): installs the binary; registers ONE MCP server `pixel` and **removes** usable-git/gitpixel/sniper MCP entries; replaces `~/.claude/hooks/gitpixel-targets-guard` with `exec pixel hook guard "$@"`; installs SessionStart hook → `pixel hook session-start`, which **emits its capability block from the binary's actual op registry** (structurally prevents "CLAUDE.md mandates nonexistent tools"); rewrites agent-config with managed markers (`<!-- pixel:managed:begin/end -->`), deleting stale GitNexus blocks (usable-git CLAUDE.md, AGENTS.md, `.claude/skills/gitnexus/*` references) and scrubbing settings.json entries pointing at the old guard.
+1. `pixel install` (idempotent): installs the binary; registers NO MCP server (pixel is deliberately not an MCP server — CLI + hooks only) and **removes** stale usable-git/gitpixel/sniper MCP entries; replaces `~/.claude/hooks/gitpixel-targets-guard` with `exec pixel hook guard "$@"`; installs SessionStart hook → `pixel hook session-start`, which **emits its capability block from the binary's actual op registry** (structurally prevents "CLAUDE.md mandates nonexistent tools"); rewrites agent-config with managed markers (`<!-- pixel:managed:begin/end -->`), deleting stale GitNexus blocks (usable-git CLAUDE.md, AGENTS.md, `.claude/skills/gitnexus/*` references) and scrubbing settings.json entries pointing at the old guard.
 2. State: **no index migration** — `pixel migrate` deletes `.gitpixel/` and rebuilds `.pixel/` fresh; only the gain ledger jsonl is carried over (appended with a source tag).
 3. Deprecation gates: gitpixel retired after M1 parity + a week of daily use; usable-git only after M2's crash matrix + safety benchmark pass in Rust; sniper and recall at M5.
 
@@ -241,8 +244,8 @@ Golden acceptance cases — each must pass live on real repos before the corresp
 6. **One-call sync (scenario 3)**: fixture remotes in all four states → single `reconcile` call lands the right terminal state with no OID transcription; diverged returns the full conflict report (conflicted paths PRESENT — regression test against usable-git review's filtering); `rebase-if-clean` opt-in proves via merge-tree, backs up, rebases, pushes leased; interrupted at every journal step → resume leaves repo consistent, `git fsck` clean.
 7. **Safety (the non-negotiable)**: crash matrix ported to Rust passes; full 960-trial-style benchmark re-run: 0 fsck failures, 0 lost unrelated work — hard gate for retiring usable-git.
 8. **Parity**: hit-set/graph-edge/target-tier parity harness vs old gitpixel binary (M1); read-op golden parity vs usable-git MCP (M2).
-9. **Install/rollout**: `pixel install` on this machine → one `pixel` MCP server registered, old servers removed, guard + SessionStart hooks emit from the binary's live op registry, GitNexus/codebase-memory blocks gone from CLAUDE.md/AGENTS.md/settings; `pixel doctor` green; a fresh Claude session sees no references to nonexistent tools.
-10. **Latency**: criterion gates — daemon retrieve ops <1ms service time; CLI end-to-end <5ms; resolve hook <30ms warm.
+9. **Install/rollout**: `pixel install` on this machine → NO pixel MCP server registered (CLI + hooks only), old usable-git/gitpixel/sniper MCP servers removed, guard + SessionStart hooks emit from the binary's live op registry, GitNexus/codebase-memory blocks gone from CLAUDE.md/AGENTS.md/settings; `pixel doctor` green; a fresh Claude session sees no references to nonexistent tools.
+10. **Latency**: criterion gates — daemon retrieve ops <1ms service time; CLI end-to-end bounded by the measured ~17ms process-spawn floor (`crates/pixel-bench/benches/m1_latency.rs`), so the CLI gate is spawn-floor + service-time, not a sub-5ms target; resolve hook <30ms warm.
 
 ## Key reference files for implementation
 

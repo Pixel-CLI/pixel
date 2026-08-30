@@ -102,8 +102,15 @@ fn plain_sig_path(gpx_dir: &Path) -> PathBuf {
 /// that can actually appear in search results.
 fn plain_signature(root: &Path) -> String {
     use std::hash::Hasher;
+    // Must mirror `index::build`'s walk policy exactly (hidden files
+    // included, `.git/` + `.pixel/` pruned) or freshness would disagree with
+    // what the shard actually contains.
     let mut entries: Vec<(String, u64)> = ignore::WalkBuilder::new(root)
-        .hidden(true)
+        .hidden(false)
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            name != ".git" && name != SHARD_DIR
+        })
         .build()
         .filter_map(Result::ok)
         .filter_map(|entry| {
@@ -664,6 +671,85 @@ mod tests {
         let (m, _) = set.search("plainWalkNeedle", None).unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].path, "solo.txt");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Phase 3 item 4: hidden files (dotfiles, `.github/`, `.claude/`) are
+    /// real project content and must be indexed — while `.git/` and our own
+    /// `.pixel/` sidecar must never be, even with the hidden filter off.
+    #[test]
+    fn hidden_files_are_indexed_but_git_dir_is_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpx-indexset-hidden-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                % 1_000_000
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+
+        // --- non-Git directory: the plain-walk build path ---
+        std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+        std::fs::write(
+            dir.join(".github/workflows/x.yml"),
+            "jobs:\n  build:\n    run: hiddenWorkflowNeedle\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join(".dotfileNeedle.cfg"), "dotfileContentNeedle=1\n").unwrap();
+        // A fake .git dir (not a valid repo, so the plain-walk path is used)
+        // whose content must NEVER be indexed.
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/config"), "gitInternalNeedle = true\n").unwrap();
+        std::fs::write(dir.join("visible.txt"), "plainVisibleNeedle\n").unwrap();
+
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let (m, _) = set.search("hiddenWorkflowNeedle", None).unwrap();
+        assert_eq!(m.len(), 1, "hidden .github workflow content must be searchable");
+        assert_eq!(m[0].path, ".github/workflows/x.yml");
+        let (m, _) = set.search("dotfileContentNeedle", None).unwrap();
+        assert_eq!(m.len(), 1, "dotfile content must be searchable");
+        let (m, _) = set.search("gitInternalNeedle", None).unwrap();
+        assert!(m.is_empty(), ".git/ content must never be indexed: {m:?}");
+        assert!(
+            set.paths().iter().all(|p| !p.starts_with(".git/") && !p.starts_with(".pixel/")),
+            "no .git/ or .pixel/ path may appear in the file universe: {:?}",
+            set.paths()
+        );
+
+        // Freshness must react to hidden-file edits too (plain signature
+        // walks the same policy).
+        std::fs::write(
+            dir.join(".github/workflows/x.yml"),
+            "jobs:\n  build:\n    run: editedHiddenNeedle\n",
+        )
+        .unwrap();
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let (m, _) = set.search("editedHiddenNeedle", None).unwrap();
+        assert_eq!(m.len(), 1, "hidden-file edits must invalidate the plain signature");
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        // --- git repo: tracked hidden files come through the git-anchored
+        // base, and .git/ still never appears in the universe ---
+        std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+        git(&dir, &["init", "-q"]);
+        std::fs::write(
+            dir.join(".github/workflows/x.yml"),
+            "jobs:\n  test:\n    run: trackedHiddenNeedle\n",
+        )
+        .unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "hidden"]);
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let (m, _) = set.search("trackedHiddenNeedle", None).unwrap();
+        assert_eq!(m.len(), 1, "tracked hidden files must be searchable in a git repo");
+        assert!(
+            set.paths().iter().all(|p| !p.starts_with(".git/")),
+            "git repo universe must not contain .git/ paths"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

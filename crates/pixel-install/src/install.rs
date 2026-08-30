@@ -2,11 +2,13 @@
 //! usable-git/gitpixel/sniper MCP entries, installs the guard and
 //! SessionStart hooks, and rewrites agent-config with managed markers.
 //!
-//! pixel is a CLI + hooks tool, not an MCP server. The four mandatory
-//! scenarios (targets, resolve, rescue/excavate, reconcile) are enforced by
-//! rule text plus the PreToolUse guard hook on Bash/Read/Grep/Glob/Edit/Write
-//! — wiring pixel as an MCP server would give agents a transport that
-//! bypasses that guard. See the pixel rule for the doctrine.
+//! pixel is a CLI + hooks tool, not an MCP server. The five mandatory
+//! scenarios (targets — mandatory first call with an advisory fence,
+//! resolve, rescue/excavate, reconcile, and impact/changes blast radius)
+//! are enforced by rule text plus the PreToolUse guard hook on
+//! Bash/Read/Grep/Glob/Edit/Write — wiring pixel as an MCP server would
+//! give agents a transport that bypasses that guard. See the pixel rule
+//! for the doctrine.
 
 use std::fs;
 use std::io;
@@ -62,13 +64,11 @@ pub struct InstallSummary {
 /// Options controlling an install run.
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
-    /// Path to the pixel binary to register. Defaults to the current exe.
+    /// Path to the pixel binary the installed hooks point at. Defaults to
+    /// the current exe.
     pub executable_path: Option<PathBuf>,
     /// Home directory. Defaults to `$HOME`.
     pub home: Option<PathBuf>,
-    /// The capability block emitted by the SessionStart hook, derived from the
-    /// binary's actual op registry. If None, a default block is used.
-    pub capability_block: Option<String>,
     /// If true, compute and report every step's outcome exactly as a real
     /// run would, but perform no filesystem writes: no settings.json edits,
     /// no hook files, no agent-config rewrites, no backups, no directory
@@ -81,7 +81,6 @@ impl Default for InstallOptions {
         InstallOptions {
             executable_path: None,
             home: None,
-            capability_block: None,
             dry_run: false,
         }
     }
@@ -115,13 +114,11 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     //    wire the PreToolUse entry into Claude settings.json.
     steps.push(install_guard_hook(&home, &exe, dry_run)?);
 
-    // 3. Install the SessionStart hook (Claude settings.json).
-    steps.push(install_session_start_hook(
-        &home,
-        &exe,
-        options.capability_block.as_deref(),
-        dry_run,
-    )?);
+    // 3. Install the SessionStart hook (Claude settings.json). The
+    //    capability block itself is emitted at session time by the hook,
+    //    straight from the binary's live op registry — never a snapshot
+    //    baked in at install time that could drift from the binary.
+    steps.push(install_session_start_hook(&home, &exe, dry_run)?);
 
     // 4. Wire PreToolUse + SessionStart hooks into Devin, Codex, Gemini,
     //    and zcode. pi gets rules only (no per-tool hooks).
@@ -260,12 +257,7 @@ fn install_guard_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallS
     })
 }
 
-fn install_session_start_hook(
-    home: &Path,
-    exe: &Path,
-    capability_block: Option<&str>,
-    dry_run: bool,
-) -> Result<InstallStep> {
+fn install_session_start_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
     let path = hooks_dir.join(config::SESSION_START_HOOK);
     let body = format!("#!/bin/sh\nexec {} hook session-start \"$@\"\n", exe.display());
@@ -303,8 +295,6 @@ fn install_session_start_hook(
         }],
     }));
     obj.insert("SessionStart".to_string(), merged);
-
-    let _ = capability_block; // emitted by the hook itself from the op registry
 
     if dry_run {
         return Ok(InstallStep {
@@ -363,7 +353,7 @@ fn load_usage_rules(home: &Path) -> Option<String> {
 }
 
 fn rewrite_agent_configs(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    // Ship the real usage rules (the four mandatory scenarios, the doctrine,
+    // Ship the real usage rules (the five mandatory scenarios, the doctrine,
     // the git-op table) in the managed block, not just a 3-line summary. The
     // rules live in ~/.agent-config/rules/pixel.md; if that file is missing we
     // fall back to the short summary so install never hard-fails on it.
@@ -398,6 +388,43 @@ fn rewrite_agent_configs(home: &Path, exe: &Path, dry_run: bool) -> Result<Insta
     let mut stale_removed = 0usize;
     let mut backups: Vec<String> = Vec::new();
     for path in targets {
+        // If the file already contains the pixel rule text (deployed by
+        // build-agent-config's aggregate), skip writing a managed block —
+        // it would only create a duplicate. Still strip any stale managed
+        // blocks from a previous install that ran before build-agent-config
+        // included pixel.md in the aggregate.
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        let has_pixel_rule = existing.contains("# pixel — Deterministic");
+        let has_managed = existing.contains(config::MANAGED_BEGIN);
+
+        if has_pixel_rule && !has_managed {
+            // Pixel rule already present via aggregate, no stale managed
+            // block to clean — nothing to do.
+            rewritten += 1;
+            continue;
+        }
+
+        if has_pixel_rule && has_managed {
+            // Pixel rule present via aggregate AND a stale managed block
+            // exists — strip the managed block only, don't write a new one.
+            let stripped = config::strip_stale_blocks(&existing).0;
+            if dry_run {
+                rewritten += 1;
+                continue;
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let bk = config::backup_if_changing(&path, stripped.as_bytes())?;
+            fs::write(&path, &stripped)?;
+            if bk.is_some() {
+                backups.push(path.display().to_string());
+            }
+            stale_removed += 1;
+            rewritten += 1;
+            continue;
+        }
+
         let outcome = config::rewrite_agent_config(&path, &managed, dry_run)?;
         if outcome.rewritten || (dry_run && outcome.would_change) {
             rewritten += 1;
@@ -647,9 +674,11 @@ fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
 }
 
 /// Wire PreToolUse + SessionStart hooks into zcode's
-/// `~/.zcode/cli/config.json`. zcode is a Claude Code variant that uses the
-/// same hooks format as Claude — hooks under `hooks.events.<Event>`, event
-/// `PreToolUse` with a `matcher` field.
+/// `~/.zcode/cli/config.json` and deploy the pixel rules to
+/// `~/.zcode/AGENTS.md`. zcode is a Claude Code variant that uses the same
+/// hooks format as Claude — hooks under `hooks.events.<Event>`, event
+/// `PreToolUse` with a `matcher` field. zcode reads user-level instructions
+/// from `~/.zcode/AGENTS.md` (loaded into model context every session).
 fn install_zcode_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let config_path = home.join(config::ZCODE_CONFIG_FILE);
     if !config_path.is_file() {
@@ -663,8 +692,9 @@ fn install_zcode_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
     let mut value = read_settings(&config_path)?;
 
     // zcode nests hooks under `hooks.events.<Event>` (one level deeper than
-    // Claude's `hooks.<Event>`).
-    let hooks_obj = value
+    // Claude's `hooks.<Event>`). Configuration-file hooks are DISABLED by
+    // default — `hooks.enabled: true` MUST be set or none of the events fire.
+    let hooks_root = value
         .as_object_mut()
         .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
             path: config_path.clone(),
@@ -676,7 +706,11 @@ fn install_zcode_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
         .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
             path: config_path.clone(),
             reason: "hooks is not an object".into(),
-        }))?
+        }))?;
+    // Enable config-file hooks (disabled by default in zcode).
+    hooks_root.insert("enabled".to_string(), serde_json::Value::Bool(true));
+
+    let hooks_obj = hooks_root
         .entry("events".to_string())
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
@@ -715,34 +749,88 @@ fn install_zcode_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
     );
     hooks_obj.insert("SessionStart".to_string(), merged_session_start);
 
+    // Deploy pixel rules to ~/.zcode/AGENTS.md (zcode's user-level
+    // instruction file, loaded into model context every session). Uses
+    // managed markers so re-installs replace only pixel's block.
+    let agents_md = home.join(".zcode").join("AGENTS.md");
+    let rules_path = home.join(config::PIXEL_RULES_REL);
+    let rules_content = fs::read_to_string(&rules_path).unwrap_or_default();
+    // Strip frontmatter — AGENTS.md is pure markdown, no YAML. Pass only
+    // the body to apply_managed_markers (it adds the markers itself).
+    let managed_body = if rules_content.is_empty() {
+        String::new()
+    } else if rules_content.starts_with("---") {
+        // Frontmatter is `---\n...\n---\n<content>`. `splitn(3, "---")`
+        // gives ["", "\n...yaml...\n", "\n<content>"].
+        rules_content
+            .splitn(3, "---")
+            .nth(2)
+            .unwrap_or("")
+            .trim_start()
+            .to_string()
+    } else {
+        rules_content.clone()
+    };
+
     if dry_run {
         return Ok(InstallStep {
             id: "hooks.zcode".into(),
             status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "zcode hooks wired (PreToolUse + SessionStart)"),
-            detail: Some(format!("would write {}", config_path.display())),
+            summary: dry_run_summary(dry_run, "zcode hooks + AGENTS.md rules wired"),
+            detail: Some(format!(
+                "would write {} + {}",
+                config_path.display(),
+                agents_md.display()
+            )),
         });
     }
 
-    let backup_path = write_settings(&config_path, &value, dry_run)?;
+    let config_backup = write_settings(&config_path, &value, dry_run)?;
+
+    // Write AGENTS.md with managed markers (idempotent replace of pixel's block).
+    let agents_backup = if !managed_body.is_empty() {
+        let existing = fs::read_to_string(&agents_md).unwrap_or_default();
+        let rewritten = config::apply_managed_markers(&existing, &managed_body);
+        if let Some(parent) = agents_md.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bk = config::backup_if_changing(&agents_md, rewritten.as_bytes())?;
+        fs::write(&agents_md, &rewritten)?;
+        bk
+    } else {
+        None
+    };
+
+    let backup_path = config_backup.or(agents_backup);
     Ok(InstallStep {
         id: "hooks.zcode".into(),
         status: CheckStatus::Green,
-        summary: "zcode hooks wired (PreToolUse + SessionStart)".into(),
+        summary: "zcode hooks + AGENTS.md rules wired".into(),
         detail: Some(with_backup_note(
-            format!("wrote {}", config_path.display()),
+            format!("wrote {} + {}", config_path.display(), agents_md.display()),
             backup_path,
         )),
     })
 }
 
-/// Install pixel rules into pi's config directory. pi uses an extension API
-/// with lifecycle events only (`session_start`, `message_start`, `agent_end`)
-/// — there is no per-tool `PreToolUse` interception, so guard hooks cannot
-/// be wired. Instead, pixel installs its rules as a memory file that pi's
-/// agent reads at session start, guiding the agent to use pixel commands
-/// voluntarily.
-fn install_pi_rules(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
+/// Install a pixel guard extension into pi's extensions directory AND deploy
+/// the pixel rules to `~/.pi/agent/AGENTS.md` (pi's global instruction file,
+/// loaded into model context at startup). pi uses a TypeScript extension API
+/// with a `tool_call` event that CAN block or rewrite tool calls by mutating
+/// `event.input` in place. The extension shells out to `pixel hook guard`
+/// with the same JSON payload the Bash/PreToolUse hooks use, and:
+///   - blocks the tool call when the guard exits non-zero (exit 2);
+///   - rewrites the tool input by mutating `event.input` in place when the
+///     guard emits `updatedInput` JSON (pi docs: "Mutations to event.input
+///     affect the actual tool execution");
+///   - allows otherwise.
+///
+/// pi auto-discovers extensions from `~/.pi/agent/extensions/*.ts` (global
+/// scope). The extension is wrapped in managed markers so re-installs
+/// replace only pixel's own content, preserving any other extension files.
+/// The AGENTS.md rules use the same managed-marker approach so pi knows
+/// WHEN to use pixel proactively (the extension only enforces/rewrites).
+fn install_pi_rules(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let config_dir = home.join(config::PI_CONFIG_DIR);
     if !config_dir.is_dir() {
         return Ok(InstallStep {
@@ -753,49 +841,133 @@ fn install_pi_rules(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallSt
         });
     }
 
-    // Read the canonical pixel rules and write them as a pi memory file.
-    let rules_path = home.join(config::PIXEL_RULES_REL);
-    let rules_content = match fs::read_to_string(&rules_path) {
-        Ok(s) => s,
-        Err(_) => {
-            return Ok(InstallStep {
-                id: "hooks.pi".into(),
-                status: CheckStatus::Yellow,
-                summary: dry_run_summary(dry_run, "pixel rules file not found — skipping pi"),
-                detail: Some(format!("expected at {}", rules_path.display())),
-            });
-        }
-    };
+    let extensions_dir = config_dir.join("extensions");
+    let ext_file = extensions_dir.join("pixel-guard.ts");
+    let agents_md = config_dir.join("AGENTS.md");
 
-    // pi stores memory files under its config dir. Write the pixel rules
-    // as a managed memory file that the agent reads at session start.
-    let memory_dir = config_dir.join("memory");
-    let memory_file = memory_dir.join("pixel-rules.md");
-    let managed = format!(
-        "{}\n{}\n{}\n",
-        config::MANAGED_BEGIN,
-        rules_content,
-        config::MANAGED_END
+    // The guard script path — pi extensions run in Node, so use the
+    // absolute path to the pixel binary's guard subcommand.
+    let exe_path = exe.display().to_string();
+
+    let extension_body = format!(
+        r#"// pixel-guard extension — managed by `pixel install`
+// {begin}
+// {end}
+import {{ spawnSync }} from "child_process";
+
+const PIXEL_BIN = {exe_literal};
+const GUARD_TOOLS = new Set(["bash", "edit", "write", "read", "grep", "find", "ls"]);
+
+export default function activate(pi) {{
+  pi.on("tool_call", async (event, ctx) => {{
+    const toolName = event.toolName;
+    if (!GUARD_TOOLS.has(toolName)) return;
+
+    // Build the PreToolUse-compatible payload that `pixel hook guard`
+    // expects on stdin.
+    const cwd = ctx?.cwd ?? process.cwd();
+    const payload = {{
+      hook_event_name: "PreToolUse",
+      tool_name: toolName,
+      tool_input: event.input ?? {{}},
+      cwd,
+    }};
+
+    try {{
+      const result = spawnSync(PIXEL_BIN, ["hook", "guard"], {{
+        input: JSON.stringify(payload),
+        timeout: 5000,
+        encoding: "utf-8",
+      }});
+
+      // exit 2 = block the tool call
+      if (result.status === 2) {{
+        const reason = (result.stderr || "").trim() || "blocked by pixel guard";
+        return {{ block: true, reason }};
+      }}
+
+      // exit 0 with stdout = possibly a rewrite (hookSpecificOutput.updatedInput).
+      // pi docs: "Mutations to event.input affect the actual tool execution"
+      // — mutate in place rather than returning a separate object.
+      if (result.status === 0 && result.stdout) {{
+        try {{
+          const parsed = JSON.parse(result.stdout);
+          const updated = parsed?.hookSpecificOutput?.updatedInput;
+          if (updated && typeof updated === "object") {{
+            Object.assign(event.input, updated);
+            return;
+          }}
+        }} catch {{
+          // stdout wasn't JSON — that's fine, the guard just allowed the call
+        }}
+      }}
+
+      // Any other exit (including crash/timeout) = allow, don't block the
+      // agent on a guard failure.
+      return;
+    }} catch {{
+      // spawn failure — allow, don't block the agent.
+      return;
+    }}
+  }});
+}}
+"#,
+        begin = config::MANAGED_BEGIN,
+        end = config::MANAGED_END,
+        exe_literal = format!("{:?}", exe_path),
     );
+
+    // Load the pixel rules for AGENTS.md (strip frontmatter, same as zcode).
+    let rules_path = home.join(config::PIXEL_RULES_REL);
+    let rules_content = fs::read_to_string(&rules_path).unwrap_or_default();
+    let managed_body = if rules_content.is_empty() {
+        String::new()
+    } else if rules_content.starts_with("---") {
+        rules_content
+            .splitn(3, "---")
+            .nth(2)
+            .unwrap_or("")
+            .trim_start()
+            .to_string()
+    } else {
+        rules_content.clone()
+    };
 
     if dry_run {
         return Ok(InstallStep {
             id: "hooks.pi".into(),
             status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "pi rules installed (no guard hooks — extension API only)"),
-            detail: Some(format!("would write {}", memory_file.display())),
+            summary: dry_run_summary(dry_run, "pi guard extension + AGENTS.md rules installed"),
+            detail: Some(format!("would write {} + {}", ext_file.display(), agents_md.display())),
         });
     }
 
-    fs::create_dir_all(&memory_dir)?;
-    let backup_path = config::backup_if_changing(&memory_file, managed.as_bytes())?;
-    fs::write(&memory_file, &managed)?;
+    // Write the extension file.
+    fs::create_dir_all(&extensions_dir)?;
+    let ext_backup = config::backup_if_changing(&ext_file, extension_body.as_bytes())?;
+    fs::write(&ext_file, &extension_body)?;
+
+    // Write AGENTS.md with managed markers (idempotent replace of pixel's block).
+    let agents_backup = if !managed_body.is_empty() {
+        let existing = fs::read_to_string(&agents_md).unwrap_or_default();
+        let rewritten = config::apply_managed_markers(&existing, &managed_body);
+        if let Some(parent) = agents_md.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bk = config::backup_if_changing(&agents_md, rewritten.as_bytes())?;
+        fs::write(&agents_md, &rewritten)?;
+        bk
+    } else {
+        None
+    };
+
+    let backup_path = ext_backup.or(agents_backup);
     Ok(InstallStep {
         id: "hooks.pi".into(),
         status: CheckStatus::Green,
-        summary: "pi rules installed (no guard hooks — extension API only)".into(),
+        summary: "pi guard extension + AGENTS.md rules installed".into(),
         detail: Some(with_backup_note(
-            format!("wrote {}", memory_file.display()),
+            format!("wrote {} + {}", ext_file.display(), agents_md.display()),
             backup_path,
         )),
     })
@@ -862,8 +1034,6 @@ pub struct MigrateReport {
     pub version: String,
     pub ok: bool,
     pub repo_root: String,
-    /// Number of gain-ledger events carried over from `.gitpixel/`.
-    pub ledger_events_carried: usize,
     /// True if a `.gitpixel/` directory was found and deleted.
     pub old_state_removed: bool,
     /// True if `.pixel/` was rebuilt fresh.
@@ -872,48 +1042,14 @@ pub struct MigrateReport {
 
 /// Migrate a repo from the old `.gitpixel/` state to a fresh `.pixel/` state.
 ///
-/// Deletes `.gitpixel/` and rebuilds `.pixel/` fresh, carrying only the gain
-/// ledger jsonl (appended with a source tag). No index migration — all
-/// indexes are caches and are rebuilt.
+/// Deletes `.gitpixel/` and rebuilds `.pixel/` fresh. No state migration —
+/// every index is a cache and is rebuilt on first use. (The old gain-ledger
+/// carry-over was removed together with the gain module: an unmeasured
+/// token-savings ledger was exactly the kind of claim-without-measurement
+/// the doctrine now forbids.)
 pub fn migrate(repo_root: &Path) -> Result<MigrateReport> {
     let old_dir = repo_root.join(".gitpixel");
     let new_dir = repo_root.join(".pixel");
-
-    // Carry the gain ledger jsonl from the old state, if present.
-    let mut ledger_events_carried = 0usize;
-    let old_ledger = old_dir.join(crate::gain::LEDGER_FILE);
-    if old_ledger.is_file() {
-        if let Ok(raw) = fs::read_to_string(&old_ledger) {
-            let ledger = crate::gain::GainLedger::open()?;
-            for line in raw.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(mut event) = serde_json::from_str::<crate::gain::GainEvent>(line) {
-                    event.source = crate::gain::SOURCE_MIGRATED.to_string();
-                    let input = crate::gain::GainEventInput {
-                        operation: event.operation,
-                        client: event.client,
-                        transport: event.transport,
-                        result_code: event.result_code,
-                        envelope_bytes: event.envelope_bytes,
-                        raw_equivalent_bytes: event.raw_equivalent_bytes,
-                        agent_ops_raw: event.agent_ops_raw,
-                        agent_ops_actual: event.agent_ops_actual,
-                        git_subprocesses_raw: event.git_subprocesses_raw,
-                        git_subprocesses_actual: event.git_subprocesses_actual,
-                        duration_ms: event.duration_ms,
-                        tokens_saved: event.tokens_saved,
-                        source: crate::gain::SOURCE_MIGRATED.to_string(),
-                    };
-                    if ledger.append(&input).is_ok() {
-                        ledger_events_carried += 1;
-                    }
-                }
-            }
-        }
-    }
 
     // Delete the old state directory.
     let old_state_removed = if old_dir.exists() {
@@ -932,7 +1068,6 @@ pub fn migrate(repo_root: &Path) -> Result<MigrateReport> {
         version: "v1".into(),
         ok: true,
         repo_root: repo_root.display().to_string(),
-        ledger_events_carried,
         old_state_removed,
         new_state_rebuilt,
     })

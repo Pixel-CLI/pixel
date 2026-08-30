@@ -104,13 +104,19 @@ fn rel_path(root: &Path, path: &Path) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// Walk `root` collecting supported source files (skips .pixel, hidden
-/// files, gitignored paths, binaries, oversized files).
+/// Walk `root` collecting supported source files (skips .git, .pixel,
+/// gitignored paths, binaries, oversized files). Hidden files (dotfiles,
+/// `.github/`, `.claude/`, …) ARE collected — they are real project content;
+/// with `hidden(false)` the `ignore` crate no longer skips `.git/` on its
+/// own, so it is pruned explicitly alongside our `.pixel/` sidecar.
 fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     let walker = WalkBuilder::new(root)
-        .hidden(true)
-        .filter_entry(|e| e.file_name().to_string_lossy() != ".pixel")
+        .hidden(false)
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            name != ".pixel" && name != ".git"
+        })
         .build();
     for entry in walker.flatten() {
         let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
@@ -278,9 +284,15 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
 /// excluded (their target's content would be unstable and they are never
 /// indexed).
 pub fn freshness_signature(root: &Path) -> String {
+    // Must mirror `collect_files`'s walk policy exactly (hidden files
+    // included, `.git/` + `.pixel/` pruned) or the freshness signature would
+    // disagree with the set of files the graph was actually built from.
     let walker = WalkBuilder::new(root)
-        .hidden(true)
-        .filter_entry(|e| e.file_name().to_string_lossy() != ".pixel")
+        .hidden(false)
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            name != ".pixel" && name != ".git"
+        })
         .build();
     let mut entries: Vec<(String, u64)> = walker
         .flatten()

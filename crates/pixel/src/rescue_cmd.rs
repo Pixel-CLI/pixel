@@ -67,12 +67,25 @@ struct VersionRow {
     unix_date: u64,
     subject: String,
     suspect: bool,
+    /// Why this version is suspect: `diff-content: ...` (primary — the
+    /// commit's own content change removed phrase-bearing text) or
+    /// `subject-keyword: ...` (secondary — used only when the content on
+    /// either side of the commit could not be read).
+    suspect_basis: Option<String>,
     blob: Option<String>,
 }
 
 /// Build the rescue plan for one repo. `target_paths` come from --file hints
 /// or the targets engine (P0 slice). `keywords` come from the tokenized
-/// problem text and mark suspect commits by subject match.
+/// problem text.
+///
+/// Suspect detection is DIFF-CONTENT based (shared heuristic:
+/// `pixel_facts::excavate::phrase_removed_between`): a commit is suspect
+/// because the file's content BEFORE it contained a keyword that its content
+/// AFTER it no longer does — i.e. this commit removed the phrase/behavior.
+/// Commit-subject keyword matching survives only as a secondary signal for
+/// versions whose blob content could not be read (over-cap, timeout); when
+/// diff content and subject disagree, diff content wins.
 pub fn plan(
     root: &Path,
     problem: &str,
@@ -82,6 +95,7 @@ pub fn plan(
 ) -> Result<Value, String> {
     let dirty = dirty_map(root)?;
     let mut targets: Vec<Value> = Vec::new();
+    let mut caveats: Vec<String> = Vec::new();
 
     for path in target_paths {
         let runner = GitRunner::new(root);
@@ -100,15 +114,68 @@ pub fn plan(
             else {
                 continue;
             };
-            let subject_lc = subject.to_lowercase();
-            let suspect = keywords.iter().any(|k| subject_lc.contains(k.as_str()));
             versions.push(VersionRow {
                 oid: oid.to_string(),
                 unix_date: ct.parse().unwrap_or(0),
                 subject: subject.to_string(),
-                suspect,
+                suspect: false,
+                suspect_basis: None,
                 blob: blob_oid(root, oid, path),
             });
+        }
+
+        // Whether `--depth` truncated this file's history: log_follow
+        // returned exactly as many rows as asked for, so older commits may
+        // exist unseen.
+        let depth_cap_hit = versions.len() >= depth;
+
+        // File content at each inspected version (newest-first). `None` =
+        // unreadable (over-cap/timeout/absent at that commit) — an unknown,
+        // never treated as evidence in either direction.
+        let contents: Vec<Option<String>> = versions
+            .iter()
+            .map(|v| runner.show_blob_string(&v.oid, path).ok())
+            .collect();
+
+        for i in 0..versions.len() {
+            // Content BEFORE version i = the previous version of the file
+            // (versions[i+1]). For the oldest row: with history fully
+            // enumerated (no depth cap) the file did not exist before, so
+            // "before" is empty; under a hit depth cap the before-state is
+            // genuinely unknown.
+            let before: Option<String> = if i + 1 < versions.len() {
+                contents[i + 1].clone()
+            } else if !depth_cap_hit {
+                Some(String::new())
+            } else {
+                None
+            };
+            let short = versions[i].oid[..7.min(versions[i].oid.len())].to_string();
+            match (&contents[i], &before) {
+                (Some(after), Some(before_text)) => {
+                    if let Some(kw) = pixel_facts::excavate::phrase_removed_between(
+                        before_text,
+                        after,
+                        keywords,
+                    ) {
+                        versions[i].suspect = true;
+                        versions[i].suspect_basis =
+                            Some(format!("diff-content: {kw:?} removed in {short}"));
+                    }
+                }
+                _ => {
+                    // Content unknown on at least one side — fall back to
+                    // the secondary subject-keyword signal, labeled as such.
+                    let subject_lc = versions[i].subject.to_lowercase();
+                    if let Some(k) = keywords.iter().find(|k| subject_lc.contains(k.as_str())) {
+                        versions[i].suspect = true;
+                        versions[i].suspect_basis = Some(format!(
+                            "subject-keyword: subject mentions {k:?} in {short} \
+                             (content unreadable; weaker signal)"
+                        ));
+                    }
+                }
+            }
         }
 
         // Recommended last-known-good: newest version strictly older than the
@@ -119,12 +186,18 @@ pub fn plan(
             .filter(|i| i + 1 < versions.len())
             .and_then(|i| {
                 versions.get(i + 1).map(|v| {
+                    let s = &versions[i];
+                    let basis = s
+                        .suspect_basis
+                        .clone()
+                        .unwrap_or_else(|| "diff-content".to_string());
                     json!({
                         "oid": v.oid,
                         "reason": format!(
-                            "last version before suspect commit {}",
-                            &versions[i].oid[..7.min(versions[i].oid.len())]
+                            "last version before suspect commit {} ({basis})",
+                            &s.oid[..7.min(s.oid.len())]
                         ),
+                        "basis": basis,
                     })
                 })
             });
@@ -139,19 +212,37 @@ pub fn plan(
                     json!({
                         "oid": v.oid,
                         "reason": "newest version whose content differs from HEAD",
+                        "basis": "content-differs: no suspect commit found; this is only the state before the file's most recent change",
                     })
                 })
         });
 
+        // Bounded-answer honesty: the default --depth silently truncates
+        // history. When the cap was hit and no suspect surfaced within it,
+        // say so instead of implying the breakage is not in history.
+        let depth_note = (depth_cap_hit && oldest_suspect_idx.is_none()).then(|| {
+            format!(
+                "{path}: only the newest {depth} commits touching this file were inspected \
+                 and none is suspect — older history was NOT examined; re-run with a larger \
+                 --depth to look further back"
+            )
+        });
+        if let Some(n) = &depth_note {
+            caveats.push(n.clone());
+        }
+
         targets.push(json!({
             "path": path,
             "dirty": dirty.contains_key(path),
+            "depth_cap_hit": depth_cap_hit,
+            "depth_note": depth_note,
             "versions": versions.iter().map(|v| json!({
                 "oid": v.oid,
                 "short": &v.oid[..7.min(v.oid.len())],
                 "unix_date": v.unix_date,
                 "subject": v.subject,
                 "suspect": v.suspect,
+                "suspect_basis": v.suspect_basis,
                 "blob_differs_from_head": v.blob.is_some() && v.blob != head_blob,
             })).collect::<Vec<_>>(),
             "recommended": recommended.unwrap_or(Value::Null),
@@ -162,7 +253,6 @@ pub fn plan(
         .iter()
         .filter(|p| dirty.contains_key(*p))
         .collect();
-    let mut caveats: Vec<String> = Vec::new();
     for p in &dirty_in_plan {
         caveats.push(format!(
             "{p} has uncommitted changes; --apply needs --merge (3-way, keeps your edits), --stash-first, or --allow-dirty"
@@ -174,7 +264,7 @@ pub fn plan(
         .collect();
     let revert_cmd = rec_oids.iter().next().map(|oid| {
         let files: Vec<String> = target_paths.iter().map(|p| format!("--file {p}")).collect();
-        format!("gitpixel rescue --apply {oid} {} .", files.join(" "))
+        format!("pixel rescue --apply {oid} {} .", files.join(" "))
     });
 
     Ok(json!({

@@ -1,4 +1,13 @@
-# Real measurements — 2026-08-30T01:06:02Z
+# Real measurements — single-op latency (NOT agent workflows) — 2026-08-30T01:06:02Z
+
+**Scope of these numbers:** wall-clock of one pixel CLI invocation with a warm daemon, on a small
+synthetic fixture. They are **single-op / daemon figures** — they say nothing about full agent
+workflow time. For agent-level end-to-end A/B numbers (which include losses as well as wins), see
+`../../pixel-bench-results.txt`. Note also that a separate micro-measurement on the bench machine
+found a ~17ms bare process-spawn floor for the ~45MB CLI binary
+(`crates/pixel-bench/benches/m1_latency.rs` comments); the sub-17ms rows below were taken on a
+different machine/fixture and should be read as "single-digit-to-tens of ms warm", not as a
+universal floor claim.
 
 Machine: dia, 4 cores. Fixture: /tmp/pixel-example-fixture (synthetic, small).
 Methodology: wall-clock via bash , best of 3 warm runs (daemon started first). Tokens estimated as response_bytes/4 (rough proxy, not a real tokenizer count).

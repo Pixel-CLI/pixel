@@ -10,8 +10,12 @@
 # Each scenario runs N times (default 3) per arm. Arms (baseline vs pixel) are
 # order-randomized per scenario so neither arm benefits from warm caches.
 # Scenarios run SERIALLY (not in parallel) so resource contention can't skew
-# wall-clock. The baseline is truly pixel-free: the pixel hooks are stripped
-# from a copy of settings.json, so pixel is never invoked — no PATH shim.
+# wall-clock. The baseline is truly pixel-free: it runs with --safe-mode
+# (skips CLAUDE.md memory, hooks, and skills while keeping OAuth) PLUS the
+# pixel hooks stripped from a copy of settings.json PLUS pixel off PATH.
+# Settings-stripping alone is NOT enough: the installed CLAUDE.md rule text
+# mandates pixel by absolute path, and a 2026-08-30 run measured 12/12
+# baseline cells self-contaminating without --safe-mode.
 #
 # Results record wall-clock ms, tool-call count, and turn count per run, plus
 # a pixel-usage check (did the pixel arm actually invoke pixel?).
@@ -174,14 +178,17 @@ echo "NOTE: full matrix = 4 scenarios x 2 arms x $N reps; expect 10-40+ minutes.
      "Do not run under a short shell timeout."
 
 # Run one cell: wall-clock ms + tool-call/turn counts from stream-json output.
+# Optional 5th arg: extra claude flags (e.g. --safe-mode for the baseline arm).
 run_scenario() {
   local label="$1"
   local prompt_file="$2"
   local settings="$3"
   local path_env="$4"
+  local extra_flag="${5:-}"
   local start end ms
   start=$(python3 -c 'import time; print(int(time.time()*1000))')
   PATH="$path_env" claude -p --dangerously-skip-permissions --verbose \
+    $extra_flag \
     --settings "$settings" --output-format stream-json \
     < "$prompt_file" > "$OUTDIR/${label}.json" 2>&1 || true
   end=$(python3 -c 'import time; print(int(time.time()*1000))')
@@ -277,7 +284,12 @@ for s in $SCENARIOS; do
     for i in $(seq 1 "$N"); do
       label="${arm}-${s}-${i}"
       if [ "$arm" = "baseline" ]; then
-        run_scenario "$label" "$PROMPT_DIR/$s.txt" "$BASELINE_SETTINGS" "$BASELINE_PATH"
+        # --safe-mode: skip CLAUDE.md memory, hooks, and skills while keeping
+        # OAuth. Without it the installed rule text mandates pixel by absolute
+        # path and the baseline arm self-contaminates (measured 2026-08-30:
+        # 12/12 baseline runs invoked pixel — see
+        # docs/bench/agent-ab-2026-08-30-rerun-contaminated.txt).
+        run_scenario "$label" "$PROMPT_DIR/$s.txt" "$BASELINE_SETTINGS" "$BASELINE_PATH" --safe-mode
       else
         run_scenario "$label" "$PROMPT_DIR/$s.txt" "$CLAUDE_SETTINGS" "$PIXEL_PATH"
       fi
@@ -294,25 +306,54 @@ done
 
 # --- Pixel-usage check on BOTH arms, recorded into the results file ---
 # pixel arm: did the agent actually use pixel? baseline arm: contamination
-# check — the baseline must NOT have used pixel (it can, voluntarily, because
-# global CLAUDE.md rules mandate pixel and the binary is on PATH).
+# check — the baseline must NOT have used pixel.
+# The check parses tool_use INPUTS from the stream-json transcript. A plain
+# grep over the whole transcript false-positives on file CONTENT the agent
+# read (this repo's docs are full of pixel command examples) — measured
+# 2026-08-30: string-grep flagged 12/12 clean baseline cells as contaminated
+# while the tool_use-level parse showed 0 real invocations.
 echo "" >> "$RESULTS"
-echo "=== PIXEL USAGE CHECK ===" >> "$RESULTS"
+echo "=== PIXEL USAGE CHECK (tool_use-level) ===" >> "$RESULTS"
 for arm in pixel baseline; do
   for s in $SCENARIOS; do
     for i in $(seq 1 "$N"); do
       label="${arm}-${s}-${i}"
-      used=$(grep -cE "pixel (search|resolve|targets|reconcile|excavate|rescue)" "$OUTDIR/$label.json" 2>/dev/null || true)
+      used=$(python3 - "$OUTDIR/$label.json" << 'PY'
+import json, re, sys
+pat = re.compile(r"(^|[\s/;&|])pixel\s+(search|resolve|targets|reconcile|excavate|rescue|impact|uses|changes|context|symbol|inspect|history|history-search|lifecycle|publish|push|ship|branch|update|sync|diff|review)")
+count = 0
+try:
+    with open(sys.argv[1]) as f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            msg = ev.get("message") or {}
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for blk in content:
+                if isinstance(blk, dict) and blk.get("type") == "tool_use":
+                    if pat.search(json.dumps(blk.get("input", {}))):
+                        count += 1
+except FileNotFoundError:
+    pass
+print(count)
+PY
+)
       used=${used:-0}
       if [ "$arm" = "pixel" ]; then
         if [ "$used" -gt 0 ] 2>/dev/null; then
-          echo "  $label: pixel used" >> "$RESULTS"
+          echo "  $label: pixel used ($used invocations)" >> "$RESULTS"
         else
           echo "  $label: pixel NOT used (fell back to grep/git)" >> "$RESULTS"
         fi
       else
         if [ "$used" -gt 0 ] 2>/dev/null; then
-          echo "  $label: CONTAMINATED — baseline invoked pixel (arm not pixel-free)" >> "$RESULTS"
+          echo "  $label: CONTAMINATED — baseline invoked pixel $used time(s) (arm not pixel-free)" >> "$RESULTS"
+        else
+          echo "  $label: baseline pixel-free" >> "$RESULTS"
         fi
       fi
     done

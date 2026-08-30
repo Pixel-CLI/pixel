@@ -2542,10 +2542,8 @@ dependencies = [
  "pixel-facts",
  "pixel-index",
  "pixel-proto",
- "pixel-session",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror",
 ]

@@ -5,25 +5,42 @@
 //! printed the manifest and never blocked anything — this replaces that
 //! with real PreToolUse enforcement.
 //!
-//! Contract (unchanged from the original):
-//! 1. SCOPING — while `<repo>/.pixel/targets.json` is active (younger than
-//!    24h), reads/greps/edits of repo files OUTSIDE the target list are
-//!    blocked with a corrective message.
-//! 2. MANDATE — in a pixel-indexed repo (a `.pixel` dir exists) with NO
-//!    active manifest, edits to *existing* files are blocked: an
-//!    implementation task must start with `pixel targets "<task>"`.
-//! 3. RESCUE — destructive history restores (`git reset --hard`,
-//!    `git checkout <ref> -- <path>`, `git restore --source`) are blocked:
-//!    use `pixel rescue` instead.
+//! Contract:
+//! 1. SCOPING (ADVISORY) — while `<repo>/.pixel/targets.json` is active
+//!    (younger than 24h), reads/greps/edits of repo files OUTSIDE the
+//!    target list emit a NON-BLOCKING advisory note and proceed. The
+//!    sniper-discovery benchmark (docs/bench/sniper-discovery.md) showed
+//!    hard blocking collapses recall (0.60 → 0.19), so the fence advises
+//!    instead of denying.
+//! 2. MANDATE (ADVISORY) — in a pixel-indexed repo (a `.pixel` dir exists)
+//!    with NO active manifest, edits to *existing* files get an advisory
+//!    suggesting `pixel targets "<task>"` first; the edit proceeds. An
+//!    EXPIRED manifest (>24h) gets an expiry advisory instead of a block.
+//! 3. RESCUE (HARD BLOCK) — destructive git commands are denied with a
+//!    pixel alternative: `git reset --hard/--keep`, raw historical file
+//!    restores (`git checkout <ref> -- <path>`, `git restore --source`),
+//!    `git clean -f*`, `git checkout -f/--force`, `git stash drop/clear`,
+//!    `git branch -D`, `git push --force` (NOT `--force-with-lease`), and
+//!    `git pull` (deny-with-suggestion: `pixel reconcile`, never executed
+//!    on the agent's behalf). These denies run even when the command
+//!    contains substitution/heredocs — a spurious deny costs a retry, a
+//!    missed hard reset costs real work.
 //! 4. GLOB — Glob tool calls are deliberately left un-denied: they only
 //!    enumerate paths, and the Read/Edit of any result is itself guarded by
 //!    the scoping rules above. Blocking enumeration would be pure noise.
 //!
+//! Rewrites NEVER change command semantics beyond read-only enrichment: a
+//! rewrite must never add a write, push, or destructive step the original
+//! command didn't have. `git pull` is therefore denied with a suggestion,
+//! never rewritten into `pixel reconcile`.
+//!
 //! Blocks by exiting 2 with a corrective message on stderr (the exit code
 //! Claude Code's hook protocol treats as "deny, feed stderr to the model").
+//! Advisories exit 0 with a JSON note (systemMessage + additionalContext),
+//! no permissionDecision — the normal permission flow is untouched.
 //! Fails open (exit 0) on any parse error or unexpected shape — a guard
 //! that crashes or wedges the session is worse than a guard that misses a
-//! case. Kill switch: `PIXEL_TARGETS_GUARD=0`.
+//! case.
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -115,7 +132,11 @@ pub fn run() -> ! {
 
     let idx_root = find_up(&anchor, ".pixel");
     let manifest_root = find_up(&anchor, &Path::new(".pixel").join("targets.json"));
-    let manifest = manifest_root.as_deref().and_then(load_manifest);
+    let (manifest, manifest_expired) = match manifest_root.as_deref().map(load_manifest_state) {
+        Some(ManifestState::Active(m)) => (Some(m), false),
+        Some(ManifestState::Expired) => (None, true),
+        _ => (None, false),
+    };
 
     if tool == "Bash" || tool == "exec" || tool == "bash" || tool == "run_shell_command" || tool == "execute" {
         let cmd = tool_input
@@ -156,7 +177,7 @@ pub fn run() -> ! {
             if let Some(m) = &manifest {
                 let p = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
                 if !allowed(&p, m) {
-                    scoping_block(&p, m);
+                    scoping_advisory(&p, m);
                 }
             }
         }
@@ -172,22 +193,24 @@ pub fn run() -> ! {
             }
             if let Some(m) = &manifest {
                 if exists && !allowed(&p, m) {
-                    scoping_block(&p, m);
+                    scoping_advisory(&p, m);
                 }
                 std::process::exit(0);
             }
-            // MANDATE — indexed repo, no manifest: edits to existing files
-            // require scoping first.
+            // MANDATE (advisory) — indexed repo, no active manifest: note
+            // that the edit is unscoped, but let it proceed.
             if let Some(root) = &idx_root {
                 if exists && !is_exempt(&p, root) {
-                    mandate_block(&p, root);
+                    if manifest_expired {
+                        expired_manifest_advisory(root);
+                    }
+                    mandate_advisory(&p, root);
                 }
             } else if exists {
-                // Unindexed git repo: suggest indexing so the guard can
-                // enforce scoping. Only fires for edits to existing files
-                // in repos that have .git/ but no .pixel/.
+                // Unindexed git repo: suggest indexing so pixel's scoped
+                // retrieval works. Advisory only — the edit proceeds.
                 if let Some(git_root) = find_up(&anchor, ".git") {
-                    suggest_index_block(&git_root);
+                    suggest_index_advisory(&git_root);
                 }
             }
         }
@@ -234,22 +257,45 @@ fn find_up(start: &Path, rel: impl AsRef<Path>) -> Option<PathBuf> {
     }
 }
 
+/// Outcome of reading `.pixel/targets.json`: distinguishes "no usable
+/// manifest because everything hit the 24h TTL" (worth an advisory note)
+/// from "no manifest at all / unreadable" (silent).
+enum ManifestState {
+    Absent,
+    Expired,
+    Active(Manifest),
+}
+
 /// Read the enforcement manifest, accepting BOTH shapes:
 /// - v2 (multi-task): `{version: 2, tasks: [{id, task, created_unix, targets: [...]}]}`
 /// - legacy (v1/singleton): `{task, created_unix, files: [...]}`
 /// Expired tasks (older than the 24h TTL) are dropped individually; a
-/// manifest whose tasks have all expired counts as no manifest at all.
-fn load_manifest(root: &Path) -> Option<Manifest> {
-    let text = std::fs::read_to_string(root.join(".pixel").join("targets.json")).ok()?;
-    let m: Value = serde_json::from_str(&text).ok()?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+/// manifest whose tasks have all expired reports `Expired`.
+fn load_manifest_state(root: &Path) -> ManifestState {
+    let Ok(text) = std::fs::read_to_string(root.join(".pixel").join("targets.json")) else {
+        return ManifestState::Absent;
+    };
+    let Ok(m) = serde_json::from_str::<Value>(&text) else {
+        return ManifestState::Absent;
+    };
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return ManifestState::Absent;
+    };
+    let now = now.as_secs();
+    let mut saw_expired = false;
     let tasks: Vec<TaskEntry> = if m.get("version").and_then(Value::as_u64) == Some(2) {
-        m.get("tasks")?
-            .as_array()?
+        let Some(raw_tasks) = m.get("tasks").and_then(Value::as_array) else {
+            return ManifestState::Absent;
+        };
+        raw_tasks
             .iter()
             .filter(|t| {
                 let created = t.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
-                now.saturating_sub(created) <= MANIFEST_MAX_AGE_SECS
+                let fresh = now.saturating_sub(created) <= MANIFEST_MAX_AGE_SECS;
+                if !fresh {
+                    saw_expired = true;
+                }
+                fresh
             })
             .filter_map(|t| {
                 Some(TaskEntry {
@@ -261,17 +307,34 @@ fn load_manifest(root: &Path) -> Option<Manifest> {
     } else {
         let created_unix = m.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
         if now.saturating_sub(created_unix) > MANIFEST_MAX_AGE_SECS {
-            return None;
+            return ManifestState::Expired;
         }
+        let Some(files) = m.get("files").and_then(Value::as_array) else {
+            return ManifestState::Absent;
+        };
         vec![TaskEntry {
             task: m.get("task").and_then(Value::as_str).unwrap_or("?").to_string(),
-            files: parse_manifest_files(m.get("files")?.as_array()?),
+            files: parse_manifest_files(files),
         }]
     };
     if tasks.is_empty() {
-        return None;
+        return if saw_expired {
+            ManifestState::Expired
+        } else {
+            ManifestState::Absent
+        };
     }
-    Some(Manifest { root: root.to_path_buf(), tasks })
+    ManifestState::Active(Manifest { root: root.to_path_buf(), tasks })
+}
+
+/// Compatibility shim over `load_manifest_state` for tests that only care
+/// about an active manifest.
+#[cfg(test)]
+fn load_manifest(root: &Path) -> Option<Manifest> {
+    match load_manifest_state(root) {
+        ManifestState::Active(m) => Some(m),
+        _ => None,
+    }
 }
 
 fn parse_manifest_files(raw: &[Value]) -> Vec<(String, String)> {
@@ -342,6 +405,26 @@ fn block(lines: &[String]) -> ! {
     std::process::exit(2);
 }
 
+/// Build the NON-BLOCKING advisory response JSON. Deliberately carries NO
+/// `permissionDecision`: the tool call proceeds through the normal
+/// permission flow; the note is surfaced to the user (`systemMessage`) and
+/// offered to the model (`additionalContext`).
+fn advisory_json(note: &str) -> Value {
+    serde_json::json!({
+        "systemMessage": note,
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": note
+        }
+    })
+}
+
+/// Emit a non-blocking advisory and allow the tool call (exit 0).
+fn advise(lines: &[String]) -> ! {
+    print!("{}", advisory_json(&lines.join("\n")));
+    std::process::exit(0);
+}
+
 /// Truncate a task string for display (char-safe, appends an ellipsis).
 fn short_task(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
@@ -351,16 +434,14 @@ fn short_task(s: &str, max_chars: usize) -> String {
     format!("{cut}…")
 }
 
-fn scoping_block(abs: &Path, m: &Manifest) -> ! {
+/// Advisory note for a read/edit outside the active targets manifest.
+/// Non-blocking by design: the sniper-discovery benchmark showed hard
+/// scoping denies collapse task recall, so the fence informs instead.
+fn scoping_advisory_lines(abs: &Path, m: &Manifest) -> Vec<String> {
     let rel = rel_of(abs, &m.root);
-    let p0: Vec<&str> = all_files(m)
-        .filter(|(_, tier)| tier == "P0")
-        .map(|(p, _)| p.as_str())
-        .take(5)
-        .collect();
     let total: usize = m.tasks.iter().map(|t| t.files.len()).sum();
     let mut lines = vec![format!(
-        "BLOCKED by pixel-targets-guard: sniper targets active for {} task(s):",
+        "pixel-targets-guard advisory: '{rel}' is outside the active targets manifest ({} task(s), {total} file(s)):",
         m.tasks.len()
     )];
     lines.extend(
@@ -368,107 +449,222 @@ fn scoping_block(abs: &Path, m: &Manifest) -> ! {
             .iter()
             .map(|t| format!("  - '{}'", short_task(&t.task, 70))),
     );
-    lines.push(format!(
-        "'{rel}' is not in any task's target list. Work only on listed files, P0 first:"
-    ));
-    lines.extend(p0.iter().map(|p| format!("  P0: {p}")));
-    lines.push(format!("  ({total} file(s) total in .pixel/targets.json)"));
     lines.push(
-        "If this file is genuinely needed, the task description was wrong — re-run".into(),
+        "Proceeding. If scope has drifted, re-run `pixel targets \"<refined task>\"`".into(),
     );
     lines.push(
-        "`pixel targets \"<refined task>\"` to add/refresh YOUR task's list (other".into(),
+        "to refresh your task's list, or `pixel targets --clear` to end scoping.".into(),
     );
-    lines.push(
-        "tasks are preserved), or `pixel targets --clear` to end ALL scoping.".into(),
-    );
-    lines.push("Do NOT bypass via other tools.".into());
-    block(&lines);
+    lines
 }
 
-fn mandate_block(abs: &Path, idx_root: &Path) -> ! {
+fn scoping_advisory(abs: &Path, m: &Manifest) -> ! {
+    advise(&scoping_advisory_lines(abs, m));
+}
+
+/// Advisory note for an edit in an indexed repo with no active manifest.
+fn mandate_advisory_lines(abs: &Path, idx_root: &Path) -> Vec<String> {
     let rel = rel_of(abs, idx_root);
-    block(&[
-        "BLOCKED by pixel-targets-guard: no sniper target list is active for this repo.".into(),
-        "Every implementation task MUST be scoped before editing:".into(),
+    vec![
+        "pixel-targets-guard advisory: no sniper target list is active for this repo.".into(),
+        format!("Proceeding with this edit ({rel}), but scoping first is recommended:"),
         "  pixel targets \"<one-line task description>\" .".into(),
-        "That returns the closed P0/P1/P2 file list and activates .pixel/targets.json;".into(),
-        format!("then edit only listed files (this edit: {rel})."),
+        "That returns the closed P0/P1/P2 file list and activates .pixel/targets.json.".into(),
         "Ending a task: pixel targets --clear".into(),
-    ]);
+    ]
 }
 
-/// Block edits in a git repo that hasn't been indexed by pixel yet.
-/// The guard can't enforce scoping without an index — tell the agent to
-/// index first, then the mandate_block path takes over on the next call.
-fn suggest_index_block(git_root: &Path) -> ! {
-    block(&[
-        "BLOCKED by pixel-targets-guard: this is a git repo but pixel has not indexed it.".into(),
-        "The guard can only enforce scoping in indexed repos.".into(),
-        "Index it now (one-time, takes seconds):".into(),
-        format!("  pixel index {}", git_root.display()),
-        "Then scope your task before editing:".into(),
+fn mandate_advisory(abs: &Path, idx_root: &Path) -> ! {
+    advise(&mandate_advisory_lines(abs, idx_root));
+}
+
+/// Advisory note when the targets manifest exists but every task in it has
+/// exceeded the 24h TTL.
+fn expired_manifest_advisory_lines(idx_root: &Path) -> Vec<String> {
+    vec![
+        format!(
+            "pixel-targets-guard advisory: the targets manifest in {} has expired (24h TTL).",
+            idx_root.join(".pixel").join("targets.json").display()
+        ),
+        "Proceeding unscoped. If you are still working a scoped task, re-run".into(),
         "  pixel targets \"<one-line task description>\" .".into(),
-        "To bypass for repos you don't want pixel in: PIXEL_TARGETS_GUARD=0".into(),
+    ]
+}
+
+fn expired_manifest_advisory(idx_root: &Path) -> ! {
+    advise(&expired_manifest_advisory_lines(idx_root));
+}
+
+/// Advisory for edits in a git repo that pixel hasn't indexed yet: suggest
+/// indexing so scoped retrieval works, then proceed.
+fn suggest_index_advisory(git_root: &Path) -> ! {
+    advise(&[
+        "pixel-targets-guard advisory: this is a git repo but pixel has not indexed it.".into(),
+        "Proceeding. To enable pixel's scoped retrieval (one-time, takes seconds):".into(),
+        format!("  pixel index {}", git_root.display()),
+        "Then scope tasks with: pixel targets \"<one-line task description>\" .".into(),
     ]);
 }
 
-/// Bash-command checks. Conservative by design (false negatives are
-/// acceptable, false positives are not) — anything containing command
-/// substitution or control-flow keywords is skipped rather than guessed at.
+/// Bash-command checks. Destructive-git DENIES run first and are NOT
+/// skipped for commands containing substitution/heredocs — `git reset
+/// --hard $(git rev-parse HEAD~1)` is exactly as destructive as the
+/// literal form. A heredoc body that merely *mentions* a destructive
+/// command can false-positive here; that is accepted for this class,
+/// because a spurious deny costs one retry while a missed hard reset
+/// costs real work. Everything below the deny tier (scoping advisories,
+/// reader-target detection) stays conservative and skips substituted
+/// commands.
 fn check_bash(cmd: &str, cwd: &Path, idx_root: Option<&Path>, manifest: Option<&Manifest>) {
-    // A heredoc body, command substitution, or backtick expansion can
-    // contain literal text that looks like a destructive git command (e.g.
-    // this very guard's own commit message describing what it blocks) —
-    // that text is data, not a command being executed. Bail out entirely
-    // rather than risk a false positive; conservative by design (false
-    // negatives are acceptable here, false positives are not).
+    if let Some(lines) = bash_deny_lines(cmd, idx_root) {
+        block(&lines);
+    }
     if cmd.contains("<<") || cmd.contains("$(") || cmd.contains('`') {
         return;
     }
-    if idx_root.is_some() && cmd.contains("git") {
-        if is_git_reset_hard(cmd) {
-            block(&[
-                "BLOCKED by pixel-targets-guard: `git reset --hard` destroys in-progress work."
-                    .into(),
-                "\"It was working before\" is a rescue problem — use the surgical planner:".into(),
-                "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good".into(),
-                "  pixel rescue --apply <oid> --file <path>  # gated restore (working tree only)".into(),
-                "Dirty files: add --merge (3-way, keeps your edits) or --stash-first.".into(),
-            ]);
-        }
-        if is_git_raw_restore(cmd) {
-            block(&[
-                "BLOCKED by pixel-targets-guard: raw historical file restore can clobber in-progress work.".into(),
-                "Use the surgical planner instead:".into(),
-                "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good".into(),
-                "  pixel rescue --apply <oid> --file <path> [--merge|--stash-first]".into(),
-            ]);
-        }
-    }
-
     if let Some(m) = manifest {
         if let Some(first_file) = single_reader_target(cmd, cwd) {
             if !allowed(&first_file, m) {
-                scoping_block(&first_file, m);
+                scoping_advisory(&first_file, m);
             }
         }
     }
 }
 
-fn is_git_reset_hard(cmd: &str) -> bool {
-    let Some(idx) = cmd.find("reset") else { return false };
-    cmd.contains("git") && cmd[idx..].contains("--hard")
+/// Hard-deny tier for Bash commands: destructive git operations. Returns
+/// the deny message lines, or None to allow. Deliberately has NO
+/// substitution/heredoc bail — see `check_bash`.
+fn bash_deny_lines(cmd: &str, idx_root: Option<&Path>) -> Option<Vec<String>> {
+    let root = idx_root?;
+    if !cmd.contains("git") {
+        return None;
+    }
+    for (sub, args) in git_invocations(cmd) {
+        if let Some(lines) = destructive_git_deny(&sub, &args, root) {
+            return Some(lines);
+        }
+    }
+    None
 }
 
-fn is_git_raw_restore(cmd: &str) -> bool {
-    if cmd.contains("checkout") && cmd.contains(" -- ") {
-        return true;
+/// Split a shell command into pipeline/sequence segments and extract every
+/// `git <subcommand> <args…>` invocation as owned tokens. Uses the guard's
+/// simple quote-aware tokenizer — not a full shell parser, but robust to
+/// flag ordering and to substitution-wrapped arguments (a `$(…)` chunk
+/// becomes ordinary tokens that simply never match a destructive flag).
+fn git_invocations(cmd: &str) -> Vec<(String, Vec<String>)> {
+    let normalized = cmd.replace("&&", ";").replace("||", ";");
+    let mut out = Vec::new();
+    for segment in normalized.split([';', '|', '\n']) {
+        let tokens = simple_tokenize(segment.trim());
+        let Some(git_pos) = tokens.iter().position(|t| t == "git") else {
+            continue;
+        };
+        let mut rest = tokens[git_pos + 1..].iter();
+        let mut sub = None;
+        while let Some(t) = rest.next() {
+            if t == "-C" || t == "-c" {
+                let _ = rest.next(); // skip the global flag's value
+                continue;
+            }
+            if t.starts_with('-') {
+                continue; // other global flags (--no-pager, --git-dir=…)
+            }
+            sub = Some(t.clone());
+            break;
+        }
+        if let Some(sub) = sub {
+            out.push((sub, rest.cloned().collect()));
+        }
     }
-    if let Some(idx) = cmd.find("restore") {
-        return cmd[idx..].contains("--source");
+    out
+}
+
+/// True for a combined short-flag cluster containing `c` (e.g. `-fd`
+/// contains 'f', `-Df` contains 'D'). Long flags (`--force`) don't match.
+fn short_cluster_has(token: &str, c: char) -> bool {
+    token.len() >= 2
+        && token.starts_with('-')
+        && !token.starts_with("--")
+        && token[1..].chars().all(|ch| ch.is_ascii_alphanumeric())
+        && token[1..].contains(c)
+}
+
+/// Deny verdict for one parsed `git <sub> <args>` invocation. Flag-order
+/// robust: matching is on tokens, not raw substrings.
+fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<String>> {
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    let cluster = |c: char| args.iter().any(|a| short_cluster_has(a, c));
+    match sub {
+        "reset" if has("--hard") || has("--keep") => Some(vec![
+            "BLOCKED by pixel-targets-guard: `git reset --hard/--keep` destroys in-progress work.".into(),
+            "\"It was working before\" is a rescue problem — use the surgical planner:".into(),
+            "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good".into(),
+            "  pixel rescue --apply <oid> --file <path>  # gated restore (working tree only)".into(),
+            "Dirty files: add --merge (3-way, keeps your edits) or --stash-first.".into(),
+        ]),
+        "checkout" if has("--") => Some(raw_restore_deny()),
+        "checkout" if has("--force") || cluster('f') => Some(vec![
+            "BLOCKED by pixel-targets-guard: `git checkout -f/--force` discards in-progress work.".into(),
+            "Use the surgical planner instead:".into(),
+            "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good".into(),
+            "  pixel rescue --apply <oid> --file <path> [--merge|--stash-first]".into(),
+        ]),
+        "restore" if args.iter().any(|a| a == "--source" || a.starts_with("--source=")) => {
+            Some(raw_restore_deny())
+        }
+        "clean" if has("--force") || cluster('f') => Some(vec![
+            "BLOCKED by pixel-targets-guard: `git clean -f` permanently deletes untracked files.".into(),
+            "If something went missing, recover it instead of deleting more:".into(),
+            "  pixel excavate --phrase \"<what you're looking for>\"  # history/stash/reflog search".into(),
+            "  pixel rescue \"<what broke>\" .".into(),
+        ]),
+        "stash" if args.first().is_some_and(|a| a == "drop" || a == "clear") => Some(vec![
+            "BLOCKED by pixel-targets-guard: `git stash drop/clear` permanently discards stashed work.".into(),
+            "Stashed code is recoverable history — use:".into(),
+            "  pixel excavate --phrase \"<what you're looking for>\"  # searches stash + reflog too".into(),
+        ]),
+        "branch" if has("-D") || cluster('D') || (has("--delete") && (has("--force") || cluster('f'))) => {
+            Some(vec![
+                "BLOCKED by pixel-targets-guard: `git branch -D` force-deletes unmerged work.".into(),
+                "If the branch's code matters, recover it deliberately:".into(),
+                "  pixel excavate --phrase \"<what you're looking for>\"".into(),
+                "  pixel rescue \"<what broke>\" .".into(),
+            ])
+        }
+        // `--force-with-lease` (and `--force-if-includes`) are the safe
+        // forms pixel's own ops use — only bare `--force`/`-f` is denied.
+        "push" if has("--force") || cluster('f') => Some(vec![
+            "BLOCKED by pixel-targets-guard: `git push --force` can destroy remote history.".into(),
+            "Use pixel's gated mutation ops instead:".into(),
+            format!("  pixel push --request-id <id> {}", shell_quote(&root.display().to_string())),
+            format!("  pixel ship --files <f>... --message \"<msg>\" --request-id <id> {}", shell_quote(&root.display().to_string())),
+            "(pixel push uses --force-with-lease semantics only where safe.)".into(),
+        ]),
+        // `git pull` is denied with a suggestion, NEVER rewritten: a
+        // transparent substitute would discard remote/branch args and a
+        // `--push` default would add a write the original didn't have.
+        "pull" => Some(vec![
+            "BLOCKED by pixel-targets-guard: raw `git pull` (fetch + merge) is replaced by deterministic reconciliation.".into(),
+            "Run instead:".into(),
+            format!(
+                "  pixel reconcile {} --strategy rebase-if-clean",
+                shell_quote(&root.display().to_string())
+            ),
+            "It fetches, proves a clean rebase via merge-tree before touching the worktree,".into(),
+            "and reports structured conflicts when they exist. It does not push.".into(),
+        ]),
+        _ => None,
     }
-    false
+}
+
+fn raw_restore_deny() -> Vec<String> {
+    vec![
+        "BLOCKED by pixel-targets-guard: raw historical file restore can clobber in-progress work.".into(),
+        "Use the surgical planner instead:".into(),
+        "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good".into(),
+        "  pixel rescue --apply <oid> --file <path> [--merge|--stash-first]".into(),
+    ]
 }
 
 /// If `cmd`'s first pipeline segment is a known reader command with exactly
@@ -634,7 +830,6 @@ fn grep_deny_lines(pattern: &str, cmd: &str, results: Option<&str>) -> Vec<Strin
             format!("Run this via Bash: {cmd}"),
             "pixel search returns the match + surrounding code (no follow-up Read needed)."
                 .into(),
-            "To bypass: PIXEL_TARGETS_GUARD=0".into(),
         ],
     }
 }
@@ -727,35 +922,123 @@ fn run_search_child(
 fn try_rewrite_bash(cmd: &str, cwd: &Path) -> Option<String> {
     let trimmed = cmd.trim();
 
-    // Skip complex commands — only rewrite simple single commands.
-    // Heredocs, command substitution, pipelines, and control-flow
-    // operators are left alone (conservative: never guess at a pipeline).
+    // Skip complex commands — heredocs, command substitution are left alone.
     if trimmed.contains("<<")
         || trimmed.contains("$(")
         || trimmed.contains('`')
-        || has_unquoted_meta(trimmed)
     {
         return None;
     }
 
-    let root_dir = find_up(cwd, ".pixel").unwrap_or_else(|| cwd.to_path_buf());
+    // Strip a leading `cd <dir> &&` prefix — agents commonly generate
+    // `cd /path && grep ...`. The cd changes the cwd for the grep, so we
+    // resolve the new cwd and pass it to the grep rewriter. The rest of
+    // the command (after &&) is what we actually rewrite.
+    let (effective_cwd, body) = strip_cd_prefix(trimmed, cwd);
+
+    let root_dir = find_up(&effective_cwd, ".pixel").unwrap_or_else(|| effective_cwd.clone());
     let root = root_dir.display().to_string();
 
+    // After stripping cd, check for remaining control operators (&, ;, >, <)
+    // that we can't handle. Pipes (|) are handled below.
+    if has_unquoted_control(body) {
+        return None;
+    }
+
     // --- rg / grep → pixel search ---
-    if let Some(rewritten) = try_rewrite_grep(trimmed, cwd, &root_dir) {
+    // Handle pipelines: if the command is `grep ... | grep -v ... | sort`,
+    // try to rewrite the FIRST segment (before the first `|`). If the first
+    // segment is a grep/rg that can be replaced by `pixel search`, rewrite
+    // just that segment and keep the rest of the pipeline intact. This is
+    // the common pattern agents generate: `grep -rln "pattern" ... | grep -v
+    // node_modules | sort | wc -l`.
+    if let Some(pipe_idx) = first_unquoted_pipe(body) {
+        let first_segment = body[..pipe_idx].trim();
+        let rest = &body[pipe_idx + 1..];
+        if let Some(rewritten) = try_rewrite_grep(first_segment, &effective_cwd, &root_dir) {
+            // Re-attach the cd prefix if we stripped one, so the rewritten
+            // command still runs in the right directory for the pipeline
+            // filters that follow.
+            if body.len() != trimmed.len() {
+                let cd_prefix = &trimmed[..trimmed.len() - body.len()];
+                return Some(format!("{cd_prefix}{rewritten} |{rest}"));
+            }
+            return Some(format!("{rewritten} |{rest}"));
+        }
+        // First segment isn't a grep — don't touch the pipeline.
+        return None;
+    }
+
+    if let Some(rewritten) = try_rewrite_grep(body, &effective_cwd, &root_dir) {
+        if body.len() != trimmed.len() {
+            let cd_prefix = &trimmed[..trimmed.len() - body.len()];
+            return Some(format!("{cd_prefix}{rewritten}"));
+        }
         return Some(rewritten);
     }
 
-    // --- git log / git show with search intent → pixel excavate ---
-    if let Some(rewritten) = try_rewrite_git_archaeology(trimmed, &root) {
+    // --- git log with search intent → pixel excavate ---
+    if let Some(rewritten) = try_rewrite_git_archaeology(body, &root) {
+        if body.len() != trimmed.len() {
+            let cd_prefix = &trimmed[..trimmed.len() - body.len()];
+            return Some(format!("{cd_prefix}{rewritten}"));
+        }
         return Some(rewritten);
     }
 
-    // --- git fetch + merge/rebase → pixel reconcile ---
-    if let Some(rewritten) = try_rewrite_git_sync(trimmed, &root) {
-        return Some(rewritten);
-    }
+    None
+}
 
+/// Strip a leading `cd <dir> && ` prefix from a command, returning the
+/// effective cwd (original cwd + cd target) and the remaining body. If
+/// there's no cd prefix, returns (original_cwd, original_cmd).
+fn strip_cd_prefix<'a>(cmd: &'a str, cwd: &Path) -> (PathBuf, &'a str) {
+    let trimmed = cmd.trim();
+    if !trimmed.starts_with("cd ") {
+        return (cwd.to_path_buf(), cmd);
+    }
+    // Find the first unquoted `&&` after the cd.
+    let rest_after_cd = &trimmed[3..];
+    let amp_idx = match find_unquoted_double_amp(rest_after_cd) {
+        Some(i) => i,
+        None => return (cwd.to_path_buf(), cmd),
+    };
+    let dir_str = rest_after_cd[..amp_idx].trim();
+    // Strip quotes from the directory.
+    let dir_str = dir_str
+        .trim_matches(|c| c == '\'' || c == '"')
+        .trim();
+    let new_cwd = if dir_str.starts_with('/') {
+        PathBuf::from(dir_str)
+    } else {
+        cwd.join(dir_str)
+    };
+    let body = rest_after_cd[amp_idx + 2..].trim_start();
+    // Return the body with a reference into the original string.
+    // Find where body starts in the original cmd.
+    let body_offset = cmd.len() - body.len();
+    let body_ref = &cmd[body_offset..];
+    (new_cwd, body_ref)
+}
+
+/// Find the byte index of the first unquoted `&&` in the string.
+fn find_unquoted_double_amp(s: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i + 1 < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c == '&' && chars[i + 1] == '&' => {
+                return Some(s.char_indices().nth(i).map(|(idx, _)| idx).unwrap_or(0));
+            }
+            None => {}
+        }
+        i += 1;
+    }
     None
 }
 
@@ -766,29 +1049,77 @@ const VALUE_FLAGS: &[&str] = &[
     "--glob", "--type", "-d", "--max-depth",
 ];
 
-/// Value-consuming flags that also change the file scope or match count in
-/// ways `pixel search` can't reproduce. Their presence makes a rewrite
-/// non-equivalent, so the command falls through to the original.
+/// Value-consuming flags that also change the match count in ways `pixel
+/// search` can't reproduce. Their presence makes a rewrite non-equivalent,
+/// so the command falls through to the original. File-filter flags
+/// (`--include`/`--exclude`/`--glob`/`--type`) are NOT here — we drop them
+/// and search a superset (see `search_can_replace`).
 const SCOPE_FLAGS: &[&str] = &[
-    "-m", "-g", "-t", "-f", "-d", "--include", "--exclude", "--glob",
-    "--type", "--max-depth",
+    "-m",
 ];
 
-/// True if `cmd` contains a shell metacharacter outside of quotes. Used to
-/// refuse rewriting pipelines and control-flow operators — never guess at a
-/// compound command.
-fn has_unquoted_meta(cmd: &str) -> bool {
+/// Check for unquoted control operators EXCEPT pipe (`|`) and redirects
+/// (`>`, `<`). Pipes are handled separately by [`first_unquoted_pipe`].
+/// Redirects (`2>/dev/null`, `> out.txt`) are common in grep commands and
+/// don't change the command structure — the guard can safely rewrite the
+/// grep part and leave the redirect in place. `&&` is handled by
+/// [`strip_cd_prefix`] which strips a leading `cd X &&` before this check.
+fn has_unquoted_control(cmd: &str) -> bool {
     let mut quote: Option<char> = None;
+    let mut prev_amp = false;
     for c in cmd.chars() {
         match quote {
             Some(q) if c == q => quote = None,
             Some(_) => {}
             None if c == '\'' || c == '"' => quote = Some(c),
-            None if matches!(c, '|' | '&' | ';' | '>' | '<' | '\n') => return true,
+            None if c == '&' => {
+                // Single `&` (background) is control; `&&` is handled by
+                // strip_cd_prefix for the leading cd case. A `&&` in the
+                // middle of the body (after cd strip) IS control.
+                if prev_amp {
+                    return true; // `&&` in the body
+                }
+                prev_amp = true;
+                continue;
+            }
+            None if c == ';' || c == '\n' => return true,
             None => {}
         }
+        prev_amp = false;
     }
     false
+}
+
+/// Find the byte index of the first unquoted pipe (`|`) in the command, or
+/// None if there are no unquoted pipes. Used to split a pipeline into
+/// segments so the first grep/rg segment can be rewritten to `pixel search`
+/// while keeping the rest of the pipe intact.
+fn first_unquoted_pipe(cmd: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut prev_was_pipe = false;
+    for (i, c) in cmd.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c == '|' => {
+                // Skip `||` (logical OR) — only split on a single `|` pipe.
+                if prev_was_pipe {
+                    prev_was_pipe = false;
+                    continue;
+                }
+                // Look ahead: is the next char also `|`? Then it's `||`.
+                if cmd[i + 1..].starts_with('|') {
+                    prev_was_pipe = true;
+                    continue;
+                }
+                return Some(i);
+            }
+            None => {}
+        }
+        prev_was_pipe = false;
+    }
+    None
 }
 
 /// Single-quote `s` for shell interpolation, leaving it bare when it is
@@ -889,12 +1220,21 @@ fn parse_grep(cmd: &str) -> Option<(String, Vec<String>, Vec<String>)> {
 /// interpolated) if equivalent, or None if it can't be expressed. pixel
 /// search is regex-based, so any pattern is expressible; only
 /// output-modifying flags we can't honor fall through.
+///
+/// `--include`/`--exclude`/`--glob`/`--type` are file-filter flags that
+/// `pixel search` doesn't support yet. We rewrite anyway and DROP them —
+/// `pixel search` searches all code files (a superset of `--include`), and
+/// the downstream pipeline (`| grep -v ...`) usually filters the rest.
+/// This is a deliberate superset rewrite: more results, but never fewer,
+/// and the agent can refine.
 fn search_can_replace(pattern: &str, flags: &[String], root: &str) -> Option<String> {
+    // Flags that change OUTPUT semantics in ways we can't represent.
+    // File-filter flags (--include/--exclude/--glob/--type) are NOT here —
+    // we drop them and search a superset.
     let unsupported_flags = [
         "-l", "--files-with-matches", "-c", "--count", "-v", "--invert",
         "-o", "--only-matching",
-        "-m", "--max-count", "-g", "--glob", "-t", "--type", "-f",
-        "--include", "--exclude", "-d", "--max-depth",
+        "-m", "--max-count",
     ];
     if flags.iter().any(|f| unsupported_flags.contains(&f.as_str())) {
         return None;
@@ -915,7 +1255,13 @@ fn search_can_replace(pattern: &str, flags: &[String], root: &str) -> Option<Str
 /// into a pixel search would silently change semantics. Multiple paths
 /// can't be expressed as one pixel root, so they fall through unrewritten.
 fn try_rewrite_grep(cmd: &str, cwd: &Path, root: &Path) -> Option<String> {
-    let (pattern, paths, unsupported) = parse_grep(cmd)?;
+    // Strip trailing redirects (2>/dev/null, >file, <file) — they don't
+    // change the search semantics, just I/O. The rewritten pixel command
+    // doesn't need them (pixel search doesn't write to stderr in a way
+    // that needs suppressing). Keep the redirect in the output so the
+    // agent's intent is preserved.
+    let (cmd_clean, redirect_suffix) = strip_redirects(cmd);
+    let (pattern, paths, unsupported) = parse_grep(&cmd_clean)?;
     let scope = match paths.len() {
         0 => root.display().to_string(),
         1 => {
@@ -932,66 +1278,123 @@ fn try_rewrite_grep(cmd: &str, cwd: &Path, root: &Path) -> Option<String> {
         }
         _ => return None,
     };
-    search_can_replace(&pattern, &unsupported, &scope)
-}
-
-/// Rewrite `git log --grep=PHRASE` / `git log -S PHRASE` / `git show` with
-/// search intent → `pixel excavate --phrase PHRASE`
-fn try_rewrite_git_archaeology(cmd: &str, root: &str) -> Option<String> {
-    let tokens = simple_tokenize(cmd);
-    if tokens.len() < 2 {
-        return None;
-    }
-    if tokens[0] != "git" {
-        return None;
-    }
-    let sub = tokens[1].as_str();
-    match sub {
-        "log" => {
-            // Look for --grep=, -S, -G (search intent)
-            for t in &tokens[2..] {
-                if let Some(p) = t.strip_prefix("--grep=") {
-                    let escaped = p.replace('\'', "'\\''");
-                    return Some(format!("pixel excavate --phrase '{}' {}", escaped, shell_quote(root)));
-                }
-            }
-            // -S <pattern> or -G <pattern>
-            for (i, t) in tokens[2..].iter().enumerate() {
-                if (t == "-S" || t == "-G") && i + 1 < tokens.len() - 2 {
-                    let pattern = tokens[i + 3].clone();
-                    let escaped = pattern.replace('\'', "'\\''");
-                    return Some(format!("pixel excavate --phrase '{}' {}", escaped, shell_quote(root)));
-                }
-            }
-            None
-        }
-        _ => None,
+    let rewritten = search_can_replace(&pattern, &unsupported, &scope)?;
+    if redirect_suffix.is_empty() {
+        Some(rewritten)
+    } else {
+        Some(format!("{rewritten} {redirect_suffix}"))
     }
 }
 
-/// Rewrite `git fetch && git merge` / `git pull` / `git fetch && git rebase`
-/// → `pixel reconcile`
-fn try_rewrite_git_sync(cmd: &str, root: &str) -> Option<String> {
+/// Strip trailing I/O redirects from a command segment. Returns (clean_cmd,
+/// redirect_suffix). Handles `2>/dev/null`, `>file`, `2>file`, `<file`,
+/// `&>file`, `1>file`. Only strips from the end — redirects in the middle
+/// of a pipeline are handled by the pipe splitter before this runs.
+fn strip_redirects(cmd: &str) -> (String, String) {
     let tokens = simple_tokenize(cmd);
     if tokens.is_empty() {
-        return None;
+        return (cmd.to_string(), String::new());
     }
-    if tokens[0] != "git" {
-        return None;
-    }
-    let sub = tokens.get(1).map(String::as_str).unwrap_or("");
-    // `git pull` = fetch + merge — rewrite to reconcile
-    if sub == "pull" {
-        return Some(format!("pixel reconcile {} --strategy rebase-if-clean --push auto", shell_quote(root)));
-    }
-    // `git fetch ... && git merge/rebase ...` — detect compound
-    if sub == "fetch" && cmd.contains("&&") {
-        let lower = cmd.to_lowercase();
-        if lower.contains("merge") || lower.contains("rebase") {
-            return Some(format!("pixel reconcile {} --strategy rebase-if-clean --push auto", shell_quote(root)));
+    // Scan from the end for redirect tokens. A redirect token is one that
+    // starts with a digit followed by `>`, or starts with `>`, `<`, or `&>`.
+    // The token may be attached to the filename (e.g. `2>/dev/null`) or
+    // separate (e.g. `2>` `/dev/null`).
+    let mut redirect_start = tokens.len();
+    let mut i = tokens.len();
+    while i > 0 {
+        i -= 1;
+        let t = &tokens[i];
+        // `2>/dev/null` or `>file` or `&>file` — single token with redirect+target
+        if t.starts_with("2>") || t.starts_with("1>") || t.starts_with("&>")
+            || t.starts_with('>') || t.starts_with('<')
+        {
+            redirect_start = i;
+            continue;
         }
+        // `2>` or `>` or `<` as a separate token — consumes the next token as filename
+        if (t == "2>" || t == "1>" || t == "&>" || t == ">" || t == "<")
+            && i + 1 < tokens.len()
+        {
+            redirect_start = i;
+            continue;
+        }
+        // Non-redirect token — stop scanning
+        break;
     }
-    None
+    if redirect_start == tokens.len() {
+        return (cmd.to_string(), String::new());
+    }
+    let clean = tokens[..redirect_start].join(" ");
+    let redirect = tokens[redirect_start..].join(" ");
+    (clean, redirect)
+}
+
+/// Rewrite `git log` archaeology to `pixel excavate` — but ONLY when the
+/// pixel command is an exact equivalent. The original command must carry
+/// nothing but ONE search term (`-S <term>` / `-Sterm` / `-G <term>` /
+/// `-Gterm` / `--grep=<term>`) and optionally ONE pathspec after `--`.
+/// Anything the rewrite can't represent — `--author`, `-n`/counts, rev
+/// ranges, display flags, bare revs, multiple pathspecs — falls through to
+/// the original command unchanged (fail open: a non-equivalent substitute
+/// is worse than no guard).
+fn try_rewrite_git_archaeology(cmd: &str, root: &str) -> Option<String> {
+    let tokens = simple_tokenize(cmd);
+    if tokens.len() < 3 || tokens[0] != "git" || tokens[1] != "log" {
+        return None;
+    }
+    let mut phrase: Option<String> = None;
+    let mut pathspecs: Vec<String> = Vec::new();
+    let mut after_dashdash = false;
+    let mut i = 2;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if after_dashdash {
+            pathspecs.push(t.clone());
+            i += 1;
+            continue;
+        }
+        if t == "--" {
+            after_dashdash = true;
+            i += 1;
+            continue;
+        }
+        if let Some(p) = t.strip_prefix("--grep=") {
+            if phrase.is_some() || p.is_empty() {
+                return None;
+            }
+            phrase = Some(p.to_string());
+            i += 1;
+            continue;
+        }
+        if t == "-S" || t == "-G" {
+            if phrase.is_some() {
+                return None;
+            }
+            phrase = Some(tokens.get(i + 1)?.clone());
+            i += 2;
+            continue;
+        }
+        if let Some(p) = t.strip_prefix("-S").or_else(|| t.strip_prefix("-G")) {
+            if phrase.is_some() || p.is_empty() {
+                return None;
+            }
+            phrase = Some(p.to_string());
+            i += 1;
+            continue;
+        }
+        // Any other flag, rev, or range makes the rewrite non-equivalent.
+        return None;
+    }
+    let phrase = phrase?;
+    if pathspecs.len() > 1 {
+        return None;
+    }
+    let escaped = phrase.replace('\'', "'\\''");
+    let mut out = format!("pixel excavate --phrase '{}' {}", escaped, shell_quote(root));
+    if let Some(p) = pathspecs.first() {
+        out.push_str(&format!(" --file {}", shell_quote(p)));
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -1072,20 +1475,262 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_git_pull() {
-        let cmd = "git pull";
-        let rewritten = try_rewrite_git_sync(cmd, "/repo");
+    fn rewrite_git_log_s_with_single_pathspec() {
+        let rewritten = try_rewrite_git_archaeology("git log -S term -- src/", "/repo");
         assert_eq!(
             rewritten,
-            Some("pixel reconcile /repo --strategy rebase-if-clean --push auto".to_string())
+            Some("pixel excavate --phrase 'term' /repo --file src/".to_string())
+        );
+        // Bare -S with no pathspec keeps the plain form.
+        assert_eq!(
+            try_rewrite_git_archaeology("git log -S term", "/repo"),
+            Some("pixel excavate --phrase 'term' /repo".to_string())
+        );
+        // Attached form -Sterm.
+        assert_eq!(
+            try_rewrite_git_archaeology("git log -Sterm", "/repo"),
+            Some("pixel excavate --phrase 'term' /repo".to_string())
         );
     }
 
     #[test]
-    fn no_rewrite_git_status() {
-        let cmd = "git status";
-        let rewritten = try_rewrite_git_sync(cmd, "/repo");
-        assert!(rewritten.is_none());
+    fn no_rewrite_git_log_unrepresentable() {
+        // Anything the excavate rewrite can't represent must fall through
+        // to the original command (fail open), never a lossy substitute.
+        for cmd in [
+            "git log -S term --author=bob",
+            "git log -S term -n 5",
+            "git log -S term main..dev",
+            "git log -S term v1.0",
+            "git log -S term --oneline",
+            "git log -S term -- src/ lib/",
+            "git log -S term src/",
+            "git log -S term -G other",
+        ] {
+            assert!(
+                try_rewrite_git_archaeology(cmd, "/repo").is_none(),
+                "`{cmd}` is not exactly representable and must not be rewritten"
+            );
+        }
+    }
+
+    #[test]
+    fn advisory_json_is_non_blocking() {
+        let v = advisory_json("note text");
+        assert_eq!(v["systemMessage"], "note text");
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "note text");
+        assert!(
+            v["hookSpecificOutput"].get("permissionDecision").is_none(),
+            "advisory must not carry a permissionDecision (neither deny nor auto-allow)"
+        );
+        assert!(v.get("decision").is_none());
+    }
+
+    #[test]
+    fn scoping_outside_manifest_is_advisory_not_deny() {
+        let repo = scratch_repo("advisory-scope");
+        let a = repo.join("src").join("a.rs");
+        let c = repo.join("src").join("c.rs");
+        for f in [&a, &c] {
+            std::fs::write(f, "x").unwrap();
+        }
+        write_manifest(
+            &repo,
+            &serde_json::json!({
+                "version": 2,
+                "tasks": [
+                    {"id": "t", "task": "the task", "created_unix": now_unix(),
+                     "targets": [{"path": "src/a.rs", "tier": "P0"}]},
+                ],
+            })
+            .to_string(),
+        );
+        let m = load_manifest(&repo).unwrap();
+        assert!(!allowed(&c, &m), "c.rs is outside the manifest");
+        let msg = scoping_advisory_lines(&c, &m).join("\n");
+        assert!(msg.contains("advisory"), "must be phrased as advisory: {msg}");
+        assert!(msg.contains("src/c.rs"), "must name the file: {msg}");
+        assert!(msg.contains("pixel targets"), "must suggest re-scoping: {msg}");
+        assert!(!msg.contains("BLOCKED"), "must not read as a deny: {msg}");
+        assert!(!msg.contains("PIXEL_TARGETS_GUARD"), "no bypass ad: {msg}");
+    }
+
+    #[test]
+    fn mandate_and_index_advisories_are_non_blocking_text() {
+        let repo = scratch_repo("advisory-mandate");
+        let f = repo.join("src").join("a.rs");
+        std::fs::write(&f, "x").unwrap();
+        let msg = mandate_advisory_lines(&f, &repo).join("\n");
+        assert!(msg.contains("advisory") && !msg.contains("BLOCKED"), "{msg}");
+        assert!(msg.contains("pixel targets"), "{msg}");
+        let msg = expired_manifest_advisory_lines(&repo).join("\n");
+        assert!(msg.contains("expired") && !msg.contains("BLOCKED"), "{msg}");
+        assert!(!msg.contains("PIXEL_TARGETS_GUARD"), "{msg}");
+    }
+
+    #[test]
+    fn manifest_all_expired_reports_expired_state() {
+        let repo = scratch_repo("expired-state");
+        write_manifest(
+            &repo,
+            &serde_json::json!({
+                "version": 2,
+                "tasks": [
+                    {"id": "old", "task": "stale", "created_unix": now_unix() - MANIFEST_MAX_AGE_SECS - 10,
+                     "targets": [{"path": "src/a.rs", "tier": "P0"}]},
+                ],
+            })
+            .to_string(),
+        );
+        assert!(matches!(load_manifest_state(&repo), ManifestState::Expired));
+        let missing = scratch_repo("expired-state-missing");
+        assert!(matches!(load_manifest_state(&missing), ManifestState::Absent));
+    }
+
+    #[test]
+    fn git_pull_denied_with_suggestion_never_rewritten() {
+        // `git pull` must be a DENY with a `pixel reconcile` suggestion —
+        // never a transparent rewrite, and never a suggestion containing
+        // any --push flag (a push the original command didn't have).
+        let repo = Path::new("/repo");
+        let lines = bash_deny_lines("git pull", Some(repo)).expect("git pull must be denied");
+        let msg = lines.join("\n");
+        assert!(msg.contains("BLOCKED"), "must be a deny: {msg}");
+        assert!(
+            msg.contains("pixel reconcile /repo --strategy rebase-if-clean"),
+            "must suggest reconcile: {msg}"
+        );
+        assert!(!msg.contains("--push"), "must never suggest --push: {msg}");
+        // And the rewrite path must not touch it either.
+        assert!(try_rewrite_bash("git pull", repo).is_none());
+        assert!(try_rewrite_bash("git pull upstream main", repo).is_none());
+    }
+
+    #[test]
+    fn git_pull_with_args_denied() {
+        let repo = Path::new("/repo");
+        assert!(bash_deny_lines("git pull upstream main", Some(repo)).is_some());
+        assert!(bash_deny_lines("git pull --rebase origin main", Some(repo)).is_some());
+    }
+
+    #[test]
+    fn no_deny_git_status() {
+        let repo = Path::new("/repo");
+        assert!(bash_deny_lines("git status", Some(repo)).is_none());
+        assert!(try_rewrite_bash("git status", Path::new("/tmp")).is_none());
+    }
+
+    #[test]
+    fn substituted_destructive_command_still_denied() {
+        // The substitution bail must NOT let destructive commands through:
+        // denies run before (and independent of) the conservative skip.
+        let repo = Path::new("/repo");
+        assert!(
+            bash_deny_lines("git reset --hard $(git rev-parse HEAD~1)", Some(repo)).is_some(),
+            "substitution must not bypass the destructive deny"
+        );
+        assert!(
+            bash_deny_lines("git clean -fd `git rev-parse --show-toplevel`", Some(repo)).is_some()
+        );
+    }
+
+    #[test]
+    fn destructive_set_expanded() {
+        let repo = Path::new("/repo");
+        let denied = [
+            "git reset --hard",
+            "git reset --keep HEAD~2",
+            "git clean -f",
+            "git clean -fd",
+            "git clean -fdx",
+            "git clean -df",
+            "git clean --force",
+            "git checkout -f main",
+            "git checkout --force main",
+            "git checkout HEAD~1 -- src/lib.rs",
+            "git restore --source HEAD~1 src/lib.rs",
+            "git restore --source=HEAD~1 src/lib.rs",
+            "git stash drop",
+            "git stash clear",
+            "git branch -D feature",
+            "git push --force",
+            "git push -f origin main",
+        ];
+        for cmd in denied {
+            assert!(
+                bash_deny_lines(cmd, Some(repo)).is_some(),
+                "`{cmd}` must be denied"
+            );
+        }
+        let allowed = [
+            "git push --force-with-lease",
+            "git push --force-with-lease=main origin main",
+            "git push --force-if-includes --force-with-lease",
+            "git push origin main",
+            "git clean -n",
+            "git checkout main",
+            "git checkout -b feature",
+            "git stash",
+            "git stash list",
+            "git stash pop",
+            "git branch -d merged",
+            "git branch --list",
+            "git reset --soft HEAD~1",
+            "git restore --staged src/lib.rs",
+        ];
+        for cmd in allowed {
+            assert!(
+                bash_deny_lines(cmd, Some(repo)).is_none(),
+                "`{cmd}` must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn destructive_deny_robust_to_flag_order_and_segments() {
+        let repo = Path::new("/repo");
+        assert!(bash_deny_lines("git -C /repo reset --hard", Some(repo)).is_some());
+        assert!(bash_deny_lines("git clean -d -f", Some(repo)).is_some());
+        assert!(
+            bash_deny_lines("git status && git reset --hard HEAD~1", Some(repo)).is_some(),
+            "destructive segment in a compound command must be denied"
+        );
+    }
+
+    #[test]
+    fn quoted_destructive_text_not_denied() {
+        // A destructive command mentioned inside a quoted argument is data,
+        // not an executed command — the tokenizer folds it into one token.
+        let repo = Path::new("/repo");
+        assert!(
+            bash_deny_lines("git commit -m 'do not git reset --hard here'", Some(repo)).is_none()
+        );
+    }
+
+    #[test]
+    fn no_deny_outside_indexed_repo() {
+        assert!(bash_deny_lines("git reset --hard", None).is_none());
+    }
+
+    #[test]
+    fn deny_messages_never_advertise_bypass() {
+        let repo = Path::new("/repo");
+        for cmd in [
+            "git pull",
+            "git reset --hard",
+            "git clean -fd",
+            "git push --force",
+            "git stash drop",
+        ] {
+            let msg = bash_deny_lines(cmd, Some(repo)).unwrap().join("\n");
+            assert!(
+                !msg.contains("PIXEL_TARGETS_GUARD"),
+                "deny for `{cmd}` must not advertise the kill switch: {msg}"
+            );
+        }
+        let grep_msg = grep_deny_lines("foo", "pixel search 'foo' /repo --context 5", None).join("\n");
+        assert!(!grep_msg.contains("PIXEL_TARGETS_GUARD"));
     }
 
     #[test]
@@ -1103,9 +1748,29 @@ mod tests {
     }
 
     #[test]
-    fn reject_pipeline_rewrite() {
+    fn rewrite_first_grep_segment_in_pipeline() {
+        // Pipelines: the first grep/rg segment is rewritten to pixel search,
+        // the rest of the pipe is preserved. This is the common agent pattern:
+        // `grep -rln "pattern" ... | grep -v node_modules | sort | wc -l`
         let rewritten = try_rewrite_bash("rg foo | head -5", Path::new("/tmp"));
-        assert!(rewritten.is_none(), "pipelines must not be rewritten");
+        assert!(rewritten.is_some(), "first grep segment in a pipeline should be rewritten");
+        let cmd = rewritten.unwrap();
+        assert!(cmd.starts_with("pixel search 'foo'"), "cmd was: {cmd}");
+        assert!(cmd.contains("| head -5"), "rest of pipe must be preserved, cmd was: {cmd}");
+    }
+
+    #[test]
+    fn pipeline_with_non_grep_first_segment_not_rewritten() {
+        // If the first segment isn't grep/rg, don't touch the pipeline.
+        let rewritten = try_rewrite_bash("cat foo.txt | grep bar", Path::new("/tmp"));
+        assert!(rewritten.is_none(), "non-grep first segment must not be rewritten");
+    }
+
+    #[test]
+    fn logical_or_not_treated_as_pipe() {
+        // `||` is logical OR, not a pipe — must not be split.
+        let rewritten = try_rewrite_bash("rg foo || echo failed", Path::new("/tmp"));
+        assert!(rewritten.is_none(), "|| must not be treated as a pipe");
     }
 
     #[test]
@@ -1136,21 +1801,33 @@ mod tests {
 
     #[test]
     fn scope_flag_not_rewritten() {
-        // --include/--glob/--type/-m change the file scope or match count;
-        // pixel search can't honor them, so the rewrite must fall through.
+        // -m changes the match count; pixel search can't honor it → no rewrite.
         let repo = Path::new("/repo");
-        assert!(try_rewrite_grep("grep --include=*.rs foo", repo, repo).is_none());
-        assert!(try_rewrite_grep("grep --glob '*.rs' foo", repo, repo).is_none());
         assert!(try_rewrite_grep("grep -m 5 foo", repo, repo).is_none());
     }
 
     #[test]
-    fn rg_type_flag_not_rewritten() {
-        // `rg --type rust foo` must not misparse "rust" as the pattern, and
-        // --type is a scope flag pixel search can't honor → no rewrite.
+    fn file_filter_flags_rewritten_as_superset() {
+        // --include/--glob/--type are file-filter flags that pixel search
+        // doesn't support yet. We rewrite anyway and DROP them — pixel search
+        // searches all code files (a superset), and downstream pipeline
+        // filters handle the rest. The pattern must be correctly identified.
         let repo = Path::new("/repo");
-        assert!(try_rewrite_grep("rg --type rust foo", repo, repo).is_none());
-        assert!(try_rewrite_grep("rg -t rust foo", repo, repo).is_none());
+        let rewritten = try_rewrite_grep("grep --include=*.rs foo", repo, repo);
+        assert!(rewritten.is_some(), "--include should be rewritten as superset");
+        assert!(rewritten.unwrap().contains("'foo'"), "pattern must be foo");
+
+        let rewritten = try_rewrite_grep("grep --glob '*.rs' foo", repo, repo);
+        assert!(rewritten.is_some(), "--glob should be rewritten as superset");
+
+        // `rg --type rust foo` must not misparse "rust" as the pattern.
+        let rewritten = try_rewrite_grep("rg --type rust foo", repo, repo);
+        assert!(rewritten.is_some(), "--type should be rewritten as superset");
+        assert!(rewritten.unwrap().contains("'foo'"), "pattern must be foo, not rust");
+
+        let rewritten = try_rewrite_grep("rg -t rust foo", repo, repo);
+        assert!(rewritten.is_some(), "-t should be rewritten as superset");
+        assert!(rewritten.unwrap().contains("'foo'"), "pattern must be foo, not rust");
     }
 
     #[test]
@@ -1398,7 +2075,10 @@ mod tests {
         let lines = grep_deny_lines("foo", "pixel search 'foo' /repo --context 5", None);
         let msg = lines.join("\n");
         assert!(msg.contains("Run this via Bash: pixel search 'foo' /repo --context 5"));
-        assert!(msg.contains("PIXEL_TARGETS_GUARD=0"));
+        assert!(
+            !msg.contains("PIXEL_TARGETS_GUARD"),
+            "the kill switch must not be advertised to the model: {msg}"
+        );
     }
 
     #[test]

@@ -1,16 +1,16 @@
-gitpixel
-Copyright (c) 2026 Livio Gamassia
+pixel
+Copyright (c) 2026 Livio Gama
 
 This project contains code derived from hypergrep
 (https://github.com/marjoballabani/hypergrep), Copyright (c) 2026
 Marjo Ballabani, licensed under the MIT License.
 
 Derived portions are marked with a provenance header comment in the
-source files that contain them (currently: crates/gitpixel-core/src/posting.rs
-and crates/gitpixel-context/src/lib.rs).
+source files that contain them (currently: crates/pixel-index/src/posting.rs
+and crates/pixel-context/src/lib.rs).
 
 The sparse n-gram selection algorithm implemented in
-crates/gitpixel-core/src/gram.rs is an independent Rust implementation of
+crates/pixel-index/src/gram.rs is an independent Rust implementation of
 the algorithm described publicly by ClickHouse (src/Functions/sparseGramsImpl.h,
 Apache-2.0) and by Cursor ("Fast regex search: indexing text for agent tools").
 No ClickHouse source code was copied.

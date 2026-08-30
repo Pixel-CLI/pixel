@@ -1,17 +1,16 @@
 //! pixel-install — M5/M6 rollout: idempotent `pixel install`, `pixel doctor`,
-//! the gain ledger, and the clean-cut deprecation of usable-git/gitpixel/
-//! sniper MCP entries. Registers ONE MCP server `pixel` and rewrites the
-//! Claude config, hooks, and agent-config with managed markers.
+//! and the clean-cut deprecation of the usable-git/gitpixel/sniper MCP
+//! entries. pixel is a CLI + hooks tool, NOT an MCP server — install scrubs
+//! the deprecated MCP entries, wires the guard/SessionStart hooks, and
+//! rewrites agent-config with managed markers.
 
 use std::io;
 use std::path::PathBuf;
 
 use thiserror::Error;
 
-pub mod capabilities;
 pub mod doctor;
 pub mod install;
-pub mod gain;
 pub mod config;
 
 /// Shared error type for the install/doctor/migrate surface.
@@ -23,8 +22,6 @@ pub enum InstallError {
     Json(#[from] serde_json::Error),
     #[error("config: {0}")]
     Config(#[from] config::ConfigError),
-    #[error("gain: {0}")]
-    Gain(#[from] gain::GainError),
     #[error("cannot resolve home directory")]
     NoHome,
     #[error("cannot resolve current executable: {0}")]

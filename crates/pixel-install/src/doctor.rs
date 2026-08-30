@@ -2,17 +2,24 @@
 //! index/graph/facts freshness, reporting green/red per check.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use crate::config;
-use crate::gain::GainLedger;
 use crate::InstallError;
 
 pub type Result<T> = std::result::Result<T, InstallError>;
+
+/// The five mandatory scenarios the rule text and the SessionStart usage
+/// string must agree on. One name per scenario (the guard-verb that anchors
+/// it): targets (sniper scoping — mandatory first call, advisory fence),
+/// resolve (phrase → code), rescue (history recovery, includes excavate),
+/// reconcile (branch sync), impact (blast radius, includes changes).
+pub const MANDATORY_SCENARIOS: &[&str] =
+    &["targets", "resolve", "rescue", "reconcile", "impact"];
 
 /// Per-check status for the doctor report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -65,6 +72,13 @@ pub struct DoctorOptions {
     /// Repo root to check index/graph/facts freshness for. If None, only
     /// install-state checks run.
     pub repo_root: Option<PathBuf>,
+    /// Dry-run parser for one `pixel …` argv (including the leading
+    /// "pixel"), supplied by the CLI binary from its real clap definition.
+    /// When present, the `rule.parity` check parses every pixel command
+    /// line found in the installed rule text against it — documented
+    /// syntax the binary rejects goes red. When None (library callers
+    /// without access to the CLI parser), the parity check is skipped.
+    pub syntax_validator: Option<fn(&[String]) -> std::result::Result<(), String>>,
 }
 
 impl Default for DoctorOptions {
@@ -73,6 +87,7 @@ impl Default for DoctorOptions {
             executable_path: None,
             home: None,
             repo_root: None,
+            syntax_validator: None,
         }
     }
 }
@@ -330,6 +345,15 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             });
         }
         let hooks = hooks.unwrap();
+        // Config-file hooks are disabled by default — check enabled: true.
+        let hooks_enabled = value
+            .get("hooks")
+            .and_then(|v| v.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if !hooks_enabled {
+            return Err("zcode hooks.enabled is false (or missing) — config-file hooks won't fire".into());
+        }
         let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
         let has_guard = hooks.get("PreToolUse")
             .and_then(serde_json::Value::as_array)
@@ -342,9 +366,18 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         if !has_guard {
             return Err("zcode PreToolUse guard hook not wired".into());
         }
+        // Check ~/.zcode/AGENTS.md has pixel rules.
+        let agents_md = home.join(".zcode").join("AGENTS.md");
+        if !agents_md.is_file() {
+            return Err("zcode AGENTS.md not deployed (no ~/.zcode/AGENTS.md)".into());
+        }
+        let agents_raw = fs::read_to_string(&agents_md).map_err(|e| e.to_string())?;
+        if !agents_raw.contains(config::MANAGED_BEGIN) {
+            return Err("zcode AGENTS.md missing pixel managed markers".into());
+        }
         Ok(DoctorCheckDetail {
-            summary: "zcode hooks wired (PreToolUse)".into(),
-            detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
+            summary: "zcode hooks + AGENTS.md rules wired (PreToolUse, hooks.enabled)".into(),
+            detail: Some(serde_json::json!({ "path": config_path.display().to_string(), "agents_md": agents_md.display().to_string() })),
         })
     }));
 
@@ -356,17 +389,32 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 detail: None,
             });
         }
-        let memory_file = config_dir.join("memory").join("pixel-rules.md");
-        if !memory_file.is_file() {
-            return Err("pi pixel-rules.md not installed".into());
+        let ext_file = config_dir.join("extensions").join("pixel-guard.ts");
+        if !ext_file.is_file() {
+            return Err("pi pixel-guard.ts extension not installed".into());
         }
-        let raw = fs::read_to_string(&memory_file).map_err(|e| e.to_string())?;
+        let raw = fs::read_to_string(&ext_file).map_err(|e| e.to_string())?;
         if !raw.contains(config::MANAGED_BEGIN) {
-            return Err("pi pixel-rules.md missing managed markers".into());
+            return Err("pi pixel-guard.ts missing managed markers".into());
+        }
+        if !raw.contains("tool_call") {
+            return Err("pi pixel-guard.ts does not intercept tool_call event".into());
+        }
+        // Check ~/.pi/agent/AGENTS.md has pixel rules.
+        let agents_md = config_dir.join("AGENTS.md");
+        if !agents_md.is_file() {
+            return Err("pi AGENTS.md not deployed (no ~/.pi/agent/AGENTS.md)".into());
+        }
+        let agents_raw = fs::read_to_string(&agents_md).map_err(|e| e.to_string())?;
+        if !agents_raw.contains(config::MANAGED_BEGIN) {
+            return Err("pi AGENTS.md missing pixel managed markers".into());
+        }
+        if !agents_raw.contains("# pixel — Deterministic") {
+            return Err("pi AGENTS.md missing pixel rule text".into());
         }
         Ok(DoctorCheckDetail {
-            summary: "pi rules installed (no guard hooks — extension API only)".into(),
-            detail: Some(serde_json::json!({ "path": memory_file.display().to_string() })),
+            summary: "pi guard extension + AGENTS.md rules installed (tool_call interception)".into(),
+            detail: Some(serde_json::json!({ "extension": ext_file.display().to_string(), "agents_md": agents_md.display().to_string() })),
         })
     }));
 
@@ -375,11 +423,23 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         if configs.is_empty() {
             return Err("no CLAUDE.md/AGENTS.md found to manage".into());
         }
+        // A config file is "managed" if it EITHER:
+        //   (a) contains a pixel managed block (legacy: pixel install wrote it), OR
+        //   (b) contains the pixel rule text (current: build-agent-config's
+        //       aggregate includes pixel.md, so the rule is present without a
+        //       managed block).
+        // The duplicate-prevention logic in rewrite_agent_configs now skips
+        // writing a managed block when the rule is already present via the
+        // aggregate, so (b) is the expected state for agent configs managed
+        // by build-agent-config.
         let unmanaged: Vec<&PathBuf> = configs
             .iter()
             .filter(|p| {
                 fs::read_to_string(p)
-                    .map(|s| !s.contains(config::MANAGED_BEGIN))
+                    .map(|s| {
+                        !s.contains(config::MANAGED_BEGIN)
+                            && !s.contains("# pixel — Deterministic")
+                    })
                     .unwrap_or(true)
             })
             .collect();
@@ -399,18 +459,102 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         })
     }));
 
-    checks.push(check("ledger.readable", || -> std::result::Result<DoctorCheckDetail, String> {
-        let ledger = GainLedger::open().map_err(|e| e.to_string())?;
-        let events = ledger.read().map_err(|e| e.to_string())?;
-        Ok(DoctorCheckDetail {
-            summary: format!("gain ledger readable ({} events)", events.len()),
-            detail: Some(serde_json::json!({
-                "events": events.len(),
-                "path": ledger.path().display().to_string(),
-                "directory": ledger.directory().display().to_string(),
-            })),
-        })
-    }));
+    // Rule-vs-binary parity: every `pixel …` command line documented in the
+    // INSTALLED rule text must dry-run parse against the binary's real clap
+    // definition. Drift between documented CLI syntax and the binary was the
+    // largest defect category found — this makes it a red doctor check
+    // instead of a silent lie agents follow into parse errors.
+    if let Some(validator) = options.syntax_validator {
+        let home_for_rule = home.clone();
+        checks.push(check_status("rule.parity", move || {
+            let Some((source, rule_text)) = installed_rule_text(&home_for_rule) else {
+                return Ok((CheckStatus::Yellow, DoctorCheckDetail {
+                    summary: "no installed rule text found (managed block or rule file) — parity not checked".into(),
+                    detail: None,
+                }));
+            };
+            let commands = extract_rule_commands(&rule_text);
+            if commands.is_empty() {
+                return Ok((CheckStatus::Yellow, DoctorCheckDetail {
+                    summary: format!(
+                        "installed rule text at {} contains no `pixel …` command lines — parity not checked",
+                        source.display()
+                    ),
+                    detail: None,
+                }));
+            }
+            let mut parsed_ok = 0usize;
+            let mut unparsed: Vec<String> = Vec::new();
+            let mut failures: Vec<String> = Vec::new();
+            for line in &commands {
+                match normalize_rule_command(line) {
+                    None => unparsed.push(line.clone()),
+                    Some(argv) => match validator(&argv) {
+                        Ok(()) => parsed_ok += 1,
+                        Err(e) => failures.push(format!("`{line}` → {e}")),
+                    },
+                }
+            }
+            let detail = Some(serde_json::json!({
+                "source": source.display().to_string(),
+                "command_lines": commands.len(),
+                "parsed_ok": parsed_ok,
+                "unparsed": unparsed,
+                "failures": failures,
+            }));
+            if !failures.is_empty() {
+                return Err(format!(
+                    "{} documented command line(s) rejected by the CLI parser: {}",
+                    failures.len(),
+                    failures.join("; ")
+                ));
+            }
+            Ok((CheckStatus::Green, DoctorCheckDetail {
+                summary: format!(
+                    "{parsed_ok}/{} documented pixel command lines parse against the CLI ({} unparsed placeholder line(s) skipped)",
+                    commands.len(),
+                    unparsed.len()
+                ),
+                detail,
+            }))
+        }));
+    }
+
+    // Scenario-count consistency: the installed rule text and the
+    // SessionStart usage string must agree on the FIVE mandatory scenarios
+    // (targets/resolve/rescue/reconcile/impact). A scenario the rule
+    // mandates but the injected session never hears about — or vice versa —
+    // is exactly the drift class this doctor exists to catch.
+    {
+        let home_for_rule = home.clone();
+        checks.push(check_status("rule.scenarios", move || {
+            let Some((source, rule_text)) = installed_rule_text(&home_for_rule) else {
+                return Ok((CheckStatus::Yellow, DoctorCheckDetail {
+                    summary: "no installed rule text found — scenario consistency not checked".into(),
+                    detail: None,
+                }));
+            };
+            let mismatches =
+                scenario_mismatches(&rule_text, pixel_proto::op::SESSION_USAGE);
+            if !mismatches.is_empty() {
+                return Err(format!(
+                    "scenario drift between installed rule text ({}) and session usage string: {}",
+                    source.display(),
+                    mismatches.join("; ")
+                ));
+            }
+            Ok((CheckStatus::Green, DoctorCheckDetail {
+                summary: format!(
+                    "rule text and session usage agree on all {} mandatory scenarios",
+                    MANDATORY_SCENARIOS.len()
+                ),
+                detail: Some(serde_json::json!({
+                    "scenarios": MANDATORY_SCENARIOS,
+                    "source": source.display().to_string(),
+                })),
+            }))
+        }));
+    }
 
     if let Some(root) = &options.repo_root {
         checks.push(check("daemon.health", || -> std::result::Result<DoctorCheckDetail, String> {
@@ -422,6 +566,35 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 summary: format!("daemon socket present at {}", sock.display()),
                 detail: Some(serde_json::json!({ "socket": sock.display().to_string() })),
             })
+        }));
+
+        // Epistemics-presence probe: when a daemon answers, one retrieval op
+        // should carry an `epistemics` object in its response. Warning-only
+        // (Yellow), never red — the envelope is landing concurrently and a
+        // daemon built from an older binary is a staleness note, not a
+        // broken install.
+        checks.push(check_status("daemon.epistemics", || {
+            let sock = pixel_daemon::daemon::socket_path(root);
+            if !sock.exists() {
+                return Ok((CheckStatus::Yellow, DoctorCheckDetail {
+                    summary: "no daemon running — epistemics probe skipped".into(),
+                    detail: None,
+                }));
+            }
+            match probe_daemon_epistemics(&sock) {
+                Ok(true) => Ok((CheckStatus::Green, DoctorCheckDetail {
+                    summary: "daemon retrieval response carries an epistemics object".into(),
+                    detail: None,
+                })),
+                Ok(false) => Ok((CheckStatus::Yellow, DoctorCheckDetail {
+                    summary: "daemon retrieval response has NO epistemics object — daemon may predate the epistemics envelope; restart it".into(),
+                    detail: None,
+                })),
+                Err(e) => Ok((CheckStatus::Yellow, DoctorCheckDetail {
+                    summary: format!("epistemics probe inconclusive: {e}"),
+                    detail: None,
+                })),
+            }
         }));
 
         checks.push(check("index.freshness", || -> std::result::Result<DoctorCheckDetail, String> {
@@ -645,12 +818,352 @@ fn age_secs(mtime: SystemTime) -> u64 {
     now.saturating_sub(m)
 }
 
+/// Locate the installed pixel rule text: the managed block inside the first
+/// CLAUDE.md/AGENTS.md that carries one, else the canonical rule source at
+/// `~/.agent-config/rules/pixel.md`. Returns the source path and the text.
+fn installed_rule_text(home: &Path) -> Option<(PathBuf, String)> {
+    for path in config::find_agent_configs(home) {
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(start) = content.find(config::MANAGED_BEGIN) {
+            let body = &content[start + config::MANAGED_BEGIN.len()..];
+            let block = match body.find(config::MANAGED_END) {
+                Some(end) => &body[..end],
+                None => body,
+            };
+            return Some((path, block.to_string()));
+        }
+    }
+    let rules = home.join(config::PIXEL_RULES_REL);
+    fs::read_to_string(&rules).ok().map(|text| (rules, text))
+}
+
+/// Extract every `pixel …` command line from the fenced code blocks of a
+/// rule document. Trailing `# comments` are stripped; prose and non-pixel
+/// lines are ignored.
+pub fn extract_rule_commands(rule_text: &str) -> Vec<String> {
+    let mut in_fence = false;
+    let mut out = Vec::new();
+    for line in rule_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            continue;
+        }
+        // Strip a trailing shell comment (` # …`) — rule examples annotate
+        // commands this way.
+        let code = match trimmed.find(" #") {
+            Some(i) => trimmed[..i].trim_end(),
+            None => trimmed,
+        };
+        if code.starts_with("pixel ") {
+            out.push(code.to_string());
+        }
+    }
+    out
+}
+
+/// Normalize one documented `pixel …` line into a parseable argv:
+/// - `[…]` optional groups are UNWRAPPED (their flags get tested too);
+/// - `a|b|c` alternations pick the first alternative;
+/// - `<placeholder>` tokens (quoted or bare) become a dummy value;
+/// - bare `N` becomes `3` (numeric flag placeholders);
+/// - `/path/to/repo` becomes `.`;
+/// - a trailing `...` variadic marker is dropped.
+///
+/// Returns `None` when the line contains syntax this normalizer cannot
+/// handle — the caller reports such lines as "unparsed" instead of silently
+/// passing them.
+pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
+    // Unwrap bracketed optional groups: brackets may span several
+    // whitespace-separated tokens, so strip the characters up front.
+    let unbracketed: String = line.chars().filter(|c| *c != '[' && *c != ']').collect();
+
+    // Tokenize, honoring double quotes.
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for c in unbracketed.chars() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if in_quotes {
+        return None; // unbalanced quotes — can't normalize
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    let mut argv = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        // Drop a trailing variadic marker (`<f>...` → `<f>`).
+        let token = token.strip_suffix("...").unwrap_or(&token).to_string();
+        // Placeholder → dummy value. A quoted multi-word placeholder is one
+        // token by now (`<what broke, in the user's words>`).
+        let token = if token.starts_with('<') && token.ends_with('>') {
+            "x".to_string()
+        } else {
+            token
+        };
+        // Alternation outside placeholders: pick the first alternative
+        // (`report|rebase-if-clean` → `report`, `--merge|--stash-first` →
+        // `--merge`).
+        let token = match token.split('|').next() {
+            Some(first) if first.len() < token.len() => first.to_string(),
+            _ => token,
+        };
+        // Well-known placeholder spellings.
+        let token = match token.as_str() {
+            "/path/to/repo" => ".".to_string(),
+            "N" => "3".to_string(),
+            _ => token,
+        };
+        // Anything still carrying placeholder syntax is beyond this
+        // normalizer.
+        if token.contains('<') || token.contains('>') || token.contains('…') {
+            return None;
+        }
+        argv.push(token);
+    }
+    if argv.first().map(String::as_str) != Some("pixel") {
+        return None;
+    }
+    Some(argv)
+}
+
+/// Compare the installed rule text and the session usage string on the
+/// mandatory scenarios. Returns one message per drift found (empty = agree).
+pub fn scenario_mismatches(rule_text: &str, session_usage: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for scenario in MANDATORY_SCENARIOS {
+        let anchored = format!("pixel {scenario}");
+        let in_rule = rule_text.contains(&anchored);
+        let in_usage = session_usage.contains(scenario);
+        match (in_rule, in_usage) {
+            (true, false) => out.push(format!(
+                "'{scenario}' is mandated by the rule text but missing from the session usage string"
+            )),
+            (false, true) => out.push(format!(
+                "'{scenario}' is in the session usage string but the rule text never mentions `pixel {scenario}`"
+            )),
+            (false, false) => out.push(format!(
+                "'{scenario}' is missing from BOTH the rule text and the session usage string"
+            )),
+            (true, true) => {}
+        }
+    }
+    out
+}
+
+/// One NDJSON retrieval round trip against a running daemon socket, checking
+/// whether the response carries an `epistemics` object (envelope- or
+/// data-level). Short timeouts — this is a health probe, not a query.
+fn probe_daemon_epistemics(sock: &Path) -> std::result::Result<bool, String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let mut stream = UnixStream::connect(sock).map_err(|e| format!("connect: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| e.to_string())?;
+    let req = serde_json::json!({
+        "op": "search",
+        "pattern": "fn ",
+        "json": true,
+        "limit": 1,
+    });
+    let mut line = req.to_string();
+    line.push('\n');
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+    stream.flush().map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(stream);
+    let mut buf = String::new();
+    reader
+        .read_line(&mut buf)
+        .map_err(|e| format!("read: {e}"))?;
+    let resp: serde_json::Value =
+        serde_json::from_str(&buf).map_err(|e| format!("parse: {e}"))?;
+    let has = resp.get("epistemics").is_some()
+        || resp
+            .get("data")
+            .map(|d| d.get("epistemics").is_some())
+            .unwrap_or(false);
+    Ok(has)
+}
+
 /// Re-export the daemon socket-path helper for the CLI.
 pub use pixel_daemon::daemon::socket_path as daemon_socket_path;
 
 #[cfg(test)]
 mod tests {
     use super::facts_dead_reason;
+    use super::{extract_rule_commands, normalize_rule_command, scenario_mismatches};
+
+    // -- rule-vs-binary parity: extraction + normalization ------------------
+
+    const SAMPLE_RULE: &str = r#"
+## Scenario 1
+
+```bash
+# Deleted or currently-nonexistent code: search all history, stash, and reflog
+pixel excavate --phrase "<what you're looking for>" [--path <path>] [--json]
+
+pixel rescue "<what broke, in the user's words>" /path/to/repo [--json]
+
+pixel rescue --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]
+```
+
+Prose mentioning `pixel doctor` inline must NOT be extracted.
+
+```bash
+pixel targets --clear /path/to/repo   # when the task ends
+pixel reconcile /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]
+git clone https://example.com/repo.git
+```
+"#;
+
+    #[test]
+    fn extracts_only_fenced_pixel_lines_and_strips_comments() {
+        let commands = extract_rule_commands(SAMPLE_RULE);
+        assert_eq!(
+            commands,
+            vec![
+                "pixel excavate --phrase \"<what you're looking for>\" [--path <path>] [--json]",
+                "pixel rescue \"<what broke, in the user's words>\" /path/to/repo [--json]",
+                "pixel rescue --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]",
+                "pixel targets --clear /path/to/repo",
+                "pixel reconcile /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]",
+            ],
+            "must extract exactly the fenced pixel lines, comment-stripped, no inline prose"
+        );
+    }
+
+    #[test]
+    fn normalizes_placeholders_brackets_and_alternations() {
+        assert_eq!(
+            normalize_rule_command(
+                "pixel resolve \"<phrase>\" /path/to/repo [--json] [--limit N]"
+            ),
+            Some(vec![
+                "pixel".into(),
+                "resolve".into(),
+                "x".into(),
+                ".".into(),
+                "--json".into(),
+                "--limit".into(),
+                "3".into(),
+            ])
+        );
+        assert_eq!(
+            normalize_rule_command(
+                "pixel reconcile /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"
+            ),
+            Some(vec![
+                "pixel".into(),
+                "reconcile".into(),
+                ".".into(),
+                "--strategy".into(),
+                "report".into(),
+                "--push".into(),
+                "auto".into(),
+            ])
+        );
+        assert_eq!(
+            normalize_rule_command(
+                "pixel publish --files <f>... --message \"<msg>\" --request-id <id> /path/to/repo"
+            ),
+            Some(vec![
+                "pixel".into(),
+                "publish".into(),
+                "--files".into(),
+                "x".into(),
+                "--message".into(),
+                "x".into(),
+                "--request-id".into(),
+                "x".into(),
+                ".".into(),
+            ])
+        );
+        // Bracketed flag alternation picks the first flag.
+        assert_eq!(
+            normalize_rule_command(
+                "pixel rescue --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]"
+            )
+            .as_deref()
+            .and_then(|v| v.last().cloned()),
+            Some("--merge".to_string())
+        );
+    }
+
+    #[test]
+    fn unnormalizable_lines_are_reported_not_silently_passed() {
+        // Unbalanced quotes.
+        assert_eq!(normalize_rule_command("pixel search \"unclosed"), None);
+        // Ellipsis placeholder syntax the normalizer doesn't understand.
+        assert_eq!(normalize_rule_command("pixel search a…b"), None);
+        // Not a pixel line at all.
+        assert_eq!(normalize_rule_command("git status"), None);
+    }
+
+    // -- scenario consistency ------------------------------------------------
+
+    #[test]
+    fn scenario_agreement_is_empty_when_both_sides_name_all_five() {
+        let rule = "use pixel targets first, pixel resolve for phrases, \
+                    pixel rescue for history, pixel reconcile for sync, \
+                    pixel impact before edits";
+        assert!(
+            scenario_mismatches(rule, pixel_proto::op::SESSION_USAGE).is_empty(),
+            "all five scenarios present on both sides must produce zero mismatches"
+        );
+    }
+
+    #[test]
+    fn scenario_drift_is_flagged_per_missing_side() {
+        let rule_without_impact =
+            "pixel targets, pixel resolve, pixel rescue, pixel reconcile";
+        let usage_without_impact =
+            "targets resolve rescue reconcile — four scenarios only";
+        // Rule lacks impact → usage-only drift message.
+        let drift = scenario_mismatches(rule_without_impact, pixel_proto::op::SESSION_USAGE);
+        assert_eq!(drift.len(), 1, "exactly the impact scenario drifts: {drift:?}");
+        assert!(drift[0].contains("impact"));
+        // Usage lacks impact while the rule mandates it → red-worthy drift.
+        let rule_full = "pixel targets pixel resolve pixel rescue pixel reconcile pixel impact";
+        let drift = scenario_mismatches(rule_full, usage_without_impact);
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert!(drift[0].contains("missing from the session usage string"));
+    }
+
+    #[test]
+    fn live_session_usage_and_live_rule_source_agree_when_rule_readable() {
+        // The real parity gate runs inside `pixel doctor` against the
+        // installed text; here we only pin that the SESSION_USAGE constant
+        // itself names every mandatory scenario.
+        for scenario in super::MANDATORY_SCENARIOS {
+            assert!(
+                pixel_proto::op::SESSION_USAGE.contains(scenario),
+                "SESSION_USAGE must name '{scenario}'"
+            );
+        }
+    }
 
     #[test]
     fn poisoned_db_signature_is_red() {

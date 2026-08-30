@@ -503,3 +503,125 @@ fn fixture_leaves_widget_tsx_dirty_for_the_apply_safety_gate() {
          refuse against: status={status:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// --from/--to rev-range narrowing (the flags used to be accepted and
+// silently discarded — golden test that they actually restrict results)
+// ---------------------------------------------------------------------------
+
+const SUBJ_ADD: &str = "Add Widget.svelte";
+const SUBJ_EXTEND: &str = "Extend Widget.svelte with a title prop";
+const SUBJ_DELETE: &str = "swap to typed component";
+
+fn subjects(result: &pixel_facts::excavate::ExcavateResult) -> Vec<String> {
+    result.candidates.iter().map(|c| c.subject.clone()).collect()
+}
+
+#[test]
+fn excavate_from_to_narrows_candidates_to_the_rev_range() {
+    let dir = make_dropped_svelte_repo();
+    let root = dir.path();
+    let c1 = git(root, &["rev-parse", "main~2"]).trim().to_string();
+    let c2 = git(root, &["rev-parse", "main~1"]).trim().to_string();
+    let store = ingest(root);
+
+    // Unbounded baseline: all three phrase-bearing commits are present.
+    let all = store.excavate(Some(PHRASE), None, None, None, 50).expect("excavate");
+    let s = subjects(&all);
+    assert!(s.iter().any(|x| x == SUBJ_ADD), "baseline missing add: {s:?}");
+    assert!(s.iter().any(|x| x == SUBJ_EXTEND), "baseline missing extend: {s:?}");
+    assert!(s.iter().any(|x| x == SUBJ_DELETE), "baseline missing delete: {s:?}");
+
+    // --to c2: the deleting commit 3 is newer than the bound and must drop.
+    let to2 = store
+        .excavate(Some(PHRASE), None, None, Some(&c2), 50)
+        .expect("excavate --to");
+    let s = subjects(&to2);
+    assert!(!s.is_empty(), "--to must not empty the result set");
+    assert!(
+        s.iter().all(|x| x != SUBJ_DELETE),
+        "--to <commit2> must exclude the newer deleting commit: {s:?}"
+    );
+    assert!(s.iter().any(|x| x == SUBJ_ADD), "--to must keep older commits: {s:?}");
+    assert!(s.iter().any(|x| x == SUBJ_EXTEND), "--to is inclusive of the bound: {s:?}");
+
+    // --from c2: the add commit 1 is older than the bound and must drop;
+    // the bound itself stays included.
+    let from2 = store
+        .excavate(Some(PHRASE), None, Some(&c2), None, 50)
+        .expect("excavate --from");
+    let s = subjects(&from2);
+    assert!(
+        s.iter().all(|x| x != SUBJ_ADD),
+        "--from <commit2> must exclude older commits: {s:?}"
+    );
+    assert!(s.iter().any(|x| x == SUBJ_EXTEND), "--from is inclusive of the bound: {s:?}");
+    assert!(s.iter().any(|x| x == SUBJ_DELETE), "--from must keep newer commits: {s:?}");
+
+    // [c1..c2]: inclusive of both ends, excludes the newer deleting commit.
+    let mid = store
+        .excavate(Some(PHRASE), None, Some(&c1), Some(&c2), 50)
+        .expect("excavate --from --to");
+    let s = subjects(&mid);
+    assert!(s.iter().any(|x| x == SUBJ_ADD), "[from..to] includes the older bound: {s:?}");
+    assert!(s.iter().any(|x| x == SUBJ_EXTEND), "[from..to] includes the newer bound: {s:?}");
+    assert!(
+        s.iter().all(|x| x != SUBJ_DELETE),
+        "[from..to] excludes commits past the newer bound: {s:?}"
+    );
+
+    // last_good is derived from the FILTERED candidates, so it narrows too:
+    // bounded at --to c1 the newest phrase-bearing commit is the add itself.
+    let to1 = store
+        .excavate(Some(PHRASE), None, None, Some(&c1), 50)
+        .expect("excavate --to c1");
+    let lg = to1.last_good.as_ref().expect("last_good inside the range");
+    assert_eq!(lg.subject, SUBJ_ADD, "last_good must respect the range bound");
+}
+
+#[test]
+fn excavate_unresolvable_range_ref_is_a_structured_error() {
+    let dir = make_dropped_svelte_repo();
+    let store = ingest(dir.path());
+
+    let err = store
+        .excavate(Some(PHRASE), None, Some("no-such-ref"), None, 50)
+        .expect_err("an unresolvable --from ref must be an error, not a silently unfiltered answer");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("does not resolve") && msg.contains("no-such-ref"),
+        "error must name the bad ref and say it does not resolve: {msg}"
+    );
+
+    let err = store
+        .excavate(Some(PHRASE), None, None, Some("also-missing"), 50)
+        .expect_err("an unresolvable --to ref must be an error");
+    assert!(err.to_string().contains("also-missing"), "error names the ref: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// Shared diff-content heuristic (rescue's suspect detection calls this)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phrase_removed_between_flags_only_actual_removals() {
+    use pixel_facts::excavate::phrase_removed_between;
+    let kw = vec!["discount".to_string()];
+    // Removed: present before, absent after.
+    assert_eq!(
+        phrase_removed_between("fn apply_discount() {}", "fn nothing() {}", &kw),
+        Some("discount".to_string())
+    );
+    // Kept (e.g. reformatting): not a removal.
+    assert_eq!(
+        phrase_removed_between("apply_discount()", "apply_discount( )", &kw),
+        None
+    );
+    // Never present: not a removal.
+    assert_eq!(phrase_removed_between("", "fn apply_discount() {}", &kw), None);
+    // Case-insensitive matching.
+    assert_eq!(
+        phrase_removed_between("Apply_DISCOUNT here", "gone", &kw),
+        Some("discount".to_string())
+    );
+}

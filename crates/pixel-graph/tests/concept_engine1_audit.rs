@@ -598,7 +598,12 @@ fn symbol_fallback_tier_resolves_ident_phrase() {
     let (_dir, store) = build_fixture();
     let outcome = resolve(&store, "checkout page", &ResolveOptions::default()).expect("resolve");
     assert_eq!(outcome.tier, Some(Tier::Symbol), "{outcome:?}");
-    assert_eq!(outcome.confidence, Confidence::Ranked, "{outcome:?}");
+    // Phase 3 honesty fix: a SINGLE symbol whose ident words are exactly the
+    // query's ident words ("checkout page" → `CheckoutPage`) is the tier's
+    // best case and must be expressible as `resolved`, not permanently
+    // demoted to `ranked` by a hardcoded confidence.
+    assert_eq!(outcome.confidence, Confidence::Resolved, "{outcome:?}");
+    assert!(!outcome.scan_capped, "{outcome:?}");
     assert!(
         outcome
             .matches

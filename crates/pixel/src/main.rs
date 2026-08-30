@@ -271,7 +271,7 @@ enum Command {
         #[command(subcommand)]
         cmd: recall_cmd::RecallCmd,
     },
-    /// One-look error capture: query the sniper error sink (CLI + MCP).
+    /// One-look error capture: query the sniper error sink.
     Sniper {
         #[command(subcommand)]
         cmd: sniper_cmd::SniperCmd,
@@ -384,13 +384,17 @@ enum Command {
         /// Commit message.
         #[arg(short = 'm', long = "message")]
         message: String,
+        // Positional order matches Push: required remote + refspec first,
+        // then the defaulted path. (A defaulted positional BEFORE required
+        // ones trips clap's debug assertions — every debug-build parse
+        // panicked before this reorder.)
+        remote: String,
+        refspec: String,
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Files to stage (repo-relative).
         #[arg(long = "files")]
         files: Vec<String>,
-        remote: String,
-        refspec: String,
         /// Idempotency / recovery key.
         #[arg(long)]
         request_id: String,
@@ -536,7 +540,7 @@ enum Command {
     // -----------------------------------------------------------------
     // M5/M6 — install / doctor / migrate / hook
     // -----------------------------------------------------------------
-    /// Idempotent install: register the pixel MCP server, hooks, agent-config.
+    /// Idempotent install: scrub deprecated MCP entries, wire hooks + agent-config.
     Install {
         #[arg(long)]
         json: bool,
@@ -656,11 +660,42 @@ fn execute(path: &Path, req: Request, no_daemon: bool) -> Result<Value, String> 
 }
 
 fn unwrap_response(resp: Response) -> Result<Value, String> {
-    if resp.ok {
-        Ok(resp.into_data())
-    } else {
-        Err(resp.error_message())
+    if !resp.ok {
+        return Err(resp.error_message());
     }
+    // Display plumbing for the Envelope v2 honesty fields: the daemon
+    // attaches `epistemics`/`snapshot`/`warnings` at the ENVELOPE level, but
+    // the CLI historically prints only the result payload — which would
+    // silently strip the completeness contract. Fold them into the printed
+    // object (never clobbering a same-named key an op itself emitted) so
+    // every cap surfaces in what the caller actually sees.
+    let Response {
+        snapshot,
+        epistemics,
+        warnings,
+        result,
+        ..
+    } = resp;
+    let mut data = result.unwrap_or(Value::Null);
+    if let Some(obj) = data.as_object_mut() {
+        if let Some(e) = epistemics
+            && !obj.contains_key("epistemics")
+        {
+            obj.insert("epistemics".into(), serde_json::to_value(e).unwrap_or(Value::Null));
+        }
+        if let Some(s) = snapshot
+            && !obj.contains_key("snapshot")
+        {
+            obj.insert("snapshot".into(), serde_json::to_value(s).unwrap_or(Value::Null));
+        }
+        if !warnings.is_empty() && !obj.contains_key("warnings") {
+            obj.insert(
+                "warnings".into(),
+                serde_json::to_value(warnings).unwrap_or(Value::Null),
+            );
+        }
+    }
+    Ok(data)
 }
 
 fn announce_graph_build(data: &Value) {
@@ -1256,6 +1291,15 @@ fn run_search_one(
             data.get("byte_cap").and_then(Value::as_u64).unwrap_or(0),
             data.get("next_offset").and_then(Value::as_u64).unwrap_or(0),
         );
+    }
+    // Epistemics surfacing for search's line-oriented output (which prints
+    // matches, not the whole response object): when the answer is a bounded
+    // partial, say so on stderr with the named caps.
+    if let Some(e) = data.get("epistemics")
+        && e.get("lower_bound").and_then(Value::as_bool) == Some(true)
+        && let Some(basis) = e.get("basis").and_then(Value::as_str)
+    {
+        eprintln!("note: bounded result — {basis}");
     }
     if stats && let Some(s) = data.get("stats") {
         eprintln!(
@@ -2271,6 +2315,11 @@ fn run() -> Result<(), String> {
             let root = discover_root(&path)?;
             let report = pixel_install::doctor::doctor(&pixel_install::doctor::DoctorOptions {
                 repo_root: Some(root),
+                // Hand the doctor this binary's REAL clap parser so the
+                // rule-vs-binary parity check dry-runs every `pixel …` line
+                // documented in the installed rule text against the actual
+                // CLI definition — documented-but-rejected syntax goes red.
+                syntax_validator: Some(validate_cli_syntax),
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
@@ -2296,10 +2345,14 @@ fn run() -> Result<(), String> {
                 // tested for exhaustiveness against every real variant, so
                 // this can never advertise a capability that doesn't exist.
                 let ops: Vec<&str> = pixel_proto::op::SESSION_CAPABILITIES.to_vec();
+                // The usage doctrine is a shared constant beside the op
+                // registry (pixel-proto), so the injected text, the doctor's
+                // scenario-consistency check, and the rule file can never
+                // silently disagree on the five mandatory scenarios.
                 let mut pixel = serde_json::json!({
                     "capabilities": ops,
                     "protocol_version": PROTOCOL_VERSION,
-                    "usage": "pixel is the unified retrieval + git engine. Use `pixel <verb>` for search, resolve, targets, history, and safe git ops. Mandatory: `pixel targets \"<task>\"` before the first file read; `pixel resolve \"<phrase>\"` before free-text search; `pixel rescue`/`pixel excavate` the moment code was working before; `pixel reconcile` for any branch sync.",
+                    "usage": pixel_proto::op::SESSION_USAGE,
                 });
                 // Per-repo freshness: index commit, graph presence, facts
                 // phase/fresh. Best-effort — if status can't be read (not a
@@ -2346,6 +2399,22 @@ fn main() -> ExitCode {
             eprintln!("pixel: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Dry-run parse one `pixel …` argv (including the leading "pixel") against
+/// this binary's real clap definition — nothing is executed. Used by
+/// `pixel doctor`'s rule-vs-binary parity check so the installed rule text
+/// can never document syntax the parser would reject.
+fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
+    match Cli::try_parse_from(args) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e
+            .to_string()
+            .lines()
+            .next()
+            .unwrap_or("parse error")
+            .to_string()),
     }
 }
 
@@ -2414,6 +2483,75 @@ fn excavate_show(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// End-to-end rule-vs-binary parity of the doctor's normalizer against
+    /// THIS binary's real clap definition: every canonical rule command
+    /// shape must normalize and dry-run parse. This is the compile-time-side
+    /// twin of the runtime `rule.parity` doctor check.
+    #[test]
+    fn canonical_rule_command_lines_parse_against_the_real_cli() {
+        let canonical = [
+            // NOTE: the historical rule text wrote `[--path <path>]` here —
+            // the real flag is `--file`. That drift is exactly what the
+            // runtime `rule.parity` doctor check flags.
+            r#"pixel excavate --phrase "<what you're looking for>" [--file <path>] [--json]"#,
+            r#"pixel rescue "<what broke, in the user's words>" /path/to/repo [--json]"#,
+            r#"pixel rescue --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]"#,
+            r#"pixel resolve "<phrase>" /path/to/repo [--json] [--limit N]"#,
+            r#"pixel search "<pattern>" /path/to/repo --context 5 [--json] [--limit N]"#,
+            r#"pixel reconcile /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"#,
+            r#"pixel targets "<one-line task description>" /path/to/repo [--json] [--limit N]"#,
+            r#"pixel targets --clear /path/to/repo"#,
+            r#"pixel impact <symbol_name_or_uid> /path/to/repo [--direction upstream|downstream] [--depth N] [--json]"#,
+            r#"pixel changes /path/to/repo [--base <ref>] [--json]"#,
+            r#"pixel inspect /path/to/repo [--json]"#,
+            r#"pixel review /path/to/repo [--json]"#,
+            r#"pixel history /path/to/repo [--ref <ref>] [--limit N] [--json]"#,
+            r#"pixel diff <from> /path/to/repo [--paths <p>...] [--json]"#,
+            r#"pixel publish --files <f>... --message "<msg>" --request-id <id> /path/to/repo"#,
+            r#"pixel push <remote> <refspec> /path/to/repo --request-id <id>"#,
+            r#"pixel ship --files <f>... --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
+            r#"pixel branch <name> /path/to/repo --request-id <id>"#,
+            r#"pixel sync <remote> /path/to/repo [--json]"#,
+            r#"pixel update /path/to/repo --expected-head <oid> --target-oid <oid> --request-id <id>"#,
+            r#"pixel status /path/to/repo"#,
+            r#"pixel index --history ."#,
+            r#"pixel install"#,
+            r#"pixel doctor"#,
+        ];
+        let mut failures = Vec::new();
+        for line in canonical {
+            match pixel_install::doctor::normalize_rule_command(line) {
+                None => failures.push(format!("`{line}` did not normalize")),
+                Some(argv) => {
+                    if let Err(e) = validate_cli_syntax(&argv) {
+                        failures.push(format!("`{line}` → argv {argv:?} → {e}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "canonical rule command lines must parse against the real CLI:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// A knowingly-wrong documented command must be REJECTED — this is what
+    /// makes the parity check able to go red at all.
+    #[test]
+    fn known_bad_rule_command_lines_are_rejected() {
+        for bad in [
+            vec!["pixel".to_string(), "search".into(), "--no-such-flag".into()],
+            vec!["pixel".to_string(), "frobnicate".into()],
+            vec!["pixel".to_string(), "rescue".into(), "--limit".into(), "3".into()],
+        ] {
+            assert!(
+                validate_cli_syntax(&bad).is_err(),
+                "argv {bad:?} should be rejected by the CLI parser"
+            );
+        }
+    }
 
     #[test]
     fn enrich_with_context_returns_surrounding_lines() {

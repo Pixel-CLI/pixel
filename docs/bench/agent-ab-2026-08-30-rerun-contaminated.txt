@@ -1,0 +1,70 @@
+# INVALID RUN — comparison unusable; contamination claim itself UNVERIFIABLE (kept as evidence)
+# This run's baseline arm (hook-stripped settings, NO --safe-mode) was flagged CONTAMINATED in all 12
+# cells by the harness's original STRING-LEVEL check. That check was later shown to false-positive on
+# file content the agent read (it flagged 12/12 provably-clean safe-mode baseline cells the same way,
+# see agent-ab-2026-08-30-safemode-baseline.txt). This run's transcripts were overwritten before a
+# tool_use-level re-check could run, so whether its baseline actually invoked pixel is UNKNOWN.
+# Either way: do not cite this run as a comparison. Harness now uses --safe-mode + tool_use-level checks.
+
+=== pixel-bench: claude -p agent workflows ===
+Date: 2026-08-30T08:30:38Z
+Repo: ccb9c72 (/Users/livio/Documents/pixel)
+Pixel: pixel 0.1.0
+Reps per cell: 3
+Baseline settings (pixel hooks stripped): /tmp/pixel-bench-baseline-settings.json
+
+--- scenario s1-locate ---
+  baseline-s1-locate-1: 17457ms (api=13774ms) tools=2 turns=5
+  baseline-s1-locate-2: 17428ms (api=13688ms) tools=2 turns=5
+  baseline-s1-locate-3: 17038ms (api=13186ms) tools=2 turns=5
+  pixel-s1-locate-1: 17308ms (api=13389ms) tools=1 turns=3
+  pixel-s1-locate-2: 18754ms (api=15208ms) tools=3 turns=7
+  pixel-s1-locate-3: 17111ms (api=13298ms) tools=2 turns=5
+--- scenario s2-scope ---
+  pixel-s2-scope-1: 89168ms (api=85519ms) tools=10 turns=22
+  pixel-s2-scope-2: 123165ms (api=119501ms) tools=21 turns=40
+  pixel-s2-scope-3: 107477ms (api=103832ms) tools=22 turns=36
+  baseline-s2-scope-1: 104052ms (api=100439ms) tools=18 turns=36
+  baseline-s2-scope-2: 126549ms (api=122850ms) tools=16 turns=34
+  baseline-s2-scope-3: 82275ms (api=78663ms) tools=11 turns=23
+--- scenario s3-sync ---
+  pixel-s3-sync-1: 13165ms (api=9382ms) tools=1 turns=4
+  pixel-s3-sync-2: 12545ms (api=8524ms) tools=1 turns=3
+  pixel-s3-sync-3: 13084ms (api=9204ms) tools=1 turns=3
+  baseline-s3-sync-1: 14329ms (api=10512ms) tools=1 turns=4
+  baseline-s3-sync-2: 12379ms (api=8463ms) tools=1 turns=3
+  baseline-s3-sync-3: 11974ms (api=8196ms) tools=1 turns=3
+--- scenario s4-recover ---
+  baseline-s4-recover-1: 73960ms (api=70459ms) tools=12 turns=25
+  baseline-s4-recover-2: 49931ms (api=46440ms) tools=7 turns=15
+  baseline-s4-recover-3: 33839ms (api=30139ms) tools=6 turns=12
+  pixel-s4-recover-1: 45253ms (api=41624ms) tools=8 turns=19
+  pixel-s4-recover-2: 79177ms (api=75562ms) tools=13 turns=25
+  pixel-s4-recover-3: 112029ms (api=108488ms) tools=20 turns=41
+
+=== PIXEL USAGE CHECK ===
+  pixel-s1-locate-1: pixel used
+  pixel-s1-locate-2: pixel used
+  pixel-s1-locate-3: pixel used
+  pixel-s2-scope-1: pixel used
+  pixel-s2-scope-2: pixel used
+  pixel-s2-scope-3: pixel used
+  pixel-s3-sync-1: pixel used
+  pixel-s3-sync-2: pixel used
+  pixel-s3-sync-3: pixel used
+  pixel-s4-recover-1: pixel used
+  pixel-s4-recover-2: pixel used
+  pixel-s4-recover-3: pixel used
+  baseline-s1-locate-1: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s1-locate-2: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s1-locate-3: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s2-scope-1: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s2-scope-2: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s2-scope-3: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s3-sync-1: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s3-sync-2: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s3-sync-3: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s4-recover-1: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s4-recover-2: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+  baseline-s4-recover-3: CONTAMINATED — baseline invoked pixel (arm not pixel-free)
+=== done ===

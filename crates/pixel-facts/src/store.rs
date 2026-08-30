@@ -130,6 +130,21 @@ impl FactsStore {
         let pixel_dir = root.join(".pixel");
         std::fs::create_dir_all(&pixel_dir)?;
         let path = pixel_dir.join(HISTORY_DB_FILE);
+        // Cross-process guard: without this, two concurrent pixel processes
+        // (e.g. two agent sessions both running `pixel index --history`
+        // against the same repo) can race the rebuild-decision + delete +
+        // recreate sequence below — one process unlinks history.db/-wal/-shm
+        // while the other still has a live WAL connection reading/writing
+        // those exact inodes, which SQLite surfaces as "disk I/O error"
+        // rather than a lock-contention error. Held only for this open
+        // sequence, not for the store's lifetime, so it doesn't serialize
+        // ongoing query traffic.
+        let lock_path = pixel_dir.join(format!("{HISTORY_DB_FILE}.lock"));
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)?;
+        lock_file.lock()?;
         // Self-healing: rebuild on structural corruption OR a schema-version
         // mismatch OR a pre-versioned DB that already has rows. The db is
         // derived data, never load-bearing for correctness, so wiping it is
@@ -151,6 +166,7 @@ impl FactsStore {
                 }
             }
         };
+        drop(lock_file);
         Ok(FactsStore {
             conn,
             runner: GitRunner::new(&root),

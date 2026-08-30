@@ -18,7 +18,7 @@ use pixel_index::index::{MAX_FILE_BYTES, open_regular_bounded};
 use pixel_index::indexset::{IndexSet, IndexSetError};
 use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, GraphStore, SymbolKind, SymbolRow};
-use pixel_proto::{Envelope, ErrorCode, PixelError, SnapshotInfo};
+use pixel_proto::{Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, Warning};
 
 pub const GRAPH_DB_FILE: &str = "graph.db";
 /// Increment whenever the daemon request/response contract changes in a way
@@ -267,16 +267,34 @@ impl Service {
         let op_name = req.op_name();
         // Ops that return repo state attach a `snapshot` envelope field so
         // callers can correlate the answer with the exact working-tree state
-        // it was computed against (HEAD, branch, dirty file list).
+        // it was computed against (HEAD, branch, dirty file list). This
+        // covers the git-state ops AND every retrieval-class op: a retrieval
+        // answer is only meaningful relative to the repo state it was
+        // computed against.
         let attach_snapshot = matches!(
             op_name,
             "inspect" | "review" | "diff" | "status" | "changes"
-        );
+        ) || is_retrieval_op(op_name);
         match self.dispatch(req) {
             Ok(v) => {
                 let mut env = Envelope::success(op_name, v);
                 if attach_snapshot {
                     env = env.with_snapshot(self.repo_snapshot());
+                }
+                // Epistemics choke point: EVERY successful retrieval-class
+                // response carries an `epistemics` object — this is the ONLY
+                // place retrieval envelopes are built, so an op cannot ship
+                // without one. Ops that fired caps have them named in
+                // `basis` and mirrored as envelope warnings; ops that
+                // attested nothing get a conservative not-closed-world
+                // default rather than an implied claim of completeness.
+                if is_retrieval_op(op_name) {
+                    let (epistemics, cap_warnings) =
+                        derive_epistemics(op_name, env.result.as_ref().unwrap_or(&Value::Null));
+                    env = env.with_epistemics(epistemics);
+                    if !cap_warnings.is_empty() {
+                        env = env.with_warnings(cap_warnings);
+                    }
                 }
                 env
             }
@@ -485,6 +503,9 @@ impl Service {
             }
         };
 
+        // Epistemics: the ranked branch's candidate pool is itself capped —
+        // when it fires, ranking never even saw the overflow candidates.
+        let mut ranked_pool_capped = false;
         let (matches, stats) = if ranked {
             // Ranked search cannot simply rerank the (offset, limit)-sliced
             // page the unranked branch fetches below: that page is sliced
@@ -513,6 +534,9 @@ impl Service {
                 .index
                 .search_page_in(pattern, 0, Some(RANK_CANDIDATE_CAP), paths)
                 .map_err(|e| e.to_string())?;
+            if pool_stats.truncated {
+                ranked_pool_capped = true;
+            }
             let ranking_graph = self.open_graph_for_ranking();
             let ranked_pool = rank_search_matches(&pool, pattern, &ranking_graph);
 
@@ -567,8 +591,30 @@ impl Service {
         // `limit` matches were found but the byte cap reduced the output.
         let truncated = stats.truncated || byte_capped;
         let next_offset = truncated.then_some(offset.saturating_add(arr.len()));
+        // Named caps for the envelope epistemics: every bound that actually
+        // fired on THIS response, so a partial answer is explicitly bounded
+        // instead of silently truncated.
+        let mut caps: Vec<String> = Vec::new();
+        if byte_capped {
+            caps.push(format!(
+                "output truncated by the {BYTE_CAP}-byte response cap; continue via next_offset"
+            ));
+        }
+        if stats.truncated {
+            caps.push(format!(
+                "match list truncated at row limit {row_limit}; more matches exist — continue \
+                 via next_offset"
+            ));
+        }
+        if ranked_pool_capped {
+            caps.push(format!(
+                "ranked candidate pool capped at {MAX_LIMIT} matches; ranking never saw \
+                 candidates beyond the cap"
+            ));
+        }
         Ok(json!({
             "matches": arr,
+            "caps": caps,
             "truncated": truncated,
             "offset": offset,
             "next_offset": next_offset,
@@ -606,17 +652,29 @@ impl Service {
         // S3: per-keyword content match counts (capped probes keep this ms-scale).
         const CONTENT_PROBE_LIMIT: usize = 500;
         let mut content_hits: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+        // Epistemics: every probe cap that fires is NAMED here and forces
+        // lower_bound on the report envelope — a truncated probe must never
+        // feed an "exhaustive" claim.
+        let mut probe_caps: Vec<String> = Vec::new();
         // Phase 3 item 1 (targets evidence): keep the first ~2 match lines per
         // (file, keyword) so the caller can verify a target's content match
         // without re-searching. Near-zero cost — the lines are already fetched.
         let mut evidence: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         for kw in &query.keywords {
-            // Keywords are [a-z0-9_]+ by construction — safe inside a regex.
-            let pattern = format!("(?i){kw}");
-            if let Ok((matches, _)) =
+            // Word-bounded so "auth" cannot count every "author" as signal.
+            // Keywords are [a-z0-9_]+ by construction (tokenize_task), but
+            // escape defensively anyway.
+            let pattern = format!(r"(?i)\b{}\b", regex_escape_keyword(kw));
+            if let Ok((matches, probe_stats)) =
                 self.index
                     .search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
             {
+                if probe_stats.truncated {
+                    probe_caps.push(format!(
+                        "content probe truncated at {CONTENT_PROBE_LIMIT} matches for keyword \
+                         '{kw}'; files beyond the cap carry no content signal"
+                    ));
+                }
                 let mut counts: BTreeMap<String, u32> = BTreeMap::new();
                 let mut kept_per_file: HashMap<String, usize> = HashMap::new();
                 for m in matches {
@@ -708,6 +766,7 @@ impl Service {
                 cluster_neighbors,
                 graph_available,
                 envelope,
+                caps: probe_caps,
             },
             &opts,
         );
@@ -788,8 +847,13 @@ impl Service {
         let budget = budget_tokens.unwrap_or(2000);
         let value_tokens =
             |value: &Value| estimate_tokens(&serde_json::to_string(value).unwrap_or_default());
+        // `budget_basis` declares the approximation behind the token cap:
+        // `estimate_tokens` is a bytes/4 heuristic, not a real tokenizer, so
+        // the fit is approximate and the response says so instead of
+        // presenting the heuristic as an exact token count.
         let minimum_response = json!({
             "budget_tokens": budget,
+            "budget_basis": pixel_context::BUDGET_BASIS,
             "rendered_tokens": 0,
             "budgeted": true,
             "truncated": false,
@@ -1379,6 +1443,170 @@ impl Service {
         };
         compute_signals(&runner, None, &[], None, &dirty, candidates, &opts).unwrap_or_default()
     }
+}
+
+// ---------------------------------------------------------------------------
+// epistemics — the honesty layer every retrieval-class response carries
+// ---------------------------------------------------------------------------
+
+/// The retrieval-class ops: answers computed FROM repo state (index/graph/
+/// working tree) whose completeness can silently degrade under caps. Every
+/// one of these MUST ship an `epistemics` object (enforced in
+/// `Service::handle` + the `every_retrieval_op_response_carries_epistemics`
+/// test). Mutation and admin ops (publish/push/ping/…) are not listed: they
+/// report what they DID, not what exists, so completeness honesty does not
+/// apply the same way.
+pub const RETRIEVAL_OPS: &[&str] = &[
+    "search",
+    "resolve",
+    "targets",
+    "impact",
+    "uses",
+    "trace",
+    "changes",
+    "context",
+    "symbol",
+    "processes",
+    "clusters",
+];
+
+fn is_retrieval_op(op_name: &str) -> bool {
+    RETRIEVAL_OPS.contains(&op_name)
+}
+
+/// Backslash-escape regex metacharacters in a probe keyword. Keywords from
+/// `tokenize_task` are `[a-z0-9_]+` by construction, so this is a no-op in
+/// practice, but the probe must stay literal even if that invariant ever
+/// changes upstream. Equivalent to `regex::escape` for the ASCII range
+/// without pulling the `regex` crate into this crate's dependency set.
+fn regex_escape_keyword(kw: &str) -> String {
+    let mut out = String::with_capacity(kw.len());
+    for c in kw.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else if c.is_ascii() {
+            out.push('\\');
+            out.push(c);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Derive the envelope [`Epistemics`] (and mirrored cap warnings) for a
+/// retrieval-class response from the completeness markers the op's result
+/// carries.
+///
+/// Why derivation-at-the-choke-point instead of a compile-time typed builder
+/// per op: `dispatch` funnels 30+ ops through `Result<Value, String>`, and
+/// several result shapes are produced by crates other agents own
+/// (pixel-ops) — a full typed-response refactor ripples across ownership
+/// boundaries. This function plus the response-walk test gives the same
+/// guarantee mechanically: a retrieval response cannot ship without
+/// epistemics, and an op that attests nothing is published as
+/// `closed_world: false` (conservative) rather than silently complete.
+///
+/// Markers consumed (ops embed these in their result JSON):
+/// - `caps: [string]` — named caps the op fired (search, targets via
+///   `envelope.caps`).
+/// - `truncated: bool` + `next_offset` — pagination/byte caps.
+/// - `envelope.lower_bound` / `envelope.unresolved_same_name` — the graph
+///   honesty envelope (impact/uses/symbol/context/targets).
+/// - `scan_capped` + `basis` — resolve's bounded fallback scans.
+/// - `graph_build.build_ms` presence — the graph was rebuilt for THIS answer,
+///   so staleness is 0ms (the one cheap staleness signal available).
+fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
+    let mut caps: Vec<String> = Vec::new();
+
+    // Op-declared named caps (top-level and inside the targets envelope).
+    for path in ["/caps", "/envelope/caps"] {
+        if let Some(arr) = v.pointer(path).and_then(Value::as_array) {
+            caps.extend(arr.iter().filter_map(Value::as_str).map(String::from));
+        }
+    }
+
+    // Generic pagination / byte-cap truncation.
+    if v.get("truncated").and_then(Value::as_bool) == Some(true) {
+        // Search already names its caps in `caps`; avoid a duplicate
+        // generic entry when specific ones exist for this marker.
+        let already_named = caps.iter().any(|c| c.contains("truncated"));
+        if !already_named {
+            if v.get("next_offset").is_some_and(|n| !n.is_null()) {
+                caps.push(
+                    "results truncated by row/byte cap; more exist — continue via next_offset"
+                        .to_string(),
+                );
+            } else {
+                caps.push("results truncated by an output cap".to_string());
+            }
+        }
+    }
+
+    // Graph honesty envelope (impact/uses/symbol/context; targets folds its
+    // graph state into envelope.caps + note instead).
+    let graph_lower =
+        v.pointer("/envelope/lower_bound").and_then(Value::as_bool) == Some(true);
+    if graph_lower {
+        let unresolved = v
+            .pointer("/envelope/unresolved_same_name")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if unresolved > 0 {
+            caps.push(format!(
+                "graph lower bound: {unresolved} unresolved same-name call site(s) — \
+                 edges beyond this answer may exist"
+            ));
+        } else if caps.is_empty() {
+            caps.push("graph lower bound: resolver could not close the world".to_string());
+        }
+    }
+
+    // Resolve's bounded fallback scans.
+    if v.get("scan_capped").and_then(Value::as_bool) == Some(true) {
+        caps.push("fallback table scan hit its row cap; unscanned rows were never considered"
+            .to_string());
+    }
+
+    let source = match op_name {
+        "search" => "text index",
+        "targets" | "resolve" => "text index + code graph",
+        "changes" => "code graph + working-tree diff",
+        _ => "code graph",
+    };
+    let mut basis = String::from(source);
+    if let Some(tier_basis) = v.get("basis").and_then(Value::as_str) {
+        // resolve: which tier produced the answer.
+        basis.push_str("; ");
+        basis.push_str(tier_basis);
+    }
+    if !caps.is_empty() {
+        basis.push_str("; caps: ");
+        basis.push_str(&caps.join("; "));
+    }
+
+    // The one cheap staleness signal: a graph rebuilt for this very answer
+    // is 0ms stale. Anything else is left unmeasured (None), never guessed.
+    let staleness_ms = v
+        .get("graph_build")
+        .and_then(|b| b.get("build_ms"))
+        .and_then(Value::as_u64)
+        .map(|_| 0u64);
+
+    let epistemics = Epistemics {
+        closed_world: caps.is_empty(),
+        lower_bound: !caps.is_empty(),
+        basis,
+        staleness_ms,
+    };
+    let warnings = caps
+        .into_iter()
+        .map(|message| Warning {
+            code: "RESULT_CAPPED".to_string(),
+            message,
+        })
+        .collect();
+    (epistemics, warnings)
 }
 
 // ---------------------------------------------------------------------------
@@ -2869,6 +3097,249 @@ mod tests {
             paths.first().copied(),
             Some("ledger.ts"),
             "per-word filename signal must rank ledger.ts first, got {paths:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Phase 3 item 1 — the epistemics choke point: EVERY retrieval-class
+    /// op's successful response must carry an `epistemics` object and a
+    /// repo `snapshot`. This is the mechanical walk over `RETRIEVAL_OPS`
+    /// that makes shipping a retrieval answer without epistemics a test
+    /// failure, given the choke-point enforcement in `Service::handle`.
+    #[test]
+    fn every_retrieval_op_response_carries_epistemics_and_snapshot() {
+        let root = tmpdir("epistemics-walk");
+        std::fs::write(
+            root.join("a.ts"),
+            "export function alpha(x: number): number { return x + 1 }\n\
+             export function beta(x: number): number { return alpha(x) }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        // Dirty edit so `changes` has something to report.
+        std::fs::write(
+            root.join("a.ts"),
+            "export function alpha(x: number): number { return x + 2 }\n\
+             export function beta(x: number): number { return alpha(x) }\n",
+        )
+        .unwrap();
+
+        let mut svc = Service::open(&root).unwrap();
+        let uid = {
+            let sym = svc.handle(Request::Symbol { name: "alpha".into() });
+            sym.data()["symbols"][0]["uid"].as_str().unwrap().to_string()
+        };
+
+        let requests: Vec<(& str, Request)> = vec![
+            ("search", Request::Search {
+                pattern: "alpha".into(),
+                json: true,
+                limit: Some(10),
+                offset: None,
+                paths: None,
+                scope: None,
+            }),
+            ("resolve", Request::Resolve { phrase: "alpha".into(), limit: Some(5) }),
+            ("targets", Request::Targets { task: "alpha beta".into(), limit: Some(5) }),
+            ("impact", Request::Impact {
+                uid_or_name: "alpha".into(),
+                direction: "upstream".into(),
+                depth: Some(2),
+            }),
+            ("uses", Request::Uses {
+                uid_or_name: "alpha".into(),
+                role: "callers".into(),
+                offset: None,
+            }),
+            ("trace", Request::Trace { from: "beta".into(), to: "alpha".into() }),
+            ("changes", Request::Changes { base: None, offset: None }),
+            ("context", Request::Context { uid, budget_tokens: Some(2000) }),
+            ("symbol", Request::Symbol { name: "alpha".into() }),
+            ("processes", Request::Processes { offset: None }),
+            ("clusters", Request::Clusters { offset: None }),
+        ];
+
+        // The walk itself must cover the registry exactly — a new retrieval
+        // op added to RETRIEVAL_OPS without a row here fails loudly.
+        let walked: std::collections::HashSet<&str> =
+            requests.iter().map(|(name, _)| *name).collect();
+        for op in super::RETRIEVAL_OPS {
+            assert!(walked.contains(op), "RETRIEVAL_OPS entry {op:?} not exercised by this test");
+        }
+
+        for (name, req) in requests {
+            assert_eq!(req.op_name(), name, "walk row mislabeled");
+            let resp = svc.handle(req);
+            assert!(resp.ok, "{name}: {:?}", resp.error);
+            let epistemics = resp
+                .epistemics
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: retrieval response shipped WITHOUT epistemics"));
+            assert!(
+                !epistemics.basis.is_empty(),
+                "{name}: epistemics.basis must name the answer's source"
+            );
+            // A response claiming closed_world must not simultaneously admit
+            // a lower bound, and vice versa.
+            assert_ne!(
+                epistemics.closed_world, epistemics.lower_bound,
+                "{name}: closed_world and lower_bound must be complementary here: {epistemics:?}"
+            );
+            let snapshot = resp
+                .snapshot
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: retrieval response shipped WITHOUT snapshot"));
+            assert!(snapshot.head.is_some(), "{name}: snapshot must carry HEAD");
+            assert!(
+                snapshot.dirty.iter().any(|p| p == "a.ts"),
+                "{name}: snapshot must list the dirty file, got {:?}",
+                snapshot.dirty
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Phase 3 item 2 — targets honesty: when the 500-match content probe
+    /// cap fires for a keyword, the targets envelope must say lower_bound
+    /// and NAME the cap; the "exhaustive" sentence must not be emitted.
+    #[test]
+    fn targets_probe_cap_sets_lower_bound_and_names_the_cap() {
+        let root = tmpdir("targets-probe-cap");
+        // 6 files x 100 lines = 600 word-bounded matches of "needle" —
+        // comfortably beyond the 500-match probe cap.
+        for f in 0..6 {
+            let body: String = (0..100)
+                .map(|i| format!("// needle occurrence {f}-{i}\n"))
+                .collect();
+            std::fs::write(root.join(format!("f{f}.rs")), body).unwrap();
+        }
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "many"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Targets {
+            task: "needle probe".into(),
+            limit: Some(20),
+        });
+        assert!(resp.ok, "targets: {:?}", resp.error);
+        let envelope = &resp.data()["envelope"];
+        assert_eq!(
+            envelope["lower_bound"].as_bool(),
+            Some(true),
+            "probe cap must force lower_bound: {envelope:?}"
+        );
+        let caps = envelope["caps"].as_array().unwrap();
+        assert!(
+            caps.iter().any(|c| {
+                let s = c.as_str().unwrap_or_default();
+                s.contains("content probe truncated at 500") && s.contains("'needle'")
+            }),
+            "the fired probe cap must be NAMED with its keyword: {caps:?}"
+        );
+        let closed_world = resp.data()["closed_world"].as_str().unwrap();
+        assert!(
+            !closed_world.contains("This list is exhaustive"),
+            "capped probe must not claim exhaustiveness: {closed_world}"
+        );
+        assert!(
+            closed_world.contains("content probe truncated at 500"),
+            "the bounded phrasing must name the cap: {closed_world}"
+        );
+        // And the envelope-level epistemics must agree.
+        let epistemics = resp.epistemics.as_ref().unwrap();
+        assert!(!epistemics.closed_world && epistemics.lower_bound);
+        assert!(epistemics.basis.contains("content probe truncated at 500"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Phase 3 item 2 — the content probe is word-bounded: keyword "auth"
+    /// must not count "authorized"/"oauthToken" mentions as content signal.
+    #[test]
+    fn targets_content_probe_is_word_bounded() {
+        let root = tmpdir("targets-word-bound");
+        // Only substring mentions of "auth" — no word-bounded occurrence.
+        std::fs::write(
+            root.join("substr.rs"),
+            "// authorized oauthToken authentication\n",
+        )
+        .unwrap();
+        // A real word-bounded occurrence.
+        std::fs::write(root.join("word.rs"), "// auth flow lives here\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Targets {
+            task: "auth handling".into(),
+            limit: Some(10),
+        });
+        assert!(resp.ok, "targets: {:?}", resp.error);
+        let targets = resp.data()["targets"].as_array().unwrap();
+        let content_reason = |path: &str| -> bool {
+            targets
+                .iter()
+                .filter(|t| t["path"].as_str() == Some(path))
+                .flat_map(|t| t["reasons"].as_array().cloned().unwrap_or_default())
+                .any(|r| {
+                    r.as_str().unwrap_or_default().contains("content matches")
+                        && r.as_str().unwrap_or_default().contains("auth")
+                })
+        };
+        assert!(
+            content_reason("word.rs"),
+            "word-bounded 'auth' occurrence must count as content signal: {targets:?}"
+        );
+        assert!(
+            !content_reason("substr.rs"),
+            "substring-only mentions must NOT count as 'auth' content signal: {targets:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Phase 3 item 3 — resolve surfaces the tier and scan-cap state in its
+    /// serialized output, and an exact-unique identifier resolves as
+    /// `resolved` (not permanently `ranked`).
+    #[test]
+    fn resolve_reports_tier_basis_and_resolved_confidence() {
+        let root = tmpdir("resolve-honesty");
+        std::fs::write(
+            root.join("a.ts"),
+            "export function uniqueTargetFn(): number { return 1 }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Resolve {
+            phrase: "uniqueTargetFn".into(),
+            limit: Some(5),
+        });
+        assert!(resp.ok, "resolve: {:?}", resp.error);
+        let data = resp.data();
+        assert_eq!(
+            data["confidence"].as_str(),
+            Some("resolved"),
+            "exact-unique identifier must resolve: {data:?}"
+        );
+        assert_eq!(data["scan_capped"].as_bool(), Some(false));
+        assert!(
+            data["basis"].as_str().unwrap_or_default().contains("ident"),
+            "output must say which tier matched: {data:?}"
+        );
+        let epistemics = resp.epistemics.as_ref().unwrap();
+        assert!(
+            epistemics.basis.contains("ident"),
+            "envelope epistemics must carry the tier basis: {epistemics:?}"
         );
 
         let _ = std::fs::remove_dir_all(&root);

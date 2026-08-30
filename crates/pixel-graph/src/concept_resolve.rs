@@ -112,6 +112,15 @@ pub struct ResolveOutcome {
     pub index_state: IndexState,
     /// Tiers attempted, in order (for `unresolved` honesty).
     pub tiers_attempted: Vec<Tier>,
+    /// True when a bounded table scan (T3 trigram / symbol fallback) hit its
+    /// row cap: rows beyond the cap were never considered, so this outcome
+    /// is a lower bound, not a closed-world answer. Always `false` for the
+    /// indexed tiers (T0/T1/T2/ident), which probe complete indexes.
+    pub scan_capped: bool,
+    /// Human-readable provenance: which tier produced the answer and which
+    /// caps (if any) bounded it. Empty only for `unresolved` with no capped
+    /// scans.
+    pub basis: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +293,11 @@ pub fn resolve(
     let limit = opts.limit.max(1);
     let norm = normalize(phrase);
     let mut tiers_attempted: Vec<Tier> = Vec::new();
+    // Caps fired by bounded scans along the way — carried into the outcome
+    // even on a miss, because "nothing found in the first 20k rows" is a
+    // weaker claim than "nothing found".
+    let mut t3_capped = false;
+    let mut symbol_capped = false;
 
     // Ident tier: when the query is a single identifier-shaped token (no
     // spaces after normalization — e.g. `GUARD_MATCHER`, `CheckoutPage`,
@@ -303,7 +317,7 @@ pub fn resolve(
             syms = store.symbols_by_name(&norm, limit as u32)?;
         }
         if !syms.is_empty() {
-            return finish_symbols(store, phrase, syms, opts, tiers_attempted, Tier::Ident);
+            return finish_symbols(store, phrase, syms, opts, tiers_attempted, Tier::Ident, false);
         }
     }
 
@@ -317,7 +331,7 @@ pub fn resolve(
             } else {
                 (Confidence::Ranked, Tier::T0)
             };
-            return finish(store, phrase, exact, confidence, tier, opts, tiers_attempted);
+            return finish(store, phrase, exact, confidence, tier, opts, tiers_attempted, false);
         }
     }
 
@@ -368,6 +382,7 @@ pub fn resolve(
                 Tier::T1,
                 opts,
                 tiers_attempted,
+                false,
             );
         }
     }
@@ -391,6 +406,7 @@ pub fn resolve(
                 Tier::T2,
                 opts,
                 tiers_attempted,
+                false,
             );
         }
     }
@@ -399,7 +415,8 @@ pub fn resolve(
     // overlap, low confidence).
     if !norm.is_empty() {
         tiers_attempted.push(Tier::T3);
-        let rows = trigram_fallback(store, &norm, limit as u32)?;
+        let (rows, capped) = trigram_fallback(store, &norm, limit as u32)?;
+        t3_capped = capped;
         if !rows.is_empty() {
             return finish(
                 store,
@@ -409,6 +426,7 @@ pub fn resolve(
                 Tier::T3,
                 opts,
                 tiers_attempted,
+                capped,
             );
         }
     }
@@ -421,13 +439,24 @@ pub fn resolve(
         // Match on the query's camelCase-split ident words (e.g. "handleLogin"
         // → ["handle", "login"]) so a single camelCase query can hit a symbol.
         let ident_words = symbol_words(phrase);
-        let symbols = symbol_fallback(store, &ident_words, limit as u32)?;
+        let (symbols, capped) = symbol_fallback(store, &ident_words, limit as u32)?;
+        symbol_capped = capped;
         if !symbols.is_empty() {
-            return finish_symbols(store, phrase, symbols, opts, tiers_attempted, Tier::Symbol);
+            return finish_symbols(
+                store,
+                phrase,
+                symbols,
+                opts,
+                tiers_attempted,
+                Tier::Symbol,
+                capped,
+            );
         }
     }
 
-    // Miss.
+    // Miss. A miss after capped scans is a weaker claim than a clean miss:
+    // rows beyond the scan cap were never considered.
+    let scan_capped = t3_capped || symbol_capped;
     let index_state = index_state(store)?;
     Ok(ResolveOutcome {
         confidence: Confidence::Unresolved,
@@ -436,6 +465,15 @@ pub fn resolve(
         inputs_digest: inputs_digest(phrase, &index_state),
         index_state,
         tiers_attempted,
+        scan_capped,
+        basis: if scan_capped {
+            format!(
+                "no tier matched, but fallback scans were capped at {TRIGRAM_SCAN_CAP} rows — \
+                 unscanned rows may contain a match"
+            )
+        } else {
+            "no tier matched; all attempted tiers were scanned to completion".to_string()
+        },
     })
 }
 
@@ -444,6 +482,7 @@ pub fn resolve(
 ///
 /// Rerank is keyed by candidate `id` (the concept row id), not by path, so
 /// multiple concepts in the same file are never collapsed to one-per-path.
+#[allow(clippy::too_many_arguments)]
 fn finish(
     store: &GraphStore,
     phrase: &str,
@@ -452,6 +491,7 @@ fn finish(
     tier: Tier,
     opts: &ResolveOptions,
     tiers_attempted: Vec<Tier>,
+    scan_capped: bool,
 ) -> Result<ResolveOutcome, StoreError> {
     let limit = opts.limit.max(1);
     let mut candidates: Vec<RankedCandidate> = Vec::with_capacity(rows.len());
@@ -499,6 +539,15 @@ fn finish(
     ordered.truncate(limit);
 
     let index_state = index_state(store)?;
+    let basis = if scan_capped {
+        format!(
+            "tier {} (concept index); scan capped at {TRIGRAM_SCAN_CAP} rows — unscanned rows \
+             may contain better matches",
+            tier.as_str()
+        )
+    } else {
+        format!("tier {} (concept index, scanned to completion)", tier.as_str())
+    };
     Ok(ResolveOutcome {
         confidence,
         tier: Some(tier),
@@ -506,6 +555,8 @@ fn finish(
         inputs_digest: inputs_digest(phrase, &index_state),
         index_state,
         tiers_attempted,
+        scan_capped,
+        basis,
     })
 }
 
@@ -521,8 +572,35 @@ fn finish_symbols(
     opts: &ResolveOptions,
     tiers_attempted: Vec<Tier>,
     tier: Tier,
+    scan_capped: bool,
 ) -> Result<ResolveOutcome, StoreError> {
     let limit = opts.limit.max(1);
+    // The symbol tiers must be able to express their best case: a single
+    // exact match is `resolved`, not `ranked` (a hardcoded `Ranked` here
+    // previously made `resolved` unreachable for identifier queries).
+    // - Ident tier: the query already matched a symbol NAME exactly; one row
+    //   means one definitive definition → Resolved.
+    // - Symbol fallback: matches are fuzzy word-overlap, so a single row is
+    //   Resolved only when its ident words are exactly the query's ident
+    //   words (e.g. "checkout page" → `CheckoutPage`), never on partial
+    //   overlap. A capped scan can never claim Resolved: unscanned rows may
+    //   hold an equally-exact competitor.
+    let confidence = if rows.len() == 1 && !scan_capped {
+        let exact_words = {
+            let mut q = symbol_words(phrase);
+            let mut n = symbol_words(&rows[0].name);
+            q.sort();
+            n.sort();
+            q == n
+        };
+        if tier == Tier::Ident || exact_words {
+            Confidence::Resolved
+        } else {
+            Confidence::Ranked
+        }
+    } else {
+        Confidence::Ranked
+    };
     let mut candidates: Vec<RankedCandidate> = Vec::with_capacity(rows.len());
     let mut by_id: HashMap<u64, ConceptMatch> = HashMap::with_capacity(rows.len());
     let reason = if tier == Tier::Ident {
@@ -567,13 +645,25 @@ fn finish_symbols(
     ordered.truncate(limit);
 
     let index_state = index_state(store)?;
+    let tier_desc = if tier == Tier::Ident {
+        "tier ident (exact symbol-name index probe)".to_string()
+    } else if scan_capped {
+        format!(
+            "tier symbol (fallback scan capped at {SYMBOL_SCAN_CAP} rows — unscanned symbols may \
+             contain better matches)"
+        )
+    } else {
+        "tier symbol (fallback scan, scanned to completion)".to_string()
+    };
     Ok(ResolveOutcome {
-        confidence: Confidence::Ranked,
+        confidence,
         tier: Some(tier),
         matches: ordered,
         inputs_digest: inputs_digest(phrase, &index_state),
         index_state,
         tiers_attempted,
+        scan_capped,
+        basis: tier_desc,
     })
 }
 
@@ -609,47 +699,65 @@ fn match_reasons(row: &ConceptRow, phrase: &str) -> Vec<String> {
 // real scoring
 // ---------------------------------------------------------------------------
 
-/// Real per-match score for a concept row:
-/// - exact-norm match → 1.0
-/// - substring match → 0.8
-/// - word-overlap ratio → 0.3–0.7 (ratio of query words present in the norm)
-/// - ×0.7 when the path is a test path
-/// - +0.15 when the owner symbol's ident words overlap the query (this is
-///   what finally makes symbol names count toward concept ranking)
-///
-/// Clamped to `[0.0, 1.0]`.
+/// Score for a candidate whose norm is byte-identical to the query's norm —
+/// the strongest possible lexical evidence, so it saturates the scale.
+const SCORE_EXACT_NORM: f64 = 1.0;
+/// Score when the query's norm is a strict substring of the candidate's norm
+/// — near-certain relevance, but weaker than identity (the candidate carries
+/// extra text the user didn't say).
+const SCORE_SUBSTRING: f64 = 0.8;
+/// Base of the word-overlap band: any nonzero word overlap starts here, so a
+/// partial match is always distinguishable from a scoreless non-match.
+const SCORE_OVERLAP_BASE: f64 = 0.3;
+/// Span of the word-overlap band: overlap ratio 0→1 maps to
+/// `SCORE_OVERLAP_BASE..=SCORE_OVERLAP_BASE + SCORE_OVERLAP_SPAN` (0.3–0.7),
+/// keeping even a full word-overlap below `SCORE_SUBSTRING` — word-bag
+/// equality is weaker evidence than an in-order substring.
+const SCORE_OVERLAP_SPAN: f64 = 0.4;
+/// Multiplier applied when the match lives in a test path: a phrase's real
+/// definition is almost always the production site, not the test that quotes
+/// it, so tests are demoted but never eliminated.
+const TEST_PATH_PENALTY: f64 = 0.7;
+/// Additive bonus when the enclosing symbol's ident words overlap the query
+/// — a concept owned by `submitButton` is better evidence for "submit
+/// button" than the same string in an unrelated function. Small enough to
+/// break ties without jumping a score band.
+const OWNER_WORD_BONUS: f64 = 0.15;
+
+/// Real per-match score for a concept row (see the named constants above for
+/// each band's rationale). Clamped to `[0.0, 1.0]`.
 fn score_match(row: &ConceptRow, phrase: &str, owner: Option<&str>, path: &str) -> f64 {
     let norm = normalize(phrase);
     let mut score = 0.0;
     if !norm.is_empty() && row.norm == norm {
-        score = 1.0;
+        score = SCORE_EXACT_NORM;
     } else if !norm.is_empty() && row.norm.contains(&norm) {
-        score = 0.8;
+        score = SCORE_SUBSTRING;
     } else {
         let words = concept_words(&row.norm);
         let qwords = concept_words(&norm);
         if !qwords.is_empty() {
             let overlap = qwords.iter().filter(|w| words.contains(w)).count();
             let ratio = overlap as f64 / qwords.len() as f64;
-            score = 0.3 + ratio * 0.4; // 0.3–0.7 band
+            score = SCORE_OVERLAP_BASE + ratio * SCORE_OVERLAP_SPAN;
         }
     }
     if is_test_path(path) {
-        score *= 0.7;
+        score *= TEST_PATH_PENALTY;
     }
     if let Some(owner) = owner {
         let owner_words = symbol_words(owner);
         let qwords = concept_words(&norm);
         if owner_words.iter().any(|w| qwords.contains(w)) {
-            score += 0.15;
+            score += OWNER_WORD_BONUS;
         }
     }
     score.clamp(0.0, 1.0)
 }
 
 /// Score for a symbol-fallback match: word-overlap ratio of the query's ident
-/// words against the symbol's camelCase-split name, in the 0.3–0.7 band, with
-/// the same test-path penalty.
+/// words against the symbol's camelCase-split name, in the word-overlap band,
+/// with the same test-path penalty.
 fn score_symbol(row: &SymbolRow, phrase: &str, path: &str) -> f64 {
     let qwords = symbol_words(phrase);
     let name_words = symbol_words(&row.name);
@@ -657,10 +765,10 @@ fn score_symbol(row: &SymbolRow, phrase: &str, path: &str) -> f64 {
     if !qwords.is_empty() {
         let overlap = qwords.iter().filter(|w| name_words.contains(w)).count();
         let ratio = overlap as f64 / qwords.len() as f64;
-        score = 0.3 + ratio * 0.4;
+        score = SCORE_OVERLAP_BASE + ratio * SCORE_OVERLAP_SPAN;
     }
     if is_test_path(path) {
-        score *= 0.7;
+        score *= TEST_PATH_PENALTY;
     }
     score.clamp(0.0, 1.0)
 }
@@ -804,14 +912,27 @@ fn trigram_overlap(
 /// T3: rank a bounded scan of concept rows by character-trigram overlap
 /// against `norm`. Falls back to the plain substring scan for queries under
 /// 3 chars (too short to form a single trigram, so overlap is meaningless).
-fn trigram_fallback(store: &GraphStore, norm: &str, limit: u32) -> Result<Vec<ConceptRow>, StoreError> {
+///
+/// The second return value is true when the scan HIT its row cap
+/// ([`TRIGRAM_SCAN_CAP`]): rows beyond the cap were never considered, so the
+/// result is a lower bound and the caller must surface that.
+fn trigram_fallback(
+    store: &GraphStore,
+    norm: &str,
+    limit: u32,
+) -> Result<(Vec<ConceptRow>, bool), StoreError> {
     let query_grams = trigram_set(norm);
     if query_grams.is_empty() {
-        return store.concepts_like(norm, limit);
+        // The `concepts_like` path is itself LIMIT-bounded; treat a full
+        // page as a possibly-capped scan for the same honesty reason.
+        let rows = store.concepts_like(norm, limit)?;
+        let capped = rows.len() as u32 >= limit;
+        return Ok((rows, capped));
     }
     let sql = "SELECT id, file_id, kind, raw, norm, detail, start_line, end_line, owner_symbol_id
                FROM concepts LIMIT ?1";
     let mut stmt = store.conn().prepare(sql)?;
+    let mut scanned: u32 = 0;
     let mut scored: Vec<(f64, ConceptRow)> = stmt
         .query_map(params![TRIGRAM_SCAN_CAP], |r| {
             Ok(ConceptRow {
@@ -828,13 +949,15 @@ fn trigram_fallback(store: &GraphStore, norm: &str, limit: u32) -> Result<Vec<Co
         })?
         .filter_map(|row: rusqlite::Result<ConceptRow>| row.ok())
         .filter_map(|row| {
+            scanned += 1;
             let score = trigram_overlap(&query_grams, &trigram_set(&row.norm));
             (score >= TRIGRAM_MIN_OVERLAP).then_some((score, row))
         })
         .collect();
+    let capped = scanned >= TRIGRAM_SCAN_CAP;
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
     scored.truncate(limit as usize);
-    Ok(scored.into_iter().map(|(_, row)| row).collect())
+    Ok((scored.into_iter().map(|(_, row)| row).collect(), capped))
 }
 
 // ---------------------------------------------------------------------------
@@ -849,17 +972,21 @@ const SYMBOL_SCAN_CAP: u32 = 20_000;
 /// whose camelCase-split name shares at least one ident word with the query's
 /// ident words, ranked by overlap ratio. This is the last tier before
 /// `unresolved`.
+/// The second return value is true when the scan HIT its row cap
+/// ([`SYMBOL_SCAN_CAP`]): symbols beyond the cap were never considered, so
+/// the result is a lower bound and the caller must surface that.
 fn symbol_fallback(
     store: &GraphStore,
     words: &[String],
     limit: u32,
-) -> Result<Vec<SymbolRow>, StoreError> {
+) -> Result<(Vec<SymbolRow>, bool), StoreError> {
     if words.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     let sql = "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
                FROM symbols LIMIT ?1";
     let mut stmt = store.conn().prepare(sql)?;
+    let mut scanned: u32 = 0;
     let mut scored: Vec<(f64, SymbolRow)> = stmt
         .query_map(params![SYMBOL_SCAN_CAP], |r| {
             Ok(SymbolRow {
@@ -876,6 +1003,7 @@ fn symbol_fallback(
         })?
         .filter_map(|row: rusqlite::Result<SymbolRow>| row.ok())
         .filter_map(|row| {
+            scanned += 1;
             let name_words = symbol_words(&row.name);
             let overlap: Vec<&str> = words
                 .iter()
@@ -890,9 +1018,10 @@ fn symbol_fallback(
             }
         })
         .collect();
+    let capped = scanned >= SYMBOL_SCAN_CAP;
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
     scored.truncate(limit as usize);
-    Ok(scored.into_iter().map(|(_, row)| row).collect())
+    Ok((scored.into_iter().map(|(_, row)| row).collect(), capped))
 }
 
 fn index_state(store: &GraphStore) -> Result<IndexState, StoreError> {
@@ -1008,12 +1137,45 @@ mod tests {
 
         // "handleLogin" is identifier-shaped (no spaces) and matches the
         // symbol name exactly, so the ident tier catches it before the
-        // symbol fallback cascade.
+        // symbol fallback cascade — and a single exact-unique identifier
+        // match is the tier's best case: `resolved`, not `ranked`.
         let out = resolve(&store, "handleLogin", &ResolveOptions::default()).unwrap();
         assert_eq!(out.tier, Some(Tier::Ident));
+        assert_eq!(out.confidence, Confidence::Resolved, "{out:?}");
+        assert!(!out.scan_capped);
+        assert!(out.basis.contains("ident"), "basis was {:?}", out.basis);
         assert_eq!(out.matches.len(), 1);
         assert_eq!(out.matches[0].raw, "handleLogin");
         assert_eq!(out.matches[0].symbol_kind.as_deref(), Some("function"));
+    }
+
+    #[test]
+    fn ident_tier_with_multiple_matches_stays_ranked() {
+        let mut store = store();
+        let f1 = add_file(&mut store, "src/a.tsx");
+        let f2 = add_file(&mut store, "src/b.tsx");
+        for (f, uid) in [(f1, "src/a.tsx#dup#function"), (f2, "src/b.tsx#dup#function")] {
+            store
+                .insert_symbol(f, uid, "dup", "dup", SymbolKind::Function, 1, 3, "dup()")
+                .unwrap();
+        }
+        let out = resolve(&store, "dup", &ResolveOptions::default()).unwrap();
+        assert_eq!(out.tier, Some(Tier::Ident));
+        assert_eq!(out.confidence, Confidence::Ranked, "{out:?}");
+        assert_eq!(out.matches.len(), 2);
+    }
+
+    #[test]
+    fn unresolved_miss_reports_uncapped_basis() {
+        let store = store();
+        let out = resolve(&store, "utterly absent phrase", &ResolveOptions::default()).unwrap();
+        assert_eq!(out.confidence, Confidence::Unresolved);
+        assert!(!out.scan_capped, "tiny store can never hit a scan cap");
+        assert!(
+            out.basis.contains("scanned to completion"),
+            "basis was {:?}",
+            out.basis
+        );
     }
 
     #[test]

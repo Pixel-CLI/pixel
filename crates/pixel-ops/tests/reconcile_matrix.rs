@@ -491,3 +491,40 @@ fn empty_request_id_from_the_daemon_wiring_does_not_crash_the_op() {
         assert_eq!(result["state"], "up_to_date", "result={result}");
     });
 }
+
+// ---------------------------------------------------------------------------
+// --push value validation (typos must be structured errors, never silent
+// don't-push; "never" is an explicit alias of "none")
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reconcile_rejects_an_unknown_push_value_with_a_structured_error() {
+    with_isolated_state(|| {
+        let (_remote, local) = new_remote_and_local();
+        // Previously any unrecognized value (e.g. the typo "always") silently
+        // behaved as don't-push. It must now fail fast, naming every
+        // accepted value.
+        let err = reconcile(local.path(), &opts("report", "always"))
+            .expect_err("an unknown --push value must be rejected, not silently mean don't-push");
+        assert!(
+            err.contains("invalid push value"),
+            "error must identify the invalid value: {err}"
+        );
+        assert!(
+            err.contains("\"auto\"") && err.contains("\"none\"") && err.contains("\"never\""),
+            "error must name the accepted values (auto, none, and the never alias): {err}"
+        );
+    });
+}
+
+#[test]
+fn reconcile_accepts_never_as_an_explicit_alias_of_none() {
+    with_isolated_state(|| {
+        let (_remote, local) = new_remote_and_local();
+        // Old rule text documented `--push never`; it must behave exactly
+        // like "none" instead of silently falling into the catch-all.
+        let result = reconcile(local.path(), &opts("report", "never"))
+            .expect("--push never must be accepted as an alias of none");
+        assert_eq!(result["state"], "up_to_date", "result={result}");
+    });
+}

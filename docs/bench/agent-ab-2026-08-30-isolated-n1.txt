@@ -1,0 +1,33 @@
+=== pixel-bench-isolated: claude --safe-mode, pixel doctrine only vs nothing ===
+Date: 2026-08-30T10:39:52Z
+Reps per cell: 1
+Rule file: /Users/livio/.agent-config/rules/pixel.md (    5000 bytes)
+NOTE: neither arm has the PreToolUse guard hook (--safe-mode disables hooks).
+This isolates pixel's DOCTRINE TEXT + voluntary tool use, not the full product.
+
+--- scenario s1-locate ---
+  pixel-isolated-s1-locate-1: 14459ms (api=10861ms) tools=2 turns=5 pixel_calls=0
+  vanilla-s1-locate-1: 12148ms (api=9233ms) tools=2 turns=4 pixel_calls=0
+
+--- scenario s2-scope ---
+  vanilla-s2-scope-1: 115933ms (api=113112ms) tools=28 turns=47 pixel_calls=0
+  pixel-isolated-s2-scope-1: 56649ms (api=54804ms) tools=12 turns=21 pixel_calls=0
+
+--- scenario s3-sync ---
+  vanilla-s3-sync-1: 10279ms (api=6284ms) tools=1 turns=3 pixel_calls=0
+  pixel-isolated-s3-sync-1: 8881ms (api=4588ms) tools=1 turns=3 pixel_calls=0
+
+--- scenario s4-recover ---
+  pixel-isolated-s4-recover-1: 31313ms (api=27012ms) tools=5 turns=11 pixel_calls=0
+  vanilla-s4-recover-1: 36929ms (api=33589ms) tools=7 turns=15 pixel_calls=0
+
+=== RESULTS ===
+
+# NOTE: N=1 per cell — directional signal only, not yet a confirmed measurement
+# (T1/T3 discipline: don't claim proven from a single sample). All 8 cells show
+# pixel_calls=0 — neither arm actually invoked the pixel binary in this run, so
+# this measures the doctrine TEXT's effect on agent reasoning/search behavior,
+# not tool-invocation cost. A striking result if it holds: isolated pixel
+# doctrine is faster than a blank agent on 3/4 scenarios (s2 -51%, s3 -14%,
+# s4 -15%), slower only on the trivial single-lookup s1 (+19%, ~2.3s absolute).
+# N=3 confirmation run queued.

@@ -1,0 +1,20 @@
+=== pixel-bench-isolated: claude --safe-mode, pixel doctrine only vs nothing ===
+Date: 2026-08-30T10:45:23Z
+Reps per cell: 3
+Rule file: /Users/livio/.agent-config/rules/pixel.md (    5000 bytes)
+NOTE: neither arm has the PreToolUse guard hook (--safe-mode disables hooks).
+This isolates pixel's DOCTRINE TEXT + voluntary tool use, not the full product.
+
+--- scenario s1-locate ---
+  pixel-isolated-s1-locate-1: 12724ms (api=8578ms) tools=2 turns=5 pixel_calls=0
+  pixel-isolated-s1-locate-2: 14987ms (api=11711ms) tools=2 turns=5 pixel_calls=0
+  pixel-isolated-s1-locate-3: 14313ms (api=10401ms) tools=2 turns=5 pixel_calls=0
+  vanilla-s1-locate-1: 13846ms (api=10612ms) tools=2 turns=4 pixel_calls=0
+  vanilla-s1-locate-2: 10850ms (api=7874ms) tools=2 turns=3 pixel_calls=0
+  vanilla-s1-locate-3: 12741ms (api=9654ms) tools=3 turns=6 pixel_calls=0
+
+--- scenario s2-scope ---
+  vanilla-s2-scope-1: 152870ms (api=152420ms) tools=28 turns=58 pixel_calls=0
+  vanilla-s2-scope-2: 76768ms (api=72779ms) tools=30 turns=45 pixel_calls=0
+  vanilla-s2-scope-3: 157003ms (api=154854ms) tools=35 turns=60 pixel_calls=0
+  pixel-isolated-s2-scope-1: 100890ms (api=95594ms) tools=22 turns=33 pixel_calls=0

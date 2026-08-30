@@ -120,6 +120,10 @@ pub struct TaskQuery {
     pub exact_tokens: Vec<String>,
     /// Lowercased keywords, first-occurrence order, deduped, len ≥ 3, ≤ 12.
     pub keywords: Vec<String>,
+    /// True when the task contained MORE searchable keywords than
+    /// [`MAX_KEYWORDS`]: the dropped words contributed no signal, so any
+    /// result built from this query is a lower bound, not exhaustive.
+    pub keywords_truncated: bool,
 }
 
 fn is_ident(s: &str) -> bool {
@@ -134,16 +138,26 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
     let mut exact_tokens: Vec<String> = Vec::new();
     let mut keywords: Vec<String> = Vec::new();
     let mut seen_kw: HashSet<String> = HashSet::new();
+    let mut keywords_truncated = false;
 
-    let push_words = |text: &str, keywords: &mut Vec<String>, seen: &mut HashSet<String>| {
+    let push_words = |text: &str,
+                      keywords: &mut Vec<String>,
+                      seen: &mut HashSet<String>,
+                      truncated: &mut bool| {
         for chunk in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
             for w in split_ident_words(chunk) {
-                if w.len() >= MIN_KEYWORD_LEN
-                    && !stop.contains(w.as_str())
-                    && keywords.len() < MAX_KEYWORDS
-                    && seen.insert(w.clone())
-                {
-                    keywords.push(w);
+                if w.len() >= MIN_KEYWORD_LEN && !stop.contains(w.as_str()) {
+                    if keywords.len() >= MAX_KEYWORDS {
+                        // A distinct searchable word was dropped by the cap —
+                        // record it so callers can surface the truncation.
+                        if !seen.contains(&w) {
+                            *truncated = true;
+                        }
+                        continue;
+                    }
+                    if seen.insert(w.clone()) {
+                        keywords.push(w);
+                    }
                 }
             }
         }
@@ -173,7 +187,7 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
         rest.push(' ');
         rest.push_str(&cur);
     }
-    push_words(&rest, &mut keywords, &mut seen_kw);
+    push_words(&rest, &mut keywords, &mut seen_kw, &mut keywords_truncated);
 
     if exact_tokens.is_empty() && keywords.is_empty() {
         return Err("task description yields no searchable keywords".to_string());
@@ -181,6 +195,7 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
     Ok(TaskQuery {
         exact_tokens,
         keywords,
+        keywords_truncated,
     })
 }
 
@@ -219,6 +234,12 @@ pub struct SignalInputs {
     pub graph_available: bool,
     /// Aggregate unresolved-call envelope over matched symbol names.
     pub envelope: Option<pixel_graph::Envelope>,
+    /// Caps the CALLER fired while gathering these inputs (e.g. "content
+    /// probe truncated at 500 matches for keyword 'x'"). Any entry here
+    /// forces `lower_bound: true` on the report envelope and is named in
+    /// `envelope.caps` — a silently-capped signal must never be presented
+    /// as exhaustive.
+    pub caps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -478,9 +499,15 @@ pub fn compute_targets(
     let mut targets: Vec<TargetFile> = Vec::new();
     let mut p0 = 0usize;
     let mut p2 = 0usize;
+    // Cap accounting: every candidate this loop DROPS (p2 cap, limit) is a
+    // file the caller will never see — that must surface as lower_bound +
+    // a named cap, never be silently absorbed into an "exhaustive" claim.
+    let mut p2_dropped = 0usize;
+    let mut beyond_limit = 0usize;
     for (path, e) in ordered {
         if targets.len() >= limit {
-            break;
+            beyond_limit += 1;
+            continue;
         }
         let fams = e.families.count_ones();
         let lexical = e.families & LEXICAL_MASK != 0;
@@ -495,6 +522,7 @@ pub fn compute_targets(
         } else {
             // Graph/cluster-only evidence: peripheral and droppable.
             if p2 >= p2_cap {
+                p2_dropped += 1;
                 continue;
             }
             p2 += 1;
@@ -512,8 +540,11 @@ pub fn compute_targets(
     // (already score-ordered globally; stable sort by tier preserves it).
     targets.sort_by(|a, b| a.tier.cmp(&b.tier));
 
-    // Envelope + closed-world claim.
-    let (lower_bound, unresolved, graph_state) = if inputs.graph_available {
+    // Envelope + closed-world claim. Three-outcome contract: a complete
+    // answer (no cap fired, graph closed), an explicitly-bounded partial
+    // answer (lower_bound + every cap NAMED), or the caller's ambiguity
+    // path. "Exhaustive" may only be claimed when NOTHING was capped.
+    let (graph_lower_bound, unresolved, graph_state) = if inputs.graph_available {
         let env = inputs.envelope.clone().unwrap_or(pixel_graph::Envelope {
             lower_bound: false,
             unresolved_same_name: 0,
@@ -522,10 +553,30 @@ pub fn compute_targets(
     } else {
         (true, 0, "unavailable")
     };
+    let mut caps: Vec<String> = inputs.caps.clone();
+    if query.keywords_truncated {
+        caps.push(format!(
+            "task keywords truncated at {MAX_KEYWORDS}; later task words contributed no signal"
+        ));
+    }
+    if p2_dropped > 0 {
+        caps.push(format!(
+            "P2 tier capped at {p2_cap}: dropped {p2_dropped} graph/cluster-evidenced file(s)"
+        ));
+    }
+    if beyond_limit > 0 {
+        caps.push(format!(
+            "target list truncated at limit {limit}: {beyond_limit} scored candidate file(s) \
+             beyond it"
+        ));
+    }
+    // ANY fired cap makes the list a lower bound — a capped signal cannot
+    // support an exhaustive claim.
+    let lower_bound = graph_lower_bound || !caps.is_empty();
     let note = if graph_state == "unavailable" {
         "code graph unavailable — lexical signals only; graph-adjacent files may be missing"
             .to_string()
-    } else if lower_bound {
+    } else if graph_lower_bound {
         format!(
             "{unresolved} unresolved call site(s) share a matched symbol name; callers beyond this list may exist"
         )
@@ -533,14 +584,24 @@ pub fn compute_targets(
         String::new()
     };
     let mut closed_world = String::from(
-        "Restrict reads and edits to the files listed. P2 entries are peripheral and droppable. \
-         This list is exhaustive for the indexed tree",
+        "Restrict reads and edits to the files listed. P2 entries are peripheral and droppable. ",
     );
     if lower_bound {
-        closed_world
-            .push_str(" EXCEPT: envelope.lower_bound is true, so unlisted files may be involved.");
-    } else {
+        // Explicitly-bounded partial answer: name every reason the list may
+        // be incomplete instead of claiming exhaustiveness.
+        closed_world.push_str(
+            "This list is a bounded partial answer, NOT exhaustive — EXCEPT clauses: ",
+        );
+        let mut reasons: Vec<String> = Vec::new();
+        if !note.is_empty() {
+            reasons.push(note.clone());
+        }
+        reasons.extend(caps.iter().cloned());
+        closed_world.push_str(&reasons.join("; "));
         closed_world.push('.');
+    } else {
+        // Only reachable when no cap fired and the graph closed the world.
+        closed_world.push_str("This list is exhaustive for the indexed tree.");
     }
 
     let signal_hits = json!({
@@ -561,6 +622,7 @@ pub fn compute_targets(
             "graph": graph_state,
             "unresolved_same_name": unresolved,
             "note": note,
+            "caps": caps,
         }),
         closed_world,
         stats: json!({
@@ -646,6 +708,7 @@ mod tests {
             ..Default::default()
         };
         let q = TaskQuery {
+            keywords_truncated: false,
             exact_tokens: vec![],
             keywords: vec!["login".into()],
         };
@@ -666,6 +729,7 @@ mod tests {
             ..Default::default()
         };
         let q = TaskQuery {
+            keywords_truncated: false,
             exact_tokens: vec!["login_user".into()],
             keywords: vec!["login".into(), "user".into()],
         };
@@ -702,6 +766,7 @@ mod tests {
             ..Default::default()
         };
         let q = TaskQuery {
+            keywords_truncated: false,
             exact_tokens: vec![],
             keywords: vec!["login".into()],
         };
@@ -730,6 +795,7 @@ mod tests {
             }
         };
         let q = TaskQuery {
+            keywords_truncated: false,
             exact_tokens: vec![],
             keywords: vec!["auth".into()],
         };
@@ -748,6 +814,7 @@ mod tests {
             ..Default::default()
         };
         let q = TaskQuery {
+            keywords_truncated: false,
             exact_tokens: vec![],
             keywords: vec!["login".into()],
         };

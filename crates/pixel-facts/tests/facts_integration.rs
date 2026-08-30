@@ -523,6 +523,39 @@ fn pre_versioned_db_with_rows_self_heals_on_open() {
 }
 
 #[test]
+fn concurrent_open_on_poisoned_db_never_ioerrors() {
+    // Regression: two processes both deciding a rebuild is needed and racing
+    // remove_db() against another's live WAL connection used to surface as
+    // "rusqlite: disk I/O error". FactsStore::open now serializes the
+    // rebuild-decision + delete + recreate critical section behind an
+    // advisory file lock, so N concurrent openers on the same poisoned db
+    // must all succeed cleanly instead of racing.
+    let dir = make_repo();
+    let root = dir.path();
+    {
+        let mut store = FactsStore::open(root).expect("open store");
+        ingest_until_fresh(&mut store, &IngestOptions::default()).expect("ingest");
+        store
+            .conn()
+            .pragma_update(None, "user_version", 0)
+            .expect("reset version");
+    }
+
+    let root = root.to_path_buf();
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let root = root.clone();
+            std::thread::spawn(move || FactsStore::open(&root).map(|s| s.index_state()))
+        })
+        .collect();
+
+    for h in handles {
+        let state = h.join().expect("thread panicked").expect("concurrent open must not error");
+        assert_eq!(state.schema_version, pixel_facts::store::FACTS_SCHEMA_VERSION);
+    }
+}
+
+#[test]
 fn lazy_ingest_is_bounded_and_converges() {
     let dir = make_repo();
     let root = dir.path();
