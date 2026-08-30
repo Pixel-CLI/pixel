@@ -2432,6 +2432,7 @@ dependencies = [
  "pixel-index",
  "pixel-install",
  "pixel-ops",
+ "pixel-proto",
  "pixel-rank",
  "pixel-recall",
  "pixel-session",

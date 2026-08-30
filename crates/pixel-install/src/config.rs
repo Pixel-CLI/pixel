@@ -37,6 +37,29 @@ pub const GUARD_HOOK: &str = "pixel-targets-guard";
 /// The SessionStart hook path.
 pub const SESSION_START_HOOK: &str = "pixel-session-start";
 
+/// The Devin config directory (relative to home).
+pub const DEVIN_CONFIG_DIR: &str = ".config/devin";
+/// The Devin config file (hooks live under the `"hooks"` key here).
+pub const DEVIN_CONFIG_FILE: &str = "config.json";
+
+/// The Codex hooks file (relative to home). Codex uses the same hook
+/// format as Claude — hooks under the `"hooks"` key, event `PreToolUse`.
+pub const CODEX_HOOKS_FILE: &str = ".codex/hooks.json";
+
+/// The Gemini config file (relative to home). Gemini uses hooks under
+/// the `"hooks"` key but the tool-event is `BeforeTool` (not `PreToolUse`).
+pub const GEMINI_SETTINGS_FILE: &str = ".gemini/settings.json";
+
+/// PreToolUse matcher covering Claude, Devin, Codex, and Gemini tool names.
+/// Claude:  Bash, Read, Grep, Glob, Edit, MultiEdit, NotebookEdit, Write
+/// Devin:   exec, read, grep, find_file_by_name, glob, edit, write, notebook_read, notebook_edit
+/// Codex:   bash, read, write, edit, apply_patch, glob
+/// Gemini:  bash, execute, run_shell_command, read, read_file, write, write_file, edit, grep, glob, search
+pub const GUARD_MATCHER: &str =
+    "Bash|Read|Grep|Glob|Edit|MultiEdit|NotebookEdit|Write|\
+     exec|read|grep|find_file_by_name|glob|edit|write|notebook_read|notebook_edit|\
+     bash|apply_patch|read_file|write_file|execute|run_shell_command|search";
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("io: {0}")]
@@ -94,11 +117,10 @@ pub struct ScrubOutcome {
 /// exist on disk.
 ///
 /// Deliberately excludes `.claude/settings.json`: that file is JSON, not
-/// Markdown, and is handled separately by [`scrub_settings_json`] /
-/// `pixel_install::install::register_mcp_server`. It must never be run
-/// through [`rewrite_agent_config`], which writes HTML-comment managed
-/// markers into the file body — doing so would corrupt settings.json into
-/// invalid JSON.
+/// Markdown, and is handled separately by [`scrub_settings_json`]. It must
+/// never be run through [`rewrite_agent_config`], which writes HTML-comment
+/// managed markers into the file body — doing so would corrupt settings.json
+/// into invalid JSON.
 pub fn find_agent_configs(home: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for rel in ["CLAUDE.md", "AGENTS.md", ".claude/CLAUDE.md", ".claude/AGENTS.md"] {
@@ -306,12 +328,11 @@ pub const DEPRECATED_GUARD_HOOKS: &[&str] = &["gitpixel-targets-guard"];
 /// When `dry_run` is true, computes the same removal counts but performs no
 /// write and no backup.
 ///
-/// `remove_mcp_servers` gates ONLY the deprecated-MCP-server removal: the
-/// caller should pass `false` when pixel's own MCP server has not been
-/// confirmed runnable yet, so this never leaves the user with zero working
-/// MCP retrieval tools. The guard-hook command rewrite is unrelated and
-/// always runs regardless of this flag.
-pub fn scrub_settings_json(path: &Path, dry_run: bool, remove_mcp_servers: bool) -> Result<ScrubOutcome> {
+/// The deprecated usable-git/gitpixel/sniper MCP server entries are removed
+/// unconditionally — pixel replaces them via Bash + the guard hook, not via
+/// MCP. The guard-hook command rewrite is unrelated to MCP registration and
+/// always runs.
+pub fn scrub_settings_json(path: &Path, dry_run: bool) -> Result<ScrubOutcome> {
     let existed = path.is_file();
     if !existed {
         return Ok(ScrubOutcome {
@@ -330,10 +351,9 @@ pub fn scrub_settings_json(path: &Path, dry_run: bool, remove_mcp_servers: bool)
         })?;
 
     let mut mcp_servers_removed = 0usize;
-    if remove_mcp_servers
-        && let Some(servers) = value
-            .get_mut("mcpServers")
-            .and_then(serde_json::Value::as_object_mut)
+    if let Some(servers) = value
+        .get_mut("mcpServers")
+        .and_then(serde_json::Value::as_object_mut)
     {
         for name in DEPRECATED_MCP_SERVERS {
             if servers.remove(*name).is_some() {

@@ -283,6 +283,49 @@ impl Op {
     }
 }
 
+/// User-facing op names for capability advertisement (the SessionStart
+/// hook, `pixel --help`, etc.) — every real variant's [`Op::op_name`]
+/// except `shutdown` (an internal admin op, not something to tell an
+/// agent to call). Kept in this file, beside the enum, so adding a
+/// variant is a one-line addition here too; `session_capabilities_track_every_real_op`
+/// below fails loudly if this list and the enum ever drift apart, which is
+/// the specific failure this const exists to make structurally impossible
+/// (a prior hand-maintained copy of this list, kept in the CLI crate with
+/// no link back to `Op`, silently went stale and undermined the exact
+/// anti-false-context guarantee the SessionStart hook is supposed to give).
+pub const SESSION_CAPABILITIES: &[&str] = &[
+    "ping",
+    "recall",
+    "search",
+    "targets",
+    "symbol",
+    "context",
+    "impact",
+    "uses",
+    "trace",
+    "processes",
+    "clusters",
+    "changes",
+    "graph",
+    "status",
+    "resolve",
+    "history",
+    "lifecycle",
+    "excavate",
+    "reconcile",
+    "journal",
+    "inspect",
+    "review",
+    "diff",
+    "history_op",
+    "publish",
+    "push",
+    "ship",
+    "branch_op",
+    "update",
+    "sync",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +502,42 @@ mod tests {
             assert_eq!(op.op_name(), *expected);
             let serialized = serde_json::to_value(op).unwrap();
             assert_eq!(serialized["op"].as_str(), Some(*expected));
+        }
+    }
+
+    #[test]
+    fn session_capabilities_track_every_real_op() {
+        // The exhaustive real variant set, independent of SESSION_CAPABILITIES
+        // itself — this must be updated by hand whenever a variant is added,
+        // same as op_name_matches_serde_tag's `cases` above, so the two lists
+        // can't silently drift in the same direction and still agree.
+        let all_real_ops: &[&str] = &[
+            "ping", "recall", "search", "targets", "symbol", "context", "impact", "uses",
+            "trace", "processes", "clusters", "changes", "graph", "status", "resolve",
+            "history", "lifecycle", "excavate", "reconcile", "journal", "inspect", "review",
+            "diff", "history_op", "publish", "push", "ship", "branch_op", "update", "sync",
+            "shutdown",
+        ];
+        // Every advertised capability must be a real op.
+        for cap in SESSION_CAPABILITIES {
+            assert!(
+                all_real_ops.contains(cap),
+                "SESSION_CAPABILITIES advertises '{cap}', which is not a real Op variant — \
+                 this is exactly the false-context bug this list exists to prevent"
+            );
+        }
+        // Every real, user-facing op (everything except the internal `shutdown`)
+        // must be advertised — an op silently missing from the capability
+        // block is a quieter version of the same failure.
+        for op in all_real_ops {
+            if *op == "shutdown" {
+                continue;
+            }
+            assert!(
+                SESSION_CAPABILITIES.contains(op),
+                "'{op}' is a real Op variant but missing from SESSION_CAPABILITIES — \
+                 an agent reading the SessionStart block won't know it exists"
+            );
         }
     }
 }

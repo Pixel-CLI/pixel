@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+mod guard;
 mod recall_cmd;
 mod rescue_cmd;
 mod sniper_cmd;
@@ -1976,29 +1977,20 @@ fn run() -> Result<(), String> {
             print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
         }
         Command::Hook { cmd } => match cmd {
-            HookCmd::Guard { path } => {
-                let root = discover_root(&path)?;
-                // Targets enforcement guard: emit the active manifest if any.
-                let manifest = root
-                    .join(pixel_index::index::SHARD_DIR)
-                    .join("targets.json");
-                if manifest.exists() {
-                    let body = std::fs::read_to_string(&manifest).map_err(|e| e.to_string())?;
-                    write_stdout(&body)?;
-                }
-                Ok(())
+            HookCmd::Guard { path: _ } => {
+                // Real PreToolUse enforcement — reads the hook JSON payload
+                // from stdin itself (matching the original working
+                // gitpixel-targets-guard's design) and exits 2 to block or
+                // 0 to allow. Never returns.
+                guard::run();
             }
             HookCmd::SessionStart { path } => {
                 let _ = discover_root(&path)?;
-                // Emit the capability block from the live op registry.
-                let ops: Vec<&str> = [
-                    "ping", "search", "targets", "symbol", "context", "impact", "uses",
-                    "trace", "processes", "clusters", "changes", "graph", "status",
-                    "resolve", "history", "lifecycle", "excavate", "reconcile", "journal",
-                    "inspect", "review", "diff", "history_op", "publish", "push", "ship",
-                    "branch_op", "update", "sync",
-                ]
-                .to_vec();
+                // Emit the capability block from the live op registry —
+                // `SESSION_CAPABILITIES` lives next to `Op` itself and is
+                // tested for exhaustiveness against every real variant, so
+                // this can never advertise a capability that doesn't exist.
+                let ops: Vec<&str> = pixel_proto::op::SESSION_CAPABILITIES.to_vec();
                 let block = serde_json::json!({
                     "pixel": {
                         "capabilities": ops,

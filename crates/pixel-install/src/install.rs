@@ -1,6 +1,12 @@
-//! Idempotent `pixel install` — registers ONE MCP server `pixel`, removes the
-//! deprecated usable-git/gitpixel/sniper MCP entries, installs the guard and
+//! Idempotent `pixel install` — removes the deprecated
+//! usable-git/gitpixel/sniper MCP entries, installs the guard and
 //! SessionStart hooks, and rewrites agent-config with managed markers.
+//!
+//! pixel is a CLI + hooks tool, not an MCP server. The four mandatory
+//! scenarios (targets, resolve, rescue/excavate, reconcile) are enforced by
+//! rule text plus the PreToolUse guard hook on Bash/Read/Grep/Glob/Edit/Write
+//! — wiring pixel as an MCP server would give agents a transport that
+//! bypasses that guard. See the pixel rule for the doctrine.
 
 use std::fs;
 use std::io;
@@ -10,9 +16,6 @@ use serde::Serialize;
 
 use crate::config;
 use crate::InstallError;
-
-/// The single MCP server pixel registers.
-pub const MCP_SERVER_NAME: &str = "pixel";
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
@@ -100,33 +103,30 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         .unwrap_or_else(|_| executable_path.clone());
 
     let dry_run = options.dry_run;
-    // Preflight: does this binary actually implement `<exe> mcp` as a real
-    // subcommand? Confirmed live against a real release build that it does
-    // NOT (`error: unrecognized subcommand 'mcp'`) — registering
-    // `{"command": exe, "args": ["mcp"]}` when that's true would install an
-    // MCP server entry that can never start. Gate both registering the new
-    // entry AND removing the old (working) usable-git/gitpixel/sniper
-    // entries on this check, so a binary without `mcp` wired up never
-    // leaves the user with zero working MCP retrieval tools.
-    let mcp_ready = binary_supports_mcp_subcommand(&exe);
     let mut steps = Vec::new();
 
-    // 1. Register the pixel MCP server in settings.json.
-    steps.push(register_mcp_server(&home, &exe, dry_run, mcp_ready)?);
+    // 1. Remove deprecated MCP servers + old guard hooks from Claude
+    //    settings.json. pixel is a CLI + hooks tool, not an MCP server —
+    //    the deprecated usable-git/gitpixel/sniper MCP entries are retired
+    //    unconditionally (pixel replaces them via Bash, not MCP).
+    steps.push(scrub_deprecated(&home, dry_run)?);
 
-    // 2. Remove deprecated MCP servers + old guard hooks from settings.json.
-    steps.push(scrub_deprecated(&home, dry_run, mcp_ready)?);
-
-    // 3. Replace the old guard hook with `exec pixel hook guard "$@"`.
+    // 2. Replace the old guard hook with `exec pixel hook guard "$@"` and
+    //    wire the PreToolUse entry into Claude settings.json.
     steps.push(install_guard_hook(&home, &exe, dry_run)?);
 
-    // 4. Install the SessionStart hook.
+    // 3. Install the SessionStart hook (Claude settings.json).
     steps.push(install_session_start_hook(
         &home,
         &exe,
         options.capability_block.as_deref(),
         dry_run,
     )?);
+
+    // 4. Wire PreToolUse + SessionStart hooks into Devin, Codex, and Gemini.
+    steps.push(install_devin_hooks(&home, &exe, dry_run)?);
+    steps.push(install_codex_hooks(&home, &exe, dry_run)?);
+    steps.push(install_gemini_hooks(&home, &exe, dry_run)?);
 
     // 5. Rewrite agent-config with managed markers.
     steps.push(rewrite_agent_configs(&home, &exe, dry_run)?);
@@ -147,124 +147,25 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     })
 }
 
-/// Probe whether the installed binary actually implements `pixel mcp` as a
-/// real subcommand, WITHOUT ever letting the probe block indefinitely: an
-/// MCP server is a long-lived stdio process, so if `mcp` really existed and
-/// somehow ignored `--help`, waiting on it forever is a real risk. This
-/// defends against that with a null stdin/stdout/stderr (so a read on stdin
-/// sees immediate EOF rather than blocking) plus an explicit wall-clock
-/// timeout that kills the child if it overruns.
-fn binary_supports_mcp_subcommand(exe: &Path) -> bool {
-    use std::process::Stdio;
-    use std::time::{Duration, Instant};
-
-    let mut child = match std::process::Command::new(exe)
-        .args(["mcp", "--help"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return false;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => return false,
-        }
-    }
-}
-
-fn register_mcp_server(home: &Path, exe: &Path, dry_run: bool, mcp_ready: bool) -> Result<InstallStep> {
-    if !mcp_ready {
-        return Ok(InstallStep {
-            id: "mcp.pixel".into(),
-            status: CheckStatus::Red,
-            summary: "pixel MCP server NOT registered — `mcp` subcommand missing from this binary".into(),
-            detail: Some(format!(
-                "skipped writing {{\"command\": \"{}\", \"args\": [\"mcp\"]}} into mcpServers.pixel because \
-                 `{} mcp --help` failed (unrecognized subcommand). Registering it anyway would install an MCP \
-                 server entry that can never start. This is a blocker in crates/pixel/src/main.rs's CLI: the \
-                 `mcp` subcommand must exist and actually run an MCP server before `pixel install` can safely \
-                 register it.",
-                exe.display(),
-                exe.display(),
-            )),
-        });
-    }
+fn scrub_deprecated(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let settings = home.join(".claude").join("settings.json");
-    let mut value = read_settings(&settings)?;
-    let servers = value
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
-            path: settings.clone(),
-            reason: "settings.json root is not an object".into(),
-        }))?;
-    let mcp = servers
-        .entry("mcpServers".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let obj = mcp
-        .as_object_mut()
-        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
-            path: settings.clone(),
-            reason: "mcpServers is not an object".into(),
-        }))?;
-    let existing = obj.get(MCP_SERVER_NAME).cloned();
-    obj.insert(
-        MCP_SERVER_NAME.to_string(),
-        serde_json::json!({
-            "command": exe.display().to_string(),
-            "args": ["mcp"],
-        }),
-    );
-    let backup_path = write_settings(&settings, &value, dry_run)?;
-    let action = if existing.is_some() {
-        "pixel MCP server already registered; updated command"
-    } else {
-        "registered pixel MCP server"
-    };
-    Ok(InstallStep {
-        id: "mcp.pixel".into(),
-        status: CheckStatus::Green,
-        summary: dry_run_summary(dry_run, "pixel MCP server registered"),
-        detail: Some(with_backup_note(action.to_string(), backup_path)),
-    })
-}
-
-fn scrub_deprecated(home: &Path, dry_run: bool, mcp_ready: bool) -> Result<InstallStep> {
-    let settings = home.join(".claude").join("settings.json");
-    // Only remove the old (working) usable-git/gitpixel/sniper MCP server
-    // entries once pixel's own MCP server is confirmed capable of starting
-    // — otherwise this step would leave the user with zero working MCP
-    // retrieval tools. The guard-hook command rewrite is unrelated to MCP
-    // registration and always proceeds regardless.
-    let outcome = config::scrub_settings_json(&settings, dry_run, mcp_ready)?;
+    // The deprecated usable-git/gitpixel/sniper MCP server entries are
+    // retired unconditionally — pixel replaces them via Bash + the guard
+    // hook, not via MCP. The guard-hook command rewrite is unrelated to MCP
+    // registration and always proceeds.
+    let outcome = config::scrub_settings_json(&settings, dry_run)?;
     let removed = outcome.mcp_servers_removed + outcome.guard_hooks_removed;
-    let mut summary = format!(
+    let summary = format!(
         "removed {removed} deprecated MCP/hook entr{}",
         if removed == 1 { "y" } else { "ies" }
     );
-    if !mcp_ready {
-        summary.push_str(" (deprecated MCP servers kept: pixel's own MCP server isn't runnable yet)");
-    }
     Ok(InstallStep {
         id: "mcp.deprecated".into(),
         status: CheckStatus::Green,
         summary: dry_run_summary(dry_run, &summary),
         detail: Some(with_backup_note(
             format!(
-                "mcp_servers_removed={} guard_hooks_removed={} mcp_ready={mcp_ready}",
+                "mcp_servers_removed={} guard_hooks_removed={}",
                 outcome.mcp_servers_removed, outcome.guard_hooks_removed
             ),
             outcome.backup_path,
@@ -279,13 +180,50 @@ fn install_guard_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallS
     let body = format!("#!/bin/sh\nexec {} hook guard \"$@\"\n", exe.display());
     let replaced_old = old.exists();
 
+    // Also wire the PreToolUse entry into Claude settings.json, so the
+    // guard actually fires on tool calls. The matcher covers both Claude
+    // tool names (Bash, Read, Grep, Glob, Edit, MultiEdit, NotebookEdit,
+    // Write) and Devin tool names (exec, read, grep, find_file_by_name,
+    // glob, edit, write, notebook_read, notebook_edit) — Devin reads
+    // ~/.claude/settings.json via its Claude compat layer.
+    let settings = home.join(".claude").join("settings.json");
+    let mut value = read_settings(&settings)?;
+    let hooks_obj = value
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: settings.clone(),
+            reason: "settings.json root is not an object".into(),
+        }))?
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_map = hooks_obj
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: settings.clone(),
+            reason: "hooks is not an object".into(),
+        }))?;
+    let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+    let existing_pretooluse = hooks_map.get("PreToolUse").cloned();
+    let merged_pretooluse = config::merge_hook_entry(
+        existing_pretooluse.as_ref(),
+        &guard_command,
+        serde_json::json!({
+            "matcher": config::GUARD_MATCHER,
+            "hooks": [{
+                "type": "command",
+                "command": guard_command,
+            }],
+        }),
+    );
+    hooks_map.insert("PreToolUse".to_string(), merged_pretooluse);
+
     if dry_run {
         return Ok(InstallStep {
             id: "hook.guard".into(),
             status: CheckStatus::Green,
             summary: dry_run_summary(dry_run, "guard hook installed"),
             detail: Some(format!(
-                "would write {} (replaced_old={replaced_old})",
+                "would write {} (replaced_old={replaced_old}) + PreToolUse entry",
                 new.display()
             )),
         });
@@ -306,13 +244,14 @@ fn install_guard_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallS
     }
     fs::write(&new, &body)?;
     set_executable(&new);
-    let backup_path = new_backup.or(old_backup);
+    let settings_backup = write_settings(&settings, &value, dry_run)?;
+    let backup_path = new_backup.or(old_backup).or(settings_backup);
     Ok(InstallStep {
         id: "hook.guard".into(),
         status: CheckStatus::Green,
         summary: "guard hook installed".into(),
         detail: Some(with_backup_note(
-            format!("wrote {} (replaced_old={replaced_old})", new.display()),
+            format!("wrote {} (replaced_old={replaced_old}) + PreToolUse entry", new.display()),
             backup_path,
         )),
     })
@@ -432,6 +371,229 @@ fn rewrite_agent_configs(home: &Path, exe: &Path, dry_run: bool) -> Result<Insta
             } else {
                 format!(" backups={}", backups.join(","))
             }
+        )),
+    })
+}
+
+/// Wire PreToolUse + SessionStart hooks into Devin's `~/.config/devin/config.json`.
+/// Devin reads `~/.claude/settings.json` via its Claude compat layer by
+/// default, but writing directly to Devin's own config ensures the hooks
+/// fire even if that compat layer is disabled.
+fn install_devin_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let config_dir = home.join(config::DEVIN_CONFIG_DIR);
+    let config_path = config_dir.join(config::DEVIN_CONFIG_FILE);
+    let mut value = read_settings(&config_path)?;
+
+    let hooks_obj = value
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "config.json root is not an object".into(),
+        }))?
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_map = hooks_obj
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "hooks is not an object".into(),
+        }))?;
+
+    // PreToolUse — guard hook. Same matcher as Claude (covers both tool
+    // name sets). The guard script is the same file under ~/.claude/hooks/.
+    let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+    let existing_pretooluse = hooks_map.get("PreToolUse").cloned();
+    let merged_pretooluse = config::merge_hook_entry(
+        existing_pretooluse.as_ref(),
+        &guard_command,
+        serde_json::json!({
+            "matcher": config::GUARD_MATCHER,
+            "hooks": [{
+                "type": "command",
+                "command": guard_command,
+            }],
+        }),
+    );
+    hooks_map.insert("PreToolUse".to_string(), merged_pretooluse);
+
+    // SessionStart — same hook script as Claude.
+    let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
+    let existing_session_start = hooks_map.get("SessionStart").cloned();
+    let merged_session_start = config::merge_hook_entry(
+        existing_session_start.as_ref(),
+        &session_start_command,
+        serde_json::json!({
+            "matcher": "SessionStart",
+            "hooks": [{
+                "type": "command",
+                "command": session_start_command,
+            }],
+        }),
+    );
+    hooks_map.insert("SessionStart".to_string(), merged_session_start);
+
+    if dry_run {
+        return Ok(InstallStep {
+            id: "hooks.devin".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "Devin hooks wired (PreToolUse + SessionStart)"),
+            detail: Some(format!("would write {}", config_path.display())),
+        });
+    }
+
+    let backup_path = write_settings(&config_path, &value, dry_run)?;
+    Ok(InstallStep {
+        id: "hooks.devin".into(),
+        status: CheckStatus::Green,
+        summary: "Devin hooks wired (PreToolUse + SessionStart)".into(),
+        detail: Some(with_backup_note(
+            format!("wrote {}", config_path.display()),
+            backup_path,
+        )),
+    })
+}
+
+/// Wire PreToolUse + SessionStart hooks into Codex's `~/.codex/hooks.json`.
+/// Codex uses the same hook format as Claude (event `PreToolUse`).
+fn install_codex_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let config_path = home.join(config::CODEX_HOOKS_FILE);
+    let mut value = read_settings(&config_path)?;
+
+    let hooks_obj = value
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "hooks.json root is not an object".into(),
+        }))?
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_map = hooks_obj
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "hooks is not an object".into(),
+        }))?;
+
+    let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+    let existing_pretooluse = hooks_map.get("PreToolUse").cloned();
+    let merged_pretooluse = config::merge_hook_entry(
+        existing_pretooluse.as_ref(),
+        &guard_command,
+        serde_json::json!({
+            "matcher": config::GUARD_MATCHER,
+            "hooks": [{
+                "type": "command",
+                "command": guard_command,
+            }],
+        }),
+    );
+    hooks_map.insert("PreToolUse".to_string(), merged_pretooluse);
+
+    let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
+    let existing_session_start = hooks_map.get("SessionStart").cloned();
+    let merged_session_start = config::merge_hook_entry(
+        existing_session_start.as_ref(),
+        &session_start_command,
+        serde_json::json!({
+            "matcher": "SessionStart",
+            "hooks": [{
+                "type": "command",
+                "command": session_start_command,
+            }],
+        }),
+    );
+    hooks_map.insert("SessionStart".to_string(), merged_session_start);
+
+    if dry_run {
+        return Ok(InstallStep {
+            id: "hooks.codex".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "Codex hooks wired (PreToolUse + SessionStart)"),
+            detail: Some(format!("would write {}", config_path.display())),
+        });
+    }
+
+    let backup_path = write_settings(&config_path, &value, dry_run)?;
+    Ok(InstallStep {
+        id: "hooks.codex".into(),
+        status: CheckStatus::Green,
+        summary: "Codex hooks wired (PreToolUse + SessionStart)".into(),
+        detail: Some(with_backup_note(
+            format!("wrote {}", config_path.display()),
+            backup_path,
+        )),
+    })
+}
+
+/// Wire BeforeTool + SessionStart hooks into Gemini's `~/.gemini/settings.json`.
+/// Gemini uses `BeforeTool` instead of `PreToolUse`, but the same hook format.
+fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let config_path = home.join(config::GEMINI_SETTINGS_FILE);
+    let mut value = read_settings(&config_path)?;
+
+    let hooks_obj = value
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "settings.json root is not an object".into(),
+        }))?
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_map = hooks_obj
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "hooks is not an object".into(),
+        }))?;
+
+    // Gemini uses "BeforeTool" instead of "PreToolUse".
+    let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+    let existing_beforetool = hooks_map.get("BeforeTool").cloned();
+    let merged_beforetool = config::merge_hook_entry(
+        existing_beforetool.as_ref(),
+        &guard_command,
+        serde_json::json!({
+            "matcher": config::GUARD_MATCHER,
+            "hooks": [{
+                "type": "command",
+                "command": guard_command,
+            }],
+        }),
+    );
+    hooks_map.insert("BeforeTool".to_string(), merged_beforetool);
+
+    let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
+    let existing_session_start = hooks_map.get("SessionStart").cloned();
+    let merged_session_start = config::merge_hook_entry(
+        existing_session_start.as_ref(),
+        &session_start_command,
+        serde_json::json!({
+            "matcher": "SessionStart",
+            "hooks": [{
+                "type": "command",
+                "command": session_start_command,
+            }],
+        }),
+    );
+    hooks_map.insert("SessionStart".to_string(), merged_session_start);
+
+    if dry_run {
+        return Ok(InstallStep {
+            id: "hooks.gemini".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "Gemini hooks wired (BeforeTool + SessionStart)"),
+            detail: Some(format!("would write {}", config_path.display())),
+        });
+    }
+
+    let backup_path = write_settings(&config_path, &value, dry_run)?;
+    Ok(InstallStep {
+        id: "hooks.gemini".into(),
+        status: CheckStatus::Green,
+        summary: "Gemini hooks wired (BeforeTool + SessionStart)".into(),
+        detail: Some(with_backup_note(
+            format!("wrote {}", config_path.display()),
+            backup_path,
         )),
     })
 }

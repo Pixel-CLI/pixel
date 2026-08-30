@@ -11,47 +11,21 @@ use pixel_install::install::{InstallOptions, install};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
-// test fixture: a fake "pixel" executable that answers `mcp --help`
+// test fixture: a fake "pixel" executable.
 //
-// `InstallOptions::default()`'s `executable_path: None` resolves to the
-// TEST binary itself via `current_exe()`, which never supports `mcp
-// --help` — so it correctly exercises the mcp_ready=false path everywhere
-// it's used. Tests that need to exercise the mcp_ready=true path (pixel
-// MCP server actually gets registered, deprecated servers actually get
-// removed) use this fixture instead.
+// pixel is a CLI + hooks tool, not an MCP server — `pixel install` no longer
+// probes for an `mcp` subcommand or registers a pixel MCP server entry. The
+// fixture below just stands in for a real pixel binary so install has
+// something to write into the guard/session-start hook scripts.
 // ---------------------------------------------------------------------------
 
-/// Write a tiny shell script to `dir` that exits 0 for `mcp --help` (and any
-/// other args), standing in for a real pixel binary whose `mcp` subcommand
-/// exists and works.
-///
-/// NOTE: `executable_path: None` (the crate's own default, which resolves to
-/// the currently-running TEST binary via `current_exe()`) is deliberately
-/// NOT used to represent "mcp not ready" anywhere in this file. `cargo
-/// test`'s libtest harness treats `--help` as its OWN flag and exits 0
-/// regardless of the preceding "mcp" positional argument (which libtest
-/// just treats as a test-name filter) — so the test binary would falsely
-/// report mcp_ready=true, unlike a real clap-based CLI (which reports
-/// "unrecognized subcommand" for an args shape it doesn't recognize,
-/// confirmed live against the actual pixel release binary). Tests that
-/// specifically need mcp_ready=false use `fake_mcp_incapable_exe` instead.
+/// Write a tiny shell script to `dir` standing in for a real pixel binary.
+/// Used so the guard/session-start hook scripts point at a real executable.
 #[cfg(unix)]
-fn fake_mcp_capable_exe(dir: &std::path::Path) -> std::path::PathBuf {
+fn fake_pixel_exe(dir: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("fake-pixel-mcp-ok");
+    let path = dir.join("fake-pixel");
     fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    path
-}
-
-/// Write a tiny shell script to `dir` that always exits non-zero, standing
-/// in for the REAL current pixel binary's actual behavior: `mcp` is not a
-/// recognized subcommand, so `<exe> mcp --help` fails.
-#[cfg(unix)]
-fn fake_mcp_incapable_exe(dir: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("fake-pixel-mcp-missing");
-    fs::write(&path, "#!/bin/sh\nexit 2\n").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     path
 }
@@ -190,15 +164,17 @@ fn doctor_runs_and_returns_report() {
         report.summary.green + report.summary.yellow + report.summary.red > 0,
         "summary should tally checks"
     );
-    // Without install, install.mcp should be red.
+    // With no settings.json, install.mcp should be green (nothing to scrub).
     let mcp_check = report
         .checks
         .iter()
         .find(|c| c.id == "install.mcp")
         .expect("should have install.mcp check");
     assert!(
-        mcp_check.status == pixel_install::doctor::CheckStatus::Red,
-        "install.mcp should be red without install"
+        mcp_check.status == pixel_install::doctor::CheckStatus::Green,
+        "install.mcp should be green when no settings.json exists (nothing to scrub), got {:?}: {:?}",
+        mcp_check.status,
+        mcp_check.reason
     );
 }
 
@@ -207,19 +183,18 @@ fn doctor_after_install_reports_green_mcp() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
 
-    // Run install first, with a fixture exe that answers `mcp --help`
-    // successfully — otherwise (matching the real, current pixel binary's
-    // actual behavior) the pixel MCP server is deliberately NOT registered
-    // and this doctor check would stay red.
+    // Run install first — pixel is a CLI + hooks tool, not an MCP server,
+    // so install only scrubs deprecated MCP entries and wires hooks. The
+    // install.mcp doctor check verifies no deprecated servers linger, not
+    // that pixel itself is registered as an MCP server.
     let install_opts = InstallOptions {
         home: Some(home.to_path_buf()),
-        executable_path: Some(fake_mcp_capable_exe(home)),
+        executable_path: Some(fake_pixel_exe(home)),
         capability_block: None,
         dry_run: false,
     };
     install(&install_opts).expect("install");
 
-    // Now doctor should see the MCP server.
     let doc_opts = DoctorOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
@@ -234,7 +209,7 @@ fn doctor_after_install_reports_green_mcp() {
         .expect("should have install.mcp check");
     assert!(
         mcp_check.status == pixel_install::doctor::CheckStatus::Green,
-        "install.mcp should be green after install, got {:?}: {:?}",
+        "install.mcp should be green after install (no deprecated servers), got {:?}: {:?}",
         mcp_check.status,
         mcp_check.reason
     );
@@ -254,7 +229,7 @@ fn install_creates_config_with_managed_markers() {
 
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
-        executable_path: Some(fake_mcp_capable_exe(home)),
+        executable_path: Some(fake_pixel_exe(home)),
         capability_block: None,
         dry_run: false,
     };
@@ -265,14 +240,6 @@ fn install_creates_config_with_managed_markers() {
     assert!(
         report.summary.green > 0,
         "should have green steps"
-    );
-
-    // settings.json should exist and contain the pixel MCP server.
-    let settings_path = home.join(".claude").join("settings.json");
-    let settings = fs::read_to_string(&settings_path).expect("settings.json");
-    assert!(
-        settings.contains("\"pixel\""),
-        "settings.json should register pixel MCP server"
     );
 
     // CLAUDE.md should now contain managed markers.
@@ -299,7 +266,7 @@ fn install_is_idempotent() {
 
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
-        executable_path: Some(fake_mcp_capable_exe(home)),
+        executable_path: Some(fake_pixel_exe(home)),
         capability_block: None,
         dry_run: false,
     };
@@ -344,7 +311,7 @@ fn install_removes_deprecated_mcp_servers() {
 
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
-        executable_path: Some(fake_mcp_capable_exe(home)),
+        executable_path: Some(fake_pixel_exe(home)),
         capability_block: None,
         dry_run: false,
     };
@@ -358,10 +325,6 @@ fn install_removes_deprecated_mcp_servers() {
     assert!(
         !after.contains("\"gitpixel\""),
         "deprecated gitpixel server should be removed"
-    );
-    assert!(
-        after.contains("\"pixel\""),
-        "pixel server should be registered"
     );
 }
 
@@ -521,27 +484,17 @@ fn dry_run_writes_nothing_on_a_clean_home() {
 
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
-        executable_path: Some(fake_mcp_incapable_exe(home)),
+        executable_path: Some(fake_pixel_exe(home)),
         capability_block: None,
         dry_run: true,
     };
     let report = install(&options).expect("dry-run install");
 
-    // Uses a fixture that fails `mcp --help`, matching the real, current
-    // pixel release binary's actual behavior (confirmed live:
-    // `error: unrecognized subcommand 'mcp'`). That correctly makes the
-    // mcp.pixel step Red (and report.ok false): a dry-run preview must show
-    // this real gap honestly, not paper over it. See
-    // `dry_run_reports_ok_when_mcp_is_ready` for the positive-path
-    // equivalent.
+    // pixel is a CLI + hooks tool, not an MCP server — there is no mcp.pixel
+    // step anymore. A dry-run on a clean home should report ok (all steps
+    // green, nothing to write) and leave nothing on disk.
     assert!(report.dry_run, "report should mark itself as a dry run");
-    let mcp_step = report.steps.iter().find(|s| s.id == "mcp.pixel").expect("mcp.pixel step");
-    assert_eq!(
-        mcp_step.status,
-        pixel_install::install::CheckStatus::Red,
-        "mcp.pixel should be red when the binary doesn't support `mcp --help`, matching the real installed binary today"
-    );
-    assert!(!report.ok, "report.ok must reflect the red mcp.pixel step, not paper over it");
+    assert!(report.ok, "dry-run on clean home should report ok: {report:?}");
 
     // Nothing should exist on disk: no .claude dir, no CLAUDE.md, no hooks.
     assert!(
@@ -554,32 +507,14 @@ fn dry_run_writes_nothing_on_a_clean_home() {
     );
 }
 
-#[test]
-fn dry_run_reports_ok_when_mcp_is_ready() {
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    let options = InstallOptions {
-        home: Some(home.to_path_buf()),
-        executable_path: Some(fake_mcp_capable_exe(home)),
-        capability_block: None,
-        dry_run: true,
-    };
-    let report = install(&options).expect("dry-run install with mcp-capable exe");
-    assert!(report.ok, "dry-run should report ok when mcp IS ready: {report:?}");
-    assert!(!home.join(".claude").exists(), ".claude directory must not be created in dry-run mode");
-}
-
 // ---------------------------------------------------------------------------
-// mcp-not-runnable safety gate (real, confirmed bug: pixel install used to
-// register {"command": exe, "args": ["mcp"]} unconditionally, even though
-// `pixel mcp` is not a real subcommand in the actual released binary today
-// — confirmed live: `error: unrecognized subcommand 'mcp'`. Running install
-// would have replaced working usable-git/gitpixel/sniper MCP registrations
-// with one that can never start.)
+// deprecated-MCP scrub (pixel is a CLI + hooks tool, not an MCP server —
+// install removes the retired usable-git/gitpixel/sniper MCP entries
+// unconditionally, since pixel replaces them via Bash + the guard hook.)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn install_preserves_working_mcp_servers_when_pixel_mcp_is_not_runnable() {
+fn install_removes_deprecated_mcp_servers_unconditionally() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     let settings_dir = home.join(".claude");
@@ -598,27 +533,30 @@ fn install_preserves_working_mcp_servers_when_pixel_mcp_is_not_runnable() {
 
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
-        executable_path: Some(fake_mcp_incapable_exe(home)),
+        executable_path: Some(fake_pixel_exe(home)),
         capability_block: None,
         dry_run: false,
     };
-    let report = install(&options).expect("install with mcp-incapable exe");
+    let report = install(&options).expect("install");
 
-    // The whole point: install must be honest that this half of its job
-    // did not happen, not silently claim success.
-    assert!(!report.ok, "report.ok must be false: the pixel MCP server could not be registered");
-    let mcp_step = report.steps.iter().find(|s| s.id == "mcp.pixel").unwrap();
-    assert_eq!(mcp_step.status, pixel_install::install::CheckStatus::Red);
+    // install should succeed — pixel is not an MCP server, so there's no
+    // mcp.pixel step to fail. The deprecated usable-git entry is removed
+    // unconditionally.
+    assert!(report.ok, "install should succeed: {report:?}");
+    assert!(
+        report.steps.iter().all(|s| s.id != "mcp.pixel"),
+        "no mcp.pixel step should exist — pixel is not an MCP server"
+    );
 
     let after: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).expect("still valid JSON");
-    assert_eq!(
-        after["mcpServers"]["usable-git"]["command"], "old-usable-git-binary",
-        "the OLD, working usable-git MCP server must be PRESERVED — never removed in favor of one that can't start"
+    assert!(
+        after["mcpServers"].get("usable-git").is_none(),
+        "the deprecated usable-git MCP server must be removed — pixel replaces it via Bash + the guard hook"
     );
     assert!(
         after["mcpServers"].get("pixel").is_none(),
-        "pixel must NOT register an MCP server entry that is guaranteed to fail to launch"
+        "pixel must NOT register an MCP server entry — it is a CLI + hooks tool"
     );
 }
 
@@ -781,7 +719,7 @@ fn install_against_realistic_settings_json_is_safe() {
 
     let options = InstallOptions {
         home: Some(home.to_path_buf()),
-        executable_path: Some(fake_mcp_capable_exe(home)),
+        executable_path: Some(fake_pixel_exe(home)),
         capability_block: None,
         dry_run: false,
     };
@@ -826,10 +764,12 @@ fn install_against_realistic_settings_json_is_safe() {
         "all 3 pre-existing SessionStart entries from another tool must survive, got session_start={session_start:?}"
     );
 
-    // (c) pixel's own entries were correctly added.
+    // (c) pixel's own entries were correctly added. pixel is a CLI + hooks
+    // tool, not an MCP server — so we check the SessionStart hook was
+    // merged in, NOT that a pixel MCP server entry was registered.
     assert!(
-        after["mcpServers"]["pixel"]["command"].is_string(),
-        "pixel MCP server should be registered"
+        after["mcpServers"].get("pixel").is_none(),
+        "pixel must NOT be registered as an MCP server — it is a CLI + hooks tool"
     );
     let has_pixel_session_start = session_start.iter().any(|e| {
         e["hooks"][0]["command"]
@@ -839,21 +779,25 @@ fn install_against_realistic_settings_json_is_safe() {
     });
     assert!(has_pixel_session_start, "pixel's own SessionStart entry should be present");
 
-    // The old guard hook's PreToolUse entry must be repointed to the new
-    // filename in place — matcher and timeout preserved, not deleted.
+    // The old guard hook's PreToolUse entry (matcher "Grep|Glob") is
+    // repointed by scrub_settings_json, then REPLACED by install_guard_hook
+    // with a new entry carrying the full GUARD_MATCHER (covers both Claude
+    // and Devin tool names). The old entry's timeout is not preserved —
+    // the new entry doesn't need it (the guard script exits quickly).
     let pre_tool_use = after["hooks"]["PreToolUse"].as_array().expect("PreToolUse array survives");
-    assert_eq!(pre_tool_use.len(), 2, "PreToolUse entries must not be deleted, only repointed");
+    assert_eq!(pre_tool_use.len(), 2, "PreToolUse: bridge entry + new pixel guard entry");
     let guard_entry = pre_tool_use
         .iter()
-        .find(|e| e["matcher"] == "Grep|Glob")
-        .expect("guard matcher group survives");
+        .find(|e| {
+            e["hooks"].as_array()
+                .map(|hs| hs.iter().any(|h| h["command"].as_str() == Some("~/.claude/hooks/pixel-targets-guard")))
+                .unwrap_or(false)
+        })
+        .expect("pixel guard PreToolUse entry present");
+    // The new matcher covers both Claude and Devin tool names.
     assert_eq!(
-        guard_entry["hooks"][0]["command"], "~/.claude/hooks/pixel-targets-guard",
-        "old guard command should be repointed to the new filename in place"
-    );
-    assert_eq!(
-        guard_entry["hooks"][0]["timeout"], 5,
-        "unrelated fields on the guard hook entry (timeout) must be preserved"
+        guard_entry["matcher"], pixel_install::config::GUARD_MATCHER,
+        "guard entry should use the full matcher covering Claude + Devin tool names"
     );
     let bridge_entry = pre_tool_use
         .iter()
@@ -862,8 +806,8 @@ fn install_against_realistic_settings_json_is_safe() {
     assert_eq!(bridge_entry["hooks"][0]["command"], "/bin/sh -c 'echo bridge'");
 
     // (d) a .bak was written before the destructive rewrite. `install()`
-    // touches settings.json across THREE separate steps (register the
-    // pixel MCP server, scrub deprecated entries, wire the SessionStart
+    // touches settings.json across THREE separate steps (scrub deprecated
+    // entries, wire the PreToolUse guard entry, wire the SessionStart
     // hook) — each backs up independently when its own write actually
     // changes the content, so multiple backup files can legitimately exist
     // in one install run. `fs::read_dir`'s order is unspecified, so pick

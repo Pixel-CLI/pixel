@@ -124,9 +124,17 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     }));
 
     checks.push(check("install.mcp", || -> std::result::Result<DoctorCheckDetail, String> {
+        // pixel is a CLI + hooks tool, not an MCP server. This check now
+        // only verifies that no deprecated usable-git/gitpixel/sniper MCP
+        // server entries linger in settings.json — it does NOT require
+        // pixel itself to be registered as an MCP server (that would give
+        // agents a transport that bypasses the PreToolUse guard hook).
         let settings = home.join(".claude").join("settings.json");
         if !settings.is_file() {
-            return Err("no .claude/settings.json found".into());
+            return Ok(DoctorCheckDetail {
+                summary: "no .claude/settings.json — nothing to scrub".into(),
+                detail: None,
+            });
         }
         let value: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(&settings).map_err(|e| e.to_string())?,
@@ -134,16 +142,15 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         .map_err(|e| e.to_string())?;
         let servers = value
             .get("mcpServers")
-            .and_then(serde_json::Value::as_object)
-            .ok_or("mcpServers missing from settings.json")?;
-        if !servers.contains_key("pixel") {
-            return Err("pixel MCP server not registered".into());
-        }
+            .and_then(serde_json::Value::as_object);
         let deprecated: Vec<String> = servers
-            .keys()
-            .filter(|k| config::DEPRECATED_MCP_SERVERS.contains(&k.as_str()))
-            .cloned()
-            .collect();
+            .map(|s| {
+                s.keys()
+                    .filter(|k| config::DEPRECATED_MCP_SERVERS.contains(&k.as_str()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
         if !deprecated.is_empty() {
             return Err(format!(
                 "deprecated MCP servers still present: {}",
@@ -151,8 +158,8 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             ));
         }
         Ok(DoctorCheckDetail {
-            summary: "pixel MCP server registered; no deprecated servers".into(),
-            detail: Some(serde_json::json!({ "servers": servers.keys().collect::<Vec<_>>() })),
+            summary: "no deprecated MCP servers present".into(),
+            detail: Some(serde_json::json!({ "servers": servers.map(|s| s.keys().collect::<Vec<_>>()).unwrap_or_default() })),
         })
     }));
 
@@ -181,6 +188,123 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         Ok(DoctorCheckDetail {
             summary: "SessionStart hook installed".into(),
             detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+        })
+    }));
+
+    checks.push(check("install.devin-hooks", || -> std::result::Result<DoctorCheckDetail, String> {
+        let config_path = home.join(config::DEVIN_CONFIG_DIR).join(config::DEVIN_CONFIG_FILE);
+        if !config_path.is_file() {
+            return Ok(DoctorCheckDetail {
+                summary: "no Devin config.json — skipping".into(),
+                detail: None,
+            });
+        }
+        let raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+        let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let hooks = value.get("hooks").and_then(serde_json::Value::as_object);
+        if hooks.is_none() {
+            return Err("Devin config.json has no hooks key".into());
+        }
+        let hooks = hooks.unwrap();
+        let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+        let has_guard = hooks.get("PreToolUse")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| {
+                        h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&guard_command)).unwrap_or(false)
+                    }))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !has_guard {
+            return Err("Devin PreToolUse guard hook not wired".into());
+        }
+        let session_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
+        let has_session = hooks.get("SessionStart")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| {
+                        h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&session_command)).unwrap_or(false)
+                    }))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !has_session {
+            return Err("Devin SessionStart hook not wired".into());
+        }
+        Ok(DoctorCheckDetail {
+            summary: "Devin hooks wired (PreToolUse + SessionStart)".into(),
+            detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
+        })
+    }));
+
+    checks.push(check("install.codex-hooks", || -> std::result::Result<DoctorCheckDetail, String> {
+        let config_path = home.join(config::CODEX_HOOKS_FILE);
+        if !config_path.is_file() {
+            return Ok(DoctorCheckDetail {
+                summary: "no Codex hooks.json — skipping".into(),
+                detail: None,
+            });
+        }
+        let raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+        let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let hooks = value.get("hooks").and_then(serde_json::Value::as_object);
+        if hooks.is_none() {
+            return Err("Codex hooks.json has no hooks key".into());
+        }
+        let hooks = hooks.unwrap();
+        let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+        let has_guard = hooks.get("PreToolUse")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks").and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&guard_command)).unwrap_or(false)))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !has_guard {
+            return Err("Codex PreToolUse guard hook not wired".into());
+        }
+        Ok(DoctorCheckDetail {
+            summary: "Codex hooks wired (PreToolUse)".into(),
+            detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
+        })
+    }));
+
+    checks.push(check("install.gemini-hooks", || -> std::result::Result<DoctorCheckDetail, String> {
+        let config_path = home.join(config::GEMINI_SETTINGS_FILE);
+        if !config_path.is_file() {
+            return Ok(DoctorCheckDetail {
+                summary: "no Gemini settings.json — skipping".into(),
+                detail: None,
+            });
+        }
+        let raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+        let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let hooks = value.get("hooks").and_then(serde_json::Value::as_object);
+        if hooks.is_none() {
+            return Err("Gemini settings.json has no hooks key".into());
+        }
+        let hooks = hooks.unwrap();
+        let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+        let has_guard = hooks.get("BeforeTool")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks").and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&guard_command)).unwrap_or(false)))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !has_guard {
+            return Err("Gemini BeforeTool guard hook not wired".into());
+        }
+        Ok(DoctorCheckDetail {
+            summary: "Gemini hooks wired (BeforeTool)".into(),
+            detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
         })
     }));
 
