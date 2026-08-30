@@ -17,18 +17,9 @@ Inspired by [GitNexus](https://github.com/abhigyanpatwari/GitNexus) (code knowle
 
 ## The problem
 
-90% of LLM coding agent work falls into four scenarios. Today, agents handle all of them by reasoning through Git — scrolling diffs, guessing commits, running repetitive searches, and burning tokens on operations that should be deterministic.
+Most of the annoying LLM coding agent work falls into four scenarios. Today, agents handle them by reasoning through Git — scrolling diffs, guessing commits, running repetitive searches, and burning tokens on operations that should be deterministic.
 
-### 1. Recovering deleted code
-
-You want a feature back. The code exists in Git history, a stale branch, or a stash.
-
-- Agent wanders through `git log`, reads diffs, guesses the commit
-- Does `git checkout` of the old version — erases fixes, destroys uncommitted work, reintroduces regressions
-- Sometimes forgets to check the stash entirely
-- Should be instant and safe — not a 15-minute archaeology expedition ending in lost work
-
-### 2. Locating code by a phrase or error
+### 1. Locating code by a phrase or error
 
 You paste a label that exists in exactly one place.
 
@@ -37,6 +28,16 @@ You paste a label that exists in exactly one place.
 - You report a 503 — finite set of endpoints can produce it, agent doesn't know which are likely
 - No awareness of what you're testing or just changed
 - Should be milliseconds for unique strings, ranked by context for ambiguous ones
+
+### 2. Scoping a task before editing
+
+You say "fix the login bug."
+
+- Agent reads 20 files, edits 15, breaks 3 unrelated features, takes 40 min
+- Nothing told it which files matter
+- Git history + code graph + call tree can produce a closed P0/P1/P2 file list
+- Agent should get that list before touching anything
+- Guard hook should block edits to files not on it
 
 ### 3. Synchronizing branches
 
@@ -47,27 +48,26 @@ You ask to sync with main. No conflict — clean fast-forward.
 - A deterministic script could handle it in under a second
 - AI should handle conflicts only — everything else stays deterministic
 
-### 4. Scoping a task before editing
+### 4. Recovering deleted code
 
-You say "fix the login bug."
+You want a feature back. The code exists in Git history, a stale branch, or a stash.
 
-- Agent reads 20 files, edits 15, breaks 3 unrelated features, takes 40 min
-- Nothing told it which files matter
-- Git history + code graph + call tree can produce a closed P0/P1/P2 file list
-- Agent should get that list before touching anything
-- Guard hook should block edits to files not on it
+- Agent wanders through `git log`, reads diffs, guesses the commit
+- Does `git checkout` of the old version — erases fixes, destroys uncommitted work, reintroduces regressions
+- Sometimes forgets to check the stash entirely
+- Should be instant and safe — not a 15-minute archaeology expedition ending in lost work
 
 ---
 
 ## 💡 What this looks like
 
-Numbers are illustrative (order-of-magnitude), not a benchmark — the source diagrams live in `docs/examples/` and get regenerated once real measurements replace them.
+Measured with `claude -p` against the pixel repo itself (308 files, Rust). Wall-clock time for the full agent workflow, 4 scenarios in parallel.
 
 <table>
-<tr><td align="center" width="50%"><b>Recovering deleted code</b></td><td align="center" width="50%"><b>Locating code by an error</b></td></tr>
-<tr><td align="center" width="50%"><img src="docs/examples/01-recover-deleted-code.svg" width="600" alt="Recovering deleted code" /></td><td align="center" width="50%"><img src="docs/examples/02-resolve-error.svg" width="600" alt="Locating code by an error" /></td></tr>
-<tr><td align="center" width="50%"><b>Syncing a branch</b></td><td align="center" width="50%"><b>Starting a task</b></td></tr>
-<tr><td align="center" width="50%"><img src="docs/examples/03-reconcile-branch.svg" width="600" alt="Syncing a branch" /></td><td align="center" width="50%"><img src="docs/examples/04-targets-task.svg" width="600" alt="Starting a task" /></td></tr>
+<tr><td align="center" width="50%"><b>Locating code by an error</b></td><td align="center" width="50%"><b>Starting a task</b></td></tr>
+<tr><td align="center" width="50%"><img src="docs/examples/02-resolve-error.svg" width="600" alt="Locating code by an error" /></td><td align="center" width="50%"><img src="docs/examples/04-targets-task.svg" width="600" alt="Starting a task" /></td></tr>
+<tr><td align="center" width="50%"><b>Syncing a branch</b></td><td align="center" width="50%"><b>Recovering deleted code</b></td></tr>
+<tr><td align="center" width="50%"><img src="docs/examples/03-reconcile-branch.svg" width="600" alt="Syncing a branch" /></td><td align="center" width="50%"><img src="docs/examples/01-recover-deleted-code.svg" width="600" alt="Recovering deleted code" /></td></tr>
 <tr><td align="center" width="50%"><b>Searching the codebase</b></td><td align="center" width="50%"><b>Blast radius before editing</b></td></tr>
 <tr><td align="center" width="50%"><img src="docs/examples/05-search-ranked.svg" width="600" alt="Searching the codebase" /></td><td align="center" width="50%"><img src="docs/examples/06-impact-blast-radius.svg" width="600" alt="Blast radius before editing" /></td></tr>
 <tr><td align="center" width="50%"><b>Finding real callers</b></td><td align="center" width="50%"><b>Checking impact before committing</b></td></tr>
