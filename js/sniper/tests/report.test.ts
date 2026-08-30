@@ -3,48 +3,48 @@ import { EventEmitter } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SinkReporter, resolveGitpixelBin } from "../src/report.ts";
+import { SinkReporter, resolvePixelBin } from "../src/report.ts";
 
-describe("resolveGitpixelBin", () => {
+describe("resolvePixelBin", () => {
   test("explicit path wins when executable", () => {
     const dir = mkdtempSync(join(tmpdir(), "sniper-bin-"));
-    const bin = join(dir, "gitpixel");
+    const bin = join(dir, "pixel");
     writeFileSync(bin, "#!/bin/sh\nexit 0\n");
     chmodSync(bin, 0o755);
-    expect(resolveGitpixelBin(bin)).toBe(bin);
+    expect(resolvePixelBin(bin)).toBe(bin);
   });
 
   test("explicit missing path throws a clear error", () => {
-    expect(() => resolveGitpixelBin("/nope/definitely/missing/gitpixel")).toThrow(
-      /not found at .*missing\/gitpixel/,
+    expect(() => resolvePixelBin("/nope/definitely/missing/pixel")).toThrow(
+      /not found at .*missing\/pixel/,
     );
   });
 
-  test("GITPIXEL_BIN env is honored", () => {
+  test("PIXEL_BIN env is honored", () => {
     const dir = mkdtempSync(join(tmpdir(), "sniper-bin-"));
-    const bin = join(dir, "gitpixel-env");
+    const bin = join(dir, "pixel-env");
     writeFileSync(bin, "#!/bin/sh\nexit 0\n");
     chmodSync(bin, 0o755);
-    const prev = process.env.GITPIXEL_BIN;
-    process.env.GITPIXEL_BIN = bin;
+    const prev = process.env.PIXEL_BIN;
+    process.env.PIXEL_BIN = bin;
     try {
-      expect(resolveGitpixelBin()).toBe(bin);
+      expect(resolvePixelBin()).toBe(bin);
     } finally {
-      if (prev === undefined) delete process.env.GITPIXEL_BIN;
-      else process.env.GITPIXEL_BIN = prev;
+      if (prev === undefined) delete process.env.PIXEL_BIN;
+      else process.env.PIXEL_BIN = prev;
     }
   });
 
   test("bare name resolves via PATH", () => {
     const dir = mkdtempSync(join(tmpdir(), "sniper-path-"));
     mkdirSync(dir, { recursive: true });
-    const bin = join(dir, "gitpixel-on-path");
+    const bin = join(dir, "pixel-on-path");
     writeFileSync(bin, "#!/bin/sh\nexit 0\n");
     chmodSync(bin, 0o755);
     const prevPath = process.env.PATH;
     process.env.PATH = `${dir}:${prevPath}`;
     try {
-      expect(resolveGitpixelBin("gitpixel-on-path")).toBe(bin);
+      expect(resolvePixelBin("pixel-on-path")).toBe(bin);
     } finally {
       process.env.PATH = prevPath;
     }

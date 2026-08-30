@@ -1,7 +1,7 @@
 {
-  "name": "@gitpixel/sniper",
+  "name": "@pixel/sniper",
   "version": "0.1.0",
-  "description": "JS companion for the gitpixel sniper error sink: Vite dev plugin, browser client, and vitest reporter that feed `gitpixel sniper report`.",
+  "description": "JS companion for the pixel sniper error sink: Vite dev plugin, browser client, and vitest reporter that feed `pixel sniper report`.",
   "license": "MIT",
   "type": "module",
   "exports": {

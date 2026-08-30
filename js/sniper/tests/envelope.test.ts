@@ -1,8 +1,8 @@
 /**
  * Golden envelope shapes + LIVE round-trip through the real Rust binary:
  * every envelope this package emits must parse with
- * `gitpixel_sniper::types::ReportEnvelope` and come back intact from
- * `gitpixel sniper last/env --json`.
+ * `pixel_sniper::types::ReportEnvelope` and come back intact from
+ * `pixel sniper last/env --json`.
  */
 import { beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -12,11 +12,11 @@ import { join, resolve } from "node:path";
 import type { ErrorEnvelope, EventEnvelope, RunEnvelope } from "../src/report.ts";
 
 const repoRoot = resolve(import.meta.dir, "..", "..", "..");
-const binPath = join(repoRoot, "target", "debug", "gitpixel");
+const binPath = join(repoRoot, "target", "debug", "pixel");
 
 beforeAll(() => {
   if (!existsSync(binPath)) {
-    execFileSync("cargo", ["build", "-p", "gitpixel-cli"], {
+    execFileSync("cargo", ["build", "-p", "pixel-cli"], {
       cwd: repoRoot,
       stdio: "inherit",
       timeout: 600_000,
@@ -95,7 +95,7 @@ const goldenRun: RunEnvelope = {
   ts: 1787799999000,
 };
 
-describe("live round-trip through the real gitpixel binary", () => {
+describe("live round-trip through the real pixel binary", () => {
   test("run, event, and error envelopes are all accepted and queryable", () => {
     const { project, run } = makeSandbox();
 

@@ -1,8 +1,8 @@
 /**
  * Shared plumbing for every server-side adapter: the envelope types that
- * mirror the Rust ingest contract (`gitpixel-sniper/src/types.rs`), gitpixel
+ * mirror the Rust ingest contract (`pixel-sniper/src/types.rs`), pixel
  * binary resolution, and a serialized shell-out queue that pipes one JSON
- * record at a time into `gitpixel sniper report --json -`.
+ * record at a time into `pixel sniper report --json -`.
  *
  * Field names are snake_case on purpose — they must round-trip through the
  * Rust serde structs verbatim.
@@ -13,7 +13,7 @@ import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 
 // ---------------------------------------------------------------------------
-// Envelope types (mirror crates/gitpixel-sniper/src/types.rs)
+// Envelope types (mirror crates/pixel-sniper/src/types.rs)
 // ---------------------------------------------------------------------------
 
 export type Surface =
@@ -118,33 +118,33 @@ const isExecutableFile = (candidate: string): boolean => {
 };
 
 /**
- * Resolve the gitpixel binary: explicit option > $GITPIXEL_BIN > `gitpixel`
+ * Resolve the pixel binary: explicit option > $PIXEL_BIN > `pixel`
  * on PATH. Throws with a clear, actionable message when unresolvable.
  */
-export const resolveGitpixelBin = (explicit?: string): string => {
-  const candidate = explicit ?? process.env.GITPIXEL_BIN;
+export const resolvePixelBin = (explicit?: string): string => {
+  const candidate = explicit ?? process.env.PIXEL_BIN;
   if (candidate) {
     if (isAbsolute(candidate) || candidate.includes("/")) {
       if (isExecutableFile(candidate)) return candidate;
       throw new Error(
-        `@gitpixel/sniper: gitpixel binary not found at ${JSON.stringify(candidate)} ` +
-          `(from ${explicit ? "plugin options.bin" : "$GITPIXEL_BIN"}). ` +
-          `Point options.bin or $GITPIXEL_BIN at an executable gitpixel build.`,
+        `@pixel/sniper: pixel binary not found at ${JSON.stringify(candidate)} ` +
+          `(from ${explicit ? "plugin options.bin" : "$PIXEL_BIN"}). ` +
+          `Point options.bin or $PIXEL_BIN at an executable pixel build.`,
       );
     }
     const onPath = findOnPath(candidate);
     if (onPath) return onPath;
     throw new Error(
-      `@gitpixel/sniper: ${JSON.stringify(candidate)} is not on PATH. ` +
-        `Point options.bin or $GITPIXEL_BIN at an executable gitpixel build.`,
+      `@pixel/sniper: ${JSON.stringify(candidate)} is not on PATH. ` +
+        `Point options.bin or $PIXEL_BIN at an executable pixel build.`,
     );
   }
-  const found = findOnPath("gitpixel");
+  const found = findOnPath("pixel");
   if (found) return found;
   throw new Error(
-    "@gitpixel/sniper: `gitpixel` was not found on PATH and neither options.bin " +
-      "nor $GITPIXEL_BIN is set. Install gitpixel (cargo build --release; copy " +
-      "target/release/gitpixel onto PATH) or set GITPIXEL_BIN=/path/to/gitpixel.",
+    "@pixel/sniper: `pixel` was not found on PATH and neither options.bin " +
+      "nor $PIXEL_BIN is set. Install pixel (cargo build --release; copy " +
+      "target/release/pixel onto PATH) or set PIXEL_BIN=/path/to/pixel.",
   );
 };
 
@@ -174,7 +174,7 @@ export interface SinkReporterOptions {
 
 /**
  * Queues envelopes and pipes them one at a time (a single child process at a
- * time, strictly ordered) into `gitpixel sniper report --json -`.
+ * time, strictly ordered) into `pixel sniper report --json -`.
  *
  * Every path is best-effort: a failed shell-out is logged (rate-limited) and
  * dropped — the sink must never break the host process.
@@ -237,13 +237,13 @@ export class SinkReporter {
           if (stderr.length < 2048) stderr += String(chunk);
         });
         child.on("error", (err: Error) => {
-          this.warn(`gitpixel sniper report spawn failed: ${err.message}`);
+          this.warn(`pixel sniper report spawn failed: ${err.message}`);
           resolve();
         });
         child.on("close", (code: number | null) => {
           if (code !== 0) {
             this.warn(
-              `gitpixel sniper report exited ${code}${stderr ? `: ${stderr.trim()}` : ""}`,
+              `pixel sniper report exited ${code}${stderr ? `: ${stderr.trim()}` : ""}`,
             );
           }
           resolve();
@@ -253,7 +253,7 @@ export class SinkReporter {
         });
         child.stdin?.end(JSON.stringify(envelope));
       } catch (err) {
-        this.warn(`gitpixel sniper report failed: ${String(err)}`);
+        this.warn(`pixel sniper report failed: ${String(err)}`);
         resolve();
       }
     });

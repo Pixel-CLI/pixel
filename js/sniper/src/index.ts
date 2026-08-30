@@ -1,7 +1,7 @@
 export { sniperDevPlugin, type SniperDevPluginOptions } from "./vite.ts";
 export { SniperReporter, type SniperReporterOptions } from "./vitest-reporter.ts";
 export {
-  resolveGitpixelBin,
+  resolvePixelBin,
   SinkReporter,
   type ErrorEnvelope,
   type EventEnvelope,

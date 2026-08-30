@@ -1,6 +1,6 @@
 /**
  * `sniperDevPlugin()` — one import in any vite config wires every server-side
- * capture surface into the gitpixel sniper sink:
+ * capture surface into the pixel sniper sink:
  *
  * - a `run` envelope on server start (pid, port, git HEAD, lockfile hash,
  *   .vite deps metadata hash);
@@ -15,7 +15,7 @@
  *
  * Every capture path is try/catch + reentrancy-guarded: the sink must never
  * break the dev server. Records ship serially through one child process at a
- * time (`gitpixel sniper report --json -`).
+ * time (`pixel sniper report --json -`).
  */
 
 import { execFileSync } from "node:child_process";
@@ -31,7 +31,7 @@ import {
   type DevServerLike,
 } from "./enrich.ts";
 import {
-  resolveGitpixelBin,
+  resolvePixelBin,
   SinkReporter,
   type ErrorEnvelope,
   type EventKind,
@@ -39,7 +39,7 @@ import {
 } from "./report.ts";
 
 export interface SniperDevPluginOptions {
-  /** Path to the gitpixel binary. Default: $GITPIXEL_BIN, then PATH lookup. */
+  /** Path to the pixel binary. Default: $PIXEL_BIN, then PATH lookup. */
   bin?: string;
   /** Ingest endpoint path. Default: /__sniper/report. */
   endpoint?: string;
@@ -122,7 +122,7 @@ export const sniperDevPlugin = (options: SniperDevPluginOptions = {}) => {
   let reporter: SinkReporter | undefined;
 
   return {
-    name: "gitpixel-sniper",
+    name: "pixel-sniper",
     apply: "serve" as const,
     api: {
       /** Test hook: resolves once every queued record has been shipped. */
@@ -131,7 +131,7 @@ export const sniperDevPlugin = (options: SniperDevPluginOptions = {}) => {
 
     configureServer(server: ViteServerish) {
       // (a) Resolve the binary up front — a broken install should be loud.
-      const bin = resolveGitpixelBin(options.bin);
+      const bin = resolvePixelBin(options.bin);
       const root = server.config.root;
       reporter = new SinkReporter({ bin, repo: root });
       const sink = reporter;

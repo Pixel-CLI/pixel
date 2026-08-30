@@ -1,6 +1,6 @@
 /**
  * Integration test: a REAL vite dev server with sniperDevPlugin() wired to the
- * REAL gitpixel binary and a temp state root. Asserts that:
+ * REAL pixel binary and a temp state root. Asserts that:
  *  - a browser-style POST to /__sniper/report lands in the sink ENRICHED
  *    (source-mapped frames);
  *  - a thrown 500 route lands as an http-5xx record with a body excerpt;
@@ -16,7 +16,7 @@ import { createServer, type ViteDevServer } from "vite";
 import { sniperDevPlugin } from "../src/vite.ts";
 
 const repoRoot = resolve(import.meta.dir, "..", "..", "..");
-const binPath = join(repoRoot, "target", "debug", "gitpixel");
+const binPath = join(repoRoot, "target", "debug", "pixel");
 
 let server: ViteDevServer;
 let port = 0;
@@ -45,7 +45,7 @@ const waitFor = async (
 
 beforeAll(async () => {
   if (!existsSync(binPath)) {
-    execFileSync("cargo", ["build", "-p", "gitpixel-cli"], {
+    execFileSync("cargo", ["build", "-p", "pixel-cli"], {
       cwd: repoRoot,
       stdio: "inherit",
       timeout: 600_000,

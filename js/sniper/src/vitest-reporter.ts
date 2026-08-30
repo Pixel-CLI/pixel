@@ -7,10 +7,10 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { resolveGitpixelBin, type ErrorEnvelope, type EventEnvelope } from "./report.ts";
+import { resolvePixelBin, type ErrorEnvelope, type EventEnvelope } from "./report.ts";
 
 export interface SniperReporterOptions {
-  /** Path to the gitpixel binary. Default: $GITPIXEL_BIN, then PATH lookup. */
+  /** Path to the pixel binary. Default: $PIXEL_BIN, then PATH lookup. */
   bin?: string;
   /** Repo passed as `--repo`. Default: process.cwd(). */
   repo?: string;
@@ -149,7 +149,7 @@ export class SniperReporter {
 
   private shell(envelope: ErrorEnvelope | EventEnvelope): void {
     try {
-      const bin = resolveGitpixelBin(this.opts.bin);
+      const bin = resolvePixelBin(this.opts.bin);
       const repo = this.opts.repo ?? process.cwd();
       const result = spawnSync(bin, ["sniper", "report", "--json", "-", "--repo", repo], {
         input: JSON.stringify(envelope),
