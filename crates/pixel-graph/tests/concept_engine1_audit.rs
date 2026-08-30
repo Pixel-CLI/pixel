@@ -548,7 +548,7 @@ fn t3_trigram_fallback_is_real_not_a_stub() {
     let outcome = resolve(&store, "mail", &ResolveOptions::default()).expect("resolve");
     assert_eq!(
         outcome.tiers_attempted,
-        vec![Tier::T0, Tier::T1, Tier::T2, Tier::T3],
+        vec![Tier::Ident, Tier::T0, Tier::T1, Tier::T2, Tier::T3],
         "expected every tier to be attempted before T3 succeeds: {outcome:?}"
     );
     assert_eq!(outcome.tier, Some(Tier::T3), "{outcome:?}");
@@ -565,7 +565,7 @@ fn unresolved_phrase_reports_every_tier_attempted_honestly() {
     assert!(outcome.matches.is_empty(), "{outcome:?}");
     assert_eq!(
         outcome.tiers_attempted,
-        vec![Tier::T0, Tier::T1, Tier::T2, Tier::T3, Tier::Symbol],
+        vec![Tier::Ident, Tier::T0, Tier::T1, Tier::T2, Tier::T3, Tier::Symbol],
         "an honest miss must report every tier it actually tried: {outcome:?}"
     );
 }

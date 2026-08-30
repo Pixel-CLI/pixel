@@ -228,6 +228,130 @@ fn excavate_plan_encodes_oid_path_restorable_when_absent_from_head() {
 }
 
 // ---------------------------------------------------------------------------
+// Inline snippets: candidates carry the hunk text, capped, with a --show hint
+// ---------------------------------------------------------------------------
+
+#[test]
+fn excavate_candidates_carry_inline_snippets_with_the_code() {
+    let dir = make_dropped_svelte_repo();
+    let store = ingest(dir.path());
+
+    let result = store
+        .excavate(Some(PHRASE), None, None, None, 50)
+        .expect("excavate");
+
+    // Top candidates must carry inline code — the answer, not just metadata.
+    let with_snippets = result
+        .candidates
+        .iter()
+        .filter(|c| c.snippet.is_some())
+        .count();
+    assert!(
+        with_snippets > 0,
+        "top excavate candidates must carry inline snippets: {:#?}",
+        result.candidates
+    );
+    // At least one snippet contains the phrase itself (the code body).
+    assert!(
+        result.candidates.iter().any(|c| c
+            .snippet
+            .as_deref()
+            .is_some_and(|s| s.to_lowercase().contains(&PHRASE.to_lowercase()))),
+        "a snippet must contain the searched phrase's code"
+    );
+    // The deleting commit's snippet is the REMOVED side — the pre-deletion
+    // code the user wants back — even though phrase_present is false there.
+    let delete_commit = result
+        .candidates
+        .iter()
+        .find(|c| c.subject == "swap to typed component")
+        .expect("deleting commit candidate");
+    let del_snip = delete_commit
+        .snippet
+        .as_deref()
+        .expect("the deleting commit must carry the removed-side snippet");
+    assert!(
+        del_snip.to_lowercase().contains(&PHRASE.to_lowercase()),
+        "deletion snippet must carry the removed (pre-deletion) code: {del_snip:?}"
+    );
+}
+
+#[test]
+fn excavate_snippets_are_capped_per_candidate() {
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+
+    // A single large file: the phrase sits in the middle of 500 lines, so an
+    // uncapped snippet would be the whole hunk.
+    let mut body = String::new();
+    for i in 0..500 {
+        if i == 250 {
+            body.push_str("fn giant() { /* legacy widget renderer */ }\n");
+        } else {
+            body.push_str(&format!("// filler line {i} with some padding text\n"));
+        }
+    }
+    fs::write(root.join("giant.rs"), &body).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "add giant file"]);
+    let store = ingest(root);
+
+    let result = store
+        .excavate(Some(PHRASE), None, None, None, 50)
+        .expect("excavate");
+    let snip = result
+        .candidates
+        .iter()
+        .find_map(|c| c.snippet.as_deref())
+        .expect("giant-file candidate must still carry a snippet");
+
+    assert!(
+        snip.len() <= 6 * 1024 + 8,
+        "snippet must be byte-capped (~6KB), got {} bytes",
+        snip.len()
+    );
+    // 60 content lines max, plus at most two ellipsis markers.
+    assert!(
+        snip.lines().count() <= 62,
+        "snippet must be line-capped (~60 lines), got {}",
+        snip.lines().count()
+    );
+    assert!(
+        snip.to_lowercase().contains(&PHRASE.to_lowercase()),
+        "capped snippet must stay centered on the phrase match"
+    );
+    assert!(
+        snip.contains('…'),
+        "a truncated snippet must mark elided content with …"
+    );
+}
+
+#[test]
+fn excavate_next_step_points_at_show_not_git() {
+    let dir = make_dropped_svelte_repo();
+    let store = ingest(dir.path());
+
+    let result = store
+        .excavate(Some(PHRASE), None, None, None, 50)
+        .expect("excavate");
+
+    assert!(
+        result.next.contains("--show"),
+        "result.next must tell the agent the follow-up is `excavate --show`: {:?}",
+        result.next
+    );
+    // It names the recommended restore point concretely.
+    let lg = result.last_good.as_ref().expect("last_good");
+    assert!(
+        result.next.contains(&lg.oid) && result.next.contains(&lg.path),
+        "result.next must name the last_good oid and path: {:?}",
+        result.next
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Suspect detection: diff-content-overlap, not subject-substring
 // ---------------------------------------------------------------------------
 

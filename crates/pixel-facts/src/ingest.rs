@@ -168,9 +168,11 @@ pub fn ingest_until_fresh(store: &mut FactsStore, options: &IngestOptions) -> Re
 /// Default wall-clock budget for the lazy query-path ingest loop (~3s).
 pub const DEFAULT_LAZY_INGEST_BUDGET_MS: u64 = 3000;
 
-/// Env-tunable lazy-ingest budget: `PIXEL_FACTS_LAZY_BUDGET_MS`.
+/// Env-tunable lazy-ingest budget: `PIXEL_FACTS_QUERY_BUDGET_MS` (canonical)
+/// with `PIXEL_FACTS_LAZY_BUDGET_MS` accepted as an alias.
 pub fn lazy_ingest_budget_ms() -> u64 {
-    std::env::var("PIXEL_FACTS_LAZY_BUDGET_MS")
+    std::env::var("PIXEL_FACTS_QUERY_BUDGET_MS")
+        .or_else(|_| std::env::var("PIXEL_FACTS_LAZY_BUDGET_MS"))
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_LAZY_INGEST_BUDGET_MS)

@@ -1174,7 +1174,57 @@ impl Service {
                 "tombstones": s.tombstones,
             },
             "graph": graph,
+            "facts": self.facts_visibility(),
         }))
+    }
+
+    /// Facts/history visibility for `op_status`: enough counters to tell a
+    /// healthy db from a dead or poisoned one at a glance. Read-only — never
+    /// triggers ingest (status must stay cheap).
+    fn facts_visibility(&self) -> Value {
+        let facts = match FactsStore::open(&self.root) {
+            Ok(f) => f,
+            Err(e) => return json!({"present": false, "error": e.to_string()}),
+        };
+        let state = facts.index_state();
+        let count = |sql: &str| -> i64 {
+            facts.conn().query_row(sql, [], |r| r.get(0)).unwrap_or(0)
+        };
+        let phase_a_done: bool = facts
+            .conn()
+            .query_row(
+                "SELECT status FROM ingest_jobs WHERE phase = 'A'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .map(|s| s == "done")
+            .unwrap_or(false);
+        // Full repo commit count via rev-list so a frozen enumeration is
+        // visible as commits_indexed < total_commits. The facts universe also
+        // covers stash/reflog-only commits that `--all` doesn't count, so take
+        // the max — indexed exceeding rev-list is healthy, not suspicious.
+        let total_commits = std::process::Command::new("git")
+            .args(["rev-list", "--count", "--all"])
+            .current_dir(&self.root)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+            .unwrap_or(0)
+            .max(state.total_commits);
+        json!({
+            "present": true,
+            "schema_version": state.schema_version,
+            "phase": state.phase,
+            "phase_a_done": phase_a_done,
+            "commits_indexed": state.commits_indexed,
+            "total_commits": total_commits,
+            "diff_indexed_pct": state.diff_indexed_pct,
+            "hunks_with_text": count(
+                "SELECT count(*) FROM hunks WHERE length(added) > 0 OR length(removed) > 0"
+            ),
+            "diff_grams": count("SELECT count(*) FROM diff_grams"),
+            "fresh": state.fresh,
+        })
     }
 
     // -- Engine 1 / M3 / M4 / M5 ops --------------------------------------
@@ -1204,6 +1254,20 @@ impl Service {
         serde_json::to_value(&outcome).map_err(|e| e.to_string())
     }
 
+    /// Lazy ingest on the query path: when the facts index is not fresh
+    /// (never built, poisoned-and-rebuilt, or refs moved), run bounded ingest
+    /// ticks before serving so a CLI with no daemon still gets real answers.
+    /// Budget: `PIXEL_FACTS_QUERY_BUDGET_MS` (default 3000ms) — a query is
+    /// never blocked longer than that; the attached `index_state` tells the
+    /// caller whether coverage is complete.
+    fn facts_open_and_catch_up(&self) -> Result<FactsStore, String> {
+        let mut facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
+        if !facts.index_state().fresh {
+            let _ = pixel_facts::ingest::lazy_ingest(&mut facts);
+        }
+        Ok(facts)
+    }
+
     /// M3 / Engine 2: history-wide fact + diff search.
     fn op_history(
         &mut self,
@@ -1211,7 +1275,7 @@ impl Service {
         facet: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Value, String> {
-        let facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
+        let facts = self.facts_open_and_catch_up()?;
         let result = pixel_facts::search::search(
             &facts,
             query,
@@ -1230,13 +1294,16 @@ impl Service {
         path: Option<&str>,
         token: Option<&str>,
     ) -> Result<Value, String> {
-        let facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
+        let facts = self.facts_open_and_catch_up()?;
         let result = match (path, token) {
             (Some(p), _) => facts.path_lifecycle(p).map_err(|e| e.to_string())?,
             (None, Some(t)) => facts.token_lifecycle(t).map_err(|e| e.to_string())?,
             (None, None) => return Err("lifecycle requires a path or token".to_string()),
         };
-        serde_json::to_value(&result).map_err(|e| e.to_string())
+        let mut value = serde_json::to_value(&result).map_err(|e| e.to_string())?;
+        value["index_state"] =
+            serde_json::to_value(facts.index_state()).map_err(|e| e.to_string())?;
+        Ok(value)
     }
 
     /// Engine 2: history-wide discovery (rescue v2).
@@ -1248,7 +1315,7 @@ impl Service {
         to: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Value, String> {
-        let facts = FactsStore::open(&self.root).map_err(|e| e.to_string())?;
+        let facts = self.facts_open_and_catch_up()?;
         let result = facts
             .excavate(phrase, path, from, to, limit.unwrap_or(200))
             .map_err(|e| e.to_string())?;

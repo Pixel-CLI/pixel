@@ -28,11 +28,17 @@
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
 const MANIFEST_MAX_AGE_SECS: u64 = 24 * 3600;
+/// Wall-clock budget for the in-hook `pixel search` child that powers
+/// deny-with-answer. Past this, fall back to the suggestion-only message.
+const SEARCH_ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Caps applied to inline search results embedded in a deny message.
+const SEARCH_ANSWER_MAX_LINES: usize = 80;
+const SEARCH_ANSWER_MAX_BYTES: usize = 8 * 1024;
 const ORIENTATION_ANY: &[&str] = &["CLAUDE.md", "AGENTS.md", "README.md"];
 const ORIENTATION_ROOT: &[&str] = &[
     "package.json",
@@ -47,10 +53,17 @@ const READERS: &[&str] = &[
     "fgrep", "find", "strings", "wc",
 ];
 
-struct Manifest {
-    root: PathBuf,
+/// One scoped task inside the manifest. v2 manifests carry several of
+/// these (concurrent agents each scope their own task); the legacy v1
+/// shape maps to exactly one.
+struct TaskEntry {
     task: String,
     files: Vec<(String, String)>, // (path, tier)
+}
+
+struct Manifest {
+    root: PathBuf,
+    tasks: Vec<TaskEntry>,
 }
 
 /// Entry point for `pixel hook guard`. Reads the PreToolUse hook payload
@@ -221,25 +234,59 @@ fn find_up(start: &Path, rel: impl AsRef<Path>) -> Option<PathBuf> {
     }
 }
 
+/// Read the enforcement manifest, accepting BOTH shapes:
+/// - v2 (multi-task): `{version: 2, tasks: [{id, task, created_unix, targets: [...]}]}`
+/// - legacy (v1/singleton): `{task, created_unix, files: [...]}`
+/// Expired tasks (older than the 24h TTL) are dropped individually; a
+/// manifest whose tasks have all expired counts as no manifest at all.
 fn load_manifest(root: &Path) -> Option<Manifest> {
     let text = std::fs::read_to_string(root.join(".pixel").join("targets.json")).ok()?;
     let m: Value = serde_json::from_str(&text).ok()?;
-    let files_raw = m.get("files")?.as_array()?;
-    let created_unix = m.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    if now.saturating_sub(created_unix) > MANIFEST_MAX_AGE_SECS {
+    let tasks: Vec<TaskEntry> = if m.get("version").and_then(Value::as_u64) == Some(2) {
+        m.get("tasks")?
+            .as_array()?
+            .iter()
+            .filter(|t| {
+                let created = t.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
+                now.saturating_sub(created) <= MANIFEST_MAX_AGE_SECS
+            })
+            .filter_map(|t| {
+                Some(TaskEntry {
+                    task: t.get("task").and_then(Value::as_str).unwrap_or("?").to_string(),
+                    files: parse_manifest_files(t.get("targets")?.as_array()?),
+                })
+            })
+            .collect()
+    } else {
+        let created_unix = m.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
+        if now.saturating_sub(created_unix) > MANIFEST_MAX_AGE_SECS {
+            return None;
+        }
+        vec![TaskEntry {
+            task: m.get("task").and_then(Value::as_str).unwrap_or("?").to_string(),
+            files: parse_manifest_files(m.get("files")?.as_array()?),
+        }]
+    };
+    if tasks.is_empty() {
         return None;
     }
-    let task = m.get("task").and_then(Value::as_str).unwrap_or("?").to_string();
-    let files = files_raw
-        .iter()
+    Some(Manifest { root: root.to_path_buf(), tasks })
+}
+
+fn parse_manifest_files(raw: &[Value]) -> Vec<(String, String)> {
+    raw.iter()
         .filter_map(|f| {
             let path = f.get("path")?.as_str()?.to_string();
             let tier = f.get("tier").and_then(Value::as_str).unwrap_or("").to_string();
             Some((path, tier))
         })
-        .collect();
-    Some(Manifest { root: root.to_path_buf(), task, files })
+        .collect()
+}
+
+/// Iterator over every (path, tier) across all active tasks.
+fn all_files(m: &Manifest) -> impl Iterator<Item = &(String, String)> {
+    m.tasks.iter().flat_map(|t| t.files.iter())
 }
 
 fn rel_of<'a>(abs: &Path, root: &Path) -> String {
@@ -257,7 +304,7 @@ fn allowed(abs: &Path, m: &Manifest) -> bool {
     if rel == ".pixel" || rel.starts_with(".pixel/") {
         return true;
     }
-    let target_paths: HashSet<&str> = m.files.iter().map(|(p, _)| p.as_str()).collect();
+    let target_paths: HashSet<&str> = all_files(m).map(|(p, _)| p.as_str()).collect();
     if target_paths.contains(rel.as_str()) {
         return true;
     }
@@ -295,33 +342,47 @@ fn block(lines: &[String]) -> ! {
     std::process::exit(2);
 }
 
+/// Truncate a task string for display (char-safe, appends an ellipsis).
+fn short_task(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max_chars).collect();
+    format!("{cut}…")
+}
+
 fn scoping_block(abs: &Path, m: &Manifest) -> ! {
     let rel = rel_of(abs, &m.root);
-    let p0: Vec<&str> = m
-        .files
-        .iter()
+    let p0: Vec<&str> = all_files(m)
         .filter(|(_, tier)| tier == "P0")
         .map(|(p, _)| p.as_str())
         .take(5)
         .collect();
-    let mut lines = vec![
-        format!(
-            "BLOCKED by pixel-targets-guard: sniper targets active for task '{}'.",
-            m.task
-        ),
-        format!("'{rel}' is not in the target list. Work only on listed files, P0 first:"),
-    ];
+    let total: usize = m.tasks.iter().map(|t| t.files.len()).sum();
+    let mut lines = vec![format!(
+        "BLOCKED by pixel-targets-guard: sniper targets active for {} task(s):",
+        m.tasks.len()
+    )];
+    lines.extend(
+        m.tasks
+            .iter()
+            .map(|t| format!("  - '{}'", short_task(&t.task, 70))),
+    );
+    lines.push(format!(
+        "'{rel}' is not in any task's target list. Work only on listed files, P0 first:"
+    ));
     lines.extend(p0.iter().map(|p| format!("  P0: {p}")));
-    lines.push(format!("  ({} file(s) total in .pixel/targets.json)", m.files.len()));
+    lines.push(format!("  ({total} file(s) total in .pixel/targets.json)"));
     lines.push(
         "If this file is genuinely needed, the task description was wrong — re-run".into(),
     );
     lines.push(
-        "`pixel targets \"<refined task>\"` to regenerate the list, or".into(),
+        "`pixel targets \"<refined task>\"` to add/refresh YOUR task's list (other".into(),
     );
     lines.push(
-        "`pixel targets --clear` to end scoping. Do NOT bypass via other tools.".into(),
+        "tasks are preserved), or `pixel targets --clear` to end ALL scoping.".into(),
     );
+    lines.push("Do NOT bypass via other tools.".into());
     block(&lines);
 }
 
@@ -548,12 +609,117 @@ fn grep_redirect(
     let Some(cmd) = search_can_replace(pattern, &flags, &root) else {
         return false;
     };
-    block(&[
-        "BLOCKED by pixel-guard: use pixel search instead of Grep in indexed repos.".into(),
-        format!("Run this via Bash: {}", cmd),
-        "pixel search returns the match + surrounding code (no follow-up Read needed).".into(),
-        "To bypass: PIXEL_TARGETS_GUARD=0".into(),
-    ]);
+    // Deny-with-answer: run the equivalent pixel search HERE and embed the
+    // results in the deny message, so the agent doesn't burn a full LLM
+    // round-trip re-issuing the search itself. On any child failure or
+    // timeout, fall back to the suggestion-only message.
+    let results = run_pixel_search(pattern, &root, SEARCH_ANSWER_TIMEOUT);
+    block(&grep_deny_lines(pattern, &cmd, results.as_deref()));
+}
+
+/// Build the deny message for a Grep redirect. With `results`, the answer
+/// is inlined; without, the message only suggests the pixel command.
+fn grep_deny_lines(pattern: &str, cmd: &str, results: Option<&str>) -> Vec<String> {
+    match results {
+        Some(out) => vec![
+            format!(
+                "BLOCKED Grep — here are the pixel search results for '{pattern}' instead:"
+            ),
+            truncate_results(out),
+            format!("(Use these results; for a different query run: {cmd})"),
+        ],
+        None => vec![
+            "BLOCKED by pixel-guard: use pixel search instead of Grep in indexed repos."
+                .into(),
+            format!("Run this via Bash: {cmd}"),
+            "pixel search returns the match + surrounding code (no follow-up Read needed)."
+                .into(),
+            "To bypass: PIXEL_TARGETS_GUARD=0".into(),
+        ],
+    }
+}
+
+/// Cap inline search results to `SEARCH_ANSWER_MAX_LINES` lines and
+/// `SEARCH_ANSWER_MAX_BYTES` bytes (whichever bites first), noting the cut.
+fn truncate_results(out: &str) -> String {
+    let mut kept = String::new();
+    let mut truncated = false;
+    for (i, line) in out.lines().enumerate() {
+        if i >= SEARCH_ANSWER_MAX_LINES
+            || kept.len() + line.len() + 1 > SEARCH_ANSWER_MAX_BYTES
+        {
+            truncated = true;
+            break;
+        }
+        if !kept.is_empty() {
+            kept.push('\n');
+        }
+        kept.push_str(line);
+    }
+    if truncated {
+        kept.push_str("\n  … (results truncated — run the pixel search yourself for the rest)");
+    }
+    kept
+}
+
+/// Run `pixel search '<pattern>' <root> --context 5` as a child of this
+/// very binary and capture stdout. Returns None on spawn failure, non-zero
+/// exit, empty output, or timeout — the caller then falls back to the
+/// suggestion-only deny. Never panics, never hangs past `timeout`.
+fn run_pixel_search(pattern: &str, root: &str, timeout: Duration) -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    run_search_child(&exe, pattern, root, timeout)
+}
+
+/// Testable core of `run_pixel_search`: exec `exe` with search args. The
+/// child's stdout is drained on a dedicated thread so a chatty child can
+/// never deadlock the pipe while we poll for exit/timeout.
+fn run_search_child(
+    exe: &Path,
+    pattern: &str,
+    root: &str,
+    timeout: Duration,
+) -> Option<String> {
+    let mut child = std::process::Command::new(exe)
+        .args(["search", pattern, root, "--context", "5"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = rx.recv_timeout(Duration::from_millis(500)).ok()?;
+                let _ = reader.join();
+                if status.success() && !out.trim().is_empty() {
+                    return Some(out);
+                }
+                return None;
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 /// Try to rewrite a Bash command to a pixel equivalent. Returns the new
@@ -572,12 +738,11 @@ fn try_rewrite_bash(cmd: &str, cwd: &Path) -> Option<String> {
         return None;
     }
 
-    let root = find_up(cwd, ".pixel")
-        .map(|r| r.display().to_string())
-        .unwrap_or_else(|| ".".to_string());
+    let root_dir = find_up(cwd, ".pixel").unwrap_or_else(|| cwd.to_path_buf());
+    let root = root_dir.display().to_string();
 
     // --- rg / grep → pixel search ---
-    if let Some(rewritten) = try_rewrite_grep(trimmed, &root) {
+    if let Some(rewritten) = try_rewrite_grep(trimmed, cwd, &root_dir) {
         return Some(rewritten);
     }
 
@@ -743,12 +908,28 @@ fn search_can_replace(pattern: &str, flags: &[String], root: &str) -> Option<Str
 }
 
 /// Rewrite `rg PATTERN` / `grep PATTERN` → `pixel search PATTERN --context 5`
-fn try_rewrite_grep(cmd: &str, root: &str) -> Option<String> {
+///
+/// A single explicit path argument is preserved as the pixel search scope,
+/// but only when it actually exists (file or directory) and lives inside
+/// the indexed repo — rewriting a grep of `/etc/hosts` (or a typo'd path)
+/// into a pixel search would silently change semantics. Multiple paths
+/// can't be expressed as one pixel root, so they fall through unrewritten.
+fn try_rewrite_grep(cmd: &str, cwd: &Path, root: &Path) -> Option<String> {
     let (pattern, paths, unsupported) = parse_grep(cmd)?;
-    // pixel search takes a single root; multiple path args can't be expressed.
     let scope = match paths.len() {
-        0 => root.to_string(),
-        1 => paths.into_iter().next().unwrap(),
+        0 => root.display().to_string(),
+        1 => {
+            let token = paths.into_iter().next().unwrap();
+            let resolved = resolve(&token, cwd)?;
+            if !resolved.is_file() && !resolved.is_dir() {
+                return None;
+            }
+            let canon_root = canonical(root);
+            if resolved != canon_root && !resolved.starts_with(&canon_root) {
+                return None;
+            }
+            token
+        }
         _ => return None,
     };
     search_can_replace(&pattern, &unsupported, &scope)
@@ -817,10 +998,20 @@ fn try_rewrite_git_sync(cmd: &str, root: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Create a unique scratch dir (with a `src/` subdir) acting as the
+    /// indexed repo root for path-validation tests. Returns the
+    /// canonicalized root so `starts_with` comparisons are stable on
+    /// platforms where the temp dir is a symlink (macOS).
+    fn scratch_repo(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("pixel-guard-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        canonical(&root)
+    }
+
     #[test]
     fn rewrite_rg_simple_pattern() {
         let cmd = "rg GUARD_MATCHER";
-        let rewritten = try_rewrite_grep(cmd, "/repo");
+        let rewritten = try_rewrite_grep(cmd, Path::new("/repo"), Path::new("/repo"));
         assert_eq!(
             rewritten,
             Some("pixel search 'GUARD_MATCHER' /repo --context 5".to_string())
@@ -829,8 +1020,9 @@ mod tests {
 
     #[test]
     fn rewrite_grep_simple_pattern() {
+        let repo = scratch_repo("dot-path");
         let cmd = "grep -rn GUARD_MATCHER .";
-        let rewritten = try_rewrite_grep(cmd, "/repo");
+        let rewritten = try_rewrite_grep(cmd, &repo, &repo);
         assert_eq!(
             rewritten,
             Some("pixel search 'GUARD_MATCHER' . --context 5".to_string())
@@ -841,7 +1033,7 @@ mod tests {
     fn rewrite_regex_pattern() {
         // pixel search is regex-based, so regex patterns are expressible.
         let cmd = "rg \"foo.*bar\"";
-        let rewritten = try_rewrite_grep(cmd, "/repo");
+        let rewritten = try_rewrite_grep(cmd, Path::new("/repo"), Path::new("/repo"));
         assert_eq!(
             rewritten,
             Some("pixel search 'foo.*bar' /repo --context 5".to_string())
@@ -851,14 +1043,14 @@ mod tests {
     #[test]
     fn no_rewrite_unsupported_flags() {
         let cmd = "rg -l GUARD_MATCHER";
-        let rewritten = try_rewrite_grep(cmd, "/repo");
+        let rewritten = try_rewrite_grep(cmd, Path::new("/repo"), Path::new("/repo"));
         assert!(rewritten.is_none(), "-l flag should not be rewritten");
     }
 
     #[test]
     fn no_rewrite_non_grep() {
         let cmd = "ls -la";
-        let rewritten = try_rewrite_grep(cmd, "/repo");
+        let rewritten = try_rewrite_grep(cmd, Path::new("/repo"), Path::new("/repo"));
         assert!(rewritten.is_none());
     }
 
@@ -926,7 +1118,7 @@ mod tests {
     #[test]
     fn value_flag_skips_pattern() {
         // -A 5 consumes "5"; the pattern is "foo", not "5".
-        let rewritten = try_rewrite_grep("grep -A 5 foo", "/repo");
+        let rewritten = try_rewrite_grep("grep -A 5 foo", Path::new("/repo"), Path::new("/repo"));
         assert_eq!(
             rewritten,
             Some("pixel search 'foo' /repo --context 5".to_string())
@@ -935,7 +1127,7 @@ mod tests {
 
     #[test]
     fn regexp_equals_pattern() {
-        let rewritten = try_rewrite_grep("grep --regexp=foo", "/repo");
+        let rewritten = try_rewrite_grep("grep --regexp=foo", Path::new("/repo"), Path::new("/repo"));
         assert_eq!(
             rewritten,
             Some("pixel search 'foo' /repo --context 5".to_string())
@@ -946,14 +1138,25 @@ mod tests {
     fn scope_flag_not_rewritten() {
         // --include/--glob/--type/-m change the file scope or match count;
         // pixel search can't honor them, so the rewrite must fall through.
-        assert!(try_rewrite_grep("grep --include=*.rs foo", "/repo").is_none());
-        assert!(try_rewrite_grep("grep --glob '*.rs' foo", "/repo").is_none());
-        assert!(try_rewrite_grep("grep -m 5 foo", "/repo").is_none());
+        let repo = Path::new("/repo");
+        assert!(try_rewrite_grep("grep --include=*.rs foo", repo, repo).is_none());
+        assert!(try_rewrite_grep("grep --glob '*.rs' foo", repo, repo).is_none());
+        assert!(try_rewrite_grep("grep -m 5 foo", repo, repo).is_none());
+    }
+
+    #[test]
+    fn rg_type_flag_not_rewritten() {
+        // `rg --type rust foo` must not misparse "rust" as the pattern, and
+        // --type is a scope flag pixel search can't honor → no rewrite.
+        let repo = Path::new("/repo");
+        assert!(try_rewrite_grep("rg --type rust foo", repo, repo).is_none());
+        assert!(try_rewrite_grep("rg -t rust foo", repo, repo).is_none());
     }
 
     #[test]
     fn preserves_path_scope() {
-        let rewritten = try_rewrite_grep("rg foo src/", "/repo");
+        let repo = scratch_repo("path-scope");
+        let rewritten = try_rewrite_grep("rg foo src/", &repo, &repo);
         assert_eq!(
             rewritten,
             Some("pixel search 'foo' src/ --context 5".to_string())
@@ -961,14 +1164,35 @@ mod tests {
     }
 
     #[test]
+    fn nonexistent_path_not_rewritten() {
+        let repo = scratch_repo("no-such-path");
+        assert!(
+            try_rewrite_grep("rg foo no/such/dir", &repo, &repo).is_none(),
+            "a path that doesn't exist must not be silently rescoped"
+        );
+    }
+
+    #[test]
+    fn path_outside_repo_not_rewritten() {
+        let repo = scratch_repo("outside");
+        let outside = std::env::temp_dir();
+        let cmd = format!("rg foo {}", outside.display());
+        assert!(
+            try_rewrite_grep(&cmd, &repo, &repo).is_none(),
+            "a path outside the indexed repo must not be rewritten"
+        );
+    }
+
+    #[test]
     fn multiple_paths_not_rewritten() {
-        let rewritten = try_rewrite_grep("rg foo src/ lib/", "/repo");
+        let repo = scratch_repo("multi-path");
+        let rewritten = try_rewrite_grep("rg foo src/ lib/", &repo, &repo);
         assert!(rewritten.is_none(), "multiple roots can't be expressed");
     }
 
     #[test]
     fn quotes_root_with_space() {
-        let rewritten = try_rewrite_grep("rg foo", "/my repo");
+        let rewritten = try_rewrite_grep("rg foo", Path::new("/my repo"), Path::new("/my repo"));
         assert_eq!(
             rewritten,
             Some("pixel search 'foo' '/my repo' --context 5".to_string())
@@ -988,5 +1212,253 @@ mod tests {
         // never turn one into a pixel command that bypasses that block.
         let rewritten = try_rewrite_bash("git reset --hard HEAD", Path::new("/tmp"));
         assert!(rewritten.is_none());
+    }
+
+    #[test]
+    fn scoping_sees_grep_file_before_rewrite() {
+        // Ordering guarantee: in run(), check_bash (which applies the
+        // manifest scoping via single_reader_target) executes BEFORE any
+        // rewrite attempt. This test proves the scoping detector still
+        // extracts the file from exactly the kind of grep command the
+        // rewriter would otherwise transform — so a manifest-blocked file
+        // read via grep is blocked by scoping_block, never rewritten.
+        let repo = scratch_repo("scope-order");
+        let file = repo.join("src").join("secret.rs");
+        std::fs::write(&file, "x").unwrap();
+        let cmd = format!("grep foo {}", file.display());
+        let detected = single_reader_target(&cmd, &repo);
+        assert_eq!(detected, Some(canonical(&file)));
+    }
+
+    fn now_unix() -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    /// Write `text` as `<root>/.pixel/targets.json`.
+    fn write_manifest(root: &Path, text: &str) {
+        let dir = root.join(".pixel");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("targets.json"), text).unwrap();
+    }
+
+    #[test]
+    fn manifest_v2_union_allows_file_from_either_task() {
+        let repo = scratch_repo("v2-union");
+        let a = repo.join("src").join("a.rs");
+        let b = repo.join("src").join("b.rs");
+        let c = repo.join("src").join("c.rs");
+        for f in [&a, &b, &c] {
+            std::fs::write(f, "x").unwrap();
+        }
+        let now = now_unix();
+        write_manifest(
+            &repo,
+            &serde_json::json!({
+                "version": 2,
+                "tasks": [
+                    {"id": "aaa", "task": "task A", "created_unix": now,
+                     "targets": [{"path": "src/a.rs", "tier": "P0"}]},
+                    {"id": "bbb", "task": "task B", "created_unix": now,
+                     "targets": [{"path": "src/b.rs", "tier": "P0"}]},
+                ],
+            })
+            .to_string(),
+        );
+        let m = load_manifest(&repo).expect("v2 manifest must load");
+        assert_eq!(m.tasks.len(), 2);
+        assert!(allowed(&a, &m), "file in task A must be allowed");
+        assert!(
+            allowed(&b, &m),
+            "file listed only in task B must be allowed while task A is also active"
+        );
+        assert!(!allowed(&c, &m), "file in no task must be blocked");
+    }
+
+    #[test]
+    fn manifest_v2_expired_task_dropped() {
+        let repo = scratch_repo("v2-expiry");
+        let a = repo.join("src").join("a.rs");
+        let b = repo.join("src").join("b.rs");
+        for f in [&a, &b] {
+            std::fs::write(f, "x").unwrap();
+        }
+        let now = now_unix();
+        write_manifest(
+            &repo,
+            &serde_json::json!({
+                "version": 2,
+                "tasks": [
+                    {"id": "old", "task": "stale", "created_unix": now - MANIFEST_MAX_AGE_SECS - 10,
+                     "targets": [{"path": "src/a.rs", "tier": "P0"}]},
+                    {"id": "new", "task": "fresh", "created_unix": now,
+                     "targets": [{"path": "src/b.rs", "tier": "P0"}]},
+                ],
+            })
+            .to_string(),
+        );
+        let m = load_manifest(&repo).expect("fresh task keeps manifest alive");
+        assert_eq!(m.tasks.len(), 1, "expired task must be dropped");
+        assert!(!allowed(&a, &m), "expired task's file must not be allowed");
+        assert!(allowed(&b, &m));
+    }
+
+    #[test]
+    fn manifest_v2_all_expired_is_no_manifest() {
+        let repo = scratch_repo("v2-all-expired");
+        let now = now_unix();
+        write_manifest(
+            &repo,
+            &serde_json::json!({
+                "version": 2,
+                "tasks": [
+                    {"id": "old", "task": "stale", "created_unix": now - MANIFEST_MAX_AGE_SECS - 10,
+                     "targets": [{"path": "src/a.rs", "tier": "P0"}]},
+                ],
+            })
+            .to_string(),
+        );
+        assert!(load_manifest(&repo).is_none());
+    }
+
+    #[test]
+    fn manifest_legacy_shape_still_read() {
+        let repo = scratch_repo("legacy-shape");
+        let a = repo.join("src").join("a.rs");
+        let c = repo.join("src").join("c.rs");
+        for f in [&a, &c] {
+            std::fs::write(f, "x").unwrap();
+        }
+        write_manifest(
+            &repo,
+            &serde_json::json!({
+                "version": 1,
+                "task": "legacy task",
+                "created_unix": now_unix(),
+                "files": [{"path": "src/a.rs", "tier": "P0"}],
+            })
+            .to_string(),
+        );
+        let m = load_manifest(&repo).expect("legacy manifest must load");
+        assert_eq!(m.tasks.len(), 1);
+        assert_eq!(m.tasks[0].task, "legacy task");
+        assert!(allowed(&a, &m));
+        assert!(!allowed(&c, &m));
+    }
+
+    /// Write an executable fake `pixel` that prints canned search output.
+    #[cfg(unix)]
+    fn fake_search_exe(name: &str, script_body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "pixel-guard-fake-{}-{}",
+            name,
+            std::process::id()
+        ));
+        std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deny_with_answer_contains_search_result_lines() {
+        // The fake child emits realistic pixel-search hit lines; the deny
+        // message must carry them inline.
+        let exe = fake_search_exe(
+            "hits",
+            "echo 'src/guard.rs:133: if idx_root.is_some() && is_grep_tool(tool, &tool_input) {'\n\
+             echo 'src/guard.rs:140: grep_redirect(&pattern, &cwd, &tool_input);'",
+        );
+        let out = run_search_child(&exe, "grep_redirect", "/repo", Duration::from_secs(5))
+            .expect("successful child with output must yield Some");
+        let lines = grep_deny_lines(
+            "grep_redirect",
+            "pixel search 'grep_redirect' /repo --context 5",
+            Some(&out),
+        );
+        let msg = lines.join("\n");
+        assert!(msg.contains("BLOCKED Grep"), "must still be a deny: {msg}");
+        assert!(
+            msg.contains("src/guard.rs:133") && msg.contains("is_grep_tool"),
+            "actual search-result lines must be inline: {msg}"
+        );
+        assert!(
+            msg.contains("pixel search 'grep_redirect' /repo --context 5"),
+            "follow-up command must be present: {msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deny_falls_back_when_search_fails() {
+        // Non-zero exit → run_search_child yields None → suggestion-only.
+        let exe = fake_search_exe("fail", "exit 3");
+        let out = run_search_child(&exe, "foo", "/repo", Duration::from_secs(5));
+        assert!(out.is_none(), "failing child must yield None");
+        let lines = grep_deny_lines("foo", "pixel search 'foo' /repo --context 5", None);
+        let msg = lines.join("\n");
+        assert!(msg.contains("Run this via Bash: pixel search 'foo' /repo --context 5"));
+        assert!(msg.contains("PIXEL_TARGETS_GUARD=0"));
+    }
+
+    #[test]
+    fn search_child_spawn_failure_is_none() {
+        let out = run_search_child(
+            Path::new("/no/such/binary-pixel-guard-test"),
+            "foo",
+            "/repo",
+            Duration::from_secs(1),
+        );
+        assert!(out.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn search_child_times_out() {
+        let exe = fake_search_exe("slow", "sleep 30\necho late");
+        let started = Instant::now();
+        let out = run_search_child(&exe, "foo", "/repo", Duration::from_millis(200));
+        assert!(out.is_none(), "timed-out child must yield None");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout must not wait for the child's full sleep"
+        );
+    }
+
+    #[test]
+    fn truncate_results_caps_lines() {
+        let long: String = (0..200)
+            .map(|i| format!("line {i}\n"))
+            .collect();
+        let out = truncate_results(&long);
+        assert!(out.lines().count() <= SEARCH_ANSWER_MAX_LINES + 1);
+        assert!(out.contains("results truncated"));
+        let short = truncate_results("just one line");
+        assert_eq!(short, "just one line");
+    }
+
+    #[test]
+    fn truncate_results_caps_bytes() {
+        let wide = format!("{}\nnext", "x".repeat(SEARCH_ANSWER_MAX_BYTES * 2));
+        let out = truncate_results(&wide);
+        assert!(out.len() < SEARCH_ANSWER_MAX_BYTES + 200);
+        assert!(out.contains("results truncated"));
+    }
+
+    #[test]
+    fn grep_redirect_allows_unsupported_fields() {
+        // A Grep tool call carrying fields pixel search can't express
+        // (glob/type/output_mode) must be allowed through, not denied with
+        // a non-equivalent suggestion. grep_redirect returns false (allow)
+        // instead of calling block() (which would exit the process).
+        for field in ["glob", "type", "output_mode"] {
+            let mut input = serde_json::Map::new();
+            input.insert("pattern".to_string(), Value::String("foo".to_string()));
+            input.insert(field.to_string(), Value::String("x".to_string()));
+            assert!(
+                !grep_redirect("foo", Path::new("/tmp"), &input),
+                "Grep with `{field}` field must be allowed through"
+            );
+        }
     }
 }

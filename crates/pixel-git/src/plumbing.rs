@@ -267,6 +267,22 @@ impl GitRunner {
         Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
+    /// `git show <oid>^:<path>` — blob content of `path` at the commit's
+    /// FIRST PARENT. The pre-deletion read: for a commit that deleted
+    /// `path`, this returns the last content that existed before the
+    /// deletion. Only the bare `oid` is validated via `validate_ref`; the
+    /// `^` suffix is appended internally (same pattern as
+    /// `rev_verify_commit`'s `^{{commit}}` suffix) so callers never pass a
+    /// suffixed refspec through validation.
+    pub fn show_blob_string_at_parent(&self, oid: &str, path: &str) -> Result<String, GitError> {
+        validate_ref(oid)?;
+        let spec = format!("{oid}^:{path}");
+        let out = self
+            .with_max_output_bytes(Some(BLOB_MAX_OUTPUT_BYTES))
+            .run(&["show", end_of_options(), &spec])?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
     /// `git merge-file -L <label1> -L <label2> -L <label3> <current> <base> <other>`.
     /// Returns the exit status: 0 = clean merge, positive = conflict count
     /// (markers left in `current`), negative = real failure. Port of
@@ -365,6 +381,27 @@ mod tests {
         std::fs::write(root.join("c.txt"), b"untracked\n").unwrap();
         let status = runner.status_porcelain();
         assert!(status.iter().any(|(xy, p)| xy == "??" && p == "c.txt"));
+    }
+
+    #[test]
+    fn show_blob_string_at_parent_returns_pre_deletion_content() {
+        let root = tmpdir("plumbing-parent");
+        init_repo(&root);
+        std::fs::write(root.join("gone.txt"), b"pre-deletion body\n").unwrap();
+        git(&root, &["add", "gone.txt"]);
+        git(&root, &["commit", "-q", "-m", "add gone.txt"]);
+        git(&root, &["rm", "-q", "gone.txt"]);
+        git(&root, &["commit", "-q", "-m", "delete gone.txt"]);
+        let runner = GitRunner::new(&root);
+        let del_oid = runner.rev_parse_head().unwrap();
+
+        // The file does not exist at the deleting commit itself...
+        assert!(runner.show_blob_string(&del_oid, "gone.txt").is_err());
+        // ...but the parent read returns the pre-deletion content.
+        let content = runner
+            .show_blob_string_at_parent(&del_oid, "gone.txt")
+            .expect("parent read must succeed for a deletion commit");
+        assert_eq!(content, "pre-deletion body\n");
     }
 
     #[test]

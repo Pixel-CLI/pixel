@@ -1,18 +1,50 @@
 === pixel-bench: claude -p agent workflows ===
-Date: 2026-08-30T04:30:27Z
-Repo: 66ea2cf (/Users/livio/Documents/pixel)
+Date: 2026-08-30T05:38:09Z
+Repo: 865facf (/Users/livio/Documents/pixel)
 Pixel: pixel 0.1.0
+Reps per cell: 3
+Baseline settings (pixel hooks stripped): /tmp/pixel-bench-baseline-settings.json
 
---- BASELINE (no pixel on PATH) ---
-baseline-s1-locate: 16103ms
-baseline-s2-scope: 85138ms
-baseline-s3-sync: 13791ms
-baseline-s4-recover: 45696ms
+--- scenario s1-locate ---
+  pixel-s1-locate-1: 13029ms tools=0 turns=3
+  pixel-s1-locate-2: 10337ms tools=0 turns=3
+  pixel-s1-locate-3: 9937ms tools=0 turns=3
+  baseline-s1-locate-1: 9113ms tools=0 turns=3
+  baseline-s1-locate-2: 11000ms tools=0 turns=3
+  baseline-s1-locate-3: 11929ms tools=0 turns=5
+--- scenario s2-scope ---
+  baseline-s2-scope-1: 46702ms tools=0 turns=15
+  baseline-s2-scope-2: 54076ms tools=0 turns=20
+  baseline-s2-scope-3: 44529ms tools=0 turns=13
+  pixel-s2-scope-1: 45198ms tools=0 turns=13
+  pixel-s2-scope-2: 50083ms tools=0 turns=16
+  pixel-s2-scope-3: 81608ms tools=0 turns=27
+--- scenario s3-sync ---
+  baseline-s3-sync-1: 10971ms tools=0 turns=3
+  baseline-s3-sync-2: 9564ms tools=0 turns=3
+  baseline-s3-sync-3: 10130ms tools=0 turns=3
+  pixel-s3-sync-1: 9275ms tools=0 turns=3
+  pixel-s3-sync-2: 8844ms tools=0 turns=3
+  pixel-s3-sync-3: 8625ms tools=0 turns=3
+--- scenario s4-recover ---
+  baseline-s4-recover-1: 36435ms tools=0 turns=14
+  baseline-s4-recover-2: 35962ms tools=0 turns=13
+  baseline-s4-recover-3: 59094ms tools=0 turns=19
+  pixel-s4-recover-1: 53849ms tools=0 turns=17
+  pixel-s4-recover-2: 64795ms tools=0 turns=19
+  pixel-s4-recover-3: 139923ms tools=0 turns=16
 
---- WITH PIXEL (pixel on PATH, indexed) ---
-pixel-s1-locate: 13351ms
-pixel-s2-scope: 55208ms
-pixel-s3-sync: 12343ms
-pixel-s4-recover: 41825ms
-
+=== PIXEL USAGE CHECK ===
+  pixel-s1-locate-1: pixel used
+  pixel-s1-locate-2: pixel used
+  pixel-s1-locate-3: pixel used
+  pixel-s2-scope-1: pixel used
+  pixel-s2-scope-2: pixel used
+  pixel-s2-scope-3: pixel used
+  pixel-s3-sync-1: pixel used
+  pixel-s3-sync-2: pixel used
+  pixel-s3-sync-3: pixel used
+  pixel-s4-recover-1: pixel used
+  pixel-s4-recover-2: pixel used
+  pixel-s4-recover-3: pixel used
 === done ===

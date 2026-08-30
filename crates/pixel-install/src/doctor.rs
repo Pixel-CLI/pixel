@@ -308,6 +308,68 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         })
     }));
 
+    checks.push(check("install.zcode-hooks", || -> std::result::Result<DoctorCheckDetail, String> {
+        let config_path = home.join(config::ZCODE_CONFIG_FILE);
+        if !config_path.is_file() {
+            return Ok(DoctorCheckDetail {
+                summary: "no zcode config.json — skipping".into(),
+                detail: None,
+            });
+        }
+        let raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+        let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        // zcode nests hooks under `hooks.events.<Event>`.
+        let hooks = value
+            .get("hooks")
+            .and_then(|v| v.get("events"))
+            .and_then(serde_json::Value::as_object);
+        if hooks.is_none() {
+            return Ok(DoctorCheckDetail {
+                summary: "zcode config.json has no hooks.events — skipping".into(),
+                detail: None,
+            });
+        }
+        let hooks = hooks.unwrap();
+        let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+        let has_guard = hooks.get("PreToolUse")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks").and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&guard_command)).unwrap_or(false)))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !has_guard {
+            return Err("zcode PreToolUse guard hook not wired".into());
+        }
+        Ok(DoctorCheckDetail {
+            summary: "zcode hooks wired (PreToolUse)".into(),
+            detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
+        })
+    }));
+
+    checks.push(check("install.pi-rules", || -> std::result::Result<DoctorCheckDetail, String> {
+        let config_dir = home.join(config::PI_CONFIG_DIR);
+        if !config_dir.is_dir() {
+            return Ok(DoctorCheckDetail {
+                summary: "no pi config dir — skipping".into(),
+                detail: None,
+            });
+        }
+        let memory_file = config_dir.join("memory").join("pixel-rules.md");
+        if !memory_file.is_file() {
+            return Err("pi pixel-rules.md not installed".into());
+        }
+        let raw = fs::read_to_string(&memory_file).map_err(|e| e.to_string())?;
+        if !raw.contains(config::MANAGED_BEGIN) {
+            return Err("pi pixel-rules.md missing managed markers".into());
+        }
+        Ok(DoctorCheckDetail {
+            summary: "pi rules installed (no guard hooks — extension API only)".into(),
+            detail: Some(serde_json::json!({ "path": memory_file.display().to_string() })),
+        })
+    }));
+
     checks.push(check("install.agent-config", || -> std::result::Result<DoctorCheckDetail, String> {
         let configs = config::find_agent_configs(&home);
         if configs.is_empty() {
@@ -406,19 +468,36 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     pixel_facts::store::FACTS_SCHEMA_VERSION
                 ));
             }
-            // Red: commits indexed but zero diff text — a poisoned signature
-            // (a db that claims commits yet has no diff coverage).
-            if state.commits_indexed > 0 && state.diff_indexed_pct == 0.0 {
-                return Err(format!(
-                    "facts db poisoned: {} commits indexed but 0% diff coverage",
-                    state.commits_indexed
-                ));
+            // Counter-based dead/poisoned detection: mtime and diff_state
+            // alone lie (the historical poisoned DB had every commit marked
+            // INDEXED with empty hunk text), so measure the actual text and
+            // gram rows.
+            let count = |sql: &str| -> i64 {
+                store.conn().query_row(sql, [], |r| r.get(0)).unwrap_or(0)
+            };
+            let hunks_with_text = count(
+                "SELECT count(*) FROM hunks WHERE length(added) > 0 OR length(removed) > 0",
+            );
+            let diff_grams = count("SELECT count(*) FROM diff_grams");
+            let repo_commits = Command::new("git")
+                .args(["rev-list", "--count", "--all"])
+                .current_dir(root)
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            if let Some(reason) =
+                facts_dead_reason(state.commits_indexed, repo_commits, diff_grams)
+            {
+                return Err(reason);
             }
             let detail = Some(serde_json::json!({
                 "phase": state.phase,
                 "commits_indexed": state.commits_indexed,
-                "total_commits": state.total_commits,
+                "total_commits": repo_commits.max(state.total_commits),
                 "diff_indexed_pct": state.diff_indexed_pct,
+                "hunks_with_text": hunks_with_text,
+                "diff_grams": diff_grams,
                 "fresh": state.fresh,
                 "schema_version": state.schema_version,
             }));
@@ -436,9 +515,11 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
             Ok((CheckStatus::Green, DoctorCheckDetail {
                 summary: format!(
-                    "facts db fresh ({} commits, {:.0}% diff coverage)",
+                    "facts db fresh ({} commits, {:.0}% diff coverage, {} hunks with text, {} grams)",
                     state.commits_indexed,
-                    state.diff_indexed_pct * 100.0
+                    state.diff_indexed_pct * 100.0,
+                    hunks_with_text,
+                    diff_grams
                 ),
                 detail,
             }))
@@ -521,6 +602,37 @@ fn check_status(
     }
 }
 
+/// The dead/poisoned-DB predicate for `facts.freshness`, factored out so it
+/// is unit-testable without a real repo:
+/// - a repo with commits but an empty facts db is DEAD (never ingested, or a
+///   just-wiped poisoned db that nothing has re-ingested yet);
+/// - indexed commits with ZERO diff-gram postings is the poisoned signature
+///   (the historical bug stored every hunk with empty added/removed text, so
+///   `diff_grams` had no rows and excavate/search returned nothing forever
+///   while diff_state claimed INDEXED).
+///
+/// Returns `Some(reason)` when the check must go RED.
+pub fn facts_dead_reason(
+    commits_indexed: u64,
+    repo_commits: u64,
+    diff_grams: i64,
+) -> Option<String> {
+    if commits_indexed == 0 && repo_commits > 0 {
+        return Some(format!(
+            "facts db has 0 commits indexed but the repo has {repo_commits} — \
+             history queries will return nothing; run `pixel index --history`"
+        ));
+    }
+    if commits_indexed > 0 && diff_grams == 0 {
+        return Some(format!(
+            "facts db poisoned: {commits_indexed} commits indexed but 0 diff-gram \
+             postings — diff text was never stored; delete .pixel/history.db or \
+             re-run `pixel index --history`"
+        ));
+    }
+    None
+}
+
 fn age_secs(mtime: SystemTime) -> u64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -535,3 +647,34 @@ fn age_secs(mtime: SystemTime) -> u64 {
 
 /// Re-export the daemon socket-path helper for the CLI.
 pub use pixel_daemon::daemon::socket_path as daemon_socket_path;
+
+#[cfg(test)]
+mod tests {
+    use super::facts_dead_reason;
+
+    #[test]
+    fn poisoned_db_signature_is_red() {
+        // The real-world poisoned DB: 11 commits marked indexed, 323 hunks all
+        // with empty text, therefore 0 diff_grams rows.
+        let reason = facts_dead_reason(11, 21, 0);
+        assert!(
+            reason.as_deref().unwrap_or("").contains("poisoned"),
+            "indexed commits with zero grams must be flagged poisoned, got {reason:?}"
+        );
+    }
+
+    #[test]
+    fn empty_db_in_nonempty_repo_is_red() {
+        let reason = facts_dead_reason(0, 21, 0);
+        assert!(
+            reason.is_some(),
+            "0 indexed commits while the repo has commits must be RED"
+        );
+    }
+
+    #[test]
+    fn healthy_and_trivially_empty_cases_are_not_red() {
+        assert_eq!(facts_dead_reason(21, 21, 50_000), None, "healthy db");
+        assert_eq!(facts_dead_reason(0, 0, 0), None, "empty repo, empty db");
+    }
+}

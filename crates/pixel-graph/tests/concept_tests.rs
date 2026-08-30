@@ -8,7 +8,7 @@ use pixel_graph::concept::{
 use pixel_graph::concept_resolve::{
     Confidence, ResolveOptions, Tier, resolve,
 };
-use pixel_graph::store::GraphStore;
+use pixel_graph::store::{GraphStore, SymbolKind};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -331,5 +331,137 @@ fn resolve_carries_index_state() {
     assert!(
         outcome.inputs_digest != 0,
         "should carry a non-zero inputs_digest"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// identifier-shaped query → symbol preference (the GUARD_MATCHER regression)
+// ---------------------------------------------------------------------------
+
+/// Build a store that mirrors the real-world bug: a string concept in a
+/// test-like file contains the identifier text (e.g. a command string
+/// `"pixel search 'GUARD_MATCHER' ..."`), while the actual definition lives
+/// in a `pub const GUARD_MATCHER` symbol in a different file. Without the
+/// identifier-tier fix, `resolve("GUARD_MATCHER")` returns the string concept
+/// (the test fixture) and never reaches the symbol.
+fn make_store_with_symbol_and_string_concept() -> (TempDir, GraphStore) {
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("graph.db");
+    let mut store = GraphStore::open(&db_path).expect("open graph store");
+
+    // File 1: the definition file (config.rs equivalent).
+    let file1 = "crates/pixel-install/src/config.rs";
+    let abs1 = dir.path().join(file1);
+    fs::create_dir_all(abs1.parent().unwrap()).unwrap();
+    fs::write(
+        &abs1,
+        r#"pub const GUARD_MATCHER: &str = "Bash|Read|Grep";
+"#,
+    )
+    .unwrap();
+    let fid1 = store
+        .replace_file(file1, "oid1", "rs")
+        .expect("replace_file");
+    // Insert the const symbol — this is the real definition.
+    store
+        .insert_symbol(
+            fid1,
+            "crates/pixel-install/src/config.rs#GUARD_MATCHER#const",
+            "GUARD_MATCHER",
+            "GUARD_MATCHER",
+            SymbolKind::Const,
+            1,
+            1,
+            "pub const GUARD_MATCHER: &str",
+        )
+        .expect("insert_symbol");
+
+    // File 2: a guard.rs equivalent with string concepts that mention
+    // GUARD_MATCHER in command strings (test fixtures / rewrite examples).
+    let file2 = "crates/pixel/src/guard.rs";
+    let abs2 = dir.path().join(file2);
+    fs::create_dir_all(abs2.parent().unwrap()).unwrap();
+    fs::write(
+        &abs2,
+        r#"fn rewrite() {
+    let cmd = "pixel search 'GUARD_MATCHER' /repo --context 5";
+    let cmd2 = "rg -l GUARD_MATCHER";
+}
+"#,
+    )
+    .unwrap();
+    let fid2 = store
+        .replace_file(file2, "oid2", "rs")
+        .expect("replace_file");
+    // Extract concepts from file2 — the string literals become String concepts.
+    let concepts = extract_concepts(file2, fs::read(&abs2).unwrap().as_slice());
+    store
+        .replace_concepts(fid2, &concepts)
+        .expect("replace_concepts");
+
+    (dir, store)
+}
+
+#[test]
+fn resolve_identifier_prefers_symbol_over_string_concept() {
+    let (_dir, store) = make_store_with_symbol_and_string_concept();
+
+    // "GUARD_MATCHER" is an identifier-shaped query (no spaces, UPPER_SNAKE).
+    // The bug: T2 word-intersection matches the string concepts in guard.rs
+    // (which literally contain "guard" and "matcher" as words), so the symbol
+    // fallback never runs, and the const definition in config.rs is missed.
+    let outcome = resolve(
+        &store,
+        "GUARD_MATCHER",
+        &ResolveOptions::default(),
+    )
+    .expect("resolve");
+
+    assert!(
+        outcome.confidence != Confidence::Unresolved,
+        "should resolve 'GUARD_MATCHER'"
+    );
+    assert!(
+        !outcome.matches.is_empty(),
+        "should have matches for 'GUARD_MATCHER'"
+    );
+    // The top match should be the const definition in config.rs, not a string
+    // concept in guard.rs.
+    let top = &outcome.matches[0];
+    assert!(
+        top.path.ends_with("config.rs"),
+        "top match should be the definition file (config.rs), got {}",
+        top.path
+    );
+    assert!(
+        top.symbol_kind.as_deref() == Some("const"),
+        "top match should be a const symbol, got symbol_kind={:?}",
+        top.symbol_kind
+    );
+}
+
+#[test]
+fn resolve_natural_language_phrase_still_uses_concepts() {
+    // A natural-language phrase like "submit the form" should still go through
+    // the concept cascade, not the identifier tier. This guards against the
+    // fix being too aggressive.
+    let (_dir, store, _file_id) = make_store_with_concepts();
+
+    let outcome = resolve(
+        &store,
+        "submit the form",
+        &ResolveOptions::default(),
+    )
+    .expect("resolve");
+
+    assert!(
+        outcome.confidence != Confidence::Unresolved,
+        "should resolve 'submit the form' via concepts"
+    );
+    // Should NOT be the symbol tier.
+    assert!(
+        outcome.tier != Some(Tier::Symbol),
+        "natural-language phrase should not use symbol fallback, got tier={:?}",
+        outcome.tier
     );
 }

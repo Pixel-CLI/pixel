@@ -57,15 +57,31 @@ pub const CODEX_HOOKS_FILE: &str = ".codex/hooks.json";
 /// the `"hooks"` key but the tool-event is `BeforeTool` (not `PreToolUse`).
 pub const GEMINI_SETTINGS_FILE: &str = ".gemini/settings.json";
 
-/// PreToolUse matcher covering Claude, Devin, Codex, and Gemini tool names.
+/// The zcode config file (relative to home). zcode is a Claude Code variant
+/// that uses the same hooks format as Claude (event `PreToolUse`,
+/// `SessionStart`) under `~/.zcode/cli/config.json` → `hooks.events.<Event>`.
+pub const ZCODE_CONFIG_FILE: &str = ".zcode/cli/config.json";
+
+/// The pi config directory (relative to home). pi uses an extension API with
+/// lifecycle events only — no per-tool `PreToolUse` interception. pixel
+/// installs rules into pi's memory but cannot wire guard hooks.
+pub const PI_CONFIG_DIR: &str = ".pi/agent";
+/// The pi settings file (relative to home).
+pub const PI_SETTINGS_FILE: &str = ".pi/agent/settings.json";
+
+/// PreToolUse matcher covering Claude, Devin, Codex, Gemini, and zcode tool
+/// names.
 /// Claude:  Bash, Read, Grep, Glob, Edit, MultiEdit, NotebookEdit, Write
 /// Devin:   exec, read, grep, find_file_by_name, glob, edit, write, notebook_read, notebook_edit
 /// Codex:   bash, read, write, edit, apply_patch, glob
 /// Gemini:  bash, execute, run_shell_command, read, read_file, write, write_file, edit, grep, glob, search
+/// zcode:   same tool names as Claude (Claude Code variant)
+/// pi:      read, bash, edit, write, grep, find, ls (no PreToolUse hooks — rules only)
 pub const GUARD_MATCHER: &str =
     "Bash|Read|Grep|Glob|Edit|MultiEdit|NotebookEdit|Write|\
      exec|read|grep|find_file_by_name|glob|edit|write|notebook_read|notebook_edit|\
-     bash|apply_patch|read_file|write_file|execute|run_shell_command|search";
+     bash|apply_patch|read_file|write_file|execute|run_shell_command|search|\
+     find|ls";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {

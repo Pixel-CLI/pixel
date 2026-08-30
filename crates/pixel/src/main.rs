@@ -484,7 +484,7 @@ enum Command {
         /// Phrase to search for in diff text.
         #[arg(long)]
         phrase: Option<String>,
-        /// Restrict to a repo-relative path.
+        /// Restrict to a repo-relative path (with --show: the path to read).
         #[arg(long)]
         file: Option<String>,
         #[arg(long)]
@@ -493,6 +493,17 @@ enum Command {
         to: Option<String>,
         #[arg(long)]
         limit: Option<usize>,
+        /// Print the FULL content of --file at this commit (safe
+        /// `git show <oid>:<path>` equivalent). When the file does not
+        /// exist at <oid> but does at <oid>^ — i.e. <oid> is the deletion
+        /// commit — the parent's pre-deletion content is returned and
+        /// flagged. One pixel call replaces the `git show` follow-ups.
+        #[arg(long, value_name = "OID")]
+        show: Option<String>,
+        /// With --show: read from the commit's first parent (<oid>^)
+        /// directly, skipping the read at <oid> itself.
+        #[arg(long)]
+        parent: bool,
         #[arg(long)]
         json: bool,
     },
@@ -765,8 +776,65 @@ fn pretty_targets(d: &Value) -> Option<String> {
     Some(output)
 }
 
-/// Write the enforcement manifest atomically (tmp + rename).
-fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Result<(), String> {
+/// TTL for a scoped task inside the targets manifest — matches the guard's
+/// `MANIFEST_MAX_AGE_SECS` (crates/pixel/src/guard.rs).
+const TARGETS_TTL_SECS: u64 = 24 * 3600;
+
+/// Stable short id for a task string (FNV-1a 64, hex). Deliberately NOT
+/// `DefaultHasher` — the id must survive across pixel builds so a re-run of
+/// the same task replaces its own entry instead of appending a duplicate.
+fn targets_task_id(task: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in task.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")[..12].to_string()
+}
+
+/// Merge a new task entry into an existing manifest (v2 multi-task, legacy
+/// single-task, or absent/corrupt), producing the v2 shape:
+/// `{version: 2, tasks: [{id, task, created_unix, targets: [...]}]}`.
+/// Tasks older than the 24h TTL are dropped; a task with the same id as the
+/// new one is replaced. Pure function — file I/O stays in the caller.
+fn merge_targets_manifest(existing: Option<&str>, new_task: Value, now: u64) -> Value {
+    let new_id = new_task.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let mut tasks: Vec<Value> = Vec::new();
+    if let Some(text) = existing {
+        if let Ok(v) = serde_json::from_str::<Value>(text) {
+            if v.get("version").and_then(Value::as_u64) == Some(2) {
+                tasks = v
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+            } else if let Some(old_task) = v.get("task").and_then(Value::as_str) {
+                // Legacy single-task shape — wrap it as one v2 task so a
+                // concurrent agent's active scope survives this write.
+                tasks = vec![serde_json::json!({
+                    "id": targets_task_id(old_task),
+                    "task": old_task,
+                    "created_unix": v.get("created_unix").cloned().unwrap_or(Value::Null),
+                    "head_oid": v.get("head_oid").cloned().unwrap_or(Value::Null),
+                    "limit": v.get("limit").cloned().unwrap_or(Value::Null),
+                    "targets": v.get("files").cloned().unwrap_or_else(|| Value::Array(vec![])),
+                })];
+            }
+        }
+    }
+    tasks.retain(|t| {
+        let created = t.get("created_unix").and_then(Value::as_u64).unwrap_or(0);
+        let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+        now.saturating_sub(created) <= TARGETS_TTL_SECS && id != new_id
+    });
+    tasks.push(new_task);
+    serde_json::json!({ "version": 2, "tasks": tasks })
+}
+
+/// Write the enforcement manifest atomically (tmp + rename), merging into
+/// any manifest already on disk so concurrent agents' tasks coexist instead
+/// of clobbering each other. Returns the number of active tasks.
+fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Result<usize, String> {
     let files: Vec<Value> = data
         .get("targets")
         .and_then(Value::as_array)
@@ -785,8 +853,8 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let manifest = serde_json::json!({
-        "version": 1,
+    let new_task = serde_json::json!({
+        "id": targets_task_id(task),
         "task": task,
         "created_unix": created_unix,
         "head_oid": data
@@ -799,8 +867,15 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
             .and_then(|s| s.get("limit"))
             .cloned()
             .unwrap_or(Value::Null),
-        "files": files,
+        "targets": files,
     });
+    let existing = std::fs::read_to_string(manifest_path).ok();
+    let manifest = merge_targets_manifest(existing.as_deref(), new_task, created_unix);
+    let active = manifest
+        .get("tasks")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(1);
     if let Some(parent) = manifest_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
@@ -812,7 +887,94 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
     .map_err(|e| format!("write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, manifest_path)
         .map_err(|e| format!("publish {}: {e}", manifest_path.display()))?;
-    Ok(())
+    Ok(active)
+}
+
+#[cfg(test)]
+mod targets_manifest_tests {
+    use super::*;
+
+    fn task_entry(id_src: &str, created: u64, path: &str) -> Value {
+        serde_json::json!({
+            "id": targets_task_id(id_src),
+            "task": id_src,
+            "created_unix": created,
+            "targets": [{"path": path, "tier": "P0"}],
+        })
+    }
+
+    #[test]
+    fn merge_two_tasks_coexist() {
+        let now = 1_000_000;
+        let v = merge_targets_manifest(None, task_entry("task A", now, "src/a.rs"), now);
+        let text = v.to_string();
+        let v2 = merge_targets_manifest(Some(&text), task_entry("task B", now, "src/b.rs"), now);
+        let tasks = v2["tasks"].as_array().unwrap();
+        assert_eq!(v2["version"], 2);
+        assert_eq!(tasks.len(), 2, "concurrent tasks must both survive");
+        let names: Vec<&str> = tasks.iter().map(|t| t["task"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["task A", "task B"]);
+    }
+
+    #[test]
+    fn merge_replaces_same_task_id() {
+        let now = 1_000_000;
+        let v = merge_targets_manifest(None, task_entry("task A", now - 100, "src/old.rs"), now);
+        let text = v.to_string();
+        let v2 = merge_targets_manifest(Some(&text), task_entry("task A", now, "src/new.rs"), now);
+        let tasks = v2["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1, "same task id must replace, not append");
+        assert_eq!(tasks[0]["targets"][0]["path"], "src/new.rs");
+    }
+
+    #[test]
+    fn merge_drops_expired_tasks() {
+        let now = 1_000_000_000;
+        let old = merge_targets_manifest(
+            None,
+            task_entry("stale task", now - TARGETS_TTL_SECS - 1, "src/stale.rs"),
+            now - TARGETS_TTL_SECS - 1,
+        );
+        let text = old.to_string();
+        let v2 = merge_targets_manifest(Some(&text), task_entry("fresh task", now, "src/fresh.rs"), now);
+        let tasks = v2["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1, "expired task must be dropped on merge");
+        assert_eq!(tasks[0]["task"], "fresh task");
+    }
+
+    #[test]
+    fn merge_wraps_legacy_singleton() {
+        let now = 1_000_000;
+        let legacy = serde_json::json!({
+            "version": 1,
+            "task": "legacy task",
+            "created_unix": now - 50,
+            "head_oid": "abc",
+            "limit": 20,
+            "files": [{"path": "src/legacy.rs", "tier": "P0"}],
+        })
+        .to_string();
+        let v2 = merge_targets_manifest(Some(&legacy), task_entry("new task", now, "src/new.rs"), now);
+        let tasks = v2["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 2, "legacy singleton must be preserved as a v2 task");
+        assert_eq!(tasks[0]["task"], "legacy task");
+        assert_eq!(tasks[0]["targets"][0]["path"], "src/legacy.rs");
+        assert_eq!(tasks[1]["task"], "new task");
+    }
+
+    #[test]
+    fn merge_survives_corrupt_existing() {
+        let now = 1_000_000;
+        let v2 = merge_targets_manifest(Some("{not json"), task_entry("task A", now, "src/a.rs"), now);
+        assert_eq!(v2["tasks"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn task_id_stable_and_short() {
+        assert_eq!(targets_task_id("x"), targets_task_id("x"));
+        assert_ne!(targets_task_id("x"), targets_task_id("y"));
+        assert_eq!(targets_task_id("anything").len(), 12);
+    }
 }
 
 fn envelope_note(data: &Value) {
@@ -1346,13 +1508,15 @@ fn run() -> Result<(), String> {
                 },
                 false,
             )?;
-            if !no_manifest {
-                write_targets_manifest(&manifest_path, &task, &data)?;
-            }
+            let active_tasks = if no_manifest {
+                None
+            } else {
+                Some(write_targets_manifest(&manifest_path, &task, &data)?)
+            };
             finish_graph_cmd(data, json, pretty_targets)?;
-            if !no_manifest {
+            if let Some(active) = active_tasks {
                 eprintln!(
-                    "targets manifest active: {} — scoping enforced; run `pixel targets --clear` when the task ends",
+                    "targets manifest active: {} ({active} task(s)) — scoping enforced; run `pixel targets --clear` when the task ends",
                     manifest_path.display()
                 );
             }
@@ -1690,8 +1854,14 @@ fn run() -> Result<(), String> {
         }
         Command::Status { path, json } => {
             let mut data = execute(&path, Request::Status {}, false)?;
-            if let Some(facts) = facts_status(&path) {
-                data["facts"] = facts;
+            // The daemon/service now attaches a rich `facts` block itself
+            // (schema version, phase-A state, hunk/gram counts). Only fill in
+            // the client-side fallback when talking to an older daemon that
+            // doesn't send one.
+            if data.get("facts").map(|f| f.is_null()).unwrap_or(true) {
+                if let Some(facts) = facts_status(&path) {
+                    data["facts"] = facts;
+                }
             }
             if json {
                 print_data(&data, true)?;
@@ -1734,6 +1904,16 @@ fn run() -> Result<(), String> {
                         f.get("fresh").and_then(Value::as_bool).unwrap_or(false),
                         f.get("schema_version").and_then(Value::as_i64).unwrap_or(0),
                     ));
+                    // Only the daemon-side block carries the poisoning
+                    // counters; print them when present.
+                    if let (Some(h), Some(g)) = (
+                        f.get("hunks_with_text").and_then(Value::as_u64),
+                        f.get("diff_grams").and_then(Value::as_u64),
+                    ) {
+                        output.push_str(&format!(
+                            "facts-text: hunks_with_text={h} diff_grams={g}\n"
+                        ));
+                    }
                 }
                 output.push_str(&format!(
                     "daemon: {}\n",
@@ -2023,8 +2203,13 @@ fn run() -> Result<(), String> {
             from,
             to,
             limit,
+            show,
+            parent,
             json,
         } => {
+            if let Some(oid) = show {
+                return excavate_show(&path, &oid, file.as_deref(), parent, json);
+            }
             let data = execute(
                 &path,
                 Request::Excavate {
@@ -2161,6 +2346,67 @@ fn main() -> ExitCode {
             eprintln!("pixel: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `pixel excavate --show <oid> --file <path>`: full historical file content
+/// in ONE call — the follow-up to an excavate candidate list that previously
+/// forced agents into raw `git show`/`git log` rounds. Reads `<oid>:<path>`
+/// through the safe `pixel_git::GitRunner` (ref-validated, output-capped);
+/// when the file does not exist at `<oid>` (e.g. `<oid>` is the deletion
+/// commit itself) it falls back to `<oid>^:<path>` — the pre-deletion
+/// content — and says so. `--parent` skips straight to the parent read.
+/// Implemented CLI-side (no daemon/proto round-trip): the content lives in
+/// the object store, not the facts db, so a direct git read is exact.
+fn excavate_show(
+    path: &Path,
+    oid: &str,
+    file: Option<&str>,
+    parent: bool,
+    json: bool,
+) -> Result<(), String> {
+    let Some(file) = file else {
+        return Err("excavate --show requires --file <repo-relative path>".to_string());
+    };
+    let root = discover_root(path)?;
+    let runner = pixel_git::GitRunner::new(&root);
+    let (content, source, parent_fallback) = if parent {
+        let c = runner
+            .show_blob_string_at_parent(oid, file)
+            .map_err(|e| format!("cannot read {oid}^:{file}: {e}"))?;
+        (c, format!("{oid}^:{file}"), false)
+    } else {
+        match runner.show_blob_string(oid, file) {
+            Ok(c) => (c, format!("{oid}:{file}"), false),
+            Err(at_oid_err) => match runner.show_blob_string_at_parent(oid, file) {
+                Ok(c) => (c, format!("{oid}^:{file}"), true),
+                Err(_) => {
+                    return Err(format!(
+                        "{file} exists neither at {oid} nor at {oid}^: {at_oid_err}"
+                    ));
+                }
+            },
+        }
+    };
+    if json {
+        let data = serde_json::json!({
+            "oid": oid,
+            "file": file,
+            "source": source,
+            "parent_fallback": parent_fallback,
+            "content": content,
+        });
+        print_data(&data, true)
+    } else {
+        if parent_fallback {
+            eprintln!(
+                "pixel: {file} does not exist at {oid}; showing the parent's \
+                 pre-deletion content ({source})"
+            );
+        } else {
+            eprintln!("pixel: {source}");
+        }
+        write_stdout(&content)
     }
 }
 

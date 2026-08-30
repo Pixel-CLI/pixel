@@ -123,10 +123,13 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         dry_run,
     )?);
 
-    // 4. Wire PreToolUse + SessionStart hooks into Devin, Codex, and Gemini.
+    // 4. Wire PreToolUse + SessionStart hooks into Devin, Codex, Gemini,
+    //    and zcode. pi gets rules only (no per-tool hooks).
     steps.push(install_devin_hooks(&home, &exe, dry_run)?);
     steps.push(install_codex_hooks(&home, &exe, dry_run)?);
     steps.push(install_gemini_hooks(&home, &exe, dry_run)?);
+    steps.push(install_zcode_hooks(&home, &exe, dry_run)?);
+    steps.push(install_pi_rules(&home, &exe, dry_run)?);
 
     // 5. Rewrite agent-config with managed markers.
     steps.push(rewrite_agent_configs(&home, &exe, dry_run)?);
@@ -638,6 +641,161 @@ fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
         summary: "Gemini hooks wired (BeforeTool + SessionStart)".into(),
         detail: Some(with_backup_note(
             format!("wrote {}", config_path.display()),
+            backup_path,
+        )),
+    })
+}
+
+/// Wire PreToolUse + SessionStart hooks into zcode's
+/// `~/.zcode/cli/config.json`. zcode is a Claude Code variant that uses the
+/// same hooks format as Claude — hooks under `hooks.events.<Event>`, event
+/// `PreToolUse` with a `matcher` field.
+fn install_zcode_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let config_path = home.join(config::ZCODE_CONFIG_FILE);
+    if !config_path.is_file() {
+        return Ok(InstallStep {
+            id: "hooks.zcode".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "no zcode config.json — skipping"),
+            detail: None,
+        });
+    }
+    let mut value = read_settings(&config_path)?;
+
+    // zcode nests hooks under `hooks.events.<Event>` (one level deeper than
+    // Claude's `hooks.<Event>`).
+    let hooks_obj = value
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "config.json root is not an object".into(),
+        }))?
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "hooks is not an object".into(),
+        }))?
+        .entry("events".to_string())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "hooks.events is not an object".into(),
+        }))?;
+
+    let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+    let existing_pretooluse = hooks_obj.get("PreToolUse").cloned();
+    let merged_pretooluse = config::merge_hook_entry(
+        existing_pretooluse.as_ref(),
+        &guard_command,
+        serde_json::json!({
+            "matcher": config::GUARD_MATCHER,
+            "hooks": [{
+                "type": "command",
+                "command": guard_command,
+            }],
+        }),
+    );
+    hooks_obj.insert("PreToolUse".to_string(), merged_pretooluse);
+
+    let session_start_command = format!("~/.claude/hooks/{}", config::SESSION_START_HOOK);
+    let existing_session_start = hooks_obj.get("SessionStart").cloned();
+    let merged_session_start = config::merge_hook_entry(
+        existing_session_start.as_ref(),
+        &session_start_command,
+        serde_json::json!({
+            "matcher": ".*",
+            "hooks": [{
+                "type": "command",
+                "command": session_start_command,
+            }],
+        }),
+    );
+    hooks_obj.insert("SessionStart".to_string(), merged_session_start);
+
+    if dry_run {
+        return Ok(InstallStep {
+            id: "hooks.zcode".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "zcode hooks wired (PreToolUse + SessionStart)"),
+            detail: Some(format!("would write {}", config_path.display())),
+        });
+    }
+
+    let backup_path = write_settings(&config_path, &value, dry_run)?;
+    Ok(InstallStep {
+        id: "hooks.zcode".into(),
+        status: CheckStatus::Green,
+        summary: "zcode hooks wired (PreToolUse + SessionStart)".into(),
+        detail: Some(with_backup_note(
+            format!("wrote {}", config_path.display()),
+            backup_path,
+        )),
+    })
+}
+
+/// Install pixel rules into pi's config directory. pi uses an extension API
+/// with lifecycle events only (`session_start`, `message_start`, `agent_end`)
+/// — there is no per-tool `PreToolUse` interception, so guard hooks cannot
+/// be wired. Instead, pixel installs its rules as a memory file that pi's
+/// agent reads at session start, guiding the agent to use pixel commands
+/// voluntarily.
+fn install_pi_rules(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let config_dir = home.join(config::PI_CONFIG_DIR);
+    if !config_dir.is_dir() {
+        return Ok(InstallStep {
+            id: "hooks.pi".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "no pi config dir — skipping"),
+            detail: None,
+        });
+    }
+
+    // Read the canonical pixel rules and write them as a pi memory file.
+    let rules_path = home.join(config::PIXEL_RULES_REL);
+    let rules_content = match fs::read_to_string(&rules_path) {
+        Ok(s) => s,
+        Err(_) => {
+            return Ok(InstallStep {
+                id: "hooks.pi".into(),
+                status: CheckStatus::Yellow,
+                summary: dry_run_summary(dry_run, "pixel rules file not found — skipping pi"),
+                detail: Some(format!("expected at {}", rules_path.display())),
+            });
+        }
+    };
+
+    // pi stores memory files under its config dir. Write the pixel rules
+    // as a managed memory file that the agent reads at session start.
+    let memory_dir = config_dir.join("memory");
+    let memory_file = memory_dir.join("pixel-rules.md");
+    let managed = format!(
+        "{}\n{}\n{}\n",
+        config::MANAGED_BEGIN,
+        rules_content,
+        config::MANAGED_END
+    );
+
+    if dry_run {
+        return Ok(InstallStep {
+            id: "hooks.pi".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "pi rules installed (no guard hooks — extension API only)"),
+            detail: Some(format!("would write {}", memory_file.display())),
+        });
+    }
+
+    fs::create_dir_all(&memory_dir)?;
+    let backup_path = config::backup_if_changing(&memory_file, managed.as_bytes())?;
+    fs::write(&memory_file, &managed)?;
+    Ok(InstallStep {
+        id: "hooks.pi".into(),
+        status: CheckStatus::Green,
+        summary: "pi rules installed (no guard hooks — extension API only)".into(),
+        detail: Some(with_backup_note(
+            format!("wrote {}", memory_file.display()),
             backup_path,
         )),
     })

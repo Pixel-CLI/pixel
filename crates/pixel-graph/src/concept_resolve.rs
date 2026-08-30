@@ -54,6 +54,13 @@ pub enum Tier {
     /// Symbol fallback: no concept matched, but a symbol's ident words
     /// overlap the query. Emitted as `tier: "symbol"`.
     Symbol,
+    /// Identifier tier: the query is a single identifier-shaped token (no
+    /// spaces, e.g. `GUARD_MATCHER`, `CheckoutPage`) and an exact symbol name
+    /// match was found. This runs BEFORE the concept cascade so that code
+    /// definitions rank above string concepts that merely mention the
+    /// identifier in test fixtures or command strings. Emitted as
+    /// `tier: "ident"`.
+    Ident,
 }
 
 impl Tier {
@@ -64,6 +71,7 @@ impl Tier {
             Tier::T2 => "T2",
             Tier::T3 => "T3",
             Tier::Symbol => "symbol",
+            Tier::Ident => "ident",
         }
     }
 }
@@ -202,6 +210,19 @@ impl Default for ResolveOptions {
 
 const ARTICLES: &[&str] = &["the", "a", "an"];
 
+/// True when the normalized form is a single identifier-shaped token: no
+/// spaces, at least 2 chars, and composed of alphanumeric + underscore
+/// characters only. This distinguishes code identifiers (`guard_matcher`,
+/// `checkoutpage`) from natural-language phrases (`submit the form`,
+/// `the 503 error`) which contain spaces after normalization.
+fn is_identifier_shaped(norm: &str) -> bool {
+    if norm.len() < 2 || norm.contains(' ') {
+        return false;
+    }
+    norm.chars()
+        .all(|c| c.is_alphanumeric() || c == '_')
+}
+
 /// Map a head noun to the concept kind(s) it implies. Returns empty when the
 /// noun carries no kind signal.
 fn kind_for_head_noun(noun: &str) -> Vec<ConceptKind> {
@@ -263,6 +284,28 @@ pub fn resolve(
     let limit = opts.limit.max(1);
     let norm = normalize(phrase);
     let mut tiers_attempted: Vec<Tier> = Vec::new();
+
+    // Ident tier: when the query is a single identifier-shaped token (no
+    // spaces after normalization — e.g. `GUARD_MATCHER`, `CheckoutPage`,
+    // `useForm`), try an exact symbol name lookup BEFORE the concept
+    // cascade. This prevents string concepts that merely mention the
+    // identifier (test fixtures, command strings) from masking the real
+    // code definition. Natural-language phrases ("submit the form", "the
+    // 503 error") have spaces in their normalized form and skip this tier.
+    if is_identifier_shaped(&norm) {
+        tiers_attempted.push(Tier::Ident);
+        // Try the exact original phrase first (symbol names are
+        // case-sensitive in the DB).
+        let mut syms = store.symbols_by_name(phrase, limit as u32)?;
+        // If no exact-case hit, try the normalized (lowercased) form —
+        // handles lowercase queries like "guard_matcher".
+        if syms.is_empty() {
+            syms = store.symbols_by_name(&norm, limit as u32)?;
+        }
+        if !syms.is_empty() {
+            return finish_symbols(store, phrase, syms, opts, tiers_attempted, Tier::Ident);
+        }
+    }
 
     // T0: exact-norm probe.
     if !norm.is_empty() {
@@ -380,7 +423,7 @@ pub fn resolve(
         let ident_words = symbol_words(phrase);
         let symbols = symbol_fallback(store, &ident_words, limit as u32)?;
         if !symbols.is_empty() {
-            return finish_symbols(store, phrase, symbols, opts, tiers_attempted);
+            return finish_symbols(store, phrase, symbols, opts, tiers_attempted, Tier::Symbol);
         }
     }
 
@@ -469,16 +512,24 @@ fn finish(
 /// Build the final outcome for the symbol fallback tier. Each `SymbolRow`
 /// becomes a [`ConceptMatch`] carrying its real symbol kind in `symbol_kind`
 /// and a best-effort [`ConceptKind`] in `kind` (see [`symbol_kind_to_concept`]).
+/// `tier` is the tier that produced these matches (`Tier::Symbol` for the
+/// fallback cascade, `Tier::Ident` for the identifier-exact-match tier).
 fn finish_symbols(
     store: &GraphStore,
     phrase: &str,
     rows: Vec<SymbolRow>,
     opts: &ResolveOptions,
     tiers_attempted: Vec<Tier>,
+    tier: Tier,
 ) -> Result<ResolveOutcome, StoreError> {
     let limit = opts.limit.max(1);
     let mut candidates: Vec<RankedCandidate> = Vec::with_capacity(rows.len());
     let mut by_id: HashMap<u64, ConceptMatch> = HashMap::with_capacity(rows.len());
+    let reason = if tier == Tier::Ident {
+        "exact symbol name match"
+    } else {
+        "symbol fallback"
+    };
     for (i, row) in rows.into_iter().enumerate() {
         let id = row.id as u64;
         let path = file_path(store, row.file_id)?;
@@ -493,14 +544,14 @@ fn finish_symbols(
             owner: None,
             symbol_kind: Some(row.kind.as_str().to_string()),
             score,
-            reasons: vec!["symbol fallback".to_string()],
+            reasons: vec![reason.to_string()],
         };
         by_id.insert(id, m.clone());
         candidates.push(RankedCandidate {
             id,
             path,
             rrf_score: 1.0 / (i as f64 + 1.0),
-            tier: Tier::Symbol.as_str().to_string(),
+            tier: tier.as_str().to_string(),
         });
     }
 
@@ -518,7 +569,7 @@ fn finish_symbols(
     let index_state = index_state(store)?;
     Ok(ResolveOutcome {
         confidence: Confidence::Ranked,
-        tier: Some(Tier::Symbol),
+        tier: Some(tier),
         matches: ordered,
         inputs_digest: inputs_digest(phrase, &index_state),
         index_state,
@@ -955,8 +1006,11 @@ mod tests {
             )
             .unwrap();
 
+        // "handleLogin" is identifier-shaped (no spaces) and matches the
+        // symbol name exactly, so the ident tier catches it before the
+        // symbol fallback cascade.
         let out = resolve(&store, "handleLogin", &ResolveOptions::default()).unwrap();
-        assert_eq!(out.tier, Some(Tier::Symbol));
+        assert_eq!(out.tier, Some(Tier::Ident));
         assert_eq!(out.matches.len(), 1);
         assert_eq!(out.matches[0].raw, "handleLogin");
         assert_eq!(out.matches[0].symbol_kind.as_deref(), Some("function"));

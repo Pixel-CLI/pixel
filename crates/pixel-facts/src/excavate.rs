@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::search::covering_hashes;
-use crate::store::{FactsStore, Result, short_oid, subject_of};
+use crate::store::{FactsStore, IndexState, Result, short_oid, subject_of};
 
 /// One excavate candidate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -30,6 +30,15 @@ pub struct ExcavateCandidate {
     /// heuristic in `pixel/src/rescue_cmd.rs`). A commit can be `suspect` even
     /// when its subject line never mentions the phrase at all.
     pub suspect: bool,
+    /// Inline recovery payload: the matching hunk's stored text (the
+    /// REMOVED side when this commit removed the phrase — a deletion's
+    /// pre-deletion code — otherwise the ADDED side), centered on the
+    /// phrase match and capped at `SNIPPET_MAX_LINES` lines /
+    /// `SNIPPET_MAX_BYTES` bytes. Only the top `SNIPPET_TOP_N` candidates
+    /// carry one (see `ExcavateResult::snippet_note`); use
+    /// `excavate --show <oid> --file <path>` for the full file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
     /// Internal recency tiebreak: `commits.id`, which increases with
     /// insertion order (oldest-first per `enumerate_all_commits`). `at`
     /// (`committed_at`) only has whole-second precision from git, so two
@@ -50,7 +59,24 @@ pub struct ExcavateResult {
     pub last_good: Option<ExcavateCandidate>,
     /// Rescue plan sources: `"<oid>:<path>"` restorable even when path ∉ HEAD.
     pub plan: Vec<String>,
+    /// Present when some candidates' snippets were withheld to stay inside
+    /// the response size cap — those candidates are metadata-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet_note: Option<String>,
+    /// The one-call follow-up: how to read FULL historical file content
+    /// without falling back to raw `git show`/`git log`.
+    #[serde(default)]
+    pub next: String,
+    /// How much of history the answer covers — callers MUST read `fresh`
+    /// before treating an empty candidate list as "the code never existed".
+    pub index_state: IndexState,
 }
+
+/// Per-candidate snippet caps and the top-N / whole-response budget.
+const SNIPPET_MAX_LINES: usize = 60;
+const SNIPPET_MAX_BYTES: usize = 6 * 1024;
+const SNIPPET_TOP_N: usize = 5;
+const SNIPPET_TOTAL_BUDGET: usize = 40 * 1024;
 
 impl FactsStore {
     /// History-wide discovery. `phrase` may be empty (list by path/time), in
@@ -68,7 +94,7 @@ impl FactsStore {
         let phrase = phrase.unwrap_or("").to_string();
         let limit = limit.min(200);
 
-        let candidates: Vec<ExcavateCandidate> = if !phrase.is_empty() {
+        let mut candidates: Vec<ExcavateCandidate> = if !phrase.is_empty() {
             self.excavate_by_phrase(&phrase, path, from, to, limit)?
         } else if let Some(p) = path {
             self.excavate_by_path(p, from, to, limit)?
@@ -104,10 +130,55 @@ impl FactsStore {
             }
         }
 
+        // Snippet budget: candidates are sorted newest-first, so keep the
+        // inline payload on the top SNIPPET_TOP_N (while the running total
+        // stays inside SNIPPET_TOTAL_BUDGET) and strip the rest to
+        // metadata-only. `last_good` was cloned above, BEFORE stripping, so
+        // the recommended restore point always keeps its snippet even when
+        // it ranks below the top N.
+        let mut total = 0usize;
+        let mut stripped = 0usize;
+        for (i, c) in candidates.iter_mut().enumerate() {
+            match c.snippet.as_ref().map(String::len) {
+                Some(len) if i < SNIPPET_TOP_N && total + len <= SNIPPET_TOTAL_BUDGET => {
+                    total += len;
+                }
+                Some(_) => {
+                    c.snippet = None;
+                    stripped += 1;
+                }
+                None => {}
+            }
+        }
+        let snippet_note = (stripped > 0).then(|| {
+            format!(
+                "{stripped} candidate(s) are metadata-only (snippets carry only the \
+                 top {SNIPPET_TOP_N} matches, {} KB total); run \
+                 `pixel excavate --show <oid> --file <path>` for any of them",
+                SNIPPET_TOTAL_BUDGET / 1024
+            )
+        });
+
         let plan: Vec<String> = candidates
             .iter()
             .map(|c| format!("{}:{}", c.oid, c.path))
             .collect();
+
+        // Tell the calling agent the follow-up is ONE pixel call — not a
+        // round of raw `git show`/`git log`.
+        let next = match &last_good {
+            Some(lg) => format!(
+                "full original file: `pixel excavate --show {} --file {}` \
+                 (reads <oid>:<path>; on a deletion commit the parent's \
+                 pre-deletion content is returned automatically, or pass \
+                 --parent). No `git show` needed.",
+                lg.oid, lg.path
+            ),
+            None => "full historical file content: `pixel excavate --show <oid> \
+                     --file <path>` (parent fallback for deletion commits; \
+                     --parent forces <oid>^). No `git show` needed."
+                .to_string(),
+        };
 
         Ok(ExcavateResult {
             phrase,
@@ -115,6 +186,9 @@ impl FactsStore {
             candidates,
             last_good,
             plan,
+            snippet_note,
+            next,
+            index_state: self.index_state(),
         })
     }
 
@@ -220,6 +294,19 @@ impl FactsStore {
                 // same phrase (e.g. reformatting the line it lives on) is
                 // correctly NOT suspect.
                 let suspect = removed_has_phrase && !added_has_phrase;
+                // Inline snippet side: a phrase-removing commit's payload is
+                // the REMOVED text (the code the user wants back); otherwise
+                // the ADDED text (the code as it landed). Falls back to the
+                // combined hunk text when neither side matched individually
+                // (can't happen for a verified candidate, but stay total).
+                let side = if removed_has_phrase && !added_has_phrase {
+                    &removed
+                } else if added_has_phrase {
+                    &added
+                } else {
+                    &text
+                };
+                let snip = snippet_block(side, phrase);
                 out.push(ExcavateCandidate {
                     oid: short_oid(&oid),
                     path: hpath,
@@ -230,6 +317,7 @@ impl FactsStore {
                     deleted_from_head,
                     span: snippet(&text, phrase),
                     suspect,
+                    snippet: (!snip.is_empty()).then_some(snip),
                     seq,
                 });
             }
@@ -280,6 +368,7 @@ impl FactsStore {
                 // No phrase given for a path-only query, so diff-overlap
                 // suspect detection has nothing to check against.
                 suspect: false,
+                snippet: None,
                 seq,
             });
         }
@@ -322,6 +411,7 @@ impl FactsStore {
                 deleted_from_head: deleted.contains(&p),
                 span: String::new(),
                 suspect: false,
+                snippet: None,
                 seq,
             });
         }
@@ -363,6 +453,48 @@ impl FactsStore {
         }
         Ok(v)
     }
+}
+
+/// Line-oriented inline snippet: up to `SNIPPET_MAX_LINES` whole lines of
+/// `text` centered on the first (case-insensitive) occurrence of `needle`,
+/// additionally capped at `SNIPPET_MAX_BYTES`. Elided ends are marked `…`.
+/// Unlike `snippet` (the short one-line `span` teaser), this carries enough
+/// of the hunk to hand back a full function body without a follow-up call.
+fn snippet_block(text: &str, needle: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let hit_line = {
+        let lower = text.to_lowercase();
+        let n = needle.to_lowercase();
+        match lower.find(&n) {
+            Some(pos) => text[..pos].matches('\n').count().min(lines.len() - 1),
+            None => 0,
+        }
+    };
+    // Center the window on the hit, clamped to the text bounds.
+    let start = hit_line
+        .saturating_sub(SNIPPET_MAX_LINES / 2)
+        .min(lines.len().saturating_sub(SNIPPET_MAX_LINES));
+    let end = (start + SNIPPET_MAX_LINES).min(lines.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push_str("…\n");
+    }
+    let mut truncated_by_bytes = false;
+    for l in &lines[start..end] {
+        if out.len() + l.len() + 1 > SNIPPET_MAX_BYTES {
+            truncated_by_bytes = true;
+            break;
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    if truncated_by_bytes || end < lines.len() {
+        out.push('…');
+    }
+    out
 }
 
 fn snippet(text: &str, needle: &str) -> String {

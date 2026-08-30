@@ -68,10 +68,14 @@ fn targets_round_trip_manifest_and_clear() {
 
     assert!(manifest.exists(), "manifest not written");
     let m: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-    assert_eq!(m["version"], 1);
-    assert_eq!(m["task"], "fix `login_user` login flow");
-    assert!(m["created_unix"].as_u64().unwrap() > 0);
-    let manifest_paths: Vec<&str> = m["files"]
+    assert_eq!(m["version"], 2);
+    let tasks = m["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 1);
+    let t = &tasks[0];
+    assert_eq!(t["task"], "fix `login_user` login flow");
+    assert!(t["id"].as_str().unwrap().len() == 12);
+    assert!(t["created_unix"].as_u64().unwrap() > 0);
+    let manifest_paths: Vec<&str> = t["targets"]
         .as_array()
         .unwrap()
         .iter()

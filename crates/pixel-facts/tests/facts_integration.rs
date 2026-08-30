@@ -281,6 +281,36 @@ fn excavate_finds_phrase_in_history() {
     );
 }
 
+#[test]
+fn excavate_result_carries_index_state() {
+    let dir = make_repo();
+    let root = dir.path();
+    let mut store = FactsStore::open(root).expect("open store");
+
+    // Before any ingest: a miss must be distinguishable from "not indexed yet"
+    // — the result carries index_state.fresh == false.
+    let unfetched = store
+        .excavate(Some("secret_token"), None, None, None, 50)
+        .expect("excavate on empty db");
+    assert!(
+        !unfetched.index_state.fresh,
+        "an un-ingested db must report fresh=false on its excavate result"
+    );
+
+    ingest_until_fresh(&mut store, &IngestOptions::default()).expect("ingest");
+    let result = store
+        .excavate(Some("secret_token"), None, None, None, 50)
+        .expect("excavate");
+    assert!(
+        result.index_state.fresh,
+        "after ingest_until_fresh the excavate result must report fresh=true"
+    );
+    assert!(
+        result.index_state.commits_indexed > 0,
+        "index_state should reflect the indexed commits"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Invariant tests: this crate's whole reason to exist over usable-git's
 // synchronous ingest is (1) a query never blocks on / waits for ingest, and
