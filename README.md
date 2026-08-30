@@ -10,18 +10,47 @@ If an answer can be retrieved instantly and with certainty from repo state, pixe
 
 ## 💡 What this looks like
 
-| The ask | ❌ Without pixel | ✅ With pixel |
-|---|---|---|
-| "bring back the deleted upload progress code" | walk `git log`/`git show` by hand, risk `git checkout` wiping uncommitted work | `pixel excavate --phrase "upload progress"` → `pixel rescue --apply` *(refuses if dirty)* |
-| "I'm getting a 503" | grep the whole tree, guess which hit is real | `pixel resolve "I'm getting a 503"` → exact route, confidence: resolved |
-| "sync my branch" | fetch → reason about ahead/behind → merge/rebase → push, by hand | `pixel reconcile` → one call, conflicts get a structured report |
-| "add rate limiting to the upload endpoint" | read a dozen files to get oriented | `pixel targets "…"` → closed P0/P1/P2 file list |
-| find `handleCheckout` | flat grep, no ranking | `pixel search 'handleCheckout' --scope code` → ranked |
-| "can I change `processPayment`?" | grep the name, hope you caught every caller | `pixel impact processPayment --direction upstream` → risk: HIGH, d1/d2/d3 counts |
-| "what calls `processPayment`?" | text-match, miss aliased imports | `pixel uses processPayment --role callers` → confidence-tiered |
-| "what did my edit touch?" | eyeball `git diff` | `pixel changes` → affected symbols/flows |
-| "commit this" | `git add -A` sweeps in unrelated changes | `pixel publish --files checkout.ts --message "…"` → exactly those files |
-| "why is there a conflict?" | `git status` can hide conflicted paths | `pixel review` → conflicts always shown |
+Numbers are illustrative (order-of-magnitude), not a benchmark — the source diagrams live in `docs/examples/` and get regenerated once real measurements replace them.
+
+### Recovering deleted code
+
+![Recovering deleted code — without vs with pixel](docs/examples/01-recover-deleted-code.svg)
+
+### Locating code by an error
+
+![Locating code by an error — without vs with pixel](docs/examples/02-resolve-error.svg)
+
+### Syncing a branch
+
+![Syncing a branch — without vs with pixel](docs/examples/03-reconcile-branch.svg)
+
+### Starting a task
+
+![Starting a task — without vs with pixel](docs/examples/04-targets-task.svg)
+
+### Searching the codebase
+
+![Searching the codebase — without vs with pixel](docs/examples/05-search-ranked.svg)
+
+### Blast radius before editing
+
+![Blast radius before editing — without vs with pixel](docs/examples/06-impact-blast-radius.svg)
+
+### Finding real callers
+
+![Finding real callers — without vs with pixel](docs/examples/07-uses-callers.svg)
+
+### Checking impact before committing
+
+![Checking impact before committing — without vs with pixel](docs/examples/08-changes-precommit.svg)
+
+### Committing a change
+
+![Committing a change — without vs with pixel](docs/examples/09-publish-commit.svg)
+
+### Reviewing a conflict
+
+![Reviewing a conflict — without vs with pixel](docs/examples/10-review-conflicts.svg)
 
 ## ✨ Features
 

@@ -1,0 +1,31 @@
+flowchart TD
+    Ask(["🧑 'sync my branch'"])
+    Ask --> w1
+    Ask --> p1
+    w1 ~~~ p1
+
+    subgraph W ["❌ Without pixel — illustrative"]
+        direction TB
+        w1["🧠 LLM: runs git fetch<br/>~2s · 🟡 ~150 tok"] --> w2
+        w2["🧠 LLM: reasons about ahead/behind<br/>~2s · 🟡 ~300 tok"] --> w3
+        w3["🧠 LLM: manually merges or rebases<br/>~5s · 🔴 ~800 tok"] --> w4
+        w4["🧠 LLM: runs git push, handles failure<br/>~3s · 🟡 ~400 tok"]
+        w4 --> w5["😬 maybe a merge commit,<br/>maybe a mishandled conflict<br/>━━━━━━━━━━━━━━<br/>Total: ~12s · 🔴 ~1.65K tok"]
+    end
+
+    subgraph P ["✅ With pixel — illustrative"]
+        direction TB
+        p1["⚡ tool: pixel reconcile<br/>~120ms · 🟢 ~250 tok"]
+        p1 --> p3["✅ classified and acted,<br/>or a clear conflict report<br/>━━━━━━━━━━━━━━<br/>Total: ~64ms · 🟢 ~68 tok (measured op: analogous read-only substitute)"]
+    end
+
+    w5 --> Recap
+    p3 --> Recap
+    Recap["📊 ~11.9s saved — ~188x faster<br/>~1582 tokens saved — ~96% fewer"]
+
+    style W fill:#3a1a1a,stroke:#e05555,color:#fff
+    style P fill:#123a1e,stroke:#33c76a,color:#fff
+    style w5 fill:#5c1f1f,stroke:#e05555,color:#fff
+    style p3 fill:#155229,stroke:#33c76a,color:#fff
+    style Recap fill:#1a1a3a,stroke:#8899ff,color:#fff
+    linkStyle 2 stroke-width:0px

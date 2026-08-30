@@ -1,0 +1,29 @@
+flowchart TD
+    Ask(["🧑 'find handleCheckout'"])
+    Ask --> w1
+    Ask --> p1
+    w1 ~~~ p1
+
+    subgraph W ["❌ Without pixel — illustrative"]
+        direction TB
+        w1["🧠 LLM: greps 'handleCheckout' across the repo<br/>~2s · 🟡 ~600 tok"] --> w2
+        w2["🧠 LLM: reads each hit to find the real one<br/>~4s · 🔴 ~1.2K tok"]
+        w2 --> w5["😬 picks a plausible file — maybe wrong<br/>━━━━━━━━━━━━━━<br/>Total: ~6s · 🔴 ~1.8K tok"]
+    end
+
+    subgraph P ["✅ With pixel — illustrative"]
+        direction TB
+        p1["⚡ tool: pixel search --scope code<br/>~40ms · 🟢 ~250 tok"]
+        p1 --> p3["✅ ranked — real definition first<br/>━━━━━━━━━━━━━━<br/>Total: ~7ms · 🟢 ~101 tok (measured)"]
+    end
+
+    w5 --> Recap
+    p3 --> Recap
+    Recap["📊 ~6.0s saved — ~857x faster<br/>~1699 tokens saved — ~94% fewer"]
+
+    style W fill:#3a1a1a,stroke:#e05555,color:#fff
+    style P fill:#123a1e,stroke:#33c76a,color:#fff
+    style w5 fill:#5c1f1f,stroke:#e05555,color:#fff
+    style p3 fill:#155229,stroke:#33c76a,color:#fff
+    style Recap fill:#1a1a3a,stroke:#8899ff,color:#fff
+    linkStyle 2 stroke-width:0px
