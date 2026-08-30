@@ -121,12 +121,18 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     steps.push(install_session_start_hook(&home, &exe, dry_run)?);
 
     // 4. Wire PreToolUse + SessionStart hooks into Devin, Codex, Gemini,
-    //    and zcode. pi gets rules only (no per-tool hooks).
+    //    zcode, and Cursor. pi gets rules only (no per-tool hooks).
     steps.push(install_devin_hooks(&home, &exe, dry_run)?);
     steps.push(install_codex_hooks(&home, &exe, dry_run)?);
     steps.push(install_gemini_hooks(&home, &exe, dry_run)?);
     steps.push(install_zcode_hooks(&home, &exe, dry_run)?);
+    steps.push(install_cursor_hooks(&home, &exe, dry_run)?);
     steps.push(install_pi_rules(&home, &exe, dry_run)?);
+
+    // 4b. Heal any project-level `.codex/hooks.json` that shadows the
+    //     global one just installed above (see `patch_project_codex_hooks`
+    //     for the empirically-verified shadowing bug this closes).
+    steps.push(patch_project_codex_hooks(&home, dry_run)?);
 
     // 5. Rewrite agent-config with managed markers.
     steps.push(rewrite_agent_configs(&home, &exe, dry_run)?);
@@ -154,22 +160,38 @@ fn scrub_deprecated(home: &Path, dry_run: bool) -> Result<InstallStep> {
     // hook, not via MCP. The guard-hook command rewrite is unrelated to MCP
     // registration and always proceeds.
     let outcome = config::scrub_settings_json(&settings, dry_run)?;
-    let removed = outcome.mcp_servers_removed + outcome.guard_hooks_removed;
+    // Retired-tool RULE files are scrubbed alongside the MCP entries. An
+    // MCP registration and a Markdown rule are two different ways to keep
+    // offering a retired tool; removing only the first leaves Devin,
+    // Cline, and Cursor still advertising `usable-git`/`gitpixel` to the
+    // model as rules it may load.
+    let rule_files = config::scrub_deprecated_rule_files(home, dry_run)?;
+    let removed = outcome.mcp_servers_removed + outcome.guard_hooks_removed + rule_files.len();
     let summary = format!(
-        "removed {removed} deprecated MCP/hook entr{}",
+        "removed {removed} deprecated MCP/hook/rule entr{}",
         if removed == 1 { "y" } else { "ies" }
     );
+    let mut detail = format!(
+        "mcp_servers_removed={} guard_hooks_removed={} rule_files_removed={}",
+        outcome.mcp_servers_removed,
+        outcome.guard_hooks_removed,
+        rule_files.len()
+    );
+    if !rule_files.is_empty() {
+        detail.push_str(&format!(
+            " rule_files=[{}]",
+            rule_files
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
     Ok(InstallStep {
         id: "mcp.deprecated".into(),
         status: CheckStatus::Green,
         summary: dry_run_summary(dry_run, &summary),
-        detail: Some(with_backup_note(
-            format!(
-                "mcp_servers_removed={} guard_hooks_removed={}",
-                outcome.mcp_servers_removed, outcome.guard_hooks_removed
-            ),
-            outcome.backup_path,
-        )),
+        detail: Some(with_backup_note(detail, outcome.backup_path)),
     })
 }
 
@@ -670,6 +692,165 @@ fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
             format!("wrote {}", config_path.display()),
             backup_path,
         )),
+    })
+}
+
+/// Wire a `preToolUse` hook into Cursor's `~/.cursor/hooks.json`. Unlike
+/// every other tool wired above, Cursor's hooks.json is a FLAT per-event
+/// array (`{command, matcher?}` objects directly, no nested `hooks`
+/// sub-array) and its own event casing `preToolUse` — see
+/// `config::CURSOR_HOOKS_FILE` and `config::merge_flat_hook_entry` for the
+/// verified schema. No SessionStart hook is wired here: only `preToolUse`'s
+/// payload shape has been verified against the installed `cursor-agent`
+/// bundle.
+fn install_cursor_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let config_path = home.join(config::CURSOR_HOOKS_FILE);
+    let mut value = read_settings(&config_path)?;
+
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "hooks.json root is not an object".into(),
+        }))?;
+    root.entry("version".to_string()).or_insert(serde_json::json!(1));
+    let hooks_obj = root
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_map = hooks_obj
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: config_path.clone(),
+            reason: "hooks is not an object".into(),
+        }))?;
+
+    let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+    let existing_pretooluse = hooks_map.get("preToolUse").cloned();
+    let merged_pretooluse = config::merge_flat_hook_entry(
+        existing_pretooluse.as_ref(),
+        &guard_command,
+        serde_json::json!({
+            "command": guard_command,
+            "matcher": config::GUARD_MATCHER,
+        }),
+    );
+    hooks_map.insert("preToolUse".to_string(), merged_pretooluse);
+
+    if dry_run {
+        return Ok(InstallStep {
+            id: "hooks.cursor".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "Cursor hooks wired (preToolUse)"),
+            detail: Some(format!("would write {}", config_path.display())),
+        });
+    }
+
+    let backup_path = write_settings(&config_path, &value, dry_run)?;
+    Ok(InstallStep {
+        id: "hooks.cursor".into(),
+        status: CheckStatus::Green,
+        summary: "Cursor hooks wired (preToolUse)".into(),
+        detail: Some(with_backup_note(
+            format!("wrote {}", config_path.display()),
+            backup_path,
+        )),
+    })
+}
+
+/// Directories commonly holding project checkouts, searched one level deep
+/// for a project-local `.codex/hooks.json` that could SHADOW the global one
+/// installed above. Empirically verified (2026-08-30, `codex exec` against
+/// a real ship-fast checkout carrying only a `worktree-path-guard.sh`
+/// PreToolUse entry): Codex does NOT merge global and project-level
+/// `hooks.json` — a project's own file completely replaces the global
+/// PreToolUse array for every Codex session in that project. A destructive
+/// `git branch -D` ran to completion, unblocked, proving the global guard
+/// never fired. Any project with a pre-existing `.codex/hooks.json`
+/// (installed by cmux/orca's worktree-path-guard, observed here in
+/// ship-fast, omni, liza, execution-engine, and others) silently drops all
+/// of pixel's Codex-side enforcement.
+fn project_hook_search_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for parent in ["Documents", "Desktop"] {
+        let Ok(entries) = fs::read_dir(home.join(parent)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                roots.push(path);
+            }
+        }
+    }
+    roots
+}
+
+/// Merge pixel's guard into the PreToolUse array of every project-level
+/// `.codex/hooks.json` found under `home`'s common project directories that
+/// doesn't already carry it. One `pixel install` run heals every shadowed
+/// project on the machine, not just the repo it happens to run from.
+fn patch_project_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let mut patched = Vec::new();
+    let mut already_ok = 0usize;
+    for root in project_hook_search_roots(home) {
+        let config_path = root.join(".codex").join("hooks.json");
+        if !config_path.is_file() {
+            continue;
+        }
+        let carries_guard = fs::read_to_string(&config_path)
+            .map(|s| s.contains(config::GUARD_HOOK))
+            .unwrap_or(true); // unreadable => don't touch it, don't count it broken
+        if carries_guard {
+            already_ok += 1;
+            continue;
+        }
+        if dry_run {
+            patched.push(config_path.display().to_string());
+            continue;
+        }
+        let mut value = read_settings(&config_path)?;
+        let Some(root_obj) = value.as_object_mut() else {
+            continue;
+        };
+        let hooks_obj = root_obj
+            .entry("hooks".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let Some(hooks_map) = hooks_obj.as_object_mut() else {
+            continue;
+        };
+        let guard_command = format!("~/.claude/hooks/{}", config::GUARD_HOOK);
+        let existing = hooks_map.get("PreToolUse").cloned();
+        let merged = config::merge_hook_entry(
+            existing.as_ref(),
+            &guard_command,
+            serde_json::json!({
+                "matcher": config::GUARD_MATCHER,
+                "hooks": [{"type": "command", "command": guard_command}],
+            }),
+        );
+        hooks_map.insert("PreToolUse".to_string(), merged);
+        write_settings(&config_path, &value, dry_run)?;
+        patched.push(config_path.display().to_string());
+    }
+
+    let status = CheckStatus::Green;
+    let summary = if patched.is_empty() {
+        format!("no shadowed project-level .codex/hooks.json found ({already_ok} already carry the guard)")
+    } else {
+        format!(
+            "{} shadowed project-level .codex/hooks.json patched ({already_ok} already fine)",
+            patched.len()
+        )
+    };
+    Ok(InstallStep {
+        id: "hooks.codex_project_shadow".into(),
+        status,
+        summary: dry_run_summary(dry_run, &summary),
+        detail: if patched.is_empty() {
+            None
+        } else {
+            Some(patched.join(", "))
+        },
     })
 }
 

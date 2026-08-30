@@ -178,6 +178,33 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         })
     }));
 
+    checks.push(check("install.rules-conflict", || -> std::result::Result<DoctorCheckDetail, String> {
+        // A retired-tool rule file left in a per-tool rules directory keeps
+        // offering the model a tool pixel replaced. Devin in particular
+        // advertises every file under `~/.devin/rules/` to the model as an
+        // available rule it may read, so a stale `usable-git.md` competes
+        // with `pixel.md` inside the same rule set. `pixel install` scrubs
+        // these; this check fails if any survived or came back.
+        let stale = config::find_deprecated_rule_files(&home);
+        if !stale.is_empty() {
+            return Err(format!(
+                "retired-tool rule file(s) still present — run `pixel install`: {}",
+                stale
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(DoctorCheckDetail {
+            summary: "no retired-tool rule files in any agent rules directory".into(),
+            detail: Some(serde_json::json!({
+                "dirs_scanned": config::AGENT_RULES_DIRS,
+                "names_checked": config::DEPRECATED_RULE_FILES,
+            })),
+        })
+    }));
+
     checks.push(check("install.guard-hook", || -> std::result::Result<DoctorCheckDetail, String> {
         let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
         let new = hooks_dir.join(config::GUARD_HOOK);

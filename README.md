@@ -85,9 +85,9 @@ Two different things get measured, and they must not be conflated:
 
 Per tenet T1 (no claim without a measurement), that table is the current honest picture: fast ops do not automatically make fast agents. The s2/s4 regressions are exactly what this change set targets — the hard targets read-fence is demoted to advisory (it measured recall 0.60 → 0.19, [`docs/bench/sniper-discovery.md`](docs/bench/sniper-discovery.md)), and the recovery flow is being reworked; per T3, each scenario keeps MANDATORY status only while a re-run shows it non-inferior to baseline.
 
-**Known caveat on that table's baseline arm**: its harness stripped pixel hooks but not the installed CLAUDE.md rule text (which mandates pixel by absolute path), and its transcripts were overwritten before a tool_use-level purity check could run — so its baseline purity is **unknown** ([`docs/bench/agent-ab-2026-08-30-rerun-contaminated.txt`](docs/bench/agent-ab-2026-08-30-rerun-contaminated.txt)).
+**Known caveat on that table's baseline arm**: its harness stripped pixel hooks but not the installed CLAUDE.md rule text (which mandates pixel by absolute path), and its transcripts were overwritten before a tool_use-level purity check could run — so its baseline purity is **unknown** ([`docs/bench/2026-08-30-session-log.md`](docs/bench/2026-08-30-session-log.md)).
 
-**Clean-baseline A/B** (same day, baseline under `claude --safe-mode` — a vanilla agent with no CLAUDE.md/hooks/skills — verified pixel-free at the tool_use level in 12/12 cells; means over 3 valid reps/cell — [`docs/bench/agent-ab-2026-08-30-safemode-baseline.txt`](docs/bench/agent-ab-2026-08-30-safemode-baseline.txt)):
+**Clean-baseline A/B** (same day, baseline under `claude --safe-mode` — a vanilla agent with no CLAUDE.md/hooks/skills — verified pixel-free at the tool_use level in 12/12 cells; means over 3 valid reps/cell — [`docs/bench/2026-08-30-session-log.md`](docs/bench/2026-08-30-session-log.md)):
 
 | Scenario | Vanilla baseline (mean) | With pixel + rules (mean) | Delta |
 |---|---|---|---|
@@ -98,7 +98,7 @@ Per tenet T1 (no claim without a measurement), that table is the current honest 
 
 Two honest readings, both required: (1) the pixel arm carries the **entire** installed rule text, so the delta measures pixel-plus-doctrine overhead, not pixel ops alone; (2) the tool_use-level parse shows the pixel arm invoked pixel **sparsely** (s1: 0 invocations in all 3 reps; s2: 2/0/0; s3: 0/0/1; s4: 1/0/6) — much of the slowdown is agents processing mandates they then barely use. Per T3, this is the measurement that keeps every scenario's MANDATORY status on probation until a run shows non-inferiority.
 
-**Post-fix re-run** (same day, same clean `--safe-mode` baseline methodology, single binary + doctrine held constant for the full run — [`docs/bench/agent-ab-2026-08-30-clean-postfix.txt`](docs/bench/agent-ab-2026-08-30-clean-postfix.txt)), after two fixes: (a) pixel's own doctrine text trimmed ~72% (16.3KB → 4.6KB — the rule-vs-binary parity and scenario-consistency `pixel doctor` checks stayed green through the cut); (b) `pixel excavate` fixed to rank diff-content-proven `suspect` commits first instead of by pure recency — it was burying the real "who deleted this" answer behind unrelated files that merely quote the search phrase as prose (`crates/pixel-facts/src/excavate.rs`, `excavate_by_phrase`):
+**Post-fix re-run** (same day, same clean `--safe-mode` baseline methodology, single binary + doctrine held constant for the full run — [`docs/bench/2026-08-30-session-log.md`](docs/bench/2026-08-30-session-log.md)), after two fixes: (a) pixel's own doctrine text trimmed ~72% (16.3KB → 4.6KB — the rule-vs-binary parity and scenario-consistency `pixel doctor` checks stayed green through the cut); (b) `pixel excavate` fixed to rank diff-content-proven `suspect` commits first instead of by pure recency — it was burying the real "who deleted this" answer behind unrelated files that merely quote the search phrase as prose (`crates/pixel-facts/src/excavate.rs`, `excavate_by_phrase`):
 
 | Scenario | Vanilla baseline (mean) | With pixel + rules (mean) | Delta | vs. pre-fix |
 |---|---|---|---|---|
@@ -109,7 +109,18 @@ Two honest readings, both required: (1) the pixel arm carries the **entire** ins
 
 s2-scope (task scoping — the `targets` mandate) now measures **better** with pixel than without, on two separate runs; per T3 that keeps it solidly MANDATORY. s4-recover's regression margin shrank by a third, tracking the ranking fix directly. s1/s3 stayed flat or worsened slightly — both are single-tool-call tasks where the delta is dominated by something pixel's own logic doesn't touch: see the isolated measurement below.
 
-**Isolating pixel's own cost from the rest of this user's config** — the arms above load the user's **entire global `CLAUDE.md`** (~140KB / ~35,000 tokens across dozens of unrelated rules — RTK, Jira, browser automation, credential policy, none of it pixel's), because `--safe-mode` is the only flag that suppresses it and that also disables the PreToolUse hooks. [`scripts/pixel-bench-isolated.sh`](scripts/pixel-bench-isolated.sh) isolates pixel's own doctrine (`--safe-mode --append-system-prompt "$(cat pixel.md)"`, verified to deliver pixel-only instructions with no other rule content) against a truly blank agent — at the cost of losing hook enforcement in both arms, so it measures doctrine-driven tool choice, not the mechanically-enforced product. Numbers pending its next run; see the linked artifact once populated.
+**Isolating pixel's own cost from the rest of this user's config** — the arms above load the user's **entire global `CLAUDE.md`** (~140KB / ~35,000 tokens across dozens of unrelated rules — RTK, Jira, browser automation, credential policy, none of it pixel's), because `--safe-mode` is the only flag that suppresses it and that also disables the PreToolUse hooks. [`scripts/pixel-bench-isolated.sh`](scripts/pixel-bench-isolated.sh) isolates pixel's own doctrine (`--safe-mode --append-system-prompt "$(cat pixel.md)"`, verified to deliver pixel-only instructions with no other rule content) against a truly blank agent — at the cost of losing hook enforcement in both arms, so it measures doctrine-driven reasoning, not the mechanically-enforced product.
+
+N=3 confirmed ([`docs/bench/2026-08-30-session-log.md`](docs/bench/2026-08-30-session-log.md)), means over valid runs, **`pixel_calls=0` in nearly every cell** — the effect below is the doctrine's reasoning guidance changing agent behavior, not tool invocation:
+
+| Scenario | Vanilla (mean) | Pixel doctrine only (mean) | Delta |
+|---|---|---|---|
+| s1-locate | 12.5s | 14.0s | ❌ +12% (small, consistent, ~1.5s absolute) |
+| s2-scope | 128.9s | 90.9s | ✅ **−29%** — cross-validates the full-stack run's −31% above, independently |
+| s3-sync | 9.1s | 8.0s | ✅ **−12%** |
+| s4-recover | 32.5s | 42.3s | ❌ +30% (reversed from an N=1 preview's −15% — one high-variance rep drove it; inconclusive at this sample size) |
+
+Honest synthesis: pixel's doctrine measurably improves agent task-scoping and branch-sync reasoning — two independent benchmark designs (full-stack and isolated) now agree on task-scoping's ~30% win. The single-lookup task (s1) pays a small, likely-irreducible tax for reading any extra instructions before a one-shot answer. Recovery (s4) improved substantially from the excavate ranking fix in the full-stack run but stays too noisy to call in isolation — legitimate open work, not a claim either way.
 
 ## 💡 What this looks like
 

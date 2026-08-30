@@ -70,6 +70,51 @@ const READERS: &[&str] = &[
     "fgrep", "find", "strings", "wc",
 ];
 
+/// On-disk transcript stores `pixel recall` already ingests into one
+/// queryable corpus (`pixel recall search`/`sessions`/`index`). A raw
+/// sqlite3/python/cat/grep session digging through one of these by hand —
+/// exactly what happened before this advisory existed, recovering a
+/// quota-blocked Devin session's task via manual `sqlite3` + `python3`
+/// archaeology — is real, non-destructive work that should not be hard
+/// blocked (same recall-regression lesson as the sniper fence:
+/// docs/bench/sniper-discovery.md), but deserves a pointer to the
+/// deterministic replacement.
+const TRANSCRIPT_STORE_MARKERS: &[&str] = &[
+    ".local/share/devin/cli/sessions.db",
+    ".local/share/devin/cli/transcripts",
+    ".config/devin",
+    ".claude/projects",
+    ".cursor/chats",
+    ".codex/sessions",
+    ".gemini/tmp",
+    ".local/share/opencode",
+];
+/// Tools capable of digging through a transcript store's raw records
+/// (queries a sqlite DB, or runs a script over JSON/JSONL). Deliberately
+/// narrower than `READERS`: a bare `cat`/`grep` on a transcript path is
+/// still flagged via `READERS` below, but `python3`/`node`/`jq` only count
+/// as archaeology when paired with a known store path — otherwise every
+/// unrelated script invocation would be flagged.
+const ARCHAEOLOGY_TOOLS: &[&str] = &["sqlite3", "python3", "python ", "node ", "jq "];
+
+/// Advisory (non-blocking) lines when `cmd` touches a known transcript
+/// store with a tool capable of reading it. `None` when the command
+/// doesn't match — the common case, checked first for speed.
+fn transcript_archaeology_advisory_lines(cmd: &str) -> Option<Vec<String>> {
+    let store = TRANSCRIPT_STORE_MARKERS.iter().find(|m| cmd.contains(**m))?;
+    let digs_in = ARCHAEOLOGY_TOOLS.iter().any(|t| cmd.contains(t))
+        || READERS.iter().any(|r| cmd.contains(r));
+    if !digs_in {
+        return None;
+    }
+    Some(vec![
+        format!("Advisory: this command reads `{store}` — a transcript store `pixel recall` already indexes."),
+        "`pixel recall sessions --agent <devin|codex|claude|cursor|gemini|opencode>` lists sessions by title/cwd/turn-count in one call.".into(),
+        "`pixel recall search \"<phrase>\" --agent <agent> --session <name>` pulls the exact turn text — no manual sqlite3/python needed.".into(),
+        "Run `pixel recall index` first if this store hasn't been ingested yet.".into(),
+    ])
+}
+
 /// One scoped task inside the manifest. v2 manifests carry several of
 /// these (concurrent agents each scope their own task); the legacy v1
 /// shape maps to exactly one.
@@ -108,7 +153,7 @@ pub fn run() -> ! {
         .get("hook_event_name")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if !is_guard_event(event) {
+    if !is_guard_event(&payload, event) {
         std::process::exit(0);
     }
 
@@ -138,7 +183,7 @@ pub fn run() -> ! {
         _ => (None, false),
     };
 
-    if tool == "Bash" || tool == "exec" || tool == "bash" || tool == "run_shell_command" || tool == "execute" {
+    if tool == "Bash" || tool == "exec" || tool == "bash" || tool == "run_shell_command" || tool == "execute" || tool == "Shell" {
         let cmd = tool_input
             .get("command")
             .and_then(Value::as_str)
@@ -219,9 +264,21 @@ pub fn run() -> ! {
     std::process::exit(0);
 }
 
-/// Accept both Claude Code's PreToolUse and Gemini's BeforeTool hook events.
-fn is_guard_event(event: &str) -> bool {
-    event == "PreToolUse" || event == "BeforeTool"
+/// Accept Claude Code's/Codex's/Devin's/zcode's `PreToolUse`, Gemini's
+/// `BeforeTool`, and Cursor's `preToolUse` hook events. Cursor's payload
+/// carries no `hook_event_name` field at all (verified against the
+/// installed `cursor-agent` bundle: the `preToolUse` handler builds its
+/// hook-script stdin from exactly `{conversation_id, generation_id, model,
+/// tool_name, tool_input, tool_use_id, cwd}` — no event-name key) because
+/// pixel is only ever wired into Cursor's `preToolUse` array, so the event
+/// is already implicit from which array invoked us. Treat the payload
+/// shape itself (`tool_name` + `tool_input` present, no explicit event
+/// name) as an implicit PreToolUse.
+fn is_guard_event(payload: &Value, event: &str) -> bool {
+    if event == "PreToolUse" || event == "BeforeTool" {
+        return true;
+    }
+    event.is_empty() && payload.get("tool_name").is_some() && payload.get("tool_input").is_some()
 }
 
 fn canonical(p: &Path) -> PathBuf {
@@ -519,6 +576,9 @@ fn check_bash(cmd: &str, cwd: &Path, idx_root: Option<&Path>, manifest: Option<&
     if let Some(lines) = bash_deny_lines(cmd, idx_root) {
         block(&lines);
     }
+    if let Some(lines) = transcript_archaeology_advisory_lines(cmd) {
+        advise(&lines);
+    }
     if cmd.contains("<<") || cmd.contains("$(") || cmd.contains('`') {
         return;
     }
@@ -641,6 +701,29 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
             format!("  pixel ship --files <f>... --message \"<msg>\" --request-id <id> {}", shell_quote(&root.display().to_string())),
             "(pixel push uses --force-with-lease semantics only where safe.)".into(),
         ]),
+        // `git merge` used to integrate a branch is denied outright: the
+        // doctrine forbids merge commits without exception, and
+        // `reconcile` is the deterministic replacement. `--abort` /
+        // `--continue` / `--quit` are merge-state *exits*, not
+        // integrations — denying those would strand an agent mid-conflict
+        // with no way out, so they pass through.
+        "merge"
+            if !args.iter().any(|a| {
+                a == "--abort" || a == "--continue" || a == "--quit"
+            }) =>
+        {
+            Some(vec![
+                "BLOCKED by pixel-targets-guard: `git merge` creates a merge commit — forbidden without exception.".into(),
+                "Branch integration is deterministic reconciliation:".into(),
+                format!(
+                    "  pixel reconcile {} --strategy rebase-if-clean",
+                    shell_quote(&root.display().to_string())
+                ),
+                "It proves a clean rebase via merge-tree before touching the worktree and".into(),
+                "reports structured conflicts when they exist. (`git merge --abort/--continue`".into(),
+                "are not blocked — they exit an in-progress merge.)".into(),
+            ])
+        }
         // `git pull` is denied with a suggestion, NEVER rewritten: a
         // transparent substitute would discard remote/branch args and a
         // `--push` default would add a write the original didn't have.
@@ -1878,9 +1961,28 @@ mod tests {
 
     #[test]
     fn accepts_before_tool_event() {
-        assert!(is_guard_event("PreToolUse"));
-        assert!(is_guard_event("BeforeTool"));
-        assert!(!is_guard_event("PostToolUse"));
+        let empty = serde_json::json!({});
+        assert!(is_guard_event(&empty, "PreToolUse"));
+        assert!(is_guard_event(&empty, "BeforeTool"));
+        assert!(!is_guard_event(&empty, "PostToolUse"));
+    }
+
+    #[test]
+    fn accepts_cursor_shaped_payload_with_no_event_name() {
+        // Cursor's preToolUse hook sends no `hook_event_name` at all —
+        // verified against the installed cursor-agent bundle. The payload
+        // shape itself (tool_name + tool_input, no event key) must count
+        // as an implicit PreToolUse.
+        let cursor_shaped = serde_json::json!({
+            "tool_name": "Shell",
+            "tool_input": {"command": "ls"},
+            "cwd": "/tmp"
+        });
+        assert!(is_guard_event(&cursor_shaped, ""));
+        // A payload with neither an event name nor the tool_name/tool_input
+        // shape must NOT be treated as a guard event.
+        let unrelated = serde_json::json!({"foo": "bar"});
+        assert!(!is_guard_event(&unrelated, ""));
     }
 
     #[test]

@@ -528,12 +528,22 @@ pub fn compute_targets(
             p2 += 1;
             "P2"
         };
+        // Structured symbol metadata (kind/line/uid) is dropped for P1/P2:
+        // `reasons` already names the same symbols in prose ("defines
+        // symbol `X`"), and duplicating that as a structured array for
+        // every tier measurably bloated the response (3.6KB of an 11.8KB
+        // response on a real 20-target query, 2026-08-30) without adding
+        // information the caller needs for files it's told are peripheral
+        // and droppable. P0 keeps it — that's the tier the doctrine
+        // mandates checking, where the uid is worth the bytes for a
+        // follow-up `pixel context`/`pixel impact` call.
+        let symbols = if tier == "P0" { e.symbols } else { Vec::new() };
         targets.push(TargetFile {
             path,
             tier: tier.to_string(),
             score: round6(e.score),
             reasons: e.reasons,
-            symbols: e.symbols,
+            symbols,
         });
     }
     // Present P0 first, then P1, then P2, score order inside each tier

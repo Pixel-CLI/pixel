@@ -18,3 +18,23 @@ This isolates pixel's DOCTRINE TEXT + voluntary tool use, not the full product.
   vanilla-s2-scope-2: 76768ms (api=72779ms) tools=30 turns=45 pixel_calls=0
   vanilla-s2-scope-3: 157003ms (api=154854ms) tools=35 turns=60 pixel_calls=0
   pixel-isolated-s2-scope-1: 100890ms (api=95594ms) tools=22 turns=33 pixel_calls=0
+  pixel-isolated-s2-scope-2: 67672ms (api=63528ms) tools=18 turns=30 pixel_calls=0
+  pixel-isolated-s2-scope-3: 104106ms (api=98235ms) tools=16 turns=33 pixel_calls=1
+
+--- scenario s3-sync ---
+  vanilla-s3-sync-1: 8968ms (api=4664ms) tools=1 turns=3 pixel_calls=0
+  vanilla-s3-sync-2: 9297ms (api=5094ms) tools=1 turns=3 pixel_calls=0
+  vanilla-s3-sync-3: 8975ms (api=4832ms) tools=1 turns=3 pixel_calls=0
+  pixel-isolated-s3-sync-1: 7398ms (api=3243ms) tools=1 turns=3 pixel_calls=1
+  pixel-isolated-s3-sync-2: 7587ms (api=3423ms) tools=1 turns=3 pixel_calls=1
+  pixel-isolated-s3-sync-3: 9075ms (api=5017ms) tools=1 turns=3 pixel_calls=1
+
+--- scenario s4-recover ---
+  pixel-isolated-s4-recover-1: 38213ms (api=31847ms) tools=4 turns=9 pixel_calls=1
+  pixel-isolated-s4-recover-2: 37661ms (api=34224ms) tools=6 turns=13 pixel_calls=0
+  pixel-isolated-s4-recover-3: 50980ms (api=46906ms) tools=11 turns=22 pixel_calls=1
+  vanilla-s4-recover-1: 35020ms (api=25114ms) tools=4 turns=9 pixel_calls=0
+  vanilla-s4-recover-2: 25268ms (api=21560ms) tools=4 turns=9 pixel_calls=0
+  vanilla-s4-recover-3: 37285ms (api=32880ms) tools=6 turns=11 pixel_calls=0
+
+=== RESULTS ===

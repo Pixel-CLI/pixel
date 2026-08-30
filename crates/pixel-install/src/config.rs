@@ -62,6 +62,19 @@ pub const GEMINI_SETTINGS_FILE: &str = ".gemini/settings.json";
 /// `SessionStart`) under `~/.zcode/cli/config.json` → `hooks.events.<Event>`.
 pub const ZCODE_CONFIG_FILE: &str = ".zcode/cli/config.json";
 
+/// The Cursor hooks file (relative to home). Cursor uses a FLAT per-event
+/// array (`hooks.<event>` is `[{command, matcher?, ...}, ...]` directly —
+/// no nested `hooks` sub-array like Claude/Codex/Devin/Gemini/zcode) and
+/// its own event name `preToolUse` (not `PreToolUse`). Verified against
+/// the installed `cursor-agent` bundle: the `preToolUse` hook-script stdin
+/// is `{conversation_id, generation_id, model, tool_name, tool_input,
+/// tool_use_id, cwd}` — no `hook_event_name` field, which `pixel hook
+/// guard` treats as an implicit PreToolUse (see `guard::is_guard_event`).
+/// Exit code 2 blocks, same convention as Claude/Codex, per Cursor's own
+/// `create-hook` skill docs — so the guard binary needs no Cursor-specific
+/// output path, only the payload-shape and matcher additions above.
+pub const CURSOR_HOOKS_FILE: &str = ".cursor/hooks.json";
+
 /// The pi config directory (relative to home). pi uses an extension API with
 /// lifecycle events only — no per-tool `PreToolUse` interception. pixel
 /// installs rules into pi's memory but cannot wire guard hooks.
@@ -69,19 +82,22 @@ pub const PI_CONFIG_DIR: &str = ".pi/agent";
 /// The pi settings file (relative to home).
 pub const PI_SETTINGS_FILE: &str = ".pi/agent/settings.json";
 
-/// PreToolUse matcher covering Claude, Devin, Codex, Gemini, and zcode tool
-/// names.
+/// PreToolUse matcher covering Claude, Devin, Codex, Gemini, zcode, and
+/// Cursor tool names.
 /// Claude:  Bash, Read, Grep, Glob, Edit, MultiEdit, NotebookEdit, Write
 /// Devin:   exec, read, grep, find_file_by_name, glob, edit, write, notebook_read, notebook_edit
 /// Codex:   bash, read, write, edit, apply_patch, glob
 /// Gemini:  bash, execute, run_shell_command, read, read_file, write, write_file, edit, grep, glob, search
 /// zcode:   same tool names as Claude (Claude Code variant)
+/// Cursor:  Shell, Read, Write (Read/Write already covered above; Shell is
+///          Cursor-only — verified against the installed `cursor-agent`
+///          bundle's `preToolUse` tool-name mapping)
 /// pi:      read, bash, edit, write, grep, find, ls (no PreToolUse hooks — rules only)
 pub const GUARD_MATCHER: &str =
     "Bash|Read|Grep|Glob|Edit|MultiEdit|NotebookEdit|Write|\
      exec|read|grep|find_file_by_name|glob|edit|write|notebook_read|notebook_edit|\
      bash|apply_patch|read_file|write_file|execute|run_shell_command|search|\
-     find|ls";
+     find|ls|Shell";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -345,6 +361,77 @@ pub const DEPRECATED_MCP_SERVERS: &[&str] = &["usable-git", "gitpixel", "sniper"
 /// Hook names that point at the old guard and must be scrubbed.
 pub const DEPRECATED_GUARD_HOOKS: &[&str] = &["gitpixel-targets-guard"];
 
+/// Per-tool rule-file basenames belonging to tools pixel retired. Each of
+/// these is a standing instruction to use `usable-git`, `gitpixel`,
+/// `gitnexus`, or the hard `sniper` fence — every one of which pixel
+/// replaced. Left on disk they compete with the pixel rule inside the same
+/// agent's rule set: Devin, for instance, advertises every file under
+/// `~/.devin/rules/` to the model as an available rule it may read, so a
+/// retired rule keeps offering the model a retired tool.
+pub const DEPRECATED_RULE_FILES: &[&str] =
+    &["usable-git.md", "gitpixel.md", "gitnexus.md", "sniper.md"];
+
+/// Directories (relative to home) that agent CLIs load per-tool Markdown
+/// rule files from. Scrubbed for [`DEPRECATED_RULE_FILES`] on every
+/// install. `.agent-config/**` is included because it is the source those
+/// per-tool directories are regenerated from — scrubbing only the
+/// destinations would let the next `build-agent-config` put them back.
+pub const AGENT_RULES_DIRS: &[&str] = &[
+    ".devin/rules",
+    ".cline/rules",
+    ".claude/rules",
+    ".codex/rules",
+    ".cursor/rules",
+    ".gemini/rules",
+    ".agent-config/rules",
+    ".agent-config/.devin/rules",
+];
+
+/// Every [`DEPRECATED_RULE_FILES`] entry present under any
+/// [`AGENT_RULES_DIRS`] directory, in scan order.
+pub fn find_deprecated_rule_files(home: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for dir in AGENT_RULES_DIRS {
+        let dir = home.join(dir);
+        if !dir.is_dir() {
+            continue;
+        }
+        for name in DEPRECATED_RULE_FILES {
+            let path = dir.join(name);
+            if path.is_file() {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Remove every retired-tool rule file found by
+/// [`find_deprecated_rule_files`], backing each one up first. Returns the
+/// paths removed (or, under `dry_run`, the paths that would be removed).
+pub fn scrub_deprecated_rule_files(home: &Path, dry_run: bool) -> Result<Vec<PathBuf>> {
+    let found = find_deprecated_rule_files(home);
+    if dry_run {
+        return Ok(found);
+    }
+    for path in &found {
+        // Back up unconditionally: the file is about to disappear, so
+        // there is no "content already matches" case to skip.
+        let current = fs::read(path)?;
+        backup_if_changing(path, &sentinel_differing_from(&current))?;
+        fs::remove_file(path)?;
+    }
+    Ok(found)
+}
+
+/// A byte string guaranteed to differ from `current`, so
+/// [`backup_if_changing`] always writes the backup.
+fn sentinel_differing_from(current: &[u8]) -> Vec<u8> {
+    let mut sentinel = current.to_vec();
+    sentinel.push(0);
+    sentinel
+}
+
 /// Remove deprecated MCP-server entries and old-guard hook entries from a
 /// Claude `settings.json`. Returns the scrub outcome.
 ///
@@ -529,6 +616,31 @@ pub fn merge_hook_entry(
         None => Vec::new(),
     };
     entries.retain(|entry| !hook_entry_matches_marker(entry, pixel_marker));
+    entries.push(pixel_entry);
+    serde_json::Value::Array(entries)
+}
+
+/// Same idempotent append-and-dedupe as [`merge_hook_entry`], for Cursor's
+/// FLAT hooks.json schema: each array entry carries `command` directly
+/// (no nested `hooks` sub-array), so the marker match looks at
+/// `entry.command` instead of `entry.hooks[].command`.
+pub fn merge_flat_hook_entry(
+    existing: Option<&serde_json::Value>,
+    pixel_marker: &str,
+    pixel_entry: serde_json::Value,
+) -> serde_json::Value {
+    let mut entries: Vec<serde_json::Value> = match existing {
+        Some(serde_json::Value::Array(arr)) => arr.clone(),
+        Some(other) => vec![other.clone()],
+        None => Vec::new(),
+    };
+    entries.retain(|entry| {
+        entry
+            .get("command")
+            .and_then(|c| c.as_str())
+            .map(|c| !c.contains(pixel_marker))
+            .unwrap_or(true)
+    });
     entries.push(pixel_entry);
     serde_json::Value::Array(entries)
 }

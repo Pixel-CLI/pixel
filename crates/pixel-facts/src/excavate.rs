@@ -98,6 +98,34 @@ pub struct ExcavateCandidate {
     /// of by incidental SQL row order. Not part of the wire contract.
     #[serde(default, skip_serializing)]
     seq: i64,
+    /// True when the phrase appears on at least one non-comment line of the
+    /// matched side — i.e. this looks like the actual declaration/usage, not
+    /// a doc comment or prose mention of the same identifier. Ranked above
+    /// comment-only matches within the same suspect/recency tier: two files
+    /// touched by the identical commit otherwise tie on every other sort
+    /// key, and a real-world case showed that tie landing on a doc-comment
+    /// reference (`/// ...install::register_mcp_server`) instead of the
+    /// actual `pub fn register_mcp_server(...)` it was describing — forcing
+    /// the caller to dig through several more candidates for the real
+    /// answer to "find the deleted function".
+    pub is_definition: bool,
+}
+
+/// Single-line-comment prefixes checked when distinguishing a real
+/// declaration/usage from a doc comment or prose mention. Deliberately
+/// covers common line-comment styles across languages this tool indexes
+/// (`//`/`///`/`//!` for Rust/JS/C-family, `#` for Python/shell/Ruby) rather
+/// than only Rust's, since excavate has no language boundary.
+const COMMENT_LINE_PREFIXES: &[&str] = &["///", "//!", "//", "#"];
+
+fn phrase_outside_comment(text: &str, phrase: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let is_comment = COMMENT_LINE_PREFIXES
+            .iter()
+            .any(|p| trimmed.starts_with(p));
+        !is_comment && line.contains(phrase)
+    })
 }
 
 /// The result of an excavate query.
@@ -434,6 +462,7 @@ impl FactsStore {
                     &text
                 };
                 let snip = snippet_block(side, phrase);
+                let is_definition = phrase_outside_comment(side, phrase);
                 out.push(ExcavateCandidate {
                     oid: short_oid(&oid),
                     path: hpath,
@@ -444,6 +473,7 @@ impl FactsStore {
                     deleted_from_head,
                     span: snippet(&text, phrase),
                     suspect,
+                    is_definition,
                     snippet: (!snip.is_empty()).then_some(snip),
                     seq,
                 });
@@ -455,9 +485,18 @@ impl FactsStore {
         // non-suspect noise (e.g. another file's prose mentioning the same
         // identifier as plain text) forces the caller to read past false
         // leads before reaching the deterministic answer this field already
-        // computed. Recency remains the tiebreaker within each group.
+        // computed. `is_definition` breaks ties WITHIN a commit: one commit
+        // routinely touches several files, and without this a real function
+        // definition can tie on (suspect, at, seq) against a doc comment in
+        // another file that merely mentions the same identifier, with the
+        // loser decided by incidental SQL row order — measured: a "find the
+        // deleted function" query surfaced a `/// ...install::X` doc-comment
+        // reference ahead of the actual `pub fn X(...)` it described.
+        // Recency remains the final tiebreaker within each (suspect,
+        // is_definition) group.
         out.sort_by(|a, b| {
-            (b.suspect, &b.at, b.seq).cmp(&(a.suspect, &a.at, a.seq))
+            (b.suspect, b.is_definition, &b.at, b.seq)
+                .cmp(&(a.suspect, a.is_definition, &a.at, a.seq))
         });
         out.truncate(limit);
         Ok(out)
@@ -510,8 +549,10 @@ impl FactsStore {
                 deleted_from_head,
                 span: String::new(),
                 // No phrase given for a path-only query, so diff-overlap
-                // suspect detection has nothing to check against.
+                // suspect detection and definition-vs-mention detection have
+                // nothing to check against.
                 suspect: false,
+                is_definition: false,
                 snippet: None,
                 seq,
             });
@@ -561,6 +602,7 @@ impl FactsStore {
                 deleted_from_head: deleted.contains(&p),
                 span: String::new(),
                 suspect: false,
+                is_definition: false,
                 snippet: None,
                 seq,
             });

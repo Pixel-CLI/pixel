@@ -625,3 +625,83 @@ fn phrase_removed_between_flags_only_actual_removals() {
         Some("discount".to_string())
     );
 }
+
+// ---------------------------------------------------------------------------
+// Same-commit tie-break: real definition over a doc-comment mention
+// ---------------------------------------------------------------------------
+
+const DEF_PHRASE: &str = "register_mcp_server";
+
+/// One commit deletes the phrase from TWO files at once: a doc comment in
+/// `a.rs` that merely mentions the identifier, and the actual function
+/// definition in `b.rs`. Both candidates tie on (suspect, at, seq) — the
+/// bug this reproduces (measured 2026-08-30, docs/bench/agent-ab-2026-08-30
+/// -clean-postfix.txt s4-recover): without a definition-vs-mention
+/// tiebreaker, incidental SQL row order can surface the doc comment first,
+/// forcing the caller to dig past it for the real "find the deleted
+/// function" answer.
+fn make_same_commit_two_file_repo() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "user.name", "Test"]);
+
+    fs::write(
+        root.join("a.rs"),
+        format!("/// See also install::{DEF_PHRASE} for the setup path.\npub fn other() {{}}\n"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("b.rs"),
+        format!("pub fn {DEF_PHRASE}() {{\n    // real implementation\n}}\n"),
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "add mcp registration"]);
+
+    fs::write(root.join("a.rs"), "pub fn other() {}\n").unwrap();
+    fs::write(root.join("b.rs"), "// removed\n").unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "drop mcp registration"]);
+
+    dir
+}
+
+#[test]
+fn excavate_ranks_the_real_definition_above_a_same_commit_comment_mention() {
+    let dir = make_same_commit_two_file_repo();
+    let store = ingest(dir.path());
+
+    let result = store
+        .excavate(Some(DEF_PHRASE), None, None, None, 50)
+        .expect("excavate");
+
+    assert!(
+        result.candidates.len() >= 2,
+        "expected candidates from both files: {:#?}",
+        result.candidates
+    );
+    let top = &result.candidates[0];
+    assert_eq!(
+        top.path, "b.rs",
+        "the real function definition (b.rs) must rank first, not the doc-comment \
+         mention (a.rs), when both tie on suspect+recency: {:#?}",
+        result.candidates
+    );
+    assert!(top.suspect, "b.rs's deletion must be flagged suspect");
+    assert!(
+        top.is_definition,
+        "b.rs's removed text is a real `pub fn` definition, not a comment mention"
+    );
+
+    let comment_candidate = result
+        .candidates
+        .iter()
+        .find(|c| c.path == "a.rs")
+        .expect("a.rs must still be a candidate");
+    assert!(
+        !comment_candidate.is_definition,
+        "a.rs's removed text is only a doc-comment mention, not a definition"
+    );
+}

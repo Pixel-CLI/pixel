@@ -347,7 +347,10 @@ enum Command {
         message: String,
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Files to stage (repo-relative).
+        /// Files to stage (repo-relative). Repeat the flag once per file
+        /// (`--files a --files b`) — a single `--files a b` does NOT work:
+        /// `b` silently becomes the trailing PATH argument instead of a
+        /// second file, or errors if a PATH was already given.
         #[arg(long = "files")]
         files: Vec<String>,
         /// Also push after committing.
@@ -392,7 +395,10 @@ enum Command {
         refspec: String,
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Files to stage (repo-relative).
+        /// Files to stage (repo-relative). Repeat the flag once per file
+        /// (`--files a --files b`) — a single `--files a b` does NOT work:
+        /// `b` silently becomes the trailing PATH argument instead of a
+        /// second file, or errors if a PATH was already given.
         #[arg(long = "files")]
         files: Vec<String>,
         /// Idempotency / recovery key.
@@ -1035,6 +1041,11 @@ fn envelope_note(data: &Value) {
 /// `.pixel` index or a `.git` dir/file (worktrees). Falls back to the
 /// starting directory. This lets every command accept a subdirectory or file
 /// where an LLM would naturally point it, instead of requiring the repo root.
+/// Hard deadline for the SessionStart per-repo freshness probe. The
+/// capability block must reach the agent even when the probe cannot
+/// complete, so the probe is bounded rather than trusted.
+const SESSION_STATUS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 fn discover_root(path: &Path) -> Result<PathBuf, String> {
     let abs = path
         .canonicalize()
@@ -1166,6 +1177,55 @@ fn enrich_with_context(
         enriched["path"] = Value::String(abs.display().to_string());
     }
     enriched
+}
+
+/// Attach inline source context to every `resolve` match, same rationale as
+/// `enrich_with_context` for `search`: without this, a `resolve` response
+/// gives only a location, forcing a mandatory follow-up Read on every call —
+/// measured as a real cost on trivial lookups (docs/bench/agent-ab-2026-08-30
+/// clean-postfix.txt, s1-locate). Spans `[start_line - MARGIN, end_line +
+/// MARGIN]` (not a fixed radius around one line) so a multi-line symbol's
+/// full body is included, not just its first line.
+fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
+    const MARGIN: usize = 2;
+    let Some(matches) = data.get_mut("matches").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut cache: HashMap<PathBuf, Option<String>> = HashMap::new();
+    for m in matches.iter_mut() {
+        let rel = m.get("path").and_then(Value::as_str).unwrap_or("").to_string();
+        if rel.is_empty() {
+            continue;
+        }
+        let start_line = m.get("start_line").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let end_line = m
+            .get("end_line")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize)
+            .unwrap_or(start_line)
+            .max(start_line);
+        if start_line == 0 {
+            continue;
+        }
+        let abs = root.join(&rel);
+        let content = match cache.entry(abs.clone()) {
+            std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(std::fs::read_to_string(&abs).ok()).clone()
+            }
+        };
+        let Some(content) = content else { continue };
+        let lines: Vec<&str> = content.lines().collect();
+        let from = start_line.saturating_sub(MARGIN + 1).min(lines.len());
+        let to = (end_line + MARGIN).min(lines.len());
+        let mut ctx_lines = Vec::with_capacity(to - from);
+        for (i, l) in lines[from..to].iter().enumerate() {
+            let ln = from + i + 1;
+            let marker = if ln >= start_line && ln <= end_line { ">>" } else { "  " };
+            ctx_lines.push(format!("{marker} {ln:>5}: {l}"));
+        }
+        m["context"] = Value::String(ctx_lines.join("\n"));
+    }
 }
 
 /// Group user-supplied paths by their discovered repo root, mapping each to a
@@ -2196,7 +2256,7 @@ fn run() -> Result<(), String> {
             limit,
             json,
         } => {
-            let data = execute(
+            let mut data = execute(
                 &path,
                 Request::Resolve {
                     phrase,
@@ -2204,6 +2264,9 @@ fn run() -> Result<(), String> {
                 },
                 false,
             )?;
+            if let Ok(root) = discover_root(&path) {
+                enrich_resolve_matches_with_context(&mut data, &root);
+            }
             print_data(&data, json)
         }
         Command::HistorySearch {
@@ -2358,7 +2421,29 @@ fn run() -> Result<(), String> {
                 // phase/fresh. Best-effort — if status can't be read (not a
                 // git repo, index not built), the capability block still
                 // stands and the repo field is simply omitted.
-                if let Ok(data) = execute(&root, Request::Status {}, true) {
+                //
+                // The probe is hard-bounded by a deadline. "Best-effort"
+                // has to mean it, because `Status` on a root that is not a
+                // git repo and has no shards walks the entire tree: a
+                // session started in a plain directory (a home directory,
+                // `/tmp`) would otherwise hang the hook forever and the
+                // agent would receive no capability block at all — the exact
+                // failure this hook exists to prevent. A presence check on
+                // `.git`/`.pixel` is not enough of a guard: a bare
+                // `.pixel/history.db` left in a home directory by any
+                // history op makes that directory look indexed.
+                //
+                // On timeout the block is emitted without `repo` and the
+                // still-running probe dies with the process.
+                let probe = {
+                    let root = root.clone();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(execute(&root, Request::Status {}, true));
+                    });
+                    rx.recv_timeout(SESSION_STATUS_PROBE_TIMEOUT).ok()
+                };
+                if let Some(Ok(data)) = probe {
                     let mut repo = serde_json::Map::new();
                     if let Some(i) = data.get("index") {
                         repo.insert(
@@ -2652,5 +2737,48 @@ mod tests {
         assert!(cache.get(&key).unwrap().is_some());
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn resolve_context_covers_full_multiline_span_not_just_start_line() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("pixel_resolve_ctx_test.rs");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 1..=10 {
+            writeln!(f, "line {i}").unwrap();
+        }
+        drop(f);
+
+        let root = dir;
+        let mut data = serde_json::json!({
+            "matches": [
+                {"path": "pixel_resolve_ctx_test.rs", "start_line": 4, "end_line": 7}
+            ]
+        });
+        enrich_resolve_matches_with_context(&mut data, &root);
+        let ctx = data["matches"][0]
+            .get("context")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        // Full span [4,7] must be marked, not just the start line.
+        assert!(ctx.contains(">>     4: line 4"));
+        assert!(ctx.contains(">>     5: line 5"));
+        assert!(ctx.contains(">>     6: line 6"));
+        assert!(ctx.contains(">>     7: line 7"));
+        // Margin lines present but unmarked.
+        assert!(ctx.contains("  2: line 2") || ctx.contains(" 2: line 2"));
+        assert!(!ctx.contains(">>     2: line 2"));
+        assert!(!ctx.contains(">>     9: line 9"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn resolve_context_skips_match_with_no_start_line() {
+        let mut data = serde_json::json!({
+            "matches": [{"path": "whatever.rs"}]
+        });
+        enrich_resolve_matches_with_context(&mut data, Path::new("/tmp"));
+        assert!(data["matches"][0].get("context").is_none());
     }
 }

@@ -799,11 +799,27 @@ impl Service {
         let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
         // Phase 3 item 1: attach per-file content evidence to each target so
         // the caller can trust a content match without re-searching (S2).
+        //
+        // Capped to P0 targets, 2 lines total per target (not per keyword):
+        // measured 2026-08-30 on a 6-keyword, 20-target `targets` response,
+        // uncapped evidence was 7.6KB of a 18.3KB response (42%) — ~1900
+        // extra tokens injected into the conversation on every scoping call,
+        // most of it justifying P1/P2 files the rule text already calls
+        // "peripheral and droppable". P0 is the only tier the doctrine
+        // mandates checking before the first edit, so it's the only tier
+        // worth spending the token budget to pre-justify.
+        const EVIDENCE_MAX_LINES_PER_TARGET: usize = 2;
         if let Some(targets) = out.get_mut("targets").and_then(Value::as_array_mut) {
             for t in targets {
+                let is_p0 = t.get("tier").and_then(Value::as_str) == Some("P0");
+                if !is_p0 {
+                    continue;
+                }
                 if let Some(path) = t.get("path").and_then(Value::as_str) {
                     if let Some(ev) = evidence.get(path) {
-                        t["evidence"] = json!(ev);
+                        let trimmed: Vec<&Value> =
+                            ev.iter().take(EVIDENCE_MAX_LINES_PER_TARGET).collect();
+                        t["evidence"] = json!(trimmed);
                     }
                 }
             }
@@ -1380,8 +1396,14 @@ impl Service {
         limit: Option<usize>,
     ) -> Result<Value, String> {
         let facts = self.facts_open_and_catch_up()?;
+        // Default cut from 200 to 15: only the top SNIPPET_TOP_N=5 candidates
+        // ever carry a code snippet, so the other ~195 were pure metadata
+        // rows a caller almost never needs — measured 2026-08-30, a 31-hit
+        // query returned ~8,200 tokens of JSON where the useful signal
+        // (5 ranked, snippet-bearing candidates) was under 3,500. `--limit`
+        // still overrides for a caller that genuinely wants the long tail.
         let result = facts
-            .excavate(phrase, path, from, to, limit.unwrap_or(200))
+            .excavate(phrase, path, from, to, limit.unwrap_or(15))
             .map_err(|e| e.to_string())?;
         serde_json::to_value(&result).map_err(|e| e.to_string())
     }
