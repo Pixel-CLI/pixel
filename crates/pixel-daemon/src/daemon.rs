@@ -16,6 +16,12 @@ use crate::api::{Request, Response, ServeError, Service, failure_response};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEBOUNCE: Duration = Duration::from_millis(500);
+/// Idle poll interval for the facts ingest thread once fresh. A ref move
+/// re-triggers ingest on the next poll without blocking queries.
+const INGEST_IDLE_POLL: Duration = Duration::from_secs(5);
+/// Backoff after a transient ingest error (e.g. a git lock held by another
+/// process) before retrying.
+const INGEST_ERROR_BACKOFF: Duration = Duration::from_secs(2);
 const IGNORED_DIRS: &[&str] = [".pixel", ".git", "target", "node_modules"].as_slice();
 /// Maximum length of a single NDJSON request line. A request larger than this
 /// is rejected to prevent a malicious client from exhausting memory with a
@@ -99,9 +105,10 @@ pub fn run(root: &Path) -> Result<(), ServeError> {
     run_corpus(service)
 }
 
-/// Spawn a low-priority background thread that ticks the facts ingest
-/// (history.db) until fresh, then idles. Queries never block on it: the
-/// ingest shares the WAL-mode connection and yields every tick budget.
+/// Spawn a low-priority background thread that periodically ticks the facts
+/// ingest (history.db) until fresh, then idle-polls so a ref move re-triggers
+/// ingest. Queries never block on it: the ingest shares the WAL-mode
+/// connection and yields every tick budget.
 fn spawn_facts_ingest(root: &Path) {
     let root = root.to_path_buf();
     std::thread::spawn(move || {
@@ -110,8 +117,23 @@ fn spawn_facts_ingest(root: &Path) {
             Err(_) => return,
         };
         let opts = pixel_facts::ingest::IngestOptions::default();
-        // Tick until fresh (bounded by the tick budget each call), then stop.
-        let _ = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts);
+        // Periodic tick loop: keep ingesting until fresh, then idle-poll so a
+        // ref move re-triggers ingest. Each tick is budget-bounded, so queries
+        // on the same WAL-mode connection are never starved.
+        loop {
+            match pixel_facts::ingest::ingest_tick(&mut store, &opts) {
+                Ok(report) if report.fresh => {
+                    std::thread::sleep(INGEST_IDLE_POLL);
+                }
+                Ok(_) => {
+                    // Not fresh yet — keep ticking (budget-bounded per call).
+                }
+                Err(_) => {
+                    // Transient error (e.g. git lock): back off and retry.
+                    std::thread::sleep(INGEST_ERROR_BACKOFF);
+                }
+            }
+        }
     });
 }
 

@@ -117,9 +117,29 @@ pub fn normalize(text: &str) -> String {
         .to_string()
 }
 
-/// True when a plain string literal is worth indexing (≥3 words or ≥12 chars).
+/// True when a plain string literal is worth indexing (≥3 words AND ≥12 chars).
 fn string_worth_indexing(text: &str) -> bool {
-    text.split_whitespace().count() >= MIN_STRING_WORDS || text.chars().count() >= MIN_STRING_CHARS
+    text.split_whitespace().count() >= MIN_STRING_WORDS && text.chars().count() >= MIN_STRING_CHARS
+}
+
+/// True when a repo-relative path looks like a test file. String concepts are
+/// skipped in test files to cut index noise (assertion messages, fixture
+/// literals, generated snapshots, etc.). Matches `/tests?/` path segments,
+/// `__tests__` directories, and `*_test.*` / `*.spec.*` / `*.test.*` files.
+fn is_test_path(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    if file.contains("__tests__") {
+        return true;
+    }
+    if file.contains(".spec.") || file.contains(".test.") {
+        return true;
+    }
+    if let Some((stem, _ext)) = file.rsplit_once('.') {
+        if stem.ends_with("_test") {
+            return true;
+        }
+    }
+    path.split('/').any(|seg| seg == "tests" || seg == "test")
 }
 
 /// The inverted-index words for a normalized concept: split on non-alphanumeric
@@ -175,12 +195,12 @@ pub fn extract_concepts(path_rel: &str, content: &[u8]) -> Vec<RawConcept> {
     };
     let mut out = match lang {
         "ts" | "tsx" | "js" => extract_ts(path_rel, content),
-        "svelte" | "vue" => extract_svelte_vue(content),
+        "svelte" | "vue" => extract_svelte_vue(path_rel, content),
         "html" => extract_html(content),
         "json" => extract_json_config(content),
         "yaml" => extract_yaml_config(content),
         "css" => extract_css(content),
-        "rust" => extract_rust(content),
+        "rust" => extract_rust(path_rel, content),
         // go/java/python have no concept sources defined in PLAN.md Engine 1.
         _ => Vec::new(),
     };
@@ -196,6 +216,8 @@ struct TsWalker<'a> {
     /// Added to every emitted line number (for `<script>` blocks in
     /// svelte/vue, whose content is parsed in isolation).
     line_offset: u32,
+    /// True when the source file is a test file; String concepts are skipped.
+    test_path: bool,
 }
 
 impl<'a> TsWalker<'a> {
@@ -235,6 +257,11 @@ impl<'a> TsWalker<'a> {
 
     fn push_string(&mut self, text: String, node: Node, always: bool) {
         if text.is_empty() {
+            return;
+        }
+        if self.test_path {
+            // Skip String concepts in test files (assertion messages,
+            // fixture literals, snapshots) to cut index noise.
             return;
         }
         if !always && !string_worth_indexing(&text) {
@@ -494,12 +521,13 @@ fn extract_ts(path: &str, content: &[u8]) -> Vec<RawConcept> {
         src: content,
         concepts: Vec::new(),
         line_offset: 0,
+        test_path: is_test_path(path),
     };
     walk_ts_concepts(&mut w, tree.root_node(), 0);
     w.concepts
 }
 
-fn extract_rust(content: &[u8]) -> Vec<RawConcept> {
+fn extract_rust(path: &str, content: &[u8]) -> Vec<RawConcept> {
     let language: Language = tree_sitter_rust::LANGUAGE.into();
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
@@ -512,6 +540,7 @@ fn extract_rust(content: &[u8]) -> Vec<RawConcept> {
         src: content,
         concepts: Vec::new(),
         line_offset: 0,
+        test_path: is_test_path(path),
     };
     walk_rust_concepts(&mut w, tree.root_node(), 0);
     w.concepts
@@ -519,7 +548,7 @@ fn extract_rust(content: &[u8]) -> Vec<RawConcept> {
 
 /// Run the TS concept walker over a `<script>` block's content, offsetting
 /// line numbers so they point into the original file.
-fn extract_ts_script(content: &str, line_offset: u32) -> Vec<RawConcept> {
+fn extract_ts_script(content: &str, line_offset: u32, test_path: bool) -> Vec<RawConcept> {
     let language: Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
@@ -532,6 +561,7 @@ fn extract_ts_script(content: &str, line_offset: u32) -> Vec<RawConcept> {
         src: content.as_bytes(),
         concepts: Vec::new(),
         line_offset,
+        test_path,
     };
     walk_ts_concepts(&mut w, tree.root_node(), 0);
     w.concepts
@@ -539,8 +569,9 @@ fn extract_ts_script(content: &str, line_offset: u32) -> Vec<RawConcept> {
 
 /// Svelte/Vue: `<script>` blocks through the TS walker (with line offset);
 /// markup through the hand-rolled scanner.
-fn extract_svelte_vue(content: &[u8]) -> Vec<RawConcept> {
+fn extract_svelte_vue(path: &str, content: &[u8]) -> Vec<RawConcept> {
     let text = String::from_utf8_lossy(content);
+    let test_path = is_test_path(path);
     let mut out = Vec::new();
     let mut markup = String::new();
     let mut markup_start = 0usize;
@@ -558,7 +589,7 @@ fn extract_svelte_vue(content: &[u8]) -> Vec<RawConcept> {
             .unwrap_or(text.len());
         let script_content = &text[open_end..close];
         let line_offset = line_of(&text, open_end).saturating_sub(1);
-        out.extend(extract_ts_script(script_content, line_offset));
+        out.extend(extract_ts_script(script_content, line_offset, test_path));
         pos = close + "</script>".len();
         markup_start = pos;
     }

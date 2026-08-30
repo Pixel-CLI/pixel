@@ -37,6 +37,13 @@ pub const GUARD_HOOK: &str = "pixel-targets-guard";
 /// The SessionStart hook path.
 pub const SESSION_START_HOOK: &str = "pixel-session-start";
 
+/// The canonical pixel usage-rule file (relative to home). This is the real,
+/// full rule text (the four mandatory scenarios, the doctrine, the git-op
+/// table) that `pixel install` embeds into the managed CLAUDE.md/AGENTS.md
+/// block — not the short 3-line summary. It lives outside the repo so the
+/// rules can be edited without a rebuild.
+pub const PIXEL_RULES_REL: &str = ".agent-config/rules/pixel.md";
+
 /// The Devin config directory (relative to home).
 pub const DEVIN_CONFIG_DIR: &str = ".config/devin";
 /// The Devin config file (hooks live under the `"hooks"` key here).
@@ -405,37 +412,76 @@ pub fn scrub_settings_json(path: &Path, dry_run: bool) -> Result<ScrubOutcome> {
 }
 
 /// Rewrite every hook `command` string anywhere under `hooks.<Event>[]`
-/// that references the old guard-hook filename, repointing it at the new
-/// filename **in place** — preserving the entry's matcher, timeout, and
-/// every other field untouched. Returns the number of command strings
-/// rewritten.
+/// that references the old guard-hook filename.
+///
+/// Under the `PreToolUse` event the command is repointed at the new guard
+/// hook filename **in place** — preserving the entry's matcher, timeout,
+/// and every other field untouched. Under every *other* event (e.g. the
+/// stray legacy `PostToolUse` registration that runs the guard binary per
+/// Bash call for nothing) the guard-hook entry is **removed** instead of
+/// repointed: the guard is a PreToolUse-only hook, so a registration under
+/// any other event is dead weight. Returns the number of command strings
+/// rewritten (PreToolUse) plus the number of guard-hook entries removed
+/// (non-PreToolUse).
 fn rewrite_guard_hook_commands(hooks: &mut serde_json::Map<String, serde_json::Value>) -> usize {
-    let mut rewritten = 0usize;
-    for entries in hooks.values_mut() {
+    let mut changed = 0usize;
+    for (event, entries) in hooks.iter_mut() {
         let Some(entries) = entries.as_array_mut() else {
             continue;
         };
-        for entry in entries {
-            let Some(inner) = entry.get_mut("hooks").and_then(serde_json::Value::as_array_mut) else {
-                continue;
-            };
-            for hook in inner {
-                let Some(hook_obj) = hook.as_object_mut() else {
+        if event == "PreToolUse" {
+            // Repoint in place, preserving every other field.
+            for entry in entries.iter_mut() {
+                let Some(inner) = entry.get_mut("hooks").and_then(serde_json::Value::as_array_mut) else {
                     continue;
                 };
-                let Some(command) = hook_obj.get("command").and_then(|c| c.as_str()).map(str::to_string)
-                else {
-                    continue;
-                };
-                if command.contains(OLD_GUARD_HOOK) {
-                    let new_command = command.replace(OLD_GUARD_HOOK, GUARD_HOOK);
-                    hook_obj.insert("command".to_string(), serde_json::Value::String(new_command));
-                    rewritten += 1;
+                for hook in inner {
+                    let Some(hook_obj) = hook.as_object_mut() else {
+                        continue;
+                    };
+                    let Some(command) = hook_obj.get("command").and_then(|c| c.as_str()).map(str::to_string)
+                    else {
+                        continue;
+                    };
+                    if command.contains(OLD_GUARD_HOOK) {
+                        let new_command = command.replace(OLD_GUARD_HOOK, GUARD_HOOK);
+                        hook_obj.insert("command".to_string(), serde_json::Value::String(new_command));
+                        changed += 1;
+                    }
                 }
             }
+        } else {
+            // Non-PreToolUse event: the guard is a PreToolUse-only hook, so
+            // any registration under another event is dead weight — remove
+            // the guard-hook entries instead of repointing them.
+            let mut kept: Vec<serde_json::Value> = Vec::with_capacity(entries.len());
+            for mut entry in std::mem::take(entries) {
+                let Some(inner) = entry.get_mut("hooks").and_then(serde_json::Value::as_array_mut) else {
+                    kept.push(entry);
+                    continue;
+                };
+                inner.retain(|hook| {
+                    let references_guard = hook
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|c| c.contains(OLD_GUARD_HOOK))
+                        .unwrap_or(false);
+                    if references_guard {
+                        changed += 1;
+                    }
+                    !references_guard
+                });
+                if inner.is_empty() {
+                    // The outer entry carried nothing but the removed guard
+                    // hook; drop it too so we don't leave an empty shell.
+                    continue;
+                }
+                kept.push(entry);
+            }
+            *entries = kept;
         }
     }
-    rewritten
+    changed
 }
 
 /// Merge a pixel-authored hook entry into an existing `hooks.<Event>` JSON
@@ -484,4 +530,69 @@ fn hook_entry_matches_marker(entry: &serde_json::Value, marker: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hook_entry(command: &str) -> serde_json::Value {
+        serde_json::json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": command }] })
+    }
+
+    #[test]
+    fn non_pretooluse_guard_hooks_are_removed_not_repointed() {
+        let mut hooks = serde_json::Map::new();
+        hooks.insert(
+            "PreToolUse".to_string(),
+            serde_json::Value::Array(vec![hook_entry("~/.claude/hooks/gitpixel-targets-guard")]),
+        );
+        hooks.insert(
+            "PostToolUse".to_string(),
+            serde_json::Value::Array(vec![hook_entry("~/.claude/hooks/gitpixel-targets-guard")]),
+        );
+        hooks.insert(
+            "SessionStart".to_string(),
+            serde_json::Value::Array(vec![hook_entry("~/.claude/hooks/pixel-session-start")]),
+        );
+
+        let changed = rewrite_guard_hook_commands(&mut hooks);
+
+        // PreToolUse guard command repointed to the new filename.
+        let pre = hooks["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(pre, "~/.claude/hooks/pixel-targets-guard");
+        // PostToolUse guard entry removed entirely (empty array left behind).
+        assert_eq!(hooks["PostToolUse"].as_array().unwrap().len(), 0);
+        // Unrelated SessionStart entry untouched.
+        let session = hooks["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(session, "~/.claude/hooks/pixel-session-start");
+
+        // One repoint (PreToolUse) + one removal (PostToolUse).
+        assert_eq!(changed, 2);
+    }
+
+    #[test]
+    fn non_pretooluse_guard_entry_with_other_hooks_keeps_others() {
+        let mut hooks = serde_json::Map::new();
+        hooks.insert(
+            "PostToolUse".to_string(),
+            serde_json::Value::Array(vec![serde_json::json!({
+                "matcher": "Bash",
+                "hooks": [
+                    { "type": "command", "command": "~/.claude/hooks/gitpixel-targets-guard" },
+                    { "type": "command", "command": "~/.claude/hooks/other-tool" }
+                ]
+            })]),
+        );
+
+        let changed = rewrite_guard_hook_commands(&mut hooks);
+
+        // The outer entry survives, but only the non-guard hook remains.
+        let remaining = hooks["PostToolUse"].as_array().unwrap();
+        assert_eq!(remaining.len(), 1);
+        let inner = remaining[0]["hooks"].as_array().unwrap();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0]["command"].as_str().unwrap(), "~/.claude/hooks/other-tool");
+        assert_eq!(changed, 1);
+    }
 }

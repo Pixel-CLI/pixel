@@ -121,15 +121,65 @@ impl From<pixel_session::StoreError> for SignalError {
     }
 }
 
-/// `0.7` when `task` mentions test/spec, else `1.0`.
-pub fn test_penalty_for(task: &str) -> f64 {
-    let mentions = task.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
+/// True when `task` mentions test/spec.
+pub fn mentions_tests(task: &str) -> bool {
+    task.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
         matches!(t.to_ascii_lowercase().as_str(), "test" | "tests" | "spec" | "specs")
-    });
-    if mentions {
-        0.7
-    } else {
+    })
+}
+
+/// `0.7` when `task` does NOT mention test/spec (a test file is a worse
+/// target for a non-test task), else `1.0` (task is about tests → no penalty).
+pub fn test_penalty_for(task: &str) -> f64 {
+    if mentions_tests(task) {
         1.0
+    } else {
+        0.7
+    }
+}
+
+/// True when `path` looks like a test file: a `test`/`tests`/`__tests__`
+/// directory component, a `*_test.*` filename, or a `*.spec.*` / `*.test.*`
+/// filename. Case-insensitive.
+pub fn is_test_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let comps: Vec<&str> = lower.split('/').collect();
+    // Directory component: /tests?/ or __tests__.
+    if comps
+        .iter()
+        .any(|c| *c == "test" || *c == "tests" || *c == "__tests__")
+    {
+        return true;
+    }
+    let file = comps.last().copied().unwrap_or("");
+    let parts: Vec<&str> = file.split('.').collect();
+    // *_test.*
+    if parts.first().map_or(false, |stem| stem.ends_with("_test")) {
+        return true;
+    }
+    // *.spec.* / *.test.*
+    if parts.len() >= 2 {
+        let penultimate = parts[parts.len() - 2];
+        if penultimate == "spec" || penultimate == "test" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Build a per-candidate penalty closure for [`crate::rerank::rerank`]:
+/// applies `test_penalty` to test paths only when `mentions_tests` is false,
+/// else `1.0` for every path. A test file is a *worse* target for a non-test
+/// task, so it is demoted only when the task does NOT mention tests/specs;
+/// when the task is about tests, the penalty is gated off. The
+/// task-mentions-tests gate lives here.
+pub fn test_penalty_fn(mentions_tests: bool, test_penalty: f64) -> impl Fn(&str) -> f64 {
+    move |path: &str| {
+        if !mentions_tests && is_test_path(path) {
+            test_penalty
+        } else {
+            1.0
+        }
     }
 }
 
@@ -424,4 +474,59 @@ pub fn inputs_digest(
     buf.extend_from_slice(&error_sink_high_water.to_le_bytes());
     buf.extend_from_slice(&weights_version.to_le_bytes());
     xxh3_64(&buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_test_path_matches_all_forms() {
+        // /tests?/ directory component
+        assert!(is_test_path("src/test/foo.rs"));
+        assert!(is_test_path("src/tests/foo.rs"));
+        // __tests__ directory
+        assert!(is_test_path("src/__tests__/foo.js"));
+        // *_test.*
+        assert!(is_test_path("src/foo_test.rs"));
+        assert!(is_test_path("foo_test.py"));
+        // *.spec.* / *.test.*
+        assert!(is_test_path("src/foo.spec.ts"));
+        assert!(is_test_path("src/foo.test.ts"));
+        // case-insensitive
+        assert!(is_test_path("src/FOO_Test.RS"));
+    }
+
+    #[test]
+    fn is_test_path_rejects_non_tests() {
+        assert!(!is_test_path("src/foo.rs"));
+        assert!(!is_test_path("src/test_utils.rs")); // starts with test, not a test file
+        assert!(!is_test_path("src/contest.rs"));
+        assert!(!is_test_path("src/foo.testing.rs"));
+        assert!(!is_test_path(""));
+    }
+
+    #[test]
+    fn test_penalty_fn_gates_on_mentions() {
+        // Task mentions tests → penalty gated OFF for every path.
+        let off = test_penalty_fn(true, 0.7);
+        assert!((off("src/foo_test.rs") - 1.0).abs() < 1e-9);
+        assert!((off("src/foo.rs") - 1.0).abs() < 1e-9);
+
+        // Task does NOT mention tests → test paths get 0.7, others 1.0.
+        let p = test_penalty_fn(false, 0.7);
+        assert!((p("src/foo_test.rs") - 0.7).abs() < 1e-9);
+        assert!((p("src/foo.rs") - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mentions_tests_detects_task_language() {
+        assert!(mentions_tests("add tests for login"));
+        assert!(mentions_tests("fix the spec"));
+        assert!(!mentions_tests("refactor the auth service"));
+        // Task mentions tests → no penalty.
+        assert_eq!(test_penalty_for("add tests"), 1.0);
+        // Task does NOT mention tests → penalty applies.
+        assert_eq!(test_penalty_for("refactor auth"), 0.7);
+    }
 }

@@ -1,6 +1,7 @@
 //! gitpixel CLI — index/search plus the graph command surface, speaking to a
 //! per-root daemon over its Unix socket when one is up, else in-process.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -61,6 +62,9 @@ enum Command {
         /// Maximum sparse gram length (ignored for trigram).
         #[arg(long, default_value_t = pixel_index::gram::DEFAULT_MAX_GRAM)]
         max_gram: usize,
+        /// Also ingest the facts/history db (commit metadata + diff text).
+        #[arg(long)]
+        history: bool,
     },
     /// Search the indexed tree with a regex pattern. Accepts any number of
     /// paths (repo roots, subdirectories, or files) — ripgrep-style; the repo
@@ -85,10 +89,10 @@ enum Command {
         /// Skip the daemon even if one is running.
         #[arg(long)]
         no_daemon: bool,
-        /// Ranking scope: `code` reranks matches by file-level signals
-        /// (filename match, symbol match, content density) via pixel-rank's
-        /// RRF without changing the hit set. Default: unranked (path/line
-        /// order).
+        /// Ranking scope. Only `code` is supported: it reranks matches by
+        /// file-level signals (filename match, symbol match, content density)
+        /// via pixel-rank's RRF without changing the hit set. Any other value
+        /// is an error. Omit `scope` for unranked (path/line) order.
         #[arg(long)]
         scope: Option<String>,
         /// Lines of context to include around each match (reads the file
@@ -928,12 +932,26 @@ fn print_search_matches(matches: &[Value], json: bool) -> Result<(), String> {
 
 /// Read surrounding lines from the file and attach as a `context` field.
 /// Eliminates the need for a follow-up Read call — the agent gets the full
-/// definition in one pixel search response.
-fn enrich_with_context(m: &Value, root: &Path, context: usize, qualify: bool) -> Value {
+/// definition in one pixel search response. A per-run file-content cache is
+/// threaded through so each file is read from disk at most once even when
+/// many matches land in the same file.
+fn enrich_with_context(
+    m: &Value,
+    root: &Path,
+    context: usize,
+    qualify: bool,
+    cache: &mut HashMap<PathBuf, Option<String>>,
+) -> Value {
     let rel = m.get("path").and_then(Value::as_str).unwrap_or("");
     let line_no = m.get("line").and_then(Value::as_u64).unwrap_or(0) as usize;
     let abs = root.join(rel);
-    let Ok(content) = std::fs::read_to_string(&abs) else {
+    let content = match cache.entry(abs.clone()) {
+        std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert(std::fs::read_to_string(&abs).ok()).clone()
+        }
+    };
+    let Some(content) = content else {
         return m.clone();
     };
     let lines: Vec<&str> = content.lines().collect();
@@ -1037,8 +1055,12 @@ fn run_search_one(
         .and_then(Value::as_array)
         .unwrap_or(&empty);
     // Enrich matches with surrounding context lines if requested.
+    let mut cache: HashMap<PathBuf, Option<String>> = HashMap::new();
     let enriched: Vec<Value> = if context > 0 {
-        matches.iter().map(|m| enrich_with_context(m, root, context, qualify)).collect()
+        matches
+            .iter()
+            .map(|m| enrich_with_context(m, root, context, qualify, &mut cache))
+            .collect()
     } else if qualify {
         matches
             .iter()
@@ -1204,12 +1226,42 @@ fn ready(path: PathBuf, no_daemon: bool, json: bool) -> Result<(), String> {
 // main
 // ---------------------------------------------------------------------------
 
+/// Count all commits reachable from any ref (`git rev-list --count --all`).
+fn rev_list_count(root: &Path) -> Option<u64> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-list", "--count", "--all"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Facts/history visibility block for `pixel status`: phase, commits indexed
+/// vs the git rev-list count, diff coverage, freshness, and schema version.
+fn facts_status(root: &Path) -> Option<Value> {
+    let store = pixel_facts::FactsStore::open(root).ok()?;
+    let state = store.index_state();
+    Some(json!({
+        "phase": state.phase,
+        "commits_indexed": state.commits_indexed,
+        "total_commits": rev_list_count(root).unwrap_or(state.total_commits),
+        "diff_indexed_pct": state.diff_indexed_pct,
+        "fresh": state.fresh,
+        "schema_version": state.schema_version,
+    }))
+}
+
 fn run() -> Result<(), String> {
     match Cli::parse().command {
         Command::Index {
             path,
             extractor,
             max_gram,
+            history,
         } => {
             let path = discover_root(&path)?;
             let ex = make_extractor(extractor, max_gram);
@@ -1218,6 +1270,20 @@ fn run() -> Result<(), String> {
                 "indexed {} files ({} bytes) -> {} grams, shard {} bytes, {} ms",
                 stats.files, stats.bytes, stats.grams, stats.shard_bytes, stats.elapsed_ms
             );
+            if history {
+                let mut store =
+                    pixel_facts::FactsStore::open(&path).map_err(|e| e.to_string())?;
+                let opts = pixel_facts::ingest::IngestOptions::default();
+                let report = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts)
+                    .map_err(|e| e.to_string())?;
+                eprintln!(
+                    "facts: phase={} commits={} diff_coverage={:.0}% fresh={}",
+                    report.phase,
+                    report.commits_indexed,
+                    report.diff_indexed_pct * 100.0,
+                    report.fresh
+                );
+            }
             Ok(())
         }
         Command::Search {
@@ -1623,7 +1689,10 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         Command::Status { path, json } => {
-            let data = execute(&path, Request::Status {}, false)?;
+            let mut data = execute(&path, Request::Status {}, false)?;
+            if let Some(facts) = facts_status(&path) {
+                data["facts"] = facts;
+            }
             if json {
                 print_data(&data, true)?;
             } else {
@@ -1654,6 +1723,17 @@ fn run() -> Result<(), String> {
                         ));
                     }
                     _ => output.push_str("graph: not built (runs on first graph command)\n"),
+                }
+                if let Some(f) = data.get("facts") {
+                    output.push_str(&format!(
+                        "facts: phase={} commits={}/{} diff_coverage={:.0}% fresh={} schema_version={}\n",
+                        f.get("phase").and_then(Value::as_str).unwrap_or("?"),
+                        f.get("commits_indexed").and_then(Value::as_u64).unwrap_or(0),
+                        f.get("total_commits").and_then(Value::as_u64).unwrap_or(0),
+                        f.get("diff_indexed_pct").and_then(Value::as_f64).unwrap_or(0.0) * 100.0,
+                        f.get("fresh").and_then(Value::as_bool).unwrap_or(false),
+                        f.get("schema_version").and_then(Value::as_i64).unwrap_or(0),
+                    ));
                 }
                 output.push_str(&format!(
                     "daemon: {}\n",
@@ -2025,18 +2105,48 @@ fn run() -> Result<(), String> {
                 guard::run();
             }
             HookCmd::SessionStart { path } => {
-                let _ = discover_root(&path)?;
+                let root = discover_root(&path)?;
                 // Emit the capability block from the live op registry —
                 // `SESSION_CAPABILITIES` lives next to `Op` itself and is
                 // tested for exhaustiveness against every real variant, so
                 // this can never advertise a capability that doesn't exist.
                 let ops: Vec<&str> = pixel_proto::op::SESSION_CAPABILITIES.to_vec();
-                let block = serde_json::json!({
-                    "pixel": {
-                        "capabilities": ops,
-                        "protocol_version": PROTOCOL_VERSION,
-                    }
+                let mut pixel = serde_json::json!({
+                    "capabilities": ops,
+                    "protocol_version": PROTOCOL_VERSION,
+                    "usage": "pixel is the unified retrieval + git engine. Use `pixel <verb>` for search, resolve, targets, history, and safe git ops. Mandatory: `pixel targets \"<task>\"` before the first file read; `pixel resolve \"<phrase>\"` before free-text search; `pixel rescue`/`pixel excavate` the moment code was working before; `pixel reconcile` for any branch sync.",
                 });
+                // Per-repo freshness: index commit, graph presence, facts
+                // phase/fresh. Best-effort — if status can't be read (not a
+                // git repo, index not built), the capability block still
+                // stands and the repo field is simply omitted.
+                if let Ok(data) = execute(&root, Request::Status {}, true) {
+                    let mut repo = serde_json::Map::new();
+                    if let Some(i) = data.get("index") {
+                        repo.insert(
+                            "index_commit".into(),
+                            i.get("commit_oid").cloned().unwrap_or(Value::Null),
+                        );
+                    }
+                    let graph_present = data
+                        .get("graph")
+                        .and_then(|g| g.get("present"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    repo.insert("graph_present".into(), Value::Bool(graph_present));
+                    if let Some(f) = facts_status(&root) {
+                        repo.insert(
+                            "facts_phase".into(),
+                            f.get("phase").cloned().unwrap_or(Value::Null),
+                        );
+                        repo.insert(
+                            "facts_fresh".into(),
+                            f.get("fresh").cloned().unwrap_or(Value::Bool(false)),
+                        );
+                    }
+                    pixel["repo"] = Value::Object(repo);
+                }
+                let block = serde_json::json!({ "pixel": pixel });
                 write_stdout(&serde_json::to_string_pretty(&block).map_err(|e| e.to_string())?)?;
                 Ok(())
             }
@@ -2051,5 +2161,112 @@ fn main() -> ExitCode {
             eprintln!("pixel: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn enrich_with_context_returns_surrounding_lines() {
+        // Create a temp file with known content
+        let dir = std::env::temp_dir();
+        let path = dir.join("pixel_ctx_test.rs");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "line 1").unwrap();
+        writeln!(f, "line 2").unwrap();
+        writeln!(f, "line 3").unwrap();
+        writeln!(f, "pub const FOO: &str =").unwrap();
+        writeln!(f, "    \"bar\";").unwrap();
+        writeln!(f, "line 6").unwrap();
+        writeln!(f, "line 7").unwrap();
+        drop(f);
+
+        let root = dir;
+        let match_val = serde_json::json!({
+            "path": "pixel_ctx_test.rs",
+            "line": 4,
+            "text": "pub const FOO: &str ="
+        });
+
+        let enriched = enrich_with_context(&match_val, &root, 2, false, &mut HashMap::new());
+        let ctx = enriched.get("context").and_then(Value::as_str).unwrap_or("");
+
+        // Should contain lines 2-6 (context=2 around line 4)
+        assert!(ctx.contains(">>     4: pub const FOO"), "match line should be marked with >>");
+        assert!(ctx.contains("      2: line 2"), "should include 2 lines before");
+        assert!(ctx.contains("      6: line 6"), "should include 2 lines after");
+        assert!(!ctx.contains("line 1"), "should not include lines outside context window");
+        assert!(!ctx.contains("line 7"), "should not include lines outside context window");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn enrich_with_context_zero_context_returns_original() {
+        let match_val = serde_json::json!({"path": "nonexistent.rs", "line": 1, "text": "foo"});
+        let enriched = enrich_with_context(&match_val, Path::new("/tmp"), 0, false, &mut HashMap::new());
+        // context=0 means no enrichment — original returned
+        assert!(enriched.get("context").is_none(), "context=0 should not add context field");
+    }
+
+    #[test]
+    fn enrich_with_context_missing_file_returns_original() {
+        let match_val = serde_json::json!({"path": "does_not_exist_xyz.rs", "line": 1, "text": "foo"});
+        let enriched = enrich_with_context(&match_val, Path::new("/tmp"), 5, false, &mut HashMap::new());
+        // File doesn't exist — should return original without context
+        assert!(enriched.get("context").is_none(), "missing file should not add context");
+    }
+
+    #[test]
+    fn enrich_with_context_clamps_at_file_boundaries() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("pixel_ctx_short.rs");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "only line").unwrap();
+        drop(f);
+
+        let root = dir;
+        let match_val = serde_json::json!({
+            "path": "pixel_ctx_short.rs",
+            "line": 1,
+            "text": "only line"
+        });
+
+        // Request 10 lines of context but file only has 1
+        let enriched = enrich_with_context(&match_val, &root, 10, false, &mut HashMap::new());
+        let ctx = enriched.get("context").and_then(Value::as_str).unwrap_or("");
+        assert!(ctx.contains(">>     1: only line"), "should contain the match line");
+        assert!(!ctx.contains("line 0"), "should not go before line 1");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn enrich_with_context_caches_file_content() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("pixel_ctx_cache.rs");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "line 1").unwrap();
+        writeln!(f, "line 2").unwrap();
+        writeln!(f, "line 3").unwrap();
+        drop(f);
+
+        let root = dir;
+        let mut cache: HashMap<PathBuf, Option<String>> = HashMap::new();
+        let m1 = serde_json::json!({"path": "pixel_ctx_cache.rs", "line": 1, "text": "line 1"});
+        let m2 = serde_json::json!({"path": "pixel_ctx_cache.rs", "line": 2, "text": "line 2"});
+        let e1 = enrich_with_context(&m1, &root, 1, false, &mut cache);
+        let e2 = enrich_with_context(&m2, &root, 1, false, &mut cache);
+        assert!(e1.get("context").and_then(Value::as_str).is_some());
+        assert!(e2.get("context").and_then(Value::as_str).is_some());
+        // The cache holds the file content so the second call did not re-read.
+        let key = root.join("pixel_ctx_cache.rs");
+        assert!(cache.contains_key(&key));
+        assert!(cache.get(&key).unwrap().is_some());
+
+        std::fs::remove_file(&path).ok();
     }
 }

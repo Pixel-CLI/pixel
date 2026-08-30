@@ -153,6 +153,68 @@ fn extract_concepts_skips_oversized_files() {
     assert!(concepts.is_empty(), "files > 1MB should produce no concepts");
 }
 
+#[test]
+fn string_concepts_skipped_in_test_files() {
+    // A long string literal that WOULD be indexed in a normal file.
+    let content = r#"const MSG = "hello world this is a test";"#;
+    // Same content, test-path vs non-test-path.
+    let normal = extract_concepts("src/lib/messages.ts", content.as_bytes());
+    let strings_normal: Vec<_> = normal
+        .iter()
+        .filter(|c| c.kind == ConceptKind::String)
+        .collect();
+    assert!(
+        !strings_normal.is_empty(),
+        "a long literal in a normal file should be indexed as a String concept"
+    );
+    for test_path in [
+        "src/__tests__/messages.test.ts",
+        "src/messages.spec.ts",
+        "src/messages.test.ts",
+        "src/messages_test.ts",
+        "tests/messages.ts",
+        "test/messages.ts",
+    ] {
+        let concepts = extract_concepts(test_path, content.as_bytes());
+        let strings: Vec<_> = concepts
+            .iter()
+            .filter(|c| c.kind == ConceptKind::String)
+            .collect();
+        assert!(
+            strings.is_empty(),
+            "String concepts should be skipped in test file {test_path}, got {strings:?}"
+        );
+    }
+}
+
+#[test]
+fn string_worth_indexing_requires_both_words_and_chars() {
+    // ≥3 words AND ≥12 chars — a literal must satisfy BOTH thresholds.
+    let content = r#"
+const BOTH = "hello world this is a test";
+const FEW_WORDS = "abcdefghijkl";
+const SHORT = "a b c";
+"#;
+    let concepts = extract_concepts("src/lib/strings.ts", content.as_bytes());
+    let strings: Vec<&str> = concepts
+        .iter()
+        .filter(|c| c.kind == ConceptKind::String)
+        .map(|c| c.raw.as_str())
+        .collect();
+    assert!(
+        strings.contains(&"hello world this is a test"),
+        "a literal with ≥3 words AND ≥12 chars should be indexed, got {strings:?}"
+    );
+    assert!(
+        !strings.contains(&"abcdefghijkl"),
+        "a literal with ≥12 chars but <3 words should NOT be indexed, got {strings:?}"
+    );
+    assert!(
+        !strings.contains(&"a b c"),
+        "a literal with ≥3 words but <12 chars should NOT be indexed, got {strings:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // resolve cascade tests
 // ---------------------------------------------------------------------------

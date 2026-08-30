@@ -165,12 +165,47 @@ pub fn ingest_until_fresh(store: &mut FactsStore, options: &IngestOptions) -> Re
     }
 }
 
+/// Default wall-clock budget for the lazy query-path ingest loop (~3s).
+pub const DEFAULT_LAZY_INGEST_BUDGET_MS: u64 = 3000;
+
+/// Env-tunable lazy-ingest budget: `PIXEL_FACTS_LAZY_BUDGET_MS`.
+pub fn lazy_ingest_budget_ms() -> u64 {
+    std::env::var("PIXEL_FACTS_LAZY_BUDGET_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_LAZY_INGEST_BUDGET_MS)
+}
+
+/// Bounded ingest loop for the query path: run ticks until fresh or the given
+/// wall-clock budget (ms) is exhausted, then return the last report. Unlike
+/// `ingest_until_fresh` this never blocks a query for more than `budget_ms`,
+/// so it is safe to call from `op_excavate` / `op_history` / `op_lifecycle`
+/// when the index is not fresh. Each tick still uses the normal per-tick
+/// budget so queries are never starved.
+pub fn ingest_until_fresh_bounded(store: &mut FactsStore, budget_ms: u64) -> Result<TickReport> {
+    let options = IngestOptions {
+        tick_budget_ms: DEFAULT_TICK_BUDGET_MS,
+    };
+    let start = Instant::now();
+    let mut last = ingest_tick(store, &options)?;
+    while !last.fresh && start.elapsed() < Duration::from_millis(budget_ms) {
+        last = ingest_tick(store, &options)?;
+    }
+    Ok(last)
+}
+
+/// Convenience: `ingest_until_fresh_bounded` with the env-tunable default
+/// budget (`PIXEL_FACTS_LAZY_BUDGET_MS`, default 3s).
+pub fn lazy_ingest(store: &mut FactsStore) -> Result<TickReport> {
+    ingest_until_fresh_bounded(store, lazy_ingest_budget_ms())
+}
+
 // ---------------------------------------------------------------------------
 // Phase A — refs + metadata
 // ---------------------------------------------------------------------------
 
 fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
-    if !needs_phase_a(store) {
+    if !needs_phase_a(store)? {
         return Ok(true);
     }
     refresh_refs(store)?;
@@ -226,8 +261,12 @@ fn phase_a(store: &mut FactsStore, deadline: &Instant) -> Result<bool> {
     Ok(done)
 }
 
-fn needs_phase_a(store: &FactsStore) -> bool {
-    // Phase A needs work if there is no 'done' row (fresh DB or interrupted).
+fn needs_phase_a(store: &FactsStore) -> Result<bool> {
+    // Phase A needs work if there is no 'done' row (fresh DB or interrupted),
+    // OR the refs have moved since the last phase-A run (the stored ref_hash
+    // no longer matches the current refs). The latter is what fixes the
+    // frozen-at-commit-11 class: a 'done' row alone no longer means "never
+    // re-run".
     let status: Option<String> = store
         .conn()
         .query_row(
@@ -236,13 +275,27 @@ fn needs_phase_a(store: &FactsStore) -> bool {
             |r| r.get(0),
         )
         .ok();
-    !matches!(status.as_deref(), Some("done"))
+    if !matches!(status.as_deref(), Some("done")) {
+        return Ok(true);
+    }
+    let stored: Option<String> = store
+        .conn()
+        .query_row(
+            "SELECT ref_hash FROM ingest_jobs WHERE phase = 'A'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    let current = store.current_refs_hash()?;
+    Ok(stored.as_deref() != Some(current.as_str()))
 }
 
 fn complete_phase_a(store: &mut FactsStore) -> Result<()> {
+    // Record the refs hash at completion so a later ref move is detectable.
+    let hash = store.current_refs_hash()?;
     store.conn().execute(
-        "UPDATE ingest_jobs SET status = 'done', updated_at = ?1 WHERE phase = 'A'",
-        [now_iso()],
+        "UPDATE ingest_jobs SET status = 'done', ref_hash = ?1, updated_at = ?2 WHERE phase = 'A'",
+        params![hash, now_iso()],
     )?;
     Ok(())
 }

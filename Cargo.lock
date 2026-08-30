@@ -2455,6 +2455,7 @@ dependencies = [
  "notify",
  "pixel-context",
  "pixel-facts",
+ "pixel-git",
  "pixel-graph",
  "pixel-index",
  "pixel-ops",
@@ -2538,6 +2539,7 @@ name = "pixel-install"
 version = "0.1.0"
 dependencies = [
  "pixel-daemon",
+ "pixel-facts",
  "pixel-index",
  "pixel-proto",
  "pixel-session",

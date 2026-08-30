@@ -15,6 +15,9 @@
 //! 3. RESCUE — destructive history restores (`git reset --hard`,
 //!    `git checkout <ref> -- <path>`, `git restore --source`) are blocked:
 //!    use `pixel rescue` instead.
+//! 4. GLOB — Glob tool calls are deliberately left un-denied: they only
+//!    enumerate paths, and the Read/Edit of any result is itself guarded by
+//!    the scoping rules above. Blocking enumeration would be pure noise.
 //!
 //! Blocks by exiting 2 with a corrective message on stderr (the exit code
 //! Claude Code's hook protocol treats as "deny, feed stderr to the model").
@@ -75,7 +78,7 @@ pub fn run() -> ! {
         .get("hook_event_name")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if event != "PreToolUse" {
+    if !is_guard_event(event) {
         std::process::exit(0);
     }
 
@@ -106,7 +109,17 @@ pub fn run() -> ! {
             .get("command")
             .and_then(Value::as_str)
             .unwrap_or("");
+        // Policy first, rewrite second: only commands that already passed
+        // check_bash may be transparently rewritten to a pixel equivalent.
+        // If a rewrite applies, emit the updatedInput JSON and exit 0 — the
+        // agent receives pixel's enriched output without knowing the command
+        // was rewritten.
         check_bash(cmd, &cwd, idx_root.as_deref(), manifest.as_ref());
+        if idx_root.is_some() {
+            if let Some(rewritten) = try_rewrite_bash(cmd, &cwd) {
+                allow_rewrite(&rewritten);
+            }
+        }
         std::process::exit(0);
     }
 
@@ -114,6 +127,19 @@ pub fn run() -> ! {
         "Read" | "Grep" | "Glob"
         | "read" | "grep" | "find_file_by_name" | "glob" | "notebook_read"
         | "read_file" | "search" => {
+            // In indexed repos, redirect Grep tool calls to pixel search.
+            // Can't rewrite the tool type (Grep→Bash), so deny with a message
+            // that tells the agent exactly what to run instead.
+            if idx_root.is_some() && is_grep_tool(tool, &tool_input) {
+                let pattern = tool_input
+                    .get("pattern")
+                    .and_then(Value::as_str)
+                    .or_else(|| tool_input.get("query").and_then(Value::as_str))
+                    .unwrap_or("");
+                if !pattern.is_empty() {
+                    grep_redirect(&pattern, &cwd, &tool_input);
+                }
+            }
             if let Some(m) = &manifest {
                 let p = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
                 if !allowed(&p, m) {
@@ -155,6 +181,11 @@ pub fn run() -> ! {
         _ => {}
     }
     std::process::exit(0);
+}
+
+/// Accept both Claude Code's PreToolUse and Gemini's BeforeTool hook events.
+fn is_guard_event(event: &str) -> bool {
+    event == "PreToolUse" || event == "BeforeTool"
 }
 
 fn canonical(p: &Path) -> PathBuf {
@@ -454,4 +485,508 @@ fn simple_tokenize(s: &str) -> Vec<String> {
         tokens.push(current);
     }
     tokens
+}
+
+// ---------------------------------------------------------------------------
+// Command rewriting — transparent upgrade of grep/rg/git to pixel equivalents.
+// Modeled on RTK's rewrite approach: the hook returns updatedInput JSON and
+// the agent receives pixel's enriched output without knowing the command was
+// rewritten. Only fires in indexed repos (.pixel/ exists).
+// ---------------------------------------------------------------------------
+
+/// Emit a PreToolUse "allow" response with a rewritten Bash command. The
+/// agent receives pixel's output instead of the original tool's output.
+fn allow_rewrite(new_command: &str) -> ! {
+    // Deliberately NO permissionDecision:"allow": the rewritten command must
+    // still go through normal permission evaluation, so the agent sees and
+    // approves the pixel command it is about to run.
+    let resp = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "updatedInput": {
+                "command": new_command
+            }
+        }
+    });
+    print!("{}", resp);
+    std::process::exit(0);
+}
+
+/// Check if a tool call is a Grep-style search (has a pattern/query field).
+fn is_grep_tool(tool: &str, input: &serde_json::Map<String, Value>) -> bool {
+    // Claude Code's Grep tool has "pattern"; Devin's grep has "pattern";
+    // some agents use "query". Read/Glob don't have pattern fields.
+    if tool != "Grep" && tool != "grep" && tool != "search" {
+        return false;
+    }
+    input.get("pattern").is_some() || input.get("query").is_some()
+}
+
+/// Deny a Grep tool call with a message redirecting to `pixel search` —
+/// but only when the search is actually equivalent. If the Grep tool
+/// carries fields pixel search can't express (glob/type/output_mode), we
+/// ALLOW THROUGH: a deny with a non-equivalent suggestion is worse than no
+/// guard. Returns true if it blocked (never returns), false to allow.
+fn grep_redirect(
+    pattern: &str,
+    cwd: &Path,
+    input: &serde_json::Map<String, Value>,
+) -> bool {
+    // Context flags are expressible; glob/type/output_mode are not.
+    let mut flags = Vec::new();
+    for f in ["-A", "-B", "-C"] {
+        if input.contains_key(f) {
+            flags.push(f.to_string());
+        }
+    }
+    if input.contains_key("glob") || input.contains_key("type") || input.contains_key("output_mode") {
+        return false;
+    }
+    let root = find_up(cwd, ".pixel")
+        .map(|r| r.display().to_string())
+        .unwrap_or_else(|| ".".to_string());
+    let Some(cmd) = search_can_replace(pattern, &flags, &root) else {
+        return false;
+    };
+    block(&[
+        "BLOCKED by pixel-guard: use pixel search instead of Grep in indexed repos.".into(),
+        format!("Run this via Bash: {}", cmd),
+        "pixel search returns the match + surrounding code (no follow-up Read needed).".into(),
+        "To bypass: PIXEL_TARGETS_GUARD=0".into(),
+    ]);
+}
+
+/// Try to rewrite a Bash command to a pixel equivalent. Returns the new
+/// command string if a rewrite applies, or None to let the original pass.
+fn try_rewrite_bash(cmd: &str, cwd: &Path) -> Option<String> {
+    let trimmed = cmd.trim();
+
+    // Skip complex commands — only rewrite simple single commands.
+    // Heredocs, command substitution, pipelines, and control-flow
+    // operators are left alone (conservative: never guess at a pipeline).
+    if trimmed.contains("<<")
+        || trimmed.contains("$(")
+        || trimmed.contains('`')
+        || has_unquoted_meta(trimmed)
+    {
+        return None;
+    }
+
+    let root = find_up(cwd, ".pixel")
+        .map(|r| r.display().to_string())
+        .unwrap_or_else(|| ".".to_string());
+
+    // --- rg / grep → pixel search ---
+    if let Some(rewritten) = try_rewrite_grep(trimmed, &root) {
+        return Some(rewritten);
+    }
+
+    // --- git log / git show with search intent → pixel excavate ---
+    if let Some(rewritten) = try_rewrite_git_archaeology(trimmed, &root) {
+        return Some(rewritten);
+    }
+
+    // --- git fetch + merge/rebase → pixel reconcile ---
+    if let Some(rewritten) = try_rewrite_git_sync(trimmed, &root) {
+        return Some(rewritten);
+    }
+
+    None
+}
+
+/// Flags that consume a following value (or an attached `=value`), so they
+/// must be skipped when locating the search pattern.
+const VALUE_FLAGS: &[&str] = &[
+    "-A", "-B", "-C", "-m", "-g", "-t", "-f", "--include", "--exclude",
+    "--glob", "--type", "-d", "--max-depth",
+];
+
+/// Value-consuming flags that also change the file scope or match count in
+/// ways `pixel search` can't reproduce. Their presence makes a rewrite
+/// non-equivalent, so the command falls through to the original.
+const SCOPE_FLAGS: &[&str] = &[
+    "-m", "-g", "-t", "-f", "-d", "--include", "--exclude", "--glob",
+    "--type", "--max-depth",
+];
+
+/// True if `cmd` contains a shell metacharacter outside of quotes. Used to
+/// refuse rewriting pipelines and control-flow operators — never guess at a
+/// compound command.
+fn has_unquoted_meta(cmd: &str) -> bool {
+    let mut quote: Option<char> = None;
+    for c in cmd.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if matches!(c, '|' | '&' | ';' | '>' | '<' | '\n') => return true,
+            None => {}
+        }
+    }
+    false
+}
+
+/// Single-quote `s` for shell interpolation, leaving it bare when it is
+/// already shell-safe (so common roots like `/repo` stay readable).
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '/' | '.' | '_' | '-' | ':' | '=' | '+' | '@' | '~')
+    }) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Parse a grep/rg command into (pattern, path-scope args, unsupported
+/// flags). Returns None if the command isn't a grep-style search.
+fn parse_grep(cmd: &str) -> Option<(String, Vec<String>, Vec<String>)> {
+    let tokens = simple_tokenize(cmd);
+    if tokens.is_empty() {
+        return None;
+    }
+    let bin = tokens[0].as_str();
+    if !matches!(bin, "rg" | "grep" | "egrep" | "fgrep") {
+        return None;
+    }
+    let unsupported_flags = [
+        "-l", "--files-with-matches", "-c", "--count", "-v", "--invert",
+        "-o", "--only-matching",
+    ];
+    let mut unsupported: Vec<String> = tokens[1..]
+        .iter()
+        .filter(|t| unsupported_flags.contains(&t.as_str()))
+        .cloned()
+        .collect();
+    // Locate the pattern, skipping value-consuming flags and their values.
+    let mut i = 1;
+    let mut pattern: Option<String> = None;
+    let mut pattern_idx = 0;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if t == "-e" {
+            pattern = tokens.get(i + 1).cloned();
+            pattern_idx = i + 1;
+            break;
+        }
+        if let Some(p) = t.strip_prefix("--regexp=") {
+            pattern = Some(p.to_string());
+            pattern_idx = i;
+            break;
+        }
+        if t.starts_with('-') {
+            if t.starts_with("--") && t.contains('=') {
+                let base = t.split('=').next().unwrap_or(t);
+                if SCOPE_FLAGS.contains(&base) {
+                    unsupported.push(base.to_string());
+                }
+                i += 1; // self-contained --flag=value
+                continue;
+            }
+            if VALUE_FLAGS.contains(&t.as_str()) {
+                if SCOPE_FLAGS.contains(&t.as_str()) {
+                    unsupported.push(t.clone());
+                }
+                i += 2; // flag + its value
+                continue;
+            }
+            if t.len() > 2 && !t.starts_with("--") {
+                let flag = &t[..2];
+                if VALUE_FLAGS.contains(&flag) {
+                    if SCOPE_FLAGS.contains(&flag) {
+                        unsupported.push(flag.to_string());
+                    }
+                    i += 1; // short flag with attached value, e.g. -A5
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        pattern = Some(t.clone());
+        pattern_idx = i;
+        break;
+    }
+    let pattern = pattern?;
+    let paths: Vec<String> = tokens[pattern_idx + 1..]
+        .iter()
+        .filter(|t| !t.starts_with('-'))
+        .cloned()
+        .collect();
+    Some((pattern, paths, unsupported))
+}
+
+/// Shared equivalence predicate: can a grep-style search be transparently
+/// replaced by `pixel search`? Returns the pixel command (root already
+/// interpolated) if equivalent, or None if it can't be expressed. pixel
+/// search is regex-based, so any pattern is expressible; only
+/// output-modifying flags we can't honor fall through.
+fn search_can_replace(pattern: &str, flags: &[String], root: &str) -> Option<String> {
+    let unsupported_flags = [
+        "-l", "--files-with-matches", "-c", "--count", "-v", "--invert",
+        "-o", "--only-matching",
+        "-m", "--max-count", "-g", "--glob", "-t", "--type", "-f",
+        "--include", "--exclude", "-d", "--max-depth",
+    ];
+    if flags.iter().any(|f| unsupported_flags.contains(&f.as_str())) {
+        return None;
+    }
+    let escaped = pattern.replace('\'', "'\\''");
+    Some(format!(
+        "pixel search '{}' {} --context 5",
+        escaped,
+        shell_quote(root)
+    ))
+}
+
+/// Rewrite `rg PATTERN` / `grep PATTERN` → `pixel search PATTERN --context 5`
+fn try_rewrite_grep(cmd: &str, root: &str) -> Option<String> {
+    let (pattern, paths, unsupported) = parse_grep(cmd)?;
+    // pixel search takes a single root; multiple path args can't be expressed.
+    let scope = match paths.len() {
+        0 => root.to_string(),
+        1 => paths.into_iter().next().unwrap(),
+        _ => return None,
+    };
+    search_can_replace(&pattern, &unsupported, &scope)
+}
+
+/// Rewrite `git log --grep=PHRASE` / `git log -S PHRASE` / `git show` with
+/// search intent → `pixel excavate --phrase PHRASE`
+fn try_rewrite_git_archaeology(cmd: &str, root: &str) -> Option<String> {
+    let tokens = simple_tokenize(cmd);
+    if tokens.len() < 2 {
+        return None;
+    }
+    if tokens[0] != "git" {
+        return None;
+    }
+    let sub = tokens[1].as_str();
+    match sub {
+        "log" => {
+            // Look for --grep=, -S, -G (search intent)
+            for t in &tokens[2..] {
+                if let Some(p) = t.strip_prefix("--grep=") {
+                    let escaped = p.replace('\'', "'\\''");
+                    return Some(format!("pixel excavate --phrase '{}' {}", escaped, shell_quote(root)));
+                }
+            }
+            // -S <pattern> or -G <pattern>
+            for (i, t) in tokens[2..].iter().enumerate() {
+                if (t == "-S" || t == "-G") && i + 1 < tokens.len() - 2 {
+                    let pattern = tokens[i + 3].clone();
+                    let escaped = pattern.replace('\'', "'\\''");
+                    return Some(format!("pixel excavate --phrase '{}' {}", escaped, shell_quote(root)));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite `git fetch && git merge` / `git pull` / `git fetch && git rebase`
+/// → `pixel reconcile`
+fn try_rewrite_git_sync(cmd: &str, root: &str) -> Option<String> {
+    let tokens = simple_tokenize(cmd);
+    if tokens.is_empty() {
+        return None;
+    }
+    if tokens[0] != "git" {
+        return None;
+    }
+    let sub = tokens.get(1).map(String::as_str).unwrap_or("");
+    // `git pull` = fetch + merge — rewrite to reconcile
+    if sub == "pull" {
+        return Some(format!("pixel reconcile {} --strategy rebase-if-clean --push auto", shell_quote(root)));
+    }
+    // `git fetch ... && git merge/rebase ...` — detect compound
+    if sub == "fetch" && cmd.contains("&&") {
+        let lower = cmd.to_lowercase();
+        if lower.contains("merge") || lower.contains("rebase") {
+            return Some(format!("pixel reconcile {} --strategy rebase-if-clean --push auto", shell_quote(root)));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_rg_simple_pattern() {
+        let cmd = "rg GUARD_MATCHER";
+        let rewritten = try_rewrite_grep(cmd, "/repo");
+        assert_eq!(
+            rewritten,
+            Some("pixel search 'GUARD_MATCHER' /repo --context 5".to_string())
+        );
+    }
+
+    #[test]
+    fn rewrite_grep_simple_pattern() {
+        let cmd = "grep -rn GUARD_MATCHER .";
+        let rewritten = try_rewrite_grep(cmd, "/repo");
+        assert_eq!(
+            rewritten,
+            Some("pixel search 'GUARD_MATCHER' . --context 5".to_string())
+        );
+    }
+
+    #[test]
+    fn rewrite_regex_pattern() {
+        // pixel search is regex-based, so regex patterns are expressible.
+        let cmd = "rg \"foo.*bar\"";
+        let rewritten = try_rewrite_grep(cmd, "/repo");
+        assert_eq!(
+            rewritten,
+            Some("pixel search 'foo.*bar' /repo --context 5".to_string())
+        );
+    }
+
+    #[test]
+    fn no_rewrite_unsupported_flags() {
+        let cmd = "rg -l GUARD_MATCHER";
+        let rewritten = try_rewrite_grep(cmd, "/repo");
+        assert!(rewritten.is_none(), "-l flag should not be rewritten");
+    }
+
+    #[test]
+    fn no_rewrite_non_grep() {
+        let cmd = "ls -la";
+        let rewritten = try_rewrite_grep(cmd, "/repo");
+        assert!(rewritten.is_none());
+    }
+
+    #[test]
+    fn rewrite_git_log_grep() {
+        let cmd = "git log --grep=register_mcp";
+        let rewritten = try_rewrite_git_archaeology(cmd, "/repo");
+        assert_eq!(
+            rewritten,
+            Some("pixel excavate --phrase 'register_mcp' /repo".to_string())
+        );
+    }
+
+    #[test]
+    fn no_rewrite_git_log_without_search() {
+        let cmd = "git log --oneline -10";
+        let rewritten = try_rewrite_git_archaeology(cmd, "/repo");
+        assert!(rewritten.is_none(), "plain git log should not be rewritten");
+    }
+
+    #[test]
+    fn rewrite_git_pull() {
+        let cmd = "git pull";
+        let rewritten = try_rewrite_git_sync(cmd, "/repo");
+        assert_eq!(
+            rewritten,
+            Some("pixel reconcile /repo --strategy rebase-if-clean --push auto".to_string())
+        );
+    }
+
+    #[test]
+    fn no_rewrite_git_status() {
+        let cmd = "git status";
+        let rewritten = try_rewrite_git_sync(cmd, "/repo");
+        assert!(rewritten.is_none());
+    }
+
+    #[test]
+    fn is_grep_tool_detects_pattern() {
+        let mut input = serde_json::Map::new();
+        input.insert("pattern".to_string(), Value::String("foo".to_string()));
+        assert!(is_grep_tool("Grep", &input));
+        assert!(!is_grep_tool("Bash", &input));
+    }
+
+    #[test]
+    fn is_grep_tool_no_pattern_field() {
+        let input = serde_json::Map::new();
+        assert!(!is_grep_tool("Grep", &input));
+    }
+
+    #[test]
+    fn reject_pipeline_rewrite() {
+        let rewritten = try_rewrite_bash("rg foo | head -5", Path::new("/tmp"));
+        assert!(rewritten.is_none(), "pipelines must not be rewritten");
+    }
+
+    #[test]
+    fn reject_control_flow_rewrite() {
+        assert!(try_rewrite_bash("rg foo && echo hi", Path::new("/tmp")).is_none());
+        assert!(try_rewrite_bash("rg foo; echo hi", Path::new("/tmp")).is_none());
+        assert!(try_rewrite_bash("rg foo > out.txt", Path::new("/tmp")).is_none());
+    }
+
+    #[test]
+    fn value_flag_skips_pattern() {
+        // -A 5 consumes "5"; the pattern is "foo", not "5".
+        let rewritten = try_rewrite_grep("grep -A 5 foo", "/repo");
+        assert_eq!(
+            rewritten,
+            Some("pixel search 'foo' /repo --context 5".to_string())
+        );
+    }
+
+    #[test]
+    fn regexp_equals_pattern() {
+        let rewritten = try_rewrite_grep("grep --regexp=foo", "/repo");
+        assert_eq!(
+            rewritten,
+            Some("pixel search 'foo' /repo --context 5".to_string())
+        );
+    }
+
+    #[test]
+    fn scope_flag_not_rewritten() {
+        // --include/--glob/--type/-m change the file scope or match count;
+        // pixel search can't honor them, so the rewrite must fall through.
+        assert!(try_rewrite_grep("grep --include=*.rs foo", "/repo").is_none());
+        assert!(try_rewrite_grep("grep --glob '*.rs' foo", "/repo").is_none());
+        assert!(try_rewrite_grep("grep -m 5 foo", "/repo").is_none());
+    }
+
+    #[test]
+    fn preserves_path_scope() {
+        let rewritten = try_rewrite_grep("rg foo src/", "/repo");
+        assert_eq!(
+            rewritten,
+            Some("pixel search 'foo' src/ --context 5".to_string())
+        );
+    }
+
+    #[test]
+    fn multiple_paths_not_rewritten() {
+        let rewritten = try_rewrite_grep("rg foo src/ lib/", "/repo");
+        assert!(rewritten.is_none(), "multiple roots can't be expressed");
+    }
+
+    #[test]
+    fn quotes_root_with_space() {
+        let rewritten = try_rewrite_grep("rg foo", "/my repo");
+        assert_eq!(
+            rewritten,
+            Some("pixel search 'foo' '/my repo' --context 5".to_string())
+        );
+    }
+
+    #[test]
+    fn accepts_before_tool_event() {
+        assert!(is_guard_event("PreToolUse"));
+        assert!(is_guard_event("BeforeTool"));
+        assert!(!is_guard_event("PostToolUse"));
+    }
+
+    #[test]
+    fn scoping_before_rewrite_destructive_not_rewritten() {
+        // check_bash blocks destructive git commands; the rewrite path must
+        // never turn one into a pixel command that bypasses that block.
+        let rewritten = try_rewrite_bash("git reset --hard HEAD", Path::new("/tmp"));
+        assert!(rewritten.is_none());
+    }
 }

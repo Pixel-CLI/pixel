@@ -327,16 +327,19 @@ fn rerank_never_lets_a_p2_candidate_outrank_any_p0_candidate() {
     let candidates = vec![
         RankedCandidate {
             path: "src/p0_weak.rs".to_string(),
+            id: 0,
             rrf_score: 0.01, // deliberately tiny RRF score
             tier: "P0".to_string(),
         },
         RankedCandidate {
             path: "src/p1_mid.rs".to_string(),
+            id: 1,
             rrf_score: 0.5,
             tier: "P1".to_string(),
         },
         RankedCandidate {
             path: "src/p2_hot.rs".to_string(),
+            id: 2,
             rrf_score: 100.0, // deliberately huge RRF score
             tier: "P2".to_string(),
         },
@@ -353,7 +356,7 @@ fn rerank_never_lets_a_p2_candidate_outrank_any_p0_candidate() {
         error_reasons: vec![],
     };
 
-    let out = rerank(candidates, &signals, 1.0);
+    let out = rerank(candidates, &signals, |_| 1.0);
 
     // Even though p2_hot's final score (100 * (1 + 0.15 + 0.35) = 150) is
     // enormously larger than p0_weak's (0.01), the output must still place
@@ -382,11 +385,13 @@ fn rerank_reorders_within_a_tier_by_amplified_score() {
     let candidates = vec![
         RankedCandidate {
             path: "src/a.rs".to_string(),
+            id: 0,
             rrf_score: 1.0,
             tier: "P1".to_string(),
         },
         RankedCandidate {
             path: "src/b.rs".to_string(),
+            id: 1,
             rrf_score: 1.0, // tied RRF score with a.rs
             tier: "P1".to_string(),
         },
@@ -399,7 +404,7 @@ fn rerank_reorders_within_a_tier_by_amplified_score() {
         session_reasons: vec![],
         error_reasons: vec![],
     };
-    let out = rerank(candidates, &signals, 1.0);
+    let out = rerank(candidates, &signals, |_| 1.0);
     assert_eq!(out[0].path, "src/b.rs", "b.rs's activity boost should move it ahead of tied a.rs");
     assert_eq!(out[1].path, "src/a.rs");
 }
@@ -432,7 +437,7 @@ fn rerank_targets_preserves_tier_non_promotion_on_target_file_shape() {
         session_reasons: vec![],
         error_reasons: vec![],
     };
-    let out = rerank_targets(targets, &signals, 1.0);
+    let out = rerank_targets(targets, &signals, |_| 1.0);
     assert_eq!(out[0].tier, "P0", "P0 must still lead even though P2 has an amplified score");
     assert_eq!(out[1].tier, "P2");
 }
@@ -443,12 +448,14 @@ fn rerank_targets_preserves_tier_non_promotion_on_target_file_shape() {
 
 #[test]
 fn test_penalty_detects_test_and_spec_mentions() {
-    assert_eq!(test_penalty_for("fix the login flow"), 1.0);
-    assert_eq!(test_penalty_for("fix the failing test for login"), 0.7);
-    assert_eq!(test_penalty_for("update auth.spec.ts"), 0.7);
+    // Task does NOT mention tests → penalty (0.7) applies.
+    assert_eq!(test_penalty_for("fix the login flow"), 0.7);
+    // Task mentions tests → penalty gated off (1.0).
+    assert_eq!(test_penalty_for("fix the failing test for login"), 1.0);
+    assert_eq!(test_penalty_for("update auth.spec.ts"), 1.0);
     // must not false-positive on substrings that merely contain "test"/"spec"
     // as part of a longer identifier token.
-    assert_eq!(test_penalty_for("update the latest contest results"), 1.0);
+    assert_eq!(test_penalty_for("update the latest contest results"), 0.7);
 }
 
 // ---------------------------------------------------------------------------

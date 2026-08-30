@@ -39,6 +39,12 @@ pub const REACH_REFLOG_ONLY: i64 = 16;
 /// Budget the default eviction budget (bytes of diff residue kept).
 pub const DEFAULT_DIFF_BUDGET_BYTES: u64 = 150 * 1024 * 1024;
 
+/// The on-disk schema version, stamped via `PRAGMA user_version`. Bump this
+/// whenever the DDL changes. On open, a mismatch (or a pre-versioned DB that
+/// already has rows) routes through the corrupt-rebuild path so every poisoned
+/// DB self-heals on next open — no manual `rm` required.
+pub const FACTS_SCHEMA_VERSION: i64 = 1;
+
 #[derive(Debug, thiserror::Error)]
 pub enum FactsError {
     #[error("rusqlite: {0}")]
@@ -77,6 +83,9 @@ pub struct IndexState {
     pub diff_indexed_pct: f64,
     /// True when ingest is caught up to the current refs (no pending work).
     pub fresh: bool,
+    /// The on-disk schema version (PRAGMA user_version) this store was opened
+    /// with — lets visibility report it.
+    pub schema_version: i64,
 }
 
 impl IndexState {
@@ -87,6 +96,7 @@ impl IndexState {
             total_commits: 0,
             diff_indexed_pct: 0.0,
             fresh: false,
+            schema_version: FACTS_SCHEMA_VERSION,
         }
     }
 }
@@ -120,14 +130,25 @@ impl FactsStore {
         let pixel_dir = root.join(".pixel");
         std::fs::create_dir_all(&pixel_dir)?;
         let path = pixel_dir.join(HISTORY_DB_FILE);
-        let conn = match Self::open_conn(&path) {
-            Ok(c) => c,
-            Err(_) => {
-                // Corrupt or schema-mismatched: derived data, safe to rebuild.
-                for suffix in ["", "-wal", "-shm"] {
-                    let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        // Self-healing: rebuild on structural corruption OR a schema-version
+        // mismatch OR a pre-versioned DB that already has rows. The db is
+        // derived data, never load-bearing for correctness, so wiping it is
+        // always safe — and this auto-heals every poisoned DB on next open
+        // with no manual `rm` required.
+        let rebuild = match Self::needs_rebuild(&path) {
+            Ok(b) => b,
+            Err(_) => true, // can't even read the version → corrupt → rebuild
+        };
+        let conn = if rebuild {
+            Self::remove_db(&path);
+            Self::open_conn(&path)?
+        } else {
+            match Self::open_conn(&path) {
+                Ok(c) => c,
+                Err(_) => {
+                    Self::remove_db(&path);
+                    Self::open_conn(&path)?
                 }
-                Self::open_conn(&path)?
             }
         };
         Ok(FactsStore {
@@ -136,6 +157,50 @@ impl FactsStore {
             path,
             root,
         })
+    }
+
+    /// True when the on-disk db at `path` must be rebuilt: the schema version
+    /// (PRAGMA user_version) is missing or mismatched, or the db is
+    /// pre-versioned (user_version 0) but already holds rows (a poisoned DB
+    /// written by an older build). An empty pre-versioned db is fine — it just
+    /// gets stamped on open.
+    fn needs_rebuild(path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        // READ_WRITE (not READ_ONLY) so a WAL-mode db with a live -wal file is
+        // readable; the file exists so CREATE is unnecessary.
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        if version == FACTS_SCHEMA_VERSION {
+            return Ok(false);
+        }
+        if version == 0 {
+            // Pre-versioned. Rebuild only if it already has rows; an empty one
+            // is stamped in place on open.
+            let has_rows: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='commits'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if has_rows == 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn remove_db(path: &Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
     }
 
     fn open_conn(path: &Path) -> Result<Connection> {
@@ -149,6 +214,7 @@ impl FactsStore {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.execute_batch(DDL)?;
+        conn.pragma_update(None, "user_version", FACTS_SCHEMA_VERSION)?;
         Ok(conn)
     }
 
@@ -189,12 +255,13 @@ impl FactsStore {
             commits_indexed: total as u64,
             total_commits: total as u64,
             diff_indexed_pct,
-            fresh: pending_diff == 0 && self.phase_a_done() && self.phase_b_done(),
+            fresh: pending_diff == 0 && self.phase_a_fresh() && self.phase_b_done(),
+            schema_version: FACTS_SCHEMA_VERSION,
         }
     }
 
     fn current_phase(&self) -> &'static str {
-        if !self.phase_a_done() {
+        if !self.phase_a_fresh() {
             return "phase_a";
         }
         if !self.phase_b_done() {
@@ -225,6 +292,45 @@ impl FactsStore {
             )
             .ok();
         matches!(status.as_deref(), Some("done"))
+    }
+
+    /// Phase A is 'done' AND its recorded refs hash still matches the current
+    /// refs. A ref move since the last phase-A run makes us stale (phase_a
+    /// again) even though the ingest_jobs row says 'done' — this is what fixes
+    /// the frozen-at-commit-11 class permanently.
+    fn phase_a_fresh(&self) -> bool {
+        if !self.phase_a_done() {
+            return false;
+        }
+        match self.current_refs_hash() {
+            Ok(current) => {
+                let stored: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT ref_hash FROM ingest_jobs WHERE phase = 'A'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                stored.as_deref() == Some(current.as_str())
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// xxh3 hash of the current refs state (`for-each-ref` + HEAD). Stored at
+    /// phase-A completion; a differing hash means refs moved and phase A must
+    /// re-run.
+    pub(crate) fn current_refs_hash(&self) -> Result<String> {
+        let mut buf = Vec::new();
+        let refs = self
+            .runner
+            .run(&["for-each-ref", "--format=%(refname)%00%(objectname)"])?;
+        buf.extend_from_slice(&refs);
+        let head = self.runner.run(&["rev-parse", "HEAD"])?;
+        buf.extend_from_slice(&head);
+        let h = xxhash_rust::xxh3::xxh3_64(&buf);
+        Ok(format!("{:016x}", h))
     }
 
     fn phase_b_done(&self) -> bool {
@@ -336,6 +442,7 @@ CREATE TABLE IF NOT EXISTS ingest_jobs (
   phase TEXT NOT NULL UNIQUE,
   cursor TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
+  ref_hash TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

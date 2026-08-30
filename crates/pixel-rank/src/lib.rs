@@ -22,7 +22,8 @@ use serde_json::{Value, json};
 pub mod rerank;
 pub mod signals;
 
-use pixel_graph::split_ident_words;
+pub use pixel_graph::split_ident_words;
+use pixel_graph::store::SymbolKind;
 use pixel_graph::targets::SymbolHit;
 
 // ---------------------------------------------------------------------------
@@ -244,12 +245,12 @@ pub struct TargetsReport {
 // RRF constants — mirrors pixel-recall/src/hybrid.rs, generalized to five
 // channels. Filename and symbol-definition evidence dominate content TF;
 // graph expansion and cluster co-membership are peripheral by construction.
-const RRF_K: f64 = 60.0;
-const W_FILENAME: f64 = 3.0;
-const W_SYMBOL: f64 = 2.5;
-const W_CONTENT: f64 = 1.5;
-const W_GRAPH: f64 = 1.0;
-const W_CLUSTER: f64 = 0.5;
+pub const RRF_K: f64 = 60.0;
+pub const W_FILENAME: f64 = 3.0;
+pub const W_SYMBOL: f64 = 2.5;
+pub const W_CONTENT: f64 = 1.5;
+pub const W_GRAPH: f64 = 1.0;
+pub const W_CLUSTER: f64 = 0.5;
 const EXACT_NAME_BONUS: f64 = 0.05;
 const P0_CAP: usize = 5;
 const CONTENT_COUNT_CAP: u32 = 50;
@@ -314,6 +315,35 @@ fn content_rank(
     scored.into_iter().map(|(_, _, p, kw)| (p, kw)).collect()
 }
 
+/// Reciprocal-rank fusion over weighted ranked lists. Each list contributes
+/// `w / (k + rank + 1)` per path; scores are summed across lists and returned
+/// best-first, ties broken by path ascending. Deterministic.
+///
+/// This is the shared fusion primitive used by [`lexical_rank`] and (in Phase
+/// 1c) the full five-channel `compute_targets` path.
+pub fn rrf_fuse(lists_with_weights: &[(&[String], f64)], k: f64) -> Vec<(String, f64)> {
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    for (list, w) in lists_with_weights {
+        for (rank, path) in list.iter().enumerate() {
+            *scores.entry(path.clone()).or_default() += w / (k + rank as f64 + 1.0);
+        }
+    }
+    let mut out: Vec<(String, f64)> = scores.into_iter().collect();
+    out.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    out
+}
+
+/// Boost multiplier for a symbol kind. Real definitions (Function/Struct/
+/// Class/Const) keep full weight; weaker / string-literal-only matches are
+/// discounted. Line-level def/ref/comment classification is deferred (Phase
+/// 1a only wires the helper; the caller decides where to apply it).
+pub fn symbol_kind_boost(kind: &SymbolKind) -> f64 {
+    match kind {
+        SymbolKind::Function | SymbolKind::Struct | SymbolKind::Class | SymbolKind::Const => 1.0,
+        _ => 0.8,
+    }
+}
+
 /// Lexical-only pre-fuse used to pick graph-expansion seeds. Returns fused
 /// paths, best first.
 pub fn lexical_rank(
@@ -332,15 +362,10 @@ pub fn lexical_rank(
         .map(|(p, _)| p)
         .collect();
 
-    let mut scores: HashMap<String, f64> = HashMap::new();
-    for (list, w) in [(&s1, W_FILENAME), (&s2, W_SYMBOL), (&s3, W_CONTENT)] {
-        for (rank, path) in list.iter().enumerate() {
-            *scores.entry(path.clone()).or_default() += w / (RRF_K + rank as f64 + 1.0);
-        }
-    }
-    let mut out: Vec<(String, f64)> = scores.into_iter().collect();
-    out.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    out.into_iter().map(|(p, _)| p).collect()
+    rrf_fuse(&[(&s1, W_FILENAME), (&s2, W_SYMBOL), (&s3, W_CONTENT)], RRF_K)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -730,5 +755,29 @@ mod tests {
         assert_eq!(report.envelope["lower_bound"], true);
         assert_eq!(report.envelope["graph"], "unavailable");
         assert!(report.closed_world.contains("EXCEPT"));
+    }
+
+    #[test]
+    fn rrf_fuse_sums_weighted_ranks_and_breaks_ties_by_path() {
+        let a = vec!["x.rs".to_string(), "y.rs".to_string()];
+        let b = vec!["y.rs".to_string(), "z.rs".to_string()];
+        let fused = rrf_fuse(&[(&a, 3.0), (&b, 1.5)], RRF_K);
+        // y.rs appears in both lists → strictly higher score than x.rs/z.rs.
+        assert_eq!(fused[0].0, "y.rs");
+        assert!(fused[0].1 > fused[1].1);
+        // Deterministic tie-break: x.rs before z.rs at equal score.
+        assert_eq!(fused[1].0, "x.rs");
+        assert_eq!(fused[2].0, "z.rs");
+    }
+
+    #[test]
+    fn symbol_kind_boost_prioritizes_definitions() {
+        use pixel_graph::store::SymbolKind;
+        assert_eq!(symbol_kind_boost(&SymbolKind::Function), 1.0);
+        assert_eq!(symbol_kind_boost(&SymbolKind::Struct), 1.0);
+        assert_eq!(symbol_kind_boost(&SymbolKind::Class), 1.0);
+        assert_eq!(symbol_kind_boost(&SymbolKind::Const), 1.0);
+        assert!(symbol_kind_boost(&SymbolKind::Enum) < 1.0);
+        assert!(symbol_kind_boost(&SymbolKind::Module) < 1.0);
     }
 }

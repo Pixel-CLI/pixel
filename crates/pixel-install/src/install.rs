@@ -328,13 +328,58 @@ fn install_session_start_hook(
     })
 }
 
+/// Load the canonical pixel usage-rule text from `~/.agent-config/rules/pixel.md`
+/// and strip its YAML frontmatter so the body can be embedded directly into a
+/// CLAUDE.md/AGENTS.md managed block. Returns `None` if the file is missing or
+/// unreadable (the caller falls back to the short summary).
+fn load_usage_rules(home: &Path) -> Option<String> {
+    let path = home.join(config::PIXEL_RULES_REL);
+    let text = fs::read_to_string(&path).ok()?;
+    // Strip a leading `---\n...\n---\n` YAML frontmatter block if present.
+    let body = if let Some(rest) = text.strip_prefix("---\n") {
+        if let Some(end) = rest.find("\n---\n") {
+            &rest[end + "\n---\n".len()..]
+        } else {
+            &text
+        }
+    } else {
+        &text
+    };
+    // Remove the conflicting usable-git rule: usable-git is retired, so the
+    // installed rules must not frame pixel's mutation ops as a "1:1
+    // replacement" for it or cite its old benchmark as a live reference.
+    // The retirement statements ("NEVER use gitpixel or usable-git") are
+    // kept — only the live-comparison framing is stripped.
+    let cleaned = body
+        .replace("## Git operations — mutation ops replace usable-git 1:1", "## Git operations — mutation ops")
+        .replace(
+            "the same crash-safety discipline usable-git proved across a 960-trial benchmark (0 fsck failures, 0 lost unrelated work)",
+            "the same crash-safety discipline that made the mutation surface trustworthy",
+        );
+    Some(cleaned.trim_end().to_string())
+}
+
 fn rewrite_agent_configs(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let managed = format!(
-        "pixel is the unified retrieval + git engine. Use `pixel <verb>` for\n\
-         search, resolve, targets, history, and safe git ops.\n\
-         Binary: {}\n",
-        exe.display()
-    );
+    // Ship the real usage rules (the four mandatory scenarios, the doctrine,
+    // the git-op table) in the managed block, not just a 3-line summary. The
+    // rules live in ~/.agent-config/rules/pixel.md; if that file is missing we
+    // fall back to the short summary so install never hard-fails on it.
+    let managed = match load_usage_rules(home) {
+        Some(rules) => format!(
+            "pixel is the unified retrieval + git engine. Use `pixel <verb>` for\n\
+             search, resolve, targets, history, and safe git ops.\n\
+             Binary: {}\n\n\
+             {}\n",
+            exe.display(),
+            rules
+        ),
+        None => format!(
+            "pixel is the unified retrieval + git engine. Use `pixel <verb>` for\n\
+             search, resolve, targets, history, and safe git ops.\n\
+             Binary: {}\n",
+            exe.display()
+        ),
+    };
     let mut targets = config::find_agent_configs(home);
     if targets.is_empty() {
         // No CLAUDE.md/AGENTS.md exists anywhere pixel looks yet. Without

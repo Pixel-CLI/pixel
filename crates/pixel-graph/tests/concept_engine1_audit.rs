@@ -95,7 +95,7 @@ export async function GET() {
 }
 
 export async function POST() {
-  return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
+  return NextResponse.json({ error: "Service is currently unavailable" }, { status: 503 });
 }
 "#;
 
@@ -262,7 +262,7 @@ fn build_graph_extracts_string_literal() {
         "expected the long WELCOME_MESSAGE literal as a string concept, got {rows:?}"
     );
     assert!(
-        rows.iter().any(|r| r.raw == "Service unavailable"),
+        rows.iter().any(|r| r.raw == "Service is currently unavailable"),
         "expected the Error-call-style string arg to be extracted, got {rows:?}"
     );
 }
@@ -565,7 +565,7 @@ fn unresolved_phrase_reports_every_tier_attempted_honestly() {
     assert!(outcome.matches.is_empty(), "{outcome:?}");
     assert_eq!(
         outcome.tiers_attempted,
-        vec![Tier::T0, Tier::T1, Tier::T2, Tier::T3],
+        vec![Tier::T0, Tier::T1, Tier::T2, Tier::T3, Tier::Symbol],
         "an honest miss must report every tier it actually tried: {outcome:?}"
     );
 }
@@ -574,8 +574,9 @@ fn unresolved_phrase_reports_every_tier_attempted_honestly() {
 fn ambiguous_bare_head_noun_is_honestly_unresolved() {
     // "the endpoint" alone has no descriptive content beyond the kind
     // classifier itself — no route concept's norm literally contains the
-    // word "endpoint" (routes are indexed as "get /api/orders" etc.), so
-    // this must NOT be silently guessed at; it should honestly miss.
+    // word "endpoint" (routes are indexed as "get /api/orders" etc.), and no
+    // symbol is named "endpoint", so this must NOT be silently guessed at; it
+    // should honestly miss.
     let (_dir, store) = build_fixture();
     let outcome = resolve(&store, "the endpoint", &ResolveOptions::default()).expect("resolve");
     assert_eq!(
@@ -584,3 +585,67 @@ fn ambiguous_bare_head_noun_is_honestly_unresolved() {
         "a bare, content-free 'the endpoint' should not be guessed at: {outcome:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1b: real scoring, same-file collapse, symbol fallback
+// ---------------------------------------------------------------------------
+
+#[test]
+fn symbol_fallback_tier_resolves_ident_phrase() {
+    // "checkout page" matches no concept norm (no ui_text/string/component
+    // contains "checkout page"), so T0–T3 all miss; the symbol fallback must
+    // find the `CheckoutPage` function by its camelCase-split ident words.
+    let (_dir, store) = build_fixture();
+    let outcome = resolve(&store, "checkout page", &ResolveOptions::default()).expect("resolve");
+    assert_eq!(outcome.tier, Some(Tier::Symbol), "{outcome:?}");
+    assert_eq!(outcome.confidence, Confidence::Ranked, "{outcome:?}");
+    assert!(
+        outcome
+            .matches
+            .iter()
+            .any(|m| m.symbol_kind.as_deref() == Some("function")),
+        "expected a function symbol match, got {outcome:?}"
+    );
+}
+
+#[test]
+fn same_file_concepts_are_not_collapsed_by_path() {
+    // "enter email" resolves at T2 to two distinct concept rows that both
+    // live in the SAME file (ContactForm.tsx: the placeholder is indexed as
+    // two separate rows normalizing to "enter your email here"). The old
+    // path-keyed rerank collapsed them to one-per-path; the id-keyed rerank
+    // must keep all of them.
+    let (_dir, store) = build_fixture();
+    let outcome = resolve(&store, "enter email", &ResolveOptions::default()).expect("resolve");
+    let contact = outcome
+        .matches
+        .iter()
+        .filter(|m| m.path.ends_with("ContactForm.tsx"))
+        .count();
+    assert!(
+        contact >= 2,
+        "expected >=2 distinct same-file concepts in ContactForm.tsx, got {contact}: {outcome:?}"
+    );
+}
+
+#[test]
+fn real_scoring_exact_beats_word_overlap() {
+    let (_dir, store) = build_fixture();
+    // Exact-norm match scores 1.0.
+    let exact = resolve(&store, "email address", &ResolveOptions::default()).expect("resolve");
+    assert!(
+        exact.matches.iter().all(|m| m.score >= 0.8),
+        "exact-norm matches should score >=0.8, got {exact:?}"
+    );
+    // Word-overlap-only match ("email address field" shares words with the
+    // "Email Address" concept but has no exact norm) scores in the 0.3–0.7
+    // band.
+    let overlap = resolve(&store, "email address field", &ResolveOptions::default())
+        .expect("resolve");
+    assert!(
+        overlap.matches.iter().all(|m| m.score < 0.8),
+        "word-overlap matches should score <0.8, got {overlap:?}"
+    );
+}
+
+

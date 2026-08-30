@@ -416,3 +416,90 @@ fn file_text_cap_genuinely_bounds_a_single_files_stored_diff_text() {
     );
     assert_eq!(truncated, 1, "the oversized file's hunk must be flagged truncated, never silently clipped");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2: schema version stamp, phase-A re-run on ref change, lazy ingest
+// ---------------------------------------------------------------------------
+
+#[test]
+fn index_state_reports_schema_version() {
+    let dir = make_repo();
+    let root = dir.path();
+    let store = FactsStore::open(root).expect("open store");
+    let state = store.index_state();
+    assert_eq!(
+        state.schema_version,
+        pixel_facts::store::FACTS_SCHEMA_VERSION,
+        "index_state must report the on-disk schema version"
+    );
+}
+
+#[test]
+fn phase_a_reruns_when_refs_change() {
+    let dir = make_repo();
+    let root = dir.path();
+    let mut store = FactsStore::open(root).expect("open store");
+    let opts = IngestOptions::default();
+    ingest_until_fresh(&mut store, &opts).expect("ingest until fresh");
+    assert!(store.index_state().fresh, "should be fresh after ingest");
+
+    // Add a new commit: refs moved, so the index is stale again.
+    fs::write(root.join("src/main.rs"), "fn main() {\n    println!(\"v2\");\n}\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "bump to v2"]);
+
+    let state = store.index_state();
+    assert!(
+        !state.fresh,
+        "a ref move must make the index stale, got {state:?}"
+    );
+    assert_eq!(
+        state.phase, "phase_a",
+        "a ref move should put us back in phase_a, got {state:?}"
+    );
+
+    // Re-ingest converges to fresh again.
+    ingest_until_fresh(&mut store, &opts).expect("re-ingest until fresh");
+    assert!(
+        store.index_state().fresh,
+        "re-ingest should restore freshness after a ref move"
+    );
+}
+
+#[test]
+fn pre_versioned_db_with_rows_self_heals_on_open() {
+    let dir = make_repo();
+    let root = dir.path();
+    // Build a store and ingest so the db has rows.
+    {
+        let mut store = FactsStore::open(root).expect("open store");
+        ingest_until_fresh(&mut store, &IngestOptions::default()).expect("ingest");
+        // Simulate a pre-versioned (poisoned) db: reset user_version to 0
+        // while rows remain. On next open it must be rebuilt (self-healed).
+        store
+            .conn()
+            .pragma_update(None, "user_version", 0)
+            .expect("reset version");
+    }
+    let store = FactsStore::open(root).expect("reopen");
+    let state = store.index_state();
+    assert_eq!(
+        state.schema_version,
+        pixel_facts::store::FACTS_SCHEMA_VERSION,
+        "reopened store must be stamped with the current schema version"
+    );
+    // The poisoned db was rebuilt, so it's empty again (derived data).
+    assert_eq!(state.total_commits, 0, "rebuilt db should start empty");
+}
+
+#[test]
+fn lazy_ingest_is_bounded_and_converges() {
+    let dir = make_repo();
+    let root = dir.path();
+    let mut store = FactsStore::open(root).expect("open store");
+    // A generous budget still converges for a tiny 3-commit repo.
+    let report = pixel_facts::ingest::ingest_until_fresh_bounded(&mut store, 5000)
+        .expect("bounded lazy ingest");
+    assert!(report.fresh, "bounded lazy ingest should converge on a tiny repo");
+    assert!(store.index_state().fresh, "index_state should be fresh after lazy ingest");
+}

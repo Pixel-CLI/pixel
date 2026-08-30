@@ -8,6 +8,8 @@
 //!   names.
 //! - **T2 word intersection** all kinds (AND, degrade to OR).
 //! - **T3 trigram fallback** (verified matches, low confidence).
+//! - **Symbol fallback** — no concept matched, but a symbol's ident words
+//!   overlap the query (e.g. "checkout page" → `CheckoutPage`).
 //! - Miss → `unresolved` with the tiers attempted (honest signal that real
 //!   search/LLM is warranted).
 //!
@@ -23,7 +25,7 @@ use serde::Serialize;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::concept::{ConceptKind, concept_words, normalize};
-use crate::store::{ConceptRow, GraphStore, StoreError};
+use crate::store::{ConceptRow, GraphStore, StoreError, SymbolKind, SymbolRow};
 
 // ---------------------------------------------------------------------------
 // response structs
@@ -49,6 +51,9 @@ pub enum Tier {
     T1,
     T2,
     T3,
+    /// Symbol fallback: no concept matched, but a symbol's ident words
+    /// overlap the query. Emitted as `tier: "symbol"`.
+    Symbol,
 }
 
 impl Tier {
@@ -58,6 +63,7 @@ impl Tier {
             Tier::T1 => "T1",
             Tier::T2 => "T2",
             Tier::T3 => "T3",
+            Tier::Symbol => "symbol",
         }
     }
 }
@@ -73,6 +79,9 @@ pub struct ConceptMatch {
     pub norm: String,
     /// Owner symbol name (smallest enclosing symbol), if any.
     pub owner: Option<String>,
+    /// The symbol kind when this match came from the symbol fallback tier
+    /// (`Some("function")`, `Some("class")`, …); `None` for concept matches.
+    pub symbol_kind: Option<String>,
     pub score: f64,
     pub reasons: Vec<String>,
 }
@@ -103,8 +112,15 @@ pub struct ResolveOutcome {
 
 /// One candidate as produced by the cascade before reranking (mirrors
 /// `pixel_rank::rerank::RankedCandidate`).
+///
+/// `id` is a stable unique key for the candidate (the concept/symbol row id
+/// cast to `u64`). The daemon adapter (Phase 1c) must preserve it through the
+/// `pixel_rank::rerank::rerank` round-trip so the local rebuild can look
+/// matches back up by id — this is what keeps same-file concepts from being
+/// collapsed to one-per-path.
 #[derive(Debug, Clone)]
 pub struct RankedCandidate {
+    pub id: u64,
     pub path: String,
     pub rrf_score: f64,
     pub tier: String,
@@ -354,6 +370,20 @@ pub fn resolve(
         }
     }
 
+    // Symbol fallback: no concept matched, but a symbol's ident words overlap
+    // the query's ident words (e.g. "checkout page" → `CheckoutPage`). This
+    // is the last tier before an honest `unresolved`.
+    if !tokens.is_empty() {
+        tiers_attempted.push(Tier::Symbol);
+        // Match on the query's camelCase-split ident words (e.g. "handleLogin"
+        // → ["handle", "login"]) so a single camelCase query can hit a symbol.
+        let ident_words = symbol_words(phrase);
+        let symbols = symbol_fallback(store, &ident_words, limit as u32)?;
+        if !symbols.is_empty() {
+            return finish_symbols(store, phrase, symbols, opts, tiers_attempted);
+        }
+    }
+
     // Miss.
     let index_state = index_state(store)?;
     Ok(ResolveOutcome {
@@ -368,6 +398,9 @@ pub fn resolve(
 
 /// Build the final outcome from a set of candidate rows: attach path/owner,
 /// score, reasons, rerank, and cap to `limit`.
+///
+/// Rerank is keyed by candidate `id` (the concept row id), not by path, so
+/// multiple concepts in the same file are never collapsed to one-per-path.
 fn finish(
     store: &GraphStore,
     phrase: &str,
@@ -378,49 +411,47 @@ fn finish(
     tiers_attempted: Vec<Tier>,
 ) -> Result<ResolveOutcome, StoreError> {
     let limit = opts.limit.max(1);
-    let mut matches: Vec<ConceptMatch> = Vec::with_capacity(rows.len());
-    for row in rows {
+    let mut candidates: Vec<RankedCandidate> = Vec::with_capacity(rows.len());
+    let mut by_id: HashMap<u64, ConceptMatch> = HashMap::with_capacity(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        let id = row.id as u64;
         let path = file_path(store, row.file_id)?;
         let owner = match row.owner_symbol_id {
-            Some(id) => symbol_name(store, id)?,
+            Some(sid) => symbol_name(store, sid)?,
             None => None,
         };
         let reasons = match_reasons(&row, phrase);
-        matches.push(ConceptMatch {
-            path,
+        let score = score_match(&row, phrase, owner.as_deref(), &path);
+        let m = ConceptMatch {
+            path: path.clone(),
             start_line: row.start_line,
             end_line: row.end_line,
             kind: row.kind,
             raw: row.raw,
             norm: row.norm,
             owner,
-            score: 1.0,
+            symbol_kind: None,
+            score,
             reasons,
+        };
+        by_id.insert(id, m.clone());
+        candidates.push(RankedCandidate {
+            id,
+            path,
+            rrf_score: 1.0 / (i as f64 + 1.0),
+            tier: tier.as_str().to_string(),
         });
     }
 
     // Rerank within the tier via the pluggable reranker.
-    let candidates: Vec<RankedCandidate> = matches
-        .iter()
-        .enumerate()
-        .map(|(i, m)| RankedCandidate {
-            path: m.path.clone(),
-            rrf_score: 1.0 / (i as f64 + 1.0),
-            tier: tier.as_str().to_string(),
-        })
-        .collect();
     let reranker: &dyn Reranker = opts
         .reranker
         .as_deref()
         .unwrap_or(&LexicalReranker);
     let reordered = reranker.rerank(candidates, &opts.signals);
-    let by_path: HashMap<&str, ConceptMatch> = matches
-        .iter()
-        .map(|m| (m.path.as_str(), m.clone()))
-        .collect();
     let mut ordered: Vec<ConceptMatch> = reordered
         .into_iter()
-        .filter_map(|c| by_path.get(c.path.as_str()).cloned())
+        .filter_map(|c| by_id.get(&c.id).cloned())
         .collect();
     ordered.truncate(limit);
 
@@ -428,6 +459,66 @@ fn finish(
     Ok(ResolveOutcome {
         confidence,
         tier: Some(tier),
+        matches: ordered,
+        inputs_digest: inputs_digest(phrase, &index_state),
+        index_state,
+        tiers_attempted,
+    })
+}
+
+/// Build the final outcome for the symbol fallback tier. Each `SymbolRow`
+/// becomes a [`ConceptMatch`] carrying its real symbol kind in `symbol_kind`
+/// and a best-effort [`ConceptKind`] in `kind` (see [`symbol_kind_to_concept`]).
+fn finish_symbols(
+    store: &GraphStore,
+    phrase: &str,
+    rows: Vec<SymbolRow>,
+    opts: &ResolveOptions,
+    tiers_attempted: Vec<Tier>,
+) -> Result<ResolveOutcome, StoreError> {
+    let limit = opts.limit.max(1);
+    let mut candidates: Vec<RankedCandidate> = Vec::with_capacity(rows.len());
+    let mut by_id: HashMap<u64, ConceptMatch> = HashMap::with_capacity(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        let id = row.id as u64;
+        let path = file_path(store, row.file_id)?;
+        let score = score_symbol(&row, phrase, &path);
+        let m = ConceptMatch {
+            path: path.clone(),
+            start_line: row.start_line,
+            end_line: row.end_line,
+            kind: symbol_kind_to_concept(row.kind),
+            raw: row.name.clone(),
+            norm: normalize(&row.name),
+            owner: None,
+            symbol_kind: Some(row.kind.as_str().to_string()),
+            score,
+            reasons: vec!["symbol fallback".to_string()],
+        };
+        by_id.insert(id, m.clone());
+        candidates.push(RankedCandidate {
+            id,
+            path,
+            rrf_score: 1.0 / (i as f64 + 1.0),
+            tier: Tier::Symbol.as_str().to_string(),
+        });
+    }
+
+    let reranker: &dyn Reranker = opts
+        .reranker
+        .as_deref()
+        .unwrap_or(&LexicalReranker);
+    let reordered = reranker.rerank(candidates, &opts.signals);
+    let mut ordered: Vec<ConceptMatch> = reordered
+        .into_iter()
+        .filter_map(|c| by_id.get(&c.id).cloned())
+        .collect();
+    ordered.truncate(limit);
+
+    let index_state = index_state(store)?;
+    Ok(ResolveOutcome {
+        confidence: Confidence::Ranked,
+        tier: Some(Tier::Symbol),
         matches: ordered,
         inputs_digest: inputs_digest(phrase, &index_state),
         index_state,
@@ -461,6 +552,122 @@ fn match_reasons(row: &ConceptRow, phrase: &str) -> Vec<String> {
         reasons.push(format!("kind {}", row.kind.as_str()));
     }
     reasons
+}
+
+// ---------------------------------------------------------------------------
+// real scoring
+// ---------------------------------------------------------------------------
+
+/// Real per-match score for a concept row:
+/// - exact-norm match → 1.0
+/// - substring match → 0.8
+/// - word-overlap ratio → 0.3–0.7 (ratio of query words present in the norm)
+/// - ×0.7 when the path is a test path
+/// - +0.15 when the owner symbol's ident words overlap the query (this is
+///   what finally makes symbol names count toward concept ranking)
+///
+/// Clamped to `[0.0, 1.0]`.
+fn score_match(row: &ConceptRow, phrase: &str, owner: Option<&str>, path: &str) -> f64 {
+    let norm = normalize(phrase);
+    let mut score = 0.0;
+    if !norm.is_empty() && row.norm == norm {
+        score = 1.0;
+    } else if !norm.is_empty() && row.norm.contains(&norm) {
+        score = 0.8;
+    } else {
+        let words = concept_words(&row.norm);
+        let qwords = concept_words(&norm);
+        if !qwords.is_empty() {
+            let overlap = qwords.iter().filter(|w| words.contains(w)).count();
+            let ratio = overlap as f64 / qwords.len() as f64;
+            score = 0.3 + ratio * 0.4; // 0.3–0.7 band
+        }
+    }
+    if is_test_path(path) {
+        score *= 0.7;
+    }
+    if let Some(owner) = owner {
+        let owner_words = symbol_words(owner);
+        let qwords = concept_words(&norm);
+        if owner_words.iter().any(|w| qwords.contains(w)) {
+            score += 0.15;
+        }
+    }
+    score.clamp(0.0, 1.0)
+}
+
+/// Score for a symbol-fallback match: word-overlap ratio of the query's ident
+/// words against the symbol's camelCase-split name, in the 0.3–0.7 band, with
+/// the same test-path penalty.
+fn score_symbol(row: &SymbolRow, phrase: &str, path: &str) -> f64 {
+    let qwords = symbol_words(phrase);
+    let name_words = symbol_words(&row.name);
+    let mut score = 0.0;
+    if !qwords.is_empty() {
+        let overlap = qwords.iter().filter(|w| name_words.contains(w)).count();
+        let ratio = overlap as f64 / qwords.len() as f64;
+        score = 0.3 + ratio * 0.4;
+    }
+    if is_test_path(path) {
+        score *= 0.7;
+    }
+    score.clamp(0.0, 1.0)
+}
+
+/// True when a path looks like a test file (`test`/`spec`/`__tests__`).
+fn is_test_path(path: &str) -> bool {
+    let p = path.to_lowercase();
+    p.contains("/test/")
+        || p.contains("/tests/")
+        || p.contains("/__tests__/")
+        || p.contains(".test.")
+        || p.contains("_test.")
+        || p.contains(".spec.")
+        || p.contains("_spec.")
+}
+
+/// Split an identifier into lowercased words on non-alphanumeric and
+/// camelCase boundaries: `ContactForm` → `["contact", "form"]`,
+/// `WELCOME_MESSAGE` → `["welcome", "message"]`, `onSubmit` →
+/// `["on", "submit"]`. Used to match query ident-words against symbol names
+/// and owner-symbol names.
+fn symbol_words(name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            let boundary = !cur.is_empty()
+                && c.is_ascii_uppercase()
+                && cur.chars().last().map(|x| x.is_ascii_lowercase()).unwrap_or(false);
+            if boundary {
+                out.push(cur.to_lowercase());
+                cur.clear();
+            }
+            cur.push(c);
+        } else if !cur.is_empty() {
+            out.push(cur.to_lowercase());
+            cur.clear();
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur.to_lowercase());
+    }
+    out
+}
+
+/// Best-effort [`ConceptKind`] for a symbol match's `kind` field. The real
+/// kind is carried losslessly in `ConceptMatch::symbol_kind`; this mapping only
+/// gives the response a non-arbitrary `kind` for consumers that read it.
+fn symbol_kind_to_concept(kind: SymbolKind) -> ConceptKind {
+    match kind {
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Const => ConceptKind::String,
+        SymbolKind::Class
+        | SymbolKind::Struct
+        | SymbolKind::Enum
+        | SymbolKind::Trait
+        | SymbolKind::Interface
+        | SymbolKind::Module => ConceptKind::Component,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +786,64 @@ fn trigram_fallback(store: &GraphStore, norm: &str, limit: u32) -> Result<Vec<Co
     Ok(scored.into_iter().map(|(_, row)| row).collect())
 }
 
+// ---------------------------------------------------------------------------
+// symbol fallback tier
+// ---------------------------------------------------------------------------
+
+/// Bound on how many symbol rows the fallback scan will consider, mirroring
+/// [`TRIGRAM_SCAN_CAP`].
+const SYMBOL_SCAN_CAP: u32 = 20_000;
+
+/// Symbol fallback: scan a bounded slice of the `symbols` table and keep rows
+/// whose camelCase-split name shares at least one ident word with the query's
+/// ident words, ranked by overlap ratio. This is the last tier before
+/// `unresolved`.
+fn symbol_fallback(
+    store: &GraphStore,
+    words: &[String],
+    limit: u32,
+) -> Result<Vec<SymbolRow>, StoreError> {
+    if words.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = "SELECT id, uid, file_id, name, qualified, kind, start_line, end_line, sig
+               FROM symbols LIMIT ?1";
+    let mut stmt = store.conn().prepare(sql)?;
+    let mut scored: Vec<(f64, SymbolRow)> = stmt
+        .query_map(params![SYMBOL_SCAN_CAP], |r| {
+            Ok(SymbolRow {
+                id: r.get(0)?,
+                uid: r.get(1)?,
+                file_id: r.get(2)?,
+                name: r.get(3)?,
+                qualified: r.get(4)?,
+                kind: SymbolKind::parse(&r.get::<_, String>(5)?),
+                start_line: r.get(6)?,
+                end_line: r.get(7)?,
+                sig: r.get(8)?,
+            })
+        })?
+        .filter_map(|row: rusqlite::Result<SymbolRow>| row.ok())
+        .filter_map(|row| {
+            let name_words = symbol_words(&row.name);
+            let overlap: Vec<&str> = words
+                .iter()
+                .filter(|t| name_words.contains(t))
+                .map(|t| t.as_str())
+                .collect();
+            if overlap.is_empty() {
+                None
+            } else {
+                let score = overlap.len() as f64 / words.len() as f64;
+                Some((score, row))
+            }
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
+    scored.truncate(limit as usize);
+    Ok(scored.into_iter().map(|(_, row)| row).collect())
+}
+
 fn index_state(store: &GraphStore) -> Result<IndexState, StoreError> {
     let concepts = store.concept_count()?;
     let concepts_version = store.concepts_version()?;
@@ -611,3 +876,126 @@ impl Clone for Box<dyn Reranker> {
         self.clone_box()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::concept::ConceptKind;
+
+    fn store() -> GraphStore {
+        GraphStore::open_in_memory().unwrap()
+    }
+
+    fn add_file(store: &mut GraphStore, path: &str) -> i64 {
+        store.replace_file(path, "blob", "tsx").unwrap()
+    }
+
+    #[test]
+    fn same_file_concepts_are_not_collapsed() {
+        let mut store = store();
+        let f1 = add_file(&mut store, "src/app.tsx");
+        let f2 = add_file(&mut store, "src/app.test.tsx");
+        store
+            .insert_concept(f1, ConceptKind::UiText, "Submit", "submit", "", 10, 10, None)
+            .unwrap();
+        store
+            .insert_concept(f1, ConceptKind::UiText, "Submit", "submit", "", 20, 20, None)
+            .unwrap();
+        store
+            .insert_concept(f2, ConceptKind::UiText, "Submit", "submit", "", 5, 5, None)
+            .unwrap();
+
+        let out = resolve(&store, "submit", &ResolveOptions::default()).unwrap();
+        assert_eq!(out.matches.len(), 3, "same-file concepts must not collapse");
+        let same_file = out
+            .matches
+            .iter()
+            .filter(|m| m.path == "src/app.tsx")
+            .count();
+        assert_eq!(same_file, 2);
+    }
+
+    #[test]
+    fn exact_norm_scores_1_and_test_path_penalized() {
+        let mut store = store();
+        let f1 = add_file(&mut store, "src/app.tsx");
+        let f2 = add_file(&mut store, "src/app.test.tsx");
+        store
+            .insert_concept(f1, ConceptKind::UiText, "Submit", "submit", "", 10, 10, None)
+            .unwrap();
+        store
+            .insert_concept(f2, ConceptKind::UiText, "Submit", "submit", "", 5, 5, None)
+            .unwrap();
+
+        let out = resolve(&store, "submit", &ResolveOptions::default()).unwrap();
+        let prod = out.matches.iter().find(|m| m.path == "src/app.tsx").unwrap();
+        let test = out
+            .matches
+            .iter()
+            .find(|m| m.path == "src/app.test.tsx")
+            .unwrap();
+        assert!((prod.score - 1.0).abs() < 1e-9, "prod score {}", prod.score);
+        assert!((test.score - 0.7).abs() < 1e-9, "test score {}", test.score);
+    }
+
+    #[test]
+    fn symbol_fallback_tier() {
+        let mut store = store();
+        let f1 = add_file(&mut store, "src/app.tsx");
+        store
+            .insert_symbol(
+                f1,
+                "src/app.tsx#handleLogin#function",
+                "handleLogin",
+                "handleLogin",
+                SymbolKind::Function,
+                1,
+                3,
+                "handleLogin()",
+            )
+            .unwrap();
+
+        let out = resolve(&store, "handleLogin", &ResolveOptions::default()).unwrap();
+        assert_eq!(out.tier, Some(Tier::Symbol));
+        assert_eq!(out.matches.len(), 1);
+        assert_eq!(out.matches[0].raw, "handleLogin");
+        assert_eq!(out.matches[0].symbol_kind.as_deref(), Some("function"));
+    }
+
+    #[test]
+    fn owner_symbol_name_boosts_score() {
+        let mut store = store();
+        let f1 = add_file(&mut store, "src/app.tsx");
+        let sym = store
+            .insert_symbol(
+                f1,
+                "src/app.tsx#submitButton#function",
+                "submitButton",
+                "submitButton",
+                SymbolKind::Function,
+                1,
+                3,
+                "submitButton()",
+            )
+            .unwrap();
+        store
+            .insert_concept(f1, ConceptKind::UiText, "Submit", "submit", "", 10, 10, Some(sym))
+            .unwrap();
+
+        let out = resolve(&store, "submit button", &ResolveOptions::default()).unwrap();
+        assert_eq!(out.matches.len(), 1);
+        assert!(
+            (out.matches[0].score - 0.65).abs() < 1e-9,
+            "score was {}",
+            out.matches[0].score
+        );
+    }
+
+    #[test]
+    fn symbol_words_splits_camel_case() {
+        assert_eq!(symbol_words("ContactForm"), vec!["contact", "form"]);
+        assert_eq!(symbol_words("WELCOME_MESSAGE"), vec!["welcome", "message"]);
+        assert_eq!(symbol_words("onSubmit"), vec!["on", "submit"]);
+    }
+}
+

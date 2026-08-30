@@ -1,0 +1,18 @@
+=== pixel-bench: claude -p agent workflows ===
+Date: 2026-08-30T04:30:27Z
+Repo: 66ea2cf (/Users/livio/Documents/pixel)
+Pixel: pixel 0.1.0
+
+--- BASELINE (no pixel on PATH) ---
+baseline-s1-locate: 16103ms
+baseline-s2-scope: 85138ms
+baseline-s3-sync: 13791ms
+baseline-s4-recover: 45696ms
+
+--- WITH PIXEL (pixel on PATH, indexed) ---
+pixel-s1-locate: 13351ms
+pixel-s2-scope: 55208ms
+pixel-s3-sync: 12343ms
+pixel-s4-recover: 41825ms
+
+=== done ===

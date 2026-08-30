@@ -10,6 +10,7 @@ pixel-proto = { path = "../pixel-proto" }
 pixel-session = { path = "../pixel-session" }
 pixel-daemon = { path = "../pixel-daemon" }
 pixel-index = { path = "../pixel-index" }
+pixel-facts = { path = "../pixel-facts" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

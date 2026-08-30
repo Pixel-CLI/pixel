@@ -394,20 +394,54 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             })
         }));
 
-        checks.push(check("facts.freshness", || -> std::result::Result<DoctorCheckDetail, String> {
-            let db = root.join(pixel_index::index::SHARD_DIR).join("history.db");
-            if !db.is_file() {
-                return Err("facts/history db not built".into());
+        checks.push(check_status("facts.freshness", || -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+            let store = pixel_facts::FactsStore::open(root).map_err(|e| e.to_string())?;
+            let state = store.index_state();
+            // Red: schema version mismatch — the db was written by a different
+            // build and must be rebuilt before it can be trusted.
+            if state.schema_version != pixel_facts::store::FACTS_SCHEMA_VERSION {
+                return Err(format!(
+                    "facts schema version mismatch: on-disk {} != expected {} (rebuild required)",
+                    state.schema_version,
+                    pixel_facts::store::FACTS_SCHEMA_VERSION
+                ));
             }
-            let mtime = fs::metadata(&db)
-                .map_err(|e| e.to_string())?
-                .modified()
-                .map_err(|e| e.to_string())?;
-            let age = age_secs(mtime);
-            Ok(DoctorCheckDetail {
-                summary: format!("facts db present ({}s old)", age),
-                detail: Some(serde_json::json!({ "age_secs": age })),
-            })
+            // Red: commits indexed but zero diff text — a poisoned signature
+            // (a db that claims commits yet has no diff coverage).
+            if state.commits_indexed > 0 && state.diff_indexed_pct == 0.0 {
+                return Err(format!(
+                    "facts db poisoned: {} commits indexed but 0% diff coverage",
+                    state.commits_indexed
+                ));
+            }
+            let detail = Some(serde_json::json!({
+                "phase": state.phase,
+                "commits_indexed": state.commits_indexed,
+                "total_commits": state.total_commits,
+                "diff_indexed_pct": state.diff_indexed_pct,
+                "fresh": state.fresh,
+                "schema_version": state.schema_version,
+            }));
+            if !state.fresh {
+                // Yellow: stale — ingest has not caught up to the current refs.
+                return Ok((CheckStatus::Yellow, DoctorCheckDetail {
+                    summary: format!(
+                        "facts db present but stale (phase {}, {} commits, {:.0}% diff coverage)",
+                        state.phase,
+                        state.commits_indexed,
+                        state.diff_indexed_pct * 100.0
+                    ),
+                    detail,
+                }));
+            }
+            Ok((CheckStatus::Green, DoctorCheckDetail {
+                summary: format!(
+                    "facts db fresh ({} commits, {:.0}% diff coverage)",
+                    state.commits_indexed,
+                    state.diff_indexed_pct * 100.0
+                ),
+                detail,
+            }))
         }));
     }
 
@@ -440,6 +474,35 @@ fn check(
         Ok(d) => DoctorCheck {
             id: id.into(),
             status: CheckStatus::Green,
+            required: true,
+            duration_ms: started.elapsed().as_millis() as u64,
+            summary: d.summary,
+            reason: None,
+            detail: d.detail,
+        },
+        Err(reason) => DoctorCheck {
+            id: id.into(),
+            status: CheckStatus::Red,
+            required: true,
+            duration_ms: started.elapsed().as_millis() as u64,
+            summary: "check failed".into(),
+            reason: Some(reason),
+            detail: None,
+        },
+    }
+}
+
+/// Like `check`, but the closure may also report a non-fatal `Yellow` status
+/// (e.g. a stale-but-valid index) in addition to `Green`/`Red`.
+fn check_status(
+    id: &str,
+    run: impl FnOnce() -> std::result::Result<(CheckStatus, DoctorCheckDetail), String>,
+) -> DoctorCheck {
+    let started = Instant::now();
+    match run() {
+        Ok((status, d)) => DoctorCheck {
+            id: id.into(),
+            status,
             required: true,
             duration_ms: started.elapsed().as_millis() as u64,
             summary: d.summary,

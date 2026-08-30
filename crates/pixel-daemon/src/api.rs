@@ -606,6 +606,10 @@ impl Service {
         // S3: per-keyword content match counts (capped probes keep this ms-scale).
         const CONTENT_PROBE_LIMIT: usize = 500;
         let mut content_hits: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+        // Phase 3 item 1 (targets evidence): keep the first ~2 match lines per
+        // (file, keyword) so the caller can verify a target's content match
+        // without re-searching. Near-zero cost — the lines are already fetched.
+        let mut evidence: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         for kw in &query.keywords {
             // Keywords are [a-z0-9_]+ by construction — safe inside a regex.
             let pattern = format!("(?i){kw}");
@@ -614,8 +618,18 @@ impl Service {
                     .search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
             {
                 let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+                let mut kept_per_file: HashMap<String, usize> = HashMap::new();
                 for m in matches {
-                    *counts.entry(m.path).or_default() += 1;
+                    *counts.entry(m.path.clone()).or_default() += 1;
+                    let kept = kept_per_file.entry(m.path.clone()).or_insert(0);
+                    if *kept < 2 {
+                        *kept += 1;
+                        evidence.entry(m.path.clone()).or_default().push(json!({
+                            "line": m.line_number,
+                            "text": m.line,
+                            "keyword": kw,
+                        }));
+                    }
                 }
                 if !counts.is_empty() {
                     content_hits.insert(kw.clone(), counts.into_iter().collect());
@@ -683,7 +697,7 @@ impl Service {
         let opts = engine::TargetsOptions {
             limit: limit.unwrap_or(engine::DEFAULT_LIMIT),
         };
-        let report = engine::compute_targets(
+        let mut report = engine::compute_targets(
             task,
             &query,
             engine::SignalInputs {
@@ -697,7 +711,44 @@ impl Service {
             },
             &opts,
         );
+        // Phase 1c: rerank within tiers via the Engine-3 reranker (first
+        // production call site). v1 = activity-only signals; session/error
+        // channels land in Phase 3. The per-path test penalty demotes test
+        // files only when the task does NOT mention tests/specs (a test file
+        // is a worse target for a non-test task).
+        let target_paths: Vec<String> = report.targets.iter().map(|t| t.path.clone()).collect();
+        let signals = self.engine_signals(&target_paths);
+        // Per-path test penalty: demote a test file only when the task does
+        // NOT mention tests/specs (a test file is a *worse* target for a
+        // non-test task, but a *better* one for a test task).
+        let mentions_tests = task
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|t| {
+                matches!(
+                    t.to_ascii_lowercase().as_str(),
+                    "test" | "tests" | "spec" | "specs"
+                )
+            });
+        let penalty = |path: &str| -> f64 {
+            if pixel_rank::signals::is_test_path(path) && !mentions_tests {
+                0.7
+            } else {
+                1.0
+            }
+        };
+        report.targets = pixel_rank::rerank::rerank_targets(report.targets, &signals, &penalty);
         let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+        // Phase 3 item 1: attach per-file content evidence to each target so
+        // the caller can trust a content match without re-searching (S2).
+        if let Some(targets) = out.get_mut("targets").and_then(Value::as_array_mut) {
+            for t in targets {
+                if let Some(path) = t.get("path").and_then(Value::as_str) {
+                    if let Some(ev) = evidence.get(path) {
+                        t["evidence"] = json!(ev);
+                    }
+                }
+            }
+        }
         if let Some(stats) = out.get_mut("stats") {
             stats["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
             stats["commit_oid"] = json!(self.index.status().commit_oid);
@@ -1132,9 +1183,21 @@ impl Service {
     fn op_resolve(&mut self, phrase: &str, limit: Option<usize>) -> Result<Value, String> {
         self.ensure_graph()?;
         let store = self.graph.as_ref().ok_or("graph store unavailable")?;
+        // Phase 1c: feed activity-only rerank signals (git churn) over the
+        // candidate universe; session/error channels land in Phase 3.
+        let all_paths = self.index.paths();
+        let signals = self.engine_signals(&all_paths);
         let opts = pixel_graph::concept_resolve::ResolveOptions {
             limit: limit.unwrap_or(8),
-            ..Default::default()
+            // Phase 1c: wire the real Engine-3 reranker (per-path test
+            // penalty) instead of the default LexicalReranker.
+            reranker: Some(Box::new(EngineReranker::new(phrase))),
+            signals: pixel_graph::concept_resolve::SignalBundle {
+                activity: signals.activity,
+                session: signals.session,
+                session_reasons: signals.session_reasons,
+                error_reasons: signals.error_reasons,
+            },
         };
         let outcome = pixel_graph::concept_resolve::resolve(store, phrase, &opts)
             .map_err(|e| e.to_string())?;
@@ -1225,11 +1288,127 @@ impl Service {
             .map_err(|e| e.to_string())?;
         Ok(json!({"recorded": true, "id": id, "kind": kind}))
     }
+
+    /// Engine-3 rerank signals shared by `op_resolve` and `op_targets`.
+    /// v1 = activity-only: git churn over the last 90 days (via the one-shot
+    /// `git log --name-only` fallback) plus the current dirty set. Session +
+    /// error-sink channels land in Phase 3. Deterministic for a fixed repo
+    /// state; degrades to an empty bundle on any git failure (the reranker
+    /// then applies only the per-path test penalty).
+    fn engine_signals(&self, candidates: &[String]) -> pixel_rank::signals::SignalBundle {
+        use pixel_rank::signals::{SignalOptions, compute_signals};
+        let runner = pixel_git::GitRunner::new(&self.root);
+        let dirty: Vec<String> = pixel_index::gitsync::status_porcelain(&self.root)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let opts = SignalOptions {
+            now_ms,
+            ..Default::default()
+        };
+        compute_signals(&runner, None, &[], None, &dirty, candidates, &opts).unwrap_or_default()
+    }
 }
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Adapter wiring pixel-rank's Engine-3 reranker into pixel-graph's pluggable
+/// `Reranker` trait. pixel-graph cannot depend on pixel-rank (circular), so
+/// the daemon adapts `pixel_rank::rerank::rerank` into the trait here.
+///
+/// v1 = activity-only signals (the bundle is passed through as-is; the daemon
+/// has no git/session signal source yet). Session + error-sink channels land
+/// in Phase 3.
+#[derive(Clone)]
+struct EngineReranker {
+    /// Whether the resolve phrase mentions tests/specs — gates the per-path
+    /// test penalty (a test file is demoted only when the task is NOT about
+    /// tests).
+    mentions_tests: bool,
+    /// The test-penalty multiplier (0.7).
+    test_penalty: f64,
+}
+
+impl EngineReranker {
+    fn new(task: &str) -> Self {
+        EngineReranker {
+            mentions_tests: task
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|t| {
+                    matches!(
+                        t.to_ascii_lowercase().as_str(),
+                        "test" | "tests" | "spec" | "specs"
+                    )
+                }),
+            test_penalty: 0.7,
+        }
+    }
+}
+
+impl pixel_graph::concept_resolve::Reranker for EngineReranker {
+    fn rerank(
+        &self,
+        candidates: Vec<pixel_graph::concept_resolve::RankedCandidate>,
+        signals: &pixel_graph::concept_resolve::SignalBundle,
+    ) -> Vec<pixel_graph::concept_resolve::RankedCandidate> {
+        use pixel_rank::rerank::RankedCandidate as PrCandidate;
+
+        let pr_candidates: Vec<PrCandidate> = candidates
+            .iter()
+            .map(|c| PrCandidate {
+                id: c.id,
+                path: c.path.clone(),
+                rrf_score: c.rrf_score,
+                tier: c.tier.clone(),
+            })
+            .collect();
+        let pr_signals = pixel_rank::signals::SignalBundle {
+            activity: signals.activity.clone(),
+            session: signals.session.clone(),
+            session_reasons: signals.session_reasons.clone(),
+            error_reasons: signals.error_reasons.clone(),
+        };
+        // Per-candidate test penalty: demote a test/spec file only when the
+        // phrase itself is NOT about tests (per-path, via `is_test_path`).
+        let penalty = |path: &str| -> f64 {
+            if pixel_rank::signals::is_test_path(path) && !self.mentions_tests {
+                self.test_penalty
+            } else {
+                1.0
+            }
+        };
+        let reordered = pixel_rank::rerank::rerank(pr_candidates, &pr_signals, &penalty);
+
+        // Restore the pixel-graph candidate shape (incl. `id`) by id — the
+        // reranker only reorders, it never adds/removes candidates. Keying by
+        // id (not path) keeps same-file concepts distinct (concept_resolve.rs
+        // requires the adapter to preserve `id` through the round-trip).
+        let by_id: HashMap<u64, &pixel_graph::concept_resolve::RankedCandidate> =
+            candidates.iter().map(|c| (c.id, c)).collect();
+        reordered
+            .into_iter()
+            .map(|c| {
+                let orig = by_id[&c.id];
+                pixel_graph::concept_resolve::RankedCandidate {
+                    id: orig.id,
+                    path: orig.path.clone(),
+                    rrf_score: c.rrf_score,
+                    tier: orig.tier.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn clone_box(&self) -> Box<dyn pixel_graph::concept_resolve::Reranker> {
+        Box::new(self.clone())
+    }
+}
 
 enum Resolved {
     One(SymbolRow),
@@ -1688,8 +1867,9 @@ fn to_val<T: Serialize>(t: T) -> Value {
 /// sets; order may differ deliberately due to ranking."
 ///
 /// Signals (same RRF family as `targets`, K=60):
-/// - **Filename**: the search pattern appears in the file's basename.
-///   Weight 3.0 (matches `targets`'s filename signal).
+/// - **Filename**: a word of the search pattern appears in the file's
+///   basename (per-word via `split_ident_words`, so "gain ledger" matches
+///   `ledger.ts`). Weight 3.0 (matches `targets`'s filename signal).
 /// - **Symbol**: the search pattern matches a symbol name in that file
 ///   (via the graph, if available). Weight 2.5.
 /// - **Content density**: files with more matches rank higher. Weight 1.5.
@@ -1715,58 +1895,55 @@ fn rank_search_matches(
         return Vec::new();
     }
 
-    // --- Signal 1: filename match ---
-    // Files whose basename contains the pattern (case-insensitive) rank first.
-    let pat_lower = pattern.to_lowercase();
-    let mut filename_rank: Vec<(usize, String)> = files
+    // --- Signal 1: per-word filename match ---
+    // Split the pattern into identifier words; a file whose basename contains
+    // any of those words ranks by how many distinct words match. This fixes
+    // S1: "gain ledger" now matches `ledger.ts` (the word "ledger" is a
+    // basename component), whereas whole-pattern basename containment
+    // (`basename.contains("gain ledger")`) matched nothing. Within a tier, a
+    // shorter/more-specific basename outranks a longer one (Bug 4: previously
+    // sorted by length DESCENDING, so the longest matching filename won).
+    let words: Vec<String> = pixel_graph::split_ident_words(pattern)
+        .into_iter()
+        .map(|w| w.to_lowercase())
+        .collect();
+    let mut filename_rank: Vec<(String, usize)> = files
         .iter()
-        .enumerate()
-        .filter(|(_, f)| {
+        .filter_map(|f| {
             let basename = std::path::Path::new(f)
                 .file_name()
                 .map(|s| s.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
-            !pat_lower.is_empty() && basename.contains(&pat_lower)
+            let matched = words
+                .iter()
+                .filter(|w| !w.is_empty() && basename.contains(w.as_str()))
+                .count();
+            if matched > 0 {
+                Some((f.clone(), matched))
+            } else {
+                None
+            }
         })
-        .map(|(i, f)| (i, f.clone()))
         .collect();
-    // Sort by filename match strength: an exact basename-stem match (e.g.
-    // `login.rs` for pattern "login") is its own top tier, ranked strictly
-    // above every substring-only match (e.g. `login_handler_extra_long.rs`,
-    // which merely mentions the pattern in a longer name). Within a tier, a
-    // shorter/more-specific basename outranks a longer one.
-    //
-    // Bug 4 fix: this previously sorted `bb.len().cmp(&ba.len())` —
-    // descending by length — so the LONGEST matching filename won, inverted
-    // from the "exact match > substring" intent stated above. E.g.
-    // `login_handler_extra_long.rs` (mere mention) outranked `login.rs`
-    // (the actual definition).
     filename_rank.sort_by(|a, b| {
-        let ba = std::path::Path::new(&a.1)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let bb = std::path::Path::new(&b.1)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let stem_a = std::path::Path::new(&a.1)
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let stem_b = std::path::Path::new(&b.1)
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let exact_a = stem_a == pat_lower;
-        let exact_b = stem_b == pat_lower;
-        exact_b
-            .cmp(&exact_a)
-            .then_with(|| ba.len().cmp(&bb.len()))
-            .then_with(|| a.1.cmp(&b.1))
+        b.1.cmp(&a.1)
+            .then_with(|| {
+                std::path::Path::new(&a.0)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().len())
+                    .unwrap_or(0)
+                    .cmp(
+                        &std::path::Path::new(&b.0)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().len())
+                            .unwrap_or(0),
+                    )
+            })
+            .then_with(|| a.0.cmp(&b.0))
     });
 
     // --- Signal 2: symbol match (graph, if available) ---
+    let pat_lower = pattern.to_lowercase();
     let symbol_rank: Vec<String> = if let Some(store) = graph {
         // For each file, check if any symbol name contains the pattern.
         let mut hits: Vec<(String, usize)> = files
@@ -1798,64 +1975,36 @@ fn rank_search_matches(
     density_rank.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     // --- RRF fusion (K=60, same as targets) ---
-    // Bug 3 NOTE: these constants intentionally duplicate
-    // `pixel_rank::{RRF_K, W_FILENAME, W_SYMBOL, W_CONTENT}`
-    // (crates/pixel-rank/src/lib.rs) instead of importing them or calling a
-    // shared fusion primitive, because:
-    //   1. those items are private `const`s in pixel-rank, not `pub`, so
-    //      they cannot be referenced from here as-is; and
-    //   2. this fix's scope was restricted to `pixel-daemon/src/api.rs` +
-    //      `pixel-proto/src/error.rs` only — editing pixel-rank's lib.rs
-    //      was out of bounds for this pass to avoid colliding with
-    //      concurrently-running work on sibling crates.
-    // A clean extraction target already exists: `pixel_rank::lexical_rank`
-    // (lib.rs) has an inline loop — `for (list, w) in [(&s1, W_FILENAME),
-    // ...] { for (rank, path) ... scores += w / (RRF_K + rank + 1.0) }` —
-    // that is exactly this same "fuse N ranked path lists by weighted RRF"
-    // primitive. Extracting it into a `pub fn rrf_fuse(lists_with_weights:
-    // &[(&[String], f64)], k: f64) -> Vec<(String, f64)>` (or similar) in
-    // pixel-rank, and exporting the four constants below as `pub`, would
-    // let both `op_targets` and this function call one source of truth
-    // instead of duplicating the formula. Do that refactor before adding a
-    // 3rd/4th independent reimplementation of RRF fusion in this codebase.
-    // Until then, keep these four values byte-for-byte equal to
-    // pixel-rank's: RRF_K = 60.0, W_FILENAME = 3.0, W_SYMBOL = 2.5,
-    // W_CONTENT = 1.5 — a drift here silently changes search ranking out of
-    // sync with `targets` ranking.
-    const K: f64 = 60.0;
-    const W_FILENAME: f64 = 3.0;
-    const W_SYMBOL: f64 = 2.5;
-    const W_CONTENT: f64 = 1.5;
+    // Phase 1c: use the shared `pixel_rank::rrf_fuse` primitive instead of a
+    // third independent reimplementation of weighted RRF. The weights are
+    // pixel-rank's own pub constants, so a drift here can no longer silently
+    // desync search ranking from `targets` ranking.
+    let s1: Vec<String> = filename_rank.iter().map(|(f, _)| f.clone()).collect();
+    let s2: Vec<String> = symbol_rank;
+    let s3: Vec<String> = density_rank.iter().map(|(f, _)| f.clone()).collect();
 
-    let rrf_score = |rank: usize, weight: f64| -> f64 {
-        weight / (K + rank as f64 + 1.0)
-    };
+    let mut file_order = pixel_rank::rrf_fuse(
+        &[
+            (&s1, pixel_rank::W_FILENAME),
+            (&s2, pixel_rank::W_SYMBOL),
+            (&s3, pixel_rank::W_CONTENT),
+        ],
+        pixel_rank::RRF_K,
+    );
 
-    let mut scores: HashMap<String, f64> = HashMap::new();
-    for (rank, (_, f)) in filename_rank.iter().enumerate() {
-        *scores.entry(f.clone()).or_default() += rrf_score(rank, W_FILENAME);
-    }
-    for (rank, f) in symbol_rank.iter().enumerate() {
-        *scores.entry(f.clone()).or_default() += rrf_score(rank, W_SYMBOL);
-    }
-    for (rank, (f, _)) in density_rank.iter().enumerate() {
-        *scores.entry(f.clone()).or_default() += rrf_score(rank, W_CONTENT);
-    }
-
-    // Sort files by fused score desc, then path asc (deterministic tie-break,
-    // same convention as `targets`).
-    let mut file_order: Vec<(String, f64)> = files
+    // Preserve the full hit set: files with no signal still appear (score
+    // 0.0), sorted by path — matching the pre-fusion behavior where every
+    // file in the pool was emitted.
+    let fused_set: HashSet<&str> = file_order.iter().map(|(p, _)| p.as_str()).collect();
+    let mut rest: Vec<String> = files
         .iter()
-        .map(|f| {
-            let s = scores.get(f).copied().unwrap_or(0.0);
-            (f.clone(), s)
-        })
+        .filter(|f| !fused_set.contains(f.as_str()))
+        .cloned()
         .collect();
-    file_order.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.cmp(&b.0))
-    });
+    rest.sort();
+    for f in rest {
+        file_order.push((f, 0.0));
+    }
 
     // Emit matches in file order, preserving within-file line order.
     let mut out: Vec<pixel_index::verify::MatchLine> = Vec::with_capacity(matches.len());
@@ -2304,6 +2453,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// S1 fix: per-word filename scoring — "gain ledger" must match
+    /// `ledger.ts` (the word "ledger" is a basename component), which
+    /// whole-pattern basename containment (`basename.contains("gain ledger")`)
+    /// never matched.
+    #[test]
+    fn rank_search_matches_scores_filename_per_word() {
+        use pixel_index::verify::MatchLine;
+        let matches = vec![
+            MatchLine {
+                path: "src/other.ts".into(),
+                line_number: 1,
+                line: "gain".into(),
+            },
+            MatchLine {
+                path: "src/ledger.ts".into(),
+                line_number: 1,
+                line: "ledger".into(),
+            },
+        ];
+        let ranked = rank_search_matches(&matches, "gain ledger", &None);
+        assert_eq!(ranked[0].path, "src/ledger.ts");
+        assert_eq!(ranked[1].path, "src/other.ts");
+    }
+
     /// Bug 1a + Bug 4 regression: ranked search must consider the FULL
     /// bounded candidate pool, not just a path-order-sliced page, so a
     /// filename-signal match that sorts after every other candidate in
@@ -2554,6 +2727,81 @@ mod tests {
         assert_eq!(
             upper.data().get("ranked").and_then(Value::as_bool),
             Some(true)
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Phase 3 item 1: `op_targets` must attach per-file content evidence
+    /// (first ~2 match lines per keyword) so a caller can verify a target's
+    /// content match without re-searching (S2 distrust loop).
+    #[test]
+    fn targets_attach_content_evidence() {
+        let root = tmpdir("targets-evidence");
+        std::fs::write(
+            root.join("ledger.rs"),
+            "// gain ledger entry\npub fn ledger() {}\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Targets {
+            task: "gain ledger".into(),
+            limit: Some(5),
+        });
+        assert!(resp.ok, "targets: {:?}", resp.error);
+        let targets = resp.data().get("targets").and_then(Value::as_array).unwrap();
+        let ledger = targets
+            .iter()
+            .find(|t| t["path"].as_str() == Some("ledger.rs"))
+            .expect("ledger.rs should be a target");
+        let evidence = ledger.get("evidence").and_then(Value::as_array).unwrap();
+        assert!(!evidence.is_empty(), "expected content evidence on ledger.rs");
+        assert!(
+            evidence.iter().any(|e| {
+                e["keyword"].as_str() == Some("ledger")
+                    && e["text"].as_str().map_or(false, |t| t.contains("ledger"))
+            }),
+            "expected a 'ledger' evidence entry, got {evidence:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// S1 fix: ranked search must match a file whose basename contains a
+    /// single word of a multi-word pattern ("gain ledger" → `ledger.ts`),
+    /// not require the whole phrase to be a basename substring. Without the
+    /// per-word filename signal, `ledger.ts` and `zzz_other.ts` (identical
+    /// content) would tie on content density and sort by path — `zzz_other.ts`
+    /// first. With it, `ledger.ts` ranks first on the filename word.
+    #[test]
+    fn search_scope_code_matches_per_word_filename() {
+        let root = tmpdir("search-per-word-filename");
+        std::fs::write(root.join("ledger.ts"), "// gain ledger here\n").unwrap();
+        std::fs::write(root.join("zzz_other.ts"), "// gain ledger here\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Search {
+            paths: None,
+            pattern: "gain ledger".into(),
+            json: true,
+            limit: Some(10),
+            offset: None,
+            scope: Some("code".into()),
+        });
+        assert!(resp.ok, "ranked search: {:?}", resp.error);
+        let matches = resp.data().get("matches").and_then(Value::as_array).unwrap();
+        let paths: Vec<&str> = matches.iter().filter_map(|m| m["path"].as_str()).collect();
+        assert_eq!(
+            paths.first().copied(),
+            Some("ledger.ts"),
+            "per-word filename signal must rank ledger.ts first, got {paths:?}"
         );
 
         let _ = std::fs::remove_dir_all(&root);

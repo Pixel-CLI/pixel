@@ -33,7 +33,7 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump whenever the concept extractor's output shape changes; forces a
 /// one-time concept rebuild via the `concepts_version` meta key.
-pub const CONCEPTS_VERSION: &str = "1";
+pub const CONCEPTS_VERSION: &str = "2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
