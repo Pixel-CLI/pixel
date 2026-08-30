@@ -91,6 +91,10 @@ enum Command {
         /// order).
         #[arg(long)]
         scope: Option<String>,
+        /// Lines of context to include around each match (reads the file
+        /// on-demand). Eliminates the need for a follow-up Read call.
+        #[arg(long, default_value_t = 0)]
+        context: usize,
     },
     /// Sniper target list: task description in, closed prioritized file list
     /// out (P0 = start here, P1 = likely, P2 = droppable). Writes the
@@ -901,11 +905,16 @@ fn print_search_matches(matches: &[Value], json: bool) -> Result<(), String> {
         let path = m.get("path").and_then(Value::as_str).unwrap_or("");
         let line = m.get("line").and_then(Value::as_u64).unwrap_or(0);
         let text = m.get("text").and_then(Value::as_str).unwrap_or("");
+        let context = m.get("context").and_then(Value::as_str);
         if json {
-            output.push_str(
-                &serde_json::json!({"path": path, "line": line, "text": text}).to_string(),
-            );
+            let mut entry = serde_json::json!({"path": path, "line": line, "text": text});
+            if let Some(ctx) = context {
+                entry["context"] = Value::String(ctx.to_string());
+            }
+            output.push_str(&entry.to_string());
             output.push('\n');
+        } else if let Some(ctx) = context {
+            output.push_str(&format!("--- {path}:{line} ---\n{ctx}\n"));
         } else {
             output.push_str(&format!("{path}:{line}:{text}\n"));
         }
@@ -915,6 +924,33 @@ fn print_search_matches(matches: &[Value], json: bool) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(format!("write search results: {error}")),
     }
+}
+
+/// Read surrounding lines from the file and attach as a `context` field.
+/// Eliminates the need for a follow-up Read call — the agent gets the full
+/// definition in one pixel search response.
+fn enrich_with_context(m: &Value, root: &Path, context: usize, qualify: bool) -> Value {
+    let rel = m.get("path").and_then(Value::as_str).unwrap_or("");
+    let line_no = m.get("line").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let abs = root.join(rel);
+    let Ok(content) = std::fs::read_to_string(&abs) else {
+        return m.clone();
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let start = line_no.saturating_sub(context + 1).min(lines.len());
+    let end = (line_no + context).min(lines.len());
+    let mut ctx_lines = Vec::with_capacity(end - start);
+    for (i, l) in lines[start..end].iter().enumerate() {
+        let ln = start + i + 1;
+        let marker = if ln == line_no { ">>" } else { "  " };
+        ctx_lines.push(format!("{marker} {ln:>5}: {l}"));
+    }
+    let mut enriched = m.clone();
+    enriched["context"] = Value::String(ctx_lines.join("\n"));
+    if qualify {
+        enriched["path"] = Value::String(abs.display().to_string());
+    }
+    enriched
 }
 
 /// Group user-supplied paths by their discovered repo root, mapping each to a
@@ -954,6 +990,7 @@ fn run_search(
     offset: usize,
     no_daemon: bool,
     scope: Option<String>,
+    context: usize,
 ) -> Result<(), String> {
     let groups = group_by_root(&paths)?;
     let multi_root = groups.len() > 1;
@@ -961,7 +998,7 @@ fn run_search(
         let whole_repo = rels.iter().any(String::is_empty);
         let req_paths = if whole_repo { None } else { Some(rels) };
         run_search_one(
-            &pattern, &root, req_paths, multi_root, json, stats, limit, offset, no_daemon, scope.clone(),
+            &pattern, &root, req_paths, multi_root, json, stats, limit, offset, no_daemon, scope.clone(), context,
         )?;
     }
     Ok(())
@@ -979,6 +1016,7 @@ fn run_search_one(
     offset: usize,
     no_daemon: bool,
     scope: Option<String>,
+    context: usize,
 ) -> Result<(), String> {
     // Fast path via daemon/service (index auto-built if missing).
     let data = execute(
@@ -998,10 +1036,11 @@ fn run_search_one(
         .get("matches")
         .and_then(Value::as_array)
         .unwrap_or(&empty);
-    if qualify {
-        // Multiple repos in one invocation: qualify paths with the root so
-        // output lines stay unambiguous.
-        let qualified: Vec<Value> = matches
+    // Enrich matches with surrounding context lines if requested.
+    let enriched: Vec<Value> = if context > 0 {
+        matches.iter().map(|m| enrich_with_context(m, root, context, qualify)).collect()
+    } else if qualify {
+        matches
             .iter()
             .map(|m| {
                 let mut m = m.clone();
@@ -1011,11 +1050,11 @@ fn run_search_one(
                 }
                 m
             })
-            .collect();
-        print_search_matches(&qualified, json)?;
+            .collect()
     } else {
-        print_search_matches(matches, json)?;
-    }
+        matches.to_vec()
+    };
+    print_search_matches(&enriched, json)?;
     // Warn the user when results were truncated so the default row cap
     // is never a surprise.
     let truncated = data
@@ -1190,7 +1229,8 @@ fn run() -> Result<(), String> {
             offset,
             no_daemon,
             scope,
-        } => run_search(pattern, paths, json, stats, limit, offset, no_daemon, scope),
+            context,
+        } => run_search(pattern, paths, json, stats, limit, offset, no_daemon, scope, context),
         Command::Targets {
             task,
             path,
