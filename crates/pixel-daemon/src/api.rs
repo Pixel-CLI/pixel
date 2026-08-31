@@ -180,7 +180,7 @@ impl Service {
         }
     }
 
-    /// Make sure `self.graph` is populated; builds graph.db on first use and
+    /// Make sure `self.graph` is populated; builds graph.db on first useand
     /// rebuilds it when the working tree has drifted from the indexed state
     /// (detected via the build-time freshness signature). Returns build info
     /// (stats + timing) when a build/rebuild happened.
@@ -189,9 +189,38 @@ impl Service {
             return Ok(None);
         }
         let db = self.graph_db_path();
+
+        // No git anchor (no `.git`): a graph build is pathological — `collect_files`
+        // walks the ENTIRE tree (no commit-OID to bound the file set, no
+        // ls-files delta to overlay) and can hang for minutes + eat hundreds of
+        // MB on a large or vendored directory (e.g. a `pi-fanout-flash`-like
+        // dir with no git repo). Without an anchor there is never a `is_fresh` match, so
+        // every fresh process would rebuild the full graph synchronously in the request.
+        // Since pixel_graph ops cannot distinguish files without a git anchor,
+        // degrade here: reuse an already-present graph.db as-is (open, never
+        // force-rebuild), otherwise fail fast — callers degrade cleanly
+        // instead of spinning. `op_status` already refuses to build for exactly
+        // the same reason; we mirror that.
+        if pixel_index::gitsync::rev_parse_head(&self.root).is_none() {
+            if !db.exists() {
+                return Err(
+                    "no git anchor (no `.git` directory): graph ops require a git repo, "
+                        .to_string()
+                        + "but none was found at "
+                        + &self.root.display().to_string()
+                        + ". Init one with `git init` (then `pixel publish`) or point pixel at a "
+                        + "git work tree.",
+                );
+            }
+            // Reuse the existing graph.db — opening it is cheap; rebuilding without
+            // an anchor would re-walk the whole tree and can never be incremental.
+            self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
+            return Ok(None);
+        }
+
         // An existing db is only reused if its freshness signature matches the
         // current working tree; otherwise it is stale (files added/removed/
-        // edited since it was built) and is rebuilt from scratch.
+        // edited since it was built)and is rebuilt from scratch.
         let stale = db.exists() && !bridge::is_fresh(&self.root, &db);
         let built = if !db.exists() || stale {
             let (stats, build_ms) = self.rebuild_graph()?;

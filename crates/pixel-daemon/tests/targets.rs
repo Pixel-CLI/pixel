@@ -128,3 +128,65 @@ fn targets_rejects_empty_task() {
     assert!(resp.error.unwrap().message.contains("no searchable keywords"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+
+/// A bare directory (NO `.git`) must NOT trigger a pathological graph build.
+/// `ensure_graph` has no git anchor here, so it degrades to lexical-only
+/// (envelope `graph` becomes "unavailable") instead of walking the whole tree
+/// and resolving calls repo-wide — otherwise `targets` on a gitless dir could
+/// hang for minutes + eat hundreds of MB. Regression for the `pi-fanout-flash`
+/// no-`.git` hang (6+ min, 732MB RAM).
+#[test]
+fn targets_no_git_degrades_to_lexical_only() {
+    // A gitless temp dir — no `.git`, no ancestor `.pixel`/`.git` — and
+    // `Service::open` uses the given path directly (not the upward
+    // `discover_root` walk), so the root is precisely this dir.
+
+    let dir = std::env::temp_dir().join(format!("gpx-targets-nogit-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/login.rs"),
+        "pub fn login_user(name: &str) -> bool {\n    !name.is_empty()\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/session.rs"),
+        "use crate::login::login_user;\n\npub fn start_session(name: &str) -> bool {\n    login_user(name)\n}\n",
+    )
+    .unwrap();
+
+    let mut svc = Service::open(&dir).unwrap();
+    let resp = svc.handle(Request::Targets {
+        task: "fix `login_user` auth flow".to_string(),
+        limit: Some(10),
+    });
+    assert!(resp.ok, "targets op failed on a no-git dir: {:?}", resp.error);
+    let data = resp.into_data();
+
+    // The graph is NOT built — it degrades to lexical-only instead of
+    // hanging on a full-tree walk + resolve-calls over an unbounded file set.
+
+    assert_eq!(
+        data["envelope"]["graph"],
+        "unavailable",
+        "no-git dir must not build the graph: {data}"
+    );
+    let note = data["closed_world"].as_str().unwrap();
+    assert!(
+        note.contains("code graph unavailable"),
+        "closed_world should declare the lexical-only degradation: {note}"
+    );
+
+    // Lexical signal still finds the defining file.
+
+
+
+    let targets = data["targets"].as_array().unwrap();
+    assert!(
+        targets.iter().any(|t| t["path"] == "src/login.rs"),
+        "lexical-signals target missing: {targets:?}",
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
