@@ -6,25 +6,16 @@ flowchart TD
 
     subgraph W ["❌ Without pixel — illustrative"]
         direction TB
-        w1["🧠 LLM: greps the function name<br/>~2s · 🟡 ~500 tok"] --> w2
-        w2["🧠 LLM: reads each call site + imports<br/>~6s · 🔴 ~2K tok"] --> w3
-        w3["🧠 LLM: guesses the risk level<br/>~1s · 🟡 ~150 tok"]
-        w3 --> w5["😬 may miss a real caller<br/>━━━━━━━━━━━━━━<br/>Total: ~9s · 🔴 ~2.65K tok"]
+        w1["🧠 greps the function name<br/>reads each call site + imports<br/>guesses the risk level"] --> w5["😬 may miss a real caller"]
     end
 
-    subgraph P ["✅ With pixel — illustrative"]
+    subgraph P ["✅ With pixel"]
         direction TB
-        p1["⚡ tool: pixel impact --direction upstream<br/>~50ms · 🟢 ~200 tok"]
-        p1 --> p3["✅ risk: HIGH — d1/d2/d3 counts<br/>━━━━━━━━━━━━━━<br/>Total: ~6ms · 🟢 ~174 tok (measured)"]
+        p1["⚡ pixel impact --direction upstream"] --> p3["✅ risk: HIGH — d1/d2/d3 counts<br/>~6ms · ~174 tok (measured)"]
     end
-
-    w5 --> Recap
-    p3 --> Recap
-    Recap["📊 left column is illustrative, not measured — no multiplier claimed (tenet T1)<br/>pixel column: single-op measured figures (real-measurements.md)<br/>agent-level A/B incl. regressions: pixel-bench-results.txt"]
 
     style W fill:#3a1a1a,stroke:#e05555,color:#fff
     style P fill:#123a1e,stroke:#33c76a,color:#fff
     style w5 fill:#5c1f1f,stroke:#e05555,color:#fff
     style p3 fill:#155229,stroke:#33c76a,color:#fff
-    style Recap fill:#1a1a3a,stroke:#8899ff,color:#fff
     linkStyle 2 stroke-width:0px

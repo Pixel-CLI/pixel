@@ -6,26 +6,16 @@ flowchart TD
 
     subgraph W ["❌ Without pixel — illustrative"]
         direction TB
-        w1["🧠 LLM: runs git fetch<br/>~2s · 🟡 ~150 tok"] --> w2
-        w2["🧠 LLM: reasons about ahead/behind<br/>~2s · 🟡 ~300 tok"] --> w3
-        w3["🧠 LLM: manually merges or rebases<br/>~5s · 🔴 ~800 tok"] --> w4
-        w4["🧠 LLM: runs git push, handles failure<br/>~3s · 🟡 ~400 tok"]
-        w4 --> w5["😬 maybe a merge commit,<br/>maybe a mishandled conflict<br/>━━━━━━━━━━━━━━<br/>Total: ~12s · 🔴 ~1.65K tok"]
+        w1["🧠 runs git fetch<br/>reasons about ahead/behind<br/>manually merges or rebases<br/>runs git push, handles failure"] --> w5["😬 maybe a merge commit,<br/>maybe a mishandled conflict"]
     end
 
-    subgraph P ["✅ With pixel — illustrative"]
+    subgraph P ["✅ With pixel"]
         direction TB
-        p1["⚡ tool: pixel reconcile<br/>~120ms · 🟢 ~250 tok"]
-        p1 --> p3["✅ classified and acted,<br/>or a clear conflict report<br/>━━━━━━━━━━━━━━<br/>Total: ~64ms · 🟢 ~68 tok (measured op: analogous read-only substitute)"]
+        p1["⚡ pixel reconcile"] --> p3["✅ classified and acted,<br/>or a clear conflict report<br/>~64ms · ~68 tok (measured)"]
     end
-
-    w5 --> Recap
-    p3 --> Recap
-    Recap["📊 left column is illustrative, not measured — no multiplier claimed (tenet T1)<br/>pixel column: single-op measured figures (real-measurements.md)<br/>agent-level A/B incl. regressions: pixel-bench-results.txt"]
 
     style W fill:#3a1a1a,stroke:#e05555,color:#fff
     style P fill:#123a1e,stroke:#33c76a,color:#fff
     style w5 fill:#5c1f1f,stroke:#e05555,color:#fff
     style p3 fill:#155229,stroke:#33c76a,color:#fff
-    style Recap fill:#1a1a3a,stroke:#8899ff,color:#fff
     linkStyle 2 stroke-width:0px

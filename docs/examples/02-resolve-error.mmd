@@ -6,25 +6,16 @@ flowchart TD
 
     subgraph W ["❌ Without pixel — illustrative"]
         direction TB
-        w1["🧠 LLM: greps the whole tree for '503'<br/>~4s · 🔴 ~2K tok"] --> w2
-        w2["🧠 LLM: reads each match's file<br/>~6s · 🔴 ~3K tok"] --> w3
-        w3["🧠 LLM: guesses which endpoint is live<br/>~2s · 🟡 ~400 tok"]
-        w3 --> w5["😬 maybe the right endpoint<br/>━━━━━━━━━━━━━━<br/>Total: ~12s · 🔴 ~5.4K tok"]
+        w1["🧠 greps the whole tree for '503'<br/>reads each match's file<br/>guesses which endpoint is live"] --> w5["😬 maybe the right endpoint"]
     end
 
-    subgraph P ["✅ With pixel — illustrative"]
+    subgraph P ["✅ With pixel"]
         direction TB
-        p1["⚡ tool: pixel resolve 'I'm getting a 503'<br/>~70ms · 🟢 ~180 tok"]
-        p1 --> p3["✅ exact route — confidence: resolved<br/>━━━━━━━━━━━━━━<br/>Total: ~6ms · 🟢 ~84 tok (measured)"]
+        p1["⚡ pixel resolve 'I'm getting a 503'"] --> p3["✅ exact route — confidence: resolved<br/>~6ms · ~84 tok (measured)"]
     end
-
-    w5 --> Recap
-    p3 --> Recap
-    Recap["📊 left column is illustrative, not measured — no multiplier claimed (tenet T1)<br/>pixel column: single-op measured figures (real-measurements.md)<br/>agent-level A/B incl. regressions: pixel-bench-results.txt"]
 
     style W fill:#3a1a1a,stroke:#e05555,color:#fff
     style P fill:#123a1e,stroke:#33c76a,color:#fff
     style w5 fill:#5c1f1f,stroke:#e05555,color:#fff
     style p3 fill:#155229,stroke:#33c76a,color:#fff
-    style Recap fill:#1a1a3a,stroke:#8899ff,color:#fff
     linkStyle 2 stroke-width:0px

@@ -6,23 +6,16 @@ flowchart TD
 
     subgraph W ["❌ Without pixel — illustrative"]
         direction TB
-        w1["🧠 LLM: runs git status<br/>~1s · 🟡 ~150 tok"]
-        w1 --> w5["⚠️ conflicted paths can be<br/>silently missing from the summary<br/>━━━━━━━━━━━━━━<br/>Total: ~1s · 🟡 ~150 tok"]
+        w1["🧠 runs git status"] --> w5["⚠️ conflicted paths can be<br/>silently missing from the summary"]
     end
 
-    subgraph P ["✅ With pixel — illustrative"]
+    subgraph P ["✅ With pixel"]
         direction TB
-        p1["⚡ tool: pixel review<br/>~50ms · 🟢 ~180 tok"]
-        p1 --> p3["✅ conflicts always shown, as structured hunks<br/>━━━━━━━━━━━━━━<br/>Total: ~16ms · 🟢 ~123 tok (measured op: analogous read-only substitute)"]
+        p1["⚡ pixel review"] --> p3["✅ conflicts always shown, as structured hunks<br/>correctness win, not a speed win"]
     end
-
-    w5 --> Recap
-    p3 --> Recap
-    Recap["📊 same order of magnitude — this one's a<br/>correctness win, not a speed win:<br/>a hidden conflict is worse than a slow one"]
 
     style W fill:#3a1a1a,stroke:#e05555,color:#fff
     style P fill:#123a1e,stroke:#33c76a,color:#fff
     style w5 fill:#5c1f1f,stroke:#e0a555,color:#fff
     style p3 fill:#155229,stroke:#33c76a,color:#fff
-    style Recap fill:#1a1a3a,stroke:#8899ff,color:#fff
     linkStyle 2 stroke-width:0px

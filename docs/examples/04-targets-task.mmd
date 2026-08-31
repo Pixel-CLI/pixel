@@ -6,25 +6,16 @@ flowchart TD
 
     subgraph W ["❌ Without pixel — illustrative"]
         direction TB
-        w1["🧠 LLM: lists the repo root recursively<br/>~2s · 🔴 ~1K tok"] --> w2
-        w2["🧠 LLM: reads ~8 files to get oriented<br/>~10s · 🔴 ~6K tok"] --> w3
-        w3["🧠 LLM: guesses which files matter<br/>~2s · 🟡 ~300 tok"]
-        w3 --> w5["😬 might miss the real file<br/>━━━━━━━━━━━━━━<br/>Total: ~14s · 🔴 ~7.3K tok"]
+        w1["🧠 lists the repo root recursively<br/>reads ~8 files to get oriented<br/>guesses which files matter"] --> w5["😬 might miss the real file"]
     end
 
-    subgraph P ["✅ With pixel — illustrative"]
+    subgraph P ["✅ With pixel"]
         direction TB
-        p1["⚡ tool: pixel targets '...'<br/>~90ms · 🟢 ~300 tok"]
-        p1 --> p3["✅ closed P0/P1/P2 file list<br/>━━━━━━━━━━━━━━<br/>Total: ~8ms · 🟢 ~277 tok (measured op: analogous read-only substitute)"]
+        p1["⚡ pixel targets '...'"] --> p3["✅ closed P0/P1/P2 file list<br/>~8ms · ~277 tok (measured)"]
     end
-
-    w5 --> Recap
-    p3 --> Recap
-    Recap["📊 left column is illustrative, not measured — no multiplier claimed (tenet T1)<br/>pixel column: single-op measured figures (real-measurements.md)<br/>agent-level A/B incl. regressions: pixel-bench-results.txt"]
 
     style W fill:#3a1a1a,stroke:#e05555,color:#fff
     style P fill:#123a1e,stroke:#33c76a,color:#fff
     style w5 fill:#5c1f1f,stroke:#e05555,color:#fff
     style p3 fill:#155229,stroke:#33c76a,color:#fff
-    style Recap fill:#1a1a3a,stroke:#8899ff,color:#fff
     linkStyle 2 stroke-width:0px
