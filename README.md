@@ -15,6 +15,24 @@ Inspired by [GitNexus](https://github.com/abhigyanpatwari/GitNexus) (code knowle
 
 ---
 
+## 🧬 Origin story
+
+pixel wasn't designed. It escalated.
+
+**1. GitNexus opened the door.** A code knowledge graph for agents — the first hint that "grep harder" wasn't the answer. Useful, but slow, and not Rust. The itch started here.
+
+**2. usable-git — the git tantrum.** Watching agents fumble `git push` for 30 minutes broke something. [usable-git](https://github.com/LivioGama/usable-git) was the response: make the boring, deterministic git ops actually deterministic so the LLM stops reasoning about things a script can just do.
+
+**3. gitpixel — the Rust rewrite.** GitNexus was too slow and not Rust. So it got rebuilt from scratch as [gitpixel](https://github.com/LivioGama/gitpixel): indexed regex search, git-anchored freshness, tree-sitter code graph. The name wrote itself — the Google Pixel is newer than the Google Nexus.
+
+**4. pixel — the merge.** usable-git handled git. gitpixel handled retrieval. Two tools, two binaries, two mental models for what was really one problem: *stop making agents reason about things a query can answer.* pixel absorbed both and became the single deterministic layer between the agent and the repo — a sniper for locating a phrase, catching an error that slips past Next.js and the browser console, or measuring the blast radius of a change before it lands.
+
+**5. The transcript mining.** Even pixel wasn't enough — agents kept burning time on CLI sequences that take 0ms on an M5. So one month of CLI transcripts got extracted, fed back, and mined for recurring operation patterns. pixel now covers those patterns like a chief. *That* is the part that finally clicked.
+
+> Five iterations, one trajectory: every step was the same realization hitting harder — **if it can be retrieved deterministically, retrieve it.**
+
+---
+
 ## The problem
 
 Most of the annoying LLM coding agent work falls into five scenarios. Today, agents handle them by reasoning through Git — scrolling diffs, guessing commits, running repetitive searches, and burning tokens on operations that should be deterministic.
@@ -166,7 +184,21 @@ pixel query 'show impact of LoginService' . --kind impact --json
 
 The V1 recipes are `locate`, `scope`, `impact`, `history-recovery`, and `status`. The response records the chosen recipe, its evidence, a token budget, and explicitly bounded epistemics. Source completeness is typed: a required source must be complete, fresh, uncapped, and exclusion-free before Pixel can state `closed_world: true`.
 
-Workspaces, persisted query deltas, transcript recall, and recipe auto-promotion remain intentionally deferred until their sources can preserve evidence identity and cap metadata end-to-end.
+### What V2 will add (speced in [`PLAN.md`](PLAN.md), not yet shipped)
+
+The V1 surface is deliberately bounded. The deferred work is designed, not vague — each item is blocked on a concrete correctness invariant, not on effort:
+
+| Deferred | Spec | Why it's held back |
+|---|---|---|
+| **Workspaces** | Multi-repo query scope in `PLAN.md` §A2 | Requires evidence identity to survive cross-repo joins before `closed_world` can be stated honestly |
+| **Persisted query deltas** | `PLAN.md` §A2 (envelope `budget.cursor`) | Needs metadata capping end-to-end so a resumed query can't silently exceed its budget |
+| **Transcript recall** | Machine daemon + recall corpus, `PLAN.md` §A3 / M5 | Same evidence-identity invariant — a recalled fragment must carry its provenance, not just its text |
+| **Recipe auto-promotion** | `PLAN.md` §A2 (ranked recipe candidates → pinned) | Promotion must be observable + reversible; pinning a wrong recipe silently is worse than returning ranked plans |
+| **Rescue `--from <oid>:<oldpath> --to <path>`** | Engine 2, `PLAN.md` line 171 | Restoring deleted/renamed files across path moves; the gated 3-way apply already exists, the cross-path variant is the open seam |
+| **`reconcile --strategy rebase-if-clean`** | Engine 4, `PLAN.md` line 200 | Zero-textual-conflict rebase is deterministic work; default stays `report` until the `merge-tree` cleanliness proof is wired through the journal transitions |
+| **Session journal hooks** | Engine 3, `PLAN.md` line 187 (`pixel journal <kind> <path>`) | `PostToolUse` → session.db feeding the shared reranker; activity/recency signals already ship, the live session-event stream is the missing input |
+
+Anything not in that table is either shipped or out of scope. The V1 recipes (`locate.v1`, `scope.v1`, `impact.v1`, `history_recovery.v1`, `status.v1`) are the wire format today; V2 extends the recipe set, it does not break V1 responses.
 
 ---
 
