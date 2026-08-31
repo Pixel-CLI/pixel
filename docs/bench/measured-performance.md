@@ -4,7 +4,7 @@ Two different things get measured, and they must not be conflated:
 
 **Single-op latency** (daemon-warm, small synthetic fixture — [`examples/real-measurements.md`](../examples/real-measurements.md)): individual pixel ops answer in 6–64ms wall-clock. These are op figures, not agent-workflow figures. The CLI also carries a measured ~17ms process-spawn floor for the ~45MB binary on the bench machine (`crates/pixel-bench/benches/m1_latency.rs` comments).
 
-**Agent-level A/B** (`claude -p` driving full workflows against this repo, pixel hooks vs. hooks stripped, 3 reps/cell, medians — [`../../pixel-bench-results.txt`](../../pixel-bench-results.txt), 2026-08-30, commit `865facf`):
+**Agent-level A/B** (`claude -p` driving full workflows against this repo, pixel hooks vs. hooks stripped, 3 reps/cell, medians — [`pixel-bench-results.txt`](pixel-bench-results.txt), 2026-08-30, commit `865facf`):
 
 | Scenario | With pixel (median) | Baseline (median) | Verdict |
 |---|---|---|---|
@@ -54,8 +54,8 @@ Honest synthesis: pixel's doctrine measurably improves agent task-scoping and br
 
 ## Raw data
 
-- [`pixel-bench-results.txt`](../../pixel-bench-results.txt) — full-stack agent A/B
-- [`pixel-bench-isolated-results.txt`](../../pixel-bench-isolated-results.txt) — doctrine-only isolated A/B
+- [`pixel-bench-results.txt`](pixel-bench-results.txt) — full-stack agent A/B
+- [`pixel-bench-isolated-results.txt`](pixel-bench-isolated-results.txt) — doctrine-only isolated A/B
 - [`2026-08-30-session-log.md`](2026-08-30-session-log.md) — session log with run ordering and validity notes
 - [`sniper-discovery.md`](sniper-discovery.md) — read-fence recall measurement (0.60 → 0.19)
 - [`examples/real-measurements.md`](../examples/real-measurements.md) — single-op latency table

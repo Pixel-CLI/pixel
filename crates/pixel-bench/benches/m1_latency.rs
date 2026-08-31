@@ -26,10 +26,11 @@
 //!
 //! An earlier version of this comment claimed the CLI end-to-end gate was
 //! "measured separately by the parity harness's timing wrapper"
-//! (`tests/parity/harness.sh`). That was false: the parity harness has no
-//! timing or latency-measurement code at all -- it only checks output
-//! parity between implementations. There is currently no automated check
-//! anywhere in this repo for the <5ms CLI end-to-end budget.
+//! (`tests/parity/harness.sh`, since removed). That was false: the parity
+//! harness had no timing or latency-measurement code at all -- it only
+//! checked output parity between implementations. There is currently no
+//! automated check anywhere in this repo for the <5ms CLI end-to-end
+//! budget.
 //!
 //! That gap is also not a small oversight to casually fix: an ad hoc
 //! measurement (fork the real `pixel` binary via `std::process::Command`,

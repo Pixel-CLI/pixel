@@ -38,7 +38,7 @@ PIXEL_BIN="${PIXEL_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/release/pixel}"
 N="${N:-3}"
 OUTDIR="/tmp/pixel-bench-outputs"
 TMPDIR_M="/tmp/pixel-bench-tmp"
-RESULTS="${RESULTS:-$(pwd)/pixel-bench-results.txt}"
+RESULTS="${RESULTS:-$(pwd)/docs/bench/pixel-bench-results.txt}"
 mkdir -p "$OUTDIR" "$TMPDIR_M"
 rm -f "$TMPDIR_M"/*.json "$TMPDIR_M"/*.ms "$TMPDIR_M"/*.counts
 

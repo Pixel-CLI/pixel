@@ -2,6 +2,23 @@
 **/*.rs.bk
 .DS_Store
 .pixel/
-scripts/experiments/sniper/artifacts/
-scripts/experiments/sniper/shim/
 .devin/
+
+# tool-local agent config dirs
+.claude/
+.codex/
+.cursor/
+.gemini/
+.pi/
+.zcode/
+
+# python
+__pycache__/
+*.pyc
+
+# node
+**/node_modules/
+
+# coverage / bench dumps
+coverage*.txt
+*.lcov

@@ -33,7 +33,7 @@ RULE_FILE="${RULE_FILE:-$HOME/.agent-config/rules/pixel.md}"
 N="${1:-1}"
 OUTDIR="/tmp/pixel-bench-isolated-outputs"
 TMPDIR_M="/tmp/pixel-bench-isolated-tmp"
-RESULTS="$(pwd)/pixel-bench-isolated-results.txt"
+RESULTS="$(pwd)/docs/bench/pixel-bench-isolated-results.txt"
 mkdir -p "$OUTDIR" "$TMPDIR_M"
 rm -f "$TMPDIR_M"/*.json "$TMPDIR_M"/*.ms "$TMPDIR_M"/*.counts
 

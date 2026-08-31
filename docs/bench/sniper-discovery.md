@@ -25,15 +25,10 @@ than doing nothing.*
 
 ## Rerun command
 
-```bash
-cd ~/gitpixel  # working repo on branch experiment/sniper-discovery
-python3 scripts/experiments/sniper/run_experiment.py --warmup --max-concurrent 4
-python3 scripts/experiments/sniper/score.py
-```
-
-Requires: `~/gitpixel-under-test` (a second clone of the repo), all three
-harness CLIs on PATH, and the `gitpixel` binary at
-`~/gitpixel/target/release/gitpixel` (or symlinked from `~/.local/bin/gitpixel`).
+The original experiment harness (`scripts/experiments/sniper/`) targeted the
+retired `gitpixel` binary and has been removed. The measurement methodology
+and results below remain valid as a historical record; a re-run against the
+current `pixel` binary would require a new harness.
 
 ## Results
 
