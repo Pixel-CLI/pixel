@@ -230,7 +230,59 @@ fn bash_git_commit_denied_with_substitute() {
         stderr.contains("--message 'fix parser'"),
         "parsed -m must enrich the substitute: {stderr}"
     );
-    assert!(stderr.contains("PIXEL_GUARD_RAW_GIT=1"), "{stderr}");
+    assert!(
+        !stderr.contains("PIXEL_GUARD_RAW_GIT=1"),
+        "human-override env var must NOT be advertised: {stderr}"
+    );
+}
+
+#[test]
+fn bash_git_add_denied_with_substitute() {
+    let repo = indexed_repo("sub-add");
+    let payload = bash_payload(&repo, "git add src/a.rs src/b.rs");
+    let (code, _stdout, stderr) = run_guard_env(&payload, &[]);
+    assert_eq!(code, 2, "raw git add must be denied: {stderr}");
+    assert!(stderr.contains("BLOCKED [PIXEL_SUBSTITUTE]"), "{stderr}");
+    assert!(stderr.contains("pixel publish"), "{stderr}");
+    assert!(
+        stderr.contains("--files src/a.rs --files src/b.rs"),
+        "each pathspec must be its own --files: {stderr}"
+    );
+    assert!(
+        !stderr.contains("PIXEL_GUARD_RAW_GIT=1"),
+        "human-override env var must NOT be advertised: {stderr}"
+    );
+}
+
+#[test]
+fn bash_git_add_dot_denied() {
+    let repo = indexed_repo("sub-add-dot");
+    let payload = bash_payload(&repo, "git add .");
+    let (code, _stdout, stderr) = run_guard_env(&payload, &[]);
+    assert_eq!(code, 2, "raw git add . must be denied: {stderr}");
+    assert!(stderr.contains("BLOCKED [PIXEL_SUBSTITUTE]"), "{stderr}");
+    assert!(stderr.contains("pixel publish"), "{stderr}");
+    assert!(
+        stderr.contains("List each modified tracked file"),
+        "`git add .` must suggest enumerating files: {stderr}"
+    );
+}
+
+#[test]
+fn bash_git_add_interactive_passes_through() {
+    let repo = indexed_repo("sub-add-interactive");
+    for cmd in ["git add -p", "git add --patch", "git add -i", "git add --interactive"] {
+        let payload = bash_payload(&repo, cmd);
+        let (code, _stdout, stderr) = run_guard_env(&payload, &[]);
+        assert_eq!(
+            code, 0,
+            "`{cmd}` must pass through (interactive hunk staging): {stderr}"
+        );
+        assert!(
+            !stderr.contains("BLOCKED"),
+            "`{cmd}` must not be denied: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -281,7 +333,10 @@ fn transcript_poke_denied_when_recall_index_exists() {
     assert_eq!(code, 2, "poke must be denied when the index exists: {stderr}");
     assert!(stderr.contains("BLOCKED [PIXEL_SUBSTITUTE]"), "{stderr}");
     assert!(stderr.contains("pixel recall sessions --agent devin"), "{stderr}");
-    assert!(stderr.contains("PIXEL_GUARD_RAW_TRANSCRIPTS=1"), "{stderr}");
+    assert!(
+        !stderr.contains("PIXEL_GUARD_RAW_TRANSCRIPTS=1"),
+        "human-override env var must NOT be advertised: {stderr}"
+    );
 
     // The dedicated escape hatch downgrades it back to the advisory.
     let (code, stdout, _stderr) = run_guard_env(

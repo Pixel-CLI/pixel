@@ -25,19 +25,24 @@
 //!    on the agent's behalf). These denies run even when the command
 //!    contains substitution/heredocs — a spurious deny costs a retry, a
 //!    missed hard reset costs real work.
-//! 4. SUBSTITUTE (HARD BLOCK, escape-hatched) — plain git mutations with an
+//! 4. SUBSTITUTE (HARD BLOCK, human-override) — plain git mutations with an
 //!    exact pixel equivalent are denied with the substitute spelled out
-//!    ([PIXEL_SUBSTITUTE] reason code): `git commit` → `pixel publish`,
-//!    `git push` (incl. `--force-with-lease`) → `pixel push`,
-//!    `git checkout -b`/`git switch -c` → `pixel branch`, `git rebase` →
-//!    `pixel reconcile`. Runs AFTER the destructive tier, BEFORE rewrite
-//!    attempts. `PIXEL_GUARD_RAW_GIT=1` downgrades ONLY this tier to an
-//!    advisory. Interactive/porcelain shapes pixel can't cover pass
-//!    through — see `git_substitute_deny` for the documented table.
+//!    ([PIXEL_SUBSTITUTE] reason code): `git add` → `pixel publish`,
+//!    `git commit` → `pixel publish`, `git push` (incl. `--force-with-lease`)
+//!    → `pixel push`, `git checkout -b`/`git switch -c` → `pixel branch`,
+//!    `git rebase` → `pixel reconcile`. Runs AFTER the destructive tier,
+//!    BEFORE rewrite attempts. `PIXEL_GUARD_RAW_GIT=1` (set in the shell
+//!    profile, NOT in the command) downgrades ONLY this tier to an advisory
+//!    — the env var is a silent human override, never advertised in the
+//!    deny message (advertising it turns the redirect into a puzzle the
+//!    model chases instead of complying). Interactive/porcelain shapes
+//!    pixel can't cover pass through — see `git_substitute_deny` for the
+//!    documented table.
 //!    Transcript-store pokes (sqlite3/cat/grep on a known store) escalate
 //!    from advisory to this same deny tier ONLY when the recall index
 //!    exists on disk (a deterministic substitute is actually available);
-//!    `PIXEL_GUARD_RAW_TRANSCRIPTS=1` downgrades that back to advisory.
+//!    `PIXEL_GUARD_RAW_TRANSCRIPTS=1` (silent human override) downgrades
+//!    that back to advisory.
 //! 5. GLOB — Glob tool calls are deliberately left un-denied: they only
 //!    enumerate paths, and the Read/Edit of any result is itself guarded by
 //!    the scoping rules above. Blocking enumeration would be pure noise.
@@ -148,8 +153,8 @@ fn transcript_store_agent(store: &str) -> &'static str {
 
 /// Advisory (non-blocking) lines for a transcript-store poke. Used when
 /// the recall index does not exist yet (no deterministic substitute is
-/// actually available) or when `PIXEL_GUARD_RAW_TRANSCRIPTS=1` downgrades
-/// the deny tier.
+/// actually available) or when `PIXEL_GUARD_RAW_TRANSCRIPTS=1` (silent
+/// human override) downgrades the deny tier.
 fn transcript_archaeology_advisory_lines(store: &str) -> Vec<String> {
     vec![
         format!("Advisory: this command reads `{store}` — a transcript store `pixel recall` already indexes."),
@@ -162,7 +167,9 @@ fn transcript_archaeology_advisory_lines(store: &str) -> Vec<String> {
 /// Deny lines for a transcript-store poke when the recall index EXISTS on
 /// disk — the deterministic substitute is real, so the raw dig is denied
 /// with it. Contract (like every SUBSTITUTE deny): what was blocked, the
-/// exact substitute, and the escape-hatch env var.
+/// reason code, and an exact substitute. The human-override env var is
+/// NOT advertised in the message (advertising it turns the redirect into
+/// a puzzle the model chases instead of complying).
 fn transcript_deny_lines(store: &str) -> Vec<String> {
     let agent = transcript_store_agent(store);
     vec![
@@ -170,7 +177,6 @@ fn transcript_deny_lines(store: &str) -> Vec<String> {
         "Run instead:".into(),
         format!("  pixel recall sessions --agent {agent}        # sessions by title/cwd/turn-count"),
         format!("  pixel recall search \"<phrase>\" --agent {agent} [--session <name>]   # exact turn text"),
-        "(To proceed with the raw dig anyway, set PIXEL_GUARD_RAW_TRANSCRIPTS=1 — this downgrades only this check to an advisory.)".into(),
     ]
 }
 
@@ -183,7 +189,9 @@ fn recall_index_ready() -> bool {
 
 /// `1`/`true`/`on` env-var check, mirroring the `PIXEL_TARGETS_GUARD`
 /// kill-switch pattern at the top of `run()` (that one checks for
-/// off-values; escape hatches check for on-values).
+/// off-values; human overrides check for on-values). These are silent
+/// overrides set in the shell profile by a human — never advertised in
+/// deny messages, never reachable from a tool call's env.
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
         .map(|v| matches!(v.as_str(), "1" | "true" | "on"))
@@ -655,8 +663,8 @@ fn check_bash(cmd: &str, cwd: &Path, idx_root: Option<&Path>, manifest: Option<&
     // Slots after the destructive tier (so `git push --force` keeps its
     // destructive deny) and before any rewrite attempt. Like the
     // destructive tier it has NO substitution/heredoc bail: a false
-    // positive costs one retry (or the escape hatch), a missed raw commit
-    // costs an unjournaled mutation.
+    // positive costs one retry (or the silent human override), a missed
+    // raw commit costs an unjournaled mutation.
     if let Some(lines) = git_mutation_substitute_lines(cmd, idx_root) {
         if env_flag("PIXEL_GUARD_RAW_GIT") {
             advise(&substitute_downgraded_advisory(&lines, "PIXEL_GUARD_RAW_GIT"));
@@ -667,8 +675,9 @@ fn check_bash(cmd: &str, cwd: &Path, idx_root: Option<&Path>, manifest: Option<&
         // Escalate to deny-with-substitute ONLY when the recall corpus
         // actually exists — without it the "substitute" would be a lie
         // (the sniper-fence lesson: a deny without a working alternative
-        // just collapses recall). `PIXEL_GUARD_RAW_TRANSCRIPTS=1`
-        // downgrades this (and only this) back to the advisory.
+        // just collapses recall). `PIXEL_GUARD_RAW_TRANSCRIPTS=1` (silent
+        // human override) downgrades this (and only this) back to the
+        // advisory.
         if recall_index_ready() && !env_flag("PIXEL_GUARD_RAW_TRANSCRIPTS") {
             block(&transcript_deny_lines(store));
         }
@@ -869,7 +878,7 @@ fn git_mutation_substitute_lines(cmd: &str, idx_root: Option<&Path>) -> Option<V
     None
 }
 
-/// Downgrade a SUBSTITUTE deny to advisory wording (escape hatch active).
+/// Downgrade a SUBSTITUTE deny to advisory wording (human override active).
 /// The substitute suggestion is kept verbatim; only the verdict changes.
 fn substitute_downgraded_advisory(deny_lines: &[String], var: &str) -> Vec<String> {
     let mut out: Vec<String> = deny_lines.to_vec();
@@ -897,9 +906,56 @@ fn substitute_downgraded_advisory(deny_lines: &[String], var: &str) -> Vec<Strin
 /// | `git rebase --onto/--exec/-x/--autosquash/--root` | not expressible as `pixel reconcile`         |
 /// | `git checkout -B` / plain `git checkout <ref>`  | force-reset / plain switch (destructive tier already covers `-f`/`--`) |
 /// | `git switch` without `-c`/`--create`            | plain branch switch, not a mutation            |
+/// | `git add -p`/`--patch`/`-i`/`--interactive`     | interactive hunk staging, no pixel equivalent  |
 fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<String>> {
     let root_q = shell_quote(&root.display().to_string());
     match sub {
+        "add" => {
+            // Interactive hunk staging — no pixel equivalent, pass through.
+            if args.iter().any(|a| {
+                a == "-p" || a == "--patch" || a == "-i" || a == "--interactive"
+            }) {
+                return None;
+            }
+            // Collect pathspecs (non-flag tokens). Flags that consume a
+            // value (-A/--all/-u/--update are self-contained; -N/--intent-to-add
+            // too) don't take a following pathspec, but we don't model every
+            // value-consuming flag — the common shapes (`git add <files>`,
+            // `git add .`, `git add -A`) are covered.
+            let all_variant = args.iter().any(|a| {
+                a == "." || a == "-A" || a == "--all" || a == "-u" || a == "--update"
+            });
+            let pathspecs: Vec<&String> = args
+                .iter()
+                .filter(|a| !a.starts_with('-') && a.as_str() != ".")
+                .collect();
+            let mut lines = vec![
+                "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw `git add` stages files outside pixel's journaled mutation surface.".into(),
+                "`pixel publish` stages AND commits in one step — use it instead:".into(),
+            ];
+            if !pathspecs.is_empty() {
+                let files = pathspecs
+                    .iter()
+                    .map(|f| format!("--files {}", shell_quote(f)))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                lines.push(format!(
+                    "  pixel publish {files} --message \"<msg>\" --request-id <id> {root_q}"
+                ));
+            } else if all_variant {
+                lines.push(format!(
+                    "  pixel publish --files <f1> [--files <f2> …] --message \"<msg>\" --request-id <id> {root_q}"
+                ));
+                lines.push(
+                    "List each modified tracked file as its own --files flag (run `pixel changes .` to see them).".into(),
+                );
+            } else {
+                lines.push(format!(
+                    "  pixel publish --files <file> [--files <file2> …] --message \"<msg>\" --request-id <id> {root_q}"
+                ));
+            }
+            Some(lines)
+        }
         "commit" => {
             let c = parse_commit_args(args);
             if c.interactive {
@@ -935,9 +991,6 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                     "(-a detected: list each modified tracked file as its own --files flag.)".into(),
                 );
             }
-            lines.push(
-                "Escape hatch for raw git this session: PIXEL_GUARD_RAW_GIT=1.".into(),
-            );
             Some(lines)
         }
         // Plain pushes — INCLUDING `--force-with-lease`, which the
@@ -969,7 +1022,6 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                 "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw `git push` bypasses pixel's snapshot-gated, journaled mutation surface.".into(),
                 "Run the exact equivalent instead:".into(),
                 format!("  pixel push {remote} {refspec} --request-id <id> {root_q}"),
-                "Escape hatch for raw git this session: PIXEL_GUARD_RAW_GIT=1.".into(),
             ])
         }
         "checkout" => {
@@ -1004,7 +1056,6 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                 "Run the exact equivalent instead:".into(),
                 format!("  pixel reconcile {root_q} --strategy rebase-if-clean --push auto"),
                 "It proves a clean rebase via merge-tree before touching the worktree and reports structured conflicts when they exist.".into(),
-                "Escape hatch for raw git this session: PIXEL_GUARD_RAW_GIT=1.".into(),
             ])
         }
         _ => None,
@@ -1016,7 +1067,6 @@ fn branch_substitute_lines(what: &str, name_q: &str, root_q: &str) -> Vec<String
         format!("BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw {what} bypasses pixel's journaled branch op."),
         "Run the exact equivalent instead (creates AND checks out the branch):".into(),
         format!("  pixel branch {name_q} --request-id <id> {root_q}"),
-        "Escape hatch for raw git this session: PIXEL_GUARD_RAW_GIT=1.".into(),
     ]
 }
 
@@ -2584,7 +2634,8 @@ mod tests {
     }
 
     /// Every SUBSTITUTE deny must carry the full contract: what was
-    /// blocked, the reason code, an exact substitute, the escape hatch.
+    /// blocked, the reason code, and an exact substitute. The human-override
+    /// env var is NOT advertised in the message.
     fn assert_substitute_contract(cmd: &str, substitute_fragment: &str) -> String {
         let msg = sub(cmd)
             .unwrap_or_else(|| panic!("`{cmd}` must be substitute-denied"))
@@ -2595,8 +2646,8 @@ mod tests {
             "substitute for `{cmd}` must contain `{substitute_fragment}`: {msg}"
         );
         assert!(
-            msg.contains("PIXEL_GUARD_RAW_GIT=1"),
-            "escape hatch missing for `{cmd}`: {msg}"
+            !msg.contains("PIXEL_GUARD_RAW_GIT=1"),
+            "human-override env var must NOT be advertised in deny for `{cmd}`: {msg}"
         );
         msg
     }
@@ -2700,8 +2751,44 @@ mod tests {
             "git switch main",
             "git status",
             "git log --oneline",
+            "git add -p",
+            "git add --patch",
+            "git add -i",
+            "git add --interactive",
         ] {
             assert!(sub(cmd).is_none(), "`{cmd}` must pass through the substitute tier");
+        }
+    }
+
+    #[test]
+    fn substitute_add_with_pathspecs() {
+        let msg = assert_substitute_contract(
+            "git add src/a.rs src/b.rs",
+            "pixel publish",
+        );
+        assert!(
+            msg.contains("--files src/a.rs --files src/b.rs"),
+            "each pathspec must be its own --files: {msg}"
+        );
+    }
+
+    #[test]
+    fn substitute_add_dot_suggests_enumerate() {
+        let msg = assert_substitute_contract("git add .", "pixel publish");
+        assert!(
+            msg.contains("List each modified tracked file"),
+            "`git add .` must suggest enumerating files: {msg}"
+        );
+    }
+
+    #[test]
+    fn substitute_add_all_variant() {
+        for cmd in ["git add -A", "git add --all", "git add -u", "git add --update"] {
+            let msg = assert_substitute_contract(cmd, "pixel publish");
+            assert!(
+                msg.contains("List each modified tracked file"),
+                "`{cmd}` must suggest enumerating files: {msg}"
+            );
         }
     }
 
@@ -2749,7 +2836,10 @@ mod tests {
         assert!(msg.contains("BLOCKED [PIXEL_SUBSTITUTE]"), "{msg}");
         assert!(msg.contains("pixel recall sessions --agent devin"), "{msg}");
         assert!(msg.contains("pixel recall search"), "{msg}");
-        assert!(msg.contains("PIXEL_GUARD_RAW_TRANSCRIPTS=1"), "{msg}");
+        assert!(
+            !msg.contains("PIXEL_GUARD_RAW_TRANSCRIPTS=1"),
+            "human-override env var must NOT be advertised: {msg}"
+        );
     }
 
     #[test]
