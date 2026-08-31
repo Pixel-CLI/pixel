@@ -8,17 +8,21 @@
 //! one; this crate depends on nothing pixel-internal.
 
 pub mod budget;
+pub mod evidence;
 pub mod envelope;
 pub mod epistemics;
 pub mod error;
 pub mod op;
+pub mod query;
 pub mod snapshot;
 pub mod warning;
 
 pub use budget::{Budget, BudgetInfo};
+pub use evidence::{CapHit, EvidenceBasis, SourceCoverage, SourceEpistemics};
 pub use envelope::{ENVELOPE_PROTOCOL_VERSION, Envelope};
 pub use epistemics::Epistemics;
 pub use error::{ErrorCode, PixelError};
 pub use op::Op;
+pub use query::{compile_query, QueryKind, QueryPlan, QueryResult, QueryStatus};
 pub use snapshot::{Snapshot, SnapshotInfo, SnapshotToken};
 pub use warning::Warning;

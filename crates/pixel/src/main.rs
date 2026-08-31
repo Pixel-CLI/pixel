@@ -20,6 +20,7 @@ use pixel_index::shard::Shard;
 use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtractor};
 use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service};
 use pixel_daemon::daemon;
+use pixel_proto::{compile_query, QueryKind, QueryStatus};
 use serde_json::{json, Value};
 
 #[derive(Parser)]
@@ -99,6 +100,20 @@ enum Command {
         /// on-demand). Eliminates the need for a follow-up Read call.
         #[arg(long, default_value_t = 0)]
         context: usize,
+    },
+    /// Compile and execute one bounded deterministic retrieval recipe.
+    Query {
+        intent: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value = "auto")]
+        kind: String,
+        #[arg(long, default_value_t = 800)]
+        budget: usize,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        no_daemon: bool,
     },
     /// Sniper target list: task description in, closed prioritized file list
     /// out (P0 = start here, P1 = likely, P2 = droppable). Writes the
@@ -229,6 +244,9 @@ enum Command {
         base: Option<String>,
         #[arg(long, default_value_t = 0)]
         offset: usize,
+        /// Also map affected symbols to the test files that exercise them.
+        #[arg(long)]
+        tests: bool,
         #[arg(long)]
         json: bool,
     },
@@ -401,6 +419,9 @@ enum Command {
         /// second file, or errors if a PATH was already given.
         #[arg(long = "files")]
         files: Vec<String>,
+        /// Leased force-push (`--force-with-lease`) for the push phase.
+        #[arg(long)]
+        force_with_lease: bool,
         /// Idempotency / recovery key.
         #[arg(long)]
         request_id: String,
@@ -527,6 +548,14 @@ enum Command {
         /// auto (default) | none
         #[arg(long, default_value = "auto")]
         push: String,
+        /// Integrate: rebase current branch onto origin/<TARGET>, then
+        /// fast-forward local <TARGET> to the rebased head (never merge).
+        /// `--strategy` is ignored in this mode.
+        #[arg(long, value_name = "TARGET")]
+        into: Option<String>,
+        /// Idempotency / recovery key.
+        #[arg(long)]
+        request_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -570,6 +599,165 @@ enum Command {
         #[command(subcommand)]
         cmd: HookCmd,
     },
+    /// Self-assessment: pixel's own action log (what ran, what went wrong).
+    /// Reads <path>/.pixel/actions.jsonl, written asynchronously by every
+    /// pixel invocation.
+    Log {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Most recent entries to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Only show entries that ended in an error.
+        #[arg(long)]
+        errors_only: bool,
+        #[arg(long)]
+        json: bool,
+        /// Delete the action log for this root and exit.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Squash every commit on the current branch since its base into ONE
+    /// commit (crash-safe, backup-ref'd), optionally force-pushing with lease.
+    Rewrite {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Explicit base ref (squash <onto>..HEAD). Default: merge-base with
+        /// the branch upstream, else with the remote default branch.
+        #[arg(long)]
+        onto: Option<String>,
+        /// Squash commit message (default: auto-generated subject list).
+        #[arg(short = 'm', long = "message")]
+        message: Option<String>,
+        /// Push the rewritten branch with --force-with-lease afterwards.
+        #[arg(long)]
+        push: bool,
+        /// Remote name.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// Reject if HEAD does not match this OID.
+        #[arg(long)]
+        expected_head: Option<String>,
+        /// Idempotency / recovery key.
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Per-region blame attribution: who introduced/owns each region of a file.
+    Provenance {
+        /// Repo-relative file to attribute.
+        file: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Restrict to lines a,b (1-based inclusive), e.g. --lines 10,40.
+        #[arg(long, value_parser = parse_line_range)]
+        lines: Option<(u32, u32)>,
+        /// Author query (case-insensitive substring on name or email) —
+        /// adds a did-they-touch-this verdict.
+        #[arg(long)]
+        author: Option<String>,
+        /// Max regions emitted (default 200); truncation sets lower_bound.
+        #[arg(long, default_value_t = 200)]
+        limit_regions: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One-call read-only branch inventory: ahead/behind, merged, stale,
+    /// unpushed — the deterministic "did you push everything?" answer.
+    Branches {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Run `git fetch --prune <remote>` first for a live view.
+        #[arg(long)]
+        fetch: bool,
+        /// Remote name.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// Days after which a branch counts as stale.
+        #[arg(long, default_value_t = 30)]
+        stale_days: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Additive-only, key-level .env mutations with snapshots and restore.
+    /// Values are NEVER printed in any output.
+    Env {
+        #[command(subcommand)]
+        cmd: EnvCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// List .env files under root — key NAMES only, never values.
+    Inventory {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set one key (snapshot-first; every other line byte-preserved).
+    Set {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        value: String,
+        /// Create the file if it does not exist.
+        #[arg(long)]
+        create_file: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore from a snapshot (latest if --snapshot omitted; undoable).
+    Restore {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        snapshot: Option<String>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List snapshots recorded for a file.
+    Snapshots {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify required keys exist (names only).
+    Check {
+        #[arg(long)]
+        file: PathBuf,
+        /// Required key name; repeat the flag once per key.
+        #[arg(long = "require")]
+        require: Vec<String>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Parse a 1-based inclusive line range "a,b" for `provenance --lines`.
+fn parse_line_range(s: &str) -> Result<(u32, u32), String> {
+    let (a, b) = s
+        .split_once(',')
+        .ok_or_else(|| format!("expected 'start,end', got '{s}'"))?;
+    let a: u32 = a.trim().parse().map_err(|e| format!("bad start line: {e}"))?;
+    let b: u32 = b.trim().parse().map_err(|e| format!("bad end line: {e}"))?;
+    if a == 0 || b < a {
+        return Err(format!("invalid range {a},{b}: need 1 <= start <= end"));
+    }
+    Ok((a, b))
 }
 
 #[derive(Subcommand)]
@@ -1521,8 +1709,37 @@ fn facts_status(root: &Path) -> Option<Value> {
     }))
 }
 
+/// Parse argv, dispatch, and record the invocation to the per-repo action
+/// log (`<root>/.pixel/actions.jsonl`) so a session can be self-assessed
+/// later. Logging is best-effort and asynchronous — it can never fail or
+/// slow down the command it observes: `discover_root` failures fall back to
+/// a no-op logger, and `ActionLog::finish` bounds the writer's shutdown
+/// window instead of blocking on a slow disk.
 fn run() -> Result<(), String> {
-    match Cli::parse().command {
+    let started = std::time::Instant::now();
+    let argv: Vec<String> = std::env::args().collect();
+    let command_label = argv.get(1).cloned().unwrap_or_else(|| "unknown".to_string());
+    let args_summary = argv[1..].join(" ");
+
+    let cli = Cli::parse();
+    let mut logger = match discover_root(Path::new(".")) {
+        Ok(root) => pixel_actionlog::ActionLog::spawn_for_root(&root),
+        Err(_) => pixel_actionlog::ActionLog::noop(),
+    };
+
+    let result = run_command(cli.command);
+
+    logger.log(
+        pixel_actionlog::ActionEvent::new(command_label, args_summary)
+            .with_result(&result, started.elapsed()),
+    );
+    logger.finish();
+
+    result
+}
+
+fn run_command(command: Command) -> Result<(), String> {
+    match command {
         Command::Index {
             path,
             extractor,
@@ -1563,6 +1780,9 @@ fn run() -> Result<(), String> {
             scope,
             context,
         } => run_search(pattern, paths, json, stats, limit, offset, no_daemon, scope, context),
+        Command::Query { intent, path, kind, budget, json, no_daemon } => {
+            run_query(intent, path, &kind, budget, json, no_daemon)
+        }
         Command::Targets {
             task,
             path,
@@ -1931,6 +2151,7 @@ fn run() -> Result<(), String> {
             path,
             base,
             offset,
+            tests,
             json,
         } => {
             let data = execute(
@@ -1938,6 +2159,7 @@ fn run() -> Result<(), String> {
                 Request::Changes {
                     base,
                     offset: Some(offset),
+                    include_tests: tests,
                 },
                 false,
             )?;
@@ -2191,17 +2413,19 @@ fn run() -> Result<(), String> {
             files,
             remote,
             refspec,
+            force_with_lease,
             request_id,
             json,
         } => {
             let root = discover_root(&path)?;
-            let data = pixel_ops::ship::ship(
+            let data = pixel_ops::ship::ship_with_lease(
                 &root,
                 &message,
                 &files,
                 &remote,
                 &refspec,
                 &request_id,
+                force_with_lease,
             )?;
             print_data(&data, json)
         }
@@ -2334,6 +2558,8 @@ fn run() -> Result<(), String> {
             path,
             strategy,
             push,
+            into,
+            request_id,
             json,
         } => {
             let data = execute(
@@ -2341,6 +2567,8 @@ fn run() -> Result<(), String> {
                 Request::Reconcile {
                     strategy: Some(strategy),
                     push: Some(push),
+                    into,
+                    request_id,
                 },
                 false,
             )?;
@@ -2474,6 +2702,234 @@ fn run() -> Result<(), String> {
                 Ok(())
             }
         },
+        Command::Log {
+            path,
+            limit,
+            errors_only,
+            json,
+            clear,
+        } => run_log(&path, limit, errors_only, json, clear),
+        Command::Rewrite {
+            path,
+            onto,
+            message,
+            push,
+            remote,
+            expected_head,
+            request_id,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let opts = pixel_ops::rewrite::RewriteOptions {
+                onto,
+                message,
+                push,
+                remote,
+                request_id,
+                expected_head,
+            };
+            let data = pixel_ops::rewrite::rewrite(&root, &opts)?;
+            print_data(&data, json)
+        }
+        Command::Provenance {
+            file,
+            path,
+            lines,
+            author,
+            limit_regions,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let opts = pixel_ops::provenance::ProvenanceOptions {
+                file,
+                lines,
+                author,
+                limit_regions,
+            };
+            let data = pixel_ops::provenance::provenance(&root, &opts)?;
+            print_data(&data, json)
+        }
+        Command::Branches {
+            path,
+            fetch,
+            remote,
+            stale_days,
+            json,
+        } => {
+            let root = discover_root(&path)?;
+            let opts = pixel_ops::branches::BranchesOptions {
+                fetch,
+                remote,
+                stale_days,
+            };
+            let data = pixel_ops::branches::branches(&root, &opts)?;
+            print_data(&data, json)
+        }
+        Command::Env { cmd } => {
+            use pixel_ops::envfile::EnvAction;
+            let (path, json, action) = match cmd {
+                EnvCmd::Inventory { path, json } => (path, json, EnvAction::Inventory),
+                EnvCmd::Set {
+                    file,
+                    key,
+                    value,
+                    create_file,
+                    path,
+                    json,
+                } => (path, json, EnvAction::Set { file, key, value, create_file }),
+                EnvCmd::Restore {
+                    file,
+                    snapshot,
+                    path,
+                    json,
+                } => (path, json, EnvAction::Restore { file, snapshot }),
+                EnvCmd::Snapshots { file, path, json } => {
+                    (path, json, EnvAction::Snapshots { file })
+                }
+                EnvCmd::Check {
+                    file,
+                    require,
+                    path,
+                    json,
+                } => (path, json, EnvAction::Check { file, require }),
+            };
+            let root = discover_root(&path)?;
+            let data = pixel_ops::envfile::envfile(&root, &action)?;
+            print_data(&data, json)
+        }
+    }
+}
+
+fn run_query(
+    intent: String,
+    path: PathBuf,
+    kind: &str,
+    budget: usize,
+    json_output: bool,
+    no_daemon: bool,
+) -> Result<(), String> {
+    let kind = match kind {
+        "auto" => QueryKind::Auto,
+        "locate" => QueryKind::Locate,
+        "scope" => QueryKind::Scope,
+        "impact" => QueryKind::Impact,
+        "history-recovery" => QueryKind::HistoryRecovery,
+        "status" => QueryKind::Status,
+        _ => return Err(format!("unsupported query kind '{kind}'")),
+    };
+    let mut result = compile_query(&intent, kind);
+    if result.status == QueryStatus::Ranked {
+        let output = serde_json::to_value(&result).map_err(|error| error.to_string())?;
+        return print_data(&output, true);
+    }
+    let operation = result.plan[0].operations[0].as_str();
+    let evidence = match operation {
+        "resolve" => {
+            let phrase = intent.trim().trim_start_matches("where is `").trim_end_matches('`');
+            execute(&path, Request::Resolve { phrase: phrase.into(), limit: None }, no_daemon)?
+        }
+        "targets" => execute(&path, Request::Targets { task: intent.clone(), limit: None }, no_daemon)?,
+        "impact" => {
+            let target = intent.trim().trim_start_matches("show impact of ");
+            execute(&path, Request::Impact { uid_or_name: target.into(), direction: "upstream".into(), depth: Some(3) }, no_daemon)?
+        }
+        "excavate" => execute(&path, Request::Excavate { phrase: Some(intent.clone()), path: None, from: None, to: None, limit: None }, no_daemon)?,
+        "inspect" => execute(&path, Request::Inspect { files: None }, no_daemon)?,
+        _ => return Err(format!("unsupported query operation '{operation}'")),
+    };
+    result.evidence.push(evidence);
+    let output = json!({
+        "op": "query",
+        "result": result,
+        "metrics": {"budget_tokens": budget, "operations": 1},
+        "epistemics": {"closed_world": false, "lower_bound": true, "basis": "compiled bounded recipe"}
+    });
+    print_data(&output, json_output)
+}
+
+/// `pixel log` — the self-assessment surface over the async action log every
+/// pixel invocation writes to `<root>/.pixel/actions.jsonl`.
+fn run_log(
+    path: &Path,
+    limit: usize,
+    errors_only: bool,
+    json: bool,
+    clear: bool,
+) -> Result<(), String> {
+    let root = discover_root(path)?;
+    let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
+    if clear {
+        return match std::fs::remove_file(&log_path) {
+            Ok(()) => {
+                println!("action log cleared: {}", log_path.display());
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!("no action log at {}", log_path.display());
+                Ok(())
+            }
+            Err(e) => Err(format!("remove {}: {e}", log_path.display())),
+        };
+    }
+    // Over-fetch when filtering to errors so `limit` still means "the last
+    // N errors", not "the last N entries, some of which happen to be errors".
+    let fetch = if errors_only { limit.max(1) * 20 } else { limit.max(1) };
+    let mut events = pixel_actionlog::tail(&log_path, fetch)
+        .map_err(|e| format!("read {}: {e}", log_path.display()))?;
+    if errors_only {
+        events.retain(|e| e.outcome == pixel_actionlog::Outcome::Error);
+    }
+    if events.len() > limit {
+        let start = events.len() - limit;
+        events.drain(0..start);
+    }
+    if json {
+        for e in &events {
+            println!(
+                "{}",
+                serde_json::to_string(e).map_err(|e| e.to_string())?
+            );
+        }
+        return Ok(());
+    }
+    if events.is_empty() {
+        println!("no recorded actions at {}", log_path.display());
+        return Ok(());
+    }
+    let now = pixel_actionlog::now_ms();
+    for e in &events {
+        let when = relative_time(e.ts_ms, now);
+        match e.outcome {
+            pixel_actionlog::Outcome::Ok => {
+                println!("{when:>8}  ok     {:<10} {} ({} ms)", e.command, e.args, e.duration_ms);
+            }
+            pixel_actionlog::Outcome::Error => {
+                println!(
+                    "{when:>8}  ERROR  {:<10} {} ({} ms) — {}",
+                    e.command,
+                    e.args,
+                    e.duration_ms,
+                    e.error.as_deref().unwrap_or("?")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn relative_time(ts_ms: i64, now_ms: i64) -> String {
+    let delta_ms = (now_ms - ts_ms).max(0);
+    let secs = delta_ms / 1000;
+    if secs < 5 {
+        "just now".to_string()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
     }
 }
 

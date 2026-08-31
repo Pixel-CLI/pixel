@@ -92,6 +92,11 @@ pub enum Op {
         base: Option<String>,
         #[serde(default)]
         offset: Option<usize>,
+        /// Map affected symbols to the test files that exercise them
+        /// (upstream caller walk). Default false; serde default keeps
+        /// existing wire calls unaffected.
+        #[serde(default)]
+        include_tests: bool,
     },
     Graph {},
     Status {},
@@ -142,6 +147,13 @@ pub enum Op {
         strategy: Option<String>,
         #[serde(default)]
         push: Option<String>,
+        /// Integration target: rebase current branch onto origin/<target>,
+        /// then fast-forward the local <target> branch (never merge).
+        #[serde(default)]
+        into: Option<String>,
+        /// Idempotency / recovery key threaded to the ops journal.
+        #[serde(default)]
+        request_id: Option<String>,
     },
     /// M5: journal a session event into the session db (fire-and-forget).
     Journal {
@@ -425,7 +437,7 @@ mod tests {
     #[test]
     fn reconcile_round_trips_with_defaults() {
         let op: Op = serde_json::from_value(json!({"op": "reconcile"})).unwrap();
-        assert_eq!(op, Op::Reconcile { strategy: None, push: None });
+        assert_eq!(op, Op::Reconcile { strategy: None, push: None, into: None, request_id: None });
     }
 
     #[test]
@@ -489,14 +501,14 @@ mod tests {
             (Op::Trace { from: "".into(), to: "".into() }, "trace"),
             (Op::Processes { offset: None }, "processes"),
             (Op::Clusters { offset: None }, "clusters"),
-            (Op::Changes { base: None, offset: None }, "changes"),
+            (Op::Changes { base: None, offset: None, include_tests: false }, "changes"),
             (Op::Graph {}, "graph"),
             (Op::Status {}, "status"),
             (Op::Resolve { phrase: "".into(), limit: None }, "resolve"),
             (Op::History { query: "".into(), facet: None, limit: None }, "history"),
             (Op::Lifecycle { path: None, token: None }, "lifecycle"),
             (Op::Excavate { phrase: None, path: None, from: None, to: None, limit: None }, "excavate"),
-            (Op::Reconcile { strategy: None, push: None }, "reconcile"),
+            (Op::Reconcile { strategy: None, push: None, into: None, request_id: None }, "reconcile"),
             (Op::Journal { kind: "".into(), path: None, detail: None }, "journal"),
             (Op::Inspect { files: None }, "inspect"),
             (Op::Review { cursor: None, byte_cap: None }, "review"),

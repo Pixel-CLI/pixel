@@ -135,6 +135,16 @@ fn opts(strategy: &str, push: &str) -> ReconcileOptions {
         strategy: strategy.to_string(),
         push: push.to_string(),
         request_id: format!("rec-{}", uuid::Uuid::new_v4()),
+        into_target: None,
+    }
+}
+
+fn opts_into(target: &str, push: &str) -> ReconcileOptions {
+    ReconcileOptions {
+        strategy: "report".to_string(),
+        push: push.to_string(),
+        request_id: format!("rec-{}", uuid::Uuid::new_v4()),
+        into_target: Some(target.to_string()),
     }
 }
 
@@ -485,6 +495,7 @@ fn empty_request_id_from_the_daemon_wiring_does_not_crash_the_op() {
                 strategy: "report".to_string(),
                 push: "none".to_string(),
                 request_id: String::new(),
+                into_target: None,
             },
         )
         .unwrap();
@@ -526,5 +537,165 @@ fn reconcile_accepts_never_as_an_explicit_alias_of_none() {
         let result = reconcile(local.path(), &opts("report", "never"))
             .expect("--push never must be accepted as an alias of none");
         assert_eq!(result["state"], "up_to_date", "result={result}");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// (g) --into <target> integration mode: rebase current branch onto
+//     origin/<target>, then fast-forward the LOCAL <target> ref to the
+//     rebased head. Never force, never a merge commit.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn into_clean_integration_rebases_feature_fast_forwards_target_and_pushes_both() {
+    with_isolated_state(|| {
+        let (remote, local) = new_remote_and_local();
+
+        // develop branches off main and is pushed.
+        git(local.path(), &["checkout", "-qb", "develop"]);
+        write(local.path(), "develop_seed.txt", "develop\n");
+        commit_all(local.path(), "develop seed");
+        git(local.path(), &["push", "-q", "-u", "origin", "develop"]);
+
+        // feature branches off develop with its own commit — never pushed,
+        // so the leased feature push must create the remote branch.
+        git(local.path(), &["checkout", "-qb", "feature/x"]);
+        write(local.path(), "feature.txt", "feature\n");
+        commit_all(local.path(), "feature work");
+
+        // origin/develop advances from another clone (disjoint file — clean).
+        let other = clone_of(remote.path());
+        git(other.path(), &["checkout", "-q", "develop"]);
+        write(other.path(), "remote_dev.txt", "remote develop\n");
+        let remote_dev_head = commit_all(other.path(), "remote develop advances");
+        git(other.path(), &["push", "-q"]);
+
+        let result = reconcile(local.path(), &opts_into("develop", "auto")).unwrap();
+        assert_eq!(result["state"], "integrated", "result={result}");
+        assert_eq!(result["pushed"], true, "result={result}");
+        assert_eq!(result["into"]["target"], "develop", "result={result}");
+        assert_eq!(result["into"]["target_pushed"], true, "result={result}");
+
+        let new_head = git(local.path(), &["rev-parse", "HEAD"]);
+        assert_eq!(
+            result["into"]["target_new_oid"].as_str().unwrap(),
+            new_head,
+            "result={result}"
+        );
+
+        // Local develop was fast-forwarded to the rebased feature head.
+        let dev_oid = git(local.path(), &["rev-parse", "refs/heads/develop"]);
+        assert_eq!(dev_oid, new_head, "local develop must be ff'd to the rebased head");
+
+        // The rebased head contains the remote develop advance (a true
+        // rebase onto origin/develop, not a stale-base replay).
+        let (is_anc, _, _) = git_allow_fail(
+            local.path(),
+            &["merge-base", "--is-ancestor", &remote_dev_head, &new_head],
+        );
+        assert!(is_anc, "rebased head must descend from the fetched origin/develop tip");
+
+        // Still on the feature branch; linear history — no merge commit.
+        assert_eq!(git(local.path(), &["symbolic-ref", "--short", "HEAD"]), "feature/x");
+        assert!(parent_counts(local.path()).iter().all(|&p| p <= 1));
+
+        // Both pushes actually landed on the remote — verified via a fresh
+        // clone, not local belief.
+        let verify = clone_of(remote.path());
+        assert_eq!(git(verify.path(), &["rev-parse", "origin/develop"]), new_head);
+        assert_eq!(git(verify.path(), &["rev-parse", "origin/feature/x"]), new_head);
+        git(verify.path(), &["checkout", "-q", "develop"]);
+        assert!(verify.path().join("feature.txt").exists());
+        assert!(verify.path().join("remote_dev.txt").exists());
+    });
+}
+
+#[test]
+fn into_refuses_with_conflict_report_and_leaves_target_untouched() {
+    with_isolated_state(|| {
+        let (remote, local) = new_remote_and_local();
+
+        git(local.path(), &["checkout", "-qb", "develop"]);
+        git(local.path(), &["push", "-q", "-u", "origin", "develop"]);
+
+        git(local.path(), &["checkout", "-qb", "feature/x"]);
+        write(local.path(), "conflict.txt", "feature version\nsame base line\n");
+        commit_all(local.path(), "feature conflicting");
+        let head_before = git(local.path(), &["rev-parse", "HEAD"]);
+        let dev_before = git(local.path(), &["rev-parse", "refs/heads/develop"]);
+
+        let other = clone_of(remote.path());
+        git(other.path(), &["checkout", "-q", "develop"]);
+        write(other.path(), "conflict.txt", "remote version\nsame base line\n");
+        commit_all(other.path(), "remote develop conflicting");
+        git(other.path(), &["push", "-q"]);
+
+        let result = reconcile(local.path(), &opts_into("develop", "auto")).unwrap();
+        assert_eq!(result["state"], "diverged", "result={result}");
+        assert_eq!(result["into_target"], "develop", "report must name the target: {result}");
+        assert_eq!(result["clean_rebase_possible"], false, "result={result}");
+        let conflicts = result["conflicts"].as_array().expect("conflicts array");
+        assert!(!conflicts.is_empty(), "conflicts must be reported, never filtered: {result}");
+        let paths: Vec<&str> = conflicts.iter().map(|c| c["path"].as_str().unwrap()).collect();
+        assert!(paths.contains(&"conflict.txt"), "paths={paths:?}");
+
+        // No mutation whatsoever: feature HEAD unmoved, local develop
+        // unmoved, no rebase sequencer state left behind.
+        assert_eq!(git(local.path(), &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(git(local.path(), &["rev-parse", "refs/heads/develop"]), dev_before);
+        assert!(
+            !local.path().join(".git/rebase-merge").exists()
+                && !local.path().join(".git/rebase-apply").exists()
+        );
+    });
+}
+
+#[test]
+fn into_refuses_when_local_target_is_not_an_ancestor_of_remote_target() {
+    with_isolated_state(|| {
+        let (remote, local) = new_remote_and_local();
+
+        git(local.path(), &["checkout", "-qb", "develop"]);
+        git(local.path(), &["push", "-q", "-u", "origin", "develop"]);
+        // Local-only commit on develop → develop diverges once the remote
+        // also advances. The ff of a diverged target would be a forced move,
+        // which --into must refuse outright.
+        write(local.path(), "local_dev_only.txt", "local develop\n");
+        commit_all(local.path(), "local develop diverges");
+        let dev_before = git(local.path(), &["rev-parse", "refs/heads/develop"]);
+
+        git(local.path(), &["checkout", "-qb", "feature/x"]);
+        write(local.path(), "feature.txt", "feature\n");
+        commit_all(local.path(), "feature work");
+        let head_before = git(local.path(), &["rev-parse", "HEAD"]);
+
+        let other = clone_of(remote.path());
+        git(other.path(), &["checkout", "-q", "develop"]);
+        write(other.path(), "remote_dev.txt", "remote develop\n");
+        commit_all(other.path(), "remote develop advances");
+        git(other.path(), &["push", "-q"]);
+
+        let err = reconcile(local.path(), &opts_into("develop", "auto")).unwrap_err();
+        assert!(
+            err.contains("NON_FAST_FORWARD") && err.contains("develop"),
+            "expected structured non-ff refusal naming the target: {err}"
+        );
+
+        // The refusal precedes ALL mutation: nothing moved, no rebase ran.
+        assert_eq!(git(local.path(), &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(git(local.path(), &["rev-parse", "refs/heads/develop"]), dev_before);
+    });
+}
+
+#[test]
+fn into_refuses_when_target_is_the_current_branch() {
+    with_isolated_state(|| {
+        let (_remote, local) = new_remote_and_local();
+        git(local.path(), &["checkout", "-qb", "develop"]);
+        let err = reconcile(local.path(), &opts_into("develop", "none")).unwrap_err();
+        assert!(
+            err.contains("UNSUPPORTED_STATE") && err.contains("develop"),
+            "expected target==current refusal: {err}"
+        );
     });
 }

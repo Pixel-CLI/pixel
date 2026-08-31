@@ -61,13 +61,25 @@ fn indexed_repo(tag: &str) -> PathBuf {
 
 /// Pipe a PreToolUse payload into `pixel hook guard`; return (code, stderr).
 fn run_guard(payload: &serde_json::Value) -> (i32, String) {
-    let mut child = Command::new(PIXEL)
-        .args(["hook", "guard"])
+    let (code, _stdout, stderr) = run_guard_env(payload, &[]);
+    (code, stderr)
+}
+
+/// Like `run_guard` but with explicit env vars, and capturing stdout too
+/// (advisories are JSON on stdout with exit 0). The guard's escape-hatch
+/// vars are always cleared first so the ambient shell can't skew a test.
+fn run_guard_env(payload: &serde_json::Value, envs: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new(PIXEL);
+    cmd.args(["hook", "guard"])
+        .env_remove("PIXEL_GUARD_RAW_GIT")
+        .env_remove("PIXEL_GUARD_RAW_TRANSCRIPTS")
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().unwrap();
     child
         .stdin
         .as_mut()
@@ -77,8 +89,18 @@ fn run_guard(payload: &serde_json::Value) -> (i32, String) {
     let out = child.wait_with_output().unwrap();
     (
         out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+fn bash_payload(cwd: &Path, command: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "cwd": cwd.to_str().unwrap(),
+        "tool_input": {"command": command},
+    })
 }
 
 #[test]
@@ -192,4 +214,119 @@ fn targets_manifest_merges_two_tasks_and_guard_honors_union() {
 
 fn dir_join(base: &Path, rel: &str) -> PathBuf {
     base.join(rel)
+}
+
+// --- SUBSTITUTE tier (end-to-end through the real binary) -----------------
+
+#[test]
+fn bash_git_commit_denied_with_substitute() {
+    let repo = indexed_repo("sub-commit");
+    let payload = bash_payload(&repo, "git commit -m 'fix parser'");
+    let (code, stdout, stderr) = run_guard_env(&payload, &[]);
+    assert_eq!(code, 2, "raw git commit must be denied: {stderr} {stdout}");
+    assert!(stderr.contains("BLOCKED [PIXEL_SUBSTITUTE]"), "{stderr}");
+    assert!(stderr.contains("pixel publish"), "{stderr}");
+    assert!(
+        stderr.contains("--message 'fix parser'"),
+        "parsed -m must enrich the substitute: {stderr}"
+    );
+    assert!(stderr.contains("PIXEL_GUARD_RAW_GIT=1"), "{stderr}");
+}
+
+#[test]
+fn escape_hatch_downgrades_commit_to_advisory() {
+    let repo = indexed_repo("sub-escape");
+    let payload = bash_payload(&repo, "git commit -m 'fix parser'");
+    let (code, stdout, stderr) =
+        run_guard_env(&payload, &[("PIXEL_GUARD_RAW_GIT", "1")]);
+    assert_eq!(code, 0, "escape hatch must allow the command: {stderr}");
+    assert!(
+        stdout.contains("pixel publish"),
+        "advisory must still carry the substitute: {stdout}"
+    );
+    assert!(
+        stdout.contains("advisory") && !stdout.contains("BLOCKED"),
+        "must be advisory wording, not a deny: {stdout}"
+    );
+}
+
+#[test]
+fn escape_hatch_does_not_touch_destructive_tier() {
+    let repo = indexed_repo("sub-escape-destructive");
+    let payload = bash_payload(&repo, "git reset --hard HEAD~1");
+    let (code, _stdout, stderr) =
+        run_guard_env(&payload, &[("PIXEL_GUARD_RAW_GIT", "1")]);
+    assert_eq!(
+        code, 2,
+        "PIXEL_GUARD_RAW_GIT must downgrade ONLY the substitute tier: {stderr}"
+    );
+}
+
+// --- transcript escalation (end-to-end through the real binary) ------------
+
+const TRANSCRIPT_POKE: &str =
+    "sqlite3 ~/.local/share/devin/cli/sessions.db 'select title from sessions'";
+
+#[test]
+fn transcript_poke_denied_when_recall_index_exists() {
+    let dir = scratch("recall-ready");
+    let recall_dir = dir.join("recall");
+    std::fs::create_dir_all(&recall_dir).unwrap();
+    std::fs::write(recall_dir.join("recall.db"), b"").unwrap();
+    let payload = bash_payload(&dir, TRANSCRIPT_POKE);
+    let (code, _stdout, stderr) = run_guard_env(
+        &payload,
+        &[("PIXEL_RECALL_DIR", recall_dir.to_str().unwrap())],
+    );
+    assert_eq!(code, 2, "poke must be denied when the index exists: {stderr}");
+    assert!(stderr.contains("BLOCKED [PIXEL_SUBSTITUTE]"), "{stderr}");
+    assert!(stderr.contains("pixel recall sessions --agent devin"), "{stderr}");
+    assert!(stderr.contains("PIXEL_GUARD_RAW_TRANSCRIPTS=1"), "{stderr}");
+
+    // The dedicated escape hatch downgrades it back to the advisory.
+    let (code, stdout, _stderr) = run_guard_env(
+        &payload,
+        &[
+            ("PIXEL_RECALL_DIR", recall_dir.to_str().unwrap()),
+            ("PIXEL_GUARD_RAW_TRANSCRIPTS", "1"),
+        ],
+    );
+    assert_eq!(code, 0, "PIXEL_GUARD_RAW_TRANSCRIPTS=1 must downgrade: {stdout}");
+    assert!(stdout.contains("Advisory"), "{stdout}");
+}
+
+#[test]
+fn transcript_poke_advisory_when_no_recall_index() {
+    let dir = scratch("recall-missing");
+    let empty = dir.join("empty-recall");
+    std::fs::create_dir_all(&empty).unwrap();
+    let payload = bash_payload(&dir, TRANSCRIPT_POKE);
+    let (code, stdout, stderr) = run_guard_env(
+        &payload,
+        &[("PIXEL_RECALL_DIR", empty.to_str().unwrap())],
+    );
+    assert_eq!(
+        code, 0,
+        "without a recall index there is no substitute — advisory only: {stderr}"
+    );
+    assert!(stdout.contains("Advisory"), "{stdout}");
+    assert!(stdout.contains("pixel recall"), "{stdout}");
+    assert!(!stdout.contains("BLOCKED"), "{stdout}");
+}
+
+#[test]
+fn zcode_poke_flagged_via_marker() {
+    let dir = scratch("zcode-marker");
+    let empty = dir.join("empty-recall");
+    std::fs::create_dir_all(&empty).unwrap();
+    let payload = bash_payload(&dir, "sqlite3 ~/.zcode/cli/db/db.sqlite '.tables'");
+    let (code, stdout, _stderr) = run_guard_env(
+        &payload,
+        &[("PIXEL_RECALL_DIR", empty.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "no index → advisory: {stdout}");
+    assert!(
+        stdout.contains(".zcode/cli/db") && stdout.contains("pixel recall"),
+        "zcode store must be recognized: {stdout}"
+    );
 }

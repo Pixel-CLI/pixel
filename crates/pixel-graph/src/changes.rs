@@ -1,16 +1,23 @@
 //! Change detection — `git diff --unified=0` hunk ranges mapped onto indexed
 //! symbols, with affected processes and depth-1 upstream callers feeding risk.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::Path;
 
 use serde::Serialize;
 
-use crate::impact::processes_for_symbol;
+use crate::concept::is_test_path;
+use crate::impact::{file_path_by_id, processes_for_symbol, symbol_by_id};
 use crate::store::{EdgeKind, GraphStore};
 use pixel_git::GitRunner;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Cap on `suggested_tests` entries (T2: the cap must surface in the report).
+const SUGGESTED_TESTS_CAP: usize = 100;
+
+/// Max upstream BFS depth when walking callers looking for test files.
+const SUGGESTED_TESTS_MAX_DEPTH: u8 = 3;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangedSymbol {
@@ -22,6 +29,23 @@ pub struct ChangedSymbol {
     pub processes: Vec<String>,
 }
 
+/// A test file suggested for the current working-tree change set, found by
+/// walking UPSTREAM callers of each affected symbol (tests call the code) or
+/// because a changed symbol lives in a test file itself.
+#[derive(Debug, Clone, Serialize)]
+pub struct SuggestedTest {
+    /// Repo-relative test file path.
+    pub file: String,
+    /// Changed symbols this test file was reached from (sorted, deduped).
+    pub matched_symbols: Vec<String>,
+    /// "direct" (a changed symbol lives in this test file, depth 0)
+    /// | "direct-caller" (a test symbol calls a changed symbol, depth 1)
+    /// | "transitive" (depth 2-3 through intermediate callers).
+    pub via: String,
+    /// Minimal call-graph distance from any changed symbol to this file.
+    pub depth: u8,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangesReport {
     pub base: String,
@@ -30,6 +54,14 @@ pub struct ChangesReport {
     pub affected_processes: Vec<String>,
     pub risk: String,
     pub envelope_note: String,
+    /// Test files that exercise the changed symbols (empty unless
+    /// `include_tests` was requested). Sorted by (depth, file).
+    pub suggested_tests: Vec<SuggestedTest>,
+    /// True when `suggested_tests` was truncated at the cap — more test
+    /// files exist than are listed (T2: every cap surfaces).
+    pub suggested_tests_lower_bound: bool,
+    /// Honest limitations of the mapping (caps hit, extraction blind spots).
+    pub suggested_tests_note: String,
 }
 
 #[derive(Debug, PartialEq)]
@@ -123,6 +155,7 @@ pub fn detect(
     store: &GraphStore,
     root: &Path,
     base_ref: Option<&str>,
+    include_tests: bool,
 ) -> Result<ChangesReport, BoxError> {
     let base = base_ref.unwrap_or("HEAD").to_string();
     let runner = GitRunner::new(root);
@@ -134,6 +167,9 @@ pub fn detect(
     let mut proc_set: BTreeSet<String> = BTreeSet::new();
     let mut caller_ids: BTreeSet<i64> = BTreeSet::new();
     let mut lower_bound_names: BTreeSet<String> = BTreeSet::new();
+    // (symbol rowid, name, path) of every affected symbol — the seeds for
+    // the upstream test-file walk when `include_tests` is set.
+    let mut changed_seeds: Vec<(i64, String, String)> = Vec::new();
 
     for fd in &file_diffs {
         let file = match store.file_by_path(&fd.path)? {
@@ -169,6 +205,9 @@ pub fn detect(
             let env = store.envelope_for_name(&sym.name)?;
             if env.lower_bound {
                 lower_bound_names.insert(sym.name.clone());
+            }
+            if include_tests {
+                changed_seeds.push((sym.id, sym.name.clone(), fd.path.clone()));
             }
             symbols.push(ChangedSymbol {
                 uid: sym.uid,
@@ -212,6 +251,12 @@ pub fn detect(
         "all call sites for changed symbols resolved".to_string()
     };
 
+    let (suggested_tests, suggested_tests_lower_bound, suggested_tests_note) = if include_tests {
+        suggest_tests(store, &changed_seeds)?
+    } else {
+        (Vec::new(), false, String::new())
+    };
+
     Ok(ChangesReport {
         base,
         changed_files: file_diffs.len() as u64,
@@ -219,7 +264,107 @@ pub fn detect(
         affected_processes,
         risk,
         envelope_note,
+        suggested_tests,
+        suggested_tests_lower_bound,
+        suggested_tests_note,
     })
+}
+
+/// Map affected symbols to the test files that exercise them.
+///
+/// Two sources, deduped by file with the minimal depth kept:
+/// 1. depth 0, via "direct" — a changed symbol lives in a test file itself
+///    (a changed test is its own suggested test);
+/// 2. depth 1..=3 — UPSTREAM callers of each changed symbol (tests call the
+///    code), via "direct-caller" at depth 1 and "transitive" beyond.
+///
+/// Honest limitation (surfaced in the note, never guessed around): the Rust
+/// extractor skips `#[test]` functions and `#[cfg(test)]` modules entirely
+/// (`extract::rust_is_test_container`), so in-file Rust unit tests have no
+/// graph nodes and cannot be reached by the caller walk. Non-`#[test]`
+/// helper symbols in `tests/` integration files ARE indexed and do resolve.
+fn suggest_tests(
+    store: &GraphStore,
+    seeds: &[(i64, String, String)],
+) -> Result<(Vec<SuggestedTest>, bool, String), BoxError> {
+    // file -> (min depth, matched changed-symbol names)
+    let mut by_file: BTreeMap<String, (u8, BTreeSet<String>)> = BTreeMap::new();
+    let record = |file: String, depth: u8, symbol: &str, map: &mut BTreeMap<String, (u8, BTreeSet<String>)>| {
+        let entry = map
+            .entry(file)
+            .or_insert_with(|| (depth, BTreeSet::new()));
+        entry.0 = entry.0.min(depth);
+        entry.1.insert(symbol.to_string());
+    };
+
+    for (seed_id, seed_name, seed_path) in seeds {
+        // Source 1: the changed symbol is itself in a test file.
+        if is_test_path(seed_path) {
+            record(seed_path.clone(), 0, seed_name, &mut by_file);
+        }
+        // Source 2: BFS upstream over `calls` edges, depth ≤ 3.
+        let mut visited: HashSet<i64> = HashSet::new();
+        visited.insert(*seed_id);
+        let mut queue: VecDeque<(i64, u8)> = VecDeque::new();
+        queue.push_back((*seed_id, 0));
+        while let Some((id, depth)) = queue.pop_front() {
+            if depth >= SUGGESTED_TESTS_MAX_DEPTH {
+                continue;
+            }
+            for e in store.edges_to(id, Some(EdgeKind::Calls))? {
+                if !visited.insert(e.src_id) {
+                    continue;
+                }
+                let d = depth + 1;
+                if let Some(caller) = symbol_by_id(store, e.src_id)? {
+                    let path = file_path_by_id(store, caller.file_id)?;
+                    if is_test_path(&path) {
+                        record(path, d, seed_name, &mut by_file);
+                    }
+                }
+                queue.push_back((e.src_id, d));
+            }
+        }
+    }
+
+    let mut out: Vec<SuggestedTest> = by_file
+        .into_iter()
+        .map(|(file, (depth, matched))| SuggestedTest {
+            file,
+            matched_symbols: matched.into_iter().collect(),
+            via: match depth {
+                0 => "direct",
+                1 => "direct-caller",
+                _ => "transitive",
+            }
+            .to_string(),
+            depth,
+        })
+        .collect();
+    // Nearest tests first; BTreeMap already ordered by file for ties.
+    out.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.file.cmp(&b.file)));
+
+    let total = out.len();
+    let lower_bound = total > SUGGESTED_TESTS_CAP;
+    if lower_bound {
+        out.truncate(SUGGESTED_TESTS_CAP);
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+    if lower_bound {
+        notes.push(format!(
+            "lower bound: {total} test files matched, truncated to {SUGGESTED_TESTS_CAP}"
+        ));
+    }
+    if seeds.iter().any(|(_, _, p)| p.ends_with(".rs")) {
+        notes.push(
+            "Rust #[test] functions and #[cfg(test)] modules are not in the graph \
+             (extraction skips test containers); in-file Rust unit tests cannot be \
+             suggested via the caller walk — tests/ integration helpers are covered"
+                .to_string(),
+        );
+    }
+    Ok((out, lower_bound, notes.join("; ")))
 }
 
 #[cfg(test)]

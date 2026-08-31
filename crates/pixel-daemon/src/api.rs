@@ -357,7 +357,11 @@ impl Service {
             Request::Trace { from, to } => self.op_trace(&from, &to),
             Request::Processes { offset } => self.op_processes(offset),
             Request::Clusters { offset } => self.op_clusters(offset),
-            Request::Changes { base, offset } => self.op_changes(base.as_deref(), offset),
+            Request::Changes {
+                base,
+                offset,
+                include_tests,
+            } => self.op_changes(base.as_deref(), offset, include_tests),
             Request::Graph {} => self.op_graph(),
             Request::Status {} => self.op_status(),
             Request::Resolve { phrase, limit } => self.op_resolve(&phrase, limit),
@@ -368,8 +372,8 @@ impl Service {
             Request::Excavate { phrase, path, from, to, limit } => {
                 self.op_excavate(phrase.as_deref(), path.as_deref(), from.as_deref(), to.as_deref(), limit)
             }
-            Request::Reconcile { strategy, push } => {
-                self.op_reconcile(strategy.as_deref(), push.as_deref())
+            Request::Reconcile { strategy, push, into, request_id } => {
+                self.op_reconcile(strategy.as_deref(), push.as_deref(), into.as_deref(), request_id.as_deref())
             }
             Request::Journal { kind, path, detail } => {
                 self.op_journal(&kind, path.as_deref(), detail.as_deref())
@@ -1147,7 +1151,12 @@ impl Service {
         Ok(out)
     }
 
-    fn op_changes(&mut self, base: Option<&str>, offset: Option<usize>) -> Result<Value, String> {
+    fn op_changes(
+        &mut self,
+        base: Option<&str>,
+        offset: Option<usize>,
+        include_tests: bool,
+    ) -> Result<Value, String> {
         const SYMBOL_LIMIT: usize = 20;
         const PROCESS_LIMIT: usize = 20;
         const PROCESSES_PER_SYMBOL_LIMIT: usize = 10;
@@ -1155,7 +1164,7 @@ impl Service {
         let built = self.ensure_graph()?;
         let root = self.root.clone();
         let store = self.graph.as_ref().unwrap();
-        let mut out = bridge::changes(store, &root, base)?;
+        let mut out = bridge::changes(store, &root, base, include_tests)?;
         let mut nested_processes_truncated = false;
         let symbols_total = out["symbols"].as_array().map_or(0, Vec::len);
         if let Some(symbols) = out["symbols"].as_array_mut() {
@@ -1413,11 +1422,14 @@ impl Service {
         &mut self,
         strategy: Option<&str>,
         push: Option<&str>,
+        into: Option<&str>,
+        request_id: Option<&str>,
     ) -> Result<Value, String> {
         let opts = pixel_ops::reconcile::ReconcileOptions {
             strategy: strategy.unwrap_or("report").to_string(),
             push: push.unwrap_or("auto").to_string(),
-            request_id: String::new(),
+            request_id: request_id.unwrap_or("").to_string(),
+            into_target: into.map(str::to_string),
         };
         pixel_ops::reconcile::reconcile(&self.root, &opts)
     }
@@ -2123,8 +2135,13 @@ mod bridge {
         }))
     }
 
-    pub fn changes(store: &GraphStore, root: &Path, base: Option<&str>) -> Result<Value, String> {
-        pixel_graph::changes::detect(store, root, base)
+    pub fn changes(
+        store: &GraphStore,
+        root: &Path,
+        base: Option<&str>,
+        include_tests: bool,
+    ) -> Result<Value, String> {
+        pixel_graph::changes::detect(store, root, base, include_tests)
             .map(to_val)
             .map_err(es)
     }
@@ -2451,10 +2468,12 @@ mod tests {
         let first = svc.handle(Request::Changes {
             base: None,
             offset: Some(0),
+            include_tests: false,
         });
         let second = svc.handle(Request::Changes {
             base: None,
             offset: Some(20),
+            include_tests: false,
         });
         assert!(first.ok && second.ok, "first={first:?} second={second:?}");
         let symbol_uids = |response: &Response| {
@@ -3177,7 +3196,7 @@ mod tests {
                 offset: None,
             }),
             ("trace", Request::Trace { from: "beta".into(), to: "alpha".into() }),
-            ("changes", Request::Changes { base: None, offset: None }),
+            ("changes", Request::Changes { base: None, offset: None, include_tests: false }),
             ("context", Request::Context { uid, budget_tokens: Some(2000) }),
             ("symbol", Request::Symbol { name: "alpha".into() }),
             ("processes", Request::Processes { offset: None }),

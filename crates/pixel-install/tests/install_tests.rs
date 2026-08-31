@@ -439,6 +439,52 @@ fn install_removes_deprecated_mcp_servers_unconditionally() {
 }
 
 #[test]
+fn install_scrubs_deprecated_mcp_servers_from_global_claude_json() {
+    // Claude Code keeps GLOBAL MCP registrations in ~/.claude.json, not in
+    // ~/.claude/settings.json — a retired server registered there survived
+    // every earlier install scrub and kept failing to connect at session
+    // start (ENOENT on the removed binary).
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let global_path = home.join(".claude.json");
+    fs::write(
+        &global_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mcpServers": {
+                "usable-git": { "command": "/opt/homebrew/bin/usable-git", "args": ["mcp"] },
+                "github": { "command": "gh-mcp" },
+            },
+            "unrelatedTopLevelKey": { "kept": true },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let options = InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        dry_run: false,
+    };
+    let report = install(&options).expect("install");
+    assert!(report.ok, "install should succeed: {report:?}");
+
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&global_path).unwrap()).expect("still valid JSON");
+    assert!(
+        after["mcpServers"].get("usable-git").is_none(),
+        "the deprecated usable-git entry in the GLOBAL ~/.claude.json must be scrubbed"
+    );
+    assert!(
+        after["mcpServers"].get("github").is_some(),
+        "unrelated MCP servers in ~/.claude.json must be preserved"
+    );
+    assert!(
+        after["unrelatedTopLevelKey"]["kept"].as_bool().unwrap_or(false),
+        "unrelated top-level keys in ~/.claude.json must be preserved"
+    );
+}
+
+#[test]
 fn dry_run_leaves_pre_existing_files_byte_identical() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();

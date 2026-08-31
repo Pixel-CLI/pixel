@@ -6,13 +6,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::SourceEpistemics;
+
 /// `{closed_world, lower_bound, basis, staleness_ms}`.
 ///
-/// The default is the common case: a complete, fresh answer with nothing
-/// left out and no staleness — `closed_world: true`, `lower_bound: false`,
-/// an empty `basis`, and `staleness_ms: None`. Ops that could not close the
-/// world (e.g. graph resolution gave up) must override this explicitly
-/// rather than rely on the default.
+/// The default deliberately makes no completeness claim. Producers must use
+/// source-native evidence to establish a closed world.
 ///
 /// Envelope v2 shape: `basis` is a single descriptive `String` (e.g.
 /// `"graph"` or `"index"`) and `staleness_ms` is `Option<u64>` — `None`
@@ -30,10 +29,22 @@ pub struct Epistemics {
 impl Default for Epistemics {
     fn default() -> Self {
         Epistemics {
-            closed_world: true,
-            lower_bound: false,
+            closed_world: false,
+            lower_bound: true,
             basis: String::new(),
             staleness_ms: None,
+        }
+    }
+}
+
+impl Epistemics {
+    pub fn from_sources(basis: impl Into<String>, sources: &[SourceEpistemics]) -> Self {
+        let closed_world = SourceEpistemics::establishes_closed_world(sources);
+        Self {
+            closed_world,
+            lower_bound: !closed_world,
+            basis: basis.into(),
+            staleness_ms: sources.iter().filter_map(|source| source.freshness_ms).max(),
         }
     }
 }
@@ -43,10 +54,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_the_complete_fresh_answer() {
+    fn default_is_an_explicitly_bounded_answer() {
         let epistemics = Epistemics::default();
-        assert!(epistemics.closed_world);
-        assert!(!epistemics.lower_bound);
+        assert!(!epistemics.closed_world);
+        assert!(epistemics.lower_bound);
         assert!(epistemics.basis.is_empty());
         assert_eq!(epistemics.staleness_ms, None);
     }
@@ -57,11 +68,28 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "closed_world": true,
-                "lower_bound": false,
+                "closed_world": false,
+                "lower_bound": true,
                 "basis": "",
             })
         );
+    }
+
+    #[test]
+    fn derives_completeness_only_from_complete_fresh_sources() {
+        let source = SourceEpistemics {
+            source: "facts".into(),
+            required: true,
+            coverage: crate::SourceCoverage::Complete,
+            basis: crate::EvidenceBasis::Exact,
+            snapshot: Some("head:abc".into()),
+            freshness_ms: Some(0),
+            exclusions: vec![],
+            caps: vec![],
+        };
+        let epistemics = Epistemics::from_sources("facts", &[source]);
+        assert!(epistemics.closed_world);
+        assert!(!epistemics.lower_bound);
     }
 
     #[test]

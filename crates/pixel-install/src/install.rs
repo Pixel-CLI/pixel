@@ -160,20 +160,31 @@ fn scrub_deprecated(home: &Path, dry_run: bool) -> Result<InstallStep> {
     // hook, not via MCP. The guard-hook command rewrite is unrelated to MCP
     // registration and always proceeds.
     let outcome = config::scrub_settings_json(&settings, dry_run)?;
+    // Claude Code keeps GLOBAL MCP registrations in ~/.claude.json (top-level
+    // `mcpServers`), not in ~/.claude/settings.json — a retired server
+    // registered there survived every install scrub and kept failing to
+    // connect at session start. Same file shape, so the same scrubber runs
+    // on both.
+    let global_config = home.join(".claude.json");
+    let global_outcome = config::scrub_settings_json(&global_config, dry_run)?;
     // Retired-tool RULE files are scrubbed alongside the MCP entries. An
     // MCP registration and a Markdown rule are two different ways to keep
     // offering a retired tool; removing only the first leaves Devin,
     // Cline, and Cursor still advertising `usable-git`/`gitpixel` to the
     // model as rules it may load.
     let rule_files = config::scrub_deprecated_rule_files(home, dry_run)?;
-    let removed = outcome.mcp_servers_removed + outcome.guard_hooks_removed + rule_files.len();
+    let removed = outcome.mcp_servers_removed
+        + global_outcome.mcp_servers_removed
+        + outcome.guard_hooks_removed
+        + rule_files.len();
     let summary = format!(
         "removed {removed} deprecated MCP/hook/rule entr{}",
         if removed == 1 { "y" } else { "ies" }
     );
     let mut detail = format!(
-        "mcp_servers_removed={} guard_hooks_removed={} rule_files_removed={}",
+        "mcp_servers_removed={} global_mcp_servers_removed={} guard_hooks_removed={} rule_files_removed={}",
         outcome.mcp_servers_removed,
+        global_outcome.mcp_servers_removed,
         outcome.guard_hooks_removed,
         rule_files.len()
     );

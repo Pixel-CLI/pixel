@@ -24,6 +24,7 @@ pub enum JournalOperation {
     Update,
     Ship,
     Sync,
+    Rewrite,
 }
 
 impl std::fmt::Display for JournalOperation {
@@ -35,6 +36,7 @@ impl std::fmt::Display for JournalOperation {
             JournalOperation::Update => write!(f, "update"),
             JournalOperation::Ship => write!(f, "ship"),
             JournalOperation::Sync => write!(f, "sync"),
+            JournalOperation::Rewrite => write!(f, "rewrite"),
         }
     }
 }

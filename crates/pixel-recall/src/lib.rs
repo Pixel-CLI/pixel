@@ -8,6 +8,7 @@
 
 pub mod ask;
 pub mod embed;
+pub mod export;
 pub mod hybrid;
 pub mod ingest;
 pub mod intent;

@@ -42,6 +42,16 @@ pub struct ReconcileOptions {
     pub strategy: String,    // "report" | "rebase-if-clean"
     pub push: String,        // "auto" | "none" ("never" accepted as an alias of "none")
     pub request_id: String,
+    /// `--into <target>` integration mode. `None` (the default) preserves the
+    /// existing behavior exactly. `Some(target)` means: fetch the remote
+    /// target, rebase the CURRENT branch onto `origin/<target>` (same
+    /// merge-tree proof path, backup ref, and structured-conflict refusal as
+    /// `rebase-if-clean`), then fast-forward the LOCAL `<target>` branch ref
+    /// to the rebased feature head — ff-only, never force, never a merge
+    /// commit. With `push: "auto"`, both the feature branch (leased) and the
+    /// target (plain ff push) are pushed. The `strategy` field is ignored in
+    /// this mode: `--into` inherently requires the rebase proof path.
+    pub into_target: Option<String>,
 }
 
 /// Validate and normalize the `--push` value. Accepted: `"auto"` (push when
@@ -85,7 +95,15 @@ pub fn reconcile_with_hooks(
 
     let runner = GitRunner::new(root);
     let repo_key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf()).display().to_string();
-    let input_hash = sha256_hex(&format!("{}\u{0}{}", opts.strategy, push_mode));
+    // `into_target` participates in the replay-identity hash: the same
+    // request_id with a different integration target must never replay a
+    // cached result computed for another target (or for plain sync mode).
+    let input_hash = sha256_hex(&format!(
+        "{}\u{0}{}\u{0}{}",
+        opts.strategy,
+        push_mode,
+        opts.into_target.as_deref().unwrap_or("")
+    ));
 
     let state_root = state_root();
     let journal = OperationJournal::with_state_root(state_root.clone());
@@ -119,6 +137,19 @@ pub fn reconcile_with_hooks(
     // Snapshot current state.
     let head = runner.rev_parse_head().ok_or("no HEAD")?;
     let branch = runner.current_branch().unwrap_or_else(|| "HEAD".to_string());
+
+    // `--into <target>` integration mode: an entirely separate flow that
+    // rebases the CURRENT branch onto origin/<target> and fast-forwards the
+    // local <target> ref to the rebased head. Dispatched before the plain
+    // sync classification below, which remains byte-for-byte unchanged for
+    // `into_target: None` callers.
+    if let Some(target) = opts.into_target.as_deref() {
+        let result = reconcile_into(root, &runner, &mut lock, &head, &branch, target, push_mode)?;
+        journal.complete(&request_id, &repo_key, result.clone())?;
+        let _ = lock.release();
+        return Ok(result);
+    }
+
     let upstream = format!("origin/{branch}");
 
     // Branch-scoped fetch (idempotent, outside journal transitions). Fetches
@@ -411,6 +442,254 @@ pub fn reconcile_with_hooks(
     journal.complete(&request_id, &repo_key, result.clone())?;
     let _ = lock.release();
     Ok(result)
+}
+
+/// `--into <target>` integration: rebase the current (feature) branch onto
+/// `origin/<target>`, then fast-forward the LOCAL `<target>` branch ref to
+/// the rebased feature head. Never a merge commit; the target ref only ever
+/// moves fast-forward (CAS `update-ref <ref> <new> <old>`, safe because the
+/// target is by precondition not the checked-out branch).
+///
+/// Refusal order is deliberate — every structured refusal happens BEFORE any
+/// mutation:
+///   1. target == current branch / detached HEAD → UNSUPPORTED_STATE.
+///   2. local `<target>` missing → UNSUPPORTED_STATE.
+///   3. strict fetch of the remote target (the rebase base must be fresh).
+///   4. local `<target>` not an ancestor of `origin/<target>` →
+///      NON_FAST_FORWARD (the post-rebase ff would be a forced move).
+///   5. dirty worktree → UNSUPPORTED_STATE (same rule as rebase-if-clean).
+///   6. merge-tree predicts conflicts → diverged report naming the target,
+///      no rebase attempted.
+/// Only once all of those pass does the rebase run; the ff of `<target>` is
+/// then guaranteed (target_old ≤ origin/<target> ≤ rebased head).
+///
+/// On success the caller (reconcile_with_hooks) journals and releases the
+/// lock; on error this function releases the lock itself, matching the
+/// file-wide error-path convention.
+fn reconcile_into(
+    root: &Path,
+    runner: &GitRunner,
+    lock: &mut RepositoryLock,
+    head: &str,
+    branch: &str,
+    target: &str,
+    push_mode: &str,
+) -> Result<Value, String> {
+    if branch == "HEAD" {
+        let _ = lock.release();
+        return Err(
+            "UNSUPPORTED_STATE: detached HEAD; --into requires a checked-out feature branch"
+                .to_string(),
+        );
+    }
+    if branch == target {
+        let _ = lock.release();
+        return Err(format!(
+            "UNSUPPORTED_STATE: --into target {target:?} is the currently checked-out branch; \
+             check out the feature branch and name the integration target"
+        ));
+    }
+
+    // Local target must exist — --into fast-forwards it, it never creates it.
+    let target_ref = format!("refs/heads/{target}");
+    let target_old_oid = runner
+        .run_opt(&["rev-parse", "--verify", "--quiet", &target_ref])
+        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let Some(target_old_oid) = target_old_oid else {
+        let _ = lock.release();
+        return Err(format!(
+            "UNSUPPORTED_STATE: local branch {target:?} does not exist; --into fast-forwards \
+             the local target branch, so it must already exist locally"
+        ));
+    };
+
+    // Strict fetch of the remote target: the rebase base is origin/<target>
+    // and must be fresh — a stale base makes the whole integration stale.
+    runner
+        .run(&["fetch", "--end-of-options", "origin", target])
+        .map_err(|e| {
+            let _ = lock.release();
+            format!("git fetch origin {target}: {e}")
+        })?;
+    // Tolerant fetch of the feature branch: it may not exist on the remote
+    // yet. Its freshly-observed OID (or absence — an empty lease expectation
+    // means "the remote ref must not exist") feeds the leased push below.
+    let _ = runner.run(&["fetch", "--end-of-options", "origin", branch]);
+
+    let remote_target = format!("origin/{target}");
+    let remote_target_oid = runner
+        .run_opt(&["rev-parse", &remote_target])
+        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
+        .unwrap_or_default();
+    if remote_target_oid.is_empty() {
+        let _ = lock.release();
+        return Err(format!(
+            "UNSUPPORTED_STATE: {remote_target} not found after fetch; --into rebases onto the \
+             remote-tracking target, which must exist"
+        ));
+    }
+
+    let upstream_oid = runner
+        .run_opt(&["rev-parse", &format!("origin/{branch}")])
+        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
+        .unwrap_or_default();
+
+    // ff precondition, checked BEFORE any mutation: the local target must be
+    // an ancestor of (or equal to) origin/<target>. The rebased head will sit
+    // atop origin/<target>, so this is exactly the condition under which the
+    // later target move is a pure fast-forward. A diverged local target must
+    // be reconciled on its own first — never forced, never merged.
+    let target_is_ancestor = runner
+        .run_opt(&["merge-base", "--is-ancestor", &target_old_oid, &remote_target_oid])
+        .is_some();
+    if !target_is_ancestor {
+        let _ = lock.release();
+        return Err(format!(
+            "NON_FAST_FORWARD: local branch {target:?} ({target_old_oid}) is not an ancestor of \
+             {remote_target} ({remote_target_oid}); refusing to move it — never force, never \
+             merge. Reconcile {target:?} itself first, then retry --into"
+        ));
+    }
+
+    // Clean worktree required — identical rule to the rebase-if-clean path,
+    // same fail-closed status source.
+    let dirty = runner.status_porcelain_or_err().map_err(|e| {
+        let _ = lock.release();
+        format!("could not determine working-tree status, refusing --into integration: {e}")
+    })?;
+    if !dirty.is_empty() {
+        let _ = lock.release();
+        return Err(format!(
+            "UNSUPPORTED_STATE: --into requires a clean worktree, {} dirty files",
+            dirty.len()
+        ));
+    }
+
+    let merge_base = runner
+        .run_opt(&["merge-base", "HEAD", &remote_target])
+        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
+        .unwrap_or_default();
+
+    if !git_supports_merge_tree_write_tree(root) {
+        // Same gate as plain diverged handling: without merge-tree the clean
+        // rebase cannot be proven, so nothing is mutated.
+        return Ok(json!({
+            "state": "diverged",
+            "into_target": target,
+            "merge_base": merge_base,
+            "clean_rebase_possible": false,
+            "feature_unavailable": true,
+            "conflicts": [],
+            "non_conflicting": non_conflicting_paths(root, &merge_base, head, &remote_target),
+            "backup_ref": Value::Null,
+            "next": "git >= 2.38 required for merge-tree; --into integration is unavailable on this git",
+        }));
+    }
+
+    // Backup ref written FIRST, before any attempt to touch the worktree.
+    let backup_ref = format!("refs/pixel/reconcile-backup/{branch}");
+    runner.run(&["update-ref", &backup_ref, head]).map_err(|e| {
+        let _ = lock.release();
+        format!("git update-ref (backup): {e}")
+    })?;
+
+    let probe = probe_merge_tree(root, head, &remote_target);
+    if !probe.clean {
+        // merge-tree predicts conflicts — never attempt the rebase, never
+        // touch the target. Same structured conflicts[] report as the plain
+        // diverged path, naming the integration target.
+        let report = build_conflict_report(runner, &merge_base, head, &remote_target, &probe);
+        return Ok(json!({
+            "state": "diverged",
+            "into_target": target,
+            "merge_base": merge_base,
+            "clean_rebase_possible": false,
+            "conflicts": report["conflicts"],
+            "conflict_count": report["conflict_count"],
+            "report_truncated": report["report_truncated"],
+            "non_conflicting": non_conflicting_paths(root, &merge_base, head, &remote_target),
+            "backup_ref": backup_ref,
+            "next": format!("manual resolution required before integrating into {target:?}"),
+        }));
+    }
+
+    // Non-interactive linear rebase onto the remote-tracking target. Plain
+    // `git rebase` never fabricates a merge commit.
+    if let Err(e) = runner.run(&["rebase", &remote_target]) {
+        // Surprise conflict despite a clean merge-tree prediction — capture
+        // the unmerged paths from the mid-rebase index BEFORE aborting (the
+        // only window they're observable in), then abort. Target untouched.
+        let unmerged: Vec<String> = runner
+            .status_porcelain()
+            .into_iter()
+            .filter(|(xy, _)| xy.contains('U') || xy == "AA" || xy == "DD")
+            .map(|(_, p)| p)
+            .collect();
+        let _ = runner.run(&["rebase", "--abort"]);
+        return Ok(json!({
+            "state": "diverged",
+            "into_target": target,
+            "merge_base": merge_base,
+            "clean_rebase_possible": true,
+            "rebase_aborted": true,
+            "error": e.to_string(),
+            "unmerged_paths_at_abort": unmerged,
+            "non_conflicting": non_conflicting_paths(root, &merge_base, head, &remote_target),
+            "backup_ref": backup_ref,
+            "next": "manual rebase required",
+        }));
+    }
+    let new_head = runner.rev_parse_head().unwrap_or_default();
+
+    // Fast-forward the LOCAL target ref to the rebased head. CAS update-ref
+    // (<new> <old>) is safe while the target is not checked out (guaranteed:
+    // the current branch is the feature) and refuses if anything moved the
+    // target under us — though the repository lock already excludes that.
+    // Ancestry holds by construction: target_old ≤ origin/<target> ≤ new_head.
+    runner
+        .run(&["update-ref", &target_ref, &new_head, &target_old_oid])
+        .map_err(|e| {
+            let _ = lock.release();
+            format!("git update-ref {target_ref}: {e}")
+        })?;
+
+    // Push per push mode: feature with a lease against this call's own
+    // freshly-fetched origin/<branch> OID (same rationale as the plain
+    // rebased path), target as a plain ff push (its move IS a fast-forward
+    // of the remote target by construction; no force of any kind).
+    let (feature_pushed, feature_push_error, target_pushed, target_push_error) =
+        if push_mode == "auto" {
+            let lease_arg = format!("--force-with-lease={branch}:{upstream_oid}");
+            let f = runner.run(&["push", &lease_arg, "origin", branch]);
+            let refspec = format!("{target}:refs/heads/{target}");
+            let t = runner.run(&["push", "origin", &refspec]);
+            (
+                f.is_ok(),
+                f.err().map(|e| e.to_string()),
+                t.is_ok(),
+                t.err().map(|e| e.to_string()),
+            )
+        } else {
+            (false, None, false, None)
+        };
+
+    Ok(json!({
+        "state": "integrated",
+        "branch": branch,
+        "from": head,
+        "to": new_head,
+        "backup_ref": backup_ref,
+        "pushed": feature_pushed,
+        "push_error": feature_push_error,
+        "into": {
+            "target": target,
+            "target_old_oid": target_old_oid,
+            "target_new_oid": new_head,
+            "target_pushed": target_pushed,
+            "target_push_error": target_push_error,
+        },
+    }))
 }
 
 fn classify_counts(runner: &GitRunner, upstream: &str) -> (u64, u64) {
@@ -754,6 +1033,7 @@ mod tests {
             strategy: "report".to_string(),
             push: "none".to_string(),
             request_id: format!("rec-{}", uuid::Uuid::new_v4()),
+            into_target: None,
         };
         let result = reconcile(dir.path(), &opts).unwrap();
         assert_eq!(result["state"], json!("up_to_date"));
@@ -779,6 +1059,7 @@ mod tests {
             strategy: "report".to_string(),
             push: "none".to_string(),
             request_id: format!("rec-{}", uuid::Uuid::new_v4()),
+            into_target: None,
         };
         let result = reconcile(dir.path(), &opts).unwrap();
         assert_eq!(result["state"], json!("fast_forwarded"));
@@ -809,6 +1090,7 @@ mod tests {
             strategy: "report".to_string(),
             push: "none".to_string(),
             request_id: format!("rec-{}", uuid::Uuid::new_v4()),
+            into_target: None,
         };
         let result = reconcile(dir.path(), &opts).unwrap();
         assert_eq!(result["state"], json!("diverged"));
@@ -830,6 +1112,7 @@ mod tests {
             strategy: "report".to_string(),
             push: "none".to_string(),
             request_id: String::new(),
+            into_target: None,
         };
         let result = reconcile(dir.path(), &opts).unwrap();
         assert_eq!(result["state"], json!("up_to_date"));

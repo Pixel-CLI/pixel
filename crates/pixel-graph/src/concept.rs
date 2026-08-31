@@ -126,7 +126,7 @@ fn string_worth_indexing(text: &str) -> bool {
 /// skipped in test files to cut index noise (assertion messages, fixture
 /// literals, generated snapshots, etc.). Matches `/tests?/` path segments,
 /// `__tests__` directories, and `*_test.*` / `*.spec.*` / `*.test.*` files.
-fn is_test_path(path: &str) -> bool {
+pub(crate) fn is_test_path(path: &str) -> bool {
     let file = path.rsplit('/').next().unwrap_or(path);
     if file.contains("__tests__") {
         return true;

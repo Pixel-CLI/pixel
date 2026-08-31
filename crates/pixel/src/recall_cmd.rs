@@ -132,7 +132,28 @@ pub enum RecallCmd {
         #[arg(long)]
         since: Option<String>,
         #[arg(long)]
+        until: Option<String>,
+        #[arg(long)]
         json: bool,
+    },
+    /// Bulk-export ingested sessions, one file per session, into a folder.
+    Export {
+        #[arg(long)]
+        agent: Option<String>,
+        /// Restrict to one session (numeric id or [agent:]id-prefix).
+        #[arg(long)]
+        session: Option<String>,
+        /// Relative (7d, 3w, 12h) or ISO date lower bound.
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        /// Directory to write exported files into (created if missing).
+        #[arg(long)]
+        out: String,
+        /// Output format: md or jsonl.
+        #[arg(long, default_value = "md")]
+        format: String,
     },
     /// Token-budgeted context pack for a query — headers, snippets, then
     /// full turns, greedily fitted for LLM consumption.
@@ -147,6 +168,8 @@ pub enum RecallCmd {
         repo: Option<String>,
         #[arg(long)]
         since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
         #[arg(long)]
         lexical_only: bool,
     },
@@ -235,16 +258,26 @@ pub fn run_recall(cmd: RecallCmd) -> Result<(), String> {
             agent,
             repo,
             since,
+            until,
             json,
-        } => run_maxtest(&keywords, agent, repo, since, json),
+        } => run_maxtest(&keywords, agent, repo, since, until, json),
         RecallCmd::Context {
             query,
             budget,
             agent,
             repo,
             since,
+            until,
             lexical_only,
-        } => run_context(&query, budget, agent, repo, since, lexical_only),
+        } => run_context(&query, budget, agent, repo, since, until, lexical_only),
+        RecallCmd::Export {
+            agent,
+            session,
+            since,
+            until,
+            out,
+            format,
+        } => run_export(agent, session, since, until, &out, &format),
         RecallCmd::Status { json } => run_status(json),
         RecallCmd::Daemon { cmd } => run_daemon_cmd(cmd),
     }
@@ -323,12 +356,14 @@ fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_context(
     query: &str,
     budget: usize,
     agent: Option<String>,
     repo: Option<String>,
     since: Option<String>,
+    until: Option<String>,
     lexical_only: bool,
 ) -> Result<(), String> {
     if budget < 100 || budget > 200_000 {
@@ -342,6 +377,7 @@ fn run_context(
         agent,
         repo_prefix: repo.as_deref().map(expand_repo),
         since_ms: since.as_deref().map(|s| parse_time(s, now)).transpose()?,
+        until_ms: until.as_deref().map(|s| parse_time(s, now)).transpose()?,
         ..Default::default()
     };
     let mut embedder_slot = if lexical_only {
@@ -550,6 +586,7 @@ fn run_maxtest(
     agent: Option<String>,
     repo: Option<String>,
     since: Option<String>,
+    until: Option<String>,
     json: bool,
 ) -> Result<(), String> {
     let terms: Vec<&str> = keywords
@@ -570,6 +607,7 @@ fn run_maxtest(
         agent,
         repo_prefix: repo.as_deref().map(expand_repo),
         since_ms: since.as_deref().map(|s| parse_time(s, now)).transpose()?,
+        until_ms: until.as_deref().map(|s| parse_time(s, now)).transpose()?,
         ..Default::default()
     };
     // Escape each keyword: maxtest terms are literals, not regexes.
@@ -629,6 +667,40 @@ fn run_maxtest(
     if pin.len() > 10 {
         println!("  … and {} more (narrow with --repo/--since)", pin.len() - 10);
     }
+    Ok(())
+}
+
+fn run_export(
+    agent: Option<String>,
+    session: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    out: &str,
+    format: &str,
+) -> Result<(), String> {
+    let format = pixel_recall::export::ExportFormat::parse(format)?;
+    let store = open_store()?;
+    let now = now_ms();
+    let session_id = session
+        .as_deref()
+        .map(|s| resolve_session(&store, s).map(|row| row.id))
+        .transpose()?;
+    let filters = pixel_recall::export::ExportFilters {
+        agent,
+        session_id,
+        since_ms: since.as_deref().map(|s| parse_time(s, now)).transpose()?,
+        until_ms: until.as_deref().map(|s| parse_time(s, now)).transpose()?,
+    };
+    let summary =
+        pixel_recall::export::export(&store, &filters, std::path::Path::new(out), format)?;
+    let out = json!({
+        "sessions_exported": summary.sessions_exported,
+        "turns": summary.turns,
+        "out_dir": summary.out_dir,
+        "skipped_unresolvable_ts": summary.skipped_unresolvable_ts,
+        "truncated": summary.truncated,
+    });
+    println!("{out}");
     Ok(())
 }
 

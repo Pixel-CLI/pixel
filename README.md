@@ -148,11 +148,25 @@ The diagrams below illustrate the intended flows. The "without pixel" columns ar
 | **Search** | Indexed, git-anchored, ranked. `search --scope code` |
 | **Code graph** | Tree-sitter across TS/TSX/JS/Rust/Go/Java/Python: `symbol`, `impact`, `uses`, `trace`, `changes`, token-budgeted `context` |
 | **Resolve** | A phrase, label, or error → exact code, with an honest confidence level (`resolved` / `ranked` / `unresolved`) |
+| **Query (V1)** | One bounded retrieval entry point: `query "where is \`symbol\`"`; compiles exact locate/scope/impact/history/status intents to deterministic recipes and returns ranked plans for ambiguous prose |
 | **Excavate + rescue** | Finds code no longer at HEAD (deleted, stashed, on another branch) and restores it safely, refusing dirty files without a strategy |
 | **Reconcile** | One-call branch sync: fetch, classify, act; real conflicts get a structured report, not silence |
 | **Git mutations** | `publish`/`push`/`branch`/`update` etc., snapshot-token gated and crash-safe |
 | **Ranking signals** | Recency and live session context rerank results, never promoting a stale file above a better match |
 | **Daemon** | A warm background process keeps *service-time* sub-millisecond (CLI end-to-end still pays a ~17ms spawn floor); falls back to in-process automatically |
+
+### Query V1
+
+`pixel query` gives agents a single read-only retrieval entrance without hiding uncertainty. Exact intents compile to one bounded recipe and execute through the existing daemon-or-in-process path; ambiguous text returns ranked recipe candidates without broad retrieval.
+
+```bash
+pixel query 'where is `Epistemics`' . --json
+pixel query 'show impact of LoginService' . --kind impact --json
+```
+
+The V1 recipes are `locate`, `scope`, `impact`, `history-recovery`, and `status`. The response records the chosen recipe, its evidence, a token budget, and explicitly bounded epistemics. Source completeness is typed: a required source must be complete, fresh, uncapped, and exclusion-free before Pixel can state `closed_world: true`.
+
+Workspaces, persisted query deltas, transcript recall, and recipe auto-promotion remain intentionally deferred until their sources can preserve evidence identity and cap metadata end-to-end.
 
 ---
 

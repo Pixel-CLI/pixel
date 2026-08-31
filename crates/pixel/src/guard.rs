@@ -25,7 +25,20 @@
 //!    on the agent's behalf). These denies run even when the command
 //!    contains substitution/heredocs — a spurious deny costs a retry, a
 //!    missed hard reset costs real work.
-//! 4. GLOB — Glob tool calls are deliberately left un-denied: they only
+//! 4. SUBSTITUTE (HARD BLOCK, escape-hatched) — plain git mutations with an
+//!    exact pixel equivalent are denied with the substitute spelled out
+//!    ([PIXEL_SUBSTITUTE] reason code): `git commit` → `pixel publish`,
+//!    `git push` (incl. `--force-with-lease`) → `pixel push`,
+//!    `git checkout -b`/`git switch -c` → `pixel branch`, `git rebase` →
+//!    `pixel reconcile`. Runs AFTER the destructive tier, BEFORE rewrite
+//!    attempts. `PIXEL_GUARD_RAW_GIT=1` downgrades ONLY this tier to an
+//!    advisory. Interactive/porcelain shapes pixel can't cover pass
+//!    through — see `git_substitute_deny` for the documented table.
+//!    Transcript-store pokes (sqlite3/cat/grep on a known store) escalate
+//!    from advisory to this same deny tier ONLY when the recall index
+//!    exists on disk (a deterministic substitute is actually available);
+//!    `PIXEL_GUARD_RAW_TRANSCRIPTS=1` downgrades that back to advisory.
+//! 5. GLOB — Glob tool calls are deliberately left un-denied: they only
 //!    enumerate paths, and the Read/Edit of any result is itself guarded by
 //!    the scoping rules above. Blocking enumeration would be pure noise.
 //!
@@ -88,6 +101,7 @@ const TRANSCRIPT_STORE_MARKERS: &[&str] = &[
     ".codex/sessions",
     ".gemini/tmp",
     ".local/share/opencode",
+    ".zcode/cli/db",
 ];
 /// Tools capable of digging through a transcript store's raw records
 /// (queries a sqlite DB, or runs a script over JSON/JSONL). Deliberately
@@ -97,22 +111,83 @@ const TRANSCRIPT_STORE_MARKERS: &[&str] = &[
 /// unrelated script invocation would be flagged.
 const ARCHAEOLOGY_TOOLS: &[&str] = &["sqlite3", "python3", "python ", "node ", "jq "];
 
-/// Advisory (non-blocking) lines when `cmd` touches a known transcript
-/// store with a tool capable of reading it. `None` when the command
-/// doesn't match — the common case, checked first for speed.
-fn transcript_archaeology_advisory_lines(cmd: &str) -> Option<Vec<String>> {
+/// The transcript-store marker `cmd` touches with a tool capable of
+/// reading it, or `None` when the command doesn't match — the common
+/// case, checked first for speed.
+fn transcript_store_hit(cmd: &str) -> Option<&'static str> {
     let store = TRANSCRIPT_STORE_MARKERS.iter().find(|m| cmd.contains(**m))?;
     let digs_in = ARCHAEOLOGY_TOOLS.iter().any(|t| cmd.contains(t))
         || READERS.iter().any(|r| cmd.contains(r));
-    if !digs_in {
-        return None;
+    if digs_in {
+        Some(store)
+    } else {
+        None
     }
-    Some(vec![
+}
+
+/// Best-effort agent name for a store marker, for `--agent` suggestions.
+fn transcript_store_agent(store: &str) -> &'static str {
+    if store.contains("devin") {
+        "devin"
+    } else if store.contains(".claude") {
+        "claude"
+    } else if store.contains(".cursor") {
+        "cursor"
+    } else if store.contains(".codex") {
+        "codex"
+    } else if store.contains(".gemini") {
+        "gemini"
+    } else if store.contains(".zcode") {
+        "zcode"
+    } else if store.contains("opencode") {
+        "opencode"
+    } else {
+        "<agent>"
+    }
+}
+
+/// Advisory (non-blocking) lines for a transcript-store poke. Used when
+/// the recall index does not exist yet (no deterministic substitute is
+/// actually available) or when `PIXEL_GUARD_RAW_TRANSCRIPTS=1` downgrades
+/// the deny tier.
+fn transcript_archaeology_advisory_lines(store: &str) -> Vec<String> {
+    vec![
         format!("Advisory: this command reads `{store}` — a transcript store `pixel recall` already indexes."),
-        "`pixel recall sessions --agent <devin|codex|claude|cursor|gemini|opencode>` lists sessions by title/cwd/turn-count in one call.".into(),
+        "`pixel recall sessions --agent <devin|codex|claude|cursor|gemini|opencode|zcode>` lists sessions by title/cwd/turn-count in one call.".into(),
         "`pixel recall search \"<phrase>\" --agent <agent> --session <name>` pulls the exact turn text — no manual sqlite3/python needed.".into(),
         "Run `pixel recall index` first if this store hasn't been ingested yet.".into(),
-    ])
+    ]
+}
+
+/// Deny lines for a transcript-store poke when the recall index EXISTS on
+/// disk — the deterministic substitute is real, so the raw dig is denied
+/// with it. Contract (like every SUBSTITUTE deny): what was blocked, the
+/// exact substitute, and the escape-hatch env var.
+fn transcript_deny_lines(store: &str) -> Vec<String> {
+    let agent = transcript_store_agent(store);
+    vec![
+        format!("BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: this command digs through `{store}` by hand, and the recall index already covers it deterministically."),
+        "Run instead:".into(),
+        format!("  pixel recall sessions --agent {agent}        # sessions by title/cwd/turn-count"),
+        format!("  pixel recall search \"<phrase>\" --agent {agent} [--session <name>]   # exact turn text"),
+        "(To proceed with the raw dig anyway, set PIXEL_GUARD_RAW_TRANSCRIPTS=1 — this downgrades only this check to an advisory.)".into(),
+    ]
+}
+
+/// True when the machine-wide recall corpus exists on disk — the gate for
+/// escalating transcript pokes from advisory to deny. Honors
+/// `PIXEL_RECALL_DIR` via `pixel_recall::db_path()`.
+fn recall_index_ready() -> bool {
+    pixel_recall::db_path().is_file()
+}
+
+/// `1`/`true`/`on` env-var check, mirroring the `PIXEL_TARGETS_GUARD`
+/// kill-switch pattern at the top of `run()` (that one checks for
+/// off-values; escape hatches check for on-values).
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "on"))
+        .unwrap_or(false)
 }
 
 /// One scoped task inside the manifest. v2 manifests carry several of
@@ -576,8 +651,28 @@ fn check_bash(cmd: &str, cwd: &Path, idx_root: Option<&Path>, manifest: Option<&
     if let Some(lines) = bash_deny_lines(cmd, idx_root) {
         block(&lines);
     }
-    if let Some(lines) = transcript_archaeology_advisory_lines(cmd) {
-        advise(&lines);
+    // SUBSTITUTE tier — plain git mutations with an exact pixel equivalent.
+    // Slots after the destructive tier (so `git push --force` keeps its
+    // destructive deny) and before any rewrite attempt. Like the
+    // destructive tier it has NO substitution/heredoc bail: a false
+    // positive costs one retry (or the escape hatch), a missed raw commit
+    // costs an unjournaled mutation.
+    if let Some(lines) = git_mutation_substitute_lines(cmd, idx_root) {
+        if env_flag("PIXEL_GUARD_RAW_GIT") {
+            advise(&substitute_downgraded_advisory(&lines, "PIXEL_GUARD_RAW_GIT"));
+        }
+        block(&lines);
+    }
+    if let Some(store) = transcript_store_hit(cmd) {
+        // Escalate to deny-with-substitute ONLY when the recall corpus
+        // actually exists — without it the "substitute" would be a lie
+        // (the sniper-fence lesson: a deny without a working alternative
+        // just collapses recall). `PIXEL_GUARD_RAW_TRANSCRIPTS=1`
+        // downgrades this (and only this) back to the advisory.
+        if recall_index_ready() && !env_flag("PIXEL_GUARD_RAW_TRANSCRIPTS") {
+            block(&transcript_deny_lines(store));
+        }
+        advise(&transcript_archaeology_advisory_lines(store));
     }
     if cmd.contains("<<") || cmd.contains("$(") || cmd.contains('`') {
         return;
@@ -748,6 +843,257 @@ fn raw_restore_deny() -> Vec<String> {
         "  pixel rescue \"<what broke>\" .            # plan: versions + recommended last-good".into(),
         "  pixel rescue --apply <oid> --file <path> [--merge|--stash-first]".into(),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// SUBSTITUTE tier — plain git mutations with an exact pixel equivalent are
+// denied ([PIXEL_SUBSTITUTE], exit 2) with the substitute command spelled
+// out. This is deny-with-suggestion, NEVER a rewrite: per the invariant at
+// the top of this file a rewrite must never add a write step, and every
+// pixel mutation op writes (journal, snapshot token). The agent must run
+// the pixel command itself.
+// ---------------------------------------------------------------------------
+
+/// Substitute-deny verdict for a full Bash command. Only fires in indexed
+/// repos, mirroring `bash_deny_lines`.
+fn git_mutation_substitute_lines(cmd: &str, idx_root: Option<&Path>) -> Option<Vec<String>> {
+    let root = idx_root?;
+    if !cmd.contains("git") {
+        return None;
+    }
+    for (sub, args) in git_invocations(cmd) {
+        if let Some(lines) = git_substitute_deny(&sub, &args, root) {
+            return Some(lines);
+        }
+    }
+    None
+}
+
+/// Downgrade a SUBSTITUTE deny to advisory wording (escape hatch active).
+/// The substitute suggestion is kept verbatim; only the verdict changes.
+fn substitute_downgraded_advisory(deny_lines: &[String], var: &str) -> Vec<String> {
+    let mut out: Vec<String> = deny_lines.to_vec();
+    if let Some(first) = out.first_mut() {
+        *first = first.replace(
+            "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard:",
+            &format!("pixel-guard advisory ({var}=1, raw git allowed):"),
+        );
+    }
+    out
+}
+
+/// Per-invocation SUBSTITUTE verdict for `git <sub> <args>`.
+///
+/// Pass-through table — shapes pixel can NOT cover, deliberately allowed:
+///
+/// | command shape                                   | why it passes through                          |
+/// |-------------------------------------------------|------------------------------------------------|
+/// | `git commit --interactive` / `-p`/`--patch`     | interactive hunk staging, no pixel equivalent  |
+/// | `git commit --fixup=` / `--squash=`             | targets an interactive-rebase workflow         |
+/// | `git push --tags/--delete/-d/--mirror/--all/--prune` | no pixel refspec equivalent               |
+/// | `git push -o/--push-option`                     | server options pixel push doesn't forward      |
+/// | `git rebase -i/--interactive`                   | interactive todo editing                       |
+/// | `git rebase --continue/--abort/--skip/--quit/--edit-todo` | rebase-state exits — denying strands the agent mid-conflict |
+/// | `git rebase --onto/--exec/-x/--autosquash/--root` | not expressible as `pixel reconcile`         |
+/// | `git checkout -B` / plain `git checkout <ref>`  | force-reset / plain switch (destructive tier already covers `-f`/`--`) |
+/// | `git switch` without `-c`/`--create`            | plain branch switch, not a mutation            |
+fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<String>> {
+    let root_q = shell_quote(&root.display().to_string());
+    match sub {
+        "commit" => {
+            let c = parse_commit_args(args);
+            if c.interactive {
+                return None; // pass-through: interactive staging
+            }
+            let msg = c
+                .message
+                .as_deref()
+                .map(shell_quote)
+                .unwrap_or_else(|| "\"<msg>\"".to_string());
+            let files = if c.files.is_empty() {
+                "--files <file> [--files <file2> …]".to_string()
+            } else {
+                c.files
+                    .iter()
+                    .map(|f| format!("--files {}", shell_quote(f)))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let amend = if c.amend { "--amend " } else { "" };
+            let what = if c.amend {
+                "`git commit --amend`"
+            } else {
+                "`git commit`"
+            };
+            let mut lines = vec![
+                format!("BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw {what} bypasses pixel's snapshot-gated, journaled mutation surface."),
+                "Run the exact equivalent instead (--files repeated once per file):".into(),
+                format!("  pixel publish {amend}{files} --message {msg} --request-id <id> {root_q}"),
+            ];
+            if c.all {
+                lines.push(
+                    "(-a detected: list each modified tracked file as its own --files flag.)".into(),
+                );
+            }
+            lines.push(
+                "Escape hatch for raw git this session: PIXEL_GUARD_RAW_GIT=1.".into(),
+            );
+            Some(lines)
+        }
+        // Plain pushes — INCLUDING `--force-with-lease`, which the
+        // destructive tier deliberately allows but pixel push covers with
+        // the same lease semantics. Bare `--force`/`-f` never reaches
+        // here (destructive tier runs first).
+        "push" => {
+            const PUSH_PASS: &[&str] = &[
+                "--tags", "--delete", "-d", "--mirror", "--all", "--prune", "--branches",
+            ];
+            if args.iter().any(|a| {
+                PUSH_PASS.contains(&a.as_str())
+                    || a == "-o"
+                    || a == "--push-option"
+                    || a.starts_with("--push-option=")
+            }) {
+                return None; // pass-through: no pixel refspec equivalent
+            }
+            let words: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+            let remote = words
+                .first()
+                .map(|s| shell_quote(s))
+                .unwrap_or_else(|| "<remote>".to_string());
+            let refspec = words
+                .get(1)
+                .map(|s| shell_quote(s))
+                .unwrap_or_else(|| "<refspec>".to_string());
+            Some(vec![
+                "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw `git push` bypasses pixel's snapshot-gated, journaled mutation surface.".into(),
+                "Run the exact equivalent instead:".into(),
+                format!("  pixel push {remote} {refspec} --request-id <id> {root_q}"),
+                "Escape hatch for raw git this session: PIXEL_GUARD_RAW_GIT=1.".into(),
+            ])
+        }
+        "checkout" => {
+            let pos = args.iter().position(|a| a == "-b")?;
+            let name = args
+                .get(pos + 1)
+                .map(|s| shell_quote(s))
+                .unwrap_or_else(|| "<name>".to_string());
+            Some(branch_substitute_lines("`git checkout -b`", &name, &root_q))
+        }
+        "switch" => {
+            let pos = args.iter().position(|a| a == "-c" || a == "--create")?;
+            let name = args
+                .get(pos + 1)
+                .map(|s| shell_quote(s))
+                .unwrap_or_else(|| "<name>".to_string());
+            Some(branch_substitute_lines("`git switch -c`", &name, &root_q))
+        }
+        // `git pull --rebase` is already denied upstream by the
+        // destructive tier's blanket `pull` deny (which suggests
+        // reconcile), so it never reaches this tier.
+        "rebase" => {
+            const REBASE_PASS: &[&str] = &[
+                "-i", "--interactive", "--continue", "--abort", "--skip", "--quit",
+                "--edit-todo", "--onto", "--exec", "-x", "--autosquash", "--root",
+            ];
+            if args.iter().any(|a| REBASE_PASS.contains(&a.as_str())) {
+                return None; // pass-through: interactive / state exit / not reconcile-expressible
+            }
+            Some(vec![
+                "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw `git rebase` is replaced by deterministic reconciliation.".into(),
+                "Run the exact equivalent instead:".into(),
+                format!("  pixel reconcile {root_q} --strategy rebase-if-clean --push auto"),
+                "It proves a clean rebase via merge-tree before touching the worktree and reports structured conflicts when they exist.".into(),
+                "Escape hatch for raw git this session: PIXEL_GUARD_RAW_GIT=1.".into(),
+            ])
+        }
+        _ => None,
+    }
+}
+
+fn branch_substitute_lines(what: &str, name_q: &str, root_q: &str) -> Vec<String> {
+    vec![
+        format!("BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw {what} bypasses pixel's journaled branch op."),
+        "Run the exact equivalent instead (creates AND checks out the branch):".into(),
+        format!("  pixel branch {name_q} --request-id <id> {root_q}"),
+        "Escape hatch for raw git this session: PIXEL_GUARD_RAW_GIT=1.".into(),
+    ]
+}
+
+/// Parsed shape of `git commit` arguments, enough to enrich the
+/// `pixel publish` substitute suggestion.
+#[derive(Default)]
+struct CommitArgs {
+    message: Option<String>,
+    all: bool,
+    amend: bool,
+    interactive: bool,
+    files: Vec<String>,
+}
+
+/// Commit flags that consume a following value token (so the value must
+/// not be mistaken for a pathspec).
+const COMMIT_VALUE_FLAGS: &[&str] = &[
+    "-m", "--message", "-C", "-c", "--fixup", "--squash", "-F", "--file",
+    "--author", "--date", "-t", "--template", "--trailer",
+];
+
+fn parse_commit_args(args: &[String]) -> CommitArgs {
+    let mut out = CommitArgs::default();
+    let mut i = 0;
+    while i < args.len() {
+        let t = args[i].as_str();
+        if t == "--amend" {
+            out.amend = true;
+        } else if t == "-a" || t == "--all" {
+            out.all = true;
+        } else if t == "--interactive" || t == "--patch" || t == "--fixup" || t == "--squash"
+            || t.starts_with("--fixup=") || t.starts_with("--squash=")
+        {
+            // --fixup/--squash target an interactive-rebase workflow.
+            out.interactive = true;
+        } else if t == "-m" || t == "--message" {
+            out.message = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        } else if let Some(v) = t.strip_prefix("--message=") {
+            out.message = Some(v.to_string());
+        } else if t.starts_with("--") {
+            if COMMIT_VALUE_FLAGS.contains(&t) {
+                i += 2; // long flag + its value
+                continue;
+            }
+            // other long flags (self-contained or --flag=value)
+        } else if t.starts_with('-') && t.len() > 1 {
+            let body = &t[1..];
+            if body.chars().all(|c| c.is_ascii_alphabetic()) {
+                // short flag or cluster: -am, -sm, -p …
+                if body.contains('a') {
+                    out.all = true;
+                }
+                if body.contains('p') {
+                    out.interactive = true;
+                }
+                if body.ends_with('m') {
+                    // -m (possibly clustered) consumes the next token
+                    out.message = args.get(i + 1).cloned();
+                    i += 2;
+                    continue;
+                }
+                if COMMIT_VALUE_FLAGS.contains(&t) {
+                    i += 2; // e.g. -C <commit>, -F <file>
+                    continue;
+                }
+            } else if let Some(v) = t.strip_prefix("-m") {
+                // attached form: -m<msg>
+                out.message = Some(v.to_string());
+            }
+        } else {
+            out.files.push(t.to_string()); // pathspec
+        }
+        i += 1;
+    }
+    out
 }
 
 /// If `cmd`'s first pipeline segment is a known reader command with exactly
@@ -1746,7 +2092,11 @@ mod tests {
                 "`{cmd}` must be denied"
             );
         }
-        let allowed = [
+        // NOT destructive-denied. Some of these (pushes, checkout -b) are
+        // deliberately picked up by the SUBSTITUTE tier instead — asserted
+        // in the substitute_* tests below — but they must never carry the
+        // destructive tier's verdict.
+        let not_destructive = [
             "git push --force-with-lease",
             "git push --force-with-lease=main origin main",
             "git push --force-if-includes --force-with-lease",
@@ -1762,10 +2112,10 @@ mod tests {
             "git reset --soft HEAD~1",
             "git restore --staged src/lib.rs",
         ];
-        for cmd in allowed {
+        for cmd in not_destructive {
             assert!(
                 bash_deny_lines(cmd, Some(repo)).is_none(),
-                "`{cmd}` must be allowed"
+                "`{cmd}` must not be destructive-denied"
             );
         }
     }
@@ -2225,6 +2575,200 @@ mod tests {
         let out = truncate_results(&wide);
         assert!(out.len() < SEARCH_ANSWER_MAX_BYTES + 200);
         assert!(out.contains("results truncated"));
+    }
+
+    // --- SUBSTITUTE tier -------------------------------------------------
+
+    fn sub(cmd: &str) -> Option<Vec<String>> {
+        git_mutation_substitute_lines(cmd, Some(Path::new("/repo")))
+    }
+
+    /// Every SUBSTITUTE deny must carry the full contract: what was
+    /// blocked, the reason code, an exact substitute, the escape hatch.
+    fn assert_substitute_contract(cmd: &str, substitute_fragment: &str) -> String {
+        let msg = sub(cmd)
+            .unwrap_or_else(|| panic!("`{cmd}` must be substitute-denied"))
+            .join("\n");
+        assert!(msg.contains("BLOCKED [PIXEL_SUBSTITUTE]"), "reason code missing for `{cmd}`: {msg}");
+        assert!(
+            msg.contains(substitute_fragment),
+            "substitute for `{cmd}` must contain `{substitute_fragment}`: {msg}"
+        );
+        assert!(
+            msg.contains("PIXEL_GUARD_RAW_GIT=1"),
+            "escape hatch missing for `{cmd}`: {msg}"
+        );
+        msg
+    }
+
+    #[test]
+    fn substitute_commit_with_message_parsed() {
+        let msg = assert_substitute_contract(
+            "git commit -m 'fix the parser'",
+            "pixel publish",
+        );
+        assert!(msg.contains("--message 'fix the parser'"), "parsed -m must enrich the suggestion: {msg}");
+        assert!(msg.contains("--request-id <id>"), "{msg}");
+        // --message form and -am cluster parse too.
+        let msg = assert_substitute_contract("git commit --message 'x y'", "pixel publish");
+        assert!(msg.contains("--message 'x y'"), "{msg}");
+        // A single safe word stays bare through shell_quote.
+        let msg = assert_substitute_contract("git commit -am 'both words here'", "pixel publish");
+        assert!(msg.contains("--message 'both words here'"), "{msg}");
+        assert!(msg.contains("-a detected"), "-a must enrich the suggestion: {msg}");
+    }
+
+    #[test]
+    fn substitute_commit_without_message_uses_placeholder() {
+        let msg = assert_substitute_contract("git commit", "pixel publish");
+        assert!(msg.contains("--message \"<msg>\""), "placeholder expected: {msg}");
+        assert!(msg.contains("--files <file>"), "files placeholder expected: {msg}");
+    }
+
+    #[test]
+    fn substitute_commit_pathspecs_become_files_flags() {
+        let msg = assert_substitute_contract(
+            "git commit -m fix src/a.rs src/b.rs",
+            "pixel publish",
+        );
+        assert!(
+            msg.contains("--files src/a.rs --files src/b.rs"),
+            "each pathspec must be its own --files: {msg}"
+        );
+    }
+
+    #[test]
+    fn substitute_commit_amend_suggests_publish_amend() {
+        let msg = assert_substitute_contract("git commit --amend -m better", "pixel publish --amend");
+        assert!(msg.contains("--message better"), "{msg}");
+    }
+
+    #[test]
+    fn substitute_push_plain_and_with_lease() {
+        let msg = assert_substitute_contract("git push origin main", "pixel push origin main --request-id <id>");
+        assert!(msg.contains("/repo"), "{msg}");
+        // --force-with-lease is allowed by the destructive tier but IS
+        // substitute-denied — pixel push carries the same lease semantics.
+        assert!(bash_deny_lines("git push --force-with-lease origin main", Some(Path::new("/repo"))).is_none());
+        assert_substitute_contract(
+            "git push --force-with-lease origin main",
+            "pixel push origin main --request-id <id>",
+        );
+        // No remote/refspec → placeholders.
+        let msg = assert_substitute_contract("git push", "pixel push <remote> <refspec>");
+        assert!(msg.contains("--request-id <id>"), "{msg}");
+    }
+
+    #[test]
+    fn substitute_branch_creation() {
+        assert_substitute_contract("git checkout -b feature/x", "pixel branch feature/x --request-id <id>");
+        assert_substitute_contract("git switch -c feature/y", "pixel branch feature/y --request-id <id>");
+        assert_substitute_contract("git switch --create feature/z", "pixel branch feature/z --request-id <id>");
+    }
+
+    #[test]
+    fn substitute_rebase_suggests_reconcile() {
+        let msg = assert_substitute_contract(
+            "git rebase main",
+            "pixel reconcile /repo --strategy rebase-if-clean --push auto",
+        );
+        assert!(msg.contains("merge-tree"), "{msg}");
+        assert_substitute_contract("git rebase", "pixel reconcile /repo");
+    }
+
+    #[test]
+    fn substitute_pass_throughs() {
+        // Interactive/porcelain shapes pixel can't cover must NOT be denied.
+        for cmd in [
+            "git rebase -i HEAD~3",
+            "git rebase --interactive main",
+            "git rebase --continue",
+            "git rebase --abort",
+            "git rebase --skip",
+            "git rebase --onto main topic feature",
+            "git commit --interactive",
+            "git commit -p",
+            "git commit --patch",
+            "git commit --fixup=abc123",
+            "git push --tags",
+            "git push origin --delete old-branch",
+            "git push -d origin old-branch",
+            "git push --mirror backup",
+            "git push --all origin",
+            "git checkout main",
+            "git checkout -B feature",
+            "git switch main",
+            "git status",
+            "git log --oneline",
+        ] {
+            assert!(sub(cmd).is_none(), "`{cmd}` must pass through the substitute tier");
+        }
+    }
+
+    #[test]
+    fn substitute_only_in_indexed_repo() {
+        assert!(git_mutation_substitute_lines("git commit -m x", None).is_none());
+    }
+
+    #[test]
+    fn substitute_downgrade_keeps_suggestion_drops_block() {
+        let lines = sub("git commit -m x").unwrap();
+        let advisory = substitute_downgraded_advisory(&lines, "PIXEL_GUARD_RAW_GIT").join("\n");
+        assert!(!advisory.contains("BLOCKED"), "downgrade must not read as a deny: {advisory}");
+        assert!(advisory.contains("pixel-guard advisory (PIXEL_GUARD_RAW_GIT=1"), "{advisory}");
+        assert!(advisory.contains("pixel publish"), "suggestion must survive the downgrade: {advisory}");
+    }
+
+    #[test]
+    fn substitute_runs_after_destructive_tier() {
+        // Bare --force stays a destructive deny; it must never fall to the
+        // softer substitute wording (check_bash consults bash_deny_lines
+        // first, and the substitute tier's push arm can't even see it
+        // in practice — but assert the destructive verdict directly).
+        let repo = Path::new("/repo");
+        let msg = bash_deny_lines("git push --force origin main", Some(repo)).unwrap().join("\n");
+        assert!(msg.contains("destroy remote history"), "{msg}");
+    }
+
+    // --- transcript escalation ------------------------------------------
+
+    #[test]
+    fn zcode_store_is_flagged() {
+        let store = transcript_store_hit("sqlite3 ~/.zcode/cli/db/db.sqlite 'select 1'");
+        assert_eq!(store, Some(".zcode/cli/db"));
+        let msg = transcript_archaeology_advisory_lines(store.unwrap()).join("\n");
+        assert!(msg.contains("Advisory") && !msg.contains("BLOCKED"), "{msg}");
+        assert!(msg.contains("pixel recall"), "{msg}");
+    }
+
+    #[test]
+    fn transcript_deny_carries_contract() {
+        let store = transcript_store_hit("sqlite3 ~/.local/share/devin/cli/sessions.db '.tables'")
+            .expect("devin store must be flagged");
+        let msg = transcript_deny_lines(store).join("\n");
+        assert!(msg.contains("BLOCKED [PIXEL_SUBSTITUTE]"), "{msg}");
+        assert!(msg.contains("pixel recall sessions --agent devin"), "{msg}");
+        assert!(msg.contains("pixel recall search"), "{msg}");
+        assert!(msg.contains("PIXEL_GUARD_RAW_TRANSCRIPTS=1"), "{msg}");
+    }
+
+    #[test]
+    fn transcript_store_agent_mapping() {
+        assert_eq!(transcript_store_agent(".claude/projects"), "claude");
+        assert_eq!(transcript_store_agent(".codex/sessions"), "codex");
+        assert_eq!(transcript_store_agent(".cursor/chats"), "cursor");
+        assert_eq!(transcript_store_agent(".gemini/tmp"), "gemini");
+        assert_eq!(transcript_store_agent(".zcode/cli/db"), "zcode");
+        assert_eq!(transcript_store_agent(".local/share/opencode"), "opencode");
+        assert_eq!(transcript_store_agent(".config/devin"), "devin");
+    }
+
+    #[test]
+    fn unrelated_commands_hit_no_store() {
+        assert!(transcript_store_hit("cargo test -p pixel").is_none());
+        // A store path with no reading tool is not archaeology.
+        assert!(transcript_store_hit("ls ~/.zcode/cli/db").is_none());
+        assert!(transcript_store_hit("echo .zcode/cli/db").is_none());
     }
 
     #[test]

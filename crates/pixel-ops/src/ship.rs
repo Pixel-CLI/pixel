@@ -17,6 +17,20 @@ pub fn ship(
     refspec: &str,
     request_id: &str,
 ) -> Result<Value, String> {
+    ship_with_lease(root, message, files, remote, refspec, request_id, false)
+}
+
+/// Ship with an optional leased push (`--force-with-lease`) for the push
+/// phase — the publish phase is unaffected.
+pub fn ship_with_lease(
+    root: &Path,
+    message: &str,
+    files: &[String],
+    remote: &str,
+    refspec: &str,
+    request_id: &str,
+    force_with_lease: bool,
+) -> Result<Value, String> {
     // Publish first.
     let pub_opts = PublishOptions {
         message: message.to_string(),
@@ -34,7 +48,7 @@ pub fn ship(
         remote: remote.to_string(),
         refspec: refspec.to_string(),
         request_id: format!("{request_id}-push"),
-        force_with_lease: false,
+        force_with_lease,
     };
     let push_result = push(root, &push_opts, None)?;
 

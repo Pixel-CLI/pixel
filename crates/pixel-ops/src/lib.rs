@@ -27,6 +27,10 @@ pub mod update;
 pub mod sync;
 pub mod ship;
 pub mod reconcile;
+pub mod rewrite;
+pub mod provenance;
+pub mod branches;
+pub mod envfile;
 
 pub use journal::{OperationJournal, JournalRecord, JournalPhase, JournalOperation, BeginOutcome};
 pub use lock::{RepositoryLock, RepositoryBusyError};
