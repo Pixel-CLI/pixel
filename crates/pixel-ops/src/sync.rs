@@ -46,7 +46,9 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_repo_with_remote(root: &Path, remote: &Path) {
-        std::process::Command::new("git").arg("init").arg("-q").arg(root).status().unwrap();
+        // `-b main`: never rely on the machine's init.defaultBranch — the
+        // push below names the literal branch "main".
+        std::process::Command::new("git").arg("init").arg("-q").arg("-b").arg("main").arg(root).status().unwrap();
         std::process::Command::new("git").arg("-C").arg(root).args(["config", "user.email", "t@t"]).status().unwrap();
         std::process::Command::new("git").arg("-C").arg(root).args(["config", "user.name", "t"]).status().unwrap();
         std::fs::write(root.join("a.txt"), b"a").unwrap();

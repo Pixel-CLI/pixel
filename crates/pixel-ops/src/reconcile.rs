@@ -1068,6 +1068,12 @@ mod tests {
         std::process::Command::new("git").arg("-C").arg(root).args(["add", "."]).status().unwrap();
         std::process::Command::new("git").arg("-C").arg(root).args(["commit", "-qm", "init"]).status().unwrap();
         std::process::Command::new("git").arg("init").arg("--bare").arg("-q").arg(remote).status().unwrap();
+        // Point the bare remote's HEAD at main: without init.defaultBranch
+        // configured on the machine, HEAD dangles at refs/heads/master, so
+        // later clones check out nothing — their commits then land on a
+        // fresh `master` and never reach `main`, silently turning every
+        // "diverged" fixture into "ahead".
+        std::process::Command::new("git").arg("-C").arg(remote).args(["symbolic-ref", "HEAD", "refs/heads/main"]).status().unwrap();
         std::process::Command::new("git").arg("-C").arg(root).args(["remote", "add", "origin", remote.to_str().unwrap()]).status().unwrap();
         std::process::Command::new("git").arg("-C").arg(root).args(["push", "-u", "origin", "main"]).status().unwrap();
     }

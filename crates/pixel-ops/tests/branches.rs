@@ -52,6 +52,11 @@ fn commit_all(dir: &Path, msg: &str) {
 fn new_remote_and_local() -> (TempDir, TempDir) {
     let remote = TempDir::new().unwrap();
     git(remote.path(), &["init", "-q", "--bare"]);
+    // Point the bare remote's HEAD at main: without init.defaultBranch on
+    // the machine, HEAD dangles at refs/heads/master and `clone_of` gets a
+    // repo with nothing checked out — commits in those clones then land on
+    // `master` instead of `main`, silently defusing the fixture.
+    git(remote.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
 
     let local = TempDir::new().unwrap();
     let out = Command::new("git")
