@@ -907,6 +907,41 @@ fn substitute_downgraded_advisory(deny_lines: &[String], var: &str) -> Vec<Strin
 /// | `git checkout -B` / plain `git checkout <ref>`  | force-reset / plain switch (destructive tier already covers `-f`/`--`) |
 /// | `git switch` without `-c`/`--create`            | plain branch switch, not a mutation            |
 /// | `git add -p`/`--patch`/`-i`/`--interactive`     | interactive hunk staging, no pixel equivalent  |
+/// | `git add` during active sequencer (cherry-pick/rebase/merge) | conflict-resolution staging; `--continue` commits, not `pixel publish` |
+/// Detect an active git sequencer state (cherry-pick, rebase, or merge) by
+/// looking for the marker files git writes into the git directory. When any
+/// is present, `git add` is conflict-resolution staging — the sequencer's own
+/// `--continue` creates the commit, so `pixel publish` (which commits in one
+/// step) cannot substitute.
+///
+/// Resolves the git directory from `root/.git`, handling both the common
+/// directory case and the worktree file-pointer case (`gitdir: <path>`).
+/// Returns `false` on any resolution uncertainty — fail-closed for the
+/// substitute deny, so an unknown layout keeps the existing guard behavior.
+fn sequencer_in_progress(root: &Path) -> bool {
+    let dot_git = root.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else if dot_git.is_file() {
+        // Worktree: `.git` is a file containing `gitdir: <path>`.
+        let Ok(text) = std::fs::read_to_string(&dot_git) else {
+            return false;
+        };
+        let Some(line) = text.lines().find(|l| l.starts_with("gitdir:")) else {
+            return false;
+        };
+        PathBuf::from(line.trim_start_matches("gitdir:").trim())
+    } else {
+        return false; // no .git — not a repo root we can reason about
+    };
+    // CHERRY_PICK_HEAD / MERGE_HEAD → cherry-pick or merge in progress.
+    // rebase-merge/ or rebase-apply/ → rebase in progress.
+    git_dir.join("CHERRY_PICK_HEAD").is_file()
+        || git_dir.join("MERGE_HEAD").is_file()
+        || git_dir.join("rebase-merge").is_dir()
+        || git_dir.join("rebase-apply").is_dir()
+}
+
 fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<String>> {
     let root_q = shell_quote(&root.display().to_string());
     match sub {
@@ -915,6 +950,16 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             if args.iter().any(|a| {
                 a == "-p" || a == "--patch" || a == "-i" || a == "--interactive"
             }) {
+                return None;
+            }
+            // Conflict-resolution staging during an active sequencer
+            // (cherry-pick / rebase / merge): `git add` here stages resolved
+            // files WITHOUT committing — the sequencer's own `--continue`
+            // creates the commit. `pixel publish` cannot substitute because it
+            // commits in one step, which would either conflict with the
+            // sequencer state or produce a stray commit outside the sequencer's
+            // replay. Pass through so the agent can resolve and continue.
+            if sequencer_in_progress(root) {
                 return None;
             }
             // Collect pathspecs (non-flag tokens). Flags that consume a
@@ -2876,5 +2921,97 @@ mod tests {
                 "Grep with `{field}` field must be allowed through"
             );
         }
+    }
+
+    // --- sequencer pass-through for `git add` ---------------------------
+
+    /// Create a real git repo in a temp dir and return its root path.
+    fn real_repo(name: &str) -> PathBuf {
+        let root = std::env::temp_dir()
+            .join(format!("pixel-guard-seq-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::process::Command::new("git")
+            .arg("init").arg("-q").arg("-b").arg("main").arg(&root)
+            .status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C").arg(&root)
+            .args(["config", "user.email", "t@t"])
+            .status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C").arg(&root)
+            .args(["config", "user.name", "t"])
+            .status().unwrap();
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        std::process::Command::new("git")
+            .arg("-C").arg(&root).args(["add", "."])
+            .status().unwrap();
+        std::process::Command::new("git")
+            .arg("-C").arg(&root).args(["commit", "-qm", "init"])
+            .status().unwrap();
+        canonical(&root)
+    }
+
+    #[test]
+    fn sequencer_in_progress_false_on_clean_repo() {
+        let root = real_repo("clean");
+        assert!(
+            !sequencer_in_progress(&root),
+            "clean repo must not report sequencer in progress"
+        );
+    }
+
+    #[test]
+    fn sequencer_in_progress_true_for_cherry_pick() {
+        let root = real_repo("cherrypick");
+        std::fs::write(root.join(".git").join("CHERRY_PICK_HEAD"), b"abc123\n").unwrap();
+        assert!(
+            sequencer_in_progress(&root),
+            "CHERRY_PICK_HEAD must signal sequencer in progress"
+        );
+    }
+
+    #[test]
+    fn sequencer_in_progress_true_for_rebase() {
+        let root = real_repo("rebase");
+        std::fs::create_dir_all(root.join(".git").join("rebase-merge")).unwrap();
+        assert!(
+            sequencer_in_progress(&root),
+            "rebase-merge/ dir must signal sequencer in progress"
+        );
+    }
+
+    #[test]
+    fn sequencer_in_progress_true_for_merge() {
+        let root = real_repo("merge");
+        std::fs::write(root.join(".git").join("MERGE_HEAD"), b"def456\n").unwrap();
+        assert!(
+            sequencer_in_progress(&root),
+            "MERGE_HEAD must signal sequencer in progress"
+        );
+    }
+
+    #[test]
+    fn git_add_passes_through_during_cherry_pick() {
+        // Regression: during cherry-pick/rebase/merge conflict resolution,
+        // `git add` stages resolved files WITHOUT committing — the
+        // sequencer's `--continue` creates the commit. `pixel publish`
+        // commits in one step and cannot substitute. The guard must pass
+        // `git add` through when a sequencer is active.
+        let root = real_repo("add-cherrypick");
+        std::fs::write(root.join(".git").join("CHERRY_PICK_HEAD"), b"abc123\n").unwrap();
+        assert!(
+            git_mutation_substitute_lines("git add src/foo.rs", Some(&root)).is_none(),
+            "`git add` during cherry-pick must pass through, not be substitute-denied"
+        );
+    }
+
+    #[test]
+    fn git_add_still_denied_without_sequencer() {
+        // No sequencer active → normal substitute deny applies.
+        let root = real_repo("add-noseq");
+        assert!(
+            git_mutation_substitute_lines("git add src/foo.rs", Some(&root)).is_some(),
+            "`git add` without active sequencer must still be substitute-denied"
+        );
     }
 }
