@@ -611,6 +611,45 @@ fn into_clean_integration_rebases_feature_fast_forwards_target_and_pushes_both()
 }
 
 #[test]
+fn into_integration_ignores_untracked_sidecar_dirt() {
+    // Regression guard for the `--into` clean-worktree gate: untracked
+    // `.pixel/` (current) and `.gitpixel/` (legacy) sidecar artifacts are
+    // daemon-generated, never rebased, and must not refuse the integration.
+    // Only the rebase-if-clean path had coverage; this pins the `--into`
+    // path against a refactor of `dirty_excluding_sidecar`.
+    with_isolated_state(|| {
+        let (remote, local) = new_remote_and_local();
+
+        git(local.path(), &["checkout", "-qb", "develop"]);
+        write(local.path(), "develop_seed.txt", "develop\n");
+        commit_all(local.path(), "develop seed");
+        git(local.path(), &["push", "-q", "-u", "origin", "develop"]);
+
+        git(local.path(), &["checkout", "-qb", "feature/x"]);
+        write(local.path(), "feature.txt", "feature\n");
+        commit_all(local.path(), "feature work");
+
+        let other = clone_of(remote.path());
+        git(other.path(), &["checkout", "-q", "develop"]);
+        write(other.path(), "remote_dev.txt", "remote develop\n");
+        commit_all(other.path(), "remote develop advances");
+        git(other.path(), &["push", "-q"]);
+
+        // Simulate daemon sidecar writes — both generations.
+        std::fs::create_dir_all(local.path().join(".pixel")).unwrap();
+        write(local.path(), ".pixel/actions.jsonl", "{}\n");
+        std::fs::create_dir_all(local.path().join(".gitpixel")).unwrap();
+        write(local.path(), ".gitpixel/index", "legacy\n");
+
+        let result = reconcile(local.path(), &opts_into("develop", "none")).unwrap();
+        assert_eq!(
+            result["state"], "integrated",
+            "untracked sidecar dirt must not refuse --into: {result}"
+        );
+    });
+}
+
+#[test]
 fn into_refuses_with_conflict_report_and_leaves_target_untouched() {
     with_isolated_state(|| {
         let (remote, local) = new_remote_and_local();

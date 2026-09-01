@@ -286,6 +286,43 @@ fn bash_git_add_interactive_passes_through() {
 }
 
 #[test]
+fn bash_sequencer_state_passes_add_commit_and_side_selection() {
+    // End-to-end sequencer pass-through: with MERGE_HEAD present, the full
+    // merge-conclusion workflow — stage, select a side, commit — must run.
+    // `pixel publish` cannot substitute mid-sequencer (a merge commit needs
+    // both parents; a plain publish would corrupt the graph).
+    let repo = indexed_repo("sequencer-merge");
+    std::fs::write(repo.join(".git").join("MERGE_HEAD"), b"abc123\n").unwrap();
+    for cmd in [
+        "git add src/lib.rs",
+        "git commit -m 'resolve merge'",
+        "git checkout --theirs -- src/lib.rs",
+        "git checkout --ours -- src/lib.rs",
+        "git merge --continue",
+    ] {
+        let payload = bash_payload(&repo, cmd);
+        let (code, _stdout, stderr) = run_guard_env(&payload, &[]);
+        assert_eq!(code, 0, "`{cmd}` must pass during an active merge: {stderr}");
+        assert!(!stderr.contains("BLOCKED"), "`{cmd}` must not be denied: {stderr}");
+    }
+}
+
+#[test]
+fn bash_publish_message_mentioning_git_add_not_denied() {
+    // Regression: the guard's segment splitter used to cut through quoted
+    // strings, so a multi-line commit message describing a git command
+    // denied pixel's own substitute command.
+    let repo = indexed_repo("quoted-message");
+    let payload = bash_payload(
+        &repo,
+        "pixel publish --files a.rs --message \"fix(guard): pass git add through\nraw git commit stays denied\" --request-id x .",
+    );
+    let (code, _stdout, stderr) = run_guard_env(&payload, &[]);
+    assert_eq!(code, 0, "quoted message must not trigger a deny: {stderr}");
+    assert!(!stderr.contains("BLOCKED"), "{stderr}");
+}
+
+#[test]
 fn escape_hatch_downgrades_commit_to_advisory() {
     let repo = indexed_repo("sub-escape");
     let payload = bash_payload(&repo, "git commit -m 'fix parser'");

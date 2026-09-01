@@ -713,14 +713,14 @@ fn bash_deny_lines(cmd: &str, idx_root: Option<&Path>) -> Option<Vec<String>> {
 
 /// Split a shell command into pipeline/sequence segments and extract every
 /// `git <subcommand> <args…>` invocation as owned tokens. Uses the guard's
-/// simple quote-aware tokenizer — not a full shell parser, but robust to
-/// flag ordering and to substitution-wrapped arguments (a `$(…)` chunk
-/// becomes ordinary tokens that simply never match a destructive flag).
+/// quote-aware segmenting tokenizer — not a full shell parser, but robust to
+/// flag ordering, to substitution-wrapped arguments (a `$(…)` chunk becomes
+/// ordinary tokens that simply never match a destructive flag), and to
+/// separators inside quoted arguments (a multi-line `--message "…git add…"`
+/// never opens a phantom `git` segment).
 fn git_invocations(cmd: &str) -> Vec<(String, Vec<String>)> {
-    let normalized = cmd.replace("&&", ";").replace("||", ";");
     let mut out = Vec::new();
-    for segment in normalized.split([';', '|', '\n']) {
-        let tokens = simple_tokenize(segment.trim());
+    for tokens in tokenize_segments(cmd) {
         let Some(git_pos) = tokens.iter().position(|t| t == "git") else {
             continue;
         };
@@ -767,7 +767,13 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
             "  pixel rescue --apply <oid> --file <path>  # gated restore (working tree only)".into(),
             "Dirty files: add --merge (3-way, keeps your edits) or --stash-first.".into(),
         ]),
-        "checkout" if has("--") => Some(raw_restore_deny()),
+        // `--ours`/`--theirs` select a side of an unmerged path — the
+        // idiomatic conflict-resolution form (`git checkout --theirs -- f`).
+        // Git itself errors on non-conflicted paths, so exempting them never
+        // opens a historical-restore path.
+        "checkout" if has("--") && !has("--ours") && !has("--theirs") => {
+            Some(raw_restore_deny())
+        }
         "checkout" if has("--force") || cluster('f') => Some(vec![
             "BLOCKED by pixel-targets-guard: `git checkout -f/--force` discards in-progress work.".into(),
             "Use the surgical planner instead:".into(),
@@ -783,7 +789,8 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
             "  pixel excavate --phrase \"<what you're looking for>\"  # history/stash/reflog search".into(),
             "  pixel rescue \"<what broke>\" .".into(),
         ]),
-        "stash" if args.first().is_some_and(|a| a == "drop" || a == "clear") => Some(vec![
+        // First NON-FLAG argument, so `git stash -q drop` doesn't slip past.
+        "stash" if args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| a == "drop" || a == "clear") => Some(vec![
             "BLOCKED by pixel-targets-guard: `git stash drop/clear` permanently discards stashed work.".into(),
             "Stashed code is recoverable history — use:".into(),
             "  pixel excavate --phrase \"<what you're looking for>\"  # searches stash + reflog too".into(),
@@ -907,12 +914,13 @@ fn substitute_downgraded_advisory(deny_lines: &[String], var: &str) -> Vec<Strin
 /// | `git checkout -B` / plain `git checkout <ref>`  | force-reset / plain switch (destructive tier already covers `-f`/`--`) |
 /// | `git switch` without `-c`/`--create`            | plain branch switch, not a mutation            |
 /// | `git add -p`/`--patch`/`-i`/`--interactive`     | interactive hunk staging, no pixel equivalent  |
-/// | `git add` during active sequencer (cherry-pick/rebase/merge) | conflict-resolution staging; `--continue` commits, not `pixel publish` |
-/// Detect an active git sequencer state (cherry-pick, rebase, or merge) by
-/// looking for the marker files git writes into the git directory. When any
-/// is present, `git add` is conflict-resolution staging — the sequencer's own
-/// `--continue` creates the commit, so `pixel publish` (which commits in one
-/// step) cannot substitute.
+/// | `git add` during active sequencer (cherry-pick/rebase/merge/revert) | conflict-resolution staging; `--continue` commits, not `pixel publish` |
+/// | `git commit` during active sequencer                | concludes the sequencer's own commit (a merge commit needs both parents) — `pixel publish` writes a plain commit and would corrupt the graph |
+/// Detect an active git sequencer state (cherry-pick, rebase, merge, or
+/// revert) by looking for the marker files git writes into the git
+/// directory. When any is present, `git add` is conflict-resolution staging
+/// and `git commit` is the sequencer's own conclusion — `pixel publish`
+/// (a plain single-parent commit) cannot substitute for either.
 ///
 /// Resolves the git directory from `root/.git`, handling both the common
 /// directory case and the worktree file-pointer case (`gitdir: <path>`).
@@ -930,14 +938,20 @@ fn sequencer_in_progress(root: &Path) -> bool {
         let Some(line) = text.lines().find(|l| l.starts_with("gitdir:")) else {
             return false;
         };
-        PathBuf::from(line.trim_start_matches("gitdir:").trim())
+        let pointed = PathBuf::from(line.trim_start_matches("gitdir:").trim());
+        // A relative `gitdir:` pointer is relative to the directory holding
+        // the `.git` file — resolving it against the process cwd instead
+        // would silently return false (fail-closed into a wrong deny).
+        if pointed.is_absolute() { pointed } else { root.join(pointed) }
     } else {
         return false; // no .git — not a repo root we can reason about
     };
-    // CHERRY_PICK_HEAD / MERGE_HEAD → cherry-pick or merge in progress.
-    // rebase-merge/ or rebase-apply/ → rebase in progress.
+    // CHERRY_PICK_HEAD / MERGE_HEAD / REVERT_HEAD → cherry-pick, merge, or
+    // revert in progress. rebase-merge/ or rebase-apply/ → rebase (or
+    // `git am`) in progress.
     git_dir.join("CHERRY_PICK_HEAD").is_file()
         || git_dir.join("MERGE_HEAD").is_file()
+        || git_dir.join("REVERT_HEAD").is_file()
         || git_dir.join("rebase-merge").is_dir()
         || git_dir.join("rebase-apply").is_dir()
 }
@@ -1005,6 +1019,15 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             let c = parse_commit_args(args);
             if c.interactive {
                 return None; // pass-through: interactive staging
+            }
+            // Concluding an in-progress sequencer (merge / cherry-pick /
+            // revert / rebase): `git commit` here finishes what the sequencer
+            // started — for a merge it writes the merge commit with BOTH
+            // parents recorded from MERGE_HEAD. `pixel publish` cannot
+            // substitute: it creates a plain single-parent commit, silently
+            // losing the merge parent. Same rule as the `add` arm above.
+            if sequencer_in_progress(root) {
+                return None;
             }
             let msg = c
                 .message
@@ -1266,6 +1289,48 @@ fn simple_tokenize(s: &str) -> Vec<String> {
         tokens.push(current);
     }
     tokens
+}
+
+/// Quote-aware segmentation + tokenization: split a command into
+/// pipeline/sequence segments on UNQUOTED `;`, `|`, `&`, and newlines
+/// (`&&`/`||` fall out of the single-char rule), tokenizing each segment
+/// with the same quote rules as `simple_tokenize`. Quote state is tracked
+/// BEFORE splitting — the raw-string pre-split this replaced cut through
+/// quoted arguments, so a multi-line `pixel publish --message "…git add…"`
+/// produced a phantom `git add` segment and denied its own substitute.
+fn tokenize_segments(s: &str) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for c in s.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => current.push(c),
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c == ';' || c == '|' || c == '&' || c == '\n' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                if !tokens.is_empty() {
+                    segments.push(std::mem::take(&mut tokens));
+                }
+            }
+            None if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    if !tokens.is_empty() {
+        segments.push(tokens);
+    }
+    segments
 }
 
 // ---------------------------------------------------------------------------
@@ -2177,6 +2242,8 @@ mod tests {
             "git restore --source=HEAD~1 src/lib.rs",
             "git stash drop",
             "git stash clear",
+            "git stash -q drop",
+            "git checkout -- src/lib.rs",
             "git branch -D feature",
             "git push --force",
             "git push -f origin main",
@@ -2206,6 +2273,12 @@ mod tests {
             "git branch --list",
             "git reset --soft HEAD~1",
             "git restore --staged src/lib.rs",
+            // Conflict-side selection: idiomatic resolution commands, not
+            // historical restores — git errors on non-conflicted paths.
+            "git checkout --theirs -- src/lib.rs",
+            "git checkout --ours -- src/lib.rs",
+            "git checkout --theirs src/lib.rs",
+            "git stash push -m 'drop'",
         ];
         for cmd in not_destructive {
             assert!(
@@ -2233,6 +2306,27 @@ mod tests {
         let repo = Path::new("/repo");
         assert!(
             bash_deny_lines("git commit -m 'do not git reset --hard here'", Some(repo)).is_none()
+        );
+        // Separators INSIDE quotes must not split the argument into a
+        // phantom segment (the raw-string pre-split bug): a semicolon or
+        // newline in a commit message is still data.
+        assert!(
+            bash_deny_lines("git commit -m 'step 1; git reset --hard later'", Some(repo)).is_none()
+        );
+        assert!(
+            bash_deny_lines("pixel publish --message \"cleanup | git clean -fd equivalent\" .", Some(repo)).is_none()
+        );
+        assert!(
+            git_mutation_substitute_lines(
+                "pixel publish --files a.rs --message \"fix(guard): pass git add through\ngit add now allowed mid-sequencer\" --request-id x .",
+                Some(repo)
+            )
+            .is_none(),
+            "a multi-line --message mentioning `git add` must not deny pixel's own substitute"
+        );
+        // …but a genuinely unquoted chained invocation is still caught.
+        assert!(
+            bash_deny_lines("pixel search 'x' . && git reset --hard", Some(repo)).is_some()
         );
     }
 
@@ -3012,6 +3106,78 @@ mod tests {
         assert!(
             git_mutation_substitute_lines("git add src/foo.rs", Some(&root)).is_some(),
             "`git add` without active sequencer must still be substitute-denied"
+        );
+    }
+
+    #[test]
+    fn sequencer_in_progress_true_for_revert() {
+        let root = real_repo("revert");
+        std::fs::write(root.join(".git").join("REVERT_HEAD"), b"abc123\n").unwrap();
+        assert!(
+            sequencer_in_progress(&root),
+            "REVERT_HEAD must signal sequencer in progress"
+        );
+    }
+
+    #[test]
+    fn sequencer_in_progress_true_for_rebase_apply() {
+        // `git rebase --apply` and `git am` conflicts use rebase-apply/.
+        let root = real_repo("rebase-apply");
+        std::fs::create_dir_all(root.join(".git").join("rebase-apply")).unwrap();
+        assert!(
+            sequencer_in_progress(&root),
+            "rebase-apply/ dir must signal sequencer in progress"
+        );
+    }
+
+    #[test]
+    fn git_commit_passes_through_during_merge() {
+        // Regression: concluding a conflicted merge is `git add` (already
+        // passed through) then `git commit` — which writes the merge commit
+        // with BOTH parents from MERGE_HEAD. The old deny pointed at
+        // `pixel publish`, whose plain single-parent commit would silently
+        // corrupt the merge graph.
+        let root = real_repo("commit-merge");
+        std::fs::write(root.join(".git").join("MERGE_HEAD"), b"def456\n").unwrap();
+        assert!(
+            git_mutation_substitute_lines("git commit -m 'resolve merge'", Some(&root)).is_none(),
+            "`git commit` during merge must pass through, not be substitute-denied"
+        );
+    }
+
+    #[test]
+    fn git_commit_passes_through_during_cherry_pick() {
+        let root = real_repo("commit-cherrypick");
+        std::fs::write(root.join(".git").join("CHERRY_PICK_HEAD"), b"abc123\n").unwrap();
+        assert!(
+            git_mutation_substitute_lines("git commit", Some(&root)).is_none(),
+            "`git commit` during cherry-pick must pass through"
+        );
+    }
+
+    #[test]
+    fn git_commit_still_denied_without_sequencer() {
+        let root = real_repo("commit-noseq");
+        assert!(
+            git_mutation_substitute_lines("git commit -m 'plain'", Some(&root)).is_some(),
+            "`git commit` without active sequencer must still be substitute-denied"
+        );
+    }
+
+    #[test]
+    fn sequencer_in_progress_resolves_relative_worktree_gitdir() {
+        // A `.git` FILE with a relative `gitdir:` pointer resolves against
+        // the directory containing the file, not the process cwd.
+        let root = real_repo("relative-gitdir");
+        let real_git = root.join(".git");
+        let moved = root.join("actual-git-dir");
+        std::fs::rename(&real_git, &moved).unwrap();
+        std::fs::write(&real_git, b"gitdir: actual-git-dir\n").unwrap();
+        assert!(!sequencer_in_progress(&root), "clean state via pointer");
+        std::fs::write(moved.join("MERGE_HEAD"), b"def456\n").unwrap();
+        assert!(
+            sequencer_in_progress(&root),
+            "relative gitdir pointer must resolve against the worktree root"
         );
     }
 }
