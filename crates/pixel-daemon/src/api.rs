@@ -393,6 +393,7 @@ impl Service {
             } => self.op_changes(base.as_deref(), offset, include_tests),
             Request::Graph {} => self.op_graph(),
             Request::Status {} => self.op_status(),
+            Request::Reindex {} => self.op_reindex(),
             Request::Resolve { phrase, limit } => self.op_resolve(&phrase, limit),
             Request::History { query, facet, limit } => {
                 self.op_history(&query, facet.as_deref(), limit)
@@ -1293,6 +1294,36 @@ impl Service {
             },
             "graph": graph,
             "facts": self.facts_visibility(),
+        }))
+    }
+
+    /// Force-rebuild the text index shard via the daemon (singleton path:
+    /// no concurrent build races because the daemon serializes requests).
+    fn op_reindex(&mut self) -> Result<Value, String> {
+        // Remove the existing shard so open_or_build is forced to rebuild.
+        let gpx = self.root.join(pixel_index::index::SHARD_DIR);
+        let base = gpx.join(pixel_index::index::SHARD_FILE);
+        std::fs::remove_file(&base).ok();
+        std::fs::remove_file(pixel_index::delta::delta_shard_path(&gpx)).ok();
+        std::fs::remove_file(pixel_index::delta::state_path(&gpx)).ok();
+
+        // Re-open the index (the build lock ensures no race even if a
+        // concurrent CLI also tries to build).
+        let extractor: Box<dyn pixel_index::GramExtractor> =
+            Box::new(pixel_index::TrigramExtractor);
+        let new_index = pixel_index::indexset::IndexSet::open_or_build(&self.root, extractor)
+            .map_err(|e| e.to_string())?;
+        self.index = new_index;
+        let s = self.index.status();
+        Ok(json!({
+            "root": self.root.display().to_string(),
+            "index": {
+                "commit_oid": s.commit_oid,
+                "base_files": s.base_files,
+                "delta_files": s.delta_files,
+                "overlay_files": s.overlay_files,
+                "tombstones": s.tombstones,
+            },
         }))
     }
 

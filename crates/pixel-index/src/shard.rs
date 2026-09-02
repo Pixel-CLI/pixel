@@ -33,6 +33,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
+use rayon::prelude::*;
 
 pub const MAGIC: &[u8; 8] = b"GPXSHARD";
 pub const VERSION: u32 = 1;
@@ -171,17 +172,28 @@ impl ShardBuilder {
             let mut hashes: Vec<&u64> = self.postings.keys().collect();
             hashes.sort_unstable();
 
-            let mut lookup_buf: Vec<u8> = Vec::with_capacity(hashes.len() * LOOKUP_RECORD);
+            // Parallel delta-varint encoding: each gram's posting list is
+            // independent. Encode in parallel, then assemble sequentially.
+            let encoded: Vec<(u64, Vec<u8>)> = hashes
+                .par_iter()
+                .map(|&h| {
+                    let ids = &self.postings[h];
+                    let mut buf = Vec::with_capacity(ids.len() * 2);
+                    let mut prev = 0u32;
+                    for (i, &id) in ids.iter().enumerate() {
+                        let delta = if i == 0 { id } else { id - prev };
+                        write_varint(&mut buf, delta);
+                        prev = id;
+                    }
+                    (*h, buf)
+                })
+                .collect();
+
+            let mut lookup_buf: Vec<u8> = Vec::with_capacity(encoded.len() * LOOKUP_RECORD);
             let mut postings_buf: Vec<u8> = Vec::new();
-            for h in &hashes {
-                let ids = &self.postings[h];
+            for (h, buf) in &encoded {
                 let start = postings_buf.len() as u64;
-                let mut prev = 0u32;
-                for (i, &id) in ids.iter().enumerate() {
-                    let delta = if i == 0 { id } else { id - prev };
-                    write_varint(&mut postings_buf, delta);
-                    prev = id;
-                }
+                postings_buf.extend_from_slice(buf);
                 let len = postings_buf.len() as u64 - start;
                 lookup_buf.extend_from_slice(&h.to_le_bytes());
                 lookup_buf.extend_from_slice(&start.to_le_bytes());

@@ -5,10 +5,12 @@
 //! planner, and verification land in later phases (see the project plan).
 
 pub mod gram;
+pub mod lock;
 pub mod posting;
 pub mod weights;
 
 pub use gram::{GramExtractor, GramHit, SparseGramExtractor, TrigramExtractor};
+pub use lock::BuildLock;
 pub use posting::GramQuery;
 pub use weights::{Crc32Weigher, Weigher};
 pub mod delta;

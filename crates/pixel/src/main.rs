@@ -1857,6 +1857,42 @@ fn run_command(command: Command) -> Result<(), String> {
             history,
         } => {
             let path = discover_root(&path)?;
+            // Route through the daemon when available (singleton build —
+            // no concurrent build races). Fall back to in-process build.
+            if let Some(resp) = try_daemon(&path, &Request::Reindex {}) {
+                let v = unwrap_response(resp)?;
+                eprintln!(
+                    "indexed via daemon: base_files={} delta_files={} overlay_files={}",
+                    v.get("index.base_files")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0),
+                    v.get("index.delta_files")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0),
+                    v.get("index.overlay_files")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0),
+                );
+                if history {
+                    let mut store =
+                        pixel_facts::FactsStore::open(&path).map_err(|e| e.to_string())?;
+                    let opts = pixel_facts::ingest::IngestOptions::default();
+                    let report = pixel_facts::ingest::ingest_until_fresh(&mut store, &opts)
+                        .map_err(|e| e.to_string())?;
+                    eprintln!(
+                        "facts: phase={} commits={} diff_coverage={:.0}% fresh={}",
+                        report.phase,
+                        report.commits_indexed,
+                        report.diff_indexed_pct * 100.0,
+                        report.fresh
+                    );
+                }
+                return Ok(());
+            }
+            // In-process fallback (with build lock to prevent concurrent
+            // build races when multiple CLI invocations hit the same root).
+            let _lock = pixel_index::BuildLock::acquire(&path)
+                .map_err(|e| format!("build lock: {e}"))?;
             let ex = make_extractor(extractor, max_gram);
             let stats = build(&path, ex.as_ref()).map_err(|e| e.to_string())?;
             eprintln!(
@@ -2955,10 +2991,26 @@ fn run_command(command: Command) -> Result<(), String> {
                         var_map.insert(k.to_string(), val.to_string());
                     }
                     // --account shortcut: resolve alias to full email and
-                    // inject as google_account var.
+                    // inject into the flow's account var. Try openai_account
+                    // first (Codex), then google_account (Claude/others).
                     if let Some(acct) = account {
                         let resolved = resolve_account_alias(&acct);
-                        var_map.insert("google_account".to_string(), resolved);
+                        // Check which var the flow expects by loading it.
+                        let var_name = pixel_flow::load(&name)
+                            .ok()
+                            .and_then(|f| {
+                                f.vars.iter().find_map(|v| {
+                                    if v.name == "openai_account" {
+                                        Some("openai_account")
+                                    } else if v.name == "google_account" {
+                                        Some("google_account")
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                            .unwrap_or("google_account");
+                        var_map.insert(var_name.to_string(), resolved);
                     }
                     FlowAction::Replay {
                         name,

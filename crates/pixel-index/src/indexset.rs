@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use crate::delta::{DeltaState, delta_shard_path};
 use crate::gram::GramExtractor;
 use crate::index::{MAX_FILE_BYTES, SHARD_DIR, SHARD_FILE, SearchStats, read_regular_bounded};
+use crate::lock::BuildLock;
 use crate::overlay::Overlay;
 use crate::plan::plan_pattern;
 use crate::posting::{GramQuery, resolve_query};
@@ -210,6 +211,9 @@ fn build_shard_from(
 
 impl IndexSet {
     /// Open the index at `root/.pixel`, (re)building layers as needed.
+    /// Concurrent callers building the same root are serialized via an
+    /// exclusive `flock` on `.pixel/build.lock` — the first process builds,
+    /// others wait and then load the already-built shard.
     pub fn open_or_build(
         root: &Path,
         extractor: Box<dyn GramExtractor>,
@@ -218,7 +222,7 @@ impl IndexSet {
         let base_path = gpx_dir.join(SHARD_FILE);
         let head = gitsync::rev_parse_head(root);
 
-        // --- base layer ---
+        // --- base layer (fast path: no lock if shard is valid) ---
         let mut base = match Shard::open(&base_path) {
             Ok(s) if s.extractor_id() == extractor.id() => Some(s),
             _ => None,
@@ -237,9 +241,32 @@ impl IndexSet {
         {
             base = None;
         }
+
         let base = match base {
             Some(s) => s,
             None => {
+                // Build needed — acquire exclusive lock so concurrent
+                // callers don't duplicate the work. After acquiring, re-check
+                // whether the shard is now valid (another process may have
+                // built it while we waited).
+                let _lock = BuildLock::acquire(root)?;
+
+                // Re-check after acquiring the lock.
+                if let Ok(s) = Shard::open(&base_path) {
+                    if s.extractor_id() == extractor.id() {
+                        let valid = if head.is_some() {
+                            s.commit_oid().is_some()
+                        } else {
+                            s.commit_oid().is_none()
+                                && load_plain_sig(&gpx_dir).as_deref()
+                                    == Some(&plain_signature(root))
+                        };
+                        if valid {
+                            return Self::finish_open(root, s, extractor, head, &gpx_dir);
+                        }
+                    }
+                }
+
                 // Invalidate stale delta state alongside a base rebuild.
                 std::fs::remove_file(delta_shard_path(&gpx_dir)).ok();
                 std::fs::remove_file(crate::delta::state_path(&gpx_dir)).ok();
@@ -265,6 +292,19 @@ impl IndexSet {
                 }
             }
         };
+
+        Self::finish_open(root, base, extractor, head, &gpx_dir)
+    }
+
+    /// Complete the open after the base shard is resolved — build delta +
+    /// overlay for git repos, assemble the `IndexSet`.
+    fn finish_open(
+        root: &Path,
+        base: Shard,
+        extractor: Box<dyn GramExtractor>,
+        head: Option<String>,
+        gpx_dir: &Path,
+    ) -> Result<Self, IndexSetError> {
 
         let mut set = Self {
             root: root.to_path_buf(),

@@ -100,6 +100,10 @@ pub enum Op {
     },
     Graph {},
     Status {},
+    /// Force a rebuild of the text index shard. Returns BuildStats.
+    /// When sent to the daemon, the daemon's already-open Service does
+    /// the rebuild (singleton — no concurrent build races).
+    Reindex {},
     /// Engine 1: concept-index resolution. `resolve "<phrase>"` returns a
     /// cascade-ranked match list (T0 exact-unique → T1 kind-directed → T2
     /// word intersection → T3 trigram), each tier short-circuiting, with
@@ -291,6 +295,7 @@ impl Op {
             Op::Update { .. } => "update",
             Op::Sync { .. } => "sync",
             Op::Shutdown => "shutdown",
+            Op::Reindex { .. } => "reindex",
         }
     }
 }

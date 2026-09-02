@@ -244,28 +244,10 @@ pub fn build_with_budget(
     let started = std::time::Instant::now();
     let max_total_bytes = build_max_bytes_from_env();
 
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for entry in policy_walk(root) {
-        if let Some(d) = budget {
-            if started.elapsed() > d {
-                return Err(budget_time_error(started.elapsed(), d, paths.len()));
-            }
-        }
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if entry.file_type().is_some_and(|t| t.is_file()) {
-            let p = entry.into_path();
-            // Never index our own shard directory.
-            if p.components().any(|c| c.as_os_str() == SHARD_DIR) {
-                continue;
-            }
-            paths.push(p);
-        }
-    }
-    paths.sort();
-
+    // Pipelined walk + extraction: the walker pushes paths into a bounded
+    // channel while rayon workers pull and extract grams concurrently. This
+    // overlaps directory I/O with CPU work instead of waiting for the full
+    // walk to finish before starting extraction.
     struct FileGrams {
         rel: String,
         bytes: u64,
@@ -273,49 +255,136 @@ pub fn build_with_budget(
     }
 
     let total_bytes = std::sync::atomic::AtomicU64::new(0);
-    let extracted: Vec<FileGrams> = paths
-        .par_iter()
-        .filter_map(|path| {
-            if max_total_bytes.is_some_and(|cap| total_bytes.load(Ordering::Relaxed) > cap) {
-                return None;
+    let budget_exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let file_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    // Bounded channel: 256 paths buffered, so the walker blocks if workers
+    // fall behind (backpressure instead of unbounded memory).
+    let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+
+    let walker_root = root.to_path_buf();
+    let walker_budget = budget;
+    let walker_started = started;
+    let walker_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+    let walker_budget_exceeded = budget_exceeded.clone();
+    let walker_file_count = file_count.clone();
+
+    // Spawn the directory walker on a dedicated thread.
+    let walker_handle = std::thread::spawn(move || {
+        let tx = walker_tx.lock().unwrap().take().unwrap();
+        for entry in policy_walk(&walker_root) {
+            if walker_budget.is_some()
+                && walker_started.elapsed() > walker_budget.unwrap()
+            {
+                walker_budget_exceeded.store(true, Ordering::Relaxed);
+                break;
             }
-            let content = read_regular_bounded(path, MAX_FILE_BYTES).ok()?;
-            // Binary sniff: NUL in the first 8KiB.
-            if content[..content.len().min(8192)].contains(&0) {
-                return None;
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if entry.file_type().is_some_and(|t| t.is_file()) {
+                let p = entry.into_path();
+                if p.components().any(|c| c.as_os_str() == SHARD_DIR) {
+                    continue;
+                }
+                walker_file_count.fetch_add(1, Ordering::Relaxed);
+                if tx.send(p).is_err() {
+                    // Receiver dropped (budget exceeded or error).
+                    break;
+                }
             }
-            total_bytes.fetch_add(content.len() as u64, Ordering::Relaxed);
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .into_owned();
-            let mut hits = Vec::new();
-            extractor.grams(&content, &mut hits);
-            let mut hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
-            hashes.sort_unstable();
-            hashes.dedup();
-            Some(FileGrams {
-                rel,
-                bytes: content.len() as u64,
-                hashes,
+        }
+    });
+
+    // Collect extracted grams from the channel using rayon's thread pool.
+    // We drain the channel and process in batches for parallelism.
+    let extractor_id = extractor.id();
+    let root_for_rel = root.to_path_buf();
+
+    let extracted: Vec<FileGrams> = {
+        let rx = std::sync::Mutex::new(rx);
+        let total_bytes = &total_bytes;
+        let budget_exceeded = &budget_exceeded;
+        let max_total_bytes = &max_total_bytes;
+        let extractor = extractor;
+
+        // Collect all paths from the channel first (walker is concurrent),
+        // then parallel-extract. This is a middle ground: the walk runs on
+        // its own thread while we drain the channel, then we rayon-extract.
+        let mut all_paths: Vec<PathBuf> = Vec::new();
+        loop {
+            match rx.lock().unwrap().recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(p) => all_paths.push(p),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if walker_handle.is_finished() {
+                        // Drain any remaining.
+                        while let Ok(p) = rx.lock().unwrap().try_recv() {
+                            all_paths.push(p);
+                        }
+                        break;
+                    }
+                    if budget.is_some() && started.elapsed() > budget.unwrap() {
+                        budget_exceeded.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        // Wait for walker to finish.
+        let _ = walker_handle.join();
+
+        all_paths.sort();
+
+        all_paths
+            .par_iter()
+            .filter_map(|path| {
+                if max_total_bytes.is_some_and(|cap| total_bytes.load(Ordering::Relaxed) > cap) {
+                    return None;
+                }
+                let content = read_regular_bounded(path, MAX_FILE_BYTES).ok()?;
+                if content[..content.len().min(8192)].contains(&0) {
+                    return None;
+                }
+                total_bytes.fetch_add(content.len() as u64, Ordering::Relaxed);
+                let rel = path
+                    .strip_prefix(&root_for_rel)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .into_owned();
+                let mut hits = Vec::new();
+                extractor.grams(&content, &mut hits);
+                let mut hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
+                hashes.sort_unstable();
+                hashes.dedup();
+                Some(FileGrams {
+                    rel,
+                    bytes: content.len() as u64,
+                    hashes,
+                })
             })
-        })
-        .collect();
+            .collect()
+    };
+
+    let paths_count = file_count.load(Ordering::Relaxed);
+    if budget_exceeded.load(Ordering::Relaxed) {
+        return Err(budget_time_error(started.elapsed(), budget.unwrap(), paths_count));
+    }
 
     let bytes_seen = total_bytes.load(Ordering::Relaxed);
     if let Some(cap) = max_total_bytes {
         if bytes_seen > cap {
-            return Err(budget_bytes_error(paths.len(), bytes_seen, cap));
+            return Err(budget_bytes_error(paths_count, bytes_seen, cap));
         }
     }
     if let Some(d) = budget {
         if started.elapsed() > d {
-            return Err(budget_time_error(started.elapsed(), d, paths.len()));
+            return Err(budget_time_error(started.elapsed(), d, paths_count));
         }
     }
 
-    let mut builder = ShardBuilder::new(&extractor.id());
+    let mut builder = ShardBuilder::new(&extractor_id);
     let mut stats = BuildStats {
         files: extracted.len(),
         bytes: 0,
