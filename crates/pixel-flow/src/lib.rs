@@ -7,10 +7,12 @@
 //! Storage is file-based (one JSON per flow in `~/.local/share/pixel/flows/`)
 //! — no SQLite, no daemon. Simple, inspectable, human-editable.
 
+pub mod execute;
 pub mod replay;
 pub mod store;
 pub mod types;
 
+pub use execute::{execute, ExecResult};
 pub use store::{delete, ensure_flow_dir, exists, flow_dir, list, load, save, slugify};
 pub use types::{Flow, FlowStep, FlowVar};
 
@@ -48,6 +50,11 @@ pub enum FlowAction {
         vars: HashMap<String, String>,
         dry_run: bool,
     },
+    /// Actually execute the flow by running agent-browser commands.
+    Execute {
+        name: String,
+        vars: HashMap<String, String>,
+    },
     /// Delete a flow by name.
     Delete { name: String },
     /// Pretty-print the full flow document (human-readable).
@@ -78,6 +85,7 @@ pub fn flow(action: &FlowAction) -> Result<Value, String> {
             vars,
             dry_run,
         } => replay_flow(name, vars, *dry_run),
+        FlowAction::Execute { name, vars } => execute_flow(name, vars),
         FlowAction::Delete { name } => delete_flow(name),
         FlowAction::Show { name } => show_flow(name),
     }
@@ -246,8 +254,31 @@ fn revise_flow(
                 .map_err(|e| format!("cannot parse steps JSON from {}: {e}", path.display()))?;
             flow.steps = parsed;
         } else {
-            // Full flow document — merge all fields into the existing flow.
-            let doc: Flow = serde_json::from_str(&data)
+            // Full flow document — all fields optional except `steps`.
+            #[derive(serde::Deserialize)]
+            struct FlowInput {
+                #[serde(default)]
+                steps: Vec<FlowStep>,
+                #[serde(default)]
+                vars: Vec<FlowVar>,
+                #[serde(default)]
+                tab: Option<String>,
+                #[serde(default)]
+                url: Option<String>,
+                #[serde(default)]
+                success_signal: Option<String>,
+                #[serde(default)]
+                success_url_contains: Vec<String>,
+                #[serde(default)]
+                success_url_excludes: Vec<String>,
+                #[serde(default)]
+                mfa_keywords: Vec<String>,
+                #[serde(default)]
+                stale_tab_cleanup: Vec<String>,
+                #[serde(default)]
+                preconditions: Vec<String>,
+            }
+            let doc: FlowInput = serde_json::from_str(&data)
                 .map_err(|e| format!("cannot parse flow doc from {}: {e}", path.display()))?;
             flow.steps = doc.steps;
             flow.vars = doc.vars;
@@ -286,6 +317,22 @@ fn replay_flow(
         "name": flow.name,
         "dry_run": dry_run,
         "output": output,
+    }))
+}
+
+fn execute_flow(
+    name: &str,
+    vars: &HashMap<String, String>,
+) -> Result<Value, String> {
+    let flow = load(name)?;
+    let result = execute::execute(&flow, vars);
+    Ok(json!({
+        "name": flow.name,
+        "success": result.success,
+        "steps_executed": result.steps_executed,
+        "steps_skipped": result.steps_skipped,
+        "error": result.error,
+        "log": result.log,
     }))
 }
 

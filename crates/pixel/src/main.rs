@@ -804,16 +804,22 @@ enum FlowCmd {
     /// Emit ready-to-run agent-browser commands with variable substitution.
     /// Pixel does NOT run agent-browser — it outputs the deterministic
     /// command sequence for the agent to execute.
+    ///
+    /// Use `--execute` to actually run the commands via agent-browser.
     Replay {
         name: String,
         /// Variable substitution: `--var key=value`. Repeat per var.
         #[arg(long = "var")]
         vars: Vec<String>,
-        /// Shortcut for `--var google_account=<value>`. Picks which Google
-        /// account to use in the flow (for multi-account OAuth flows).
+        /// Shortcut for `--var google_account=<value>` (or `openai_account`
+        /// depending on the flow). Picks which account to use.
         /// Accepts a full email or a short alias: loic, mfleguier, livio.
         #[arg(long)]
         account: Option<String>,
+        /// Actually execute the flow by running agent-browser commands.
+        /// Without this flag, replay only prints the command sequence.
+        #[arg(long)]
+        execute: bool,
         /// Print commands without marking as executed (default is still
         /// print-only — pixel never runs agent-browser).
         #[arg(long)]
@@ -2980,6 +2986,7 @@ fn run_command(command: Command) -> Result<(), String> {
                     name,
                     vars,
                     account,
+                    execute,
                     dry_run,
                     json: _,
                 } => {
@@ -3012,10 +3019,17 @@ fn run_command(command: Command) -> Result<(), String> {
                             .unwrap_or("google_account");
                         var_map.insert(var_name.to_string(), resolved);
                     }
-                    FlowAction::Replay {
-                        name,
-                        vars: var_map,
-                        dry_run,
+                    if execute {
+                        FlowAction::Execute {
+                            name,
+                            vars: var_map,
+                        }
+                    } else {
+                        FlowAction::Replay {
+                            name,
+                            vars: var_map,
+                            dry_run,
+                        }
                     }
                 }
                 FlowCmd::Delete { name, json: _ } => FlowAction::Delete { name },
@@ -3033,6 +3047,23 @@ fn run_command(command: Command) -> Result<(), String> {
                     } else {
                         print_data(&data, true)
                     }
+                }
+                FlowAction::Execute { .. } => {
+                    // Print the execution log to stderr, result summary to stdout.
+                    if let Some(log) = data.get("log").and_then(|v| v.as_str()) {
+                        eprintln!("{log}");
+                    }
+                    let success = data.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let steps = data.get("steps_executed").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let skipped = data.get("steps_skipped").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if success {
+                        println!("✓ Flow executed: {} steps, {} skipped", steps, skipped);
+                    } else if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
+                        println!("✗ Flow failed after {} steps: {}", steps, err);
+                    } else {
+                        println!("~ Flow completed with warnings: {} steps, {} skipped", steps, skipped);
+                    }
+                    Ok(())
                 }
                 _ => print_data(&data, true),
             }
