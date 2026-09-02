@@ -2437,6 +2437,7 @@ dependencies = [
  "pixel-actionlog",
  "pixel-daemon",
  "pixel-facts",
+ "pixel-flow",
  "pixel-git",
  "pixel-graph",
  "pixel-index",
@@ -2494,6 +2495,16 @@ dependencies = [
  "tempfile",
  "thiserror",
  "xxhash-rust",
+]
+
+[[package]]
+name = "pixel-flow"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

@@ -686,6 +686,13 @@ enum Command {
         #[command(subcommand)]
         cmd: EnvCmd,
     },
+    /// Save, retrieve, list, revise, and replay proven agent-browser paths
+    /// (auth flows, config flows) so the agent follows a deterministic
+    /// shortcut instead of re-discovering the UI from scratch every time.
+    Flow {
+        #[command(subcommand)]
+        cmd: FlowCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -742,6 +749,82 @@ enum EnvCmd {
         require: Vec<String>,
         #[arg(default_value = ".")]
         path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum FlowCmd {
+    /// Create a new flow. Refuses to overwrite — use `revise` to update.
+    Save {
+        /// Flow name (kebab-case recommended, e.g. "github-auth-device-flow").
+        name: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Tag; repeat the flag once per tag (`--tag auth --tag github`).
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long)]
+        url: Option<String>,
+        /// Path to a JSON file containing the steps array.
+        #[arg(long)]
+        from_file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retrieve a flow by name (for the agent to follow deterministically).
+    Get {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List all saved flows, optionally filtered by tag.
+    List {
+        #[arg(long)]
+        tag: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update an existing flow's metadata and/or steps. Bumps revision.
+    Revise {
+        name: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Path to a JSON file containing the new steps array.
+        #[arg(long)]
+        from_file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Emit ready-to-run agent-browser commands with variable substitution.
+    /// Pixel does NOT run agent-browser — it outputs the deterministic
+    /// command sequence for the agent to execute.
+    Replay {
+        name: String,
+        /// Variable substitution: `--var key=value`. Repeat per var.
+        #[arg(long = "var")]
+        vars: Vec<String>,
+        /// Print commands without marking as executed (default is still
+        /// print-only — pixel never runs agent-browser).
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a flow by name.
+    Delete {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pretty-print the full flow document (human-readable).
+    Show {
+        name: String,
         #[arg(long)]
         json: bool,
     },
@@ -2796,6 +2879,77 @@ fn run_command(command: Command) -> Result<(), String> {
             let root = discover_root(&path)?;
             let data = pixel_ops::envfile::envfile(&root, &action)?;
             print_data(&data, json)
+        }
+        Command::Flow { cmd } => {
+            use pixel_flow::FlowAction;
+            let action = match cmd {
+                FlowCmd::Save {
+                    name,
+                    title,
+                    description,
+                    tags,
+                    url,
+                    from_file,
+                    json: _,
+                } => FlowAction::Save {
+                    name,
+                    title,
+                    description,
+                    tags,
+                    url,
+                    from_file: Some(from_file),
+                },
+                FlowCmd::Get { name, json: _ } => FlowAction::Get { name },
+                FlowCmd::List { tag, json: _ } => FlowAction::List { tag },
+                FlowCmd::Revise {
+                    name,
+                    title,
+                    description,
+                    from_file,
+                    json: _,
+                } => FlowAction::Revise {
+                    name,
+                    title,
+                    description,
+                    from_file,
+                },
+                FlowCmd::Replay {
+                    name,
+                    vars,
+                    dry_run,
+                    json: _,
+                } => {
+                    let mut var_map = std::collections::HashMap::new();
+                    for v in &vars {
+                        let (k, val) = v
+                            .split_once('=')
+                            .ok_or_else(|| format!("--var expects key=value, got '{v}'"))?;
+                        var_map.insert(k.to_string(), val.to_string());
+                    }
+                    FlowAction::Replay {
+                        name,
+                        vars: var_map,
+                        dry_run,
+                    }
+                }
+                FlowCmd::Delete { name, json: _ } => FlowAction::Delete { name },
+                FlowCmd::Show { name, json: _ } => FlowAction::Show { name },
+            };
+            let data = pixel_flow::flow(&action)?;
+            // For replay and show, the output field contains human-readable
+            // text — print it directly to stdout. For everything else, use
+            // the standard print_data path (JSON or pretty).
+            match &action {
+                FlowAction::Replay { .. } | FlowAction::Show { .. } => {
+                    if let Some(output) = data.get("output").and_then(|v| v.as_str()) {
+                        println!("{output}");
+                        Ok(())
+                    } else {
+                        print_data(&data, true)
+                    }
+                }
+                _ => print_data(&data, true),
+            }
         }
     }
 }

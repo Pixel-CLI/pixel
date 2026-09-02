@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pixel-index", "crates/pixel", "crates/pixel-graph", "crates/pixel-context", "crates/pixel-daemon", "crates/pixel-recall", "crates/pixel-bench", "crates/pixel-session", "crates/pixel-proto", "crates/pixel-git", "crates/pixel-rank", "crates/pixel-ops", "crates/pixel-facts", "crates/pixel-install", "crates/pixel-actionlog"]
+members = ["crates/pixel-index", "crates/pixel", "crates/pixel-graph", "crates/pixel-context", "crates/pixel-daemon", "crates/pixel-recall", "crates/pixel-bench", "crates/pixel-session", "crates/pixel-proto", "crates/pixel-git", "crates/pixel-rank", "crates/pixel-ops", "crates/pixel-facts", "crates/pixel-install", "crates/pixel-actionlog", "crates/pixel-flow"]
 
 [workspace.package]
 edition = "2024"

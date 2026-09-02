@@ -336,6 +336,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "branch_op",
     "update",
     "sync",
+    "flow",
 ];
 
 /// The one-paragraph usage doctrine the SessionStart hook injects into every
@@ -551,7 +552,7 @@ mod tests {
             "trace", "processes", "clusters", "changes", "graph", "status", "resolve",
             "history", "lifecycle", "excavate", "reconcile", "journal", "inspect", "review",
             "diff", "history_op", "publish", "push", "ship", "branch_op", "update", "sync",
-            "shutdown",
+            "flow", "shutdown",
         ];
         // Every advertised capability must be a real op.
         for cap in SESSION_CAPABILITIES {
