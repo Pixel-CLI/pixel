@@ -102,16 +102,10 @@ fn plain_sig_path(gpx_dir: &Path) -> PathBuf {
 /// that can actually appear in search results.
 fn plain_signature(root: &Path) -> String {
     use std::hash::Hasher;
-    // Must mirror `index::build`'s walk policy exactly (hidden files
-    // included, `.git/` + `.pixel/` pruned) or freshness would disagree with
-    // what the shard actually contains.
-    let mut entries: Vec<(String, u64)> = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            name != ".git" && name != SHARD_DIR
-        })
-        .build()
+    // Must mirror `index::build`'s walk policy exactly — both go through
+    // `policy_walk` — or freshness would disagree with what the shard
+    // actually contains.
+    let mut entries: Vec<(String, u64)> = crate::index::policy_walk(root)
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();

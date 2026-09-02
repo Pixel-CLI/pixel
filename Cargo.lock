@@ -2518,8 +2518,8 @@ dependencies = [
 name = "pixel-graph"
 version = "0.1.0"
 dependencies = [
- "ignore",
  "pixel-git",
+ "pixel-index",
  "rayon",
  "rusqlite",
  "serde",

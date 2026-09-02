@@ -809,6 +809,11 @@ enum FlowCmd {
         /// Variable substitution: `--var key=value`. Repeat per var.
         #[arg(long = "var")]
         vars: Vec<String>,
+        /// Shortcut for `--var google_account=<value>`. Picks which Google
+        /// account to use in the flow (for multi-account OAuth flows).
+        /// Accepts a full email or a short alias: loic, mfleguier, livio.
+        #[arg(long)]
+        account: Option<String>,
         /// Print commands without marking as executed (default is still
         /// print-only — pixel never runs agent-browser).
         #[arg(long)]
@@ -1317,6 +1322,19 @@ fn envelope_note(data: &Value) {
 /// complete, so the probe is bounded rather than trusted.
 const SESSION_STATUS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Resolve a short account alias to a full email address for the
+/// `--account` flag on `pixel flow replay`. Accepts full emails as-is.
+fn resolve_account_alias(input: &str) -> String {
+    let lower = input.to_lowercase();
+    match lower.as_str() {
+        "loic" | "loicmancino" => "loicmancino.work@gmail.com".to_string(),
+        "mfleguier" | "marie" | "marie-france" => "mfleguier@gmail.com".to_string(),
+        "livio" | "livio.gamassia" | "livio.g" => "livio.gamassia@gmail.com".to_string(),
+        // Pass through if it already looks like an email or is unknown.
+        _ => input.to_string(),
+    }
+}
+
 fn discover_root(path: &Path) -> Result<PathBuf, String> {
     let abs = path
         .canonicalize()
@@ -1330,14 +1348,23 @@ fn discover_root(path: &Path) -> Result<PathBuf, String> {
     };
     // The nearest `.git` defines the repo boundary and always wins — a
     // nested `.pixel` left behind by indexing a subdirectory must never
-    // shadow the real repo root. `.pixel` alone only anchors non-git trees.
+    // shadow the real repo root. `.pixel` anchors a non-git tree only when
+    // it actually holds a shard: a journal-only `.pixel` (actions/history —
+    // e.g. the global `$HOME/.pixel` state dir) must never anchor, or every
+    // gitless invocation below it silently re-roots to that ancestor and
+    // plain-walk-indexes the entire home directory.
     let mut nearest_index: Option<PathBuf> = None;
     let mut cur = start.clone();
     loop {
         if cur.join(".git").exists() {
             return Ok(cur);
         }
-        if nearest_index.is_none() && cur.join(pixel_index::index::SHARD_DIR).is_dir() {
+        if nearest_index.is_none()
+            && cur
+                .join(pixel_index::index::SHARD_DIR)
+                .join(pixel_index::index::SHARD_FILE)
+                .is_file()
+        {
             nearest_index = Some(cur.clone());
         }
         match cur.parent() {
@@ -2916,6 +2943,7 @@ fn run_command(command: Command) -> Result<(), String> {
                 FlowCmd::Replay {
                     name,
                     vars,
+                    account,
                     dry_run,
                     json: _,
                 } => {
@@ -2925,6 +2953,12 @@ fn run_command(command: Command) -> Result<(), String> {
                             .split_once('=')
                             .ok_or_else(|| format!("--var expects key=value, got '{v}'"))?;
                         var_map.insert(k.to_string(), val.to_string());
+                    }
+                    // --account shortcut: resolve alias to full email and
+                    // inject as google_account var.
+                    if let Some(acct) = account {
+                        let resolved = resolve_account_alias(&acct);
+                        var_map.insert("google_account".to_string(), resolved);
                     }
                     FlowAction::Replay {
                         name,
@@ -3178,6 +3212,40 @@ fn excavate_show(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// A `.pixel` holding only the global journal (no `base.shard`) — e.g.
+    /// the `$HOME/.pixel` state dir — must NOT anchor root discovery, or
+    /// every gitless invocation below it re-roots to that ancestor and
+    /// plain-walk-indexes the whole home directory. Regression for the
+    /// `pixel resolve`/`search` in `~/.zcode` hang (9+ min, 1.7GB RSS via a
+    /// journal-only `~/.pixel`).
+    #[test]
+    fn discover_root_ignores_journal_only_pixel_dir() {
+        let base = std::env::temp_dir().join(format!(
+            "pixel-discover-journal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(base.join("home/.pixel")).unwrap();
+        std::fs::create_dir_all(base.join("home/work")).unwrap();
+        let work = std::fs::canonicalize(base.join("home/work")).unwrap();
+
+        // Journal-only `.pixel` (actions/history, no shard): no anchor.
+        assert_eq!(discover_root(&work).unwrap(), work);
+
+        // With a shard present, the `.pixel` ancestor anchors as before.
+        std::fs::write(
+            base.join("home/.pixel").join(pixel_index::index::SHARD_FILE),
+            b"shard",
+        )
+        .unwrap();
+        assert_eq!(discover_root(&work).unwrap(), std::fs::canonicalize(base.join("home")).unwrap());
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     /// End-to-end rule-vs-binary parity of the doctor's normalizer against
     /// THIS binary's real clap definition: every canonical rule command

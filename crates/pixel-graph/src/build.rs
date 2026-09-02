@@ -10,7 +10,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::Instant;
 
-use ignore::WalkBuilder;
 use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -105,19 +104,14 @@ fn rel_path(root: &Path, path: &Path) -> Option<String> {
 }
 
 /// Walk `root` collecting supported source files (skips .git, .pixel,
-/// gitignored paths, binaries, oversized files). Hidden files (dotfiles,
-/// `.github/`, `.claude/`, …) ARE collected — they are real project content;
-/// with `hidden(false)` the `ignore` crate no longer skips `.git/` on its
-/// own, so it is pruned explicitly alongside our `.pixel/` sidecar.
+/// default-ignored dirs, gitignored paths, binaries, oversized files). Hidden
+/// files (dotfiles, `.github/`, `.claude/`, …) ARE collected — they are real
+/// project content. The walk itself is the shared
+/// `pixel_index::index::policy_walk`, so default-ignored-dir pruning and
+/// gitless-tree gitignore handling stay in lockstep with the lexical index.
 fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
-    let walker = WalkBuilder::new(root)
-        .hidden(false)
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            name != ".pixel" && name != ".git"
-        })
-        .build();
+    let walker = pixel_index::index::policy_walk(root);
     for entry in walker.flatten() {
         let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
         if !is_file {
@@ -284,16 +278,10 @@ pub fn build_graph(root: &Path, db_path: &Path) -> Result<GraphStats, BoxErr> {
 /// excluded (their target's content would be unstable and they are never
 /// indexed).
 pub fn freshness_signature(root: &Path) -> String {
-    // Must mirror `collect_files`'s walk policy exactly (hidden files
-    // included, `.git/` + `.pixel/` pruned) or the freshness signature would
+    // Must mirror `collect_files`'s walk policy exactly — both go through
+    // `pixel_index::index::policy_walk` — or the freshness signature would
     // disagree with the set of files the graph was actually built from.
-    let walker = WalkBuilder::new(root)
-        .hidden(false)
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            name != ".pixel" && name != ".git"
-        })
-        .build();
+    let walker = pixel_index::index::policy_walk(root);
     let mut entries: Vec<(String, u64)> = walker
         .flatten()
         .filter_map(|entry| {

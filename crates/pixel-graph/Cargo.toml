@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
 pixel-git = { path = "../pixel-git" }
+pixel-index = { path = "../pixel-index" }
 tree-sitter = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.23"
@@ -15,7 +16,6 @@ tree-sitter-go = "0.23"
 tree-sitter-java = "0.23"
 tree-sitter-python = "0.23"
 rayon = "1"
-ignore = "0.4"
 xxhash-rust = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
