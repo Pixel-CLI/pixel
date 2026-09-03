@@ -239,9 +239,34 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         if !path.is_file() {
             return Err("UserPromptSubmit (task boundary) hook not installed".into());
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = path.metadata() {
+                if meta.permissions().mode() & 0o111 == 0 {
+                    return Err(format!("{} is not executable (chmod +x needed)", path.display()));
+                }
+            }
+        }
+        let settings_path = home.join(".claude").join("settings.json");
+        if settings_path.is_file() {
+            let raw = fs::read_to_string(&settings_path).unwrap_or_default();
+            if !raw.contains("hook prompt-submit") && !raw.contains(config::PROMPT_SUBMIT_HOOK) {
+                return Err("UserPromptSubmit hook not wired in ~/.claude/settings.json".into());
+            }
+        }
+        let model_cached = home.join(".local/share/gitpixel/models/potion.ok").is_file();
+        let summary = if model_cached {
+            "UserPromptSubmit (task boundary) hook installed & model cached".into()
+        } else {
+            "UserPromptSubmit (task boundary) hook installed (model not cached)".into()
+        };
         Ok(DoctorCheckDetail {
-            summary: "UserPromptSubmit (task boundary) hook installed".into(),
-            detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            summary,
+            detail: Some(serde_json::json!({
+                "path": path.display().to_string(),
+                "model_cached": model_cached,
+            })),
         })
     }));
 
@@ -290,8 +315,23 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         if !has_session {
             return Err("Devin SessionStart hook not wired".into());
         }
+        let prompt_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+        let has_prompt = hooks.get("UserPromptSubmit")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| {
+                        h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&prompt_command)).unwrap_or(false)
+                    }))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !has_prompt {
+            return Err("Devin UserPromptSubmit hook not wired".into());
+        }
         Ok(DoctorCheckDetail {
-            summary: "Devin hooks wired (PreToolUse + SessionStart)".into(),
+            summary: "Devin hooks wired (PreToolUse + SessionStart + UserPromptSubmit)".into(),
             detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
         })
     }));
@@ -323,8 +363,20 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         if !has_guard {
             return Err("Codex PreToolUse guard hook not wired".into());
         }
+        let prompt_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+        let has_prompt = hooks.get("UserPromptSubmit")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks").and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&prompt_command)).unwrap_or(false)))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !has_prompt {
+            return Err("Codex UserPromptSubmit hook not wired".into());
+        }
         Ok(DoctorCheckDetail {
-            summary: "Codex hooks wired (PreToolUse)".into(),
+            summary: "Codex hooks wired (PreToolUse + UserPromptSubmit)".into(),
             detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
         })
     }));
@@ -356,8 +408,20 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         if !has_guard {
             return Err("Gemini BeforeTool guard hook not wired".into());
         }
+        let prompt_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+        let has_prompt = hooks.get("BeforeAgent")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks").and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&prompt_command)).unwrap_or(false)))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !has_prompt {
+            return Err("Gemini BeforeAgent (task boundary) hook not wired".into());
+        }
         Ok(DoctorCheckDetail {
-            summary: "Gemini hooks wired (BeforeTool)".into(),
+            summary: "Gemini hooks wired (BeforeTool + BeforeAgent)".into(),
             detail: Some(serde_json::json!({ "path": config_path.display().to_string() })),
         })
     }));
@@ -405,6 +469,18 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         if !has_guard {
             return Err("zcode PreToolUse guard hook not wired".into());
         }
+        let prompt_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+        let has_prompt = hooks.get("UserPromptSubmit")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| entries.iter().any(|e| {
+                e.get("hooks").and_then(serde_json::Value::as_array)
+                    .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()).map(|c| c.contains(&prompt_command)).unwrap_or(false)))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !has_prompt {
+            return Err("zcode UserPromptSubmit hook not wired".into());
+        }
         // Check ~/.zcode/AGENTS.md has pixel rules.
         let agents_md = home.join(".zcode").join("AGENTS.md");
         if !agents_md.is_file() {
@@ -415,7 +491,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             return Err("zcode AGENTS.md missing pixel managed markers".into());
         }
         Ok(DoctorCheckDetail {
-            summary: "zcode hooks + AGENTS.md rules wired (PreToolUse, hooks.enabled)".into(),
+            summary: "zcode hooks + AGENTS.md rules wired (PreToolUse, UserPromptSubmit, hooks.enabled)".into(),
             detail: Some(serde_json::json!({ "path": config_path.display().to_string(), "agents_md": agents_md.display().to_string() })),
         })
     }));

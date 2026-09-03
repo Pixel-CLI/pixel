@@ -1347,7 +1347,7 @@ fn resolve_account_alias(input: &str) -> String {
     }
 }
 
-fn discover_root(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn discover_root(path: &Path) -> Result<PathBuf, String> {
     let abs = path
         .canonicalize()
         .map_err(|e| format!("bad path {}: {e}", path.display()))?;

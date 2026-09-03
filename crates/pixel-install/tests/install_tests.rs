@@ -98,6 +98,19 @@ fn doctor_after_install_reports_green_mcp() {
         mcp_check.status,
         mcp_check.reason
     );
+
+    let prompt_check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.prompt-submit-hook")
+        .expect("should have install.prompt-submit-hook check");
+    assert_eq!(
+        prompt_check.status,
+        pixel_install::doctor::CheckStatus::Green,
+        "install.prompt-submit-hook should be green after install, got {:?}: {:?}",
+        prompt_check.status,
+        prompt_check.reason
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -839,4 +852,252 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
         .expect("CLAUDE.md should be created even when no agent-config file pre-existed");
     assert!(claude.contains(MANAGED_BEGIN));
     assert!(claude.contains(MANAGED_END));
+}
+
+// ---------------------------------------------------------------------------
+// doctor hook check tests (prompt-submit, Devin, Codex, Gemini, zcode)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn doctor_prompt_submit_check_permissions_and_settings() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+
+    let hooks_dir = home.join(".claude").join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    let hook_path = hooks_dir.join("pixel-prompt-submit");
+    fs::write(&hook_path, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let doc_opts = DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        ..Default::default()
+    };
+
+    // 1. Non-executable hook fails on unix
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let report = doctor(&doc_opts).expect("doctor runs");
+        let check = report.checks.iter().find(|c| c.id == "install.prompt-submit-hook").unwrap();
+        assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
+        assert!(check.reason.as_ref().unwrap().contains("is not executable"));
+    }
+
+    // Set executable
+    #[cfg(unix)]
+    fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 2. Settings.json exists but doesn't wire prompt-submit
+    let settings_path = home.join(".claude").join("settings.json");
+    fs::write(&settings_path, "{}").unwrap();
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.prompt-submit-hook").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
+    assert!(check.reason.as_ref().unwrap().contains("not wired in ~/.claude/settings.json"));
+
+    // 3. Settings.json wires prompt-submit, without cached model
+    fs::write(&settings_path, r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"pixel hook prompt-submit"}]}]}}"#).unwrap();
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.prompt-submit-hook").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
+    assert!(check.summary.contains("(model not cached)"));
+    assert_eq!(check.detail.as_ref().unwrap()["model_cached"], false);
+
+    // 4. With cached model
+    let models_dir = home.join(".local/share/gitpixel/models");
+    fs::create_dir_all(&models_dir).unwrap();
+    fs::write(models_dir.join("potion.ok"), "ok").unwrap();
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.prompt-submit-hook").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
+    assert!(check.summary.contains("model cached"));
+    assert_eq!(check.detail.as_ref().unwrap()["model_cached"], true);
+}
+
+#[test]
+fn doctor_checks_devin_hooks_wiring() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let config_dir = home.join(pixel_install::config::DEVIN_CONFIG_DIR);
+    fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join(pixel_install::config::DEVIN_CONFIG_FILE);
+
+    let doc_opts = DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        ..Default::default()
+    };
+
+    // Missing UserPromptSubmit
+    let partial_hooks = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-targets-guard" }] }],
+            "SessionStart": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-session-start" }] }]
+        }
+    });
+    fs::write(&config_path, serde_json::to_string(&partial_hooks).unwrap()).unwrap();
+
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.devin-hooks").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
+    assert!(check.reason.as_ref().unwrap().contains("Devin UserPromptSubmit hook not wired"));
+
+    // Full hooks
+    let full_hooks = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-targets-guard" }] }],
+            "SessionStart": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-session-start" }] }],
+            "UserPromptSubmit": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-prompt-submit" }] }]
+        }
+    });
+    fs::write(&config_path, serde_json::to_string(&full_hooks).unwrap()).unwrap();
+
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.devin-hooks").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
+    assert!(check.summary.contains("PreToolUse + SessionStart + UserPromptSubmit"));
+}
+
+#[test]
+fn doctor_checks_codex_hooks_wiring() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let config_path = home.join(pixel_install::config::CODEX_HOOKS_FILE);
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+
+    let doc_opts = DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        ..Default::default()
+    };
+
+    // Missing UserPromptSubmit
+    let partial = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-targets-guard" }] }]
+        }
+    });
+    fs::write(&config_path, serde_json::to_string(&partial).unwrap()).unwrap();
+
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.codex-hooks").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
+    assert!(check.reason.as_ref().unwrap().contains("Codex UserPromptSubmit hook not wired"));
+
+    // With UserPromptSubmit
+    let full = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-targets-guard" }] }],
+            "UserPromptSubmit": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-prompt-submit" }] }]
+        }
+    });
+    fs::write(&config_path, serde_json::to_string(&full).unwrap()).unwrap();
+
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.codex-hooks").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
+    assert!(check.summary.contains("PreToolUse + UserPromptSubmit"));
+}
+
+#[test]
+fn doctor_checks_gemini_hooks_wiring() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let config_path = home.join(pixel_install::config::GEMINI_SETTINGS_FILE);
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+
+    let doc_opts = DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        ..Default::default()
+    };
+
+    // Missing BeforeAgent
+    let partial = serde_json::json!({
+        "hooks": {
+            "BeforeTool": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-targets-guard" }] }]
+        }
+    });
+    fs::write(&config_path, serde_json::to_string(&partial).unwrap()).unwrap();
+
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.gemini-hooks").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
+    assert!(check.reason.as_ref().unwrap().contains("Gemini BeforeAgent (task boundary) hook not wired"));
+
+    // With BeforeAgent
+    let full = serde_json::json!({
+        "hooks": {
+            "BeforeTool": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-targets-guard" }] }],
+            "BeforeAgent": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-prompt-submit" }] }]
+        }
+    });
+    fs::write(&config_path, serde_json::to_string(&full).unwrap()).unwrap();
+
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.gemini-hooks").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
+    assert!(check.summary.contains("BeforeTool + BeforeAgent"));
+}
+
+#[test]
+fn doctor_checks_zcode_hooks_wiring() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let config_path = home.join(pixel_install::config::ZCODE_CONFIG_FILE);
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let agents_md = home.join(".zcode").join("AGENTS.md");
+    if let Some(parent) = agents_md.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(agents_md, format!("{}\n# pixel rules\n", pixel_install::config::MANAGED_BEGIN)).unwrap();
+
+    let doc_opts = DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        ..Default::default()
+    };
+
+    // Missing UserPromptSubmit
+    let partial = serde_json::json!({
+        "hooks": {
+            "enabled": true,
+            "events": {
+                "PreToolUse": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-targets-guard" }] }]
+            }
+        }
+    });
+    fs::write(&config_path, serde_json::to_string(&partial).unwrap()).unwrap();
+
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.zcode-hooks").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Red);
+    assert!(check.reason.as_ref().unwrap().contains("zcode UserPromptSubmit hook not wired"));
+
+    // With UserPromptSubmit
+    let full = serde_json::json!({
+        "hooks": {
+            "enabled": true,
+            "events": {
+                "PreToolUse": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-targets-guard" }] }],
+                "UserPromptSubmit": [{ "hooks": [{ "command": "~/.claude/hooks/pixel-prompt-submit" }] }]
+            }
+        }
+    });
+    fs::write(&config_path, serde_json::to_string(&full).unwrap()).unwrap();
+
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let check = report.checks.iter().find(|c| c.id == "install.zcode-hooks").unwrap();
+    assert_eq!(check.status, pixel_install::doctor::CheckStatus::Green);
+    assert!(check.summary.contains("PreToolUse, UserPromptSubmit, hooks.enabled"));
 }

@@ -783,9 +783,10 @@ fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
     );
     hooks_map.insert("SessionStart".to_string(), merged_session_start);
 
-    // UserPromptSubmit — task boundary detector hook.
+    // BeforeAgent — task boundary detector hook in Gemini CLI.
     let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
-    let existing_prompt_submit = hooks_map.get("UserPromptSubmit").cloned();
+    hooks_map.remove("UserPromptSubmit"); // Scrub stale key if previously registered
+    let existing_prompt_submit = hooks_map.get("BeforeAgent").cloned();
     let merged_prompt_submit = config::merge_hook_entry(
         existing_prompt_submit.as_ref(),
         &prompt_submit_command,
@@ -797,13 +798,13 @@ fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
             }],
         }),
     );
-    hooks_map.insert("UserPromptSubmit".to_string(), merged_prompt_submit);
+    hooks_map.insert("BeforeAgent".to_string(), merged_prompt_submit);
 
     if dry_run {
         return Ok(InstallStep {
             id: "hooks.gemini".into(),
             status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "Gemini hooks wired (BeforeTool + SessionStart + UserPromptSubmit)"),
+            summary: dry_run_summary(dry_run, "Gemini hooks wired (BeforeTool + SessionStart + BeforeAgent)"),
             detail: Some(format!("would write {}", config_path.display())),
         });
     }
@@ -812,7 +813,7 @@ fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
     Ok(InstallStep {
         id: "hooks.gemini".into(),
         status: CheckStatus::Green,
-        summary: "Gemini hooks wired (BeforeTool + SessionStart + UserPromptSubmit)".into(),
+        summary: "Gemini hooks wired (BeforeTool + SessionStart + BeforeAgent)".into(),
         detail: Some(with_backup_note(
             format!("wrote {}", config_path.display()),
             backup_path,
@@ -922,10 +923,10 @@ fn patch_project_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> 
         if !config_path.is_file() {
             continue;
         }
-        let carries_guard = fs::read_to_string(&config_path)
-            .map(|s| s.contains(config::GUARD_HOOK))
+        let carries_hooks = fs::read_to_string(&config_path)
+            .map(|s| s.contains(config::GUARD_HOOK) && s.contains(config::PROMPT_SUBMIT_HOOK))
             .unwrap_or(true); // unreadable => don't touch it, don't count it broken
-        if carries_guard {
+        if carries_hooks {
             already_ok += 1;
             continue;
         }
@@ -954,13 +955,26 @@ fn patch_project_codex_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> 
             }),
         );
         hooks_map.insert("PreToolUse".to_string(), merged);
+
+        let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+        let existing_prompt = hooks_map.get("UserPromptSubmit").cloned();
+        let merged_prompt = config::merge_hook_entry(
+            existing_prompt.as_ref(),
+            &prompt_submit_command,
+            serde_json::json!({
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": prompt_submit_command}],
+            }),
+        );
+        hooks_map.insert("UserPromptSubmit".to_string(), merged_prompt);
+
         write_settings(&config_path, &value, dry_run)?;
         patched.push(config_path.display().to_string());
     }
 
     let status = CheckStatus::Green;
     let summary = if patched.is_empty() {
-        format!("no shadowed project-level .codex/hooks.json found ({already_ok} already carry the guard)")
+        format!("no shadowed project-level .codex/hooks.json found ({already_ok} already carry hooks)")
     } else {
         format!(
             "{} shadowed project-level .codex/hooks.json patched ({already_ok} already fine)",
@@ -1062,7 +1076,7 @@ fn install_zcode_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
         existing_prompt_submit.as_ref(),
         &prompt_submit_command,
         serde_json::json!({
-            "matcher": "*",
+            "matcher": ".*",
             "hooks": [{
                 "type": "command",
                 "command": prompt_submit_command,

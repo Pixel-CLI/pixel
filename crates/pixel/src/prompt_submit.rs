@@ -14,8 +14,8 @@
 //! exits 0 with no output.
 
 use std::io::Read;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -28,25 +28,33 @@ const WEAK_THRESHOLD: f32 = 0.35;
 const COMPLETION_LOOKBACK_SECS: i64 = 300;
 /// Number of recent assistant turns to use as context.
 const CONTEXT_TURNS: usize = 5;
+/// Maximum age of a session in recall.db to be considered active context (4 hours).
+const MAX_SESSION_AGE_MS: i64 = 4 * 3600 * 1000;
 /// Hard deadline for the entire hook — never block the user's prompt.
-const HOOK_DEADLINE: Duration = Duration::from_millis(500);
+const HOOK_DEADLINE: Duration = Duration::from_millis(750);
 
 /// Commands in actions.jsonl that signal task completion.
 const COMPLETION_COMMANDS: &[&str] = &["publish", "ship", "push", "commit"];
 
-/// The UserPromptSubmit hook payload (Claude Code shape).
-/// Other CLIs may send different fields; we only need prompt + cwd.
+/// The prompt submit hook payload (Claude Code / Gemini / Devin / Codex / zcode shape).
 #[derive(Deserialize)]
 struct PromptSubmitPayload {
     prompt: String,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    hook_event_name: Option<String>,
+    #[serde(default, rename = "hookEventName")]
+    hook_event_name_camel: Option<String>,
 }
 
-/// Entry point for `pixel hook prompt-submit`. Reads the UserPromptSubmit
-/// payload from stdin. Never returns an `Err` as exit 1 — every failure
-/// path is a silent exit 0 (prompt proceeds normally).
+/// Entry point for `pixel hook prompt-submit`. Reads the hook payload from stdin.
+/// Never returns an `Err` as exit 1 — every failure path is a silent exit 0
+/// (prompt proceeds normally).
 pub fn run() -> ! {
+    // Suppress stderr panics in hook mode so unexpected edge cases cleanly exit 0.
+    std::panic::set_hook(Box::new(|_| {}));
+
     // Allow opt-out via env var.
     if let Ok(kill) = std::env::var("PIXEL_TASK_BOUNDARY") {
         if matches!(kill.as_str(), "0" | "false" | "off") {
@@ -62,8 +70,7 @@ pub fn run() -> ! {
         std::process::exit(0);
     };
 
-    // Short prompts like "yes", "ok", "continue" are almost certainly
-    // continuations — skip embedding entirely.
+    // Short prompts like "yes", "ok", "looks good" are continuations — skip embedding.
     if is_trivial_continuation(&payload.prompt) {
         std::process::exit(0);
     }
@@ -74,22 +81,26 @@ pub fn run() -> ! {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    let deadline = Instant::now() + HOOK_DEADLINE;
+    let event_name = payload
+        .hook_event_name
+        .or(payload.hook_event_name_camel)
+        .unwrap_or_else(|| "UserPromptSubmit".to_string());
 
-    // Run detection in a thread with a channel so we can enforce the hard
-    // deadline. Using join() would block until the thread finishes — which
-    // could be seconds if the model is loading — defeating the deadline.
+    // Run detection in a worker thread so the deadline is strictly enforced.
     let (tx, rx) = std::sync::mpsc::channel();
     let prompt = payload.prompt.clone();
     let cwd_clone = cwd.clone();
     std::thread::spawn(move || {
-        let result = detect_boundary(&prompt, &cwd_clone);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            detect_boundary(&prompt, &cwd_clone)
+        }))
+        .unwrap_or(Ok(None));
         let _ = tx.send(result);
     });
 
     match rx.recv_timeout(HOOK_DEADLINE) {
-        Ok(Ok(Some(boundary))) if Instant::now() <= deadline => {
-            emit_boundary(&boundary);
+        Ok(Ok(Some(boundary))) => {
+            emit_boundary(&boundary, &event_name);
         }
         _ => std::process::exit(0),
     }
@@ -105,18 +116,21 @@ struct BoundaryEvent {
 /// Core detection logic: embed prompt + context, compute similarity, check
 /// completion signals. Returns `Some(BoundaryEvent)` if a task boundary is
 /// detected, `None` otherwise.
-fn detect_boundary(prompt: &str, cwd: &PathBuf) -> Result<Option<BoundaryEvent>, String> {
-    // 1. Open embedder (download=false — fail fast if model not cached).
-    let mut embedder = pixel_recall::embed::open_default_embedder(false)?;
-
-    // 2. Get recent assistant turns from the recall corpus for this cwd.
-    let context_text = recent_context_text(cwd, CONTEXT_TURNS);
+fn detect_boundary(prompt: &str, cwd: &Path) -> Result<Option<BoundaryEvent>, String> {
+    // 1. Get recent assistant turns from the recall corpus for this cwd.
+    // Early exit before opening embedder if there is no prior context!
+    let (context_text, context_summary) = recent_context_and_summary(cwd, CONTEXT_TURNS);
     if context_text.is_empty() {
-        // No prior context — can't detect a boundary.
         return Ok(None);
     }
 
-    // 3. Embed prompt and context.
+    // 2. Check actions.jsonl for recent completion signals.
+    let completion = recent_completion_signal(cwd);
+
+    // 3. Open embedder (download=false — fail fast if model not cached).
+    let mut embedder = pixel_recall::embed::open_default_embedder(false)?;
+
+    // 4. Embed prompt and context.
     let prompt_text = embed_text_for_prompt(prompt, cwd);
     let texts = [prompt_text.as_str(), context_text.as_str()];
     let vecs = embedder.embed_batch(&texts, pixel_recall::embed::EmbedKind::Query)?;
@@ -124,9 +138,6 @@ fn detect_boundary(prompt: &str, cwd: &PathBuf) -> Result<Option<BoundaryEvent>,
         return Ok(None);
     }
     let similarity = cosine_similarity(&vecs[0], &vecs[1]);
-
-    // 4. Check actions.jsonl for recent completion signals.
-    let completion = recent_completion_signal(cwd);
 
     // 5. Decision logic.
     let is_boundary = if similarity < SIMILARITY_THRESHOLD && completion {
@@ -141,9 +152,6 @@ fn detect_boundary(prompt: &str, cwd: &PathBuf) -> Result<Option<BoundaryEvent>,
         return Ok(None);
     }
 
-    // Build a short context summary from the first 200 chars of context.
-    let context_summary = context_text.chars().take(200).collect::<String>();
-
     Ok(Some(BoundaryEvent {
         similarity,
         completion_signal: completion,
@@ -152,46 +160,56 @@ fn detect_boundary(prompt: &str, cwd: &PathBuf) -> Result<Option<BoundaryEvent>,
 }
 
 /// Retrieve the last N assistant turns from the recall corpus for the given
-/// cwd. Returns concatenated text suitable for embedding.
-fn recent_context_text(cwd: &PathBuf, n: usize) -> String {
+/// cwd, ensuring the session is within the recency cutoff and prioritizing the
+/// newest turns so Model2Vec's token budget does not truncate them away.
+/// Returns (embedding_text, context_summary).
+fn recent_context_and_summary(cwd: &Path, n: usize) -> (String, String) {
     let db_path = pixel_recall::db_path();
     let Ok(store) = pixel_recall::store::RecallStore::open(&db_path) else {
-        return String::new();
+        return (String::new(), String::new());
     };
 
     let cwd_str = cwd.display().to_string();
-    // Find the most recent session matching this cwd.
-    let Ok(sessions) = store.sessions(None, Some(&cwd_str), None, None, false, 1) else {
-        return String::new();
+    let now_ms = pixel_actionlog::now_ms();
+    let since_ms = now_ms.saturating_sub(MAX_SESSION_AGE_MS);
+
+    // Find the most recent session matching this cwd within the recency window.
+    let Ok(sessions) = store.sessions(None, Some(&cwd_str), Some(since_ms), None, false, 1) else {
+        return (String::new(), String::new());
     };
     let Some(session) = sessions.first() else {
-        return String::new();
+        return (String::new(), String::new());
     };
 
-    // Get turns for that session, take the last N assistant turns.
     let Ok(turns) = store.turns_for_session(session.id, None) else {
-        return String::new();
+        return (String::new(), String::new());
     };
 
+    // Extract the last N assistant turns, newest first.
     let assistant_texts: Vec<String> = turns
         .iter()
         .rev()
         .filter(|t| t.role == "assistant")
         .take(n)
-        .map(|t| t.text.clone())
+        .map(|t| t.text.chars().take(500).collect::<String>()) // Budget per turn
         .collect();
 
     if assistant_texts.is_empty() {
-        return String::new();
+        return (String::new(), String::new());
     }
 
-    // Concatenate in chronological order (we reversed for take, so reverse back).
-    assistant_texts.into_iter().rev().collect::<Vec<_>>().join("\n")
+    // Summary comes from the most recent assistant turn (first in reversed list).
+    let summary = assistant_texts[0].chars().take(200).collect::<String>();
+
+    // Newest turn first for embedding so token truncation preserves the latest context.
+    let embedding_text = assistant_texts.join("\n---\n");
+
+    (embedding_text, summary)
 }
 
 /// Format the prompt text for embedding, matching the recall corpus's
 /// `embed_text` convention so similarity is comparable.
-fn embed_text_for_prompt(prompt: &str, cwd: &PathBuf) -> String {
+fn embed_text_for_prompt(prompt: &str, cwd: &Path) -> String {
     let repo = cwd
         .file_name()
         .and_then(|n| n.to_str())
@@ -199,20 +217,47 @@ fn embed_text_for_prompt(prompt: &str, cwd: &PathBuf) -> String {
     format!("[prompt] [{repo}] user: {prompt}")
 }
 
-/// Check `~/.pixel/actions.jsonl` for recent completion signals (commits,
-/// publishes, pushes) in the given cwd within the lookback window.
-fn recent_completion_signal(cwd: &PathBuf) -> bool {
+/// Check `actions.jsonl` for recent completion signals (commits, publishes,
+/// pushes, ships) in the given cwd within the lookback window.
+/// Checks the repository root first, then falls back to global `~/.pixel/actions.jsonl`.
+fn recent_completion_signal(cwd: &Path) -> bool {
+    let mut log_paths = Vec::new();
+    if let Ok(root) = crate::discover_root(cwd) {
+        log_paths.push(pixel_actionlog::ActionLog::path_for_root(&root));
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let log_path = PathBuf::from(&home).join(".pixel").join("actions.jsonl");
-    let Ok(content) = std::fs::read_to_string(&log_path) else {
-        return false;
-    };
+    log_paths.push(PathBuf::from(&home).join(".pixel").join("actions.jsonl"));
 
     let now_ms = pixel_actionlog::now_ms();
     let cutoff = now_ms - (COMPLETION_LOOKBACK_SECS * 1000);
-    let cwd_str = cwd.display().to_string();
 
-    for line in content.lines().rev() {
+    for path in log_paths {
+        if let Ok(file) = std::fs::File::open(&path) {
+            if check_action_log_file(file, cwd, cutoff) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Parse action log entries from the tail of the file to stay bounded in memory and CPU.
+fn check_action_log_file(mut file: std::fs::File, cwd: &Path, cutoff: i64) -> bool {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    let Ok(metadata) = file.metadata() else { return false; };
+    let len = metadata.len();
+    if len == 0 {
+        return false;
+    }
+    // Seek to the last 64KB for speed instead of reading entire large log files
+    let seek_start = len.saturating_sub(64 * 1024);
+    if file.seek(SeekFrom::Start(seek_start)).is_err() {
+        return false;
+    }
+    let reader = BufReader::new(file);
+    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+
+    for line in lines.iter().rev() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -220,7 +265,7 @@ fn recent_completion_signal(cwd: &PathBuf) -> bool {
             continue;
         };
         if ts < cutoff {
-            break; // lines are roughly chronological, older entries past this
+            break; // Lines are roughly chronological, older entries past this
         }
         let Some(command) = v.get("command").and_then(Value::as_str) else {
             continue;
@@ -232,7 +277,7 @@ fn recent_completion_signal(cwd: &PathBuf) -> bool {
         if outcome != "ok" {
             continue;
         }
-        if !cwd_matches(&cwd_str, log_cwd) {
+        if !cwd_matches(cwd, Path::new(log_cwd)) {
             continue;
         }
         if COMPLETION_COMMANDS.contains(&command) {
@@ -243,25 +288,32 @@ fn recent_completion_signal(cwd: &PathBuf) -> bool {
 }
 
 /// Check if two cwd paths refer to the same project (exact match or one
-/// is a parent of the other).
-fn cwd_matches(a: &str, b: &str) -> bool {
+/// is a parent of the other) using path components to avoid substring false matches.
+fn cwd_matches(a: &Path, b: &Path) -> bool {
     a == b || a.starts_with(b) || b.starts_with(a)
 }
 
 /// Trivial continuations that are almost certainly not new tasks.
 fn is_trivial_continuation(prompt: &str) -> bool {
     let trimmed = prompt.trim().to_lowercase();
-    let words = trimmed.split_whitespace().count();
-    if words == 0 {
+    if trimmed.is_empty() {
         return true;
     }
-    // Single-word or very short responses.
-    matches!(
-        trimmed.as_str(),
-        "yes" | "y" | "no" | "n" | "ok" | "okay" | "continue" | "go" | "proceed"
-            | "thanks" | "done" | "next" | "sure" | "correct" | "right" | "exactly"
-            | "yep" | "yeah" | "nope" | "fine" | "good" | "great" | "perfect"
-    ) && words <= 2
+    let words = trimmed.split_whitespace().count();
+    if words <= 3 {
+        // Single-word or common short affirmative/acknowledgment phrases
+        if matches!(
+            trimmed.as_str(),
+            "yes" | "y" | "no" | "n" | "ok" | "okay" | "continue" | "go" | "proceed"
+                | "thanks" | "thank you" | "done" | "next" | "sure" | "correct" | "right"
+                | "exactly" | "yep" | "yeah" | "nope" | "fine" | "good" | "great" | "perfect"
+                | "looks good" | "lgtm" | "go ahead" | "sounds good" | "do it" | "ship it"
+                | "go for it" | "proceed with that" | "all good"
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Cosine similarity between two vectors.
@@ -279,8 +331,9 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Emit the boundary advisory JSON. The `additionalContext` field is
-/// injected into the conversation by Claude Code's hook system.
-fn emit_boundary(event: &BoundaryEvent) -> ! {
+/// injected into the conversation by the host agent's hook system.
+fn emit_boundary(event: &BoundaryEvent, event_name: &str) -> ! {
+    use std::io::Write;
     let signal = if event.completion_signal {
         "completion detected"
     } else {
@@ -295,11 +348,14 @@ fn emit_boundary(event: &BoundaryEvent) -> ! {
     );
     let json = serde_json::json!({
         "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
+            "hookEventName": event_name,
             "additionalContext": note
         }
     });
-    print!("{}", serde_json::to_string(&json).unwrap_or_default());
+    if let Ok(s) = serde_json::to_string(&json) {
+        println!("{s}");
+        let _ = std::io::stdout().flush();
+    }
     std::process::exit(0);
 }
 
@@ -366,6 +422,12 @@ mod tests {
         assert!(is_trivial_continuation("OK"));
         assert!(is_trivial_continuation("  continue  "));
         assert!(is_trivial_continuation("thanks"));
+        assert!(is_trivial_continuation("thank you"));
+        assert!(is_trivial_continuation("looks good"));
+        assert!(is_trivial_continuation("lgtm"));
+        assert!(is_trivial_continuation("go ahead"));
+        assert!(is_trivial_continuation("sounds good"));
+        assert!(is_trivial_continuation("ship it"));
         assert!(is_trivial_continuation(""));
     }
 
@@ -378,17 +440,18 @@ mod tests {
 
     #[test]
     fn cwd_exact_match() {
-        assert!(cwd_matches("/tmp/foo", "/tmp/foo"));
+        assert!(cwd_matches(Path::new("/tmp/foo"), Path::new("/tmp/foo")));
     }
 
     #[test]
     fn cwd_parent_child() {
-        assert!(cwd_matches("/tmp/foo", "/tmp/foo/bar"));
-        assert!(cwd_matches("/tmp/foo/bar", "/tmp/foo"));
+        assert!(cwd_matches(Path::new("/tmp/foo"), Path::new("/tmp/foo/bar")));
+        assert!(cwd_matches(Path::new("/tmp/foo/bar"), Path::new("/tmp/foo")));
     }
 
     #[test]
-    fn cwd_no_match() {
-        assert!(!cwd_matches("/tmp/foo", "/tmp/baz"));
+    fn cwd_no_prefix_confusion() {
+        assert!(!cwd_matches(Path::new("/tmp/foo"), Path::new("/tmp/foobar")));
+        assert!(!cwd_matches(Path::new("/tmp/foo"), Path::new("/tmp/baz")));
     }
 }
