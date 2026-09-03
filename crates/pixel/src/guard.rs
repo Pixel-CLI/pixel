@@ -663,7 +663,7 @@ fn check_bash(cmd: &str, cwd: &Path, idx_root: Option<&Path>, manifest: Option<&
     // destructive tier it has NO substitution/heredoc bail: a false
     // positive costs one retry (or the silent human override), a missed
     // raw commit costs an unjournaled mutation.
-    if let Some(lines) = git_mutation_substitute_lines(cmd, idx_root) {
+    if let Some(lines) = git_mutation_substitute_lines(cmd, idx_root, &cwd) {
         if env_flag("PIXEL_GUARD_RAW_GIT") {
             advise(&substitute_downgraded_advisory(&lines, "PIXEL_GUARD_RAW_GIT"));
         }
@@ -857,17 +857,56 @@ fn raw_restore_deny() -> Vec<String> {
 
 /// Substitute-deny verdict for a full Bash command. Only fires in indexed
 /// repos, mirroring `bash_deny_lines`.
-fn git_mutation_substitute_lines(cmd: &str, idx_root: Option<&Path>) -> Option<Vec<String>> {
+fn git_mutation_substitute_lines(cmd: &str, idx_root: Option<&Path>, cwd: &Path) -> Option<Vec<String>> {
+    // The idx_root is found from the hook payload's cwd, but the actual
+    // command may cd to a different directory first (e.g. `cd /repo && git
+    // rebase`). Try the idx_root first, then extract a cd/-C target from the
+    // command as a fallback for conflict-state checking.
     let root = idx_root?;
     if !cmd.contains("git") {
         return None;
     }
     for (sub, args) in git_invocations(cmd) {
         if let Some(lines) = git_substitute_deny(&sub, &args, root) {
+            // Check if a cd target or git -C path has a reconcile conflict
+            // state file — if so, allow the rebase as an escape hatch.
+            if sub == "rebase" {
+                let alt_root = extract_cd_target(cmd, cwd).or_else(|| extract_git_c_path(&args, cwd));
+                if let Some(alt) = alt_root {
+                    if alt != root && reconcile_conflict_pending(&alt) {
+                        return None;
+                    }
+                }
+            }
             return Some(lines);
         }
     }
     None
+}
+
+/// Extract the target of a `cd <path>` in the command string, resolved
+/// against cwd. Returns None if no cd is found or the path doesn't exist.
+fn extract_cd_target(cmd: &str, cwd: &Path) -> Option<PathBuf> {
+    // Match `cd <path>` possibly followed by `&&` or `;`
+    let cd_idx = cmd.find("cd ")?;
+    let rest = &cmd[cd_idx + 3..];
+    let end = rest.find(|c: char| c == '&' || c == ';').unwrap_or(rest.len());
+    let path = rest[..end].trim().trim_matches(|c: char| c == '"' || c == '\'');
+    if path.is_empty() {
+        return None;
+    }
+    let p = Path::new(path);
+    let resolved = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    resolved.canonicalize().ok().filter(|p| p.is_dir())
+}
+
+/// Extract the path from `git -C <path>` args, resolved against cwd.
+fn extract_git_c_path(args: &[String], cwd: &Path) -> Option<PathBuf> {
+    let c_idx = args.iter().position(|a| a == "-C")?;
+    let path = args.get(c_idx + 1)?;
+    let p = Path::new(path);
+    let resolved = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    resolved.canonicalize().ok().filter(|p| p.is_dir())
 }
 
 /// Downgrade a SUBSTITUTE deny to advisory wording (human override active).
