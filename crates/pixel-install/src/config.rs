@@ -38,6 +38,8 @@ pub const GUARD_HOOK: &str = "pixel-targets-guard";
 pub const SESSION_START_HOOK: &str = "pixel-session-start";
 /// The UserPromptSubmit hook path (task boundary detector).
 pub const PROMPT_SUBMIT_HOOK: &str = "pixel-prompt-submit";
+/// The PostCompaction hook path (targets manifest re-injection).
+pub const POST_COMPACTION_HOOK: &str = "pixel-post-compaction";
 
 /// The canonical pixel usage-rule file (relative to home). This is the real,
 /// full rule text (the five mandatory scenarios, the doctrine, the git-op

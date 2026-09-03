@@ -113,6 +113,75 @@ const STOPWORDS: &[&str] = &[
 const MAX_KEYWORDS: usize = 12;
 const MIN_KEYWORD_LEN: usize = 3;
 
+/// Static, code-domain thesaurus for semantic keyword expansion. Each keyword
+/// is mapped to a small, conservative set of related terms used only to
+/// broaden path/filename matching; the original keywords remain canonical for
+/// content probes and report labels.
+const SEMANTIC_RELATIONS: &[(&str, &[&str])] = &[
+    ("login", &["auth", "authenticate", "signin", "session"]),
+    ("auth", &["login", "authenticate", "session", "user"]),
+    ("authenticate", &["login", "auth", "session", "user"]),
+    ("signin", &["login", "auth", "authenticate"]),
+    ("user", &["account", "login", "profile"]),
+    ("account", &["user", "login", "profile"]),
+    ("session", &["cookie", "login", "auth", "token"]),
+    ("cookie", &["session", "auth", "login"]),
+    ("token", &["jwt", "session", "auth", "credential"]),
+    ("jwt", &["token", "auth", "session"]),
+    ("credential", &["token", "password", "auth", "login"]),
+    ("password", &["credential", "auth", "login"]),
+    ("config", &["settings", "configuration", "options"]),
+    ("settings", &["config", "configuration", "options"]),
+    ("configuration", &["config", "settings", "options"]),
+    ("database", &["sql", "query", "schema"]),
+    ("sql", &["database", "query"]),
+    ("query", &["sql", "database", "request"]),
+    ("api", &["endpoint", "route", "request", "response"]),
+    ("endpoint", &["api", "route", "request"]),
+    ("request", &["response", "api", "route", "endpoint"]),
+    ("response", &["request", "api", "route", "endpoint"]),
+    ("route", &["endpoint", "api", "request"]),
+    ("error", &["exception", "failure", "panic"]),
+    ("exception", &["error", "failure"]),
+    ("failure", &["error", "exception"]),
+    ("panic", &["error", "exception"]),
+    ("cache", &["store", "storage"]),
+    ("store", &["cache", "storage"]),
+    ("storage", &["cache", "store"]),
+    ("queue", &["job", "worker", "background"]),
+    ("job", &["queue", "worker", "task"]),
+    ("worker", &["queue", "job", "background"]),
+    ("background", &["queue", "job", "worker"]),
+    ("email", &["mail"]),
+    ("mail", &["email"]),
+];
+
+/// Expand a single keyword to its semantic relatives.
+pub fn semantic_expand(word: &str) -> Vec<&'static str> {
+    for (term, related) in SEMANTIC_RELATIONS {
+        if *term == word {
+            return related.iter().copied().collect();
+        }
+    }
+    Vec::new()
+}
+
+/// Expand a list of keywords, returning related terms that are not already
+/// present in the original list. Deterministic: preserves keyword order and
+/// then first-occurrence order of the thesaurus.
+pub fn expand_keywords(keywords: &[String]) -> Vec<String> {
+    let mut seen: HashSet<&str> = keywords.iter().map(String::as_str).collect();
+    let mut out = Vec::new();
+    for kw in keywords {
+        for related in semantic_expand(kw) {
+            if seen.insert(related) {
+                out.push(related.to_string());
+            }
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TaskQuery {
     /// Backticked/quoted identifiers taken verbatim: `` `login_user` `` →
@@ -205,11 +274,19 @@ pub fn tokenize_task(task: &str) -> Result<TaskQuery, String> {
 
 pub struct TargetsOptions {
     pub limit: usize,
+    /// When set, drop files at tiers above this. `"P0"` = P0 only, `"P1"` =
+    /// P0+P1, `"P2"` or `None` = all tiers (default).
+    pub max_tier: Option<String>,
+    /// When true, apply a score-gap cutoff: if the score drops by more than
+    /// `SCORE_GAP_RATIO` between the last P0 and the first P1, drop all P1/P2
+    /// files below the gap threshold. This dramatically improves precision on
+    /// simple tasks where 1 file is the clear answer.
+    pub precision_mode: bool,
 }
 
 impl Default for TargetsOptions {
     fn default() -> Self {
-        TargetsOptions { limit: 20 }
+        TargetsOptions { limit: 20, max_tier: None, precision_mode: false }
     }
 }
 
@@ -275,6 +352,14 @@ pub const W_CLUSTER: f64 = 0.5;
 const EXACT_NAME_BONUS: f64 = 0.05;
 const P0_CAP: usize = 5;
 const CONTENT_COUNT_CAP: u32 = 50;
+/// Score-gap ratio for precision mode: if the last P0 score is S and the first
+/// P1 score is < S * SCORE_GAP_RATIO, drop all P1/P2 below the threshold.
+/// 0.5 means a 50% score drop triggers the cutoff (P1 < P0 * 0.5).
+const SCORE_GAP_RATIO: f64 = 0.5;
+/// Secondary gap ratio for the no-P0 path: if #2 is < TOP * SECONDARY_GAP_RATIO,
+/// keep only the top file. More aggressive than the primary ratio because
+/// without P0 the top file is the only strong signal.
+const SECONDARY_GAP_RATIO: f64 = 0.7;
 
 // ---------------------------------------------------------------------------
 // signal ranking
@@ -373,7 +458,12 @@ pub fn lexical_rank(
     symbol_hits: &[SymbolHit],
     content_hits: &BTreeMap<String, Vec<(String, u32)>>,
 ) -> Vec<String> {
-    let s1: Vec<String> = filename_rank(all_paths, keywords)
+    let ranking_keywords: Vec<String> = keywords
+        .iter()
+        .cloned()
+        .chain(expand_keywords(keywords).into_iter())
+        .collect();
+    let s1: Vec<String> = filename_rank(all_paths, &ranking_keywords)
         .into_iter()
         .map(|(p, _)| p)
         .collect();
@@ -414,8 +504,17 @@ pub fn compute_targets(
 ) -> TargetsReport {
     let limit = opts.limit.clamp(1, MAX_LIMIT);
 
+    // Broaden filename matching with semantically related terms without
+    // changing the canonical keyword list used for content/symbol probes.
+    let ranking_keywords: Vec<String> = query
+        .keywords
+        .iter()
+        .cloned()
+        .chain(expand_keywords(&query.keywords).into_iter())
+        .collect();
+
     // Per-signal ranked lists.
-    let s1 = filename_rank(&inputs.all_paths, &query.keywords);
+    let s1 = filename_rank(&inputs.all_paths, &ranking_keywords);
     let s2 = &inputs.symbol_hits;
     let s3 = content_rank(&inputs.content_hits);
     let s4 = &inputs.graph_neighbors;
@@ -550,6 +649,55 @@ pub fn compute_targets(
     // (already score-ordered globally; stable sort by tier preserves it).
     targets.sort_by(|a, b| a.tier.cmp(&b.tier));
 
+    // Precision mode: score-gap cutoff. If the top file's score is much
+    // higher than the rest, there's a clear winner and the lower files are
+    // noise. Two strategies:
+    // 1. P0→P1 gap: if last P0 score S, drop P1/P2 below S * (1 - RATIO).
+    // 2. Top-file gap: if no P0, compare #1 vs #2. If #1 is > 1/RATIO times
+    //    #2, keep only files within RATIO of #1.
+    let mut precision_dropped = 0usize;
+    if opts.precision_mode && targets.len() > 1 {
+        let p0_scores: Vec<f64> = targets.iter()
+            .filter(|t| t.tier == "P0")
+            .map(|t| t.score)
+            .collect();
+        let threshold = if let Some(&last_p0_score) = p0_scores.last() {
+            // P0 present: keep files scoring >= last_p0 * RATIO.
+            Some(last_p0_score * SCORE_GAP_RATIO)
+        } else {
+            // No P0: use top-file gap with the more aggressive secondary ratio.
+            let top = targets[0].score;
+            let second = targets[1].score;
+            if top > 0.0 && second < top * SECONDARY_GAP_RATIO {
+                Some(top * SECONDARY_GAP_RATIO)
+            } else {
+                None
+            }
+        };
+        if let Some(threshold) = threshold {
+            let before = targets.len();
+            let top_score = targets[0].score;
+            // Always keep the top file; drop others below threshold.
+            targets.retain(|t| t.score >= threshold || t.score == top_score);
+            precision_dropped = before - targets.len();
+        }
+    }
+
+    // Max-tier filter: drop files above the requested tier.
+    let mut tier_dropped = 0usize;
+    if let Some(ref max_tier) = opts.max_tier {
+        let allow_p1 = max_tier == "P1" || max_tier == "P2";
+        let allow_p2 = max_tier == "P2";
+        let before = targets.len();
+        targets.retain(|t| match t.tier.as_str() {
+            "P0" => true,
+            "P1" => allow_p1,
+            "P2" => allow_p2,
+            _ => true,
+        });
+        tier_dropped = before - targets.len();
+    }
+
     // Envelope + closed-world claim. Three-outcome contract: a complete
     // answer (no cap fired, graph closed), an explicitly-bounded partial
     // answer (lower_bound + every cap NAMED), or the caller's ambiguity
@@ -578,6 +726,17 @@ pub fn compute_targets(
         caps.push(format!(
             "target list truncated at limit {limit}: {beyond_limit} scored candidate file(s) \
              beyond it"
+        ));
+    }
+    if precision_dropped > 0 {
+        caps.push(format!(
+            "precision mode: {precision_dropped} low-score P1/P2 file(s) dropped by score-gap cutoff"
+        ));
+    }
+    if tier_dropped > 0 {
+        caps.push(format!(
+            "max-tier filter: {tier_dropped} file(s) above tier {} dropped",
+            opts.max_tier.as_deref().unwrap_or("?")
         ));
     }
     // ANY fired cap makes the list a lower bound — a capped signal cannot
@@ -780,7 +939,7 @@ mod tests {
             exact_tokens: vec![],
             keywords: vec!["login".into()],
         };
-        let report = compute_targets("t", &q, inputs, &TargetsOptions { limit: 8 });
+        let report = compute_targets("t", &q, inputs, &TargetsOptions { limit: 8, max_tier: None, precision_mode: false });
         assert_eq!(report.targets.len(), 8);
         let p2 = report.targets.iter().filter(|t| t.tier == "P2").count();
         assert!(p2 <= 2); // ceil(8/4)

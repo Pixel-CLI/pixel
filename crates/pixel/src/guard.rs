@@ -20,9 +20,8 @@
 //!    pixel alternative: `git reset --hard/--keep`, raw historical file
 //!    restores (`git checkout <ref> -- <path>`, `git restore --source`),
 //!    `git clean -f*`, `git checkout -f/--force`, `git stash drop/clear`,
-//!    `git branch -D`, `git push --force` (NOT `--force-with-lease`), and
-//!    `git pull` (deny-with-suggestion: `pixel reconcile`, never executed
-//!    on the agent's behalf). These denies run even when the command
+//!    `git branch -D`, `git push --force` (NOT `--force-with-lease`).
+//!    These denies run even when the command
 //!    contains substitution/heredocs — a spurious deny costs a retry, a
 //!    missed hard reset costs real work.
 //! 4. SUBSTITUTE (HARD BLOCK, human-override) — plain git mutations with an
@@ -49,8 +48,7 @@
 //!
 //! Rewrites NEVER change command semantics beyond read-only enrichment: a
 //! rewrite must never add a write, push, or destructive step the original
-//! command didn't have. `git pull` is therefore denied with a suggestion,
-//! never rewritten into `pixel reconcile`.
+//! command didn't have.
 //!
 //! Blocks by exiting 2 with a corrective message on stderr (the exit code
 //! Claude Code's hook protocol treats as "deny, feed stderr to the model").
@@ -835,19 +833,6 @@ fn destructive_git_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<S
                 "are not blocked — they exit an in-progress merge.)".into(),
             ])
         }
-        // `git pull` is denied with a suggestion, NEVER rewritten: a
-        // transparent substitute would discard remote/branch args and a
-        // `--push` default would add a write the original didn't have.
-        "pull" => Some(vec![
-            "BLOCKED by pixel-targets-guard: raw `git pull` (fetch + merge) is replaced by deterministic reconciliation.".into(),
-            "Run instead:".into(),
-            format!(
-                "  pixel reconcile {} --strategy rebase-if-clean",
-                shell_quote(&root.display().to_string())
-            ),
-            "It fetches, proves a clean rebase via merge-tree before touching the worktree,".into(),
-            "and reports structured conflicts when they exist. It does not push.".into(),
-        ]),
         _ => None,
     }
 }
@@ -1108,9 +1093,6 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                 .unwrap_or_else(|| "<name>".to_string());
             Some(branch_substitute_lines("`git switch -c`", &name, &root_q))
         }
-        // `git pull --rebase` is already denied upstream by the
-        // destructive tier's blanket `pull` deny (which suggests
-        // reconcile), so it never reaches this tier.
         "rebase" => {
             const REBASE_PASS: &[&str] = &[
                 "-i", "--interactive", "--continue", "--abort", "--skip", "--quit",
@@ -2178,29 +2160,15 @@ mod tests {
     }
 
     #[test]
-    fn git_pull_denied_with_suggestion_never_rewritten() {
-        // `git pull` must be a DENY with a `pixel reconcile` suggestion —
-        // never a transparent rewrite, and never a suggestion containing
-        // any --push flag (a push the original command didn't have).
+    fn git_pull_passes_through_and_is_not_rewritten() {
+        // Raw `git pull` is no longer blocked; it must not be transparently
+        // rewritten either.
         let repo = Path::new("/repo");
-        let lines = bash_deny_lines("git pull", Some(repo)).expect("git pull must be denied");
-        let msg = lines.join("\n");
-        assert!(msg.contains("BLOCKED"), "must be a deny: {msg}");
-        assert!(
-            msg.contains("pixel reconcile /repo --strategy rebase-if-clean"),
-            "must suggest reconcile: {msg}"
-        );
-        assert!(!msg.contains("--push"), "must never suggest --push: {msg}");
-        // And the rewrite path must not touch it either.
+        assert!(bash_deny_lines("git pull", Some(repo)).is_none());
+        assert!(bash_deny_lines("git pull upstream main", Some(repo)).is_none());
+        assert!(bash_deny_lines("git pull --rebase origin main", Some(repo)).is_none());
         assert!(try_rewrite_bash("git pull", repo).is_none());
         assert!(try_rewrite_bash("git pull upstream main", repo).is_none());
-    }
-
-    #[test]
-    fn git_pull_with_args_denied() {
-        let repo = Path::new("/repo");
-        assert!(bash_deny_lines("git pull upstream main", Some(repo)).is_some());
-        assert!(bash_deny_lines("git pull --rebase origin main", Some(repo)).is_some());
     }
 
     #[test]
@@ -2339,7 +2307,6 @@ mod tests {
     fn deny_messages_never_advertise_bypass() {
         let repo = Path::new("/repo");
         for cmd in [
-            "git pull",
             "git reset --hard",
             "git clean -fd",
             "git push --force",

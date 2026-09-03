@@ -12,8 +12,3 @@ After finishing any implementation turn in this repo (code edit + verify cycle),
    - **Track A:** `pixel index --history .` — rebuild the facts/history index.
    - **Track B:** `build-agent-config && pixel install` — propagate rule edits to tool directories, then reinstall hooks and managed blocks.
 3. **Run `pixel doctor`** and confirm green (or explicitly report any non-green check).
-
-### When to skip
-
-- Pure read-only exploration (no edits to `crates/` or rules).
-- The turn only touched docs, prompts, or bench scripts — nothing that changes binary behavior or installed rules.

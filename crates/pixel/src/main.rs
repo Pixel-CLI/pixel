@@ -12,6 +12,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod guard;
+mod post_compaction;
 mod prompt_submit;
 mod recall_cmd;
 mod rescue_cmd;
@@ -135,6 +136,13 @@ enum Command {
         /// Deactivate scoping: delete .pixel/targets.json and exit.
         #[arg(long)]
         clear: bool,
+        /// Drop files above this tier: "P0" = P0 only, "P1" = P0+P1, "P2" = all.
+        #[arg(long)]
+        max_tier: Option<String>,
+        /// Precision mode: drop low-score P1/P2 files when there's a sharp
+        /// score gap after P0. Improves precision on simple tasks.
+        #[arg(long)]
+        precision: bool,
     },
     /// Surgical revert planner: locate the files a problem points at, list
     /// recent versions with the likely-breaking commit flagged, recommend a
@@ -872,6 +880,11 @@ enum HookCmd {
     /// and recent context, and emits a `[PIXEL:TASK_BOUNDARY]` advisory
     /// when a task boundary is detected.
     PromptSubmit,
+    /// `pixel hook post-compaction` — re-inject targets manifest after
+    /// context compaction. Reads the PostCompaction payload from stdin,
+    /// finds the active `.pixel/targets.json`, and emits it as
+    /// `additionalContext` so the agent resumes with its retrieval state.
+    PostCompaction,
 }
 
 #[derive(Subcommand)]
@@ -1948,6 +1961,8 @@ fn run_command(command: Command) -> Result<(), String> {
             limit,
             no_manifest,
             clear,
+            max_tier,
+            precision,
         } => {
             if clear {
                 // With --clear the sole positional (if any) is a path, not a
@@ -1987,6 +2002,8 @@ fn run_command(command: Command) -> Result<(), String> {
                 Request::Targets {
                     task: task.clone(),
                     limit,
+                    max_tier: max_tier.clone(),
+                    precision,
                 },
                 false,
             )?;
@@ -2056,6 +2073,8 @@ fn run_command(command: Command) -> Result<(), String> {
                     Request::Targets {
                         task: problem.clone(),
                         limit: Some(10),
+                        max_tier: None,
+                        precision: false,
                     },
                     false,
                 )?;
@@ -2866,6 +2885,12 @@ fn run_command(command: Command) -> Result<(), String> {
                 // emit function).
                 prompt_submit::run();
             }
+            HookCmd::PostCompaction => {
+                // Post-compaction re-injection — reads PostCompaction
+                // payload from stdin, finds the active targets manifest,
+                // and emits it as additionalContext. Never returns.
+                post_compaction::run();
+            }
         },
         Command::Log {
             path,
@@ -3112,7 +3137,7 @@ fn run_query(
             let phrase = intent.trim().trim_start_matches("where is `").trim_end_matches('`');
             execute(&path, Request::Resolve { phrase: phrase.into(), limit: None }, no_daemon)?
         }
-        "targets" => execute(&path, Request::Targets { task: intent.clone(), limit: None }, no_daemon)?,
+        "targets" => execute(&path, Request::Targets { task: intent.clone(), limit: None, max_tier: None, precision: false }, no_daemon)?,
         "impact" => {
             let target = intent.trim().trim_start_matches("show impact of ");
             execute(&path, Request::Impact { uid_or_name: target.into(), direction: "upstream".into(), depth: Some(3) }, no_daemon)?

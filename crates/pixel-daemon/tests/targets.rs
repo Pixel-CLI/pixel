@@ -51,6 +51,8 @@ fn run_targets(dir: &Path, task: &str) -> serde_json::Value {
     let resp = svc.handle(Request::Targets {
         task: task.to_string(),
         limit: Some(10),
+        max_tier: None,
+        precision: false,
     });
     assert!(resp.ok, "targets op failed: {:?}", resp.error);
     resp.into_data()
@@ -123,6 +125,8 @@ fn targets_rejects_empty_task() {
     let resp = svc.handle(Request::Targets {
         task: "fix the code".to_string(),
         limit: None,
+        max_tier: None,
+        precision: false,
     });
     assert!(!resp.ok);
     assert!(resp.error.unwrap().message.contains("no searchable keywords"));
@@ -160,6 +164,8 @@ fn targets_no_git_degrades_to_lexical_only() {
     let resp = svc.handle(Request::Targets {
         task: "fix `login_user` auth flow".to_string(),
         limit: Some(10),
+        max_tier: None,
+        precision: false,
     });
     assert!(resp.ok, "targets op failed on a no-git dir: {:?}", resp.error);
     let data = resp.into_data();

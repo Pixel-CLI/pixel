@@ -186,6 +186,7 @@ mod tests {
             lower_bound: false,
             basis: "index".into(),
             staleness_ms: Some(120),
+            confidence: None,
         })
         .with_budget(BudgetInfo {
             byte_cap: 1024,
@@ -290,6 +291,7 @@ mod tests {
                 lower_bound: true,
                 basis: "graph".into(),
                 staleness_ms: None,
+                confidence: None,
             })
             .with_budget(BudgetInfo {
                 byte_cap: 8192,

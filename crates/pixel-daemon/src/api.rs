@@ -370,7 +370,7 @@ impl Service {
                 paths,
                 scope,
             } => self.op_search(&pattern, limit, offset, paths.as_deref(), scope.as_deref()),
-            Request::Targets { task, limit } => self.op_targets(&task, limit),
+            Request::Targets { task, limit, max_tier, precision } => self.op_targets(&task, limit, max_tier.as_deref(), precision),
             Request::Symbol { name } => self.op_symbol(&name),
             Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
             Request::Impact {
@@ -670,7 +670,7 @@ impl Service {
     /// fuse, tier. Graph failure degrades to lexical-only (envelope says so)
     /// instead of erroring — a scoping request must never die on a broken
     /// graph build.
-    fn op_targets(&mut self, task: &str, limit: Option<usize>) -> Result<Value, String> {
+    fn op_targets(&mut self, task: &str, limit: Option<usize>, max_tier: Option<&str>, precision: bool) -> Result<Value, String> {
         use pixel_rank as engine;
         use pixel_graph::targets as graph_targets;
 
@@ -788,6 +788,8 @@ impl Service {
 
         let opts = engine::TargetsOptions {
             limit: limit.unwrap_or(engine::DEFAULT_LIMIT),
+            max_tier: max_tier.map(String::from),
+            precision_mode: precision,
         };
         let mut report = engine::compute_targets(
             task,
@@ -1607,6 +1609,8 @@ fn regex_escape_keyword(kw: &str) -> String {
 /// - `truncated: bool` + `next_offset` — pagination/byte caps.
 /// - `envelope.lower_bound` / `envelope.unresolved_same_name` — the graph
 ///   honesty envelope (impact/uses/symbol/context/targets).
+/// - `confidence` (top-level or `envelope.confidence`) — epistemic label such
+///   as `resolved`/`ranked`/`unresolved` from resolve and ranked results.
 /// - `scan_capped` + `basis` — resolve's bounded fallback scans.
 /// - `graph_build.build_ms` presence — the graph was rebuilt for THIS answer,
 ///   so staleness is 0ms (the one cheap staleness signal available).
@@ -1687,11 +1691,20 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         .and_then(Value::as_u64)
         .map(|_| 0u64);
 
+    // Epistemic confidence label: resolve places it at the top level;
+    // targets and other ranked results place it inside `envelope`.
+    let confidence = v
+        .get("confidence")
+        .and_then(Value::as_str)
+        .or_else(|| v.pointer("/envelope/confidence").and_then(Value::as_str))
+        .map(String::from);
+
     let epistemics = Epistemics {
         closed_world: caps.is_empty(),
         lower_bound: !caps.is_empty(),
         basis,
         staleness_ms,
+        confidence,
     };
     let warnings = caps
         .into_iter()
@@ -3060,6 +3073,8 @@ mod tests {
         let targets = svc.handle(Request::Targets {
             task: "needle".into(),
             limit: Some(5),
+            max_tier: None,
+            precision: false,
         });
         assert!(targets.ok, "targets: {:?}", targets.error);
 
@@ -3147,6 +3162,8 @@ mod tests {
         let resp = svc.handle(Request::Targets {
             task: "gain ledger".into(),
             limit: Some(5),
+            max_tier: None,
+            precision: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let targets = resp.data().get("targets").and_then(Value::as_array).unwrap();
@@ -3244,7 +3261,7 @@ mod tests {
                 scope: None,
             }),
             ("resolve", Request::Resolve { phrase: "alpha".into(), limit: Some(5) }),
-            ("targets", Request::Targets { task: "alpha beta".into(), limit: Some(5) }),
+            ("targets", Request::Targets { task: "alpha beta".into(), limit: Some(5), max_tier: None, precision: false }),
             ("impact", Request::Impact {
                 uid_or_name: "alpha".into(),
                 direction: "upstream".into(),
@@ -3326,6 +3343,8 @@ mod tests {
         let resp = svc.handle(Request::Targets {
             task: "needle probe".into(),
             limit: Some(20),
+            max_tier: None,
+            precision: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let envelope = &resp.data()["envelope"];
@@ -3380,6 +3399,8 @@ mod tests {
         let resp = svc.handle(Request::Targets {
             task: "auth handling".into(),
             limit: Some(10),
+            max_tier: None,
+            precision: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let targets = resp.data()["targets"].as_array().unwrap();

@@ -192,6 +192,8 @@ fn bench_targets_service_time(c: &mut Criterion) {
         Request::from(Op::Targets {
             task: "fix uniqueNeedle123".into(),
             limit: Some(20),
+            max_tier: None,
+            precision: false,
         })
     };
 
@@ -342,6 +344,8 @@ fn gate_targets_service_time() {
         Request::from(Op::Targets {
             task: "fix uniqueNeedle123".into(),
             limit: Some(20),
+            max_tier: None,
+            precision: false,
         })
     };
     let _ = svc.handle(make_req());

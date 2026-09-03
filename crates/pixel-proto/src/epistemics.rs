@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SourceEpistemics;
 
-/// `{closed_world, lower_bound, basis, staleness_ms}`.
+/// `{closed_world, lower_bound, basis, staleness_ms, confidence}`.
 ///
 /// The default deliberately makes no completeness claim. Producers must use
 /// source-native evidence to establish a closed world.
@@ -16,6 +16,9 @@ use crate::SourceEpistemics;
 /// Envelope v2 shape: `basis` is a single descriptive `String` (e.g.
 /// `"graph"` or `"index"`) and `staleness_ms` is `Option<u64>` — `None`
 /// means "not stale / unknown", a present value is the measured staleness.
+/// `confidence` is an optional epistemic confidence label such as
+/// `"resolved"`, `"ranked"`, or `"unresolved"` for retrieval ops that
+/// distinguish single-match certainty from ordered candidates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Epistemics {
     pub closed_world: bool,
@@ -24,6 +27,8 @@ pub struct Epistemics {
     pub basis: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staleness_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
 }
 
 impl Default for Epistemics {
@@ -33,6 +38,7 @@ impl Default for Epistemics {
             lower_bound: true,
             basis: String::new(),
             staleness_ms: None,
+            confidence: None,
         }
     }
 }
@@ -45,6 +51,7 @@ impl Epistemics {
             lower_bound: !closed_world,
             basis: basis.into(),
             staleness_ms: sources.iter().filter_map(|source| source.freshness_ms).max(),
+            confidence: None,
         }
     }
 }
@@ -60,6 +67,7 @@ mod tests {
         assert!(epistemics.lower_bound);
         assert!(epistemics.basis.is_empty());
         assert_eq!(epistemics.staleness_ms, None);
+        assert_eq!(epistemics.confidence, None);
     }
 
     #[test]
@@ -99,6 +107,7 @@ mod tests {
             lower_bound: true,
             basis: "graph".into(),
             staleness_ms: Some(5_000),
+            confidence: None,
         };
         let value = serde_json::to_value(&epistemics).unwrap();
         assert_eq!(

@@ -53,6 +53,10 @@ pub enum Op {
         task: String,
         #[serde(default)]
         limit: Option<usize>,
+        #[serde(default)]
+        max_tier: Option<String>,
+        #[serde(default)]
+        precision: bool,
     },
     Symbol {
         name: String,
@@ -401,6 +405,8 @@ mod tests {
             Op::Targets {
                 task: "fix the bug".into(),
                 limit: None,
+                max_tier: None,
+                precision: false,
             }
         );
     }
@@ -499,7 +505,7 @@ mod tests {
             (Op::Ping, "ping"),
             (Op::Recall { action: "x".into(), params: json!(null) }, "recall"),
             (Op::Search { pattern: "".into(), json: false, limit: None, offset: None, paths: None, scope: None }, "search"),
-            (Op::Targets { task: "".into(), limit: None }, "targets"),
+            (Op::Targets { task: "".into(), limit: None, max_tier: None, precision: false }, "targets"),
             (Op::Symbol { name: "".into() }, "symbol"),
             (Op::Context { uid: "".into(), budget_tokens: None }, "context"),
             (Op::Impact { uid_or_name: "".into(), direction: "".into(), depth: None }, "impact"),
