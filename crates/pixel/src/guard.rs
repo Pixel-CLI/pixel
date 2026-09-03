@@ -941,6 +941,14 @@ fn sequencer_in_progress(root: &Path) -> bool {
         || git_dir.join("rebase-apply").is_dir()
 }
 
+/// Check if `pixel reconcile` has reported a conflict that requires manual
+/// resolution. When true, the guard allows `git rebase` as an escape hatch —
+/// `pixel reconcile` itself reported "manual resolution required", so the
+/// deterministic path is exhausted and raw git is the only way forward.
+fn reconcile_conflict_pending(root: &Path) -> bool {
+    root.join(".pixel").join("reconcile-conflict.json").is_file()
+}
+
 fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<String>> {
     let root_q = shell_quote(&root.display().to_string());
     match sub {
@@ -1101,11 +1109,21 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
             if args.iter().any(|a| REBASE_PASS.contains(&a.as_str())) {
                 return None; // pass-through: interactive / state exit / not reconcile-expressible
             }
+            // Escape hatch: if `pixel reconcile` already reported a conflict
+            // (state file exists), allow the rebase so the agent can resolve
+            // manually. The guard already allows `git rebase --continue` etc.
+            // via REBASE_PASS, but the initial `git rebase origin/main` that
+            // starts the rebase is blocked here. When reconcile says "manual
+            // resolution required", this is the only path forward.
+            if reconcile_conflict_pending(root) {
+                return None;
+            }
             Some(vec![
                 "BLOCKED [PIXEL_SUBSTITUTE] by pixel-guard: raw `git rebase` is replaced by deterministic reconciliation.".into(),
                 "Run the exact equivalent instead:".into(),
                 format!("  pixel reconcile {root_q} --strategy rebase-if-clean --push auto"),
                 "It proves a clean rebase via merge-tree before touching the worktree and reports structured conflicts when they exist.".into(),
+                "If reconcile already reported a conflict, set PIXEL_GUARD_RAW_GIT=1 in your shell profile to allow raw git.".into(),
             ])
         }
         _ => None,

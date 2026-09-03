@@ -589,6 +589,23 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Rebuild the binary, stop the daemon, copy the new binary to the
+    /// install path, and optionally restart the daemon. Solves the
+    /// "Text file busy" error when the daemon holds the binary open.
+    Upgrade {
+        /// Cargo build command to run (default: `cargo build --release -p pixel-cli`).
+        #[arg(long, default_value = "cargo build --release -p pixel-cli")]
+        build: String,
+        /// Install path (default: ~/.local/bin/pixel).
+        #[arg(long)]
+        install_path: Option<PathBuf>,
+        /// Restart the daemon after upgrade.
+        #[arg(long)]
+        restart_daemon: bool,
+        /// Repo path for daemon restart.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
     /// Health check: install state, daemon, index/graph/facts freshness.
     Doctor {
         #[arg(default_value = ".")]
@@ -2778,6 +2795,54 @@ fn run_command(command: Command) -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
             print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
+        }
+        Command::Upgrade { build, install_path, restart_daemon, repo } => {
+            let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+            let dest = install_path.unwrap_or_else(|| {
+                PathBuf::from(&home).join(".local").join("bin").join("pixel")
+            });
+            // 1. Build.
+            eprintln!("Building: {build}");
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&build)
+                .status()
+                .map_err(|e| format!("build failed: {e}"))?;
+            if !status.success() {
+                return Err(format!("build exited with status {status}"));
+            }
+            // 2. Find the built binary (target/release/pixel relative to cwd).
+            let src = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("target")
+                .join("release")
+                .join("pixel");
+            if !src.is_file() {
+                return Err(format!("built binary not found at {}", src.display()));
+            }
+            // 3. Stop the daemon if running (frees the binary file).
+            eprintln!("Stopping daemon...");
+            let _ = std::process::Command::new("pkill")
+                .arg("-f")
+                .arg("pixel daemon")
+                .status();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            // 4. Copy.
+            eprintln!("Installing to {}", dest.display());
+            std::fs::copy(&src, &dest)
+                .map_err(|e| format!("copy failed: {e}"))?;
+            eprintln!("Upgrade complete: {} -> {}", src.display(), dest.display());
+            // 5. Optionally restart daemon.
+            if restart_daemon {
+                let repo_path = repo.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                eprintln!("Starting daemon in {}...", repo_path.display());
+                let _ = std::process::Command::new(&dest)
+                    .arg("daemon")
+                    .arg("start")
+                    .arg(&repo_path)
+                    .spawn();
+            }
+            Ok(())
         }
         Command::Doctor { path, json } => {
             let root = discover_root(&path)?;

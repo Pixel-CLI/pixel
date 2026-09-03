@@ -118,6 +118,30 @@ pub fn reconcile(root: &Path, opts: &ReconcileOptions) -> Result<Value, String> 
     reconcile_with_hooks(root, opts, None)
 }
 
+/// Write a `.pixel/reconcile-conflict.json` state file so the guard knows
+/// `pixel reconcile` has reported a conflict and should allow raw `git rebase`
+/// as an escape hatch. Cleared on successful reconcile or by `pixel targets --clear`.
+fn write_conflict_state(root: &Path, conflict_count: usize) {
+    let pixel_dir = root.join(".pixel");
+    let _ = std::fs::create_dir_all(&pixel_dir);
+    let state = json!({
+        "conflict_count": conflict_count,
+        "written_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    });
+    let _ = std::fs::write(
+        pixel_dir.join("reconcile-conflict.json"),
+        serde_json::to_string_pretty(&state).unwrap_or_default(),
+    );
+}
+
+/// Remove the conflict state file — called on successful reconcile.
+fn clear_conflict_state(root: &Path) {
+    let _ = std::fs::remove_file(root.join(".pixel").join("reconcile-conflict.json"));
+}
+
 /// Test seam mirroring `push::PushProbe`: `pre_push_hook`, when given, runs
 /// exactly once, right after this call's own fetch (`upstream_oid` has just
 /// been captured) and before any leased push is attempted — the precise
@@ -131,6 +155,10 @@ pub fn reconcile_with_hooks(
     opts: &ReconcileOptions,
     mut pre_push_hook: Option<Box<dyn FnMut()>>,
 ) -> Result<Value, String> {
+    // Clear any stale conflict state from a previous reconcile attempt.
+    // If this call finds a new conflict, it will write a fresh state file.
+    clear_conflict_state(root);
+
     // Validate BEFORE any journal/lock/git work — a bad value must be a
     // structured error, never a silent don't-push. The normalized mode is
     // also what gets hashed, so "never" and "none" replay identically.
@@ -370,6 +398,8 @@ pub fn reconcile_with_hooks(
                         // merge-tree predicts conflicts — never attempt the
                         // rebase, report diverged with full conflict detail.
                         let report = build_conflict_report(&runner, &merge_base, &head, &upstream, &probe);
+                        let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
+                        write_conflict_state(root, conflict_count);
                         json!({
                             "state": "diverged",
                             "merge_base": merge_base,
@@ -649,6 +679,8 @@ fn reconcile_into(
         // touch the target. Same structured conflicts[] report as the plain
         // diverged path, naming the integration target.
         let report = build_conflict_report(runner, &merge_base, head, &remote_target, &probe);
+        let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
+        write_conflict_state(root, conflict_count);
         return Ok(json!({
             "state": "diverged",
             "into_target": target,
