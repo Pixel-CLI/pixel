@@ -132,20 +132,22 @@ fn render_step(
 
     // Per-step tab switching — if this step has a `tab` field, emit a
     // switch_tab command before the action. Falls back to the flow-level
-    // default tab.
+    // default tab. Skip if the action itself is `switch_tab` (it emits its
+    // own tab commands).
     let effective_tab = step.tab.as_deref().or(flow_tab);
-    if let Some(tab) = effective_tab {
-        if step.tab.is_some() {
-            // Only emit per-step switch if the step overrides the flow tab.
-            out.push_str(&format!(
-                "{}agent-browser --session comet tab list   # switch to tab matching '{}'\n",
-                indent,
-                substitute(tab, vars)
-            ));
-            out.push_str(&format!(
-                "{}agent-browser --session comet tab <id>\n",
-                indent
-            ));
+    if step.action != "switch_tab" {
+        if let Some(tab) = effective_tab {
+            if step.tab.is_some() {
+                out.push_str(&format!(
+                    "{}agent-browser --session comet tab list   # switch to tab matching '{}'\n",
+                    indent,
+                    substitute(tab, vars)
+                ));
+                out.push_str(&format!(
+                    "{}agent-browser --session comet tab <id>\n",
+                    indent
+                ));
+            }
         }
     }
 

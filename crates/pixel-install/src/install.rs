@@ -120,6 +120,12 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     //    baked in at install time that could drift from the binary.
     steps.push(install_session_start_hook(&home, &exe, dry_run)?);
 
+    // 3b. Install the UserPromptSubmit hook (task boundary detector).
+    //     Fires on every user prompt, embeds prompt + recent context, and
+    //     emits a [PIXEL:TASK_BOUNDARY] advisory when a task boundary is
+    //     detected.
+    steps.push(install_prompt_submit_hook(&home, &exe, dry_run)?);
+
     // 4. Wire PreToolUse + SessionStart hooks into Devin, Codex, Gemini,
     //    zcode, and Cursor. pi gets rules only (no per-tool hooks).
     steps.push(install_devin_hooks(&home, &exe, dry_run)?);
@@ -354,6 +360,66 @@ fn install_session_start_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<
     })
 }
 
+fn install_prompt_submit_hook(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
+    let path = hooks_dir.join(config::PROMPT_SUBMIT_HOOK);
+    let body = format!("#!/bin/sh\nexec {} hook prompt-submit \"$@\"\n", exe.display());
+
+    let settings = home.join(".claude").join("settings.json");
+    let mut value = read_settings(&settings)?;
+    let hooks = value
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: settings.clone(),
+            reason: "settings.json root is not an object".into(),
+        }))?;
+    let hooks_obj = hooks
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let obj = hooks_obj
+        .as_object_mut()
+        .ok_or_else(|| InstallError::Config(config::ConfigError::InvalidSettings {
+            path: settings.clone(),
+            reason: "hooks is not an object".into(),
+        }))?;
+    // Merge, never blind-overwrite — same idempotent pattern as guard and
+    // session-start. Replace only a prior pixel-authored entry.
+    let existing = obj.get("UserPromptSubmit").cloned();
+    let pixel_command = format!("{} hook prompt-submit", exe.display());
+    let merged = config::merge_hook_entry(existing.as_ref(), "hook prompt-submit", serde_json::json!({
+        "matcher": "*",
+        "hooks": [{
+            "type": "command",
+            "command": pixel_command,
+        }],
+    }));
+    obj.insert("UserPromptSubmit".to_string(), merged);
+
+    if dry_run {
+        return Ok(InstallStep {
+            id: "hook.prompt-submit".into(),
+            status: CheckStatus::Green,
+            summary: dry_run_summary(dry_run, "UserPromptSubmit hook installed"),
+            detail: Some(format!("would write {}", path.display())),
+        });
+    }
+
+    fs::create_dir_all(&hooks_dir)?;
+    let hook_backup = config::backup_if_changing(&path, body.as_bytes())?;
+    fs::write(&path, &body)?;
+    set_executable(&path);
+
+    let settings_backup = write_settings(&settings, &value, dry_run)?;
+    let backup_path = hook_backup.or(settings_backup);
+
+    Ok(InstallStep {
+        id: "hook.prompt-submit".into(),
+        status: CheckStatus::Green,
+        summary: "UserPromptSubmit hook installed".into(),
+        detail: Some(with_backup_note(format!("wrote {}", path.display()), backup_path)),
+    })
+}
+
 /// Load the canonical pixel usage-rule text from `~/.agent-config/rules/pixel.md`
 /// and strip its YAML frontmatter so the body can be embedded directly into a
 /// CLAUDE.md/AGENTS.md managed block. Returns `None` if the file is missing or
@@ -540,11 +606,27 @@ fn install_devin_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
     );
     hooks_map.insert("SessionStart".to_string(), merged_session_start);
 
+    // UserPromptSubmit — task boundary detector hook.
+    let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+    let existing_prompt_submit = hooks_map.get("UserPromptSubmit").cloned();
+    let merged_prompt_submit = config::merge_hook_entry(
+        existing_prompt_submit.as_ref(),
+        &prompt_submit_command,
+        serde_json::json!({
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": prompt_submit_command,
+            }],
+        }),
+    );
+    hooks_map.insert("UserPromptSubmit".to_string(), merged_prompt_submit);
+
     if dry_run {
         return Ok(InstallStep {
             id: "hooks.devin".into(),
             status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "Devin hooks wired (PreToolUse + SessionStart)"),
+            summary: dry_run_summary(dry_run, "Devin hooks wired (PreToolUse + SessionStart + UserPromptSubmit)"),
             detail: Some(format!("would write {}", config_path.display())),
         });
     }
@@ -553,7 +635,7 @@ fn install_devin_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
     Ok(InstallStep {
         id: "hooks.devin".into(),
         status: CheckStatus::Green,
-        summary: "Devin hooks wired (PreToolUse + SessionStart)".into(),
+        summary: "Devin hooks wired (PreToolUse + SessionStart + UserPromptSubmit)".into(),
         detail: Some(with_backup_note(
             format!("wrote {}", config_path.display()),
             backup_path,
@@ -612,11 +694,27 @@ fn install_codex_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
     );
     hooks_map.insert("SessionStart".to_string(), merged_session_start);
 
+    // UserPromptSubmit — task boundary detector hook.
+    let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+    let existing_prompt_submit = hooks_map.get("UserPromptSubmit").cloned();
+    let merged_prompt_submit = config::merge_hook_entry(
+        existing_prompt_submit.as_ref(),
+        &prompt_submit_command,
+        serde_json::json!({
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": prompt_submit_command,
+            }],
+        }),
+    );
+    hooks_map.insert("UserPromptSubmit".to_string(), merged_prompt_submit);
+
     if dry_run {
         return Ok(InstallStep {
             id: "hooks.codex".into(),
             status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "Codex hooks wired (PreToolUse + SessionStart)"),
+            summary: dry_run_summary(dry_run, "Codex hooks wired (PreToolUse + SessionStart + UserPromptSubmit)"),
             detail: Some(format!("would write {}", config_path.display())),
         });
     }
@@ -625,7 +723,7 @@ fn install_codex_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
     Ok(InstallStep {
         id: "hooks.codex".into(),
         status: CheckStatus::Green,
-        summary: "Codex hooks wired (PreToolUse + SessionStart)".into(),
+        summary: "Codex hooks wired (PreToolUse + SessionStart + UserPromptSubmit)".into(),
         detail: Some(with_backup_note(
             format!("wrote {}", config_path.display()),
             backup_path,
@@ -685,11 +783,27 @@ fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
     );
     hooks_map.insert("SessionStart".to_string(), merged_session_start);
 
+    // UserPromptSubmit — task boundary detector hook.
+    let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+    let existing_prompt_submit = hooks_map.get("UserPromptSubmit").cloned();
+    let merged_prompt_submit = config::merge_hook_entry(
+        existing_prompt_submit.as_ref(),
+        &prompt_submit_command,
+        serde_json::json!({
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": prompt_submit_command,
+            }],
+        }),
+    );
+    hooks_map.insert("UserPromptSubmit".to_string(), merged_prompt_submit);
+
     if dry_run {
         return Ok(InstallStep {
             id: "hooks.gemini".into(),
             status: CheckStatus::Green,
-            summary: dry_run_summary(dry_run, "Gemini hooks wired (BeforeTool + SessionStart)"),
+            summary: dry_run_summary(dry_run, "Gemini hooks wired (BeforeTool + SessionStart + UserPromptSubmit)"),
             detail: Some(format!("would write {}", config_path.display())),
         });
     }
@@ -698,7 +812,7 @@ fn install_gemini_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Insta
     Ok(InstallStep {
         id: "hooks.gemini".into(),
         status: CheckStatus::Green,
-        summary: "Gemini hooks wired (BeforeTool + SessionStart)".into(),
+        summary: "Gemini hooks wired (BeforeTool + SessionStart + UserPromptSubmit)".into(),
         detail: Some(with_backup_note(
             format!("wrote {}", config_path.display()),
             backup_path,
@@ -940,6 +1054,22 @@ fn install_zcode_hooks(home: &Path, _exe: &Path, dry_run: bool) -> Result<Instal
         }),
     );
     hooks_obj.insert("SessionStart".to_string(), merged_session_start);
+
+    // UserPromptSubmit — task boundary detector hook.
+    let prompt_submit_command = format!("~/.claude/hooks/{}", config::PROMPT_SUBMIT_HOOK);
+    let existing_prompt_submit = hooks_obj.get("UserPromptSubmit").cloned();
+    let merged_prompt_submit = config::merge_hook_entry(
+        existing_prompt_submit.as_ref(),
+        &prompt_submit_command,
+        serde_json::json!({
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": prompt_submit_command,
+            }],
+        }),
+    );
+    hooks_obj.insert("UserPromptSubmit".to_string(), merged_prompt_submit);
 
     // Deploy pixel rules to ~/.zcode/AGENTS.md (zcode's user-level
     // instruction file, loaded into model context every session). Uses

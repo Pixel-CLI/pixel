@@ -24,6 +24,106 @@ pub struct PushOptions {
 
 pub type PushProbe = Box<dyn FnMut(&str) -> Result<(), String>>;
 
+/// Split a refspec into its (source, destination) halves.
+///
+/// `main` → (`main`, `main`); `src:dst` → (`src`, `dst`). A leading `+`
+/// (git's own force marker) is stripped from the source side — pixel expresses
+/// force through `force_with_lease`, never through refspec syntax.
+fn split_refspec(refspec: &str) -> (String, String) {
+    match refspec.split_once(':') {
+        Some((src, dst)) => (
+            src.trim_start_matches('+').to_string(),
+            dst.trim_start_matches('+').to_string(),
+        ),
+        None => {
+            let one = refspec.trim_start_matches('+').to_string();
+            (one.clone(), one)
+        }
+    }
+}
+
+/// Validate both halves of a refspec independently.
+///
+/// `validate_ref` rejects `:` because a colon is not legal *inside* a ref name.
+/// A refspec is two ref names joined by one, so validating the whole string
+/// rejected every `src:dst` push. Split first, then validate each side.
+fn validate_refspec(refspec: &str) -> Result<(), String> {
+    let (src, dst) = split_refspec(refspec);
+    pixel_git::validate_ref(&src).map_err(|e| e.to_string())?;
+    pixel_git::validate_ref(&dst).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The OID the *pushed ref* points at — not HEAD.
+///
+/// Reporting HEAD was wrong in two ways: the `source_oid` in the result
+/// described a different commit than the one that moved whenever the refspec
+/// named anything but the checked-out branch, and the crash-resume check
+/// compared the remote ref against HEAD, so it could never confirm a completed
+/// push of a non-HEAD branch. Falls back to HEAD only when the source side
+/// cannot be resolved locally (e.g. a delete refspec).
+fn resolve_source_oid(runner: &GitRunner, refspec: &str) -> Option<String> {
+    let (src, _) = split_refspec(refspec);
+    if src.is_empty() {
+        return runner.rev_parse_head();
+    }
+    runner
+        .run_opt(&["rev-parse", "--verify", "--quiet", &src])
+        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| runner.rev_parse_head())
+}
+
+/// The OID the remote currently has for `dst`, via `ls-remote`.
+///
+/// Returns `None` when the remote has no such ref (the push will create it).
+fn resolve_remote_oid(runner: &GitRunner, remote: &str, dst: &str) -> Option<String> {
+    let out = runner.run_opt(&["ls-remote", remote, dst])?;
+    let text = String::from_utf8_lossy(&out);
+    text.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let oid = fields.next()?;
+        let name = fields.next()?;
+        // Skip the `^{}` peeled entries annotated tags emit; we want the tag
+        // object's own OID, which is what the remote ref actually holds.
+        if name.ends_with("^{}") {
+            return None;
+        }
+        let matches = name == dst
+            || name == format!("refs/heads/{dst}")
+            || name == format!("refs/tags/{dst}")
+            || name == format!("refs/{dst}");
+        if matches { Some(oid.to_string()) } else { None }
+    })
+}
+
+/// Build the `git push` argument list.
+///
+/// When a lease is requested, resolve the remote's current OID and pass the
+/// EXPLICIT `--force-with-lease=<dst>:<oid>` form. Bare `--force-with-lease`
+/// leases against the remote-tracking ref, which does not exist for tags and is
+/// destroyed by history-rewriting tools — git then refuses with "stale info",
+/// so a legitimately rewritten history could never be pushed. Pinning the OID
+/// we just observed keeps the actual safety property (refuse if someone else
+/// moved the ref) while allowing a non-fast-forward we intend.
+fn build_push_args(runner: &GitRunner, opts: &PushOptions) -> Vec<String> {
+    let mut args: Vec<String> = vec!["push".into()];
+    if opts.force_with_lease {
+        let (_, dst) = split_refspec(&opts.refspec);
+        match resolve_remote_oid(runner, &opts.remote, &dst) {
+            // Remote has the ref: lease against exactly what we saw.
+            Some(remote_oid) => args.push(format!("--force-with-lease={dst}:{remote_oid}")),
+            // Remote has no such ref: the push creates it, so it cannot
+            // clobber anything and needs no lease.
+            None => {}
+        }
+    }
+    args.push("--end-of-options".into());
+    args.push(opts.remote.clone());
+    args.push(opts.refspec.clone());
+    args
+}
+
 pub fn push(root: &Path, opts: &PushOptions, probe: Option<PushProbe>) -> Result<Value, String> {
     let state_root = state_root();
     push_with_state(root, opts, probe, &state_root)
@@ -68,10 +168,10 @@ pub fn push_with_state(
 
     // Validate remote ref.
     pixel_git::validate_ref(&opts.remote).map_err(|e| { let _ = lock.release(); e.to_string() })?;
-    pixel_git::validate_ref(&opts.refspec).map_err(|e| { let _ = lock.release(); e.to_string() })?;
+    validate_refspec(&opts.refspec).map_err(|e| { let _ = lock.release(); e })?;
 
-    // Get source OID before push (for lease verification).
-    let source_oid = runner.rev_parse_head().ok_or("no HEAD")?;
+    // OID of the ref being pushed (not HEAD).
+    let source_oid = resolve_source_oid(&runner, &opts.refspec).ok_or("no HEAD")?;
 
     // Journal: push_started
     journal.transition(
@@ -87,13 +187,7 @@ pub fn push_with_state(
     }
 
     // Build push args.
-    let mut args: Vec<String> = vec!["push".into()];
-    if opts.force_with_lease {
-        args.push("--force-with-lease".into());
-    }
-    args.push("--end-of-options".into());
-    args.push(opts.remote.clone());
-    args.push(opts.refspec.clone());
+    let args = build_push_args(&runner, opts);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     runner.run(&arg_refs).map_err(|e| {
@@ -147,16 +241,14 @@ fn resume_push(
                     .and_then(|v| v.get("source_oid"))
                     .and_then(|v| v.as_str())
                 {
-                    // Check if remote-tracking ref matches source_oid.
-                    let remote_ref_name = format!("{}/{}", opts.remote, opts.refspec);
-                    let check = runner.run_opt(&[
-                        "rev-parse",
-                        "--verify",
-                        "--quiet",
-                        &remote_ref_name,
-                    ]);
-                    if let Some(out) = check {
-                        let remote_ref = String::from_utf8_lossy(&out).trim().to_string();
+                    // Ask the REMOTE what it holds, rather than trusting a
+                    // local remote-tracking ref. The tracking ref may be stale,
+                    // absent (tags never have one), or removed by a
+                    // history-rewriting tool — in all of which cases the old
+                    // check silently failed to confirm a push that had in fact
+                    // completed, and reported NETWORK_AMBIGUITY instead.
+                    let (_, dst) = split_refspec(&opts.refspec);
+                    if let Some(remote_ref) = resolve_remote_oid(runner, &opts.remote, &dst) {
                         if remote_ref == source_oid {
                             // Push already succeeded.
                             let result = json!({
@@ -198,9 +290,9 @@ fn continue_push_after_begin(
     ).map_err(|_| "repository is busy".to_string())?;
 
     pixel_git::validate_ref(&opts.remote).map_err(|e| { let _ = lock.release(); e.to_string() })?;
-    pixel_git::validate_ref(&opts.refspec).map_err(|e| { let _ = lock.release(); e.to_string() })?;
+    validate_refspec(&opts.refspec).map_err(|e| { let _ = lock.release(); e })?;
 
-    let source_oid = runner.rev_parse_head().ok_or("no HEAD")?;
+    let source_oid = resolve_source_oid(runner, &opts.refspec).ok_or("no HEAD")?;
 
     journal.transition(
         &opts.request_id,
@@ -209,13 +301,7 @@ fn continue_push_after_begin(
         Some(json!({"source_oid": source_oid})),
     )?;
 
-    let mut args: Vec<String> = vec!["push".into()];
-    if opts.force_with_lease {
-        args.push("--force-with-lease".into());
-    }
-    args.push("--end-of-options".into());
-    args.push(opts.remote.clone());
-    args.push(opts.refspec.clone());
+    let args = build_push_args(runner, opts);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     runner.run(&arg_refs).map_err(|e| {
@@ -255,9 +341,13 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_repo_with_remote(root: &Path, remote: &Path) {
+        // `-b main`: never rely on the machine's init.defaultBranch — the
+        // push tests below use the literal refspec "main".
         std::process::Command::new("git")
             .arg("init")
             .arg("-q")
+            .arg("-b")
+            .arg("main")
             .arg(root)
             .status()
             .unwrap();
@@ -362,5 +452,129 @@ mod tests {
         let r1 = push(dir.path(), &opts, None).unwrap();
         let r2 = push(dir.path(), &opts, None).unwrap();
         assert_eq!(r1["source_oid"], r2["source_oid"]);
+    }
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn split_refspec_handles_both_forms() {
+        assert_eq!(split_refspec("main"), ("main".into(), "main".into()));
+        assert_eq!(split_refspec("src:dst"), ("src".into(), "dst".into()));
+        assert_eq!(split_refspec("+src:dst"), ("src".into(), "dst".into()));
+    }
+
+    #[test]
+    fn validate_refspec_accepts_src_colon_dst() {
+        // `validate_ref` alone rejects a colon, which used to make every
+        // `src:dst` push fail with "invalid git ref".
+        assert!(validate_refspec("refs/heads/main:refs/heads/main").is_ok());
+        assert!(validate_refspec("main").is_ok());
+        assert!(validate_refspec("--upload-pack=evil").is_err());
+    }
+
+    /// A rewritten history must be pushable even though the remote-tracking
+    /// ref is gone — this is exactly the state `git filter-repo` leaves behind,
+    /// and bare `--force-with-lease` fails it with "stale info".
+    #[test]
+    fn force_with_lease_pushes_rewritten_history_without_tracking_ref() {
+        let dir = tempdir().unwrap();
+        let remote = tempdir().unwrap();
+        init_repo_with_remote(dir.path(), remote.path());
+
+        let branch = git(dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let opts_plain = PushOptions {
+            remote: "origin".to_string(),
+            refspec: branch.clone(),
+            request_id: format!("base-{}", uuid::Uuid::new_v4()),
+            force_with_lease: false,
+        };
+        push(dir.path(), &opts_plain, None).unwrap();
+
+        // Rewrite history, then destroy the remote-tracking refs the way
+        // git-filter-repo does.
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["commit", "-q", "--amend", "-m", "rewritten"])
+            .status()
+            .unwrap();
+        for r in git(dir.path(), &["for-each-ref", "--format=%(refname)", "refs/remotes"])
+            .lines()
+        {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["update-ref", "-d", r])
+                .status()
+                .unwrap();
+        }
+        assert_eq!(
+            git(dir.path(), &["for-each-ref", "refs/remotes"]),
+            "",
+            "precondition: no remote-tracking refs"
+        );
+
+        let opts = PushOptions {
+            remote: "origin".to_string(),
+            refspec: branch.clone(),
+            request_id: format!("rw-{}", uuid::Uuid::new_v4()),
+            force_with_lease: true,
+        };
+        let result = push(dir.path(), &opts, None).unwrap();
+        assert_eq!(result["pushed"], json!(true));
+
+        let local = git(dir.path(), &["rev-parse", &branch]);
+        let pushed = git(remote.path(), &["rev-parse", &branch]);
+        assert_eq!(local, pushed, "remote must hold the rewritten commit");
+        assert_eq!(
+            result["source_oid"], json!(local),
+            "source_oid must be the pushed ref's OID"
+        );
+    }
+
+    /// `source_oid` used to report HEAD, so pushing any branch other than the
+    /// checked-out one described the wrong commit.
+    #[test]
+    fn source_oid_tracks_the_pushed_ref_not_head() {
+        let dir = tempdir().unwrap();
+        let remote = tempdir().unwrap();
+        init_repo_with_remote(dir.path(), remote.path());
+
+        let head_branch = git(dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        // A side branch, then move HEAD forward so the two differ.
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["branch", "side"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["commit", "-q", "--allow-empty", "-m", "moves HEAD only"])
+            .status()
+            .unwrap();
+
+        let side_oid = git(dir.path(), &["rev-parse", "side"]);
+        let head_oid = git(dir.path(), &["rev-parse", &head_branch]);
+        assert_ne!(side_oid, head_oid, "precondition: HEAD moved past side");
+
+        let opts = PushOptions {
+            remote: "origin".to_string(),
+            refspec: "side".to_string(),
+            request_id: format!("side-{}", uuid::Uuid::new_v4()),
+            force_with_lease: false,
+        };
+        let result = push(dir.path(), &opts, None).unwrap();
+        assert_eq!(result["source_oid"], json!(side_oid));
+        assert_eq!(git(remote.path(), &["rev-parse", "side"]), side_oid);
     }
 }

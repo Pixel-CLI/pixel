@@ -233,6 +233,18 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         })
     }));
 
+    checks.push(check("install.prompt-submit-hook", || -> std::result::Result<DoctorCheckDetail, String> {
+        let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
+        let path = hooks_dir.join(config::PROMPT_SUBMIT_HOOK);
+        if !path.is_file() {
+            return Err("UserPromptSubmit (task boundary) hook not installed".into());
+        }
+        Ok(DoctorCheckDetail {
+            summary: "UserPromptSubmit (task boundary) hook installed".into(),
+            detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+        })
+    }));
+
     checks.push(check("install.devin-hooks", || -> std::result::Result<DoctorCheckDetail, String> {
         let config_path = home.join(config::DEVIN_CONFIG_DIR).join(config::DEVIN_CONFIG_FILE);
         if !config_path.is_file() {

@@ -747,6 +747,42 @@ mod tests {
         assert!(evaluate_condition("page shows Continue button", snapshot));
     }
 
+    // Regression: codex-auth-flow account selection. When the account email
+    // is quoted in the condition/ref_hint, the evaluator and ref finder must
+    // require it — not silently match any "Select account" button.
+    #[test]
+    fn condition_account_present_in_chooser() {
+        let snapshot = "- heading \"Welcome back\" [level=1, ref=e1]\n\
+            - button \"Select account Marie mfleguier@gmail.com\" [ref=e3]\n\
+            - button \"Select account Livio livio.gamassia@gmail.com\" [ref=e7]";
+        let cond = "the desired account 'mfleguier@gmail.com' is visible as a 'Select account' button";
+        assert!(evaluate_condition(cond, snapshot));
+    }
+
+    #[test]
+    fn condition_account_absent_from_chooser() {
+        // Only livio's account is shown — mfleguier is NOT listed.
+        let snapshot = "- heading \"Welcome back\" [level=1, ref=e1]\n\
+            - button \"Select account Livio livio.gamassia@gmail.com\" [ref=e7]";
+        let cond = "the desired account 'mfleguier@gmail.com' is visible as a 'Select account' button";
+        assert!(!evaluate_condition(cond, snapshot));
+    }
+
+    #[test]
+    fn find_ref_picks_correct_account_button() {
+        let snapshot = "- button \"Select account Livio livio.gamassia@gmail.com\" [ref=e7]\n\
+            - button \"Select account Marie mfleguier@gmail.com\" [ref=e3]";
+        let hint = "button containing 'Select account' and matching 'mfleguier@gmail.com'";
+        assert_eq!(find_ref_in_snapshot(snapshot, hint), Some("e3".into()));
+    }
+
+    #[test]
+    fn find_ref_account_not_present_returns_none() {
+        let snapshot = "- button \"Select account Livio livio.gamassia@gmail.com\" [ref=e7]";
+        let hint = "button containing 'Select account' and matching 'mfleguier@gmail.com'";
+        assert_eq!(find_ref_in_snapshot(snapshot, hint), None);
+    }
+
     #[test]
     fn parse_wait_seconds() {
         assert_eq!(parse_wait_duration("120s"), Duration::from_secs(120));

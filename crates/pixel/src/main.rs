@@ -12,6 +12,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod guard;
+mod prompt_submit;
 mod recall_cmd;
 mod rescue_cmd;
 mod sniper_cmd;
@@ -866,6 +867,11 @@ enum HookCmd {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// `pixel hook prompt-submit "$@"` — task boundary detector.
+    /// Reads the UserPromptSubmit payload from stdin, embeds the prompt
+    /// and recent context, and emits a `[PIXEL:TASK_BOUNDARY]` advisory
+    /// when a task boundary is detected.
+    PromptSubmit,
 }
 
 #[derive(Subcommand)]
@@ -2852,6 +2858,13 @@ fn run_command(command: Command) -> Result<(), String> {
                 let block = serde_json::json!({ "pixel": pixel });
                 write_stdout(&serde_json::to_string_pretty(&block).map_err(|e| e.to_string())?)?;
                 Ok(())
+            }
+            HookCmd::PromptSubmit => {
+                // Task boundary detector — reads UserPromptSubmit payload
+                // from stdin, embeds prompt + context, emits advisory if a
+                // boundary is detected. Never returns (exits 0 or via the
+                // emit function).
+                prompt_submit::run();
             }
         },
         Command::Log {
