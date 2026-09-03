@@ -77,9 +77,13 @@ The diagrams below illustrate the intended flows. The "without pixel" columns ar
 | **Resolve** | A phrase, label, or error → exact code, with an honest confidence level (`resolved` / `ranked` / `unresolved`) |
 | **Query (V1)** | One bounded retrieval entry point: `query "where is \`symbol\`"`; compiles exact locate/scope/impact/history/status intents to deterministic recipes and returns ranked plans for ambiguous prose |
 | **Excavate + rescue** | Finds code no longer at HEAD (deleted, stashed, on another branch) and restores it safely, refusing dirty files without a strategy |
-| **Reconcile** | One-call branch sync: fetch, classify, act; real conflicts get a structured report, not silence |
+| **Reconcile** | One-call branch sync: fetch, classify, act; additive conflicts auto-resolved via union merge, genuine conflicts get a structured report |
 | **Git mutations** | `publish`/`push`/`branch`/`update` etc., snapshot-token gated and crash-safe |
 | **Ranking signals** | Recency and live session context rerank results, never promoting a stale file above a better match |
+| **Precision mode** | `targets --precision` drops weak P1/P2 files when there's a sharp score drop after P0; `--max-tier P0|P1|P2` hard tier cutoff |
+| **PostCompaction hook** | Re-injects the active targets manifest after context compaction so the agent resumes with its P0/P1/P2 file list intact |
+| **Auto-resolve** | When `reconcile` hits a conflict, auto-resolves conflict markers by union-merging both sides (ours then theirs), then continues the rebase — no manual intervention needed for additive conflicts |
+| **Upgrade** | `pixel upgrade` builds, stops the daemon, copies the new binary, and optionally restarts the daemon — solves the "Text file busy" error |
 | **Daemon** | A warm background process keeps *service-time* sub-millisecond (CLI end-to-end still pays a ~17ms spawn floor); falls back to in-process automatically |
 
 ### Query V1
@@ -104,7 +108,6 @@ The V1 surface is deliberately bounded. The deferred work is designed, not vague
 | **Transcript recall** | Machine daemon + recall corpus, `PLAN.md` §A3 / M5 | Same evidence-identity invariant — a recalled fragment must carry its provenance, not just its text |
 | **Recipe auto-promotion** | `PLAN.md` §A2 (ranked recipe candidates → pinned) | Promotion must be observable + reversible; pinning a wrong recipe silently is worse than returning ranked plans |
 | **Rescue `--from <oid>:<oldpath> --to <path>`** | Engine 2, `PLAN.md` line 171 | Restoring deleted/renamed files across path moves; the gated 3-way apply already exists, the cross-path variant is the open seam |
-| **`reconcile --strategy rebase-if-clean`** | Engine 4, `PLAN.md` line 200 | Zero-textual-conflict rebase is deterministic work; default stays `report` until the `merge-tree` cleanliness proof is wired through the journal transitions |
 | **Session journal hooks** | Engine 3, `PLAN.md` line 187 (`pixel journal <kind> <path>`) | `PostToolUse` → session.db feeding the shared reranker; activity/recency signals already ship, the live session-event stream is the missing input |
 
 Anything not in that table is either shipped or out of scope. The V1 recipes (`locate.v1`, `scope.v1`, `impact.v1`, `history_recovery.v1`, `status.v1`) are the wire format today; V2 extends the recipe set, it does not break V1 responses.
@@ -117,7 +120,7 @@ pixel enforces five scenarios through **CLI + hooks**, not MCP:
 
 - **Recovery** (mandatory): `pixel rescue` / `pixel excavate` — restore deleted/stashed code
 - **Resolution** (mandatory): `pixel resolve` — find code by error/phrase/label
-- **Branch sync** (mandatory): `pixel reconcile` — one-call fetch + classify + act
+- **Branch sync** (mandatory): `pixel reconcile` — one-call fetch + classify + act; additive conflicts auto-resolved via union merge
 - **Task scoping** (advisory): `pixel targets` — mandatory *first call* of a task, but the returned list is a starting set, not a read-fence (the hard fence measured recall 0.60 → 0.19, [`docs/bench/sniper-discovery.md`](docs/bench/sniper-discovery.md))
 - **Blast radius** (mandatory): `pixel impact` / `pixel changes` — callers and affected flows before any edit
 
@@ -138,6 +141,49 @@ The guard hook blocks destructive git commands and warns on edits outside the ac
 | Cursor | ❌ | No hook support (VSCode extension) |
 | OpenCode | ❌ | No hook support |
 | Zed | ❌ | No hook support |
+
+---
+
+## 📝 Recent changes
+
+### Auto-resolve conflicts in `reconcile` (`ac595e5`)
+
+`pixel reconcile` no longer stops at "manual resolution required" when `merge-tree` predicts a conflict. It now:
+
+1. Attempts the rebase anyway
+2. If the rebase conflicts, reads each conflicted file's `<<<<<<<`/`=======`/`>>>>>>>` markers
+3. Union-merges both sides (ours first, then theirs) — no conflict markers left behind
+4. Stages the resolved files and runs `git rebase --continue` with `GIT_EDITOR=true`
+5. Only falls back to "manual resolution required" if the marker structure is malformed or `--continue` fails
+
+This handles the common case where two commits both add different content to the same file region (additive conflicts) — the case that previously blocked the entire reconcile flow and required manual `git rebase` intervention.
+
+Both the plain `reconcile` and `reconcile --into` paths support auto-resolve. Tests updated to expect auto-resolve instead of refusal.
+
+### Guard: cd-aware rebase escape hatch + sequencer pass-through (`31652ac`)
+
+The guard hook now extracts the actual repository root from `cd <path>` and `git -C <path>` in commands, instead of using the hook payload's `cwd`. This fixes false blocks when the hook's `cwd` differs from the command's target directory. Sequencer checks (`git rebase --continue`, `git add` during rebase) now use the correct root.
+
+### Rebase escape hatch + `pixel upgrade` + benchmark jq fix (`bf01774`)
+
+- **Reconcile conflict state**: `pixel reconcile` writes `.pixel/reconcile-conflict.json` when it detects a conflict, allowing the guard to permit `git rebase` as an escape hatch.
+- **`pixel upgrade`**: New command that builds the release binary, stops the daemon (`pkill -f "pixel daemon"`), copies the binary to the install path, and optionally restarts the daemon. Solves the "Text file busy" error when the daemon holds the binary open.
+- **Benchmark jq fix**: `pixel-recall-bench.sh` aggregation switched from `jq -s` to plain `jq` with `(. as $arr | ...)` binding, fixing arithmetic parse errors.
+
+### Precision mode + max-tier filter + PostCompaction hook (`721c6fb`)
+
+- **Precision mode** (`targets --precision`): Drops weak P1/P2 results when there's a sharp score drop after P0. Uses `SCORE_GAP_RATIO = 0.5` (P0-based threshold) and `SECONDARY_GAP_RATIO = 0.7` (no-P0 threshold). Always preserves the top result. Reduces 3-file outputs to 1–2 files while preserving all expected hits.
+- **Max-tier filter** (`--max-tier P0|P1|P2`): Hard tier cutoff for `targets` and `search`.
+- **PostCompaction hook**: `pixel hook post-compaction` re-injects the active targets manifest (`.pixel/targets.json`) after context compaction, so the agent resumes with its P0/P1/P2 file list intact. Installed for Claude Code, Codex, Devin, Gemini, and zcode.
+- **Hook install merging**: `pixel install` now merges hooks into existing config files instead of overwriting them, preserving hooks from other tools.
+- **Gemini hook rename**: Updated from `UserPromptSubmit` to `BeforeAgent` to match upstream.
+
+### Verification status
+
+- 249 tests pass (0 failed)
+- `pixel doctor`: 20 green, 0 red, 0 yellow
+- Recall benchmark: 38/41 = 0.927 (no regression)
+- Precision benchmark: full hit preservation with fewer results on simple tasks
 
 ---
 
