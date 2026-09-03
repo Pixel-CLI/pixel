@@ -142,6 +142,65 @@ fn clear_conflict_state(root: &Path) {
     let _ = std::fs::remove_file(root.join(".pixel").join("reconcile-conflict.json"));
 }
 
+/// Resolve conflict markers in a worktree file by union-merging both sides.
+///
+/// During a rebase, git writes conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
+/// into the worktree file. This function reads the file, extracts both sides
+/// of each conflict hunk, and unions them (both sides' content kept, in order:
+/// ours then theirs). This is safe for additive conflicts where both sides
+/// added different content to the same region.
+///
+/// Returns true if all conflict markers were resolved, false if the file
+/// couldn't be read or had an unexpected conflict marker structure.
+fn auto_resolve_conflict_markers(_runner: &GitRunner, root: &Path, path: &str) -> bool {
+    let worktree_path = root.join(path);
+    let Ok(content) = std::fs::read_to_string(&worktree_path) else {
+        return false;
+    };
+
+    // If no conflict markers, file is already resolved.
+    if !content.contains("<<<<<<<") {
+        return true;
+    }
+
+    let mut resolved_lines: Vec<String> = Vec::new();
+    let mut lines = content.lines().peekable();
+    let mut in_ours = false;
+    let mut in_theirs = false;
+    let mut ours_lines: Vec<String> = Vec::new();
+    let mut theirs_lines: Vec<String> = Vec::new();
+
+    while let Some(line) = lines.next() {
+        if line.starts_with("<<<<<<<") {
+            in_ours = true;
+            ours_lines.clear();
+            theirs_lines.clear();
+        } else if line.starts_with("=======") && in_ours {
+            in_ours = false;
+            in_theirs = true;
+        } else if line.starts_with(">>>>>>>") && in_theirs {
+            in_theirs = false;
+            // Union: ours first, then theirs.
+            resolved_lines.extend(ours_lines.drain(..));
+            resolved_lines.extend(theirs_lines.drain(..));
+        } else if in_ours {
+            ours_lines.push(line.to_string());
+        } else if in_theirs {
+            theirs_lines.push(line.to_string());
+        } else {
+            resolved_lines.push(line.to_string());
+        }
+    }
+
+    // If we still have unresolved markers, the structure was unexpected.
+    if in_ours || in_theirs {
+        return false;
+    }
+
+    let resolved_content = resolved_lines.join("\n") + "\n";
+    std::fs::write(&worktree_path, resolved_content).is_ok()
+}
+
 /// Test seam mirroring `push::PushProbe`: `pre_push_hook`, when given, runs
 /// exactly once, right after this call's own fetch (`upstream_oid` has just
 /// been captured) and before any leased push is attempted — the precise
@@ -395,24 +454,170 @@ pub fn reconcile_with_hooks(
                     })?;
 
                     if !probe.clean {
-                        // merge-tree predicts conflicts — never attempt the
-                        // rebase, report diverged with full conflict detail.
-                        let report = build_conflict_report(&runner, &merge_base, &head, &upstream, &probe);
-                        let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
-                        write_conflict_state(root, conflict_count);
-                        json!({
-                            "state": "diverged",
-                            "merge_base": merge_base,
-                            "ahead": ahead,
-                            "behind": behind,
-                            "clean_rebase_possible": false,
-                            "conflicts": report["conflicts"],
-                            "conflict_count": report["conflict_count"],
-                            "report_truncated": report["report_truncated"],
-                            "non_conflicting": non_conflicting_paths(root, &merge_base, &head, &upstream),
-                            "backup_ref": backup_ref,
-                            "next": "manual resolution required",
-                        })
+                        // merge-tree predicts conflicts. Attempt the rebase
+                        // anyway — if it conflicts, auto-resolve the conflict
+                        // markers by union-merging both sides, then continue.
+                        // This handles additive conflicts (both sides added
+                        // different content to the same region) which are the
+                        // common case in collaborative development.
+                        match runner.run(&["rebase", &upstream]) {
+                            Ok(_) => {
+                                // Rebase succeeded cleanly (merge-tree
+                                // was overly cautious).
+                                let new_head = runner.rev_parse_head().unwrap_or_default();
+                                clear_conflict_state(root);
+                                if push_mode == "auto" {
+                                    match attempt_lease_push_or_reclassify(&runner, &branch, &upstream_oid, &upstream) {
+                                        LeaseOutcome::Pushed => json!({
+                                            "state": "rebased",
+                                            "from": head,
+                                            "to": new_head,
+                                            "branch": branch,
+                                            "backup_ref": backup_ref,
+                                            "pushed": true,
+                                        }),
+                                        LeaseOutcome::Raced { error, ahead: a2, behind: b2 } => json!({
+                                            "state": "rebased",
+                                            "from": head,
+                                            "to": new_head,
+                                            "branch": branch,
+                                            "backup_ref": backup_ref,
+                                            "pushed": false,
+                                            "push_error": error,
+                                            "reclassified": {
+                                                "ahead": a2,
+                                                "behind": b2,
+                                                "state": classify_state(a2, b2),
+                                            },
+                                            "next": "local rebase succeeded but remote advanced during push; call reconcile again",
+                                        }),
+                                    }
+                                } else {
+                                    json!({
+                                        "state": "rebased",
+                                        "from": head,
+                                        "to": new_head,
+                                        "branch": branch,
+                                        "backup_ref": backup_ref,
+                                        "pushed": false,
+                                    })
+                                }
+                            }
+                            Err(_) => {
+                                // Rebase conflicted. Auto-resolve the conflict
+                                // markers in the worktree, then continue.
+                                let unmerged = runner.run_opt(&["diff", "--name-only", "--diff-filter=U"])
+                                    .map(|b| String::from_utf8_lossy(&b).lines().map(String::from).collect::<Vec<_>>())
+                                    .unwrap_or_default();
+                                let mut rebase_resolved = Vec::new();
+                                let mut rebase_unresolved = Vec::new();
+                                for path in &unmerged {
+                                    if auto_resolve_conflict_markers(&runner, root, path) {
+                                        let _ = runner.run(&["add", path]);
+                                        rebase_resolved.push(path.clone());
+                                    } else {
+                                        rebase_unresolved.push(path.clone());
+                                    }
+                                }
+
+                                if rebase_unresolved.is_empty() && !rebase_resolved.is_empty() {
+                                    // All rebase conflicts auto-resolved.
+                                    // Use GIT_EDITOR=true to avoid opening an
+                                    // editor for the rebase commit message.
+                                    let cont = std::process::Command::new("git")
+                                        .arg("-C").arg(root)
+                                        .arg("rebase").arg("--continue")
+                                        .env("GIT_EDITOR", "true")
+                                        .output()
+                                        .ok()
+                                        .filter(|o| o.status.success());
+                                    if cont.is_some() {
+                                        let new_head = runner.rev_parse_head().unwrap_or_default();
+                                        clear_conflict_state(root);
+                                        if push_mode == "auto" {
+                                            match attempt_lease_push_or_reclassify(&runner, &branch, &upstream_oid, &upstream) {
+                                                LeaseOutcome::Pushed => json!({
+                                                    "state": "rebased",
+                                                    "from": head,
+                                                    "to": new_head,
+                                                    "branch": branch,
+                                                    "backup_ref": backup_ref,
+                                                    "pushed": true,
+                                                    "auto_resolved": rebase_resolved,
+                                                }),
+                                                LeaseOutcome::Raced { error, ahead: a2, behind: b2 } => json!({
+                                                    "state": "rebased",
+                                                    "from": head,
+                                                    "to": new_head,
+                                                    "branch": branch,
+                                                    "backup_ref": backup_ref,
+                                                    "pushed": false,
+                                                    "push_error": error,
+                                                    "auto_resolved": rebase_resolved,
+                                                    "reclassified": {
+                                                        "ahead": a2,
+                                                        "behind": b2,
+                                                        "state": classify_state(a2, b2),
+                                                    },
+                                                    "next": "local rebase succeeded but remote advanced during push; call reconcile again",
+                                                }),
+                                            }
+                                        } else {
+                                            json!({
+                                                "state": "rebased",
+                                                "from": head,
+                                                "to": new_head,
+                                                "branch": branch,
+                                                "backup_ref": backup_ref,
+                                                "pushed": false,
+                                                "auto_resolved": rebase_resolved,
+                                            })
+                                        }
+                                    } else {
+                                        // --continue failed, abort and report.
+                                        let _ = runner.run_opt(&["rebase", "--abort"]);
+                                        let report = build_conflict_report(&runner, &merge_base, &head, &upstream, &probe);
+                                        let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
+                                        write_conflict_state(root, conflict_count);
+                                        json!({
+                                            "state": "diverged",
+                                            "merge_base": merge_base,
+                                            "ahead": ahead,
+                                            "behind": behind,
+                                            "clean_rebase_possible": false,
+                                            "conflicts": report["conflicts"],
+                                            "conflict_count": report["conflict_count"],
+                                            "report_truncated": report["report_truncated"],
+                                            "non_conflicting": non_conflicting_paths(root, &merge_base, &head, &upstream),
+                                            "backup_ref": backup_ref,
+                                            "auto_resolved": rebase_resolved,
+                                            "next": "manual resolution required (rebase --continue failed)",
+                                        })
+                                    }
+                                } else {
+                                    // Some rebase conflicts couldn't be auto-resolved.
+                                    let _ = runner.run_opt(&["rebase", "--abort"]);
+                                    let report = build_conflict_report(&runner, &merge_base, &head, &upstream, &probe);
+                                    let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
+                                    write_conflict_state(root, conflict_count);
+                                    json!({
+                                        "state": "diverged",
+                                        "merge_base": merge_base,
+                                        "ahead": ahead,
+                                        "behind": behind,
+                                        "clean_rebase_possible": false,
+                                        "conflicts": report["conflicts"],
+                                        "conflict_count": report["conflict_count"],
+                                        "report_truncated": report["report_truncated"],
+                                        "non_conflicting": non_conflicting_paths(root, &merge_base, &head, &upstream),
+                                        "backup_ref": backup_ref,
+                                        "auto_resolved": rebase_resolved,
+                                        "auto_unresolved": rebase_unresolved,
+                                        "next": "manual resolution required",
+                                    })
+                                }
+                            }
+                        }
                     } else {
                         // Non-interactive linear rebase under journal. Plain
                         // `git rebase` never fabricates a merge commit.
@@ -675,24 +880,78 @@ fn reconcile_into(
 
     let probe = probe_merge_tree(root, head, &remote_target);
     if !probe.clean {
-        // merge-tree predicts conflicts — never attempt the rebase, never
-        // touch the target. Same structured conflicts[] report as the plain
-        // diverged path, naming the integration target.
-        let report = build_conflict_report(runner, &merge_base, head, &remote_target, &probe);
-        let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
-        write_conflict_state(root, conflict_count);
-        return Ok(json!({
-            "state": "diverged",
-            "into_target": target,
-            "merge_base": merge_base,
-            "clean_rebase_possible": false,
-            "conflicts": report["conflicts"],
-            "conflict_count": report["conflict_count"],
-            "report_truncated": report["report_truncated"],
-            "non_conflicting": non_conflicting_paths(root, &merge_base, head, &remote_target),
-            "backup_ref": backup_ref,
-            "next": format!("manual resolution required before integrating into {target:?}"),
-        }));
+        // merge-tree predicts conflicts. Attempt the rebase anyway — if it
+        // conflicts, auto-resolve conflict markers by union-merging both
+        // sides, then continue. Same approach as the plain diverged path.
+        match runner.run(&["rebase", &remote_target]) {
+            Ok(_) => {
+                let new_head = runner.rev_parse_head().unwrap_or_default();
+                clear_conflict_state(root);
+                return Ok(json!({
+                    "state": "rebased",
+                    "into_target": target,
+                    "from": head,
+                    "to": new_head,
+                    "backup_ref": backup_ref,
+                }));
+            }
+            Err(_) => {
+                let unmerged = runner.run_opt(&["diff", "--name-only", "--diff-filter=U"])
+                    .map(|b| String::from_utf8_lossy(&b).lines().map(String::from).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let mut rebase_resolved = Vec::new();
+                let mut rebase_unresolved = Vec::new();
+                for path in &unmerged {
+                    if auto_resolve_conflict_markers(runner, root, path) {
+                        let _ = runner.run(&["add", path]);
+                        rebase_resolved.push(path.clone());
+                    } else {
+                        rebase_unresolved.push(path.clone());
+                    }
+                }
+
+                if rebase_unresolved.is_empty() && !rebase_resolved.is_empty() {
+                    let cont = std::process::Command::new("git")
+                        .arg("-C").arg(root)
+                        .arg("rebase").arg("--continue")
+                        .env("GIT_EDITOR", "true")
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success());
+                    if cont.is_some() {
+                        let new_head = runner.rev_parse_head().unwrap_or_default();
+                        clear_conflict_state(root);
+                        return Ok(json!({
+                            "state": "rebased",
+                            "into_target": target,
+                            "from": head,
+                            "to": new_head,
+                            "backup_ref": backup_ref,
+                            "auto_resolved": rebase_resolved,
+                        }));
+                    }
+                }
+                // Fall back to manual.
+                let _ = runner.run_opt(&["rebase", "--abort"]);
+                let report = build_conflict_report(runner, &merge_base, head, &remote_target, &probe);
+                let conflict_count = report["conflict_count"].as_u64().unwrap_or(0) as usize;
+                write_conflict_state(root, conflict_count);
+                return Ok(json!({
+                    "state": "diverged",
+                    "into_target": target,
+                    "merge_base": merge_base,
+                    "clean_rebase_possible": false,
+                    "conflicts": report["conflicts"],
+                    "conflict_count": report["conflict_count"],
+                    "report_truncated": report["report_truncated"],
+                    "non_conflicting": non_conflicting_paths(root, &merge_base, head, &remote_target),
+                    "backup_ref": backup_ref,
+                    "auto_resolved": rebase_resolved,
+                    "auto_unresolved": rebase_unresolved,
+                    "next": format!("manual resolution required before integrating into {target:?}"),
+                }));
+            }
+        }
     }
 
     // Non-interactive linear rebase onto the remote-tracking target. Plain

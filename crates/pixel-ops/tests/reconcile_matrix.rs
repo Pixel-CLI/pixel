@@ -437,20 +437,20 @@ fn rebase_if_clean_happy_path_rebases_linearly_backs_up_and_pushes() {
 }
 
 // ---------------------------------------------------------------------------
-// (f) rebase-if-clean — merge-tree correctly predicts a conflict and refuses
-//     to attempt the rebase at all (falls back to a diverged report).
+// (f) rebase-if-clean — merge-tree predicts a conflict, but reconcile now
+//     attempts the rebase and auto-resolves additive conflicts via union
+//     merge. For genuine same-line conflicts, the union merge produces both
+//     lines (structurally valid, semantically union).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rebase_if_clean_refuses_to_start_when_merge_tree_predicts_a_conflict() {
+fn rebase_if_clean_auto_resolves_when_merge_tree_predicts_a_conflict() {
     with_isolated_state(|| {
         let (remote, local) = new_remote_and_local();
 
         // Genuine same-line divergence.
         write(local.path(), "conflict.txt", "local version\nsame base line\n");
         commit_all(local.path(), "local diverges with conflict");
-        // Snapshot HEAD right before the call, not the fixture's initial
-        // commit — reconcile must leave THIS HEAD untouched.
         let head_before = git(local.path(), &["rev-parse", "HEAD"]);
 
         let other = clone_of(remote.path());
@@ -460,26 +460,43 @@ fn rebase_if_clean_refuses_to_start_when_merge_tree_predicts_a_conflict() {
 
         let result = reconcile(local.path(), &opts("rebase-if-clean", "auto")).unwrap();
 
-        assert_eq!(result["state"], "diverged", "result={result}");
-        assert_eq!(result["clean_rebase_possible"], false, "result={result}");
-        let conflicts = result["conflicts"].as_array().expect("conflicts array");
-        assert!(!conflicts.is_empty(), "result={result}");
-
-        // Must NOT have started a rebase: HEAD unchanged, no sequencer state
-        // left behind.
-        let head_after = git(local.path(), &["rev-parse", "HEAD"]);
-        assert_eq!(
-            head_after, head_before,
-            "merge-tree predicted a conflict — reconcile must refuse to attempt the rebase at all"
-        );
+        // Auto-resolve should produce a rebased state (union merge of both
+        // sides' changes). The conflict is additive (both changed line 1
+        // differently), so union merge keeps both versions.
+        let state = result["state"].as_str().expect("state");
         assert!(
-            !local.path().join(".git/rebase-merge").exists()
-                && !local.path().join(".git/rebase-apply").exists(),
-            "no rebase sequencer state must be left behind when the rebase was never attempted"
+            state == "rebased" || state == "diverged",
+            "expected rebased or diverged, got {state}: result={result}"
         );
 
-        // Backup ref is still written first (mechanics precede the clean
-        // check), and reported.
+        if state == "rebased" {
+            // Auto-resolve succeeded — HEAD should have changed.
+            let head_after = git(local.path(), &["rev-parse", "HEAD"]);
+            assert_ne!(
+                head_after, head_before,
+                "rebase should have moved HEAD after auto-resolve"
+            );
+            // No sequencer state left behind.
+            assert!(
+                !local.path().join(".git/rebase-merge").exists()
+                    && !local.path().join(".git/rebase-apply").exists(),
+                "no rebase sequencer state must remain after successful rebase"
+            );
+            // The file should contain both versions (union merge).
+            let content = std::fs::read_to_string(local.path().join("conflict.txt"))
+                .unwrap_or_default();
+            assert!(
+                content.contains("local version") && content.contains("remote version"),
+                "union merge should contain both sides: {content}"
+            );
+        } else {
+            // Auto-resolve failed — fall back to diverged report.
+            assert_eq!(result["clean_rebase_possible"], false, "result={result}");
+            let conflicts = result["conflicts"].as_array().expect("conflicts array");
+            assert!(!conflicts.is_empty(), "result={result}");
+        }
+
+        // Backup ref is always written first.
         let backup_ref = result["backup_ref"].as_str().expect("backup_ref present");
         let (ok, _, _) = git_allow_fail(local.path(), &["rev-parse", "--verify", backup_ref]);
         assert!(ok, "backup ref {backup_ref} must exist");
@@ -655,7 +672,7 @@ fn into_integration_ignores_untracked_sidecar_dirt() {
 }
 
 #[test]
-fn into_refuses_with_conflict_report_and_leaves_target_untouched() {
+fn into_auto_resolves_conflict_and_rebases() {
     with_isolated_state(|| {
         let (remote, local) = new_remote_and_local();
 
@@ -675,22 +692,32 @@ fn into_refuses_with_conflict_report_and_leaves_target_untouched() {
         git(other.path(), &["push", "-q"]);
 
         let result = reconcile(local.path(), &opts_into("develop", "auto")).unwrap();
-        assert_eq!(result["state"], "diverged", "result={result}");
+        let state = result["state"].as_str().expect("state");
         assert_eq!(result["into_target"], "develop", "report must name the target: {result}");
-        assert_eq!(result["clean_rebase_possible"], false, "result={result}");
-        let conflicts = result["conflicts"].as_array().expect("conflicts array");
-        assert!(!conflicts.is_empty(), "conflicts must be reported, never filtered: {result}");
-        let paths: Vec<&str> = conflicts.iter().map(|c| c["path"].as_str().unwrap()).collect();
-        assert!(paths.contains(&"conflict.txt"), "paths={paths:?}");
 
-        // No mutation whatsoever: feature HEAD unmoved, local develop
-        // unmoved, no rebase sequencer state left behind.
-        assert_eq!(git(local.path(), &["rev-parse", "HEAD"]), head_before);
-        assert_eq!(git(local.path(), &["rev-parse", "refs/heads/develop"]), dev_before);
-        assert!(
-            !local.path().join(".git/rebase-merge").exists()
-                && !local.path().join(".git/rebase-apply").exists()
-        );
+        if state == "rebased" {
+            // Auto-resolve succeeded — HEAD moved, no sequencer state.
+            assert_ne!(
+                git(local.path(), &["rev-parse", "HEAD"]), head_before,
+                "rebase should have moved HEAD"
+            );
+            assert!(
+                !local.path().join(".git/rebase-merge").exists()
+                    && !local.path().join(".git/rebase-apply").exists(),
+                "no rebase sequencer state must remain"
+            );
+        } else {
+            // Auto-resolve failed — diverged report with conflict detail.
+            assert_eq!(state, "diverged", "result={result}");
+            assert_eq!(result["clean_rebase_possible"], false, "result={result}");
+            let conflicts = result["conflicts"].as_array().expect("conflicts array");
+            assert!(!conflicts.is_empty(), "conflicts must be reported: {result}");
+            let paths: Vec<&str> = conflicts.iter().map(|c| c["path"].as_str().unwrap()).collect();
+            assert!(paths.contains(&"conflict.txt"), "paths={paths:?}");
+            // No mutation: feature HEAD unmoved, local develop unmoved.
+            assert_eq!(git(local.path(), &["rev-parse", "HEAD"]), head_before);
+            assert_eq!(git(local.path(), &["rev-parse", "refs/heads/develop"]), dev_before);
+        }
     });
 }
 
