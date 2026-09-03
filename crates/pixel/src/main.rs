@@ -664,6 +664,10 @@ enum Command {
         /// Reject if HEAD does not match this OID.
         #[arg(long)]
         expected_head: Option<String>,
+        /// Allow rewriting the default branch and published mainline commits.
+        /// Overrides both default-branch and published-mainline protection.
+        #[arg(long)]
+        allow_default_branch: bool,
         /// Idempotency / recovery key.
         #[arg(long)]
         request_id: String,
@@ -943,6 +947,39 @@ fn roundtrip(stream: &mut UnixStream, req: &Request) -> Option<Response> {
 
 /// Daemon path: only if the socket answers Ping within ~100ms.
 fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
+    try_daemon_inner(root, req).or_else(|| {
+        // Auto-start: socket connection failed. Spawn the daemon in the
+        // background and retry once. This makes the fast path transparent —
+        // no need for the user to run `pixel daemon start` manually.
+        // `PIXEL_DAEMON_AUTO_START=0` disables auto-start.
+        if env_flag_off("PIXEL_DAEMON_AUTO_START") {
+            return None;
+        }
+        let exe = std::env::current_exe().ok()?;
+        let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let mut command = std::process::Command::new(exe);
+        command
+            .arg("daemon")
+            .arg("start")
+            .arg(&abs)
+            .arg("--foreground")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        command.spawn().ok()?;
+        // Wait up to 5s for the socket to come up.
+        for _ in 0..50 {
+            if let Some(resp) = try_daemon_inner(root, req) {
+                return Some(resp);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        None
+    })
+}
+
+fn try_daemon_inner(root: &Path, req: &Request) -> Option<Response> {
     let sock = daemon::socket_path(root);
     let mut stream = UnixStream::connect(&sock).ok()?;
     stream
@@ -969,6 +1006,13 @@ fn try_daemon(root: &Path, req: &Request) -> Option<Response> {
         .set_write_timeout(Some(Duration::from_secs(30)))
         .ok()?;
     roundtrip(&mut stream, req)
+}
+
+/// Check if an env var is explicitly set to "0"/"false"/"off".
+fn env_flag_off(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.as_str(), "0" | "false" | "off"))
+        .unwrap_or(false)
 }
 
 /// Prefer the daemon; fall back to an in-process Service. The given path may
@@ -2971,6 +3015,7 @@ fn run_command(command: Command) -> Result<(), String> {
             push,
             remote,
             expected_head,
+            allow_default_branch,
             request_id,
             json,
         } => {
@@ -2982,6 +3027,7 @@ fn run_command(command: Command) -> Result<(), String> {
                 remote,
                 request_id,
                 expected_head,
+                allow_default_branch,
             };
             let data = pixel_ops::rewrite::rewrite(&root, &opts)?;
             print_data(&data, json)

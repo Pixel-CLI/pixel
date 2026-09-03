@@ -88,6 +88,7 @@ fn opts(onto: Option<&str>, push: bool) -> RewriteOptions {
         remote: "origin".to_string(),
         request_id: format!("rw-{}", uuid::Uuid::new_v4()),
         expected_head: None,
+        allow_default_branch: false,
     }
 }
 
@@ -222,6 +223,40 @@ fn rewrite_refuses_squashing_commits_already_on_remote_default() {
         err.contains("REFUSED") && err.contains("already contained"),
         "expected published-mainline refusal, got: {err}"
     );
+}
+
+#[test]
+fn rewrite_allow_default_branch_overrides_default_branch_refusal() {
+    let fx = fixture(false);
+    git(fx.work.path(), &["checkout", "-q", "main"]);
+    commit_file(fx.work.path(), "m.txt", "m", "unpushed on main");
+
+    let mut o = opts(None, false);
+    o.allow_default_branch = true;
+    let res =
+        rewrite_with_state(fx.work.path(), &o, None, fx.state.path());
+    assert!(res.is_ok(), "allow_default_branch should override default-branch refusal, got: {res:?}");
+}
+
+#[test]
+fn rewrite_allow_default_branch_overrides_published_mainline_refusal() {
+    let fx = fixture(false);
+    git(fx.work.path(), &["checkout", "-q", "main"]);
+    commit_file(fx.work.path(), "m2.txt", "m2", "published main commit");
+    git(fx.work.path(), &["push", "-q", "origin", "main"]);
+    let old_main = git(fx.work.path(), &["rev-parse", "main~1"]);
+    git(fx.work.path(), &["checkout", "-qb", "feat2"]);
+    commit_file(fx.work.path(), "f2.txt", "f2", "feat2 wip");
+
+    let mut o = opts(Some(&old_main), false);
+    o.allow_default_branch = true;
+    let res = rewrite_with_state(
+        fx.work.path(),
+        &o,
+        None,
+        fx.state.path(),
+    );
+    assert!(res.is_ok(), "allow_default_branch should override published-mainline refusal, got: {res:?}");
 }
 
 #[test]

@@ -19,9 +19,11 @@
 //! Safety invariants:
 //!   * refuse detached HEAD;
 //!   * refuse rewriting the repo default branch (origin/HEAD or
-//!     `init.defaultBranch` detection) unless `--onto` was explicit;
-//!   * ALWAYS refuse when any squashed commit is already contained in the
-//!     remote default branch — rewriting published mainline is forbidden;
+//!     `init.defaultBranch` detection) unless `--onto` was explicit or
+//!     `--allow-default-branch` was passed;
+//!   * refuse when any squashed commit is already contained in the
+//!     remote default branch — rewriting published mainline is forbidden
+//!     unless `--allow-default-branch` was passed;
 //!   * `expected_head` STALE_STATE gate like `publish`;
 //!   * dirty worktree is tolerated (`reset --soft` never touches it) but
 //!     recorded as a warning — pre-staged changes get absorbed into the
@@ -60,6 +62,10 @@ pub struct RewriteOptions {
     pub request_id: String,
     /// STALE_STATE gate: refuse unless HEAD is exactly this OID.
     pub expected_head: Option<String>,
+    /// Explicitly allow rewriting the default branch and published mainline
+    /// commits. Overrides both default-branch protection and published-
+    /// mainline protection. The user has opted into rewriting shared history.
+    pub allow_default_branch: bool,
 }
 
 /// A probe hook called at each phase. Used by tests to inject crashes.
@@ -163,11 +169,13 @@ fn run_body(
     if let Some(default) = &default_branch
         && &branch == default
         && opts.onto.is_none()
+        && !opts.allow_default_branch
     {
         bail!(format!(
             "REFUSED: {branch} is the repository default branch; rewriting it is forbidden \
-             unless an explicit --onto base is given (and even then, published commits are \
-             never rewritten)"
+             unless an explicit --onto base is given or --allow-default-branch is passed \
+             (and even then, published commits are never rewritten without \
+             --allow-default-branch)"
         ));
     }
 
@@ -199,7 +207,9 @@ fn run_body(
 
     // Published-mainline protection: refuse if ANY commit being squashed is
     // already contained in the remote default branch.
-    if let Some(default) = &default_branch {
+    if let Some(default) = &default_branch
+        && !opts.allow_default_branch
+    {
         let remote_default = format!("refs/remotes/{}/{}", opts.remote, default);
         if runner
             .run_opt(&["rev-parse", "--verify", "--quiet", &remote_default])
@@ -213,7 +223,8 @@ fn run_body(
             if outside < total {
                 bail!(format!(
                     "REFUSED: {} of the {} commits to squash are already contained in {} — \
-                     rewriting published mainline history is forbidden",
+                     rewriting published mainline history is forbidden; pass \
+                     --allow-default-branch to override",
                     total - outside,
                     total,
                     remote_default,
@@ -594,11 +605,12 @@ fn common_dir(root: &Path) -> String {
 
 fn rewrite_input_hash(opts: &RewriteOptions) -> String {
     sha256_hex(&format!(
-        "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
+        "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
         opts.onto.as_deref().unwrap_or(""),
         opts.message.as_deref().unwrap_or(""),
         opts.push,
         opts.remote,
         opts.expected_head.as_deref().unwrap_or(""),
+        opts.allow_default_branch,
     ))
 }
