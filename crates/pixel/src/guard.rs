@@ -300,6 +300,17 @@ pub fn run() -> ! {
                     grep_redirect(&pattern, &cwd, &tool_input);
                 }
             }
+            // RETRIEVAL GUARD — in an indexed repo with NO active manifest,
+            // block Grep/Glob/find_file_by_name and tell the agent to run
+            // `pixel targets` first. This is the hard enforcement that makes
+            // any harness behave like Devin CLI's retrieval-first discipline.
+            // Read is allowed through (reading a known file is not retrieval).
+            // `PIXEL_GUARD_RETRIEVAL=0` disables this tier.
+            if idx_root.is_some() && manifest.is_none() && !manifest_expired && is_retrieval_tool(tool) {
+                if !env_flag_off("PIXEL_GUARD_RETRIEVAL") {
+                    retrieval_guard_block(&cwd, idx_root.as_deref().unwrap());
+                }
+            }
             if let Some(m) = &manifest {
                 let p = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
                 if !allowed(&p, m) {
@@ -323,14 +334,20 @@ pub fn run() -> ! {
                 }
                 std::process::exit(0);
             }
-            // MANDATE (advisory) — indexed repo, no active manifest: note
-            // that the edit is unscoped, but let it proceed.
+            // MANDATE — indexed repo, no active manifest: block edits to
+            // existing files until `pixel targets` has been called. This
+            // enforces Devin CLI's retrieval-first discipline: no edits
+            // before scoping. `PIXEL_GUARD_EDIT=0` downgrades to advisory.
             if let Some(root) = &idx_root {
                 if exists && !is_exempt(&p, root) {
                     if manifest_expired {
                         expired_manifest_advisory(root);
                     }
-                    mandate_advisory(&p, root);
+                    if env_flag_off("PIXEL_GUARD_EDIT") {
+                        mandate_advisory(&p, root);
+                    } else {
+                        edit_guard_block(&p, root);
+                    }
                 }
             } else if exists {
                 // Unindexed git repo: suggest indexing so pixel's scoped
@@ -614,6 +631,53 @@ fn mandate_advisory_lines(abs: &Path, idx_root: &Path) -> Vec<String> {
 
 fn mandate_advisory(abs: &Path, idx_root: &Path) -> ! {
     advise(&mandate_advisory_lines(abs, idx_root));
+}
+
+/// True for tools that perform codebase retrieval (Grep, Glob, find_file_by_name).
+/// Read is NOT a retrieval tool — reading a known file path is consumption,
+/// not search. `search` is included (some agents use it for code search).
+fn is_retrieval_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "Grep" | "grep" | "Glob" | "glob" | "find_file_by_name" | "search"
+    )
+}
+
+/// Check if an env var is explicitly set to "0"/"false"/"off" (kill-switch
+/// pattern, mirroring the top-level PIXEL_TARGETS_GUARD check).
+fn env_flag_off(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.as_str(), "0" | "false" | "off"))
+        .unwrap_or(false)
+}
+
+/// Hard-block Grep/Glob/find in an indexed repo with no active manifest.
+/// Tells the agent to run `pixel targets` first — this is the enforcement
+/// that makes any harness behave like Devin CLI's retrieval-first discipline.
+fn retrieval_guard_block(_cwd: &Path, idx_root: &Path) -> ! {
+    let root = idx_root.display().to_string();
+    block(&[
+        "BLOCKED [PIXEL_RETRIEVAL_GUARD] by pixel-guard: code search attempted before retrieval scoping.".into(),
+        "In an indexed repo, you MUST run `pixel targets` before searching the codebase.".into(),
+        format!("  pixel targets \"<one-line task description>\" {root}"),
+        "That returns the P0/P1/P2 file list in <50ms. Work P0 first, then P1.".into(),
+        "After scoping, use `pixel search` / `pixel resolve` for code search — not grep/glob.".into(),
+        "Set PIXEL_GUARD_RETRIEVAL=0 to disable this check (not recommended).".into(),
+    ]);
+}
+
+/// Hard-block edits to existing files in an indexed repo with no active
+/// manifest. Enforces: no edits before `pixel targets` has been called.
+fn edit_guard_block(abs: &Path, idx_root: &Path) -> ! {
+    let rel = rel_of(abs, idx_root);
+    let root = idx_root.display().to_string();
+    block(&[
+        format!("BLOCKED [PIXEL_EDIT_GUARD] by pixel-guard: editing {rel} before retrieval scoping."),
+        "In an indexed repo, you MUST run `pixel targets` before editing existing files.".into(),
+        format!("  pixel targets \"<one-line task description>\" {root}"),
+        "That returns the P0/P1/P2 file list. If this file is in the list, the edit proceeds.".into(),
+        "Set PIXEL_GUARD_EDIT=0 to downgrade to advisory (not recommended).".into(),
+    ]);
 }
 
 /// Advisory note when the targets manifest exists but every task in it has
@@ -1162,7 +1226,7 @@ fn git_substitute_deny(sub: &str, args: &[String], root: &Path) -> Option<Vec<St
                 "Run the exact equivalent instead:".into(),
                 format!("  pixel reconcile {root_q} --strategy rebase-if-clean --push auto"),
                 "It proves a clean rebase via merge-tree before touching the worktree and reports structured conflicts when they exist.".into(),
-                "If reconcile already reported a conflict, set PIXEL_GUARD_RAW_GIT=1 in your shell profile to allow raw git.".into(),
+                "If reconcile already reported a conflict, use `pixel reconcile --into` or resolve the conflict markers manually.".into(),
             ])
         }
         _ => None,
@@ -2344,7 +2408,8 @@ mod tests {
         assert!(
             git_mutation_substitute_lines(
                 "pixel publish --files a.rs --message \"fix(guard): pass git add through\ngit add now allowed mid-sequencer\" --request-id x .",
-                Some(repo)
+                Some(repo),
+                Path::new("/repo")
             )
             .is_none(),
             "a multi-line --message mentioning `git add` must not deny pixel's own substitute"
@@ -2793,7 +2858,7 @@ mod tests {
     // --- SUBSTITUTE tier -------------------------------------------------
 
     fn sub(cmd: &str) -> Option<Vec<String>> {
-        git_mutation_substitute_lines(cmd, Some(Path::new("/repo")))
+        git_mutation_substitute_lines(cmd, Some(Path::new("/repo")), Path::new("/repo"))
     }
 
     /// Every SUBSTITUTE deny must carry the full contract: what was
@@ -2957,7 +3022,7 @@ mod tests {
 
     #[test]
     fn substitute_only_in_indexed_repo() {
-        assert!(git_mutation_substitute_lines("git commit -m x", None).is_none());
+        assert!(git_mutation_substitute_lines("git commit -m x", None, Path::new("/repo")).is_none());
     }
 
     #[test]
@@ -3118,7 +3183,7 @@ mod tests {
         let root = real_repo("add-cherrypick");
         std::fs::write(root.join(".git").join("CHERRY_PICK_HEAD"), b"abc123\n").unwrap();
         assert!(
-            git_mutation_substitute_lines("git add src/foo.rs", Some(&root)).is_none(),
+            git_mutation_substitute_lines("git add src/foo.rs", Some(&root), &root).is_none(),
             "`git add` during cherry-pick must pass through, not be substitute-denied"
         );
     }
@@ -3128,7 +3193,7 @@ mod tests {
         // No sequencer active → normal substitute deny applies.
         let root = real_repo("add-noseq");
         assert!(
-            git_mutation_substitute_lines("git add src/foo.rs", Some(&root)).is_some(),
+            git_mutation_substitute_lines("git add src/foo.rs", Some(&root), &root).is_some(),
             "`git add` without active sequencer must still be substitute-denied"
         );
     }
@@ -3164,7 +3229,7 @@ mod tests {
         let root = real_repo("commit-merge");
         std::fs::write(root.join(".git").join("MERGE_HEAD"), b"def456\n").unwrap();
         assert!(
-            git_mutation_substitute_lines("git commit -m 'resolve merge'", Some(&root)).is_none(),
+            git_mutation_substitute_lines("git commit -m 'resolve merge'", Some(&root), &root).is_none(),
             "`git commit` during merge must pass through, not be substitute-denied"
         );
     }
@@ -3174,7 +3239,7 @@ mod tests {
         let root = real_repo("commit-cherrypick");
         std::fs::write(root.join(".git").join("CHERRY_PICK_HEAD"), b"abc123\n").unwrap();
         assert!(
-            git_mutation_substitute_lines("git commit", Some(&root)).is_none(),
+            git_mutation_substitute_lines("git commit", Some(&root), &root).is_none(),
             "`git commit` during cherry-pick must pass through"
         );
     }
@@ -3183,7 +3248,7 @@ mod tests {
     fn git_commit_still_denied_without_sequencer() {
         let root = real_repo("commit-noseq");
         assert!(
-            git_mutation_substitute_lines("git commit -m 'plain'", Some(&root)).is_some(),
+            git_mutation_substitute_lines("git commit -m 'plain'", Some(&root), &root).is_some(),
             "`git commit` without active sequencer must still be substitute-denied"
         );
     }
