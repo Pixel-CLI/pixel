@@ -656,7 +656,8 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     bottles, release SBOM, homebrew-core formula,
     nightly mutants, mutants
     config, action pins, advisory ignores, clean, cancel-stale sweep, harness-grid dispatch input), the
-    pixel-retro lead-time contract (`.agents/skills/pixel-retro/test_lead_time.py`)
+    pixel-retro lead-time and adherence contracts
+    (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`)
     and the Bun Pi-policy contract (`scripts/test-pi-policy.mjs`);
   - **Lint**: `cargo clippy --all-targets` with warnings denied, then
     `cargo check` of the two reduced feature lanes (`--no-default-features`,
