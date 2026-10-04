@@ -101,6 +101,28 @@ class UnitContracts(unittest.TestCase):
                                                "Error: 401 Unauthorized"))
         self.assertTrue(host_reached.unreached("", "Not logged in · Please run /login"))
         self.assertFalse(host_reached.unreached("", "warning: slow disk"))
+        # Codex reports a stream reconnect as an `error` event before the
+        # first item; a run that then completes items reached the model, and
+        # stopping the campaign on it would throw away a valid cell.
+        self.assertFalse(host_reached.unreached("\n".join(json.dumps(e) for e in [
+            {"type": "turn.started"}, {"type": "error", "message": "Reconnecting... 1/5"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+            {"type": "turn.completed"}])))
+
+    def test_a_codex_reconnect_does_not_unanswer_a_completed_turn(self):
+        def answered(stream):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "s-a.codex.jsonl"
+                path.write_text("\n".join(json.dumps(e) for e in stream))
+                return score.load_result(path, "codex")[1]["answered"]
+        message = {"type": "item.completed", "item": {"type": "agent_message", "text": "src/lib.rs:3"}}
+        reconnect = {"type": "error", "message": "Reconnecting... 1/5"}
+        # A transient error the turn recovered from: the answer is scored.
+        self.assertTrue(answered([{"type": "turn.started"}, reconnect, message, {"type": "turn.completed"}]))
+        # An error the run never recovered from, and a failed turn, are not.
+        self.assertFalse(answered([{"type": "turn.started"}, message, {"type": "turn.completed"}, reconnect]))
+        self.assertFalse(answered([{"type": "turn.started"}, message, {"type": "turn.failed"},
+                                   {"type": "turn.completed"}]))
 
     def test_arm_order_matches_the_controlled_runner(self):
         # bun: armOrder(seed, rep, case) from eval/controlled.ts, arms
@@ -437,6 +459,15 @@ class OfflinePipeline(unittest.TestCase):
         for r in edits:
             self.assertEqual(r["verifier_passed"], r["arm"] != "baseline", r)
             self.assertEqual(r["quality"], 1.0 if r["arm"] != "baseline" else 0.0)
+
+    def test_files_changed_counts_the_agent_edits_only(self):
+        # The arm's setup (stripped AGENTS.md block, `pixel install --repo`),
+        # the warm step and the verifier's held-out tests all touch the tree;
+        # none of them is the agent's work, and counting them would differ
+        # per arm for an identical agent.
+        for r in (json.loads(p.read_text()) for p in self.results.rglob("*.run.json")):
+            agent_edits = 1 if r["scenario"] == "fx-edit" and r["arm"] != "baseline" else 0
+            self.assertEqual(r["files_changed"], agent_edits, (r["scenario"], r["arm"], r["cli"], r["rep"]))
 
     def test_scores_carry_metrics_and_unknown_usage_stays_unknown(self):
         self.assertEqual(len(self.rows), 54)

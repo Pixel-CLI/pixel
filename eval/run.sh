@@ -490,6 +490,9 @@ run_one() {  # rep scenario cli arm position
     warm_ms=$(( $(now_ms) - w0 ))
   fi
   log "run  rep=$rep scenario=$scenario arm=$arm cli=$cli position=$pos"
+  # The arm's own setup (AGENTS.md block, stripped skill, install files)
+  # already shows in `git status`: count only what the agent run adds.
+  local status_before; status_before="$(git -C "$wt" status --porcelain | LC_ALL=C sort)"
   local t0 t1 rc=0
   t0=$(now_ms)
   run_cli "$cli" "$arm" "$scenario" "$out" "$turns" || rc=$?
@@ -507,10 +510,12 @@ run_one() {  # rep scenario cli arm position
   fi
   # Pixel's own action log is a second witness of what the agent ran.
   [ -f "$wt/.pixel/actions.jsonl" ] && cp "$wt/.pixel/actions.jsonl" "${out%.jsonl}.actions.jsonl" || true
+  # Before the verifier, which copies its held-out tests into the tree.
+  local changed
+  changed="$(LC_ALL=C comm -13 <(printf '%s\n' "$status_before") <(git -C "$wt" status --porcelain | LC_ALL=C sort) | grep -c . || true)"
   if [ "$mode" = edit ]; then
     run_verifier "$scenario" "$wt" "$out" "$target"
   fi
-  local changed; changed="$(git -C "$wt" status --porcelain | wc -l | tr -d ' ')"
   record "$run" schema_version:=1 scenario="$scenario" arm="$arm" cli="$cli" rep:="$rep" \
     position:="$pos" order_seed="$ORDER_SEED" commit="$commit" eval_head="$EVAL_HEAD" mode="$mode" \
     model="$(cli_model "$cli")" cli_version="$(version_of "$cli")" pixel_version="$PIXEL_VERSION" \

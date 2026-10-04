@@ -11,8 +11,9 @@ produced by a reached model.
 
 - Claude (`stream-json`): a `result` event whose `terminal_reason` is
   `api_error`, or an error result whose text starts with "Not logged in".
-- Codex (`exec --json`): an `error` or `turn.failed` event raised before any
-  item completed.
+- Codex (`exec --json`): an `error` or `turn.failed` event, with no item
+  completed anywhere in the run (a transient `error` such as a stream
+  reconnect, followed by completed items, is a reached model).
 - Either host: stderr naming a missing login or a 401.
 
 Usage: host_reached.py <out.jsonl> [<stderr file>]
@@ -38,7 +39,7 @@ def events(text):
 def unreached(out_text, err_text=""):
     if STDERR_FAILURE.search(err_text):
         return True
-    item_completed = False
+    item_completed = failed = False
     for event in events(out_text):
         kind = event.get("type")
         if kind == "result":
@@ -48,9 +49,9 @@ def unreached(out_text, err_text=""):
                 return True
         elif kind == "item.completed":
             item_completed = True
-        elif kind in ("error", "turn.failed") and not item_completed:
-            return True
-    return False
+        elif kind in ("error", "turn.failed"):
+            failed = True
+    return failed and not item_completed
 
 
 def read(path):

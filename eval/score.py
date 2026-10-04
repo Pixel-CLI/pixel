@@ -282,7 +282,7 @@ def load_result(path: Path, cli: str):
     answer, metrics = "", {}
     if cli == "codex":
         events = events_of(path)
-        texts, turns, usage_seen, turn_failed = [], 0, False, False
+        texts, turns, usage_seen, turn_failed, stream_error = [], 0, False, False, False
         totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
         for ev in events:
             if ev.get("type") == "item.completed":
@@ -291,17 +291,23 @@ def load_result(path: Path, cli: str):
                     texts.append(item["text"])
             elif ev.get("type") == "turn.completed":
                 turns += 1
+                # A completed turn recovers from an earlier transient
+                # `error` event (a stream reconnect), not from turn.failed.
+                stream_error = False
                 usage = ev.get("usage")
                 if isinstance(usage, dict):
                     usage_seen = True
                     for key in totals:
                         totals[key] += usage.get(key) or 0
-            elif ev.get("type") in ("turn.failed", "error"):
+            elif ev.get("type") == "turn.failed":
                 turn_failed = True
+            elif ev.get("type") == "error":
+                stream_error = True
         answer = "\n\n".join(texts)
         # codex emits the message and the turn completion as separate events:
         # an answer without a completed turn is an interrupted trial.
-        metrics = {"answered": bool(answer.strip()) and turns >= 1 and not turn_failed,
+        metrics = {"answered": bool(answer.strip()) and turns >= 1 and not turn_failed
+                               and not stream_error,
                    "turns": turns or None,
                    "input_tokens": totals["input_tokens"] if usage_seen else None,
                    "gen_tokens": totals["output_tokens"] if usage_seen else None,
