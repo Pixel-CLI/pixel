@@ -566,20 +566,19 @@ mod tests {
         // Only the skip row (digit 3, or arrows onto it) skips. A bare
         // Enter chooses the highlighted row — picker's semantics, not the
         // old numbered prompt's "unknown means skip".
-        for answers in ["3\n"] {
-            let mut output = Vec::new();
-            install_step_with(
-                true,
-                &mut std::io::Cursor::new(answers.as_bytes().to_vec()),
-                &mut output,
-                |_| panic!("a skipped choice must not store a URL"),
-                |_| panic!("a skipped choice must not store a key"),
-                || panic!("a skipped choice must not remove SearXNG"),
-                &mut FakeEcho::live(),
-                &mut FakeRaw,
-            )
-            .unwrap();
-        }
+        let answers = "3\n";
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(answers.as_bytes().to_vec()),
+            &mut output,
+            |_| panic!("a skipped choice must not store a URL"),
+            |_| panic!("a skipped choice must not store a key"),
+            || panic!("a skipped choice must not remove SearXNG"),
+            &mut FakeEcho::live(),
+            &mut FakeRaw,
+        )
+        .unwrap();
         let mut output = Vec::new();
         install_step_with(
             true,
