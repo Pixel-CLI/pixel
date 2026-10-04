@@ -18,12 +18,20 @@ on:
   schedule:
     - cron: '*/10 * * * *'
 
+# Read-only at the top: the write scope belongs to the one job that cancels
+# runs, so a job added later does not inherit it (OpenSSF Scorecard
+# Token-Permissions).
 permissions:
-  actions: write
+  contents: read
 
 jobs:
   cancel:
     runs-on: ubuntu-26.04
+    permissions:
+      # actions/checkout of main.
+      contents: read
+      # List runs and POST /actions/runs/{id}/cancel.
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
