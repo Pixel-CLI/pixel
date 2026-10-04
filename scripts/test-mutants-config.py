@@ -645,11 +645,54 @@ class ShardedMutantsGate(unittest.TestCase):
             )
             return result, outputs
 
+    def run_gate_raw(self, listed: int, *extra: str, shards=()):
+        """`run_gate` without reading `github-output`: for a gate that exits
+        before writing it (a malformed `--runners` file)."""
+        with tempfile.TemporaryDirectory(prefix="pixel-mutants-shards-") as tmp:
+            root = Path(tmp)
+            (root / "pr.diff").write_text(self.DIFF)
+            (root / "list.txt").write_text(self.listing(listed))
+            for name, summaries, *logs in shards:
+                self.write_shard(root / "shards", name, *summaries, logs=logs[0] if logs else None)
+            output = root / "github-output"
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(GATE),
+                    "--diff",
+                    str(root / "pr.diff"),
+                    "--list",
+                    str(root / "list.txt"),
+                    "--github-output",
+                    str(output),
+                    *[a.replace("{root}", tmp) for a in extra],
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
     def shards_for(self, listed: int) -> list[str]:
         result, outputs = self.run_gate(listed)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(outputs["mutants"], str(listed))
         return json.loads(outputs["shards"])
+
+    def matrix_for(self, listed: int, *extra: str, pool: str | None = None):
+        """The gate's `matrix` output as the workflow reads it.
+
+        `pool` becomes the `--runners` file's content: the
+        PIXEL_MUTANTS_SHARD_RUNNERS variable the plan job passes on.
+        """
+        with tempfile.TemporaryDirectory(prefix="pixel-mutants-matrix-") as tmp:
+            extra = list(extra)
+            if pool is not None:
+                runners = Path(tmp) / "runners.json"
+                runners.write_text(pool)
+                extra += ["--runners", str(runners)]
+            result, outputs = self.run_gate(listed, *extra)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(outputs["matrix"])["include"]
 
     def test_a_diff_without_mutants_starts_no_shard(self):
         """Every shard pays a baseline build, so nothing to mutate means no job."""
@@ -678,6 +721,59 @@ class ShardedMutantsGate(unittest.TestCase):
     def test_a_huge_diff_does_not_exceed_the_concurrent_job_budget(self):
         """A free account runs 20 jobs at once; the CI workflow needs some of them."""
         self.assertLessEqual(len(self.shards_for(10_000)), 20)
+
+    def test_the_matrix_pairs_every_shard_with_the_default_runner(self):
+        """No PIXEL_MUTANTS_SHARD_RUNNERS: every shard stays on GitHub's image."""
+        include = self.matrix_for(25)
+        self.assertEqual(
+            include,
+            [
+                {"shard": f"{k}/3", "runner": "ubuntu-26.04"} for k in range(3)
+            ],
+        )
+
+    def test_the_pool_is_dealt_round_robin_one_host_per_shard(self):
+        """A pool of two spreads the matrix evenly, shard k taking pool k % len.
+
+        Each shard sits on exactly one host: its mutants are consecutive
+        slices, and a host holds no shard half of the list.
+        """
+        include = self.matrix_for(21, pool='["a2","b1"]')
+        self.assertEqual(
+            [entry["runner"] for entry in include],
+            ["a2", "b1", "a2"],
+        )
+        self.assertEqual(
+            [entry["shard"] for entry in include], ["0/3", "1/3", "2/3"]
+        )
+
+    def test_a_pool_larger_than_the_matrix_leaves_no_idle_entry(self):
+        """More hosts than shards: the include list stays shard-sized."""
+        include = self.matrix_for(11, pool='["a2","b1","c3","d4"]')
+        self.assertEqual(
+            [entry["runner"] for entry in include], ["a2", "b1"]
+        )
+
+    def test_an_empty_or_blank_pool_falls_back_to_the_default(self):
+        """The variable set but empty must not ask GitHub for a runner with
+        empty labels: it would queue forever."""
+        for pool in ("", "[]", '["", "  "]'):
+            with self.subTest(pool=pool):
+                include = self.matrix_for(2, pool=pool)
+                self.assertEqual(
+                    [entry["runner"] for entry in include], ["ubuntu-26.04"]
+                )
+
+    def test_a_malformed_pool_fails_the_plan_loudly(self):
+        """A mistyped variable must not silently route everything to the
+        default: the plan job names the bad value and stops the run."""
+        with tempfile.TemporaryDirectory(prefix="pixel-mutants-bad-pool-") as tmp:
+            runners = Path(tmp) / "runners.json"
+            runners.write_text('{"a2": 8}')
+            result = self.run_gate_raw(2, "--runners", str(runners))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("::error title=Bad PIXEL_MUTANTS_SHARD_RUNNERS::", result.stdout)
+        self.assertIn("expected a JSON array of runs-on values", result.stdout)
 
     def test_every_listed_mutant_caught_or_unviable_passes(self):
         result, _ = self.run_gate(
