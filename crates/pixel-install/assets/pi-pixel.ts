@@ -164,7 +164,7 @@ const searchRead = (args: string[]): boolean => readFlags(args, [
 const pixelReadOrRecovery = (args: string[]): boolean => {
   if (args[0] === "config") return args.length === 1 || args.length === 2 && ["policy", "metrics", "--help", "-h"].includes(args[1]);
   if (["task", "task-state"].includes(args[0])) return ["begin", "contract", "prepare", "verify", "review", "finish", "route", "cancel", "recover", "status", "events", "replay", "--help", "-h"].includes(args[1]);
-  return ["status", "doctor", "build-index", "scope-task", "find-code", "find-symbol", "search-content", "search-meaning", "impact", "pack-context", "what-changed", "review-changes", "repo-state", "list-areas", "list-flows", "who-calls", "capabilities", "--help", "--version"].includes(args[0]);
+  return ["status", "doctor", "build-index", "scope-task", "execution-brief", "find-code", "find-symbol", "search-content", "search-meaning", "impact", "pack-context", "what-changed", "review-changes", "repo-state", "list-areas", "list-flows", "who-calls", "capabilities", "--help", "--version"].includes(args[0]);
 };
 const sortRead = (args: string[]): boolean => readFlags(args, ["-r", "-n", "-u", "-f", "-b", "-d", "-g", "-h", "-M", "-V", "-s", "-z", "-c", "-C", "--reverse", "--numeric-sort", "--unique", "--ignore-case", "--stable", "--check", "--zero-terminated"], ["--key=", "--field-separator="]);
 const uniqRead = (args: string[]): boolean => {
@@ -307,6 +307,30 @@ function latestUserText(ctx: any) {
   return Array.isArray(content)
     ? content.filter((part: any) => part.type === "text").map((part: any) => part.text).join(" ")
     : "";
+}
+
+function renderExecutionRoute(stdout: string): string | null {
+  try {
+    const route = JSON.parse(stdout)?.route;
+    if (!route || typeof route.first_command !== "string" || !route.first_command.trim()
+      || !Array.isArray(route.steps) || route.steps.length < 3) return null;
+    const steps = route.steps.map((step: any) => {
+      const order = Number(step.order);
+      const action = typeof step.action === "string" ? step.action : "step";
+      const command = typeof step.command === "string" ? step.command : "";
+      const limit = Number(step.max_lines);
+      return `${order}. ${action}${Number.isFinite(limit) && limit > 0 ? ` (maximum ${limit} lines)` : ""}: ${command}`;
+    });
+    const retry = route.retry?.command
+      ? `\nRetry only if the first result is unresolved, capped, or irrelevant: ${route.retry.command}` : "";
+    const fallback = route.fallback?.command
+      ? `\nAfter two nonconverging Pixel calls, use: ${route.fallback.command}` : "";
+    const unavailable = typeof route.on_unavailable === "string"
+      ? `\nIf Pixel is unavailable: ${route.on_unavailable}` : "";
+    return `DETERMINISTIC PIXEL ROUTE (index is a lower bound):\n${steps.join("\n")}${retry}${fallback}${unavailable}`;
+  } catch {
+    return null;
+  }
 }
 
 function authorized(action: Action, ctx: any) {
@@ -725,12 +749,18 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
     // semantics so the native tool stays authoritative. `powershell` is
     // out of scope (it is absent from `classify` on the Rust side).
     const decision = enforceLeafDecision(command, root);
+    if (decision?.operation === "search-content" && state.pixelCalled) {
+      return { kind: "exception", reason: "native search fallback after Pixel retrieval" };
+    }
     if (decision) return { kind: "blocked", reason: decision.reason, operation: decision.operation };
     return { kind: "exception", reason: "native command or unsupported shell syntax" };
   }
   if (["grep", "find", "ls", "glob", "list_dir", "grep_search", "file_search"].includes(tool)) {
     const path = input.path ?? input.directory ?? input.target_directory;
     if (typeof path === "string" && !inRepo(root, path)) return { kind: "exception", reason: "outside repository" };
+    if (state.pixelCalled && ["grep", "grep_search"].includes(tool)) {
+      return { kind: "exception", reason: "native search fallback after Pixel retrieval" };
+    }
     return { kind: "blocked", reason: "Use the pixel tool for repository retrieval" };
   }
   return { kind: "exception", reason: "unknown tool capability" };
@@ -962,21 +992,24 @@ export default function activate(pi: ExtensionAPI) {
       // context calls and never fails the bootstrap. Both are quiet probes
       // (`runAsync` passes `--metrics off`), like main's other bootstrap reads.
       const intent = classifyIntent(root, prompt);
+      const routeAvailable = capabilities().commands.has("execution-brief");
+      const contextOperation = routeAvailable ? "execution-brief" : "scope-task";
       const [scope, repo] = (await Promise.all([
-        runAsync(root, ["scope-task", prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"]),
+        runAsync(root, [contextOperation, prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"]),
         runAsync(root, ["repo-state", "--json"]),
       ])).map((text) => text.trim());
       const intentText = await intent;
       for (const text of [scope, repo]) rememberPaths(parseEvidence(text), resolvedPaths, root);
+      const routeText = routeAvailable ? renderExecutionRoute(scope) : null;
       state.pixelHealthy = true;
-      audit(root, "bootstrap", "scope-task and repo-state injected", { graph_present: index.graph?.present });
+      audit(root, "bootstrap", `${contextOperation} and repo-state injected`, { graph_present: index.graph?.present, route_available: Boolean(routeText) });
       const guidance = policyFor(root) === "enforce"
         ? "Enforcement is enabled for supported native retrieval. Call the pixel tool before editing; compositions and unsupported syntax retain native behavior."
         : "Use these targets as suggestions. Native tools remain available; `pixel config policy enforce` opts into retrieval enforcement, `pixel config policy off` disables policy checks.";
       return {
         message: {
           customType: "pixel-bootstrap", display: false,
-          content: `PIXEL TASK CONTEXT (deterministic, from pixel scope-task + repo-state):\n\n${scope.slice(0, BOOTSTRAP_BUDGET)}${scope.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}${intentText ? `\n\n${intentText}` : ""}`,
+          content: `PIXEL TASK CONTEXT (deterministic, from pixel ${contextOperation} + repo-state):\n\n${routeText ?? "Pixel execution route unavailable; continue normally and keep retrieval non-blocking."}\n\n${scope.slice(0, BOOTSTRAP_BUDGET)}${scope.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}${intentText ? `\n\n${intentText}` : ""}`,
         },
       };
     } catch (error) {

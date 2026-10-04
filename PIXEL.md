@@ -50,14 +50,16 @@ Pixel does not choose the next action.
 | direct edges only | `pixel who-calls '<fn>' --role callers` |
 | past sessions, deleted code | `pixel recall search '<token>' --since 30d` · `pixel recall ask '<topic>'` |
 | what already differs in this tree | `pixel what-changed` · `pixel review-changes` · `pixel review-gate` (deterministic findings: secrets, changed symbols read by untouched callers) |
+| task-specific first command and recovery route | `pixel execution-brief '<task>' --json` — one populated first command, one alternate query, a bounded read, fallback, and minimal validation |
 | before multi-file edits / "it worked before" / branch sync | `pixel scope-task '<task>'` · `pixel plan-rollback '<problem>'` · `pixel sync-branch` |
 | index freshness | `pixel status` |
 
 ## Reading results
 
 - Result markers: `complete` = nothing truncated; `capped` = more may exist,
-  narrow the query; `unresolved` = nothing found — try `pixel find-code` or
-  fall back to grep.
+  narrow the query; `unresolved` = nothing found. Follow the execution route:
+  try its alternate Pixel query once, then use its native fallback after two
+  nonconverging Pixel calls. A prior-call count or warning alone is not a miss.
 - Graph answers carry an `epistemics` object, and `closed_world` is always
   false: "0 callers" means "none found", not "no callers exist". Verify
   before claiming a symbol is uncalled.
@@ -94,3 +96,12 @@ Estimates, not measurements: `sequential-v1` computes time savings from a
 per-step round trip (default `round_trip_ms` is 2000,
 `PIXEL_METRICS_ROUND_TRIP_MS` overrides); zero or negative values are valid —
 relay as emitted.
+
+## Harness verification
+
+Six-harness live verification uses the evidence matrix template at
+`docs/harness-evidence-matrix.md`. Challenge Claude, Codex, Pi,
+agy/Antigravity, OpenCode, and Devin with the same read-only task in a
+Herdr-managed pane; record pane identity, first Pixel command, empty-fallback
+behavior, read range (≤40 lines), metrics line visibility, evidence class
+(direct/self-report/inference/unknown), and any gap.

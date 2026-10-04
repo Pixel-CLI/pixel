@@ -1,0 +1,1 @@
+**install:** `pixel install`'s Antigravity step reads `agy plugin list` before registering the CLI plugin; it now drives that real-CLI contract with the imports JSON an installed `agy` answers with, so a present CLI reports "registered it with agy" and an absent one defers the registration instead of failing the deploy. ([#629](https://github.com/Pixel-CLI/pixel/pull/629))
