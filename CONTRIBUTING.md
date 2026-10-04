@@ -8,6 +8,7 @@ checklist as the contract for your pull request.
 
 - Architecture, crate map, wire contract: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Security model and vulnerability reporting: [SECURITY.md](SECURITY.md)
+- How we treat each other, and how to report a problem: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - Agent rules for this repo, whatever the tool: [AGENTS.md](AGENTS.md) (the
   loops) and [`.agents/rules/`](.agents/rules/) (scoped rules: mutation-gate-proof
   code, test hygiene, long campaigns, the lint idioms) and [`.agents/skills/`](.agents/skills/)
