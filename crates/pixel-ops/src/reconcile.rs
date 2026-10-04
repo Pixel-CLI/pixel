@@ -2277,3 +2277,6 @@ mod tests {
         assert_eq!(git(&["log", "-1", "--format=%s", "HEAD~1"]), "main line");
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

@@ -409,3 +409,6 @@ mod tests {
         assert_eq!(out.sessions[0].turns.len(), 2, "both readable records land");
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

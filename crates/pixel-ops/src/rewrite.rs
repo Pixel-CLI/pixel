@@ -640,3 +640,6 @@ fn rewrite_input_hash(opts: &RewriteOptions) -> String {
         opts.allow_default_branch,
     ))
 }
+
+#[cfg(test)]
+mod contract_tests;
