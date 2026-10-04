@@ -142,7 +142,7 @@ pub fn target_question(op: Op, elements: &[Element], budget: usize) -> Option<Ta
 /// results on every reachable input, so no test can kill them and the
 /// three budget tests pin the observable contract instead.
 #[cfg_attr(test, mutants::skip)]
-fn bound_operation_labels(op_labels: Vec<String>, budget: usize) -> Vec<String> {
+fn bound_operation_labels(mut op_labels: Vec<String>, budget: usize) -> Vec<String> {
     if op_labels.len() > budget {
         let mut bounded: Vec<String> = op_labels
             .iter()
