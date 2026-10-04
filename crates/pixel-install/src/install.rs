@@ -1127,7 +1127,10 @@ fn install_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Instal
             reason: "hooks is not an object".into(),
         })?;
     let guard = serde_json::json!({
-        "command": format!("{} run-hook guard", crate::routing::quoted_executable(exe)),
+        "command": format!(
+            "{} run-hook guard --provider cursor",
+            crate::routing::quoted_executable(exe)
+        ),
         "matcher": crate::config::GUARD_MATCHER,
     });
     let metrics = serde_json::json!({

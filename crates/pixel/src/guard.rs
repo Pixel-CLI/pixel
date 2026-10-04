@@ -1187,6 +1187,15 @@ fn enforce_deny(provider: Provider, reason: &str) -> Value {
         // Antigravity and Devin both take a top-level decision envelope.
         Provider::Antigravity => serde_json::json!({"decision": "deny", "reason": reason}),
         Provider::Devin => serde_json::json!({"decision": "block", "reason": reason}),
+        // Cursor's permission hooks read `permission`/`user_message`/
+        // `agent_message`; `additional_context` is supported on the deny
+        // path so the model also learns why the call was blocked.
+        Provider::Cursor => serde_json::json!({
+            "permission": "deny",
+            "user_message": reason,
+            "agent_message": reason,
+            "additional_context": reason,
+        }),
         _ => serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -6993,6 +7002,20 @@ mod tests {
         // Shown, but no record matches: nothing to finalize.
         shown["tool_input"] = serde_json::json!({"command": "pixel impact other.rs"});
         assert_eq!(metrics_hook_response(Some(Provider::Claude), &shown), None);
+    }
+
+    #[test]
+    fn cursor_deny_uses_the_permission_envelope_not_the_claude_shape() {
+        let response = enforce_deny(Provider::Cursor, "reads require a bound");
+        assert_eq!(response["permission"], "deny");
+        assert!(
+            response["agent_message"]
+                .as_str()
+                .unwrap()
+                .contains("pixel policy: reads require a bound")
+        );
+        assert_eq!(response["additional_context"], response["agent_message"]);
+        assert!(response.get("hookSpecificOutput").is_none());
     }
 
     #[test]
