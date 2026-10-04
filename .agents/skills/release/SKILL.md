@@ -25,7 +25,7 @@ jobs, each needing the previous one:
 Three facts shape everything below:
 
 - **The macOS binary is first run by `smoke`.** `cross-build.yml` builds
-  all three release targets on every push to `main` with release.yml's exact
+  all three release targets on every push to `main` with release-build.yml's exact
   commands, so a green `main` proves each lane compiles and links; nothing
   before `smoke` runs the darwin binary. The same job saves the per-target
   cache (`release-<target>`) that the tag's `build` job restores, and the

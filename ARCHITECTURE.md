@@ -649,9 +649,12 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 - Other workflows: `mutants.yml` (the `Mutants in diff` gate on every pull
   request touching `crates/`, sharded), `mutants-nightly.yml` (a whole-tree
   rotation), `cross-build.yml` (the three release lanes), `release.yml`
-  (which writes the formula and the Linux bottles with
-  `scripts/homebrew-formula.py`, and the homebrew-core formula with
-  `scripts/homebrew-core-formula.py`), `homebrew-core.yml` (that formula
+  (on a tag: `verify`, then publication, the tap and the post-publish smoke
+  test) and `release-build.yml`, the reusable workflow it calls to build the
+  archives, write the formula and the Linux bottles with
+  `scripts/homebrew-formula.py` and the homebrew-core formula with
+  `scripts/homebrew-core-formula.py`, and sign their provenance (it is the
+  attestation's signer, which makes the provenance SLSA Build Level 3), `homebrew-core.yml` (that formula
   built from source, `brew test`, `brew audit --strict --new`, on macOS and
   Linux),
   `release-prepare-scope.yml` and `pages.yml` (the website).
