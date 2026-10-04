@@ -205,8 +205,12 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
             format!("{pointer}\n\n{context}")
         };
     }
+    // A prompt that asks about the Pixel tool itself carries the operation it
+    // names as the first guidance line, so the agent consults the CLI instead
+    // of answering about Pixel from memory.
+    let pixel_note = crate::pixel_question::pixel_question_note(&payload.prompt);
     if matches!(provider, Some(crate::guard::Provider::Devin)) {
-        context = render_devin_context(&context);
+        context = render_devin_context(&context, pixel_note.as_deref());
     }
     // Codex reads no SessionStart prompt of its own for this contract, so
     // every prompt in an *indexed* repository carries the Pixel-first
@@ -214,7 +218,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // commands there would build a full index instead of answering (the
     // sub-agent prompt carries the same rule), so the guidance stays quiet.
     if matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
-        context = render_codex_context(&context);
+        context = render_codex_context(&context, pixel_note.as_deref());
     }
     // Claude Code reads no per-turn mandate of its own for this contract, so a
     // real Claude host in an *indexed* repository carries the Pixel-first
@@ -222,7 +226,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // Claude config (Devin reading `~/.claude/settings.json` verbatim) from
     // prepending a second guidance over Devin's own.
     if claude_host && indexed {
-        context = render_claude_context(&context);
+        context = render_claude_context(&context, pixel_note.as_deref());
     }
     if !context.is_empty() {
         emit_context(&context, event_name);
@@ -347,27 +351,42 @@ fn render_legacy_context(targets: Option<Value>, boundary: Option<&BoundaryEvent
     notes.join("\n\n")
 }
 
-fn render_devin_context(context: &str) -> String {
-    if context.is_empty() {
-        DEVIN_PIXEL_GUIDANCE.to_string()
-    } else {
-        format!("{DEVIN_PIXEL_GUIDANCE}\n\n{context}")
+/// Prepend `pixel_note` (the explicit-operation pointer for a question about
+/// the tool itself) ahead of the provider's generic guidance, when the prompt
+/// names Pixel; the note is the first thing the agent reads, so the named
+/// operation is the first-class retrieval step instead of the two-command
+/// default.
+fn prepend_note(note: Option<&str>, guidance: &str) -> String {
+    match note {
+        Some(note) => format!("{note}\n\n{guidance}"),
+        None => guidance.to_string(),
     }
 }
 
-fn render_codex_context(context: &str) -> String {
+fn render_devin_context(context: &str, pixel_note: Option<&str>) -> String {
+    let guidance = prepend_note(pixel_note, DEVIN_PIXEL_GUIDANCE);
     if context.is_empty() {
-        CODEX_PIXEL_GUIDANCE.to_string()
+        guidance
     } else {
-        format!("{CODEX_PIXEL_GUIDANCE}\n\n{context}")
+        format!("{guidance}\n\n{context}")
     }
 }
 
-fn render_claude_context(context: &str) -> String {
+fn render_codex_context(context: &str, pixel_note: Option<&str>) -> String {
+    let guidance = prepend_note(pixel_note, CODEX_PIXEL_GUIDANCE);
     if context.is_empty() {
-        CLAUDE_PIXEL_GUIDANCE.to_string()
+        guidance
     } else {
-        format!("{CLAUDE_PIXEL_GUIDANCE}\n\n{context}")
+        format!("{guidance}\n\n{context}")
+    }
+}
+
+fn render_claude_context(context: &str, pixel_note: Option<&str>) -> String {
+    let guidance = prepend_note(pixel_note, CLAUDE_PIXEL_GUIDANCE);
+    if context.is_empty() {
+        guidance
+    } else {
+        format!("{guidance}\n\n{context}")
     }
 }
 
@@ -906,7 +925,7 @@ mod tests {
 
     #[test]
     fn devin_context_requires_pixel_before_retrieval_and_keeps_fallback_open() {
-        let context = render_devin_context("task targets");
+        let context = render_devin_context("task targets", None);
 
         assert!(context.starts_with("Pixel-first retrieval"));
         assert!(context.contains("before any repository search, file read"));
@@ -924,7 +943,7 @@ mod tests {
 
     #[test]
     fn codex_context_requires_pixel_evidence_on_every_repository_prompt() {
-        let context = render_codex_context("task targets");
+        let context = render_codex_context("task targets", None);
         assert!(context.starts_with("Pixel-first retrieval"));
         assert!(context.contains("for this repository prompt"));
         assert!(context.contains("Do not answer from memory, a generic web search"));
@@ -937,12 +956,15 @@ mod tests {
             "the guidance fails open, like Devin's"
         );
         assert!(context.ends_with("task targets"));
-        assert_eq!(render_codex_context(""), CODEX_PIXEL_GUIDANCE.to_string());
+        assert_eq!(
+            render_codex_context("", None),
+            CODEX_PIXEL_GUIDANCE.to_string()
+        );
     }
 
     #[test]
     fn claude_context_requires_pixel_first_retrieval_on_every_indexed_prompt() {
-        let context = render_claude_context("task targets");
+        let context = render_claude_context("task targets", None);
         assert!(context.starts_with("Pixel-first retrieval"));
         assert!(context.contains("this is a pixel-indexed repository"));
         assert!(context.contains("pixel search-content -F"));
@@ -960,7 +982,38 @@ mod tests {
             "the guidance fails open, like Devin's and Codex's"
         );
         assert!(context.ends_with("task targets"));
-        assert_eq!(render_claude_context(""), CLAUDE_PIXEL_GUIDANCE.to_string());
+        assert_eq!(
+            render_claude_context("", None),
+            CLAUDE_PIXEL_GUIDANCE.to_string()
+        );
+    }
+
+    #[test]
+    fn a_pixel_question_makes_the_named_operation_the_first_guidance_line() {
+        let note =
+            crate::pixel_question::pixel_question_note("how do i use pixel find-code").unwrap();
+        for context in [
+            render_devin_context("task targets", Some(&note)),
+            render_codex_context("task targets", Some(&note)),
+            render_claude_context("task targets", Some(&note)),
+        ] {
+            assert!(context.starts_with("[PIXEL:TASK_CONTEXT]"), "{context}");
+            assert!(context.contains("`pixel find-code`"), "{context}");
+            assert!(
+                context.contains("Pixel-first retrieval"),
+                "the generic guidance still follows the explicit pointer"
+            );
+            assert!(context.ends_with("task targets"), "{context}");
+        }
+    }
+
+    #[test]
+    fn an_unrelated_prompt_keeps_the_generic_guidance_without_a_pixel_note() {
+        let note = crate::pixel_question::pixel_question_note("fix the login bug");
+        assert_eq!(note, None);
+        let context = render_codex_context("task targets", None);
+        assert!(context.starts_with("Pixel-first retrieval"), "{context}");
+        assert!(!context.contains("[PIXEL:TASK_CONTEXT]"), "{context}");
     }
     use std::process::Command;
 

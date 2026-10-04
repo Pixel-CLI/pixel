@@ -45,6 +45,7 @@ mod guard;
 mod index_cmd;
 mod operation_metrics;
 mod overview_intent;
+mod pixel_question;
 mod plan_cmd;
 mod plan_state;
 mod post_compaction;
