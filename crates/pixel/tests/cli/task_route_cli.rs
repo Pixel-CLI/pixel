@@ -318,7 +318,12 @@ fn task_route_should_recover_frozen_classifier_telemetry_without_reinference() {
 
 #[test]
 fn task_route_should_share_one_inflight_prediction_between_processes() {
-    let server = Classifier::start(Duration::from_millis(150), false);
+    // The route allows the classifier 300ms minus what elapsed before the call
+    // (task_route.rs), so the fixture delay must leave runner-load margin
+    // inside that budget or the first process falls back and the test flakes
+    // (shard 1 of run 37213453475). 60ms still spans a second process spawn;
+    // if it misses, the lock and cache still yield one shared request.
+    let server = Classifier::start(Duration::from_millis(60), false);
     let (root, home, task) = fixture("concurrent", &server.base, true, "local");
     let first = command(&root, &home, &task, "gates_classifier")
         .spawn()

@@ -27,11 +27,17 @@ enum Key {
     EscapeStart,
     /// A byte arrived after `ESC [` that is not `A` or `B`.
     EscapeOther,
+    /// A byte inside a CSI sequence that is neither a final byte nor one of
+    /// the keys the picker cares about (a parameter or intermediate byte).
+    EscapeMore,
 }
 
 /// Byte-at-a-time decoder: arrows are the three-byte sequence `ESC [ A/B`,
 /// digits and Enter are single bytes. State lives in `escape`, so a partial
-/// sequence never consumes the following keystroke.
+/// sequence never consumes the following keystroke. A CSI sequence keeps
+/// consuming while it carries parameter or intermediate bytes
+/// (`0x20..=0x3f`), so a modified key like Ctrl-Up (`ESC [ 1 ; 5 A`) never
+/// leaks its `5` as a digit.
 struct Keys {
     /// 0 = idle, 1 = saw ESC, 2 = saw `ESC [` (a CSI sequence).
     escape: u8,
@@ -54,11 +60,23 @@ impl Keys {
                 }
             }
             2 => {
-                self.escape = 0;
                 match byte {
-                    b'A' => Key::Up,
-                    b'B' => Key::Down,
-                    _ => Key::EscapeOther,
+                    // A parameter or intermediate byte continues the CSI
+                    // sequence (`ESC [ 1 ; 5 A`); staying in state 2 keeps
+                    // its digits from decoding as an option choice.
+                    0x20..=0x3f => Key::EscapeMore,
+                    b'A' => {
+                        self.escape = 0;
+                        Key::Up
+                    }
+                    b'B' => {
+                        self.escape = 0;
+                        Key::Down
+                    }
+                    _ => {
+                        self.escape = 0;
+                        Key::EscapeOther
+                    }
                 }
             }
             _ => match byte {
@@ -316,6 +334,34 @@ mod tests {
         assert_eq!(
             keys(b"\x1bx2"),
             vec![Key::EscapeStart, Key::EscapeOther, Key::Digit(2)]
+        );
+    }
+
+    #[test]
+    fn a_parameterised_csi_sequence_never_leaks_its_digits() {
+        // Ctrl-Up is `ESC [ 1 ; 5 A`: the parameter bytes stay inside the
+        // sequence and the trailing `1` decodes as a digit, not the `5`.
+        assert_eq!(
+            keys(b"\x1b[1;5A1"),
+            vec![
+                Key::EscapeStart,
+                Key::EscapeStart,
+                Key::EscapeMore,
+                Key::EscapeMore,
+                Key::EscapeMore,
+                Key::Up,
+                Key::Digit(1)
+            ]
+        );
+        // Delete is `ESC [ 3 ~`: no digit escapes the sequence either.
+        assert_eq!(
+            keys(b"\x1b[3~"),
+            vec![
+                Key::EscapeStart,
+                Key::EscapeStart,
+                Key::EscapeMore,
+                Key::EscapeOther
+            ]
         );
     }
 
