@@ -46,7 +46,14 @@ jobs:
           HARNESS_INTERACTIVE_MAX: "300"
           PR: ${{ inputs.pr }}
           PROMPT: ${{ inputs.prompt }}
+        # `pr` names the pull request the script comments on and pushes media
+        # for: refuse anything but a number before it reaches gh or git. The
+        # prompt is free text by design; it stays in an env var and the
+        # script shell-quotes it (printf %q) before use.
         run: |
+          case "$PR" in
+            '' | *[!0-9]*) echo "::error::pr must be a pull request number, got '$PR'"; exit 1 ;;
+          esac
           scripts/harness-sandbox-shoot.sh "$PR" "$PROMPT"
       - name: Post the run summary
         if: always()

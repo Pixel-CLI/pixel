@@ -698,7 +698,8 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 
 `pixel check-release <version|tag> [--repo <path>] [--json]`
 (the `pixel-release` crate) runs in the first job of
-`.github/workflows/release.yml` (`verify`, before its `cargo test`) and is a
+`.github/workflows/release.yml` (`verify`, before `cargo deny check` and its
+`cargo test`) and is a
 maintainer's last local step: it
 reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
 `CHANGELOG.md` and reports three checks (`cli-version`, `cargo-lock`,
