@@ -402,6 +402,89 @@ class OneProgramForEveryLane(unittest.TestCase):
                     self.assertEqual((expected / "linker-probe").read_text(), "temporary output\n")
 
 
+class DispatchRangeStaysInTheDispatchedBranch(unittest.TestCase):
+    """A dispatched run mutates only a commit the dispatched branch holds.
+
+    The shards build and test the range's right end inside the run's cache
+    scope, `main`'s when dispatched from it. A tip on an unmerged branch
+    would run unreviewed code where it can write cache entries every later
+    `main` run restores (CodeQL actions/cache-poisoning/poisonable-step,
+    #674). The plan job's diff step is the one place that can refuse it,
+    before any worktree or `ref` output reaches the shards.
+    """
+
+    @staticmethod
+    def diff_step() -> str:
+        workflow = (REPO / ".github/workflows/mutants.yml").read_text()
+        step = workflow.split("      - name: Diff against the target branch\n", 1)[1]
+        blocks = yaml_run_blocks(step.split("\n      - ", 1)[0])
+        assert len(blocks) == 1, blocks
+        return blocks[0]
+
+    def dispatch(self, base: str, tip: str, repo: Path, root: Path):
+        output = root / "github-output"
+        output.write_text("")
+        env = dict(os.environ)
+        env.update(
+            GITHUB_EVENT_NAME="workflow_dispatch",
+            DIFF_RANGE=f"{base}...{tip}",
+            GITHUB_OUTPUT=str(output),
+            GITHUB_REF_NAME="main",
+            RUNNER_TEMP=str(root / "runner"),
+        )
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", self.diff_step()],
+            cwd=repo, env=env, capture_output=True, text=True,
+        )
+        return result, output.read_text()
+
+    def test_only_a_tip_in_the_dispatched_branch_history_reaches_the_shards(self):
+        with tempfile.TemporaryDirectory(prefix="pixel-mutants-dispatch-") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            (root / "runner").mkdir()
+            env = dict(
+                os.environ,
+                GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com",
+                GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+            )
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", "-C", str(repo), *args],
+                    env=env, check=True, capture_output=True, text=True,
+                ).stdout.strip()
+
+            def commit(message: str) -> str:
+                (repo / "crates").mkdir(exist_ok=True)
+                (repo / "crates" / "lib.rs").write_text(f"// {message}\n")
+                git("add", ".")
+                git("commit", "-qm", message)
+                return git("rev-parse", "HEAD")
+
+            repo.mkdir()
+            git("init", "-q", "-b", "main")
+            base = commit("base")
+            git("switch", "-qc", "unmerged")
+            outside = commit("unmerged work")
+            git("switch", "-q", "main")
+            merged = commit("merged work")
+
+            result, outputs = self.dispatch(base, outside, repo, root)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("Range outside this branch", result.stdout)
+            self.assertNotIn("ref=", outputs, "no ref may reach the shards")
+            self.assertFalse((root / "runner" / "tip").exists())
+
+            result, outputs = self.dispatch(base, merged, repo, root)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"ref={merged}\n", outputs)
+            self.assertEqual(
+                (root / "repo" / "pr.diff").read_text().count("+++ b/crates/lib.rs"), 1
+            )
+
+
 class MutantsGateReport(unittest.TestCase):
     """Contract of scripts/mutants-gate.py.
 
