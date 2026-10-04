@@ -364,8 +364,15 @@ if [ -n "$LAST_TAG" ]; then
         if [ -z "$merged" ]; then
             DIRECT="${DIRECT}${DIRECT:+
 }  $(git log -1 --format='%h %an: %s' "$sha")"
-        elif [ -z "$UNRELEASED" ]; then
-            incomplete_inventory "PR search is empty but $sha belongs to a merged PR"
+        else
+            represented=0
+            for number in $merged; do
+                if printf '%s\n' "$UNRELEASED" | grep -Eq "^  #${number} "; then
+                    represented=1
+                    break
+                fi
+            done
+            [ "$represented" -eq 1 ] || incomplete_inventory "$sha belongs to a merged PR missing from the candidate inventory"
         fi
     done
 fi
