@@ -26,7 +26,8 @@ writing nothing:
   target than `<target>` (a wrong flag in the release job);
 - a compiled crate the SBOM does not list: a smaller SBOM than the binary is
   the one error worse than a larger one;
-- a tree with no crate in it (an empty or truncated `cargo tree` output).
+- a tree with no crate besides `pixel-cli` (an empty or truncated `cargo tree`
+  output).
 """
 
 import json
@@ -54,10 +55,11 @@ def compiled_crates(tree_text):
             continue
         if len(fields) < 2 or not fields[1].startswith("v"):
             raise SbomError(f"unreadable cargo tree line: {line!r}")
-        crates.add((fields[0], fields[1][1:]))
+        if fields[0] != PACKAGE:
+            crates.add((fields[0], fields[1][1:]))
     if not crates:
-        raise SbomError("cargo tree listed no crate")
-    return {c for c in crates if c[0] != PACKAGE}
+        raise SbomError(f"cargo tree listed no crate besides {PACKAGE}")
+    return crates
 
 
 def check_subject(bom, version, target):

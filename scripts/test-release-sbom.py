@@ -161,7 +161,12 @@ class ReleaseSbomContract(unittest.TestCase):
                 self.assertFalse(self.out.exists())
 
     def test_an_empty_or_unreadable_tree_fails(self):
-        for case, tree in {"empty": "\n", "unreadable": "error: package `pixel-cli` not found\n"}.items():
+        cases = {
+            "empty": "\n",
+            "root only": "pixel-cli v9.8.7 (/work/crates/pixel)\n",
+            "unreadable": "error: package `pixel-cli` not found\n",
+        }
+        for case, tree in cases.items():
             with self.subTest(case):
                 result = self.run_script(self.with_proc_macro(), tree)
                 self.assertEqual(result.returncode, 1, result.stdout)
