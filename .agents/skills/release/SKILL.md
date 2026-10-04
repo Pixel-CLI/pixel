@@ -219,6 +219,12 @@ It must end with `release-check: all checks passed`. Then:
   with `git cat-file -e v<last>:<path>` before calling it new.
 - **Release body.** Read the new `## [x.y.z]` section as a stranger: it is
   published verbatim. Fix wording or section order now, not after the tag.
+- **Threat model.** Read the same section against
+  [`docs/threat-model.md`](../../../docs/threat-model.md) section 4: an entry
+  that adds an entry point, a sidecar file, a network destination, a secret,
+  a hook or an install target that the threat model does not name gets a
+  `docs` pull request into `main` before the tag, not an edit here (the
+  `scope` rule below refuses it).
 - **Diff.** `prepare.sh` ends with `scripts/release-prepare-only.py HEAD`,
   the rule CI's `scope` job applies: only version lines (17 `Cargo.toml`,
   `Cargo.lock`, the 7 plugin manifests), `CHANGELOG.md` and deleted
@@ -245,10 +251,11 @@ once they exist: right after `gh pr create`, `gh pr checks <n> --watch`
 finds no check yet and exits 0 at once, a watcher that reports nothing
 (0.5.2). Start it with `sleep 20; gh pr checks <n> --watch --interval 30`.
 
-A healthy prepare PR shows three `scope / Release-prepare scope` checks
-passing (one per workflow: CI, Mutants, Cross-build) and every other CI job
+A healthy prepare PR shows four `scope / Release-prepare scope` checks
+passing (one per workflow: CI, Mutants, Cross-build, Homebrew core) and every
+other CI job
 skipping (Test + Format, Lint, MSRV, Ranking gates, cargo-deny, Mutants plan and gate,
-Cross-build); CodeRabbit skips on the title (`ignore_title_keywords`). The
+Cross-build, brew install --build-from-source); CodeRabbit skips on the title (`ignore_title_keywords`). The
 diff holds no code, and step 3's local gates plus the push run on its merge
 commit, which step 4 waits for, cover it. If Test + Format or Mutants runs,
 `scope` refused the diff: stop and read its log, do not wait for green. A
