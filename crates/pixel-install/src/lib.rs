@@ -19,6 +19,7 @@ pub mod codex_config;
 pub mod config;
 pub mod doctor;
 pub mod install;
+pub mod intro;
 pub mod opencode_config;
 mod pi_project;
 mod pixel_first;
