@@ -142,6 +142,8 @@ pub struct TracedStep {
     pub url_before: String,
     pub url_after: String,
     pub changed: bool,
+    /// The fill executor skipped because the field already held its value.
+    pub fill_skipped: bool,
     pub log: String,
 }
 
@@ -408,7 +410,7 @@ pub fn discover(
         };
 
         let snapshot_before = page.snapshot.clone();
-        let (executed, log) = match execute_step(&step, &vars, &shell, browser) {
+        let (executed, fill_skipped, log) = match execute_step(&step, &vars, &shell, browser) {
             Ok(result) => result,
             Err(failure) => {
                 // The browser refused the step, so it did not run: the cycle
@@ -442,7 +444,7 @@ pub fn discover(
         // value is a satisfied step, not a stalled one: it must not burn
         // the stall bound, but the next decision has to hear that the
         // field is done, so the run's state text carries the outcome.
-        let satisfied = step.action == "fill" && log.contains("already holds");
+        let satisfied = fill_skipped;
         stalled = if changed || step.action == "wait" || satisfied {
             0
         } else {
@@ -459,6 +461,7 @@ pub fn discover(
             url_before: before.url,
             url_after: page.url.clone(),
             changed,
+            fill_skipped,
             log,
         });
         if stalled >= request.limits.max_stalled {
@@ -578,7 +581,7 @@ pub fn state_text(page: &Observation, steps: &[TracedStep]) -> String {
         for (index, step) in steps[steps.len() - shown..].iter().enumerate() {
             // A skipped fill says so: the field already holds the value,
             // and the next decision must not repeat it.
-            let satisfied = step.step.action == "fill" && step.log.contains("already holds");
+            let satisfied = step.fill_skipped;
             let outcome = if satisfied {
                 " (done — the field already holds its value)"
             } else {
@@ -1337,6 +1340,7 @@ mod tests {
                 url_before: String::new(),
                 url_after: String::new(),
                 changed: false,
+                fill_skipped: false,
                 log: String::new(),
             })
             .collect();

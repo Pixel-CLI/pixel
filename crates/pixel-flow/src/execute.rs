@@ -64,9 +64,11 @@ impl Browser for AgentBrowser {
     }
 }
 
-/// Run one step of `flow`, returning `(executed, log)`. `executed` is false
-/// for a step that ran no browser action (a conditional whose branch was
-/// empty, an unknown action).
+/// Run one step of `flow`, returning `(executed, fill_skipped, log)`.
+/// `executed` is false for a step that ran no browser action (a conditional
+/// whose branch was empty, an unknown action). `fill_skipped` is true only
+/// for a fill (or type) whose field already held the exact value, so the
+/// caller can treat it as satisfied without reading the log.
 ///
 /// `execute` runs a whole flow itself; this is the seam a caller that has to
 /// decide *between* steps uses — `pixel ultraflow` evaluates a
@@ -77,10 +79,11 @@ pub fn execute_step(
     vars: &HashMap<String, String>,
     flow: &Flow,
     browser: &mut dyn Browser,
-) -> Result<(bool, String), String> {
+) -> Result<(bool, bool, String), String> {
     let mut log = String::new();
-    let executed = exec_step(step, 1, vars, flow, &mut log, 0, browser)?;
-    Ok((executed, log))
+    let mut fill_skipped = false;
+    let executed = exec_step(step, 1, vars, flow, &mut log, 0, browser, &mut fill_skipped)?;
+    Ok((executed, fill_skipped, log))
 }
 
 pub(crate) fn execute_with(
@@ -150,7 +153,7 @@ pub(crate) fn execute_with(
 
     // Execute steps.
     for (i, step) in flow.steps.iter().enumerate() {
-        match exec_step(step, i + 1, vars, flow, &mut log, 0, browser) {
+        match exec_step(step, i + 1, vars, flow, &mut log, 0, browser, &mut false) {
             Ok(executed) => {
                 if executed {
                     steps_executed += 1;
@@ -266,6 +269,7 @@ fn exec_step(
     log: &mut String,
     depth: usize,
     browser: &mut dyn Browser,
+    fill_skipped: &mut bool,
 ) -> Result<bool, String> {
     let indent = "  ".repeat(depth);
     if let Some(r) = &step.rationale {
@@ -407,6 +411,7 @@ fn exec_step(
             // (the Drive run of 2026-10-04 re-typed the same search six
             // times and stalled out). Skip the send, say so.
             if !value.is_empty() && field_holds_value(&snapshot, &ref_id, &value) {
+                *fill_skipped = true;
                 log.push_str(&format!(
                     "{indent}# field @{ref_id} already holds \"{value}\" — fill skipped\n"
                 ));
@@ -496,7 +501,7 @@ fn exec_step(
             };
             let mut any_executed = false;
             for (i, sub) in branch.iter().enumerate() {
-                match exec_step(sub, i + 1, vars, flow, log, depth + 1, browser) {
+                match exec_step(sub, i + 1, vars, flow, log, depth + 1, browser, fill_skipped) {
                     Ok(true) => any_executed = true,
                     Ok(false) => {}
                     Err(e) => return Err(e),
@@ -569,11 +574,21 @@ fn run_agent_browser(args: &[&str]) -> Result<String, String> {
 fn field_holds_value(snapshot: &str, ref_id: &str, value: &str) -> bool {
     snapshot
         .lines()
-        .filter(|line| line.contains(&format!("ref={ref_id}]")))
-        .any(|line| {
-            line.split_once(": ")
-                .is_some_and(|(_, held)| held.trim() == value.trim())
+        .filter_map(|line| {
+            let at = line.find(&format!("ref={ref_id}"))?;
+            let after = &line[at..];
+            let close = after.find(']')?;
+            // The value lives after the attribute block; a quoted label may
+            // itself contain `: `, so start from the closing `]`, not the
+            // first colon-space. The ref id must end at `]` or `,`, not
+            // continue as digits, or `ref=e1` would match a `ref=e10` line.
+            let id_end = &after["ref=".len() + ref_id.len()..close];
+            if !(id_end.is_empty() || id_end.starts_with(',')) {
+                return None;
+            }
+            after[close + 1..].strip_prefix(": ")
         })
+        .any(|held| held.trim() == value.trim())
 }
 
 fn find_ref_in_snapshot(snapshot: &str, ref_hint: &str) -> Option<String> {
@@ -1106,7 +1121,7 @@ mod tests {
     fn run_step(step: &FlowStep, browser: &mut Scripted) -> (Result<bool, String>, String) {
         let flow = flow_with(vec![]);
         let mut log = String::new();
-        let result = exec_step(step, 1, &HashMap::new(), &flow, &mut log, 0, browser);
+        let result = exec_step(step, 1, &HashMap::new(), &flow, &mut log, 0, browser, &mut false);
         (result, log)
     }
 
@@ -1206,7 +1221,7 @@ mod tests {
         };
         let mut log = String::new();
         let vars = HashMap::from([("p".to_string(), "login".to_string())]);
-        let r = exec_step(&s, 1, &vars, &flow_with(vec![]), &mut log, 0, &mut b);
+        let r = exec_step(&s, 1, &vars, &flow_with(vec![]), &mut log, 0, &mut b, &mut false);
         assert_eq!(r, Ok(true));
         assert_eq!(
             b.calls(),
@@ -1446,6 +1461,34 @@ mod tests {
     }
 
     #[test]
+    fn a_label_with_a_colon_space_does_not_confuse_the_value_parse() {
+        // The label itself contains `: `; the held value is the one after
+        // the ref block. The old `split_once(": ")` read past the label.
+        let label = "Query: foo";
+        // An already-held value must be skipped, not re-typed.
+        let mut b = Scripted::new(vec![Ok(format!("- textbox \"{label}\" [ref=e1]: bar\n"))]);
+        let s = FlowStep {
+            ref_hint: Some("textbox matching 'Query'".into()),
+            value: Some("bar".into()),
+            ..step("fill")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["snapshot", "-i"]], "the held fill is skipped");
+        assert!(log.contains("ref=e1"), "{log}");
+        // A different value is sent exactly once.
+        let mut b = Scripted::new(vec![Ok(format!("- textbox \"{label}\" [ref=e1]: bar\n"))]);
+        let s = FlowStep {
+            ref_hint: Some("textbox matching 'Query'".into()),
+            value: Some("baz".into()),
+            ..step("fill")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls()[1], vec!["fill", "@e1", "baz"], "{log}");
+    }
+
+    #[test]
     fn fill_takes_the_nth_character_of_user_code_for_split_code_inputs() {
         let mut b = Scripted::new(vec![Ok("- textbox \"Code character 3 of 9\" [ref=e8]\n")]);
         let s = FlowStep {
@@ -1454,7 +1497,7 @@ mod tests {
         };
         let vars = HashMap::from([("user_code".to_string(), "AB-CD".to_string())]);
         let mut log = String::new();
-        let r = exec_step(&s, 1, &vars, &flow_with(vec![]), &mut log, 0, &mut b);
+        let r = exec_step(&s, 1, &vars, &flow_with(vec![]), &mut log, 0, &mut b, &mut false);
         assert_eq!(r, Ok(true));
         assert_eq!(b.calls()[1], vec!["fill", "@e8", "C"]);
     }
@@ -1548,13 +1591,14 @@ mod tests {
     fn execute_step_runs_exactly_the_step_it_is_given() {
         let flow = flow_with(vec![step("snapshot"), step("snapshot")]);
         let mut b = Scripted::new(vec![]);
-        let (executed, log) = execute_step(&step("press"), &HashMap::new(), &flow, &mut b).unwrap();
+        let (executed, _, log) =
+            execute_step(&step("press"), &HashMap::new(), &flow, &mut b).unwrap();
         assert!(executed);
         assert_eq!(b.calls(), vec![vec!["press", "Enter"]]);
         assert!(log.contains("agent-browser press Enter"), "{log}");
         // A skipped step (unknown action) reports false, not an error.
         let mut b = Scripted::new(vec![]);
-        let (executed, _) =
+        let (executed, _, _) =
             execute_step(&step("teleport"), &HashMap::new(), &flow, &mut b).unwrap();
         assert!(!executed);
         assert!(b.calls().is_empty());
