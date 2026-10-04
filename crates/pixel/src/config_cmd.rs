@@ -2188,36 +2188,27 @@ mod tests {
         restore_home(saved);
     }
 
-        let _lock = crate::ENV_LOCK.lock().unwrap();
-        let home = HomeGuard::set();
-        let saved = home_env();
-        point_home(&home.0);
-        restore_home(saved);
-    }
-
-    /// A section that somehow holds a scalar (a hand-edited config) must be
-    /// repaired by the setters: the create-if-missing guard builds a fresh
-    /// object instead of indexing into the non-object, which would panic.
     #[test]
-    fn web_search_setters_recreate_a_section_that_is_not_an_object() {
+    fn setting_the_perplexity_key_preserves_existing_remote_keys() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();
         let saved = home_env();
         point_home(&home.0);
+
         write(
             &home.0.join(".pixel/config.yaml"),
-            "web_search: 7\nremote_keys: false\n",
+            "remote_keys: {openrouter: sk-existing}\n",
         );
-        set_web_search_searxng_url("https://sx.test").unwrap();
         set_web_search_perplexity_key("pplx-secret").unwrap();
-        assert_eq!(
-            web_search_searxng_url().as_deref(),
-            Some("https://sx.test")
-        );
-        assert_eq!(
-            web_search_perplexity_key().as_deref(),
-            Some("pplx-secret")
-        );
+
+        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+        let cfg: Value = serde_saphyr::from_str(
+            &std::fs::read_to_string(home.0.join(".pixel/config.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg["remote_keys"]["openrouter"], "sk-existing");
+        assert_eq!(cfg["remote_keys"]["perplexity"], "pplx-secret");
+
         restore_home(saved);
     }
 
