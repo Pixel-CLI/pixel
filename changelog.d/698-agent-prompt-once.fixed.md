@@ -1,0 +1,1 @@
+**install:** the deployed agent prompt and its plugin, skill and editor-rule copies no longer carry the opening "deterministic repository facts" section twice (since #571), saving every session that text; a test keeps every heading and paragraph of the agent and sub-agent prompts unique.

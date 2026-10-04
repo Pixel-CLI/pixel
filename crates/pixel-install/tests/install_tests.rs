@@ -3494,6 +3494,29 @@ fn prompt_packet_guidance_allows_exploration_beyond_candidates() {
     assert!(prompt.contains("continue exploring any files or"));
 }
 
+/// Every heading and paragraph of a deployed prompt occurs once: a repeated
+/// block (#571 shipped the opening section twice, #698) costs every session
+/// its tokens and reads as two instructions.
+#[test]
+fn deployed_prompts_carry_each_heading_and_paragraph_once() {
+    for (name, prompt) in [
+        ("agent", include_str!("../assets/pixel-agent-prompt.md")),
+        (
+            "subagent",
+            include_str!("../assets/pixel-subagent-prompt.md"),
+        ),
+    ] {
+        let mut seen = std::collections::HashSet::new();
+        for block in prompt.split("\n\n").map(str::trim) {
+            let substantial = block.starts_with('#') || block.len() > 80;
+            assert!(
+                !substantial || seen.insert(block),
+                "{name} prompt repeats a block:\n{block}"
+            );
+        }
+    }
+}
+
 fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

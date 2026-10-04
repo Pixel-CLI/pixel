@@ -114,7 +114,7 @@ The project is trusted the way a user accepting the prompt would: a Codex
 it, neither loads project-level configuration.
 
 Asserted per agent: exit and final answer, the Pixel prompt in the first model
-request (`Pixel Retrieval Layer` for Claude's SessionStart context,
+request (`Pixel — deterministic repository facts` for Claude's SessionStart context,
 `pixel:managed:begin` for Codex developer instructions and pi's
 `APPEND_SYSTEM.md`), both tool results fed back, and a new `search-content` row
 in the project's `.pixel/actions.jsonl` from the model's pixel call. Reported,
