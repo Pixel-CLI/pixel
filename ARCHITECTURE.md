@@ -759,7 +759,9 @@ parent equal to that base, and its tree identical to the validated prepare
 head. Later target commits do not change which merge gets tagged. Its real
 Git contract runs in both `scripts/gates.sh` and CI
 (`scripts/test-release-candidate.py`). CI results and semantic changelog
-coverage remain separate release requirements.
+coverage remain separate release requirements. The explicit `--maintenance`
+mode permits backport code in the diff (full CI is required), retaining the
+ancestry, empty-fragment and exact-tree checks.
 
 ## Build provenance
 
