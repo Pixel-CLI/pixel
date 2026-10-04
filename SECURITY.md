@@ -58,11 +58,13 @@ workflow, under the owner below.
 
 v0.6.0 and v0.6.1 were signed before the repository moved from
 `LivioGama/pixel` to `Pixel-CLI/pixel`, and their attestations stayed with
-the former owner: `--repo Pixel-CLI/pixel` answers `HTTP 404` for them.
-Verify those two under the name they were built as:
+the former owner: `--repo` answers `HTTP 404` for them, under either name,
+since it looks attestations up by the repository's id, which now belongs to
+`Pixel-CLI/pixel`. Verify those two by the owner they were built under,
+the signer workflow still pinning the repository:
 
 ```bash
-gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --repo LivioGama/pixel \
+gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --owner LivioGama \
   --signer-workflow LivioGama/pixel/.github/workflows/release.yml \
   --source-ref refs/tags/v0.6.1 --deny-self-hosted-runners
 ```
