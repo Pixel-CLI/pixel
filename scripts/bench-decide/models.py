@@ -100,7 +100,7 @@ class Gavel:
         torch.set_num_threads(THREADS)
         self.tok = AutoTokenizer.from_pretrained(str(SNAPSHOTS["gavel"]))
         self.model = AutoModelForSequenceClassification.from_pretrained(
-            str(SNAPSHOTS["gavel"])).eval()
+            str(SNAPSHOTS["gavel"])).train(False)
         return self
 
     def decide(self, spec):
@@ -195,7 +195,7 @@ class Gliformer:
         torch.set_num_threads(THREADS)
         from gliformer import GLiFormer
         self.model = GLiFormer.from_pretrained(str(SNAPSHOTS["gliformer"]), load_tokenizer=True)
-        self.model = self.model.to("cpu").eval()
+        self.model = self.model.to("cpu").train(False)
         return self
 
     def decide(self, spec):
@@ -249,7 +249,7 @@ class GteReranker:
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
         torch.set_num_threads(THREADS)
         self.tok = AutoTokenizer.from_pretrained(self.REPO)
-        self.model = AutoModelForSequenceClassification.from_pretrained(self.REPO).eval()
+        self.model = AutoModelForSequenceClassification.from_pretrained(self.REPO).train(False)
         return self
 
     def decide(self, spec):

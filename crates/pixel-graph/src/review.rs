@@ -603,16 +603,21 @@ mod tests {
 
     /// An added-line fixture is a protocol fixture: each case names the
     /// pattern class it must land in, built as data so the scanner is
-    /// tested against the table, not against a narrative.
+    /// tested against the table, not against a narrative. Provider-shaped
+    /// literals are split with `concat!` so external secret scanners do not
+    /// read the table itself as leaked keys.
     const SECRET_CASES: &[(&str, Option<(&str, bool)>)] = &[
         ("const K: &str = \"ghp_abc\";", Some(("github-token", true))),
-        ("sku = sk-proj-abcdef", Some(("openai-key", true))),
         (
-            "-----BEGIN RSA PRIVATE KEY-----",
+            concat!("sku = sk-", "proj-abcdef"),
+            Some(("openai-key", true)),
+        ),
+        (
+            concat!("-----BEGIN RSA ", "PRIVATE KEY-----"),
             Some(("private-key", true)),
         ),
         (
-            "value = \"AKIAIOSFODNN7EXAMPLE\"",
+            concat!("value = \"AKIA", "IOSFODNN7EXAMPLE\""),
             Some(("cloud-access-key", true)),
         ),
         // A bare or short `AKIA` substring is not an access key id.
@@ -1505,7 +1510,10 @@ mod tests {
         let root = dir.path();
         std::fs::write(
             root.join("f.rs"),
-            "const K: &str = \"AKIAIOSFODNN7EXAMPLE\";\nconst TABLE: &str = \"ABCDEFGHIJKLMNOPQRSTUV\";\n",
+            concat!(
+                "const K: &str = \"AKIA",
+                "IOSFODNN7EXAMPLE\";\nconst TABLE: &str = \"ABCDEFGHIJKLMNOPQRSTUV\";\n"
+            ),
         )
         .unwrap();
         let text = [
