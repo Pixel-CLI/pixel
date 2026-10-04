@@ -2148,7 +2148,10 @@ mod tests {
         set_web_search_searxng_url("https://sx.test").unwrap();
         validate(&cfg).unwrap();
         remove_web_search_searxng_url().unwrap();
-        assert!(web_search_searxng_url().is_none(), "field removed, not emptied");
+        assert!(
+            web_search_searxng_url().is_none(),
+            "field removed, not emptied"
+        );
         // `validate` accepts the removed state — an empty `searxng_url`
         // would be rejected, and would stall every later `pixel config setup`.
         validate(&cfg).unwrap();

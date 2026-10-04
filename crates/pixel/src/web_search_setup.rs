@@ -493,10 +493,7 @@ mod tests {
             &mut terminal,
         )
         .unwrap_err();
-        assert!(
-            err.contains("could not disable terminal echo"),
-            "{err}"
-        );
+        assert!(err.contains("could not disable terminal echo"), "{err}");
         // Nothing was read, so the key never reached a store.
         assert!(terminal.echoed(), "echo was never toggled");
     }
