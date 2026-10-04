@@ -272,7 +272,7 @@ fn propose_remote_key_with(
 ) -> Result<(), String> {
     writeln!(
         stdout,
-        "Remote providers: openrouter / ollama / deepseek / opencode-go"
+        "Remote providers: openrouter / ollama / deepseek / opencode-go / jev"
     )
     .map_err(|e| e.to_string())?;
     write!(stdout, "Provider [openrouter]> ").map_err(|e| e.to_string())?;
@@ -288,7 +288,7 @@ fn propose_remote_key_with(
     };
     let Some(preset) = crate::decide_remote::Preset::parse_name(provider) else {
         return Err(format!(
-            "unknown provider {provider:?} (openrouter, ollama, deepseek, opencode-go, local)"
+            "unknown provider {provider:?} (openrouter, ollama, deepseek, opencode-go, jev, local)"
         ));
     };
     let Some(var) = crate::decide_remote::key_env_name(preset, None) else {
@@ -889,6 +889,11 @@ mod tests {
                 "opencode-go\n\n",
                 crate::decide_remote::Preset::OpencodeGo,
                 None,
+            ),
+            (
+                "  jev  \n typesafe-secret \n",
+                crate::decide_remote::Preset::Jev,
+                Some("typesafe-secret"),
             ),
             ("\n\n", crate::decide_remote::Preset::Openrouter, None),
         ] {

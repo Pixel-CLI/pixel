@@ -40,6 +40,8 @@ mod classify_setup;
 mod config_cmd;
 mod config_file;
 mod coverage_cmd;
+mod decide_infisical;
+mod decide_jev;
 mod decide_ollaya;
 mod decide_remote;
 mod evaluate_cmd;

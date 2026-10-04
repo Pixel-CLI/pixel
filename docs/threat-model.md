@@ -37,7 +37,7 @@ model providers, and the website under `website/`.
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
 | Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, `~/.pi/agent/APPEND_SYSTEM.md`, OpenCode, Antigravity, zcode and Devin configs; per repository with `--repo`, `.claude/settings.local.json`, `.codex/`, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`, the managed block in `AGENTS.md` | a hook command runs with the user's privileges on every agent tool call |
-| User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `PERPLEXITY_API_KEY` or `remote_keys` in the global config), `.env` values edited by `pixel edit-env` | credential theft, billing abuse |
+| User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project), `.env` values edited by `pixel edit-env` | credential theft, billing abuse |
 | Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
 | CI | `.github/workflows/*.yml`, the `PROJECTS_TOKEN` secret, the self-hosted runner named by the `PIXEL_RUNNER_LABELS` repository variable | a foothold in CI is a step towards the release chain |
 
@@ -50,7 +50,7 @@ model providers, and the website under `website/`.
 | Repository content | untrusted when the repository is not the user's own: files, commit messages, branch names, a committed `.pixel/` or `.codex/`, git configuration that came with an archive | the walkers, tree-sitter, git, every sidecar reader |
 | Other processes of the same user | trusted by the operating system; not distinguished by Pixel | the daemon socket, every file Pixel writes |
 | Other local users | untrusted | file and socket permissions only |
-| Network services | untrusted for integrity, trusted with what is sent to them | Hugging Face, the classify endpoints, the web-search endpoints, `github.com` release checks, `ollaya.dev` |
+| Network services | untrusted for integrity, trusted with what is sent to them | Hugging Face, the classify endpoints (including `api.typesafe.ai`), a configured Infisical host (default `app.infisical.com`, sent the bearer token), the web-search endpoints, `github.com` release checks, `ollaya.dev` |
 | Contributors | untrusted until review | pull requests, which CI builds and tests |
 | Maintainers | trusted ([GOVERNANCE.md](../GOVERNANCE.md)) | merges, tags, repository secrets and settings |
 

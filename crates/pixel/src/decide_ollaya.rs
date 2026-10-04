@@ -277,15 +277,25 @@ fn parse_answer(
     response: &Value,
     labels: &[String],
 ) -> Result<(BTreeMap<String, f64>, AnswerMeta), String> {
+    parse_answer_for(response, labels, "ollaya")
+}
+
+/// [`parse_answer`] with the engine label the error strings name — hosted
+/// Jev (`decide_jev`) reuses the same TypeSafe answer contract.
+pub(crate) fn parse_answer_for(
+    response: &Value,
+    labels: &[String],
+    engine: &str,
+) -> Result<(BTreeMap<String, f64>, AnswerMeta), String> {
     let answer = response
         .get("answers")
         .and_then(|a| a.get(QUESTION_ID))
-        .ok_or("ollaya response missing answers.q1")?;
-    let meta = AnswerMeta::from_answer(answer)?;
+        .ok_or_else(|| format!("{engine} response missing answers.{QUESTION_ID}"))?;
+    let meta = AnswerMeta::from_answer(answer).map_err(|e| e.replacen("ollaya", engine, 1))?;
     let probs_value = answer
         .get("probabilities")
         .and_then(Value::as_object)
-        .ok_or("ollaya answer probabilities is not an object")?;
+        .ok_or_else(|| format!("{engine} answer probabilities is not an object"))?;
     let mut out: BTreeMap<String, f64> = labels.iter().map(|l| (l.clone(), 0.0)).collect();
     let mut sum = 0.0f64;
     for (label, value) in probs_value {
@@ -293,18 +303,20 @@ fn parse_answer(
             .as_f64()
             .filter(|p| p.is_finite() && *p >= 0.0)
             .ok_or_else(|| {
-                format!("ollaya probabilities[{label:?}] is not a finite non-negative number")
+                format!("{engine} probabilities[{label:?}] is not a finite non-negative number")
             })?;
         if !out.contains_key(label) {
             return Err(format!(
-                "ollaya returned probability for unknown label {label:?} (expected only: {labels:?})"
+                "{engine} returned probability for unknown label {label:?} (expected only: {labels:?})"
             ));
         }
         out.insert(label.clone(), p);
         sum += p;
     }
     if !sum.is_finite() || sum <= 0.0 {
-        return Err("ollaya probabilities must sum to a finite positive value".to_string());
+        return Err(format!(
+            "{engine} probabilities must sum to a finite positive value"
+        ));
     }
     for p in out.values_mut() {
         *p /= sum;

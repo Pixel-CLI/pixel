@@ -7,9 +7,14 @@
 //! completion (OpenRouter, Ollama Cloud, or a local llama-server) maps the
 //! state, shared framing, labels and criteria onto a probability
 //! distribution over the caller's labels — the shape a Jev-class decision
-//! model returns. Non-deterministic and network-bound by design: the local
-//! static/verdict backends were removed because no off-the-shelf local
-//! model beat Jev on the coding benchmark (see
+//! model returns. TypeSafe's hosted Jev itself is the `jev` preset: it
+//! serves the same decision shape over TypeSafe's `/v1/systemone` wire
+//! (`decide_jev`), with native calibrated probabilities instead of
+//! verbalized ones. Remote keys resolve from the env var, then
+//! `pixel config remote-key`, then — when configured — an Infisical
+//! project (`decide_infisical`). Non-deterministic and network-bound by
+//! design: the local static/verdict backends were removed because no
+//! off-the-shelf local model beat Jev on the coding benchmark (see
 //! `docs/bench/decide-bakeoff.md`).
 //!
 //! `context` stays a separate field — it is the shared framing every
@@ -197,6 +202,33 @@ impl DecisionEngine for crate::decide_ollaya::Ollaya {
     }
 }
 
+impl DecisionEngine for crate::decide_jev::Jev {
+    fn model_id(&self) -> String {
+        self.model_id().to_string()
+    }
+
+    fn provider(&self) -> Option<&'static str> {
+        Some("jev")
+    }
+
+    fn deterministic(&self) -> bool {
+        false
+    }
+
+    fn basis(&self) -> String {
+        crate::decide_jev::JEV_BASIS.to_string()
+    }
+
+    fn extra_snapshot(&self) -> Option<Value> {
+        self.last_meta()
+            .map(crate::decide_ollaya::AnswerMeta::snapshot)
+    }
+
+    fn decide(&mut self, spec: &Spec) -> Result<BTreeMap<String, f64>, String> {
+        crate::decide_jev::Jev::decide(self, spec)
+    }
+}
+
 /// The argmax label — first in the caller's label order on a tie
 /// (deterministic, never alphabetical accident).
 pub(crate) fn predicted<'a>(probs: &BTreeMap<String, f64>, labels: &'a [String]) -> &'a str {
@@ -279,22 +311,55 @@ fn open_engine(
     preset: crate::decide_remote::Preset,
     model: Option<String>,
 ) -> Result<crate::decide_remote::Remote, String> {
-    crate::decide_remote::resolve_config(preset, model, remote_key_value(preset))
+    crate::decide_remote::resolve_config(preset, model, remote_key_value(preset)?)
         .map(crate::decide_remote::Remote::open)
 }
 
-/// Read the remote API-key value from the preset's key env var (or
-/// `PIXEL_REMOTE_KEY_ENV` when set) by name. The value is consumed here and
-/// held only inside the `Remote` adapter — it is never logged or written to
-/// a document.
+/// Open the hosted Jev engine from the same preset config the chat
+/// adapters resolve: base, model override and key — so `--remote-model`,
+/// `PIXEL_REMOTE_*`, `pixel config remote-key jev` and the Infisical
+/// source all behave identically whichever preset is chosen.
+#[cfg_attr(test, mutants::skip)] // thin adapter over the real env; the policy is decide_jev's
+fn open_jev_engine(model: Option<String>) -> Result<crate::decide_jev::Jev, String> {
+    crate::decide_remote::resolve_config(
+        crate::decide_remote::Preset::Jev,
+        model,
+        remote_key_value(crate::decide_remote::Preset::Jev)?,
+    )
+    .map(|config| {
+        let key = config.key_value();
+        crate::decide_jev::Jev::open(crate::decide_jev::JevConfig {
+            base: config.base,
+            model_name: config.model,
+            key,
+            ..Default::default()
+        })
+    })
+}
+
+/// Read the remote API-key value for a preset, in disclosure order: the
+/// key env var (`PIXEL_REMOTE_KEY_ENV` names one, else the preset's own),
+/// then `pixel config remote-key <preset>`, then a configured Infisical
+/// project (see `decide_infisical`) — a configured Infisical failure is
+/// loud, an unconfigured one just falls through. The value is consumed
+/// here and held only inside the engine adapter — never logged or written
+/// to a document.
 #[cfg_attr(test, mutants::skip)] // reads the real env and ~/.pixel; the name rule is key_env_name
-fn remote_key_value(preset: crate::decide_remote::Preset) -> Option<String> {
+fn remote_key_value(preset: crate::decide_remote::Preset) -> Result<Option<String>, String> {
     let explicit = std::env::var("PIXEL_REMOTE_KEY_ENV").ok();
-    crate::decide_remote::key_env_name(preset, explicit)
-        .and_then(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
-        // Env wins; `pixel config remote-key <preset>` is the fallback so a
-        // key need not live in every shell's environment.
-        .or_else(|| crate::config_cmd::remote_key(preset))
+    let from_env = crate::decide_remote::key_env_name(preset, explicit)
+        .and_then(|name| std::env::var(name).ok().filter(|v| !v.is_empty()));
+    if from_env.is_some() {
+        return Ok(from_env);
+    }
+    // `pixel config remote-key <preset>` is the fallback so a key need not
+    // live in every shell's environment.
+    if let Some(key) = crate::config_cmd::remote_key(preset) {
+        return Ok(Some(key));
+    }
+    // Infisical is the third source, off unless configured; its own
+    // contract decides what counts as absent.
+    crate::decide_infisical::lookup_key(preset)
 }
 
 /// Parse one JSONL spec line (serve mode and tests share this path).
@@ -799,9 +864,14 @@ pub(crate) fn open_resolved(
     if_warm: bool,
 ) -> Result<Box<dyn DecisionEngine>, String> {
     match resolved {
-        crate::classify_setup::ResolvedEngine::Remote => {
-            open_engine(preset, model).map(|engine| Box::new(engine) as _)
-        }
+        crate::classify_setup::ResolvedEngine::Remote => match preset {
+            // Jev speaks TypeSafe's decision wire, not `/chat/completions`;
+            // it resolves its base/model/key through the same config.
+            crate::decide_remote::Preset::Jev => {
+                open_jev_engine(model).map(|engine| Box::new(engine) as _)
+            }
+            _ => open_engine(preset, model).map(|engine| Box::new(engine) as _),
+        },
         crate::classify_setup::ResolvedEngine::Local { base } => Ok(Box::new(
             crate::decide_ollaya::Ollaya::open(ollaya_config(base, if_warm)),
         ) as _),

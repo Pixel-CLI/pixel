@@ -17,14 +17,20 @@
 //! `snapshot.basis`, and the response is renormalized to sum 1 before it
 //! reaches the caller.
 //!
-//! Config: a preset (`openrouter` | `ollama` | `local`) selects the base URL,
-//! the default model, and the env var that names the API key; the preset is
-//! overridable by `--remote-model` / `PIXEL_REMOTE_MODEL`,
-//! `PIXEL_REMOTE_BASE`, and `PIXEL_REMOTE_KEY_ENV`. The key resolves from
-//! the env var first, then from `remote_keys.<preset>` in
-//! `~/.pixel/config.json` (`pixel config remote-key`). The key value itself is
+//! Config: a preset (`openrouter` | `ollama` | `local` | `deepseek` |
+//! `opencode-go` | `jev`) selects the base URL, the default model, and the
+//! env var that names the API key; the preset is overridable by
+//! `--remote-model` / `PIXEL_REMOTE_MODEL`, `PIXEL_REMOTE_BASE`, and
+//! `PIXEL_REMOTE_KEY_ENV`. The key resolves from the env var first, then
+//! from `remote_keys.<preset>` in `~/.pixel/config.json`
+//! (`pixel config remote-key`), then — when Infisical is configured — from
+//! the project's secrets (see `decide_infisical`). The key value itself is
 //! only ever written into the Authorization header — never into logs, error
 //! text, or documents — and is passed by env-var name only.
+//!
+//! `jev` is the exception in transport: TypeSafe's hosted Jev speaks the
+//! `/v1/systemone` decision shape, not `/chat/completions`, so its preset
+//! config is resolved here (base, model, key) but served by [`decide_jev`].
 
 use crate::classify::Spec;
 use serde_json::{Value, json};
@@ -45,6 +51,7 @@ pub enum Preset {
     Local,
     Deepseek,
     OpencodeGo,
+    Jev,
 }
 
 impl Preset {
@@ -56,6 +63,11 @@ impl Preset {
             Preset::Local => "http://localhost:11434/v1",
             Preset::Deepseek => "https://api.deepseek.com",
             Preset::OpencodeGo => "https://opencode.ai/zen/go/v1",
+            // TypeSafe's hosted Jev decision model. Unlike the chat presets
+            // it speaks TypeSafe's `/v1/systemone` shape, served by
+            // `decide_jev` — the base stays bare so the shared
+            // `PIXEL_REMOTE_BASE` override keeps working for it too.
+            Preset::Jev => "https://api.typesafe.ai",
         }
     }
 
@@ -68,6 +80,7 @@ impl Preset {
             Preset::Local => None,
             Preset::Deepseek => Some("DEEPSEEK_API_KEY"),
             Preset::OpencodeGo => Some("OPENCODE_API_KEY"),
+            Preset::Jev => Some("TYPESAFE_API_KEY"),
         }
     }
 
@@ -80,6 +93,7 @@ impl Preset {
             Preset::Local => "qwen3.5:4b",
             Preset::Deepseek => "deepseek-flash",
             Preset::OpencodeGo => "deepseek-v4.1-flash",
+            Preset::Jev => "jev-latest",
         }
     }
 
@@ -92,6 +106,7 @@ impl Preset {
             Preset::Local => "local",
             Preset::Deepseek => "deepseek",
             Preset::OpencodeGo => "opencode-go",
+            Preset::Jev => "jev",
         }
     }
 
@@ -110,6 +125,7 @@ impl Preset {
             Preset::Local,
             Preset::Deepseek,
             Preset::OpencodeGo,
+            Preset::Jev,
         ]
         .into_iter()
         .find(|preset| preset.display() == normalized)
@@ -124,6 +140,8 @@ pub struct Config {
     pub base: String,
     pub model: String,
     /// The API key value, read once from an env var by name. Never logged.
+    /// `pub(crate)` accessor below: the hosted Jev engine takes the same
+    /// resolved key.
     key: Option<String>,
     /// Stable per-invocation session id for providers that require one
     /// (`x-opencode-session` for OpenCode Go); `None` elsewhere.
@@ -139,6 +157,15 @@ impl std::fmt::Debug for Config {
             .field("base", &self.base)
             .field("model", &self.model)
             .finish_non_exhaustive()
+    }
+}
+
+impl Config {
+    /// The resolved API-key value, for callers that build their own
+    /// transport from a resolved [`Config`] (hosted Jev). Keep it out of
+    /// logs and documents, like `key` itself.
+    pub(crate) fn key_value(&self) -> Option<String> {
+        self.key.clone()
     }
 }
 
@@ -224,7 +251,8 @@ fn resolve_config_from(
 }
 
 /// Whether `base` is plain `http://` to a host other than this machine.
-fn sends_in_clear_text(base: &str) -> bool {
+/// `pub(crate)`: the Infisical lookup reuses it before sending its token.
+pub(crate) fn sends_in_clear_text(base: &str) -> bool {
     let Some(rest) = base
         .get(..7)
         .filter(|scheme| scheme.eq_ignore_ascii_case("http://"))
@@ -529,6 +557,13 @@ mod tests {
                 "opencode-go",
                 Some("OPENCODE_API_KEY"),
             ),
+            (
+                Preset::Jev,
+                "https://api.typesafe.ai",
+                "jev-latest",
+                "jev",
+                Some("TYPESAFE_API_KEY"),
+            ),
         ];
         for (preset, base, model, display, key_env) in table {
             assert_eq!(
@@ -547,6 +582,7 @@ mod tests {
         assert!(Preset::OpencodeGo.wants_session_header());
         assert!(!Preset::Openrouter.wants_session_header());
         assert!(!Preset::Local.wants_session_header());
+        assert!(!Preset::Jev.wants_session_header());
     }
 
     #[test]
