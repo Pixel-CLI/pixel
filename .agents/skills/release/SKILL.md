@@ -12,12 +12,13 @@ then a maintenance-release pull request targets a `release/x.y` branch cut
 from the line's last tag (see "Patch release while `main` is not releasable").
 
 The tag is the release. Pushing `vX.Y.Z` runs `.github/workflows/release.yml`,
-and nothing else gates it: CI does not run on tags. The workflow has four
+and nothing else gates it: CI does not run on tags. The workflow has five
 jobs, each needing the previous one:
 
 | Job | Does | A failure means |
 | --- | --- | --- |
 | `verify` | `check-release $GITHUB_REF` (tag = `crates/pixel` version, `Cargo.lock` fresh for all 17 members, `## [x.y.z]` heading and empty Unreleased), then `cargo test --workspace --locked` | nothing built, nothing published |
+| `fuzz` | `fuzz.yml` called with 120 s per target: every cargo-fuzz target on nightly, `cargo deny` on `fuzz/` first | a crash or a target that ran nothing: nothing built; the reproducer is the run's `fuzz-artifacts-*` artifact |
 | `build` | musl x86_64 + aarch64 via `cross` (`--no-default-features --features model2vec`), `aarch64-apple-darwin` natively; tarball + `.sha256` each; `fail-fast` | nothing published |
 | `release` | writes `pixel.rb` with the real hashes and the two Linux bottles (`scripts/homebrew-formula.py`, held by `scripts/test-homebrew-formula.py` in CI), cuts the release body from the `## [x.y.z]` section of `CHANGELOG.md`, creates the GitHub release (3 tarballs, 3 `.sha256`, 2 `pixel-x.y.z.<arm64|x86_64>_linux.bottle.tar.gz`, `pixel.rb`, `pixel-core.rb` (the homebrew-core formula built from the tag's source archive, `scripts/homebrew-core-formula.py`), `install.sh`), commits `pixel x.y.z` to `LivioGama/homebrew-tap` with `HOMEBREW_TAP_TOKEN` | published, possibly partially: see Recovery |
 | `smoke` (×3, `fail-fast: false`) | on each target's own runner, from an empty `HOME`: the release asset (checksum, run), the documented one-liner through `releases/latest/download/install.sh` (when the tag is the latest release), `brew install LivioGama/tap/pixel` + `brew test` (macOS, when the tap was pushed), and on Linux the same install poured from the bottle (`poured_from_bottle`, skipped with a notice on a runner image without Homebrew); each binary's `--version` must print `pixel x.y.z` and `commit: <tag commit>` | already published: the next patch is due |
@@ -332,7 +333,9 @@ failures that never happened.
 
 About 12 minutes to the end of `smoke` (0.3.0: verify 5 min, builds 6 min,
 publish and smoke under a minute; 0.5.0, uncached: builds 5.3 to 5.5 min
-on musl).
+on musl). The `fuzz` job, added after 0.7.0, sits between `verify` and
+the builds: about 5 more minutes (nightly build of the targets, then 120 s
+per target).
 
 ## 5. Verify the publication
 

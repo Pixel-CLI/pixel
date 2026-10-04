@@ -707,8 +707,8 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   `fuzz.yml` (`cargo deny` on the `fuzz/` workspace with the root
   `deny.toml`, then every cargo-fuzz target on nightly: 60 s each on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
-  root `Cargo.toml` or `deny.toml`, 600 s weekly and on demand, crash
-  reproducers uploaded) and `coverage.yml` (the Test job's nextest suite
+  root `Cargo.toml` or `deny.toml`, 600 s weekly and on demand, 120 s when
+  `release.yml` calls it on a `v*` tag, crash reproducers uploaded) and `coverage.yml` (the Test job's nextest suite
   under `cargo llvm-cov`, doctests aside, on every push to `main`, on a pull
   request touching `crates/`, the manifests or the nextest profile, and on
   demand: line, region and function totals and one row per crate in the job
@@ -745,6 +745,10 @@ reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
 `CHANGELOG.md` and reports three checks (`cli-version`, `cargo-lock`,
 `changelog`), exit 1 on any failure. Pure functions over file contents;
 no git, no network.
+
+After `verify`, the `fuzz` job calls `fuzz.yml` (every cargo-fuzz target,
+120 s each) on the tagged commit. The `assets` build needs both `verify`
+and `fuzz`, so no release is built from code that was not fuzzed.
 
 The release skill also runs `.agents/skills/release/check-candidate.py` on
 recorded base and prepare SHAs. Before merge it requires the fetched target

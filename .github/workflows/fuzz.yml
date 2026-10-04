@@ -9,8 +9,10 @@
 #
 # A pull request touching a target or the code it fuzzes gets 60 seconds per
 # target; the weekly run and a manual one get 600 (or the `seconds` input).
-# The corpus grows across scheduled runs in the Actions cache; the seeds
-# under fuzz/seeds/ are tracked.
+# release.yml calls this workflow on every `v*` tag (`workflow_call`, 120 s
+# per target) and builds nothing until it passes, so each release ships
+# fuzzed code. The corpus grows across scheduled and manual runs in the
+# Actions cache; the seeds under fuzz/seeds/ are tracked.
 #
 # A crash: download the `fuzz-artifacts-*` artifact of the run, then
 # `cargo +nightly fuzz run <target> <crash-file>` reproduces it and
@@ -42,6 +44,13 @@ on:
         description: "Seconds of fuzzing per target (1 to 1200)"
         required: false
         default: "600"
+  workflow_call:
+    inputs:
+      seconds:
+        description: "Seconds of fuzzing per target (1 to 1200)"
+        type: string
+        required: false
+        default: "120"
 
 permissions:
   contents: read
@@ -159,10 +168,11 @@ jobs:
             exit 1
           fi
 
-      # Only the default branch's runs grow the shared corpus; a pull
-      # request reads it and leaves it alone.
+      # Only branch runs grow the shared corpus: a pull request and a
+      # release tag read it and leave it alone (a cache saved on a tag would
+      # be visible to that tag only).
       - name: Save the corpus
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus

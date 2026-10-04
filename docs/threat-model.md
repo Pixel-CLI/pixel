@@ -603,7 +603,8 @@ Across all of them:
   "Mutation testing").
 - **Fuzzing**: `fuzz.yml` runs every cargo-fuzz target for 60 s on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
-  root `Cargo.toml` or `deny.toml`, and for 600 s weekly.
+  root `Cargo.toml` or `deny.toml`, for 600 s weekly, and for 120 s on every
+  `v*` tag before `release.yml` builds anything.
 - **Static analysis**: `codeql.yml` scans Rust, the workflows, Python and
   JavaScript/TypeScript on every pull request into `main`, every push to it,
   and weekly; `cargo clippy` with warnings denied runs in CI.
