@@ -196,10 +196,10 @@ pub fn retrieval_route(task: &str) -> Value {
         None => ("find-code", vec![task.clone()]),
     };
     let first = route_command(subcommand, &args);
-    let fallback_query = identifier.as_deref().unwrap_or(&task);
+    let fallback_query = identifier.clone().unwrap_or_else(|| bounded_native_query(&task));
     let native_fallback = format!(
         "rtk rg -m 5 -n -F -- {} . | rtk sed -n '1,20p'",
-        shell_quote(fallback_query)
+        shell_quote(&fallback_query)
     );
     let alternate = if identifier.is_some() {
         native_fallback.clone()
@@ -305,6 +305,18 @@ fn explicit_identifier(task: &str) -> Option<String> {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Derive a bounded literal term for a native search fallback so the whole
+/// task sentence is never handed to a fixed-string `rg`. Pick the longest
+/// punctuation-free keyword; if the task has none, fall back to the task text
+/// so the fixed-string search still targets a term that can match.
+fn bounded_native_query(task: &str) -> String {
+    task.split_whitespace()
+        .map(|word| word.trim_matches(|ch: char| !ch.is_alphanumeric()))
+        .max_by_key(|word| word.chars().count())
+        .and_then(|word| (!word.is_empty()).then(|| word.to_string()))
+        .unwrap_or_else(|| task.to_string())
 }
 
 fn truncate_chars(value: &str, max: usize) -> String {

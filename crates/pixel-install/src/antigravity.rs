@@ -234,9 +234,9 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
     // when the plugin is already registered. Skip the call when agy already
     // lists `pixel` — the assets are freshly deployed above, so the
     // registration is the only thing the call adds.
-    let cli_registered = match agy_pixel_registered(home) {
-        Ok(Some(true)) => true,
-        _ => run_agy_plugin(home, "install", Some(&cli_dir))?,
+    let cli_registered = match agy_pixel_registered(home)? {
+        Some(true) => true,
+        Some(false) | None => run_agy_plugin(home, "install", Some(&cli_dir))?,
     };
 
     Ok(InstallStep {
