@@ -50,6 +50,12 @@ SCEN_DIR="$EVAL_DIR/scenarios"
 # Under /tmp on purpose: the operator's Codex config trusts /tmp, which
 # project-scoped .codex/ files written by `pixel install --repo` need.
 SCRATCH="${SCRATCH:-/tmp/pixel-eval-run-$$}"
+# Every run changes into its scenario worktree: a relative RESULTS or SCRATCH
+# would then name a path under that worktree, and the first transcript write
+# fails ("No such file or directory") before the agent starts.
+mkdir -p "$RESULTS" "$SCRATCH"
+RESULTS="$(cd "$RESULTS" && pwd)"
+SCRATCH="$(cd "$SCRATCH" && pwd)"
 EVAL_HEAD="$(git -C "$EVAL_DIR" rev-parse HEAD)"
 MAIN_ROOT="$(cd "$EVAL_DIR" && cd "$(git -C "$EVAL_DIR" rev-parse --git-common-dir)/.." && pwd)"
 CLIS="${CLIS:-claude}"

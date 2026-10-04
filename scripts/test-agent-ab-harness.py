@@ -260,6 +260,15 @@ class OfflinePipeline(unittest.TestCase):
                                   timeout=900, env={**cls.env, "ARMS": "vslim quiet baseline", "CLIS": "claude",
                                                     "SCENARIOS": "fx-answer", "RESULTS": str(root / "results-swap"),
                                                     "SCRATCH": str(root / "scratch-swap"), "FAKE_LOG": str(cls.swap_log)})
+        # The documented command passes RESULTS and SCRATCH relative to the
+        # operator's directory, while every run changes into its scenario
+        # worktree: the paths must be resolved before that.
+        cls.relative = subprocess.run(["bash", str(repo / "eval/run.sh")], cwd=root, capture_output=True, text=True,
+                                      timeout=900, env={**cls.env, "ARMS": "baseline", "CLIS": "claude", "REPS": "1",
+                                                        "SCENARIOS": "fx-answer", "RESULTS": "results-rel",
+                                                        "SCRATCH": "scratch-rel",
+                                                        "FAKE_LOG": str(root / "fake-rel.jsonl")})
+        cls.relative_root = root
         cls.log = [json.loads(line) for line in cls.fake_log.read_text().splitlines()] if cls.fake_log.exists() else []
         cls.rows = json.loads((cls.results / "scores.json").read_text()) if (cls.results / "scores.json").exists() else []
 
@@ -273,6 +282,12 @@ class OfflinePipeline(unittest.TestCase):
         self.assertEqual(self.rerun.returncode, 0, self.rerun.stderr[-4000:])
         self.assertEqual(self.rerun.stdout.count("=== skip "), 54, self.rerun.stdout[-2000:])
         self.assertEqual(len(self.log), 54, "the rerun must not call a host again")
+
+    def test_relative_results_and_scratch_paths_resolve_before_the_runs(self):
+        self.assertEqual(self.relative.returncode, 0, self.relative.stdout[-3000:] + self.relative.stderr[-3000:])
+        self.assertNotIn("run failed", self.relative.stdout)
+        rows = json.loads((self.relative_root / "results-rel/scores.json").read_text())
+        self.assertEqual([(r["scenario"], r["arm"]) for r in rows], [("fx-answer", "baseline")])
 
     def test_a_variant_payload_never_leaks_into_the_quiet_arm(self):
         self.assertEqual(self.swap.returncode, 0, self.swap.stdout[-3000:] + self.swap.stderr[-3000:])
