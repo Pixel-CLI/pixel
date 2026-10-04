@@ -1,7 +1,9 @@
 //! Host hook normalization and response envelopes for durable task gates.
 
 use std::io::{Read, Write};
+use std::iter::Peekable;
 use std::path::Path;
+use std::str::Chars;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -488,127 +490,161 @@ fn sed_read(args: &[String]) -> bool {
             "--version",
         ],
         &["-e", "--expression", "--line-length="],
-    ) && !args.iter().any(|arg| sed_script_writes(arg))
+    ) && !args.iter().any(|arg| sed_arg_writes(arg))
 }
 
-/// A sed script writes or executes when an `e` command (execute shell), a
-/// `w`/`W` command (write to file), or an `e`/`w` substitution flag appears at
-/// a command or address boundary. Addresses (numbers, `$`, `/re/`, `\cre`,
-/// including ranges) may precede the command letter, and a substitution may use
-/// any delimiter, so the script is tokenised rather than split on a fixed set
-/// of characters.
+/// An argument writes or executes when its own script content does. A
+/// positional script (`sed 'w out'`) is scanned directly; an inline script
+/// carried by `--expression=<script>` or a merged `-e<script>` is scanned the
+/// same way, so `sed --expression='w out'` and `sed -e'w out'` are denied
+/// where the two-argument `sed -e 'w out'` already is. `-f`/`--file` script
+/// files never reach here: `read_flags` rejects them before this runs.
+fn sed_arg_writes(arg: &str) -> bool {
+    sed_script_writes(arg)
+        || arg
+            .strip_prefix("--expression=")
+            .is_some_and(sed_script_writes)
+        || arg
+            .strip_prefix("-e")
+            .filter(|rest| !rest.is_empty())
+            .is_some_and(sed_script_writes)
+}
+
+/// A sed script writes or executes when it carries an `e` command (execute the
+/// shell), a `w`/`W` command (write the pattern space to a file), or a
+/// substitution with an `e`/`w`/`W` flag. GNU sed takes the rest of the
+/// command line as the `e` command or the `w`/`W` filename, so `east`,
+/// `west` and `write` are writes too — recognition is by command and flag,
+/// never by a following word boundary. Addresses (numbers, `$`, `/re/`,
+/// `\cre`, including ranges) may precede the command letter, substitutions
+/// may use any delimiter, and commands may be separated by `;`, braces or
+/// newlines, so the script is tokenised rather than split on a fixed set of
+/// characters.
 fn sed_script_writes(script: &str) -> bool {
-    let chars: Vec<char> = script.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            ';' | '{' | '}' => {
-                i += 1;
-                continue;
-            }
-            '#' => {
-                while i < chars.len() && !matches!(chars[i], '\n' | '\r') {
-                    i += 1;
-                }
-                continue;
-            }
-            c if c.is_ascii_whitespace() => {
-                i += 1;
-                continue;
-            }
-            _ => {}
+    let mut chars = script.chars().peekable();
+    loop {
+        if !skip_separators(&mut chars) || !skip_addresses(&mut chars) {
+            return false;
         }
-        // Skip the address(es) that may precede the command letter.
-        while i < chars.len() {
-            match chars[i] {
-                '0'..='9' | '$' | ',' => i += 1,
-                '/' => {
-                    i += 1;
-                    while i < chars.len() {
-                        if chars[i] == '\\' {
-                            i += 1;
-                        } else if chars[i] == '/' {
-                            i += 1;
-                            break;
-                        }
-                        i += 1;
-                    }
+        match chars.peek().copied() {
+            None => return false,
+            Some('e' | 'w' | 'W') => return true,
+            Some('s') => {
+                chars.next();
+                if substitution_writes(&mut chars) {
+                    return true;
                 }
-                '\\' if i + 1 < chars.len() => {
-                    let delim = chars[i + 1];
-                    i += 2;
-                    while i < chars.len() && chars[i] != delim {
-                        if chars[i] == '\\' {
-                            i += 1;
-                        }
-                        i += 1;
-                    }
-                    if i < chars.len() {
-                        i += 1;
-                    }
-                }
-                _ => break,
             }
-        }
-        if i >= chars.len() {
-            break;
-        }
-        // chars[i] is the command letter (or a non-address argument).
-        let command = chars[i];
-        let write_command = matches!(command, 'e' | 'w' | 'W')
-            && chars.get(i + 1).is_none_or(|c| *c == ' ' || *c == '\t');
-        if write_command || (command == 's' && substitution_writes(&chars, &mut i)) {
-            return true;
+            Some(_) => {}
         }
         // The remainder of this command is argument text, not more commands.
-        while i < chars.len() && !matches!(chars[i], ';' | '{' | '}') {
-            i += 1;
+        for c in chars.by_ref() {
+            if matches!(c, ';' | '{' | '}' | '\n') {
+                break;
+            }
         }
     }
-    false
 }
 
-/// Returns true when a substitution (`s<delim>regexp<delim>replacement<delim>
-/// flags`) carries an `e` (execute) or `w`/`W` (write to a file) flag. The
-/// delimiter is whatever character follows `s`, so `s@a@b@w out` is caught the
-/// same way as `s/a/b/w out`.
-fn substitution_writes(chars: &[char], i: &mut usize) -> bool {
-    *i += 1;
-    if *i >= chars.len() {
-        return false;
-    }
-    let delim = if chars[*i] == '\\' {
-        *i += 1;
-        if *i >= chars.len() {
-            return false;
-        }
-        chars[*i]
-    } else {
-        chars[*i]
-    };
-    // Skip the regular expression and the replacement, honouring escapes.
-    for _ in 0..2 {
-        *i += 1;
-        while *i < chars.len() && chars[*i] != delim {
-            if chars[*i] == '\\' {
-                *i += 1;
+/// Consume command separators, whitespace and comments. Returns false only
+/// when the script ends there, so the caller can stop scanning.
+fn skip_separators(chars: &mut Peekable<Chars<'_>>) -> bool {
+    loop {
+        match chars.peek().copied() {
+            None => return false,
+            Some(';' | '{' | '}') => {
+                chars.next();
             }
-            *i += 1;
+            Some('#') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if matches!(c, '\n' | '\r') {
+                        break;
+                    }
+                }
+            }
+            Some(c) if c.is_ascii_whitespace() => {
+                chars.next();
+            }
+            Some(_) => return true,
         }
-        if *i >= chars.len() {
-            return false;
-        }
-        *i += 1;
     }
-    // Inspect the trailing flags for an execute/write flag at a word boundary.
-    while *i < chars.len() && !matches!(chars[*i], ';' | '{' | '}') {
-        let flag = chars[*i];
-        if matches!(flag, 'w' | 'W' | 'e')
-            && chars.get(*i + 1).is_none_or(|c| *c == ' ' || *c == '\t')
-        {
-            return true;
+}
+
+/// Consume the address(es) that may precede a command letter: line numbers,
+/// `$`, the comma of a range, `/re/` and `\cre`. Returns false only when the
+/// script ends there, so the caller can stop scanning.
+fn skip_addresses(chars: &mut Peekable<Chars<'_>>) -> bool {
+    loop {
+        match chars.peek().copied() {
+            None => return false,
+            Some('0'..='9' | '$' | ',') => {
+                chars.next();
+            }
+            Some('/') => {
+                chars.next();
+                skip_delimited(chars, '/');
+            }
+            Some('\\') => {
+                chars.next();
+                let Some(delim) = chars.next() else {
+                    return false;
+                };
+                skip_delimited(chars, delim);
+            }
+            Some(_) => return true,
         }
-        *i += 1;
+    }
+}
+
+/// Consume through the next unescaped `delim`, honouring backslash escapes,
+/// so a `\c` delimiter or an escaped delimiter inside a regexp does not end
+/// the scan early.
+fn skip_delimited(chars: &mut Peekable<Chars<'_>>, delim: char) {
+    while let Some(next) = chars.next() {
+        match next {
+            '\\' => {
+                chars.next();
+            }
+            _ if next == delim => break,
+            _ => {}
+        }
+    }
+}
+
+/// Scan a substitution `s<delim>regexp<delim>replacement<delim>flags` whose
+/// `s` has already been consumed. Returns true when the trailing flags carry
+/// an `e` (execute) or `w`/`W` (write to a file) flag; GNU sed accepts them in
+/// any flag position and takes the text after `w` as its filename, so
+/// `s/a/b/e`, `s/.*/touch marker/ep`, `s/a/id/e;p` and `s/a/b/w out` are
+/// writes alike.
+fn substitution_writes(chars: &mut Peekable<Chars<'_>>) -> bool {
+    // The delimiter is whatever follows the `s`; `\c` is also accepted.
+    let Some(leading) = chars.next() else {
+        return false;
+    };
+    let delim = if leading == '\\' {
+        let Some(delim) = chars.next() else {
+            return false;
+        };
+        delim
+    } else {
+        leading
+    };
+    // Skip the regular expression and the replacement, each through its
+    // closing delimiter, honouring escaped delimiters inside them.
+    skip_delimited(chars, delim);
+    skip_delimited(chars, delim);
+    // Any remaining text before a command boundary is the flag list; a
+    // boundary is left in place so the next command still starts there.
+    while let Some(&flag) = chars.peek() {
+        match flag {
+            'e' | 'w' | 'W' => return true,
+            ';' | '{' | '}' | '\n' | '\r' => break,
+            _ => {
+                chars.next();
+            }
+        }
     }
     false
 }
@@ -1156,10 +1192,14 @@ mod tests {
         }
     }
 
-    /// `sed_script_writes` fires only on a write/exec command word at a
-    /// command boundary: `w out`, `W x`, `e cmd` mutate; `1,20p`,
-    /// `s/a/b/`, `d`, `p`, `n`, `a label`, `w` inside a filename, and
-    /// substitution delimiters do not.
+    /// `sed_script_writes` fires only on a write/exec command at a command
+    /// boundary (`w out`, `W x`, `e cmd`, `1e touch marker`), a substitution
+    /// with an `e`/`w`/`W` flag (`s/a/b/w out`, `s/.*/x/ep`), and the
+    /// newline-separated, comment-hidden and inline-`--expression` forms that
+    /// carry one (`p\ne touch marker`, `#x\nw out`). GNU sed takes the rest of
+    /// the line as the `e` command or `w`/`W` filename, so `west`, `write` and
+    /// `east` are writes too. Bounded reads (`1,20p`, `s/a/b/`, `d`, `p`, `a
+    /// label`) and unterminated or comment-stripped scripts stay reads.
     #[test]
     fn sed_script_writes_should_flag_only_write_or_exec_commands() {
         for script in [
@@ -1181,11 +1221,22 @@ mod tests {
             "w",
             "\\#foo#w out",
             "\\#\\b#w out",
+            "west",
+            "write",
+            "east",
+            "p\ne touch marker",
+            "1,20p\nw out",
+            "#x\nw out",
+            "s/.*/touch marker/ep",
+            "s/a/id/e;p",
+            "s/a\\/b/c/w out",
+            "s/a/b/west",
         ] {
             assert!(sed_script_writes(script), "{script}");
         }
         for script in [
             "1,20p",
+            "1,20p\n2,30q",
             "s/a/b/",
             "s/a b/c/",
             "s@a@b@",
@@ -1197,8 +1248,7 @@ mod tests {
             "p",
             "n",
             "a label",
-            "write",
-            "west",
+            "# ; w out",
             "\\#foo",
             "\\#foo#p",
             "# w out\n1,20p",
@@ -1294,6 +1344,11 @@ mod tests {
             "sed 's@a@b@w out' file.rs",
             "sed -f script.sed file.rs",
             "sed --file=script.sed file.rs",
+            "sed --expression='w out' file.rs",
+            "sed -e'w out' file.rs",
+            "sed 'west' file.rs",
+            "sed 'p\ne touch marker' file.rs",
+            "sed 's/a/b/ep' file.rs",
         ] {
             assert!(shell_mutates(command), "{command}");
             assert_eq!(
@@ -1314,6 +1369,8 @@ mod tests {
             "sed -n '433,472p' crates/pixel/src/code_search.rs",
             "rtk sed -n '145,184p' crates/pixel/src/main.rs",
             "sed -n '1,20p' file.rs | sort | uniq",
+            "sed --expression='1,20p' file.rs",
+            "sed -e'1,40p' file.rs",
             "rg -- --pre",
             "pixel config",
             "pixel config policy",
