@@ -50,7 +50,7 @@ fi
 # pull_request:[closed] event (a point-in-time snapshot) cannot see.
 open_branches=""
 if [ "$closed" -eq 1 ]; then
-    open_branches=$(gh api "repos/$owner_repo/pulls?state=open&per_page=100" --jq '.[] | .head.ref' | sort -u)
+    open_branches=$(gh api --paginate "repos/$owner_repo/pulls?state=open&per_page=100" --jq '.[] | .head.ref' | sort -u)
 fi
 
 
@@ -82,7 +82,7 @@ for status in queued in_progress; do
                     *) continue ;;
                 esac
                 [ "$head" = "main" ] && continue
-                if printf '%s\n' "$open_branches" | grep -qx "$head"; then continue; fi
+                if printf '%s\n' "$open_branches" | grep -Fqx -- "$head"; then continue; fi
                 # Runs queued for days are undispatchable ghosts the cancel
                 # API refuses (409) — skip them so the sweep stays quiet.
                 if older "$created" 2880; then continue; fi
