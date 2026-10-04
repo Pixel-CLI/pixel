@@ -1479,6 +1479,36 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The daemon's catch-up reads these two accessors: the HEAD the set
+    /// answers for, and every path the overlay holds — an edit and a
+    /// deletion (tombstone only) alike — so it can re-read them.
+    #[test]
+    fn catch_up_accessors_should_report_the_opened_head_and_overlay_paths() {
+        let _cache = IsolatedCache::new("catch_up_accessors");
+        let dir = scratch("catch-up-accessors");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn alphaNeedle() {}\n").unwrap();
+        std::fs::write(dir.join("b.rs"), "fn betaNeedle() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        assert_eq!(set.opened_head(), Some(head.as_str()));
+        assert_eq!(set.overlay_paths(), BTreeSet::new());
+
+        std::fs::write(dir.join("a.rs"), "fn editedNeedle() {}\n").unwrap();
+        std::fs::remove_file(dir.join("b.rs")).unwrap();
+        set.refresh_files(&[("a.rs", false), ("b.rs", true)]);
+        assert_eq!(
+            set.overlay_paths(),
+            BTreeSet::from(["a.rs".to_string(), "b.rs".to_string()])
+        );
+        // A new commit does not move the HEAD the open answered for.
+        git(&dir, &["commit", "-qam", "two"]);
+        assert_eq!(set.opened_head(), Some(head.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn git_anchored_layers_end_to_end() {
         let _cache = IsolatedCache::new("git_anchored_layers_end_to_end");

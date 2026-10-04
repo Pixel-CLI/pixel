@@ -187,6 +187,9 @@ enum Msg {
     WatchReady(Result<WatchGuard, String>),
 }
 
+/// Git's empty tree (SHA-1): the base a first commit is diffed from.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// Keeps a registered watch alive for as long as the loop holds it.
 type WatchGuard = Box<dyn Send>;
 
@@ -282,12 +285,14 @@ impl Corpus for Service {
                 .into_iter()
                 .map(|(_xy, path)| path),
         );
-        if let Some(opened) = opened_head
-            && let Some(head) = pixel_index::gitsync::rev_parse_head(&root)
-            && head != opened
+        // A repository with no commit at open has no HEAD to diff from: a
+        // first commit made meanwhile is diffed from the empty tree.
+        if let Some(head) = pixel_index::gitsync::rev_parse_head(&root)
+            && opened_head.as_deref() != Some(head.as_str())
         {
+            let from = opened_head.unwrap_or_else(|| EMPTY_TREE.to_string());
             paths.extend(
-                pixel_index::gitsync::diff_name_status(&root, &opened, &head)
+                pixel_index::gitsync::diff_name_status(&root, &from, &head)
                     .into_iter()
                     .map(|(_status, path)| path),
             );
@@ -1721,6 +1726,26 @@ mod tests {
 
     /// A branch switch before the watch was live rewrites files `git status`
     /// never lists: `watch_ready` re-reads what HEAD's move changed.
+    /// A repository opened before its first commit has no HEAD to diff
+    /// from; a file added and committed during registration is clean in
+    /// `git status` and absent from the overlay, so only the empty-tree
+    /// diff brings it in.
+    #[test]
+    fn service_watch_ready_should_pick_up_a_first_commit_before_the_watch() {
+        let root = scratch_root("watch-ready-first-commit");
+        git_in(&root, &["init", "-q"]);
+        let mut svc = Service::open(&root).unwrap();
+
+        std::fs::write(root.join("a.rs"), "fn firstNeedle() {}\n").unwrap();
+        git_in(&root, &["add", "a.rs"]);
+        git_in(&root, &["commit", "-qm", "first"]);
+        assert_eq!(search_hits(&mut svc, "firstNeedle"), 0, "no event yet");
+        Corpus::watch_ready(&mut svc);
+        assert_eq!(search_hits(&mut svc, "firstNeedle"), 1);
+        drop(svc);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn service_watch_ready_should_follow_a_head_move_before_the_watch() {
         let root = committed_repo("watch-ready-head-move");
