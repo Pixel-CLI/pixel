@@ -455,6 +455,55 @@ fn uniq_read(args: &[String]) -> bool {
         )
 }
 
+/// `sed` reads when it never writes: no `-i`/`--in-place` in any spelling,
+/// only the read-oriented flags the bounded-read route prescribes (`-n`,
+/// `-e <script>`, `-f <file>`). An unknown flag or combined form like `-ni`
+/// stays a mutation, so a destructive sed can never slip through as a read.
+fn sed_read(args: &[String]) -> bool {
+    read_flags(
+        args,
+        &[
+            "-n",
+            "-N",
+            "-s",
+            "-z",
+            "-u",
+            "-l",
+            "-E",
+            "-r",
+            "--silent",
+            "--quiet",
+            "--regexp-extended",
+            "--separate",
+            "--null-data",
+            "--unbuffered",
+            "--line-length",
+            "--posix",
+            "--sandbox",
+            "--debug",
+            "--help",
+            "--version",
+        ],
+        &["-e", "-f", "--expression", "--file", "--line-length="],
+    ) && !args.iter().any(|arg| sed_script_writes(arg))
+}
+
+/// A sed script writes or executes when a `w`/`W` command (write to file), an
+/// `e` command (execute shell), or `r`+`w` combos appear at a command
+/// boundary. `;`, `{`, and `}` start commands; a `w` inside `s/…/…/w` is the
+/// same write.
+fn sed_script_writes(script: &str) -> bool {
+    script
+        .split([';', '{', '}'])
+        .map(str::trim_start)
+        .chain(script.split(['/', '#']).map(str::trim_start))
+        .any(|cmd| {
+            let mut chars = cmd.chars();
+            matches!(chars.next(), Some('w' | 'W' | 'e'))
+                && chars.next().is_none_or(|c| c == ' ' || c == '\t')
+        })
+}
+
 /// Only proven read pipelines and single-command recovery bypass the edit gate.
 fn shell_mutates(command: &str) -> bool {
     let Some(segments) = crate::guard::split_segments(command) else {
@@ -495,6 +544,7 @@ fn shell_leaf_mutates(command: &str, recovery: bool) -> bool {
         }
         "git" => !git_read(args),
         "rg" | "grep" => !search_read(args),
+        "sed" => !sed_read(args),
         "sort" => !sort_read(args),
         "uniq" => !uniq_read(args),
         "pwd" | "true" | "false" | "cat" | "head" | "tail" | "wc" | "ls" | "read" => false,
@@ -997,6 +1047,31 @@ mod tests {
         }
     }
 
+    /// `sed_script_writes` fires only on a write/exec command word at a
+    /// command boundary: `w out`, `W x`, `e cmd` mutate; `1,20p`,
+    /// `s/a/b/`, `d`, `p`, `n`, `a label`, `w` inside a filename, and
+    /// substitution delimiters do not.
+    #[test]
+    fn sed_script_writes_should_flag_only_write_or_exec_commands() {
+        for script in [
+            "w out",
+            "W tmp",
+            "e rm -rf x",
+            "s/a/b/w out",
+            "1,5p;w out",
+            "1,5{w out}",
+            "s/a/b/; w out",
+            "w",
+        ] {
+            assert!(sed_script_writes(script), "{script}");
+        }
+        for script in [
+            "1,20p", "s/a/b/", "s/a b/c/", "d", "p", "n", "a label", "write", "west",
+        ] {
+            assert!(!sed_script_writes(script), "{script}");
+        }
+    }
+
     #[test]
     fn unavailable_should_block_edits_but_preserve_reads_and_recovery() {
         for tool in ["Write", "Edit", "apply_patch", "write", "edit"] {
@@ -1073,6 +1148,12 @@ mod tests {
             "pixel task reset session",
             "pixel task-state evaluate --suite external.json",
             "pixel task-state reset session",
+            "sed -i 's/a/b/' file.rs",
+            "sed -ni 's/a/b/' file.rs",
+            "sed --in-place 's/a/b/' file.rs",
+            "sed -e 's/a/b/' -e 'w out' file.rs",
+            "sed -n 's/a/b/w out' file.rs",
+            "sed 'e rm -rf x' file.rs",
         ] {
             assert!(shell_mutates(command), "{command}");
             assert_eq!(
@@ -1090,6 +1171,9 @@ mod tests {
             "git diff -- --output=notes",
             "rg -n -F needle src",
             "rg --glob='*.rs' needle",
+            "sed -n '433,472p' crates/pixel/src/code_search.rs",
+            "rtk sed -n '145,184p' crates/pixel/src/main.rs",
+            "sed -n '1,20p' file.rs | sort | uniq",
             "rg -- --pre",
             "pixel config",
             "pixel config policy",
