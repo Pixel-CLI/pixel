@@ -1433,3 +1433,98 @@ mod shell_resolution_tests;
 
 #[cfg(test)]
 mod shell_wrapper_strip_tests;
+
+#[cfg(test)]
+mod cursor_hooks_tests {
+    use super::{install_cursor_hooks, read_settings};
+
+    fn cursor_command(exe: &std::path::Path, verb: &str) -> String {
+        format!("{} run-hook {verb}", crate::routing::quoted_executable(exe))
+    }
+
+    fn commands_for(value: &serde_json::Value, event: &str) -> Vec<String> {
+        value["hooks"][event]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|entry| entry["command"].as_str())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn fresh_install_writes_version_and_both_flat_hook_commands() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = std::path::Path::new("/opt/pixel");
+        let step = install_cursor_hooks(home.path(), exe, false).unwrap();
+        assert!(step.summary.contains("configured"), "{}", step.summary);
+
+        let path = home.path().join(crate::config::CURSOR_HOOKS_FILE);
+        let value = read_settings(&path).unwrap();
+        // Cursor documents `version` as required; a fresh install must carry it.
+        assert_eq!(value["version"], serde_json::json!(1));
+        let pre = commands_for(&value, "preToolUse");
+        assert_eq!(
+            pre,
+            vec![cursor_command(exe, "guard --provider cursor")],
+            "{pre:?}"
+        );
+        assert_eq!(
+            value["hooks"]["preToolUse"][0]["matcher"],
+            serde_json::json!(crate::config::GUARD_MATCHER)
+        );
+        let post = commands_for(&value, "postToolUse");
+        assert_eq!(
+            post,
+            vec![cursor_command(exe, "metrics --provider cursor")],
+            "{post:?}"
+        );
+    }
+
+    #[test]
+    fn reinstall_preserves_version_and_foreign_entries_without_duplication() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = std::path::Path::new("/opt/pixel");
+        let path = home.path().join(crate::config::CURSOR_HOOKS_FILE);
+        // A pre-existing Cursor config: a non-1 version plus a foreign hook.
+        super::write_settings(
+            &path,
+            &serde_json::json!({
+                "version": 2,
+                "hooks": {
+                    "preToolUse": [{"command": "notify-send done"}]
+                }
+            }),
+            false,
+        )
+        .unwrap();
+
+        install_cursor_hooks(home.path(), exe, false).unwrap();
+        // Idempotence: a second install must not duplicate pixel's own entry.
+        install_cursor_hooks(home.path(), exe, false).unwrap();
+
+        let value = read_settings(&path).unwrap();
+        assert_eq!(value["version"], serde_json::json!(2));
+        let pre = commands_for(&value, "preToolUse");
+        assert_eq!(
+            pre,
+            vec![
+                "notify-send done".to_owned(),
+                cursor_command(exe, "guard --provider cursor"),
+            ],
+            "foreign preToolUse entries survive and pixel's stays singular: {pre:?}"
+        );
+    }
+
+    #[test]
+    fn dry_run_reports_planned_changes_without_writing() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = std::path::Path::new("/opt/pixel");
+        let step = install_cursor_hooks(home.path(), exe, true).unwrap();
+        assert!(step.summary.contains("would configure"), "{}", step.summary);
+        assert!(
+            !home.path().join(crate::config::CURSOR_HOOKS_FILE).exists(),
+            "dry-run must not create the hooks file"
+        );
+    }
+}
