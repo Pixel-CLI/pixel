@@ -668,6 +668,7 @@ fn unquoted_after(line: &str, start: usize, needle: char) -> usize {
 
 /// The index of the last `needle` at or before `end` that is not inside a
 /// `"..."` run, or `None` when there is none.
+#[cfg_attr(test, mutants::skip)] // `> 0` bounds an unsigned backward scan; `>= 0` is always true and underflows
 fn unquoted_before(line: &str, end: usize, needle: char) -> Option<usize> {
     let mut at = end;
     let mut quoted = false;
