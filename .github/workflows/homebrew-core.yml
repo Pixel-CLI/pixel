@@ -34,8 +34,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Release-prepare pull request? See release-prepare-scope.yml. Its version
+  # bump names a tag that only exists after the merge, so `brew audit --new`
+  # finds the formula's source URL unreachable (404) on every release; the
+  # weekly run and the next pull request touching these paths check the
+  # released version instead.
+  scope:
+    uses: ./.github/workflows/release-prepare-scope.yml
+
   build-from-source:
     name: brew install --build-from-source (${{ matrix.os }})
+    needs: scope
+    if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
