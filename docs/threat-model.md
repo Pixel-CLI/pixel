@@ -170,9 +170,12 @@ repository file.
   `crates/pixel/src/decide_remote.rs` (`Preset::base`), over `ureq` with
   `rustls-webpki-roots`; the question and its context are sent, each capped
   at `TEXT_CAP_CHARS` (32 768). `PIXEL_REMOTE_BASE` overrides the endpoint.
-- The prompt hook's task-intent question goes to the local engine only
-  (`prompt_intent::hook_intent`, `HOOK_CALL_TIMEOUT` 300 ms), at the base the
-  global config names.
+- The prompt hook's task-intent question, when classify is enabled
+  (`prompt_intent::hook_intent`, `HOOK_CALL_TIMEOUT` 300 ms), carries the full
+  prompt to the Ollaya endpoint the global config names
+  (`classify_setup::local_base`: the launch entry's `base`, else
+  `decide_ollaya::DEFAULT_BASE` on loopback). A non-loopback base receives
+  every prompt the hook classifies.
 - `pixel web-search`: SearXNG at `PIXEL_WEB_SEARCH_URL`, Perplexity with a
   key, else DuckDuckGo then Wikipedia (`crates/pixel/src/web_search.rs`).
 - The release check: one `HEAD` to `RELEASES_LATEST_URL`
