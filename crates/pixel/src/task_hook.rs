@@ -503,7 +503,8 @@ fn sed_read(args: &[String]) -> bool {
 /// is given, the first positional operand. File operands are not scripts —
 /// sed decides which operand is the script, and the rest are input files.
 /// `--line-length`/`-l` consume a separate value argument so it is not
-/// mistaken for a positional.
+/// mistaken for a positional. `--` ends the options only: the first operand
+/// after it is still the script when none came before.
 fn sed_scripts(args: &[String]) -> impl Iterator<Item = &str> {
     let mut scripts: Vec<&str> = Vec::new();
     let mut has_explicit = false;
@@ -512,6 +513,11 @@ fn sed_scripts(args: &[String]) -> impl Iterator<Item = &str> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if after_dd {
+            // `--` ends the options, not the script search: with no `-e` and
+            // no earlier positional, GNU sed runs the first operand after it.
+            if first_positional.is_none() {
+                first_positional = Some(arg.as_str());
+            }
             continue;
         }
         if arg == "--" {
@@ -1440,6 +1446,9 @@ mod tests {
             // -l consumes its value arg, so the script after it is still scanned
             "sed -n -l 72 'w out' file.rs",
             "sed -n --line-length 72 'w out' file.rs",
+            // `--` ends the options: the first operand after it is the script
+            "sed -- 'e touch marker' file.rs",
+            "sed -n -- 'w out' file.rs",
         ] {
             assert!(shell_mutates(command), "{command}");
             assert_eq!(
@@ -1481,6 +1490,10 @@ mod tests {
             // -l consumes its value, so the script after it is still the script
             "sed -n -l 72 '1,20p' file.rs",
             "sed -n --line-length 72 '1,20p' file.rs",
+            // after `--`, only the first operand is the script; the rest are files
+            "sed -n -- '1,20p' west.rs",
+            "sed -n '1,20p' -- west.rs",
+            "sed -n -e '1,20p' -- west.rs",
             "rg -- --pre",
             "pixel config",
             "pixel config policy",
