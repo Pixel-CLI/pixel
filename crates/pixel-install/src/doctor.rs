@@ -2664,8 +2664,8 @@ mod tests {
         fix_for, judge_repair, load_pixel_config, names_check, normalize_rule_command, one_line,
         probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
         rtk_backup_check, run_repair, scenario_mismatches, selected, shell_path_check, shell_word,
-        spec, split_home_repairs, validate_selection, web_search_provider_check_with,
-        web_search_provider_from,
+        spec, split_home_repairs, validate_selection, web_search_provider_check,
+        web_search_provider_check_with, web_search_provider_from,
     };
     use super::env_non_empty;
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
@@ -3295,6 +3295,51 @@ mod tests {
             "remote_keys": { "perplexity": "" },
         });
         assert_eq!(web_search_provider_from(false, false, &empty), "none");
+    }
+
+    /// The env wrapper is the one path the resolution tests cannot reach
+    /// with literal flags: a real `pixel doctor` reads the provider env
+    /// vars itself. Each assertion pins one guard mutation (non-empty wins,
+    /// empty is absent, unset is absent).
+    #[test]
+    fn web_search_env_flags_drive_the_provider_check() {
+        let home = tempfile::tempdir().unwrap();
+        let provider = || {
+            let (_, check) = super::web_search_provider_check(home.path()).unwrap();
+            check.detail.unwrap()["provider"]
+                .as_str()
+                .unwrap_or("?")
+                .to_string()
+        };
+        // SAFETY: nextest isolates one process per test (this repo's
+        // nextest config relies on exactly that), so mutating the process
+        // env here races with no other test.
+        unsafe {
+            std::env::set_var("PIXEL_WEB_SEARCH_URL", "https://sx.test");
+        };
+        // SAFETY: nextest isolates one process per test (this repo's
+        // nextest config relies on exactly that), so mutating the process
+        // env here races with no other test.
+        unsafe {
+            std::env::remove_var("PERPLEXITY_API_KEY");
+        };
+        assert_eq!(provider(), "searxng");
+        // An empty value counts as absent, exactly like the CLI.
+        // SAFETY: nextest isolates one process per test (this repo's
+        // nextest config relies on exactly that), so mutating the process
+        // env here races with no other test.
+        unsafe {
+            std::env::set_var("PIXEL_WEB_SEARCH_URL", "");
+        };
+        assert_eq!(provider(), "none");
+        // Unset leaves the public chain as the fallback.
+        // SAFETY: nextest isolates one process per test (this repo's
+        // nextest config relies on exactly that), so mutating the process
+        // env here races with no other test.
+        unsafe {
+            std::env::remove_var("PIXEL_WEB_SEARCH_URL");
+        };
+        assert_eq!(provider(), "none");
     }
 
     /// The global config reads as JSON either way: the YAML file (parsed
