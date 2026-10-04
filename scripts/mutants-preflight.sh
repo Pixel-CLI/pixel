@@ -89,7 +89,11 @@ fi
 
 if [ "$mode" = --run ]; then
     # The CI shard's command without `--shard`: the cargo arguments come
-    # from .cargo/mutants.toml for both, and so must the cargo-mutants version.
+    # from .cargo/mutants.toml for both, and so must the cargo-mutants
+    # version and the pinned nightly that libtest's --fail-fast needs
+    # (scripts/mutants-toolchain.sh, sourced before any cargo runs).
+    # shellcheck source=/dev/null
+    . "$repo/scripts/mutants-toolchain.sh"
     sh "$repo/scripts/mutants-version-check.sh" "$repo"
     worktree="$tmp_dir/tree"
     git worktree add --detach "$worktree" "$head_oid" >/dev/null

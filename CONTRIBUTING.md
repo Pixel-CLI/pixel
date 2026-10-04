@@ -53,6 +53,9 @@ A change is ready for a pull request when every line below is true.
 | `just` (optional) | only for the `justfile` recipes (see "Reclaiming disk"): `cargo install just`, `brew install just`, `mise use -g just`. Every recipe is a one-line call into `scripts/`, which runs without it |
 
 No `rust-toolchain` file is pinned; CI uses `dtolnay/rust-toolchain@stable`.
+Mutation campaigns are the exception: every lane that runs mutants uses the
+pinned nightly in `scripts/mutants-toolchain.sh` (libtest `--fail-fast`), while
+listing mutants and all other builds stay on stable.
 
 ## Build
 
@@ -299,8 +302,12 @@ The diff goes through a file rather than `<(git diff …)` so the same lines
 run in bash, zsh and fish, which has no `<(…)` process substitution.
 
 Every one of these runs the program a CI shard runs: the cargo arguments
-that decide it (`--locked`, `--all-targets`) live in `.cargo/mutants.toml`,
-never on a command line, and `scripts/mutants-preflight.sh --run` and
+that decide it (`--locked`, `--all-targets`, and the test binary's
+`-Zunstable-options --fail-fast` — libtest stops a target at its first
+failing test, roughly halving the time a caught mutant's suite spends)
+live in `.cargo/mutants.toml`, never on a command line, and the campaign
+lanes source the pinned nightly first (`scripts/mutants-toolchain.sh`;
+`--fail-fast` needs it). `scripts/mutants-preflight.sh --run` and
 `scripts/gates.sh --mutants` refuse a cargo-mutants other than the pinned
 one (`scripts/mutants-version-check.sh`). A lane with a flag of its own
 judges different mutants: `scripts/test-mutants-config.py` fails on one.

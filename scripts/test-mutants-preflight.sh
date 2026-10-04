@@ -11,13 +11,29 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/pixel-mutants-preflight-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 fixture="$tmp/repo"
 mkdir -p "$fixture/scripts" "$fixture/crates/demo/src" "$fixture/.github/workflows" "$tmp/bin"
-cp "$repo/scripts/mutants-preflight.sh" "$repo/scripts/mutants-version-check.sh" "$fixture/scripts/"
+cp "$repo/scripts/mutants-preflight.sh" "$repo/scripts/mutants-version-check.sh" \
+    "$repo/scripts/mutants-toolchain.sh" "$fixture/scripts/"
 printf '      - uses: taiki-e/install-action@x\n        with:\n          tool: cargo-mutants@27.1.0\n' \
     > "$fixture/.github/workflows/mutants.yml"
 
+# The campaign lane runs on the pinned nightly (libtest --fail-fast needs
+# it), installed and exported by scripts/mutants-toolchain.sh; the stub
+# records what the lane asked rustup for and reports the pin as installed,
+# so the contract below can pin both halves.
+cat > "$tmp/bin/rustup" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$RUSTUP_LOG"
+case "$*" in
+    "toolchain list") echo "nightly-2026-05-12-x (default)" ;;
+    "toolchain install"*) : ;;
+    *) echo "rustup stub: unexpected: $*" >&2; exit 9 ;;
+esac
+EOF
+chmod +x "$tmp/bin/rustup"
+
 cat > "$tmp/bin/cargo" <<'EOF'
 #!/bin/sh
-printf '%s\n' "$*" >> "$CARGO_LOG"
+printf '%s\n' "${RUSTUP_TOOLCHAIN:-unset} $*" >> "$CARGO_LOG"
 case "$*" in
     "mutants --version")
         echo "cargo-mutants ${CARGO_MUTANTS_VERSION:-27.1.0}"
@@ -53,7 +69,8 @@ git -C "$fixture" add crates/demo/src/lib.rs
 git -C "$fixture" commit -qm rust-change
 
 run() {
-    PATH="$tmp/bin:$PATH" CARGO_LOG="$tmp/cargo.log" CARGO_LISTING='crates/demo/src/lib.rs:2:1: replace changed -> ()\n' \
+    PATH="$tmp/bin:$PATH" CARGO_LOG="$tmp/cargo.log" RUSTUP_LOG="$tmp/rustup.log" \
+        CARGO_LISTING='crates/demo/src/lib.rs:2:1: replace changed -> ()\n' \
         sh "$fixture/scripts/mutants-preflight.sh" "$@"
 }
 
@@ -62,7 +79,8 @@ if (cd "$fixture" && run --check > "$tmp/blocked.out" 2>&1); then
     exit 1
 fi
 grep -q 'scripts/mutants-preflight.sh --ack' "$tmp/blocked.out"
-grep -q '^mutants --list --in-diff ' "$tmp/cargo.log"
+# The listing lane runs on whatever toolchain is active: no pin prefix.
+grep -q '^unset mutants --list --in-diff ' "$tmp/cargo.log"
 
 (cd "$fixture" && run --ack > "$tmp/ack.out")
 (cd "$fixture" && run --check > "$tmp/allowed.out")
@@ -105,9 +123,17 @@ fi
 grep -q 'cargo mutants --list failed' "$tmp/cargo-failure.out"
 
 : > "$tmp/cargo.log"
+: > "$tmp/rustup.log"
 (cd "$fixture" && run --run > "$tmp/run.out")
 grep -q 'local run caught every listed mutant' "$tmp/run.out"
-grep -q '^mutants -vV --no-shuffle --in-place --iterate --in-diff ' "$tmp/cargo.log"
+# Every campaign cargo call runs under the pinned nightly; the listing
+# lanes above ran with no RUSTUP_TOOLCHAIN (the pin would prefix their
+# cargo log lines -- the --check greps above would have failed).
+grep -q '^nightly-2026-05-12 mutants -vV --no-shuffle --in-place --iterate --in-diff ' "$tmp/cargo.log"
+if grep -q '^unset mutants -vV' "$tmp/cargo.log"; then
+    echo "expected the campaign to run under the pinned nightly" >&2
+    exit 1
+fi
 # .cargo/mutants.toml owns --all-targets and --locked for every lane.
 if grep -Eq -- '--all-targets|--locked' "$tmp/cargo.log"; then
     echo "expected the local run to leave --all-targets and --locked to .cargo/mutants.toml" >&2

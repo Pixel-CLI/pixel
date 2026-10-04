@@ -24,6 +24,12 @@ export CARGO_INCREMENTAL=1
 # a gate campaign and a shard: line-tables-only debuginfo is what makes a
 # one-crate rebuild cost seconds instead of minutes.
 export CARGO_PROFILE_DEV_DEBUG=line-tables-only
+# The campaign below runs on the pinned nightly of
+# scripts/mutants-toolchain.sh (sourced by mutants-preflight.sh --run, which
+# this execs): .cargo/mutants.toml hands the test binary --fail-fast, which
+# stable libtest rejects. The first nightly campaign rebuilds the warm
+# target/ once (stable and nightly artifacts never share fingerprints);
+# every later one is warm again.
 # The ssh session has no XDG_RUNTIME_DIR; without it the test process and the
 # spawned pixel binaries resolve daemon sockets into different homes and the
 # daemon fixtures never meet (2026-10-03, three aborted baselines).
