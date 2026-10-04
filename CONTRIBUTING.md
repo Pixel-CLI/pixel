@@ -406,6 +406,10 @@ the `/tmp/pixel-bench-*` scratch.
 
 ## Repository map
 
+The project spans two repositories: [Pixel-CLI/pixel](https://github.com/Pixel-CLI/pixel),
+the source, and [LivioGama/homebrew-tap](https://github.com/LivioGama/homebrew-tap),
+which holds the Homebrew formula the release workflow writes on every tag.
+
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full map. The short version:
 
 | Path | What lives there |
@@ -773,6 +777,14 @@ Steps 1 to 3 are `.agents/skills/release/prepare.sh x.y.z`.
    files. `fail-fast: true`
    means a partial build failure publishes nothing.
 6. Only the latest release receives security fixes.
+
+## Reporting bugs
+
+Report a bug with the [bug report form](https://github.com/Pixel-CLI/pixel/issues/new?template=bug_report.yml):
+what happened, the steps to reproduce, the output of `pixel --version` (release,
+commit and target) and the platform and install method. Questions and ideas go
+to [GitHub Discussions](https://github.com/Pixel-CLI/pixel/discussions).
+Vulnerabilities never go in a public issue: see the next section.
 
 ## Security
 

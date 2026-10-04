@@ -6,7 +6,8 @@ Only the latest release is supported with security fixes.
 
 ## Reporting a vulnerability
 
-Email: Open a private security advisory on GitHub (https://github.com/Pixel-CLI/pixel/security/advisories/new).
+Open a private security advisory on GitHub:
+https://github.com/Pixel-CLI/pixel/security/advisories/new
 
 Do **not** open a public issue for security vulnerabilities.
 
