@@ -18,7 +18,8 @@ neither needs the other's approval to do so.
 
 - **Review and merge.** Read and review pull requests, answer CodeRabbit's
   findings (CONTRIBUTING.md, "CodeRabbit reviews"), and merge into `main`.
-  Merging into `main` is reserved to the maintainers.
+  Only the maintainers push branches to this repository and merge into
+  `main`.
 - **Release.** Cut releases with the `release` skill: the prepare pull
   request into `main`, then the `vX.Y.Z` tag that runs the release workflow
   (CONTRIBUTING.md, "Release (maintainers)").
@@ -42,11 +43,15 @@ neither needs the other's approval to do so.
 
 ## Contributors
 
-Anyone can contribute through a pull request; CONTRIBUTING.md is the guide.
-Contributors who work on the repository directly may be given write access
-to push branches: [@xDelph](https://github.com/xDelph) has it today. Write
-access does not include the secrets, the settings or releases, and merging
-into `main` stays with the maintainers.
+Anyone can contribute, from a fork: open a pull request from your fork's
+branch into `main`; CONTRIBUTING.md is the guide. Only the two maintainers
+have write access to this repository, so only they push branches here and
+open pull requests from them; a regular contributor may be given the Triage
+role to label and manage issues and pull requests, never write access. A
+fork's pull request runs CI only after a maintainer approves it. Its
+workflows receive no secrets, except the metadata-only `pull_request_target`
+board sync, which receives `PROJECTS_TOKEN` to update the project board and
+never checks out the fork's code.
 
 ## Changes to this file
 
