@@ -121,8 +121,8 @@ flowchart TD
     A --> F["stderr · 🟩 round-trips · tokens saved"]
     classDef llm fill:#ffe3e3,stroke:#d64545,color:#8a1f1f
     classDef det fill:#e6f4ea,stroke:#2ea043,color:#14522a
-    class L,M llm
-    class S,P det
+    class L llm
+    class S,P,M det
 ```
 
 **Implement a feature** — "implement feature":
