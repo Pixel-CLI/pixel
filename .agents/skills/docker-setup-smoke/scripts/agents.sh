@@ -79,7 +79,7 @@ path, marker, agent = sys.argv[1:]
 bodies = [json.loads(line)["body"] or {} for line in open(path)]
 turns = [b for b in bodies if b.get("tools")]
 assert turns, f"{agent} sent no request offering tools"
-first = json.dumps(turns[0])
+first = json.dumps(turns[0], ensure_ascii=False)
 assert marker in first, f"{agent}: the first model request lacks {marker!r}"
 results = []
 for body in turns:
@@ -91,7 +91,7 @@ for body in turns:
                 if isinstance(i, dict) and i.get("type") == "function_call_output"]
 last = results[-2:] if len(results) >= 2 else results
 assert len(last) == 2 and all("src/m1.py:1:" in r for r in last), f"{agent} tool results: {last}"
-if "<persisted-output>" in first and "Pixel — deterministic repository facts" in first:
+if "<persisted-output>" in first and "deterministic repository facts" in first:
     print(f"NOTE {agent} received the Pixel prompt as a persisted-output preview, not inline")
 PY
     test "$(actions search-content)" -gt "$searches_before"
@@ -114,7 +114,7 @@ ANTHROPIC_BASE_URL="http://127.0.0.1:$port" CLAUDE_CODE_OAUTH_TOKEN=smoke-fake-o
     timeout 120 claude -p 'Where is helper_1 defined?' --model claude-smoke-fake \
     --dangerously-skip-permissions --output-format json > /evidence/claude.json 2> /evidence/claude.err
 python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"])' /evidence/claude.json > /evidence/claude.out
-verify claude 'Pixel — deterministic repository facts' "$before_searches" "$before_compat"
+verify claude 'deterministic repository facts' "$before_searches" "$before_compat"
 before_searches=$(actions search-content)
 before_compat=$(actions search-compat)
 before_hooks=$(hook_runs codex)

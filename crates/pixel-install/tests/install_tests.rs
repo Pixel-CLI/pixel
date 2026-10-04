@@ -3506,12 +3506,26 @@ fn deployed_prompts_carry_each_heading_and_paragraph_once() {
             include_str!("../assets/pixel-subagent-prompt.md"),
         ),
     ] {
-        let mut seen = std::collections::HashSet::new();
-        for block in prompt.split("\n\n").map(str::trim) {
-            let substantial = block.starts_with('#') || block.len() > 80;
+        let mut headings = std::collections::HashSet::new();
+        for heading in prompt.lines().filter(|line| line.starts_with('#')) {
             assert!(
-                !substantial || seen.insert(block),
-                "{name} prompt repeats a block:\n{block}"
+                headings.insert(heading),
+                "{name} prompt repeats a heading: {heading}"
+            );
+        }
+        let mut paragraphs = std::collections::HashSet::new();
+        for block in prompt.split("\n\n") {
+            // A paragraph is a block's text without its heading line, so a
+            // repeated body under a new heading is still a repeat.
+            let text = block
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let text = text.trim();
+            assert!(
+                text.len() <= 80 || paragraphs.insert(text.to_string()),
+                "{name} prompt repeats a paragraph:\n{text}"
             );
         }
     }
