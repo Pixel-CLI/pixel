@@ -3464,6 +3464,20 @@ fn files_only_output(paths: &[String], cap: usize) -> (String, usize) {
     (out, printed)
 }
 
+/// Whether an empty exact-search page is the complete answer — first page,
+/// no matches, zero counted, and not cut by the daemon — so the task-aware
+/// fallback may replace it. A `truncated` empty page is partial evidence,
+/// not a no-hit, and must keep its own result.
+fn empty_exact_page_is_complete(offset: usize, matches: &[Value], data: &Value) -> bool {
+    offset == 0
+        && matches.is_empty()
+        && data.get("match_count").and_then(Value::as_u64) == Some(0)
+        && !data
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_search_one(
     pattern: &str,
@@ -3506,15 +3520,9 @@ fn run_search_one(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if let Some(phrase) = fallback_query.filter(|_| {
-        offset == 0
-            && matches.is_empty()
-            && data.get("match_count").and_then(Value::as_u64) == Some(0)
-            && !data
-                .get("truncated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-    }) {
+    if let Some(phrase) =
+        fallback_query.filter(|_| empty_exact_page_is_complete(offset, &matches, &data))
+    {
         operation_metrics::observe(&data);
         match run_task_aware_search_fallback(root, phrase, limit, no_daemon, json) {
             Ok(found) => {
@@ -9075,3 +9083,7 @@ mod commit_message_tests;
 #[cfg(test)]
 #[path = "main_tests/review_gate_pretty_tests.rs"]
 mod review_gate_pretty_tests;
+
+#[cfg(test)]
+#[path = "main_tests/search_fallback_gate_tests.rs"]
+mod search_fallback_gate_tests;
