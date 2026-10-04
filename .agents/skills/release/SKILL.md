@@ -168,7 +168,19 @@ only, 2000 bytes; `prepare.sh` refuses more).
 
 ## 3. Prepare the release commit
 
-From an up-to-date `main`, on a `release-x.y.z` branch:
+From an up-to-date `main`, on a `release-x.y.z` branch. Record the full
+`BASE=$(git rev-parse origin/main)` before preparation and
+`PREPARE_HEAD=$(git rev-parse HEAD)` after its final validated commit.
+A rebase invalidates that record and its changelog coverage, even if Git
+reports no conflict: review every newly included PR and direct commit,
+fold new fragments into the released section, then validate and record anew.
+
+```bash
+git fetch origin
+BASE=$(git rev-parse origin/main)
+```
+
+Prepare:
 
 ```bash
 pixel new-branch release-x.y.z --from origin/main --request-id "release-x.y.z-branch"
@@ -255,8 +267,19 @@ commit, which step 4 waits for, cover it. If Test + Format or Mutants runs,
 maintenance release into `release/x.y` keeps every job, and there green is
 the bar.
 
-All skipped but `scope`, or all green on `release/x.y`, and no actionable
-review comment: merge it, squash like every PR on `main`
+Immediately before merging, fetch the target and run the candidate guard
+with the recorded SHAs (use `origin/release/x.y` for maintenance):
+
+```bash
+git fetch origin
+python3 .agents/skills/release/check-candidate.py "$BASE" "$PREPARE_HEAD" --tip origin/main
+```
+
+If the base moved or GitHub reports `BEHIND`, refresh coverage and validation;
+never bypass the stale candidate. The guard after merge closes the remaining
+race between this fetch and GitHub merging. All skipped but `scope`, or all
+green on `release/x.y`, and no actionable review comment: merge it, squash
+like every PR on `main`
 (`gh pr merge <n> --squash --delete-branch`).
 
 ## 4. Tag
@@ -268,7 +291,7 @@ that commit's push CI (CI, Cross-build) to be green:
 ```bash
 git fetch origin
 SHA=$(gh pr view <n> --json mergeCommit --jq .mergeCommit.oid)
-git merge-base --is-ancestor "$SHA" origin/main && echo "on main"
+python3 .agents/skills/release/check-candidate.py "$BASE" "$PREPARE_HEAD" --tip origin/main --merge "$SHA"
 git show --stat "$SHA" | head -5                      # the merge of release: prepare x.y.z
 git show "${SHA}:crates/pixel/Cargo.toml" | sed -n 3p # version = "x.y.z"; braces: zsh reads "$SHA:c" as a modifier
 gh run list --branch main --commit "$SHA"             # CI and Cross-build: success
@@ -276,7 +299,9 @@ git tag -a vx.y.z -m "pixel x.y.z" "$SHA"             # annotated, as v0.2.4
 git push origin vx.y.z                                # the release ask covers it (Authority)
 ```
 
-Record the SHA, then find the run and watch it in the background, never with
+A failed candidate guard means no tag: prepare a new reviewed candidate
+with complete coverage and gates. Tree equality alone is insufficient; the
+guard checks the merge parent too. Record the SHA, then find the run and watch it in the background, never with
 a foreground sleep loop:
 
 ```bash

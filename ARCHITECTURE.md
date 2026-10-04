@@ -728,6 +728,16 @@ reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
 `changelog`), exit 1 on any failure. Pure functions over file contents;
 no git, no network.
 
+The release skill also runs `.agents/skills/release/check-candidate.py` on
+recorded base and prepare SHAs. Before merge it requires the fetched target
+to equal that base and a prepare-only diff without remaining fragments.
+Before tagging it requires the squash merge on the target history, its sole
+parent equal to that base, and its tree identical to the validated prepare
+head. Later target commits do not change which merge gets tagged. Its real
+Git contract runs in both `scripts/gates.sh` and CI
+(`scripts/test-release-candidate.py`). CI results and semantic changelog
+coverage remain separate release requirements.
+
 ## Build provenance
 
 `crates/pixel/build.rs` captures the commit (`-dirty` when tracked files
