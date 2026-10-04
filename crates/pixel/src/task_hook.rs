@@ -1179,6 +1179,8 @@ mod tests {
             "s@a@b@e touch marker",
             "s/a/b/e",
             "w",
+            "\\#foo#w out",
+            "\\#\\b#w out",
         ] {
             assert!(sed_script_writes(script), "{script}");
         }
@@ -1197,6 +1199,8 @@ mod tests {
             "a label",
             "write",
             "west",
+            "\\#foo",
+            "\\#foo#p",
         ] {
             assert!(!sed_script_writes(script), "{script}");
         }
