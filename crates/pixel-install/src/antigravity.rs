@@ -976,7 +976,11 @@ mod tests {
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         if present == "yes" {
-            fake_agy(&bin.join("agy"), "");
+            // `agy plugin list` must answer with its imports JSON: the deploy
+            // path reads the listing to skip `agy plugin install` for a
+            // plugin that agy already lists. An empty answer is not that
+            // contract — it would fail the listing's JSON parse.
+            fake_agy(&bin.join("agy"), r#"{"imports":[]}"#);
         }
         // PATH holds only the fixture: a developer's real agy cannot leak in.
         // SAFETY: single-purpose child spawned just for this assertion.

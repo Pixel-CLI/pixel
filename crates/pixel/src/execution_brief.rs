@@ -743,17 +743,12 @@ mod tests {
             route["first_on_empty_or_irrelevant"],
             "rtk pixel find-code 'How does task preparation refresh stale source evidence? implementation and callers'"
         );
-        assert!(
-            route["after_two_nonconverging_calls"]
-                .as_str()
-                .unwrap()
-                .starts_with("rtk rg -m 5 -n -F -- '")
-        );
-        assert!(
-            route["after_two_nonconverging_calls"]
-                .as_str()
-                .unwrap()
-                .ends_with("| rtk sed -n '1,20p'")
+        // The native fallback carries the bounded term derived from the
+        // task — not the whole sentence and not an empty or placeholder
+        // term — shell-quoted into one literal `rg` query.
+        assert_eq!(
+            route["after_two_nonconverging_calls"],
+            "rtk rg -m 5 -n -F -- 'preparation' . | rtk sed -n '1,20p'"
         );
         assert_eq!(
             route["progression"],

@@ -6912,6 +6912,28 @@ mod tests {
     }
 
     #[test]
+    fn metrics_hook_line_keeps_a_record_that_only_touches_the_previous_interval() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("touch");
+        let start = pixel_actionlog::now_ms().saturating_sub(60_000);
+        // The second record ends exactly where the first starts: the
+        // intervals share a boundary but never overlap, so the latest record
+        // stays attributable and the relay must not be suppressed.
+        fixture.record_interval("impact", "impact src/login.rs", "x-000001", start, 1_000);
+        fixture.record_interval(
+            "impact",
+            "impact src/login.rs",
+            "x-000002",
+            start.saturating_add(1_000),
+            1_000,
+        );
+        let line =
+            metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs")))
+                .unwrap();
+        assert!(line.contains("#000002"), "{line}");
+    }
+
+    #[test]
     fn metrics_hook_response_dedupes_except_for_claude_users() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let fixture = MetricsFixture::new("response");

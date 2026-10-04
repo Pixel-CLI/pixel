@@ -528,6 +528,44 @@ fn an_empty_exact_search_should_run_one_task_aware_find_code_fallback() {
     assert_eq!(fixture.events("search-content").len(), 1);
 }
 
+/// When the task-aware fallback also finds nothing, the empty-answer note
+/// still lands on stderr — replacing the exact search with one fallback
+/// query must not silence the report that no match was found.
+#[test]
+fn an_exhausted_fallback_still_reports_the_empty_answer_note() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["build-index"]));
+
+    let output = fixture
+        .command()
+        .args([
+            "search-content",
+            "-F",
+            "missing_exact_pixel_literal",
+            "--fallback-query",
+            "mzzqxwv xorffle gazonk 4f9",
+            "--no-daemon",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "No matches found.", "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ran one task-aware find-code fallback"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "0 matches under {}; repo root {}",
+            fixture.0.display(),
+            fixture.0.display()
+        )),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn an_exact_hit_should_not_run_fallback_when_call_count_warning_is_present() {
     let fixture = Fixture::new();
