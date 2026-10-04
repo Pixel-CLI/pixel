@@ -598,25 +598,76 @@ fn run_agent_browser(args: &[&str]) -> Result<String, String> {
 ///   "account matching user@example.com"
 ///   "input[type=email] or textbox matching 'Email'"
 /// Whether the snapshot line carrying `ref_id` shows the field already
-/// holding `value` (`- textbox "Search" [ref=e59]: filled text`).
+/// holding `value`.
+///
+/// agent-browser renders a field's current contents as a `value="..."`
+/// attribute inside the node's bracket block (`- textbox "Search"
+/// [value="notion invoice", ref=e59]` — the attribute the observation
+/// parser reads on real snapshots); a page can also spell it after the
+/// block (`- textbox "Search" [ref=e59]: notion invoice`). Read both:
+/// the snapshot's choice of rendering must not decide whether a fill is
+/// a no-op (the Drive rerun of 2026-10-04 re-filled the search box 38
+/// times because only the column form matched).
 fn field_holds_value(snapshot: &str, ref_id: &str, value: &str) -> bool {
     snapshot
         .lines()
-        .filter_map(|line| {
-            let at = line.find(&format!("ref={ref_id}"))?;
-            let after = &line[at..];
-            let close = after.find(']')?;
-            // The value lives after the attribute block; a quoted label may
-            // itself contain `: `, so start from the closing `]`, not the
-            // first colon-space. The ref id must end at `]` or `,`, not
-            // continue as digits, or `ref=e1` would match a `ref=e10` line.
-            let id_end = &after["ref=".len() + ref_id.len()..close];
-            if !(id_end.is_empty() || id_end.starts_with(',')) {
-                return None;
-            }
-            after[close + 1..].strip_prefix(": ")
-        })
-        .any(|held| held.trim() == value.trim())
+        .any(|line| held_on_line(line, ref_id).is_some_and(|held| held.trim() == value.trim()))
+}
+
+/// The value the snapshot reports for the node holding `ref_id` on this
+/// line, if any: the `value="..."` attribute inside its bracket block, or
+/// a `: value` suffix after the block.
+fn held_on_line<'a>(line: &'a str, ref_id: &str) -> Option<&'a str> {
+    let needle = format!("ref={ref_id}");
+    let at = line.find(&needle)?;
+    let after = &line[at + needle.len()..];
+    // `ref=e1` must not read a `ref=e10` line: the id ends at `]` or `,`.
+    let delimiter = after.find([']', ','])?;
+    if !after[..delimiter].is_empty() {
+        return None;
+    }
+    // The value agent-browser attributes to a field sits in its own bracket
+    // block (`[value="notion invoice", ref=e59]`).
+    if let Some(value) = attr_value_in_line(line) {
+        return Some(value);
+    }
+    // A page can also spell the value after the closing bracket. A quoted
+    // label may itself contain `: `, so the suffix starts at that `]`, not
+    // the first colon-space.
+    after[delimiter..]
+        .strip_prefix(']')
+        .and_then(|tail| tail.strip_prefix(": "))
+}
+
+/// The `value="..."` attribute inside a snapshot line's bracket blocks,
+/// when the line renders one. Mirrors the observation parser: the value is
+/// quoted to its closing quote, or bare to the next `,` or space.
+fn attr_value_in_line(line: &str) -> Option<&str> {
+    let mut rest = line;
+    while let Some((_, after_open)) = rest.split_once('[') {
+        let (span, tail) = after_open.split_once(']')?; // an unclosed `[` opens nothing
+        if let Some(value) = attr_value(span) {
+            return Some(value);
+        }
+        rest = tail;
+    }
+    None
+}
+
+/// Read `value=` out of one `,`-joined bracketed span.
+fn attr_value(span: &str) -> Option<&str> {
+    let mut rest = span.trim_start_matches([',', ' ']);
+    loop {
+        if let Some(after) = rest.strip_prefix("value=").map(str::trim_start) {
+            return Some(match after.strip_prefix('"') {
+                // A quoted value runs to its closing quote, so a value
+                // containing a comma (`value="Zurich, CH"`) survives.
+                Some(quoted) => &quoted[..quoted.find('"')?],
+                None => after.split([',', ' ']).next().unwrap_or_default(),
+            });
+        }
+        rest = rest.split_once(',')?.1.trim_start_matches(' ');
+    }
 }
 
 fn find_ref_in_snapshot(snapshot: &str, ref_hint: &str) -> Option<String> {
@@ -1509,6 +1560,60 @@ mod tests {
         let (r, log) = run_step(&s, &mut b);
         assert_eq!(r, Ok(true));
         assert_eq!(b.calls()[1], vec!["fill", "@e59", "other query"], "{log}");
+    }
+
+    #[test]
+    fn a_real_snapshot_renders_the_held_value_as_an_attribute_and_the_fill_is_skipped() {
+        // agent-browser renders a field's current contents inside its
+        // bracket block — `[value="...", ref=eN]` — not after the block.
+        // That is the exact line format a rerun of a filled page shows, and
+        // it must fire the skip (the Drive rerun of 2026-10-04 re-filled
+        // the search box 38 times because only the `: value` form matched).
+        let mut b = Scripted::new(vec![Ok(
+            "- combobox \"Search\" [value=\"notion invoice\", ref=e59]\n",
+        )]);
+        let s = FlowStep {
+            ref_hint: Some("combobox containing 'Search'".into()),
+            value: Some("notion invoice".into()),
+            ..step("fill")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["snapshot", "-i"]], "no fill is sent");
+        assert!(log.contains("already holds \"notion invoice\""), "{log}");
+        // The ref need not end the block: with the value first, the same
+        // line still renders the held value.
+        let mut b = Scripted::new(vec![Ok(
+            "- combobox \"Search\" [ref=e59, value=\"notion invoice\"]\n",
+        )]);
+        let s = FlowStep {
+            ref_hint: Some("combobox containing 'Search'".into()),
+            value: Some("notion invoice".into()),
+            ..step("fill")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["snapshot", "-i"]], "no fill is sent");
+        assert!(log.contains("already holds \"notion invoice\""), "{log}");
+        // A field elsewhere holding the same value is not this field: the
+        // line must carry the ref the fill resolved.
+        let mut b = Scripted::new(vec![Ok(Box::leak(
+            "- textbox \"Other\" [value=\"notion invoice\", ref=e60]\n\
+             - textbox \"Search\" [ref=e59]\n"
+                .into_boxed_str(),
+        ))]);
+        let s = FlowStep {
+            ref_hint: Some("textbox matching 'Search'".into()),
+            value: Some("notion invoice".into()),
+            ..step("fill")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(
+            b.calls()[1],
+            vec!["fill", "@e59", "notion invoice"],
+            "{log}"
+        );
     }
 
     #[test]

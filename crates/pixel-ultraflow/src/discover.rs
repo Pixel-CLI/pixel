@@ -441,11 +441,27 @@ pub fn discover(
         page = Observation::see(browser)?;
         let changed = page.changed_since(&before);
         // A fill the executor skipped because the field already holds its
-        // value is a satisfied step, not a stalled one: it must not burn
-        // the stall bound, but the next decision has to hear that the
-        // field is done, so the run's state text carries the outcome.
+        // value is a satisfied step: its first sighting does not burn the
+        // stall bound, and the next decision has to hear that the field
+        // is done, so the run's state text carries the outcome.
+        //
+        // But a satisfied fill re-proposed right after the run already
+        // recorded that same fill as done is a stall: the page did not
+        // move and the goal did not advance, and no page noise can make
+        // repeating it progress. Only the stall bound ends such a rerun —
+        // the step budget must never be what stops it (the Drive rerun of
+        // 2026-10-04 re-filled 38 times and hit `# budget: stopped after
+        // 40 steps`).
         let satisfied = fill_skipped;
-        stalled = if changed || step.action == "wait" || satisfied {
+        let repeated = satisfied
+            && steps.last().is_some_and(|prev| {
+                prev.fill_skipped
+                    && prev.step.action == step.action
+                    && prev.step.ref_hint == step.ref_hint
+                    && prev.step.value == step.value
+                    && prev.step.value_var == step.value_var
+            });
+        stalled = if step.action == "wait" || changed || (satisfied && !repeated) {
             0
         } else {
             stalled + 1
@@ -612,6 +628,12 @@ mod tests {
     pub(crate) const DUCK: &str = "- link \"Learn about DuckDuckGo\" [ref=e80]\n\
                                    - combobox \"Search with DuckDuckGo\" [ref=e185]\n\
                                    - button \"Search\" [ref=e186]";
+    /// The page a rerun finds: the search box already holds the value the
+    /// var would type, rendered the way `snapshot -i` renders a field's
+    /// contents — inside the node's bracket block.
+    const DUCK_FILLED: &str = "- link \"Learn about DuckDuckGo\" [ref=e80]\n\
+                               - combobox \"Search with DuckDuckGo\" [value=\"Zurich\", ref=e185]\n\
+                               - button \"Search\" [ref=e186]";
 
     pub(crate) fn request<'a>(vars: &'a [Var], limits: Limits) -> DiscoverRequest<'a> {
         DiscoverRequest {
@@ -935,28 +957,22 @@ mod tests {
         assert!(trace.steps.iter().all(|step| !step.changed));
     }
 
-    /// A fill the executor skipped because the field already holds its
-    /// value is satisfied, not stalled: it does not count toward the
-    /// bound, and the next decision's state text says the field is done.
+    /// A satisfied fill does not burn the stall bound on its own: the run
+    /// records it as done, the next decision hears that the field already
+    /// holds its value, and the engine moves on to DONE.
     #[test]
-    fn a_satisfied_fill_neither_stalls_nor_stays_unsaid() {
+    fn a_satisfied_fill_says_so_and_the_run_reaches_done() {
         let mut browser = ScriptedBrowser::default();
         browser.start();
-        browser.observe(URL, DUCK);
+        // A rerun starts on the page the earlier run left: the search box
+        // already holds the value the var would type.
+        browser.observe(URL, DUCK_FILLED);
         // A skipped fill takes one browser call: the pre-fill snapshot
-        // whose line shows the field already holding the value. Three
-        // times running — enough to block if the exemption were broken —
-        // then the engine gives up repeating and reports done.
-        for _ in 0..DEFAULT_MAX_STALLED {
-            browser.ok("- combobox \"Search with DuckDuckGo\" [ref=e185]: Zurich\n");
-            browser.observe(URL, DUCK);
-        }
+        // whose value attribute shows the field already holding the value.
+        browser.ok("- combobox \"Search with DuckDuckGo\" [value=\"Zurich\", ref=e185]\n");
+        browser.observe(URL, DUCK_FILLED);
         let vars = [Var::new("query", "Zurich")];
         let mut decider = ScriptedDecider::new(vec![
-            Ok(distribution(&[("TYPE 2", 0.9)])),
-            Ok(distribution(&[("VAR query", 0.8)])),
-            Ok(distribution(&[("TYPE 2", 0.9)])),
-            Ok(distribution(&[("VAR query", 0.8)])),
             Ok(distribution(&[("TYPE 2", 0.9)])),
             Ok(distribution(&[("VAR query", 0.8)])),
             Ok(distribution(&[("DONE", 1.0)])),
@@ -969,7 +985,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(trace.status, Status::Done, "{}", trace.detail);
-        assert_eq!(trace.steps.len(), 3);
+        assert_eq!(trace.steps.len(), 1);
         assert!(
             trace.steps.iter().all(|s| s.log.contains("already holds")),
             "{}",
@@ -984,9 +1000,68 @@ mod tests {
         );
     }
 
+    /// A rerun whose engine keeps re-proposing the satisfied fill is a
+    /// stall, and the stall bound — not the step budget — is what ends it.
+    /// The Drive rerun of 2026-10-04 re-filled the search box 38 times and
+    /// hit `# budget: stopped after 40 steps`; a skipped fill never sends
+    /// anything to the browser, so nothing else can stop the run before
+    /// the budget.
+    #[test]
+    fn a_rerun_repeating_a_satisfied_fill_stalls_at_the_bound_not_the_budget() {
+        let mut browser = ScriptedBrowser::default();
+        browser.start();
+        browser.observe(URL, DUCK_FILLED);
+        // One proposal reads the held value; the following three repeat
+        // it — the third repeat is where the stall bound trips.
+        for _ in 0..DEFAULT_MAX_STALLED + 1 {
+            browser.ok("- combobox \"Search with DuckDuckGo\" [value=\"Zurich\", ref=e185]\n");
+            browser.observe(URL, DUCK_FILLED);
+        }
+        let vars = [Var::new("query", "Zurich")];
+        let mut decider = ScriptedDecider::new(vec![
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+        ]);
+        let trace = discover(
+            &mut browser,
+            &mut decider,
+            &request(&vars, Limits::default()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            trace.status,
+            Status::Blocked,
+            "the stall bound ends the rerun, not the budget: {}",
+            trace.detail
+        );
+        assert!(!trace.detail.contains("budget"), "{}", trace.detail);
+        assert!(
+            browser.calls().iter().all(|call| call[0] != "fill"),
+            "a satisfied rerun never calls fill: {:?}",
+            browser.calls()
+        );
+        assert_eq!(trace.steps.len(), DEFAULT_MAX_STALLED + 1);
+        assert!(
+            trace
+                .steps
+                .iter()
+                .all(|s| s.fill_skipped && s.log.contains("already holds")),
+            "{}",
+            trace.steps[0].log
+        );
+    }
+
     /// A fill that IS sent — the field did not already hold the value —
-    /// and leaves the page unchanged is a real stall: only the skipped
-    /// kind is exempt.
+    /// and leaves the page unchanged is a real stall. The absence of the
+    /// skip (`fill_skipped` false) is what distinguishes the two cases on
+    /// a page that never moves.
     #[test]
     fn a_sent_fill_that_changes_nothing_stalls() {
         let mut browser = ScriptedBrowser::default();
