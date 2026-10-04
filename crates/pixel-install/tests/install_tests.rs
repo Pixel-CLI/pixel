@@ -617,6 +617,69 @@ fn dry_run_writes_nothing_on_a_clean_home() {
 }
 
 #[test]
+fn dry_run_install_has_no_copilot_step_without_copilot_config() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+
+    let report = install(&InstallOptions {
+        repo: None,
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: true,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("dry-run install");
+
+    // Pixel only writes ~/.copilot/hooks/pixel.json when ~/.copilot already
+    // exists. A machine that has never run Copilot CLI gets no copilot-hooks
+    // step and no directory fabricated for it.
+    assert!(
+        !report.steps.iter().any(|s| s.id == "copilot-hooks"),
+        "no copilot step without ~/.copilot: {report:?}"
+    );
+    assert!(!home.join(".copilot").exists());
+}
+
+#[test]
+fn install_deploys_copilot_hooks_when_copilot_config_is_present() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    // A machine that has run Copilot CLI has ~/.copilot; pixel install then
+    // deploys its dedicated hooks file next to it.
+    fs::create_dir_all(home.join(".copilot")).unwrap();
+
+    install(&InstallOptions {
+        repo: None,
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("install");
+
+    let hooks = home.join(".copilot").join("hooks").join("pixel.json");
+    let doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&hooks).unwrap()).unwrap();
+    assert_eq!(doc["_pixel_managed"], "pixel-managed-copilot-hooks-v1");
+    assert!(
+        doc["hooks"]["preToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| {
+                e["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|a| a.as_str() == Some("guard"))
+            }),
+        "guard entry must be deployed: {doc}"
+    );
+}
+
+#[test]
 fn dry_run_leaves_pre_existing_files_byte_identical() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
@@ -1135,6 +1198,37 @@ fn uninstall_removes_managed_block_and_preserves_user_content() {
     assert!(
         claude.contains("Some notes."),
         "original user content should be preserved after uninstall"
+    );
+}
+
+#[test]
+fn uninstall_removes_pixel_managed_copilot_hooks() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+
+    // A leftover pixel-managed Copilot hooks file (as `pixel install` writes).
+    let hooks = home.join(".copilot").join("hooks").join("pixel.json");
+    fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+    fs::write(
+        &hooks,
+        "{\"version\":1,\"_pixel_managed\":\"pixel-managed-copilot-hooks-v1\",\"hooks\":{}}\n",
+    )
+    .unwrap();
+
+    let uninstall_opts = UninstallOptions {
+        repo: None,
+        home: Some(home.to_path_buf()),
+        binary_path: Some(home.join("pixel")),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    };
+    let report = uninstall(&uninstall_opts).expect("uninstall");
+    assert!(report.ok, "uninstall should succeed");
+    assert_eq!(report.summary.red, 0, "no red steps");
+    assert!(
+        !hooks.exists(),
+        "pixel-managed copilot hooks must be removed on uninstall"
     );
 }
 

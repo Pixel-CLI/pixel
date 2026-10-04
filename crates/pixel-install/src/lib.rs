@@ -17,6 +17,7 @@ pub mod antigravity;
 pub mod banner;
 pub mod codex_config;
 pub mod config;
+pub mod copilot_config;
 pub mod doctor;
 pub mod install;
 pub mod intro;
