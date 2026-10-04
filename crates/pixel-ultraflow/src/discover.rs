@@ -1193,14 +1193,14 @@ mod tests {
     /// repetition and the bound would stop the run Blocked before DONE.
     #[test]
     fn satisfied_fills_in_different_fields_reach_done_not_the_bound() {
-        let mut browser = ScriptedBrowser::default();
-        browser.start();
         const FOUR_SAME_VALUE: &str = "- link \"Learn about DuckDuckGo\" [ref=e80]\n\
                                        - combobox \"From\" [value=\"Zurich\", ref=e185]\n\
                                        - combobox \"To\" [value=\"Zurich\", ref=e190]\n\
                                        - combobox \"Best\" [value=\"Zurich\", ref=e195]\n\
                                        - combobox \"Last\" [value=\"Zurich\", ref=e200]\n\
                                        - button \"Search\" [ref=e186]";
+        let mut browser = ScriptedBrowser::default();
+        browser.start();
         browser.observe(URL, FOUR_SAME_VALUE);
         // Each proposal skips in one browser call (the pre-fill snapshot
         // whose line shows the field holding the value); the page never
