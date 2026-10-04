@@ -491,6 +491,12 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-cancel-stale-runs.py
 
+      # The workflow's own step, run with a stub script: only a pull request
+      # number reaches the shoot script.
+      - name: Harness-grid dispatch input contract
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-harness-grid-input.py
+
       # clean.sh removes whole directories. The cases that matter are the ones
       # asserting what it leaves alone: a file git tracks, a tree behind a
       # symlink, the index under `just clean`, the daemon sockets beside the
