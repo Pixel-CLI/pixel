@@ -1,0 +1,1 @@
+**ultraflow:** a page too big for the engine's label budget no longer truncates the question: the cycle switches to two classify calls — one for the operation (`CLICK`/`TYPE`/…, always fits), one for the target among only that operation's slots — so every control on a long page stays reachable on any engine budget. Pages the pair space fits are still answered in one call.

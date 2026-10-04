@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::action::{ActionSpace, Choice, Op};
 use crate::decide::{Decider, Decision};
 use crate::elements::{Element, Observation};
+use crate::twostage::{self};
 use crate::value::{self, ValueChoice, ValueSource, Var};
 
 /// Actions one discovery run may take.
@@ -92,6 +93,24 @@ pub struct DecisionRecord {
     /// to the label budget.
     pub offered: usize,
     pub truncated: usize,
+}
+
+/// A two-stage answer: the operation, then — for a targeted one — the
+/// slot it acts on, each with its own probability and disclosure.
+///
+/// `slot` is `None` exactly for a targetless operation; `target_label`
+/// and `target_probability` are then `None` too, and the cycle cost one
+/// decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TwoStageChoice {
+    pub op: Op,
+    pub slot: Option<usize>,
+    pub probability: f64,
+    pub target_label: Option<String>,
+    pub target_probability: Option<f64>,
+    pub model: String,
+    pub offered_operations: usize,
+    pub truncated_targets: usize,
 }
 
 /// One decided cycle: the question's answer, and the step it produced.
@@ -203,27 +222,68 @@ pub fn one_cycle(
 ) -> Result<Cycle, String> {
     let budget = decider.option_budget();
     let space = ActionSpace::of(&page.elements, budget);
-    let question = Decision {
-        text: state_text(page, history),
-        context: context_of(goal),
-        labels: space.labels().to_vec(),
-        criteria: space.criteria().clone(),
-    };
-    let distribution = decider.decide(&question)?;
-    let mut decisions = 1usize;
-    let Some(choice) = space.choose(&distribution.probabilities) else {
-        return Err(format!(
-            "the decision engine gave no probability to any of the {} options offered on {}",
-            space.labels().len(),
-            page.url
-        ));
-    };
-    let record = DecisionRecord {
-        label: choice.label.clone(),
-        probability: choice.probability,
-        model: distribution.model.clone(),
-        offered: space.labels().len(),
-        truncated: space.truncated().len(),
+    // A page the pair space fits is answered in one question — the cheap
+    // path. One that does not fit is never truncated silently: the same
+    // cycle runs through the two-stage space (operation, then target),
+    // whose only truncation is a named target list. See [`twostage`].
+    let text = state_text(page, history);
+    let context = context_of(goal);
+    let mut decisions = 0usize;
+    let (choice, record) = if space.truncated().is_empty() {
+        let question = Decision {
+            text,
+            context,
+            labels: space.labels().to_vec(),
+            criteria: space.criteria().clone(),
+        };
+        let distribution = decider.decide(&question)?;
+        decisions += 1;
+        let Some(choice) = space.choose(&distribution.probabilities) else {
+            return Err(format!(
+                "the decision engine gave no probability to any of the {} options offered on {}",
+                space.labels().len(),
+                page.url
+            ));
+        };
+        let record = DecisionRecord {
+            label: choice.label.clone(),
+            probability: choice.probability,
+            model: distribution.model,
+            offered: space.labels().len(),
+            truncated: 0,
+        };
+        (choice, record)
+    } else {
+        let (answer, spent) =
+            twostage::choose_two_stage(decider, text, context, &page.elements, budget)?;
+        decisions += spent;
+        let element = answer
+            .slot
+            .and_then(|slot| twostage::element_for_slot(&page.elements, slot))
+            .cloned();
+        let label = match (answer.op.is_targetless(), answer.slot) {
+            (true, _) | (_, None) => answer.op.word().to_string(),
+            (false, Some(slot)) => format!("{} {slot}", answer.op.word()),
+        };
+        let record = DecisionRecord {
+            label: label.clone(),
+            probability: answer.probability,
+            model: answer.model.clone(),
+            offered: answer.offered_operations,
+            truncated: answer.truncated_targets,
+        };
+        (
+            Choice {
+                label,
+                probability: answer.probability,
+                action: crate::action::Action {
+                    op: answer.op,
+                    slot: answer.slot,
+                },
+                element,
+            },
+            record,
+        )
     };
     if let Some(terminal) = match choice.action.op {
         Op::Done => Some(Status::Done),
@@ -697,32 +757,71 @@ mod tests {
 
     /// A model's own option budget is below the schema ceiling, and it is
     /// the model's that decides: a page with more controls than it accepts
-    /// is truncated, and the run says so rather than being refused.
+    /// does not truncate the question silently — the cycle switches to the
+    /// two-stage space (operation, then target), whose operation question
+    /// always fits and whose target list is the only thing a tight budget
+    /// can cut, disclosed as `truncated`.
     #[test]
     fn the_engines_option_budget_bounds_the_question() {
         let body = "- button \"a\" [ref=e1]\n- button \"b\" [ref=e2]\n- button \"c\" [ref=e3]";
         let mut browser = ScriptedBrowser::default();
         browser.start();
         browser.observe(URL, body);
-        browser.ok("- button \"a\" [ref=e1]");
-        browser.ok("");
+        browser.click("- button \"a\" [ref=e1]");
         browser.observe(URL, body);
-        let mut decider = ScriptedDecider::then("CLICK 1", "DONE", "DONE").with_budget(6);
+        // The operation answer, then the target answer, then DONE.
+        let mut decider = ScriptedDecider::new(vec![
+            Ok(distribution(&[("CLICK", 1.0)])),
+            Ok(distribution(&[("1", 1.0)])),
+            Ok(distribution(&[("DONE", 1.0)])),
+        ])
+        .with_budget(6);
         let trace = discover(&mut browser, &mut decider, &request(&[], Limits::default())).unwrap();
+        // The operation question: no TYPE/SELECT (nothing editable), and
+        // it fits a budget of six exactly.
         assert_eq!(
             decider.asked(0).labels,
             [
-                "CLICK 1",
+                "CLICK",
                 "SCROLL_UP",
                 "SCROLL_DOWN",
                 "WAIT",
                 "DONE",
                 "BLOCKED"
             ],
-            "one element option fits in a budget of six"
         );
+        // The target question: the three buttons, all of them — nothing
+        // truncated at this stage, and one slot was chosen. The recorded
+        // step resolves the chosen slot to the element it named.
+        assert_eq!(decider.asked(1).labels, ["1", "2", "3"]);
         assert_eq!(trace.steps[0].decision.offered, 6);
-        assert_eq!(trace.steps[0].decision.truncated, 2);
+        assert_eq!(trace.steps[0].decision.truncated, 0);
+        assert_eq!(
+            trace.steps[0].step.ref_hint.as_deref(),
+            Some("button containing 'a'"),
+            "the winning slot resolved to its element"
+        );
+        assert_eq!(trace.status, Status::Done);
+    }
+
+    /// The two-stage path is only for pages the pair space cannot carry:
+    /// a page that fits is answered in one question, as before.
+    #[test]
+    fn a_page_that_fits_the_budget_skips_the_second_stage() {
+        let mut browser = ScriptedBrowser::default();
+        browser.start();
+        browser.observe(URL, DUCK);
+        browser.click("- button \"Search\" [ref=e186]");
+        browser.observe(URL, "- link \"Elsewhere\" [ref=e300]");
+        let mut decider = ScriptedDecider::then("CLICK 3", "DONE", "DONE");
+        let trace = discover(&mut browser, &mut decider, &request(&[], Limits::default())).unwrap();
+        // One page decision, pair labels and all — no operation question.
+        assert_eq!(
+            decider.asked(0).labels.first().map(String::as_str),
+            Some("CLICK 1"),
+        );
+        assert_eq!(trace.steps[0].decision.offered, 9);
+        assert_eq!(trace.steps[0].decision.truncated, 0);
         assert_eq!(trace.status, Status::Done);
     }
 

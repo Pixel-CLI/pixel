@@ -28,13 +28,15 @@ pub mod decide;
 pub mod discover;
 pub mod elements;
 pub mod replay;
+pub mod twostage;
 pub mod value;
 
 pub use action::{Action, ActionSpace, Choice, Op};
 pub use compose::{Composed, FlowMeta, compose};
 pub use decide::{Decider, Decision, Distribution};
 pub use discover::{
-    Cycle, DecisionRecord, DiscoverRequest, Limits, Status, Trace, TracedStep, discover, one_cycle,
+    Cycle, DecisionRecord, DiscoverRequest, Limits, Status, Trace, TracedStep, TwoStageChoice,
+    discover, one_cycle,
 };
 pub use elements::{Element, Observation};
 pub use replay::{ConditionRecord, Deviation, ReplayReport, ReplayRequest, replay};
