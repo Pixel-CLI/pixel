@@ -481,6 +481,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-verify-action-pins.py
 
+      - name: Advisory ignore check contract (deny.toml and osv-scanner.toml agree)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-check-advisory-ignores.py
+
       # clean.sh removes whole directories. The cases that matter are the ones
       # asserting what it leaves alone: a file git tracks, a tree behind a
       # symlink, the index under `just clean`, the daemon sockets beside the
