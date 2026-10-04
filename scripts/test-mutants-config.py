@@ -775,6 +775,21 @@ class ShardedMutantsGate(unittest.TestCase):
         self.assertIn("::error title=Bad PIXEL_MUTANTS_SHARD_RUNNERS::", result.stdout)
         self.assertIn("expected a JSON array of runs-on values", result.stdout)
 
+    def test_a_pool_with_a_non_string_member_fails_the_plan(self):
+        """`["a2", 8]`: a number is a mistyped variable, and a `null` dropped
+        here would route its shards somewhere nobody configured."""
+        for pool in ('["a2", 8]', '["a2", null]', '[12]'):
+            with self.subTest(pool=pool):
+                with tempfile.TemporaryDirectory(prefix="pixel-mutants-bad-member-") as tmp:
+                    runners = Path(tmp) / "runners.json"
+                    runners.write_text(pool)
+                    result = self.run_gate_raw(2, "--runners", str(runners))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "::error title=Bad PIXEL_MUTANTS_SHARD_RUNNERS::", result.stdout
+                )
+                self.assertIn("pool member is not a string", result.stdout)
+
     def test_every_listed_mutant_caught_or_unviable_passes(self):
         result, _ = self.run_gate(
             4,

@@ -165,9 +165,17 @@ def runner_pool(runners: list[str] | None) -> list[str]:
 
     An empty or blank entry would ask GitHub for a runner whose labels are
     the empty string and queue forever, so the whole variable is rejected
-    rather than partly honored.
+    rather than partly honored. Every member must be a string: a `null`
+    silently dropped here would route its shards somewhere their operator
+    never configured, and a number or dict is a mistyped variable, not a
+    label. The all-blank fallback stays: an unset variable and an empty
+    string mean the same thing.
     """
-    pool = [r.strip() for r in (runners or []) if r and r.strip()]
+    members = runners or []
+    for member in members:
+        if not isinstance(member, str):
+            raise ValueError(f"pool member is not a string: {member!r}")
+    pool = [r.strip() for r in members if r.strip()]
     return pool or [DEFAULT_RUNNER]
 
 
@@ -381,7 +389,14 @@ def main(argv: list[str] | None = None) -> int:
                         f"expected a JSON array of runs-on values, got {text!r}"
                     )
                     return 1
-                runners = parsed
+                try:
+                    runners = runner_pool(parsed)
+                except ValueError as bad_pool:
+                    print(
+                        "::error title=Bad PIXEL_MUTANTS_SHARD_RUNNERS::"
+                        f"expected a JSON array of runs-on values: {bad_pool}"
+                    )
+                    return 1
         with args.github_output.open("a") as fh:
             fh.write(f"mutants={mutants}\n")
             fh.write(f"shards={json.dumps(shard_matrix(mutants))}\n")

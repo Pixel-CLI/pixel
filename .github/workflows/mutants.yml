@@ -212,8 +212,12 @@ jobs:
           # per shard round-robin (scripts/mutants-gate.py). Absent or empty
           # falls back to GitHub's image; a malformed array fails the plan.
           RUNNERS_FILE: ${{ runner.temp }}/shard-runners.json
+          # Through the environment, not template expansion: `${{ vars.* }}`
+          # inside the script would let the variable's quotes be eaten by the
+          # shell and its content parsed as shell, not JSON.
+          RUNNER_POOL: ${{ vars.PIXEL_MUTANTS_SHARD_RUNNERS }}
         run: |
-          printf '%s' "${{ vars.PIXEL_MUTANTS_SHARD_RUNNERS }}" > "$RUNNERS_FILE"
+          printf '%s' "$RUNNER_POOL" > "$RUNNERS_FILE"
           python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt \
             --config mutants-config.toml --runners "$RUNNERS_FILE" \
             --github-output "$GITHUB_OUTPUT"
