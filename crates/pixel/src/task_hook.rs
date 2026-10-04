@@ -466,7 +466,9 @@ fn uniq_read(args: &[String]) -> bool {
 /// `-f`/`--file` are rejected outright: their contents cannot be inspected,
 /// so a script file carrying `e …` or `w …` would otherwise slip through as
 /// a read. An unknown flag or combined form like `-ni` stays a mutation, so
-/// a destructive sed can never slip through as a read.
+/// a destructive sed can never slip through as a read. Only the script
+/// operands are scanned — file operands (`events.rs`, `worker.rs`) are not
+/// scripts, so a bounded read like `sed -n '1,20p' events.rs` stays a read.
 fn sed_read(args: &[String]) -> bool {
     read_flags(
         args,
@@ -493,24 +495,56 @@ fn sed_read(args: &[String]) -> bool {
             "--version",
         ],
         &["-e", "--expression", "--line-length="],
-    ) && !args.iter().any(|arg| sed_arg_writes(arg))
+    ) && !sed_scripts(args).any(sed_script_writes)
 }
 
-/// An argument writes or executes when its own script content does. A
-/// positional script (`sed 'w out'`) is scanned directly; an inline script
-/// carried by `--expression=<script>` or a merged `-e<script>` is scanned the
-/// same way, so `sed --expression='w out'` and `sed -e'w out'` are denied
-/// where the two-argument `sed -e 'w out'` already is. `-f`/`--file` script
-/// files never reach here: `read_flags` rejects them before this runs.
-fn sed_arg_writes(arg: &str) -> bool {
-    sed_script_writes(arg)
-        || arg
-            .strip_prefix("--expression=")
-            .is_some_and(sed_script_writes)
-        || arg
-            .strip_prefix("-e")
-            .filter(|rest| !rest.is_empty())
-            .is_some_and(sed_script_writes)
+/// The script texts sed will run: every `-e`/`--expression` value (including
+/// the `--expression=<script>` and merged `-e<script>` forms), or, when none
+/// is given, the first positional operand. File operands are not scripts —
+/// sed decides which operand is the script, and the rest are input files.
+/// `--line-length`/`-l` consume a separate value argument so it is not
+/// mistaken for a positional. `--` ends the options only: the first operand
+/// after it is still the script when none came before.
+fn sed_scripts(args: &[String]) -> impl Iterator<Item = &str> {
+    let mut scripts: Vec<&str> = Vec::new();
+    let mut has_explicit = false;
+    let mut first_positional: Option<&str> = None;
+    let mut after_dd = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if after_dd {
+            // `--` ends the options, not the script search: with no `-e` and
+            // no earlier positional, GNU sed runs the first operand after it.
+            if first_positional.is_none() {
+                first_positional = Some(arg.as_str());
+            }
+            continue;
+        }
+        if arg == "--" {
+            after_dd = true;
+        } else if arg == "-e" || arg == "--expression" {
+            has_explicit = true;
+            if let Some(script) = iter.next() {
+                scripts.push(script.as_str());
+            }
+        } else if let Some(rest) = arg.strip_prefix("--expression=") {
+            has_explicit = true;
+            scripts.push(rest);
+        } else if let Some(rest) = arg.strip_prefix("-e") {
+            if !rest.is_empty() {
+                has_explicit = true;
+                scripts.push(rest);
+            }
+        } else if arg == "-l" || arg == "--line-length" {
+            iter.next();
+        } else if !arg.starts_with('-') && first_positional.is_none() {
+            first_positional = Some(arg.as_str());
+        }
+    }
+    if !has_explicit && let Some(script) = first_positional {
+        scripts.push(script);
+    }
+    scripts.into_iter()
 }
 
 /// A sed script writes or executes when it carries an `e` command (execute the
@@ -575,7 +609,10 @@ fn skip_separators(chars: &mut Peekable<Chars<'_>>) -> bool {
 }
 
 /// Consume the address(es) that may precede a command letter: line numbers,
-/// `$`, the comma of a range, `/re/` and `\cre`. Returns false only when the
+/// `$`, the comma of a range, `/re/` and `\cre`. GNU sed also accepts
+/// whitespace, negation (`!`), step/offset range syntax (`~`, `+`, `/` after
+/// a comma) and regex address flags (`I`, `M`) between the address and the
+/// command, so those are consumed here too. Returns false only when the
 /// script ends there, so the caller can stop scanning.
 fn skip_addresses(chars: &mut Peekable<Chars<'_>>) -> bool {
     loop {
@@ -587,6 +624,8 @@ fn skip_addresses(chars: &mut Peekable<Chars<'_>>) -> bool {
             Some('/') => {
                 chars.next();
                 skip_delimited(chars, '/');
+                // Regex address flags: /pat/I, /pat/M
+                skip_regex_flags(chars);
             }
             Some('\\') => {
                 chars.next();
@@ -594,9 +633,30 @@ fn skip_addresses(chars: &mut Peekable<Chars<'_>>) -> bool {
                     return false;
                 };
                 skip_delimited(chars, delim);
+                skip_regex_flags(chars);
+            }
+            // Step/offset range syntax: 1~2, 1,~4, 1,+2, 1,/pat/
+            Some('~' | '+') => {
+                chars.next();
+            }
+            // Negation: 1!w out, $!e cmd
+            Some('!') => {
+                chars.next();
+            }
+            // Whitespace between address and command: 1 w out
+            Some(c) if c.is_ascii_whitespace() => {
+                chars.next();
             }
             Some(_) => return true,
         }
+    }
+}
+
+/// Consume regex address flags (`I`, `M`) that may follow a `/re/` or `\cre`
+/// address. GNU sed accepts them in any combination and order.
+fn skip_regex_flags(chars: &mut Peekable<Chars<'_>>) {
+    while matches!(chars.peek(), Some('I' | 'M')) {
+        chars.next();
     }
 }
 
@@ -1234,6 +1294,16 @@ mod tests {
             "s/a/id/e;p",
             "s/a\\/b/c/w out",
             "s/a/b/west",
+            // Address modifiers before command: whitespace, negation, step/offset, regex flags
+            "1 w out",
+            "1!w out",
+            "1~2w out",
+            "1,+2w out",
+            "1,~4w out",
+            "/x/Iw out",
+            "/x/Mw out",
+            "/x/!e cmd",
+            "1!e touch marker",
         ] {
             assert!(sed_script_writes(script), "{script}");
         }
@@ -1259,6 +1329,16 @@ mod tests {
             "\\#foo#p",
             "# w out\n1,20p",
             "\\",
+            // Address modifiers with read commands
+            "1 p",
+            "1!p",
+            "1~2p",
+            "1,+2p",
+            "/x/Ip",
+            "/x/Mp",
+            "1,20p\n2,30q",
+            // Comment with embedded ; must not expose w as a command
+            "p; # x; w out\nq",
         ] {
             assert!(!sed_script_writes(script), "{script}");
         }
@@ -1355,6 +1435,20 @@ mod tests {
             "sed 'west' file.rs",
             "sed 'p\ne touch marker' file.rs",
             "sed 's/a/b/ep' file.rs",
+            // Address modifiers before write/exec commands
+            "sed -n '1 w out' file.rs",
+            "sed -n '1!w out' file.rs",
+            "sed -n '1~2w out' file.rs",
+            "sed -n '1,+2w out' file.rs",
+            "sed -n '/x/Iw out' file.rs",
+            "sed -n '/x/Mw out' file.rs",
+            "sed -n '1!e touch marker' file.rs",
+            // -l consumes its value arg, so the script after it is still scanned
+            "sed -n -l 72 'w out' file.rs",
+            "sed -n --line-length 72 'w out' file.rs",
+            // `--` ends the options: the first operand after it is the script
+            "sed -- 'e touch marker' file.rs",
+            "sed -n -- 'w out' file.rs",
         ] {
             assert!(shell_mutates(command), "{command}");
             assert_eq!(
@@ -1377,6 +1471,29 @@ mod tests {
             "sed -n '1,20p' file.rs | sort | uniq",
             "sed --expression='1,20p' file.rs",
             "sed -e'1,40p' file.rs",
+            // File operands starting with e/w/W must not be misclassified as writes
+            "sed -n '1,20p' events.rs",
+            "sed -n '1,20p' worker.rs",
+            "sed -n '1,20p' web/index.js",
+            "sed -n '1,20p' examples/x.rs",
+            "sed -n '1,20p' /tmp/w.rs",
+            "sed -n '1,20p' west.rs",
+            "sed -e '1,20p' -e '2,30p' events.rs",
+            "sed --expression='1,20p' worker.rs",
+            // Address modifiers with read commands
+            "sed -n '1 p' file.rs",
+            "sed -n '1!p' file.rs",
+            "sed -n '1~2p' file.rs",
+            "sed -n '1,+2p' file.rs",
+            "sed -n '/x/Ip' file.rs",
+            "sed -n '/x/Mp' file.rs",
+            // -l consumes its value, so the script after it is still the script
+            "sed -n -l 72 '1,20p' file.rs",
+            "sed -n --line-length 72 '1,20p' file.rs",
+            // after `--`, only the first operand is the script; the rest are files
+            "sed -n -- '1,20p' west.rs",
+            "sed -n '1,20p' -- west.rs",
+            "sed -n -e '1,20p' -- west.rs",
             "rg -- --pre",
             "pixel config",
             "pixel config policy",
