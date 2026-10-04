@@ -34,6 +34,21 @@ gh attestation verify pixel-vX.Y.Z-aarch64-apple-darwin.tar.gz --repo Pixel-CLI/
 The same command verifies `install.sh` before you pipe it into `sh`.
 Releases before the first attested one have no attestation.
 
+Releases after v0.6.1 also attach the attestation itself as
+`pixel-vX.Y.Z.intoto.jsonl`: the Sigstore bundle of that one attestation,
+covering every archive, Linux bottle and `install.sh` of the release.
+`--bundle` checks a file against it instead of fetching the attestation
+from GitHub, with the same identity flags; adding a trusted root saved
+beforehand with `gh attestation trusted-root > trusted_root.jsonl` makes the
+check fully offline:
+
+```bash
+gh attestation verify pixel-vX.Y.Z-aarch64-apple-darwin.tar.gz --repo Pixel-CLI/pixel \
+  --bundle pixel-vX.Y.Z.intoto.jsonl --custom-trusted-root trusted_root.jsonl \
+  --signer-workflow Pixel-CLI/pixel/.github/workflows/release-build.yml \
+  --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
+```
+
 Signing in a reusable workflow is what makes this SLSA Build Level 3: the
 signing identity belongs to `release-build.yml`, which holds no secret, and
 `release.yml`, which publishes the release and holds the Homebrew tap token,

@@ -150,6 +150,7 @@ jobs:
       # publishing it unattested. release.yml's smoke job verifies both
       # subjects after publication.
       - name: Attest build provenance
+        id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
@@ -159,12 +160,26 @@ jobs:
 
       # Everything release.yml publishes, in one artifact: the attested
       # files themselves, not a rebuild or a second checkout of them.
+      # The attestation also ships as a file: bundle-path is the Sigstore
+      # bundle actions/attest wrote, one JSON line covering every subject,
+      # which `gh attestation verify --bundle` checks without the
+      # attestations API (SECURITY.md). It is named *.intoto.jsonl because
+      # that suffix is what OpenSSF Scorecard's Signed-Releases check reads
+      # as provenance on a release asset; it matches neither pixel-*.tar.gz
+      # glob the publication, the smoke job and VirusTotal read.
       - name: Stage the release assets
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
         run: |
           mkdir release-assets
           cp artifacts/pixel-*.tar.gz artifacts/pixel-*.tar.gz.sha256 \
             pixel-*.bottle.tar.gz pixel.rb pixel-core.rb scripts/install.sh \
             release-assets/
+          if [ ! -s "$BUNDLE" ]; then
+            echo "::error::actions/attest left no bundle at '$BUNDLE'; the release would ship without its provenance file"
+            exit 1
+          fi
+          cp "$BUNDLE" "release-assets/pixel-${GITHUB_REF#refs/tags/}.intoto.jsonl"
           ls -l release-assets
 
       - name: Upload the release assets

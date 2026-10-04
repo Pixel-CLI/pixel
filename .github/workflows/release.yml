@@ -91,7 +91,8 @@ jobs:
           persist-credentials: false
 
       # The files release-build.yml built and attested: archives and their
-      # .sha256, the Linux bottles, pixel.rb, pixel-core.rb and install.sh.
+      # .sha256, the Linux bottles, pixel.rb, pixel-core.rb and install.sh,
+      # plus the attestation's Sigstore bundle (pixel-<tag>.intoto.jsonl).
       - name: Download the release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -123,13 +124,16 @@ jobs:
           # releases/latest/download/install.sh, so it always runs the
           # script of the release it installs.
           # assets/pixel-*.tar.gz matches the archives and the Linux
-          # bottles (pixel-*.bottle.tar.gz) alike.
+          # bottles (pixel-*.bottle.tar.gz) alike. pixel-*.intoto.jsonl is
+          # the provenance bundle, the file Scorecard's Signed-Releases
+          # check looks for.
           files: |
             assets/pixel-*.tar.gz
             assets/pixel-*.tar.gz.sha256
             assets/pixel.rb
             assets/pixel-core.rb
             assets/install.sh
+            assets/pixel-*.intoto.jsonl
 
       - name: Check out the Homebrew tap
         if: env.HOMEBREW_TAP_TOKEN != ''
@@ -216,9 +220,17 @@ jobs:
           # Signed by release-build.yml on this tag, on a GitHub-hosted
           # runner: the command SECURITY.md gives users, so a release whose
           # attestation is missing or foreign fails here.
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern install.sh
+          # The bundle published beside them must verify the same subjects
+          # on its own (`--bundle`, SECURITY.md): a missing, empty or foreign
+          # pixel-<tag>.intoto.jsonl fails here too.
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern install.sh --pattern "pixel-$GITHUB_REF_NAME.intoto.jsonl"
           for subject in "$ARCHIVE" install.sh; do
             gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-build.yml" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
+              --bundle "pixel-$GITHUB_REF_NAME.intoto.jsonl" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-build.yml" \
               --source-ref "$GITHUB_REF" --deny-self-hosted-runners
           done
