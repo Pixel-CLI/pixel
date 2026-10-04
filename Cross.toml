@@ -1,0 +1,6 @@
+# cross forwards RUSTFLAGS and the CARGO_* variables into its container by
+# itself, not SOURCE_DATE_EPOCH: crates/pixel/build.rs reads it for the build
+# date `pixel --version` prints, which scripts/release-build-env.sh pins to
+# the commit's time so a release build is reproducible.
+[build.env]
+passthrough = ["SOURCE_DATE_EPOCH"]

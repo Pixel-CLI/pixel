@@ -168,6 +168,38 @@ A finding here is a workflow change, not a pixel bug: its destination is
 CONTRIBUTING.md, `.agents/rules/*.md`, a script under `scripts/` or a CI
 workflow, and its report block gives the before/after numbers.
 
+**D. Adherence: do agents use Pixel, and use it well?** Whenever the
+question is whether a hook, prompt or routing change moved agent behaviour
+("coherence", « est-ce que l'agent utilise pixel », adoption), and in every
+retro whose window spans such a change. `adherence.py` reduces each session
+in a Pixel-indexed repository, Claude Code and Codex alike, to its retrieval
+events and prints per host (never pooled):
+
+```bash
+python3 .agents/skills/pixel-retro/adherence.py $W          # table
+python3 .agents/skills/pixel-retro/adherence.py $W --json   # for a before/after diff
+```
+
+the Pixel share of searches, how often the first search was Pixel, how often
+a Pixel call's very next event was a native search, unbounded and wide reads
+overall and right after a Pixel call, and the editing sessions that ran
+`impact`/`who-calls`/`call-path` before their first edit. The baseline,
+`adherence.py 30d` on 2026-10-04, before the #703/#704/#706/#707/#711 fixes:
+Claude 503 sessions, Pixel share 0.011 (74 Pixel against 6 458 native
+searches), first search Pixel 6 %, a native search right after Pixel 32 %
+(24/74), unbounded reads right after Pixel 50 %, impact before the first edit
+1 % (3/311); Codex 76 sessions, share 0.059 (85 against 1 350), first search
+Pixel 20 %, a native search right after Pixel 22 %, impact before the first
+edit 65 % (20/31). Read them
+with their limits:
+
+- **It records order, not intent.** A native search right after Pixel is a
+  sequence, not proof the answer went unused: it can be the right move (a
+  string Pixel does not index). The A/B in `eval/` (#626) says where Pixel
+  should win; this says what agents did.
+- **Compare windows on the same host**, before and after the change, each
+  quoted with its command; a Codex number is never read against a Claude one.
+
 For each action-log error worth keeping, find its transcript turn with a
 distinctive token from `args` (a `--request-id`, a path, a pattern):
 `pixel recall search '<token>' --since $W`. The turns after it show the
