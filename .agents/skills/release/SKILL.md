@@ -12,7 +12,7 @@ then a maintenance-release pull request targets a `release/x.y` branch cut
 from the line's last tag (see "Patch release while `main` is not releasable").
 
 The tag is the release. Pushing `vX.Y.Z` runs `.github/workflows/release.yml`,
-and nothing else gates it: CI does not run on tags. The workflow has four
+and nothing else gates it: CI does not run on tags. The workflow has five
 jobs, each needing the previous one:
 
 | Job | Does | A failure means |
