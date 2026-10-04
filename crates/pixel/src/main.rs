@@ -43,6 +43,7 @@ mod evaluate_cmd;
 mod execution_brief;
 mod guard;
 mod index_cmd;
+mod install_intro;
 mod operation_metrics;
 mod overview_intent;
 mod pixel_question;
@@ -69,6 +70,7 @@ mod task_runtime;
 use task_commands::TaskCmd;
 mod ultraflow_cmd;
 
+mod select;
 mod update_notice;
 mod web_search;
 mod web_search_setup;
@@ -2903,16 +2905,17 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
         .and_then(Value::as_array)
         .map_or(1, Vec::len);
     if let Some(parent) = manifest_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        pixel_git::sidecar::private_dir(parent)
+            .map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    let tmp = manifest_path.with_extension("json.tmp");
-    std::fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+    // A fresh temporary file renamed over the name: a link committed at
+    // either name is replaced, never written through.
+    pixel_git::nofollow::write_replace(
+        manifest_path,
+        &serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+        pixel_git::nofollow::PRIVATE_MODE,
     )
-    .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, manifest_path)
-        .map_err(|e| format!("publish {}: {e}", manifest_path.display()))?;
+    .map_err(|e| format!("publish {}: {e}", manifest_path.display()))?;
     Ok(active)
 }
 
@@ -6220,6 +6223,12 @@ fn run_command(
             let interactive_banner = should_render_install_banner(json, stdout_tty);
             let color = banner_color(std::env::var_os("NO_COLOR").as_deref());
             if interactive_banner {
+                let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+                if install_intro::should_play(json, stdout_tty, stdin_tty, |key| {
+                    std::env::var_os(key)
+                }) {
+                    install_intro::play();
+                }
                 write_stdout(&pixel_install::banner::render_start(color))?;
             }
             let report = pixel_install::install::install(&pixel_install::install::InstallOptions {

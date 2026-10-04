@@ -26,7 +26,7 @@
 //! silent skip; the next write rebuilds the store from the vectors in hand.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -208,7 +208,9 @@ impl Store {
         rebuild: bool,
         between: &mut dyn FnMut(),
     ) -> Result<(), String> {
-        fs::create_dir_all(&self.dir)
+        // Owner-only, and never created through a link committed under
+        // `.pixel/`.
+        pixel_git::sidecar::private_dir(&self.dir)
             .map_err(|e| format!("code-vector store {}: {e}", self.dir.display()))?;
         let _lock = self.lock(true)?;
         // An unreadable manifest is rebuilt from the vectors in hand, like
@@ -249,12 +251,7 @@ impl Store {
     /// The lock file, locked shared or `exclusive`; released when dropped.
     fn lock(&self, exclusive: bool) -> Result<File, String> {
         let path = self.dir.join(LOCK);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
+        let file = pixel_git::nofollow::open_lock(&path)
             .map_err(|e| format!("code-vector lock {}: {e}", path.display()))?;
         if exclusive {
             file.lock()
@@ -422,10 +419,14 @@ fn read_segment(
 fn write_atomically(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
     let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
     let target = dir.join(name);
-    let written = File::create(&tmp).and_then(|mut file| {
-        file.write_all(bytes)?;
-        file.sync_all()
-    });
+    // A leftover from a crashed run, or a link committed at the name, is
+    // removed, then the name is created fresh: never written through.
+    let _ = fs::remove_file(&tmp);
+    let written = pixel_git::nofollow::create_new(&tmp, pixel_git::nofollow::PRIVATE_MODE)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        });
     if let Err(error) = written.and_then(|()| fs::rename(&tmp, &target)) {
         let _ = fs::remove_file(&tmp);
         return Err(format!("code-vector store {}: {error}", target.display()));

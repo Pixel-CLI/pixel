@@ -86,12 +86,13 @@ pub fn merge(state: &mut PlanState, findings: &[PlanFinding]) {
 pub fn save(root: &Path, state: &PlanState) -> Result<(), String> {
     let path = state_path(root);
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("plan state dir: {e}"))?;
+        pixel_git::sidecar::private_dir(dir).map_err(|e| format!("plan state dir: {e}"))?;
     }
-    let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(state).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, bytes).map_err(|e| format!("plan state write: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("plan state rename: {e}"))
+    // A fresh temporary file renamed over the name: a link committed at
+    // either name is replaced, never written through.
+    pixel_git::nofollow::write_replace(&path, &bytes, pixel_git::nofollow::PRIVATE_MODE)
+        .map_err(|e| format!("plan state write: {e}"))
 }
 
 /// Flip `done` on the item at 1-based position `n` (as `--status` prints

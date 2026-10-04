@@ -1113,6 +1113,123 @@ fn metrics_relay_shows_claude_users_the_box_already_in_the_result() {
     assert_eq!(relay("codex", &codex), Value::Null);
 }
 
+/// Copilot CLI hooks send a camelCase payload (`toolName`, `toolArgs`,
+/// `toolResult.textResultForLlm`) and take a top-level `additionalContext`
+/// response — never the Claude `hookSpecificOutput` envelope.
+#[test]
+fn metrics_relay_speaks_copilots_camelcase_contract() {
+    let dir = indexed_dir("metrics-relay-copilot");
+    seed_metrics_record(&dir);
+    let envs = [("PIXEL_METRICS", "1")];
+    let copilot = |result_text: &str| {
+        json!({
+            "sessionId":"s", "timestamp":0,
+            "toolName":"bash",
+            "toolArgs":{"command":"pixel impact src/lib.rs"},
+            "toolResult":{"resultType":"success","textResultForLlm":result_text},
+            "cwd":dir.as_ref()
+        })
+    };
+    let relay = |payload: &Value| {
+        hook(
+            &["run-hook", "metrics", "--provider", "copilot"],
+            payload,
+            &envs,
+        )
+    };
+    // Box absent from the tool result: relayed as flat additionalContext.
+    let response = relay(&copilot("impact: 0 dependants"));
+    let line = response["additionalContext"].as_str().unwrap();
+    assert!(line.starts_with("🟩 pixel impact"), "{line}");
+    assert_eq!(response, json!({"additionalContext":line}));
+    // `toolArgs` can also arrive as the JSON string the CLI docs describe;
+    // parsing it must relay the same flat additionalContext.
+    let response = relay(&json!({
+        "sessionId":"s", "timestamp":0,
+        "toolName":"bash",
+        "toolArgs":"{\"command\":\"pixel impact src/lib.rs\"}",
+        "toolResult":{"resultType":"success","textResultForLlm":"impact: 0 dependants"},
+        "cwd":dir.as_ref()
+    }));
+    let line = response["additionalContext"].as_str().unwrap();
+    assert!(line.starts_with("🟩 pixel impact"), "{line}");
+    assert_eq!(response, json!({"additionalContext":line}));
+    // Box already merged into `textResultForLlm`: silent dedupe.
+    assert_eq!(
+        relay(&copilot(&format!("impact: 0 dependants\n{line}"))),
+        Value::Null
+    );
+    // Unrelated tool (Copilot fires the hook for every tool): silence.
+    let foreign = json!({
+        "toolName":"view", "toolArgs":{"path":"src/lib.rs"},
+        "toolResult":{"resultType":"success","textResultForLlm":"fn needle() {}"},
+        "cwd":dir.as_ref()
+    });
+    assert_eq!(relay(&foreign), Value::Null);
+}
+
+/// The Copilot guard normalizes `toolName`/`toolArgs` before evaluating, so
+/// an unindexed `grep` in `bash` is denied with Copilot's flat decision
+/// fields.
+#[test]
+fn copilot_guard_denies_retrieval_bypass_with_the_flat_decision_envelope() {
+    let dir = indexed_dir("copilot-deny");
+    let envs = [("PIXEL_POLICY", "enforce")];
+    let event = json!({
+        "toolName":"bash",
+        "toolArgs":{"command":"grep -n needle src/lib.rs"},
+        "cwd":dir.as_ref()
+    });
+    let response = guard("copilot", &event, &envs);
+    assert_eq!(response["permissionDecision"], "deny", "{response}");
+    assert!(
+        response["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .starts_with("pixel policy:"),
+        "{response}"
+    );
+    // Reads pass through silently.
+    let read = json!({
+        "toolName":"bash",
+        "toolArgs":{"command":"pixel impact src/lib.rs"},
+        "cwd":dir.as_ref()
+    });
+    assert_eq!(guard("copilot", &read, &envs), Value::Null);
+    // The CLI documents `toolArgs` as a JSON string; the string-parsing path
+    // must deny the same retrieval bypass.
+    let str_event = json!({
+        "toolName":"bash",
+        "toolArgs":"{\"command\":\"grep -n needle src/lib.rs\"}",
+        "cwd":dir.as_ref()
+    });
+    let response = guard("copilot", &str_event, &envs);
+    assert_eq!(response["permissionDecision"], "deny", "{response}");
+    assert!(
+        response["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .starts_with("pixel policy:"),
+        "{response}"
+    );
+    // Copilot's `view` tool reads files: an unbounded in-repo read is denied
+    // under enforce policy like the other read-carrying tools.
+    let view = json!({
+        "toolName":"view",
+        "toolArgs":{"path":"src/lib.rs"},
+        "cwd":dir.as_ref()
+    });
+    let response = guard("copilot", &view, &envs);
+    assert_eq!(response["permissionDecision"], "deny", "{response}");
+    assert!(
+        response["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .starts_with("pixel policy:"),
+        "{response}"
+    );
+}
+
 /// The lone bounded-sed approval stops at the repository: absolute paths,
 /// `..` escapes, device files, credential names, an in-repo symlink to
 /// `.env` and missing files all leave the decision to the user. Exact

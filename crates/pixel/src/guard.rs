@@ -301,6 +301,13 @@ pub enum Provider {
     /// blocks on `permissionDecision: "deny"` by catching the plugin's throw,
     /// so this provider both rewrites and denies like Claude and Codex.
     Opencode,
+    /// Cursor's `postToolUse` hook: flat `{tool_name, tool_input, tool_output,
+    /// cwd, duration}` payload, `additional_context` (snake_case) response.
+    Cursor,
+    /// GitHub Copilot CLI hooks: camelCase payload (`toolName`, `toolArgs`,
+    /// `toolResult.textResultForLlm`), top-level `additionalContext`
+    /// response.
+    Copilot,
 }
 
 const MANIFEST_MAX_AGE_SECS: u64 = 24 * 3600;
@@ -568,8 +575,11 @@ fn provider_rewrite_with(
         Provider::Zcode => tool == "Bash" || tool == "exec",
         // OpenCode names the same tools as Claude but lowercases them.
         Provider::Opencode => matches!(tool, "bash" | "Bash"),
-        // Antigravity has no documented input rewrite contract.
-        Provider::Antigravity => return None,
+        // Antigravity has no documented input rewrite contract; Cursor's
+        // preToolUse goes through the implicit (provider-less) guard path.
+        // Copilot's rewrites use a different field (`modifiedArgs`) the
+        // guard does not emit yet — deny-only for now.
+        Provider::Antigravity | Provider::Cursor | Provider::Copilot => return None,
     };
     if !shell {
         return None;
@@ -615,12 +625,16 @@ fn provider_rewrite_with(
 
 /// Which repository's configuration layers decide the policy: the call's
 /// working directory, resolved the way every `pixel config` lookup resolves it.
+/// The same resolution [`provider_cwd`] applies for enforcement — Cursor sends
+/// `cwd: ""` with the repository in `workspace_roots`, and a policy lookup
+/// through the empty path would read the global configuration instead of the
+/// workspace's, silently diverging from the enforcement decision.
 fn policy_root(payload: &Value) -> Option<PathBuf> {
-    let cwd = payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())?;
+    // Resolve the working directory the same way enforcement does, so an
+    // empty `cwd` (Cursor sends `cwd: ""`) still falls back to
+    // `workspace_roots` instead of silently reading global policy.
+    let input = payload.get("tool_input").unwrap_or(&Value::Null);
+    let cwd = provider_cwd(payload, input)?;
     crate::discover_root(&cwd).ok()
 }
 
@@ -653,6 +667,29 @@ fn opencode_tool_input(mut payload: Value) -> Value {
 
 /// Normalize Antigravity's documented toolCall payload at the provider boundary.
 fn provider_payload(provider: Provider, mut payload: Value) -> Value {
+    // Copilot CLI sends camelCase fields; normalize to the shared
+    // snake_case shape the rest of the guard reads.
+    if provider == Provider::Copilot {
+        if payload.get("tool_name").is_none()
+            && let Some(value) = payload.get("toolName").cloned()
+        {
+            payload["tool_name"] = value;
+        }
+        if payload.get("tool_input").is_none()
+            && let Some(value) = payload.get("toolArgs").cloned()
+        {
+            // The CLI hook docs describe `toolArgs` as a JSON string; the
+            // SDK sends the object itself. Accept both.
+            payload["tool_input"] = match value.as_str().and_then(|s| {
+                let parsed: Result<Value, _> = serde_json::from_str(s);
+                parsed.ok()
+            }) {
+                Some(parsed) => parsed,
+                None => value,
+            };
+        }
+        return payload;
+    }
     if provider == Provider::Antigravity
         && let Some(call) = payload.get("toolCall")
     {
@@ -674,7 +711,18 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
     let base = payload
         .get("cwd")
         .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
         .map(PathBuf::from)
+        // Cursor sends `cwd: ""` on Shell calls and puts the repo in
+        // `workspace_roots` instead (observed on cursor-agent 2026.10.01).
+        .or_else(|| {
+            payload
+                .get("workspace_roots")
+                .and_then(Value::as_array)
+                .and_then(|roots| roots.first())
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+        })
         .or_else(|| std::env::current_dir().ok())?;
     Some(
         input
@@ -704,7 +752,7 @@ fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
         .get("hook_event_name")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if !is_guard_event(payload, event) || event == "PostToolUse" {
+    if !is_guard_event(payload, event) || event.eq_ignore_ascii_case("posttooluse") {
         return None;
     }
     let tool = payload.get("tool_name")?.as_str()?;
@@ -729,6 +777,8 @@ fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
         "Bash"
             | "bash"
             | "shell"
+            // Cursor's composer shell tool.
+            | "Shell"
             | "unified_exec"
             | "local_shell"
             | "exec_command"
@@ -767,7 +817,12 @@ fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
             "repository read: use exec with pixel search-content or pixel pack-context <uid>"
                 .into(),
         ),
-        "read" | "view_file" | "notebook_read" if path.is_some() && !bounded_read(input) => {
+        // `view` is Copilot CLI's file-read tool (its camelCase payload is
+        // normalized to `tool_name="view"` upstream). Like the other reads,
+        // an unbounded in-repo read is a policy denial.
+        "read" | "view" | "view_file" | "notebook_read"
+            if path.is_some() && !bounded_read(input) =>
+        {
             Some(REPO_READ_REASON.into())
         }
         _ => None,
@@ -1183,6 +1238,26 @@ fn enforce_deny(provider: Provider, reason: &str) -> Value {
         // Antigravity and Devin both take a top-level decision envelope.
         Provider::Antigravity => serde_json::json!({"decision": "deny", "reason": reason}),
         Provider::Devin => serde_json::json!({"decision": "block", "reason": reason}),
+        // Cursor's permission hooks read `permission`/`user_message`/
+        // `agent_message`; `additional_context` is supported on the deny
+        // path so the model also learns why the call was blocked.
+        Provider::Cursor => serde_json::json!({
+            "permission": "deny",
+            "user_message": reason,
+            "agent_message": reason,
+            "additional_context": reason,
+        }),
+        // Copilot reads a flat `permissionDecision`; the Claude-style
+        // envelope is emitted alongside for the VS Code-compatible shape.
+        Provider::Copilot => serde_json::json!({
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }),
         _ => serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -1220,6 +1295,14 @@ fn policy_response(
                 "Pixel suggestion: {reason}. Original call proceeds."
             )))
         }
+        // Cursor's preToolUse injects `additional_context` (documented on
+        // the deny path, accepted on pass-through); its own permissions
+        // stay authoritative — advisory only.
+        PolicyMode::Advisory if provider == Provider::Cursor => Some(serde_json::json!({
+            "additional_context": format!(
+                "Pixel suggestion: {reason}. Original call proceeds."
+            )
+        })),
         _ => None,
     }
 }
@@ -2640,7 +2723,7 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     // into a *delivered fact*: the PreToolUse doctrine says "run pixel impact
     // before editing a symbol", butthe bench shows agents don't. Here the
     // dependants arrive after the edit, unsolicited.
-    if event == "PostToolUse" {
+    if event.eq_ignore_ascii_case("posttooluse") {
         post_tool_use_blast_radius(&anchor, idx_root.as_deref(), tool);
         std::process::exit(0);
     }
@@ -2775,17 +2858,26 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
 }
 
 /// Accept Claude Code's/Codex's/Devin's/zcode's `PreToolUse`, Gemini's
-/// `BeforeTool`, and Cursor's `preToolUse` hook events. Cursor's payload
-/// carries no `hook_event_name` field at all (verified against the
-/// installed `cursor-agent` bundle: the `preToolUse` handler builds its
-/// hook-script stdin from exactly `{conversation_id, generation_id, model,
-/// tool_name, tool_input, tool_use_id, cwd}` — no event-name key) because
+/// `BeforeTool`, and Cursor's `preToolUse` hook events. Older cursor-agent
+/// builds sent no `hook_event_name` field at all (the `preToolUse` handler
+/// built the hook-script stdin from exactly `{conversation_id, generation_id,
+/// model, tool_name, tool_input, tool_use_id, cwd}`); cursor-agent 2026.10.01
+/// was observed sending `hook_event_name: "preToolUse"` verbatim — so the
+/// camelCase name is also accepted above. Either way
 /// pixel is only ever wired into Cursor's `preToolUse` array, so the event
 /// is already implicit from which array invoked us. Treat the payload
 /// shape itself (`tool_name` + `tool_input` present, no explicit event
 /// name) as an implicit PreToolUse.
 fn is_guard_event(payload: &Value, event: &str) -> bool {
-    if event == "PreToolUse" || event == "BeforeTool" || event == "PostToolUse" {
+    // Cursor >=2026.10 sends camelCase `preToolUse`/`postToolUse` in
+    // `hook_event_name` (observed live, cursor-agent 2026.10.01); older
+    // builds omit the field entirely, which is the implicit-shape arm below.
+    if event == "PreToolUse"
+        || event == "BeforeTool"
+        || event == "PostToolUse"
+        || event == "preToolUse"
+        || event == "postToolUse"
+    {
         return true;
     }
     event.is_empty() && payload.get("tool_name").is_some() && payload.get("tool_input").is_some()
@@ -3013,6 +3105,8 @@ fn post_tool_use_advisory(note: &str) -> serde_json::Value {
 const METRICS_SHELL_TOOLS: &[&str] = &[
     "Bash",
     "bash",
+    // Cursor's composer-mode shell tool.
+    "Shell",
     "shell",
     "local_shell",
     "unified_exec",
@@ -3062,9 +3156,29 @@ pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
 
 /// Whether the host already put the invocation's 🟩 box in the tool result.
 fn result_carries_metrics_box(payload: &Value) -> bool {
-    payload
-        .get("tool_response")
-        .is_some_and(|r| r.to_string().contains("🟩 pixel"))
+    // `tool_response` is the Claude/Codex/Devin field; Cursor's postToolUse
+    // sends the same idea as `tool_output` (a JSON-stringified result);
+    // Copilot nests it under `toolResult.textResultForLlm` — the serialized
+    // contains-check reaches the nested text field.
+    ["tool_response", "tool_output", "toolResult"]
+        .iter()
+        .any(|key| {
+            payload
+                .get(key)
+                .is_some_and(|r| r.to_string().contains("🟩 pixel"))
+        })
+}
+
+/// The provider-shaped envelope for a replayed metrics line: Cursor's
+/// postToolUse contract is flat snake_case `additional_context` and
+/// Copilot's is flat camelCase `additionalContext`; every other host takes
+/// the Claude-style advisory shape.
+fn metrics_relay_response(provider: Option<Provider>, line: &str) -> Value {
+    match provider {
+        Some(Provider::Cursor) => serde_json::json!({"additional_context": line}),
+        Some(Provider::Copilot) => serde_json::json!({"additionalContext": line}),
+        _ => post_tool_use_advisory(line),
+    }
 }
 
 /// The hook's answer. A box missing from the result is replayed as
@@ -3076,7 +3190,7 @@ fn result_carries_metrics_box(payload: &Value) -> bool {
 /// silent dedupe.
 fn metrics_hook_response(provider: Option<Provider>, payload: &Value) -> Option<Value> {
     if !result_carries_metrics_box(payload) {
-        return metrics_hook_line(payload).map(|line| post_tool_use_advisory(&line));
+        return metrics_hook_line(payload).map(|line| metrics_relay_response(provider, &line));
     }
     (provider == Some(Provider::Claude))
         .then(|| metrics_record_line(payload))
@@ -3107,11 +3221,12 @@ fn metrics_record_line(payload: &Value) -> Option<String> {
     if !METRICS_SHELL_TOOLS.contains(&tool) {
         return None;
     }
-    let command = tool_command_text(payload.get("tool_input")?)?;
-    let payload_cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
-        || std::env::current_dir().unwrap_or_default(),
-        PathBuf::from,
-    );
+    let tool_input = payload.get("tool_input")?;
+    let command = tool_command_text(tool_input)?;
+    // Resolve the working directory the way enforcement does, so an empty
+    // `cwd` (Cursor sends `cwd: ""`) falls back to `workspace_roots` and the
+    // workspace's `.pixel` is still found for the metrics lookup.
+    let payload_cwd = provider_cwd(payload, tool_input).unwrap_or_default();
     // A leading `cd dir &&` selects where the invocation actually ran:
     // the record's cwd is that effective directory, not the tool cwd.
     let (effective_cwd, effective_cmd) = strip_cd_prefix(&command, &payload_cwd);
@@ -5290,6 +5405,36 @@ mod tests {
     }
 
     #[test]
+    fn cursor_advises_with_flat_additional_context_without_blocking() {
+        let (root, source) = indexed_large_source("cursor-advisory-read");
+        // The real cursor-agent 2026.10 payload: camelCase event name,
+        // `cwd: ""`, repository in `workspace_roots`.
+        let payload = serde_json::json!({
+            "hook_event_name": "preToolUse",
+            "tool_name": "Shell",
+            "tool_input": {"command": format!("cat {}", source.display())},
+            "cwd": "",
+            "workspace_roots": [root],
+        });
+
+        let response = policy_response(
+            Provider::Cursor,
+            &payload,
+            crate::config_cmd::PolicyMode::Advisory,
+        )
+        .expect("advisory mode still injects guidance for Cursor");
+        let context = response["additional_context"]
+            .as_str()
+            .expect("Cursor contract is flat additional_context");
+        assert!(context.contains("Pixel suggestion:"), "{context}");
+        assert!(context.contains("Original call proceeds"), "{context}");
+        assert!(response.get("permission").is_none());
+        assert!(response.get("hookSpecificOutput").is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn devin_allows_bounded_large_repository_reads_without_advisory() {
         let (root, source) = indexed_large_source("devin-bounded-read");
         for range in [
@@ -5692,6 +5837,91 @@ mod tests {
         // shape must NOT be treated as a guard event.
         let unrelated = serde_json::json!({"foo": "bar"});
         assert!(!is_guard_event(&unrelated, ""));
+    }
+
+    #[test]
+    fn accepts_cursor_payload_with_camelcase_event_name() {
+        // cursor-agent 2026.10.01 was observed sending
+        // `hook_event_name: "preToolUse"` (camelCase) — a value the
+        // earlier allowlist silently dropped, disabling the guard.
+        let payload = serde_json::json!({
+            "hook_event_name": "preToolUse",
+            "tool_name": "Shell",
+            "tool_input": {"command": "ls"},
+            "cwd": ""
+        });
+        assert!(is_guard_event(&payload, "preToolUse"));
+        // The postToolUse variant must be a guard event for the gate but is
+        // still skipped by the event.eq_ignore_ascii_case("posttooluse")
+        // checks in the response paths.
+        assert!(is_guard_event(&payload, "postToolUse"));
+    }
+
+    #[test]
+    fn cursor_empty_cwd_falls_back_to_workspace_roots() {
+        // Observed on cursor-agent 2026.10.01: Shell preToolUse payloads
+        // carry `cwd: ""` and put the repository in `workspace_roots`.
+        let payload = serde_json::json!({
+            "cwd": "",
+            "workspace_roots": ["/repo/from/cursor"]
+        });
+        let input = serde_json::json!({"command": "ls", "cwd": ""});
+        assert_eq!(
+            provider_cwd(&payload, &input),
+            Some(PathBuf::from("/repo/from/cursor"))
+        );
+        // A non-empty payload cwd still wins over workspace_roots.
+        let payload = serde_json::json!({
+            "cwd": "/real/cwd",
+            "workspace_roots": ["/repo/from/cursor"]
+        });
+        assert_eq!(
+            provider_cwd(&payload, &input),
+            Some(PathBuf::from("/real/cwd"))
+        );
+    }
+
+    #[test]
+    fn policy_root_resolves_the_workspace_through_provider_cwd() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-guard-policy-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("repo/.pixel")).unwrap();
+        let root = canonical(&dir.join("repo"));
+        // The workspace's own policy layer decides.
+        std::fs::write(root.join(".pixel/config.yaml"), "policy: enforce\n").unwrap();
+        let payload = serde_json::json!({
+            "cwd": "",
+            "workspace_roots": [root],
+        });
+        assert_eq!(
+            policy_root(&payload),
+            Some(root.clone()),
+            "empty cwd with workspace_roots resolves the workspace"
+        );
+        assert_eq!(
+            policy_mode(&payload),
+            crate::config_cmd::PolicyMode::Enforce,
+            "policy reads the workspace layer, not the global one"
+        );
+        // A non-empty payload cwd still wins, with no workspace_roots.
+        let payload = serde_json::json!({"cwd": root.display().to_string()});
+        assert_eq!(policy_root(&payload), Some(root.clone()));
+        // An empty cwd with no workspace_roots falls back to the process
+        // cwd, then to `None` when that is not a repository.
+        let empty = serde_json::json!({"cwd": ""});
+        assert_eq!(
+            policy_root(&empty),
+            crate::discover_root(&std::env::current_dir().unwrap_or_default()).ok(),
+            "no workspace_roots: the fallback matches the enforcement path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -6879,6 +7109,33 @@ mod tests {
     }
 
     #[test]
+    fn cursor_metrics_relay_resolves_the_workspace_from_empty_cwd() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("cursor-empty-cwd");
+        // The documented Cursor shell payload: `cwd: ""` with the repository
+        // in `workspace_roots`, the hook process running outside the
+        // workspace. The record lookup must still find the workspace's
+        // action log, or the relay never fires for Cursor.
+        let payload = serde_json::json!({
+            "tool_name": "Shell",
+            "tool_input": { "command": "pixel impact src/login.rs" },
+            "cwd": "",
+            "workspace_roots": [fixture.root],
+        });
+        let line =
+            metrics_hook_line(&payload).expect("the workspace resolves through workspace_roots");
+        assert!(line.starts_with("🟩 pixel impact ❀"), "{line}");
+        // Without workspace_roots and with an empty cwd there is no
+        // workspace to look up from the fixture dir: nothing to relay.
+        let payload = serde_json::json!({
+            "tool_name": "Shell",
+            "tool_input": { "command": "pixel impact src/login.rs" },
+            "cwd": "",
+        });
+        assert_eq!(metrics_hook_line(&payload), None);
+    }
+
+    #[test]
     fn metrics_hook_line_suppresses_overlapping_identical_records() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let fixture = MetricsFixture::new("overlap");
@@ -6975,6 +7232,77 @@ mod tests {
         // Shown, but no record matches: nothing to finalize.
         shown["tool_input"] = serde_json::json!({"command": "pixel impact other.rs"});
         assert_eq!(metrics_hook_response(Some(Provider::Claude), &shown), None);
+    }
+
+    #[test]
+    fn cursor_deny_uses_the_permission_envelope_not_the_claude_shape() {
+        let response = enforce_deny(Provider::Cursor, "reads require a bound");
+        assert_eq!(response["permission"], "deny");
+        assert!(
+            response["agent_message"]
+                .as_str()
+                .unwrap()
+                .contains("pixel policy: reads require a bound")
+        );
+        assert_eq!(response["additional_context"], response["agent_message"]);
+        assert!(response.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn metrics_relay_response_switches_on_the_cursor_contract() {
+        let advisory = post_tool_use_advisory("line");
+        assert_eq!(
+            metrics_relay_response(Some(Provider::Cursor), "line"),
+            serde_json::json!({"additional_context": "line"})
+        );
+        // Every non-Cursor provider — including the None fallback — keeps
+        // the Claude-style advisory envelope; a flipped comparison here
+        // would hand Cursor a shape it cannot read and vice versa.
+        for provider in [
+            None,
+            Some(Provider::Claude),
+            Some(Provider::Codex),
+            Some(Provider::Devin),
+        ] {
+            assert_eq!(metrics_relay_response(provider, "line"), advisory);
+        }
+    }
+
+    #[test]
+    fn cursor_metrics_response_uses_the_flat_additional_context_field() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("cursor");
+        let mut payload = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
+        payload["tool_name"] = serde_json::json!("Shell");
+        let line = metrics_hook_line(&payload).expect("seeded record");
+        assert_eq!(
+            metrics_hook_response(Some(Provider::Cursor), &payload),
+            Some(serde_json::json!({"additional_context": line}))
+        );
+        // The box inside Cursor's `tool_output` dedupes like `tool_response`.
+        payload["tool_output"] = serde_json::json!(line);
+        assert_eq!(
+            metrics_hook_response(Some(Provider::Cursor), &payload),
+            None
+        );
+    }
+
+    /// Cursor sends `cwd: ""` on Shell calls and names the repo only in
+    /// `workspace_roots`; the metrics relay must still resolve the workspace
+    /// and find the matching record instead of silently returning no line.
+    #[test]
+    fn cursor_metrics_lookup_falls_back_to_workspace_roots_on_empty_cwd() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("cursor-roots");
+        let payload = serde_json::json!({
+            "tool_name": "Shell",
+            "tool_input": { "command": "pixel impact src/login.rs" },
+            "cwd": "",
+            "workspace_roots": [fixture.root.display().to_string()],
+        });
+        let line = metrics_hook_line(&payload)
+            .expect("an empty cwd still resolves the workspace via workspace_roots");
+        assert!(line.starts_with("🟩 pixel impact"), "{line}");
     }
 
     #[test]

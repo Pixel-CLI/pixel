@@ -1,1 +1,0 @@
-**query:** `run-recipe --kind locate` runs its whole plan in one call: resolve, the fresh context of up to three symbols under one `--budget`, the test files among the callers, ranked files on a miss, and a `status` (`located`, `ambiguous`, `needs_reading`, `needs_search`) with a `next_action` and its limits. Opt-in. ([#527](https://github.com/Pixel-CLI/pixel/pull/527))

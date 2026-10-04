@@ -1,1 +1,0 @@
-**mutants:** `scripts/mutants-preflight.sh --run` keeps its outcomes under `target/mutants-preflight/` and reruns unfiltered lists with `--iterate`, so a MISSED-fix cycle re-tests only the mutants not yet caught; the shard cap rises from 10 to 15 so large diffs parallelize further within the concurrent-job budget.

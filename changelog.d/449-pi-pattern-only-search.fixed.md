@@ -1,1 +1,0 @@
-**pi:** the project guard judges a search given no path (`rg needle`, `grep -rn needle`) as the repository search it is, instead of taking the pattern for a path and letting it through even under `pixel config policy enforce`. ([#449](https://github.com/Pixel-CLI/pixel/pull/449))

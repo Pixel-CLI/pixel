@@ -47,18 +47,18 @@ MCP server. `pixel install` registers no MCP server with any agent.
 | `pixel-rank` | Fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. The scoring is pure; `compute_signals` gathers the activity channel itself (git log churn when facts have none, and a failed or capped scan is reported as unavailable rather than as an empty map) and takes the session and error-sink channels from its caller — the daemon feeds neither of those. | graph, git, session |
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
 | `pixel-ops` | Safe git mutation infrastructure ported from usable-git: snapshot store, repository lock, operation journal, recovery keys. Implements `inspect`, `review`, `history`, `diff`, `publish`, `push`, `ship`, `branch`, `update`, `sync`, `reconcile`, `rewrite`, `provenance`, `branches`, `env`. | git |
-| `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through `GitRunner` (timeout, output cap, redacted stderr); `crates/pixel-git/tests/boundary.rs` fails the build on a `Command::new("git")` in any other crate's non-test code. | none |
-| `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, pi, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features) and the `search-meaning` code chunker, which reuses the graph's tree-sitter extraction. | graph, index, rank |
+| `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through `GitRunner` (timeout, output cap, redacted stderr); `crates/pixel-git/tests/boundary.rs` fails the build on a `Command::new("git")` in any other crate's non-test code. Also owns the trust boundary of `.pixel/`: `sidecar` refuses a `.pixel` that is a link or that git tracks and creates owner-only directories without following a link, `nofollow` opens files without following a link at their name, and `repo_path` confines a stored path to the repository root. | none |
+| `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, pi, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features) and the `search-meaning` code chunker, which reuses the graph's tree-sitter extraction. | git, graph, index, rank |
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | git |
-| `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` and `pixel token-savings` reporting. | none |
+| `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` and `pixel token-savings` reporting. | git |
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
-| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: the bundled prompts, Claude Code lifecycle hooks (removing the retired `claude()` shell wrapper), the Codex `developer_instructions` key plus `UserPromptSubmit` and metrics hooks, the Pi `APPEND_SYSTEM.md` block, and, when their config exists, the OpenCode `AGENTS.md` block and guard plugin, the Antigravity plugin and hooks, Devin's own lifecycle hooks (`~/.config/devin/config.json` — Devin imports Claude's hooks, so without them its sessions get the imported Claude text instead of its own protocol), and the zcode guard. `--repo`: project guards for Claude, Codex, Devin and Pi, and the Pixel-first `AGENTS.md` rule (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups and ends on a `backups` step listing them with the quoted `rm --` command that drops them. | proto, daemon, index, facts, git |
+| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: the bundled prompts, Claude Code lifecycle hooks (removing the retired `claude()` shell wrapper), the Codex `developer_instructions` key plus `UserPromptSubmit` and metrics hooks, the Pi `APPEND_SYSTEM.md` block, and, when their config exists, the OpenCode `AGENTS.md` block and guard plugin, the Antigravity plugin and hooks, Devin's own lifecycle hooks (`~/.config/devin/config.json` — Devin imports Claude's hooks, so without them its sessions get the imported Claude text instead of its own protocol), and the zcode guard. `--repo`: project guards for Claude, Codex, Devin and Pi, and the Pixel-first `AGENTS.md` rule (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups and ends on a `backups` step listing them with the quoted `rm --` command that drops them. A run at a terminal opens with the `intro` animation (frames only; `pixel` owns the tty) and ends on the `banner` summary. | proto, daemon, index, facts, git |
 | `pixel-ultraflow` | The classify-driven browser loop over saved flows: the observation (`agent-browser snapshot -i` parsed into numbered slots, `elements`), the indexed action space of operation-target pairs (`action`), the decision seam (`decide`), the discovery loop and its single-cycle unit (`discover`), the composition of what worked into a `pixel-flow` document whose `conditional` steps carry the conditions that tell its branches apart (`compose`), and the replay that decides those conditions with `pixel classify` and re-decides a step whose page moved on (`replay`). Drives `pixel-flow`'s browser seam; the engine is a trait, so the whole loop is tested without a model, a network or a page. | flow |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
 
-Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context`, `pixel-actionlog`, `pixel-flow`, `pixel-ultraflow` (which depends on `pixel-flow` alone) and `pixel-release`; `pixel-session` depends on `pixel-git` only). `pixel-daemon` is
+Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context`, `pixel-flow`, `pixel-ultraflow` (which depends on `pixel-flow` alone) and `pixel-release`; `pixel-session` and `pixel-actionlog` depend on `pixel-git` only). `pixel-daemon` is
 the integration point and is the only library crate allowed to depend on
 almost everything. The CLI depends on the daemon plus whatever it needs for
 commands that never touch the daemon (install, flow, actionlog, release-check).
@@ -169,6 +169,18 @@ Per repository, under `.pixel/` (git-ignored):
 | `workspace.json` | CLI `workspace` | The registered member repositories. |
 | `config.yaml` (legacy `config.json`) | CLI `config` | Repository-level settings over `~/.pixel/config.yaml` (`pixel config edit --repo`). |
 | `pi-policy.jsonl` | Pi extension (`pi-pixel.ts`) | The Pi harness's policy decisions ([docs/pi-harness.md](docs/pi-harness.md)). |
+
+A repository can commit `.pixel/`, links included, so nothing in it is
+trusted by name. The index, graph and history stores, and `index unpack`,
+call `pixel_git::sidecar::check` when they open: a `.pixel` that is a link,
+or that holds anything `git ls-files .pixel` lists, is refused with the
+command to delete it (the integrity markers inside the files tell stale from
+current, not forged from genuine). Every file pixel writes there goes through
+`pixel_git::nofollow` (`O_NOFOLLOW`, a fresh temporary file renamed over the
+name, permissions set on the descriptor) and every directory through
+`pixel_git::sidecar::private_dir`, which refuses a link; the SQLite stores
+open with `SQLITE_OPEN_NOFOLLOW`. Paths read back from a shard or the graph
+are used only when `pixel_git::repo_path` finds them inside the root.
 
 The prompt-submit hook emits a `[PIXEL:TASK_CONTEXT]` fact packet only when a
 compatible warm daemon can serve fresh `targets_facts`; the packet is bounded,
@@ -642,9 +654,9 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
     contract scripts (installer, gate runner, pre-push baseline, mutation
     pre-push and remote host, release prepare, Homebrew formula and Linux
-    bottles, homebrew-core formula,
+    bottles, release SBOM, homebrew-core formula,
     nightly mutants, mutants
-    config, action pins, advisory ignores, clean, cancel-stale sweep), the
+    config, action pins, advisory ignores, clean, cancel-stale sweep, harness-grid dispatch input), the
     pixel-retro lead-time contract (`.agents/skills/pixel-retro/test_lead_time.py`)
     and the Bun Pi-policy contract (`scripts/test-pi-policy.mjs`);
   - **Lint**: `cargo clippy --all-targets` with warnings denied, then
@@ -655,17 +667,27 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     `scripts/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
     reads, accepts the same advisories as `deny.toml`).
 - Other workflows: `mutants.yml` (the `Mutants in diff` gate on every pull
-  request touching `crates/`, sharded), `mutants-nightly.yml` (a whole-tree
+  request touching `crates/`, sharded over the `PIXEL_MUTANTS_SHARD_RUNNERS`
+  runner pool — a JSON array of `runs-on` values the plan job deals
+  round-robin per shard through `scripts/mutants-gate.py`, GitHub-hosted
+  `ubuntu-26.04` when the variable is unset or empty, so capacity moves
+  with a variable edit and no shard queues behind one busy self-hosted
+  host), `mutants-nightly.yml` (a whole-tree
   rotation), `cross-build.yml` (the three release lanes), `release.yml`
   (on a tag: `verify`, then publication, the tap and the post-publish smoke
   test) and `release-build.yml`, the reusable workflow it calls to build the
   archives, write the formula and the Linux bottles with
   `scripts/homebrew-formula.py` and the homebrew-core formula with
-  `scripts/homebrew-core-formula.py`, and sign their provenance (it is the
+  `scripts/homebrew-core-formula.py`, write each archive's CycloneDX SBOM
+  `pixel-<tag>-<target>.cdx.json` (cargo-cyclonedx, narrowed by
+  `scripts/release-sbom.py` to the crates `cargo tree -p pixel-cli` compiles
+  for that target and feature set, from the build matrix's `features`), and
+  sign their provenance, the SBOMs among the subjects (it is the
   attestation's signer, which makes the provenance SLSA Build Level 3; the
   signed Sigstore bundle ships as the release asset `pixel-<tag>.intoto.jsonl`,
   the suffix Scorecard's Signed-Releases check reads as provenance, and the
-  smoke test verifies it with `gh attestation verify --bundle`), `homebrew-core.yml` (that formula
+  smoke test verifies it, the archive and its SBOM with `gh attestation
+  verify`, with and without `--bundle`), `homebrew-core.yml` (that formula
   built from source, `brew test`, `brew audit --strict --new`, on macOS and
   Linux),
   `release-prepare-scope.yml`, `pages.yml` (the website) and `scorecard.yml`
@@ -699,7 +721,8 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 
 `pixel check-release <version|tag> [--repo <path>] [--json]`
 (the `pixel-release` crate) runs in the first job of
-`.github/workflows/release.yml` (`verify`, before its `cargo test`) and is a
+`.github/workflows/release.yml` (`verify`, before `cargo deny check` and its
+`cargo test`) and is a
 maintainer's last local step: it
 reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
 `CHANGELOG.md` and reports three checks (`cli-version`, `cargo-lock`,

@@ -1,1 +1,0 @@
-**graph:** `pixel review-gate` reports `risk-climb` and `unresolved-callers-lower-bound` as SUGGESTION instead of CONCERN or BLOCKER, so `--fail-on concern` (the pre-push hook) no longer refuses a change only for touching a widely used or twice-defined symbol; the level reached stays in the evidence. ([#558](https://github.com/Pixel-CLI/pixel/pull/558))

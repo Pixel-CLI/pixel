@@ -295,6 +295,33 @@ pub fn plan(
 // apply
 // ---------------------------------------------------------------------------
 
+/// Mode of a restored or temporary file before the umask, as `fs::write`
+/// creates one.
+const RESTORED_MODE: u32 = 0o666;
+
+/// A temporary file beside `abs` for `git merge-file`, unique to this
+/// process and call so a name committed in the repository is never reused.
+fn rescue_tmp(abs: &Path, suffix: &str) -> std::path::PathBuf {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = abs
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    abs.with_file_name(format!(
+        ".{name}.{}.{}.{suffix}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
+
+/// Create `path` as a new file holding `bytes`; an existing entry, a link
+/// included, is an error rather than a target.
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    pixel_git::nofollow::create_new(path, RESTORED_MODE)
+        .and_then(|mut file| file.write_all(bytes))
+        .map_err(|e| format!("write {}: {e}", path.display()))
+}
+
 pub struct ApplyOptions {
     pub merge: bool,
     pub stash_first: bool,
@@ -318,6 +345,12 @@ pub fn apply(
         .map_err(|_| format!("{oid} is not a commit in this repository"))?;
     if files.is_empty() {
         return Err("--apply requires at least one --file".to_string());
+    }
+    // Every write lands inside the root: a `..` path, an absolute one or a
+    // directory link leading out is refused before anything is touched.
+    for path in files {
+        pixel_git::repo_path::confine(root, path)
+            .map_err(|e| format!("refusing --file {path}: {e}"))?;
     }
 
     let dirty = dirty_map(root)?;
@@ -361,7 +394,8 @@ pub fn apply(
             }
             other => format!("failed to read {path} at {oid}: {other}"),
         })?;
-        let abs = root.join(path);
+        let abs = pixel_git::repo_path::confine(root, path)
+            .map_err(|e| format!("refusing --file {path}: {e}"))?;
         let was_dirty = dirty.contains_key(path);
 
         if opts.merge && was_dirty && !opts.stash_first {
@@ -375,10 +409,18 @@ pub fn apply(
             let base = runner.show_blob_string("HEAD", path).map_err(|e| {
                 format!("failed to read HEAD version of {path} for 3-way merge: {e}")
             })?;
-            let tmp_base = abs.with_extension("gpx-rescue-base");
-            let tmp_theirs = abs.with_extension("gpx-rescue-theirs");
-            std::fs::write(&tmp_base, &base).map_err(|e| e.to_string())?;
-            std::fs::write(&tmp_theirs, &content).map_err(|e| e.to_string())?;
+            // `git merge-file` writes its result through `abs`: never
+            // through a link.
+            if std::fs::symlink_metadata(&abs).is_ok_and(|meta| !meta.is_file()) {
+                return Err(format!("refusing to merge into {path}: not a regular file"));
+            }
+            let tmp_base = rescue_tmp(&abs, "gpx-rescue-base");
+            let tmp_theirs = rescue_tmp(&abs, "gpx-rescue-theirs");
+            write_new(&tmp_base, base.as_bytes())?;
+            if let Err(error) = write_new(&tmp_theirs, content.as_bytes()) {
+                std::fs::remove_file(&tmp_base).ok();
+                return Err(error);
+            }
             let merged = runner
                 .merge_file_with_labels(
                     &abs,
@@ -402,10 +444,10 @@ pub fn apply(
                 "conflicts": code,
             }));
         } else {
-            // Plain restore via temp file + atomic rename.
-            let tmp = abs.with_extension("gpx-rescue-tmp");
-            std::fs::write(&tmp, &content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-            std::fs::rename(&tmp, &abs).map_err(|e| format!("publish {}: {e}", abs.display()))?;
+            // Plain restore via a fresh temp file + atomic rename, which
+            // replaces a link at `abs` instead of writing through it.
+            pixel_git::nofollow::write_replace(&abs, content.as_bytes(), RESTORED_MODE)
+                .map_err(|e| format!("restore {}: {e}", abs.display()))?;
             results.push(json!({
                 "path": path,
                 "action": if was_dirty { "overwritten" } else { "restored" },
@@ -605,5 +647,85 @@ mod tests {
             err.contains("limit") || err.contains("larger"),
             "error should explain the size limit was exceeded: {err}"
         );
+    }
+
+    /// A `0644` file outside the repository and the check that neither its
+    /// content nor its mode changed.
+    fn sentinel(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("victim.txt");
+        std::fs::write(&path, b"victim content\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        path
+    }
+
+    fn assert_intact(victim: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::read(victim).unwrap(), b"victim content\n");
+        let mode = std::fs::metadata(victim).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o644);
+    }
+
+    /// A repository whose `f.txt` changed once, plus committed links at the
+    /// temporary names the rollback used to write through. Returns the
+    /// repository, the sentinel and the first commit.
+    fn rollback_repo(tag: &str) -> (PathBuf, PathBuf, String) {
+        let base = tmpdir(tag);
+        let victim = sentinel(&base);
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        init_repo(&root);
+        std::fs::write(root.join("f.txt"), b"first\n").unwrap();
+        for suffix in ["gpx-rescue-tmp", "gpx-rescue-base", "gpx-rescue-theirs"] {
+            std::os::unix::fs::symlink(&victim, root.join(format!("f.{suffix}"))).unwrap();
+        }
+        std::os::unix::fs::symlink(&base, root.join("up")).unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        let first = GitRunner::new(&root).rev_parse_head().unwrap();
+        std::fs::write(root.join("f.txt"), b"second\n").unwrap();
+        git(&root, &["commit", "-q", "-am", "second"]);
+        (root, victim, first)
+    }
+
+    #[test]
+    fn apply_should_restore_without_writing_through_a_committed_temp_link() {
+        let (root, victim, first) = rollback_repo("apply-tmp-link");
+        apply(&root, &first, &["f.txt".to_string()], &no_strategy()).unwrap();
+        assert_eq!(std::fs::read(root.join("f.txt")).unwrap(), b"first\n");
+        assert_intact(&victim);
+    }
+
+    #[test]
+    fn apply_merge_should_not_write_through_committed_temp_links() {
+        let (root, victim, first) = rollback_repo("apply-merge-link");
+        std::fs::write(root.join("f.txt"), b"second\nin progress\n").unwrap();
+        let merge = ApplyOptions {
+            merge: true,
+            stash_first: false,
+            allow_dirty: false,
+        };
+        apply(&root, &first, &["f.txt".to_string()], &merge).unwrap();
+        assert_intact(&victim);
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".f.txt."))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+    }
+
+    #[test]
+    fn apply_should_refuse_a_file_outside_the_root() {
+        let (root, victim, first) = rollback_repo("apply-outside");
+        for file in ["../victim.txt", "up/victim.txt", "/etc/hosts"] {
+            let error = apply(&root, &first, &[file.to_string()], &no_strategy()).unwrap_err();
+            assert!(
+                error.starts_with(&format!("refusing --file {file}")),
+                "{error}"
+            );
+        }
+        assert_intact(&victim);
+        assert_eq!(std::fs::read(root.join("f.txt")).unwrap(), b"second\n");
     }
 }

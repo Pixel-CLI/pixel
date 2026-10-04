@@ -1,1 +1,0 @@
-**cli:** `pixel self-update` recognises a cargo build directory by the `CACHEDIR.TAG` cargo writes, so a binary run from a `target/` symlinked elsewhere or a `CARGO_TARGET_DIR` is no longer taken for an install and overwritten; the update notice leaves it alone too. ([#516](https://github.com/Pixel-CLI/pixel/pull/516))

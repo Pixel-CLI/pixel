@@ -1,1 +1,0 @@
-**docs:** Reconcile marketing evidence: foreground file/signature read volumes, qualify historical agent trials and conditional cost estimates (Task 398). ([#429](https://github.com/Pixel-CLI/pixel/pull/429))

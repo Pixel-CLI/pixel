@@ -1,1 +1,0 @@
-**graph:** a Go package import, and a Java wildcard import, now resolve to the package's smallest path instead of whichever file the walk listed first, so a full build and an incremental update store the same import; existing graphs rebuild once on the next graph command.

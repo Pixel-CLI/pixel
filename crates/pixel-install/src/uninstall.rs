@@ -77,6 +77,8 @@ const PIXEL_HOOK_MARKERS: &[&str] = &[
     crate::codex_config::METRICS_HOOK_MARKER,
     crate::codex_config::PROMPT_SUBMIT_HOOK_MARKER,
     "run-hook guard --provider zcode",
+    "run-hook metrics --provider cursor",
+    "run-hook guard",
 ];
 
 /// Run `pixel uninstall`. Idempotent: safe to re-run.
@@ -131,7 +133,8 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         remove_codex_hooks(&home, &exe, dry_run)?,
         remove_gemini_hooks(&home, &exe, dry_run)?,
         remove_zcode_hooks(&home, dry_run)?,
-        remove_cursor_hooks(&home, dry_run)?,
+        remove_cursor_hooks(&home, &exe, dry_run)?,
+        crate::copilot_config::remove_copilot_hooks(&home, dry_run)?,
         remove_pi_extension(&home, dry_run)?,
         // 5. Remove pixel hooks from project-level .codex/hooks.json files.
         remove_project_codex_hooks(&home, &exe, dry_run)?,
@@ -461,6 +464,9 @@ fn remove_claude_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Install
             };
             let before = hooks.clone();
             routing::remove_pixel_hooks(hooks, exe);
+            // Flat-schema (Cursor-style) entries are pixel's by executable
+            // ownership, not by a command substring.
+            routing::remove_flat_pixel_hooks(hooks, exe);
             if !saved.is_empty() {
                 routing::restore_rtk(hooks, &saved);
             }
@@ -475,11 +481,6 @@ fn remove_claude_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Install
                     let mut filtered = existing.clone();
                     for marker in PIXEL_HOOK_MARKERS {
                         filtered = config::remove_hook_entries(&filtered, marker);
-                    }
-                    // Also handle flat-schema entries (Cursor-style command
-                    // at top level) just in case.
-                    for marker in PIXEL_HOOK_MARKERS {
-                        filtered = config::remove_flat_hook_entries(&filtered, marker);
                     }
                     if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
                         hooks.remove(&event);
@@ -703,7 +704,7 @@ fn remove_zcode_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
 // Step 3e: remove Cursor hooks (flat schema)
 // -------------------------------------------------------------------------
 
-fn remove_cursor_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
+pub(crate) fn remove_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let config_path = home.join(config::CURSOR_HOOKS_FILE);
     if !config_path.is_file() {
         return Ok(InstallStep {
@@ -719,22 +720,12 @@ fn remove_cursor_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
         .get_mut("hooks")
         .and_then(serde_json::Value::as_object_mut)
     {
-        let event_keys: Vec<String> = hooks.keys().cloned().collect();
-        for event in event_keys {
-            if let Some(existing) = hooks.get(&event) {
-                let mut filtered = existing.clone();
-                for marker in PIXEL_HOOK_MARKERS {
-                    filtered = config::remove_flat_hook_entries(&filtered, marker);
-                }
-                if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
-                    hooks.remove(&event);
-                    removed += 1;
-                } else if filtered != *hooks.get(&event).unwrap() {
-                    hooks.insert(event, filtered);
-                    removed += 1;
-                }
-            }
-        }
+        // Match pixel's own commands by executable ownership, never by a
+        // command substring: a foreign hook whose command merely contains a
+        // pixel verb (e.g. `run-hook guard`) survives.
+        let before = hooks.clone();
+        routing::remove_flat_pixel_hooks(hooks, exe);
+        removed += usize::from(*hooks != before);
         if hooks.is_empty()
             && let Some(obj) = value.as_object_mut()
         {
@@ -1378,6 +1369,9 @@ fn remove_pixel_hooks_from_settings(
     {
         let before = hooks.clone();
         routing::remove_pixel_hooks(hooks, exe);
+        // Flat-schema (Cursor-style) entries are matched by executable
+        // ownership, not by a command substring.
+        routing::remove_flat_pixel_hooks(hooks, exe);
         removed += usize::from(*hooks != before);
         let event_keys: Vec<String> = hooks.keys().cloned().collect();
         for event in event_keys {
@@ -1385,10 +1379,6 @@ fn remove_pixel_hooks_from_settings(
                 let mut filtered = existing.clone();
                 for marker in PIXEL_HOOK_MARKERS {
                     filtered = config::remove_hook_entries(&filtered, marker);
-                }
-                // Also handle flat-schema entries.
-                for marker in PIXEL_HOOK_MARKERS {
-                    filtered = config::remove_flat_hook_entries(&filtered, marker);
                 }
                 let changed = filtered != *hooks.get(&event).unwrap();
                 if filtered.as_array().is_some_and(std::vec::Vec::is_empty) {
@@ -1452,6 +1442,37 @@ mod routing_tests {
         assert_eq!(restored["later_user_change"], true);
         assert!(!home.join(routing::RTK_BACKUP).exists());
         remove_claude_hooks(home, Path::new("/tmp/pixel"), false).unwrap();
+        assert_eq!(install::read_settings(&path).unwrap(), restored);
+    }
+
+    #[test]
+    fn remove_cursor_hooks_counts_and_preserves_foreign_entries() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = Path::new("/tmp/pixel");
+        let path = home.path().join(config::CURSOR_HOOKS_FILE);
+        let pixel_guard =
+            json!({"command":format!("'{}' run-hook guard --provider cursor", exe.display())});
+        let pixel_metrics =
+            json!({"command":format!("'{}' run-hook metrics --provider cursor", exe.display())});
+        let foreign = json!({"command":"notify-send done"});
+        install::write_settings(
+            &path,
+            &json!({"hooks":{
+                "preToolUse":[pixel_guard, foreign.clone()],
+                "postToolUse":[pixel_metrics],
+            }}),
+            false,
+        )
+        .unwrap();
+        let step = remove_cursor_hooks(home.path(), exe, false).unwrap();
+        assert!(step.summary.contains("removed 1"), "{}", step.summary);
+        let restored = install::read_settings(&path).unwrap();
+        assert_eq!(restored["hooks"]["preToolUse"], json!([foreign]));
+        assert!(restored["hooks"].get("postToolUse").is_none());
+        // Nothing pixel-owned left: a second pass reports zero and does not
+        // rewrite the file.
+        let step = remove_cursor_hooks(home.path(), exe, false).unwrap();
+        assert!(step.summary.contains("removed 0"), "{}", step.summary);
         assert_eq!(install::read_settings(&path).unwrap(), restored);
     }
 

@@ -43,12 +43,13 @@ fn load(root: &Path) -> Result<Registry, String> {
 fn save(root: &Path, registry: &Registry) -> Result<(), String> {
     let path = registry_path(root);
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("workspace dir: {e}"))?;
+        pixel_git::sidecar::private_dir(dir).map_err(|e| format!("workspace dir: {e}"))?;
     }
-    let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(registry).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, bytes).map_err(|e| format!("workspace write: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("workspace rename: {e}"))
+    // A fresh temporary file renamed over the name: a link committed at
+    // either name is replaced, never written through.
+    pixel_git::nofollow::write_replace(&path, &bytes, pixel_git::nofollow::PRIVATE_MODE)
+        .map_err(|e| format!("workspace write: {e}"))
 }
 
 /// Canonicalized member list. Members that vanished from disk are reported

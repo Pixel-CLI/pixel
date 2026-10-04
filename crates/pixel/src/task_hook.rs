@@ -1,7 +1,9 @@
 //! Host hook normalization and response envelopes for durable task gates.
 
 use std::io::{Read, Write};
+use std::iter::Peekable;
 use std::path::Path;
+use std::str::Chars;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -455,6 +457,198 @@ fn uniq_read(args: &[String]) -> bool {
         )
 }
 
+/// `sed` reads when it never writes: no `-i`/`--in-place` in any spelling,
+/// only the read-oriented flags the bounded-read route prescribes (`-n`,
+/// `-e <script>`, `--expression <script>`). Script files supplied with
+/// `-f`/`--file` are rejected outright: their contents cannot be inspected,
+/// so a script file carrying `e …` or `w …` would otherwise slip through as
+/// a read. An unknown flag or combined form like `-ni` stays a mutation, so
+/// a destructive sed can never slip through as a read.
+fn sed_read(args: &[String]) -> bool {
+    read_flags(
+        args,
+        &[
+            "-n",
+            "-N",
+            "-s",
+            "-z",
+            "-u",
+            "-l",
+            "-E",
+            "-r",
+            "--silent",
+            "--quiet",
+            "--regexp-extended",
+            "--separate",
+            "--null-data",
+            "--unbuffered",
+            "--line-length",
+            "--posix",
+            "--sandbox",
+            "--debug",
+            "--help",
+            "--version",
+        ],
+        &["-e", "--expression", "--line-length="],
+    ) && !args.iter().any(|arg| sed_arg_writes(arg))
+}
+
+/// An argument writes or executes when its own script content does. A
+/// positional script (`sed 'w out'`) is scanned directly; an inline script
+/// carried by `--expression=<script>` or a merged `-e<script>` is scanned the
+/// same way, so `sed --expression='w out'` and `sed -e'w out'` are denied
+/// where the two-argument `sed -e 'w out'` already is. `-f`/`--file` script
+/// files never reach here: `read_flags` rejects them before this runs.
+fn sed_arg_writes(arg: &str) -> bool {
+    sed_script_writes(arg)
+        || arg
+            .strip_prefix("--expression=")
+            .is_some_and(sed_script_writes)
+        || arg
+            .strip_prefix("-e")
+            .filter(|rest| !rest.is_empty())
+            .is_some_and(sed_script_writes)
+}
+
+/// A sed script writes or executes when it carries an `e` command (execute the
+/// shell), a `w`/`W` command (write the pattern space to a file), or a
+/// substitution with an `e`/`w`/`W` flag. GNU sed takes the rest of the
+/// command line as the `e` command or the `w`/`W` filename, so `east`,
+/// `west` and `write` are writes too — recognition is by command and flag,
+/// never by a following word boundary. Addresses (numbers, `$`, `/re/`,
+/// `\cre`, including ranges) may precede the command letter, substitutions
+/// may use any delimiter, and commands may be separated by `;`, braces or
+/// newlines, so the script is tokenised rather than split on a fixed set of
+/// characters.
+fn sed_script_writes(script: &str) -> bool {
+    let mut chars = script.chars().peekable();
+    loop {
+        if !skip_separators(&mut chars) || !skip_addresses(&mut chars) {
+            return false;
+        }
+        match chars.peek().copied() {
+            None => return false,
+            Some('e' | 'w' | 'W') => return true,
+            Some('s') => {
+                chars.next();
+                if substitution_writes(&mut chars) {
+                    return true;
+                }
+            }
+            Some(_) => {}
+        }
+        // The remainder of this command is argument text, not more commands.
+        for c in chars.by_ref() {
+            if matches!(c, ';' | '{' | '}' | '\n') {
+                break;
+            }
+        }
+    }
+}
+
+/// Consume command separators, whitespace and comments. Returns false only
+/// when the script ends there, so the caller can stop scanning.
+fn skip_separators(chars: &mut Peekable<Chars<'_>>) -> bool {
+    loop {
+        match chars.peek().copied() {
+            None => return false,
+            Some(';' | '{' | '}') => {
+                chars.next();
+            }
+            Some('#') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if matches!(c, '\n' | '\r') {
+                        break;
+                    }
+                }
+            }
+            Some(c) if c.is_ascii_whitespace() => {
+                chars.next();
+            }
+            Some(_) => return true,
+        }
+    }
+}
+
+/// Consume the address(es) that may precede a command letter: line numbers,
+/// `$`, the comma of a range, `/re/` and `\cre`. Returns false only when the
+/// script ends there, so the caller can stop scanning.
+fn skip_addresses(chars: &mut Peekable<Chars<'_>>) -> bool {
+    loop {
+        match chars.peek().copied() {
+            None => return false,
+            Some('0'..='9' | '$' | ',') => {
+                chars.next();
+            }
+            Some('/') => {
+                chars.next();
+                skip_delimited(chars, '/');
+            }
+            Some('\\') => {
+                chars.next();
+                let Some(delim) = chars.next() else {
+                    return false;
+                };
+                skip_delimited(chars, delim);
+            }
+            Some(_) => return true,
+        }
+    }
+}
+
+/// Consume through the next unescaped `delim`, honouring backslash escapes,
+/// so a `\c` delimiter or an escaped delimiter inside a regexp does not end
+/// the scan early.
+fn skip_delimited(chars: &mut Peekable<Chars<'_>>, delim: char) {
+    while let Some(next) = chars.next() {
+        match next {
+            '\\' => {
+                chars.next();
+            }
+            _ if next == delim => break,
+            _ => {}
+        }
+    }
+}
+
+/// Scan a substitution `s<delim>regexp<delim>replacement<delim>flags` whose
+/// `s` has already been consumed. Returns true when the trailing flags carry
+/// an `e` (execute) or `w`/`W` (write to a file) flag; GNU sed accepts them in
+/// any flag position and takes the text after `w` as its filename, so
+/// `s/a/b/e`, `s/.*/touch marker/ep`, `s/a/id/e;p` and `s/a/b/w out` are
+/// writes alike.
+fn substitution_writes(chars: &mut Peekable<Chars<'_>>) -> bool {
+    // The delimiter is whatever follows the `s`; `\c` is also accepted.
+    let Some(leading) = chars.next() else {
+        return false;
+    };
+    let delim = if leading == '\\' {
+        let Some(delim) = chars.next() else {
+            return false;
+        };
+        delim
+    } else {
+        leading
+    };
+    // Skip the regular expression and the replacement, each through its
+    // closing delimiter, honouring escaped delimiters inside them.
+    skip_delimited(chars, delim);
+    skip_delimited(chars, delim);
+    // Any remaining text before a command boundary is the flag list; a
+    // boundary is left in place so the next command still starts there.
+    while let Some(&flag) = chars.peek() {
+        match flag {
+            'e' | 'w' | 'W' => return true,
+            ';' | '{' | '}' | '\n' | '\r' => break,
+            _ => {
+                chars.next();
+            }
+        }
+    }
+    false
+}
+
 /// Only proven read pipelines and single-command recovery bypass the edit gate.
 fn shell_mutates(command: &str) -> bool {
     let Some(segments) = crate::guard::split_segments(command) else {
@@ -495,6 +689,7 @@ fn shell_leaf_mutates(command: &str, recovery: bool) -> bool {
         }
         "git" => !git_read(args),
         "rg" | "grep" => !search_read(args),
+        "sed" => !sed_read(args),
         "sort" => !sort_read(args),
         "uniq" => !uniq_read(args),
         "pwd" | "true" | "false" | "cat" | "head" | "tail" | "wc" | "ls" | "read" => false,
@@ -997,6 +1192,75 @@ mod tests {
         }
     }
 
+    /// `sed_script_writes` fires only on a write/exec command at a command
+    /// boundary (`w out`, `W x`, `e cmd`, `1e touch marker`), a substitution
+    /// with an `e`/`w`/`W` flag (`s/a/b/w out`, `s/.*/x/ep`), and the
+    /// newline-separated, comment-hidden and inline-`--expression` forms that
+    /// carry one (`p\ne touch marker`, `#x\nw out`). GNU sed takes the rest of
+    /// the line as the `e` command or `w`/`W` filename, so `west`, `write` and
+    /// `east` are writes too. Bounded reads (`1,20p`, `s/a/b/`, `d`, `p`, `a
+    /// label`) and unterminated or comment-stripped scripts stay reads.
+    #[test]
+    fn sed_script_writes_should_flag_only_write_or_exec_commands() {
+        for script in [
+            "w out",
+            "W tmp",
+            "e rm -rf x",
+            "s/a/b/w out",
+            "1,5p;w out",
+            "1,5{w out}",
+            "s/a/b/; w out",
+            "1e touch marker",
+            "1,5e touch marker",
+            "$e rm -rf x",
+            "2w out",
+            "/pat/e touch marker",
+            "s@a@b@w out",
+            "s@a@b@e touch marker",
+            "s/a/b/e",
+            "w",
+            "\\#foo#w out",
+            "\\#\\b#w out",
+            "west",
+            "write",
+            "east",
+            "p\ne touch marker",
+            "1,20p\nw out",
+            "#x\nw out",
+            "s/.*/touch marker/ep",
+            "s/a/id/e;p",
+            "s/a\\/b/c/w out",
+            "s/a/b/west",
+        ] {
+            assert!(sed_script_writes(script), "{script}");
+        }
+        for script in [
+            "1,20p",
+            "1,20p\n2,30q",
+            "s/a/b/",
+            "s/a b/c/",
+            "s@a@b@",
+            "s@a@b@g",
+            "1,20p;2,30q",
+            "433,472p",
+            "145,184p",
+            "d",
+            "p",
+            "n",
+            "a label",
+            "# ; w out",
+            "s/a\\/b/wout",
+            "s/a/b/;q west",
+            "s/a/b/\nq west",
+            "\\#foo",
+            "\\#foo#p",
+            "# w out\n1,20p",
+            "\\",
+        ] {
+            assert!(!sed_script_writes(script), "{script}");
+        }
+    }
+
     #[test]
     fn unavailable_should_block_edits_but_preserve_reads_and_recovery() {
         for tool in ["Write", "Edit", "apply_patch", "write", "edit"] {
@@ -1073,6 +1337,21 @@ mod tests {
             "pixel task reset session",
             "pixel task-state evaluate --suite external.json",
             "pixel task-state reset session",
+            "sed -i 's/a/b/' file.rs",
+            "sed -ni 's/a/b/' file.rs",
+            "sed --in-place 's/a/b/' file.rs",
+            "sed -e 's/a/b/' -e 'w out' file.rs",
+            "sed -n 's/a/b/w out' file.rs",
+            "sed 'e rm -rf x' file.rs",
+            "sed '1e touch marker' file.rs",
+            "sed 's@a@b@w out' file.rs",
+            "sed -f script.sed file.rs",
+            "sed --file=script.sed file.rs",
+            "sed --expression='w out' file.rs",
+            "sed -e'w out' file.rs",
+            "sed 'west' file.rs",
+            "sed 'p\ne touch marker' file.rs",
+            "sed 's/a/b/ep' file.rs",
         ] {
             assert!(shell_mutates(command), "{command}");
             assert_eq!(
@@ -1090,6 +1369,11 @@ mod tests {
             "git diff -- --output=notes",
             "rg -n -F needle src",
             "rg --glob='*.rs' needle",
+            "sed -n '433,472p' crates/pixel/src/code_search.rs",
+            "rtk sed -n '145,184p' crates/pixel/src/main.rs",
+            "sed -n '1,20p' file.rs | sort | uniq",
+            "sed --expression='1,20p' file.rs",
+            "sed -e'1,40p' file.rs",
             "rg -- --pre",
             "pixel config",
             "pixel config policy",

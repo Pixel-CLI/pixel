@@ -15,7 +15,7 @@
 //! Perplexity key under `remote_keys.perplexity`, the same secret store
 //! `pixel config remote-key` uses — 0600, never echoed back.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
 /// SearXNG — your own instance, queries stay private.
 pub const SEARXNG_LABEL: &str = "SearXNG — your own instance (queries stay private; recommended)";
@@ -43,6 +43,7 @@ pub fn install_step(
     stdout: &mut dyn Write,
 ) -> Result<(), String> {
     let mut terminal = TermiosEcho;
+    let mut raw = crate::select::TermiosRaw::default();
     install_step_with(
         tty,
         stdin,
@@ -51,9 +52,12 @@ pub fn install_step(
         crate::config_cmd::set_web_search_perplexity_key,
         crate::config_cmd::remove_web_search_searxng_url,
         &mut terminal,
+        &mut raw,
+        std::io::stdin().is_terminal(),
     )
 }
 
+#[allow(clippy::too_many_arguments)] // the seams are the point: tests inject each collaborator
 fn install_step_with(
     tty: bool,
     stdin: &mut dyn BufRead,
@@ -62,23 +66,40 @@ fn install_step_with(
     store_key: impl FnOnce(&str) -> Result<(), String>,
     remove_searxng: impl FnOnce() -> Result<(), String>,
     terminal: &mut dyn EchoFlag,
+    raw: &mut dyn crate::select::RawMode,
+    stdin_is_terminal: bool,
 ) -> Result<(), String> {
     writeln!(stdout, "Web search provider:").map_err(|e| e.to_string())?;
-    writeln!(stdout, "  [1] {SEARXNG_LABEL}").map_err(|e| e.to_string())?;
-    writeln!(stdout, "  [2] {PERPLEXITY_LABEL}").map_err(|e| e.to_string())?;
-    writeln!(stdout, "  [3] {SKIP_LABEL}").map_err(|e| e.to_string())?;
     if !tty {
+        writeln!(stdout, "  [1] {SEARXNG_LABEL}").map_err(|e| e.to_string())?;
+        writeln!(stdout, "  [2] {PERPLEXITY_LABEL}").map_err(|e| e.to_string())?;
+        writeln!(stdout, "  [3] {SKIP_LABEL}").map_err(|e| e.to_string())?;
         writeln!(stdout, "web search provider: not configured (non-interactive install) — run `pixel config setup` in a terminal to choose")
             .map_err(|e| e.to_string())?;
         return Ok(());
     }
-    write!(stdout, "Choice> ").map_err(|e| e.to_string())?;
-    stdout.flush().map_err(|e| e.to_string())?;
-    let mut line = String::new();
-    stdin
-        .read_line(&mut line)
-        .map_err(|e| format!("read choice: {e}"))?;
-    match parse_choice(&line) {
+    // TTY: the arrow picker paints the option rows itself. EOF falls back
+    // to the numbered prompt so a piped answer still lands.
+    let options = [SEARXNG_LABEL, PERPLEXITY_LABEL, SKIP_LABEL];
+    let picked = crate::select::pick(&options, stdin, stdout, raw, stdin_is_terminal)?;
+    let choice = match picked {
+        Some(0) => Some("searxng"),
+        Some(1) => Some("perplexity"),
+        Some(_) => None,
+        None => {
+            writeln!(stdout, "  [1] {SEARXNG_LABEL}").map_err(|e| e.to_string())?;
+            writeln!(stdout, "  [2] {PERPLEXITY_LABEL}").map_err(|e| e.to_string())?;
+            writeln!(stdout, "  [3] {SKIP_LABEL}").map_err(|e| e.to_string())?;
+            write!(stdout, "Choice> ").map_err(|e| e.to_string())?;
+            stdout.flush().map_err(|e| e.to_string())?;
+            let mut line = String::new();
+            stdin
+                .read_line(&mut line)
+                .map_err(|e| format!("read choice: {e}"))?;
+            parse_choice(&line)
+        }
+    };
+    match choice {
         Some("searxng") => ask_searxng_url(stdin, stdout, store_searxng),
         Some("perplexity") => {
             let stored = ask_perplexity_key(stdin, stdout, store_key, terminal)?;
@@ -316,6 +337,17 @@ mod tests {
         }
     }
 
+    /// A no-op raw-mode seam: the test stdin is a cursor, never a terminal,
+    /// so "raw mode" is a state flag, not a syscall.
+    struct FakeRaw;
+
+    impl crate::select::RawMode for FakeRaw {
+        fn enter(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn leave(&mut self) {}
+    }
+
     impl EchoFlag for FakeEcho {
         fn echoed(&self) -> bool {
             self.echoed
@@ -356,6 +388,8 @@ mod tests {
             |_| panic!("non-interactive install must not store a key"),
             || panic!("non-interactive install must not remove SearXNG"),
             &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
         )
         .unwrap();
         let text = String::from_utf8(output).unwrap();
@@ -381,6 +415,8 @@ mod tests {
             |_| panic!("the SearXNG choice must not store a key"),
             || panic!("the SearXNG choice must not remove SearXNG"),
             &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert_eq!(stored, Some("https://sx.test".to_string()));
@@ -401,6 +437,8 @@ mod tests {
             |_| panic!("an empty URL must not store a key"),
             || panic!("an empty URL must not remove SearXNG"),
             &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert_eq!(stored, None);
@@ -432,6 +470,8 @@ mod tests {
                 Ok(())
             },
             &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert_eq!(stored, Some("pplx-secret-key".to_string()));
@@ -462,6 +502,8 @@ mod tests {
                 Ok(())
             },
             &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(!stored, "an empty key stores nothing");
@@ -528,19 +570,23 @@ mod tests {
 
     #[test]
     fn skip_and_unknown_choices_store_nothing() {
-        for answers in ["3\n", "\n", "yes\n", "0\n"] {
-            let mut output = Vec::new();
-            install_step_with(
-                true,
-                &mut std::io::Cursor::new(answers.as_bytes().to_vec()),
-                &mut output,
-                |_| panic!("a skipped choice must not store a URL"),
-                |_| panic!("a skipped choice must not store a key"),
-                || panic!("a skipped choice must not remove SearXNG"),
-                &mut FakeEcho::live(),
-            )
-            .unwrap();
-        }
+        // Only the skip row (digit 3, or arrows onto it) skips. A bare
+        // Enter chooses the highlighted row — picker's semantics, not the
+        // old numbered prompt's "unknown means skip".
+        let answers = "3\n";
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(answers.as_bytes().to_vec()),
+            &mut output,
+            |_| panic!("a skipped choice must not store a URL"),
+            |_| panic!("a skipped choice must not store a key"),
+            || panic!("a skipped choice must not remove SearXNG"),
+            &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
         let mut output = Vec::new();
         install_step_with(
             true,
@@ -550,6 +596,8 @@ mod tests {
             |_| panic!("skip must not store a key"),
             || panic!("skip must not remove SearXNG"),
             &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(
@@ -557,5 +605,91 @@ mod tests {
                 .unwrap()
                 .contains("the free public chain stays the fallback")
         );
+    }
+
+    #[test]
+    fn arrows_pick_the_highlighted_row() {
+        // Down, down, Enter lands on the third option: skip stores nothing.
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"\x1b[B\x1b[B\r".to_vec()),
+            &mut output,
+            |_| panic!("skipping must not store a URL"),
+            |_| panic!("skipping must not store a key"),
+            || panic!("skipping must not remove SearXNG"),
+            &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(&output);
+        assert!(
+            text.contains("the free public chain stays the fallback"),
+            "{text}"
+        );
+
+        // Down, up, Enter lands back on row 0: SearXNG asks for its URL.
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"\x1b[B\x1b[A\r\n".to_vec()),
+            &mut output,
+            |url| {
+                panic!("an empty URL must not store, got {url}");
+            },
+            |_| panic!("SearXNG must not store a key"),
+            || panic!("SearXNG must not remove SearXNG"),
+            &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+        assert!(String::from_utf8_lossy(&output).contains("skipped (no URL)"));
+    }
+
+    #[test]
+    fn eof_in_the_picker_falls_back_to_the_numbered_prompt() {
+        // A piped answer to a TTY install gets the numbered prompt after the
+        // picker's EOF, so the scripted path still lands.
+        let mut stored = None;
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"2\npplx-scripted\n".to_vec()),
+            &mut output,
+            |_| panic!("the Perplexity choice must not store a URL"),
+            |key| {
+                stored = Some(key.to_string());
+                Ok(())
+            },
+            || Ok(()),
+            &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+        // "2" is a valid quick-pick digit — it stores without touching the
+        // fallback prompt. Forced EOF instead:
+        let mut output = Vec::new();
+        let mut stored = None;
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(Vec::new()),
+            &mut output,
+            |_| Ok(()),
+            |key| {
+                stored = Some(key.to_string());
+                Ok(())
+            },
+            || Ok(()),
+            &mut FakeEcho::live(),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+        assert_eq!(stored, None, "empty input falls through to skip");
+        let text = String::from_utf8_lossy(&output);
+        assert!(text.contains("Choice>"), "numbered fallback shown: {text}");
     }
 }

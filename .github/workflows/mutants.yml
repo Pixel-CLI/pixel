@@ -63,6 +63,11 @@ jobs:
     outputs:
       mutants: ${{ steps.size.outputs.mutants }}
       shards: ${{ steps.size.outputs.shards }}
+      # The shard matrix as `include` entries, one `runs-on` value per shard
+      # dealt round-robin over the PIXEL_MUTANTS_SHARD_RUNNERS pool
+      # (GitHub-hosted by default), so the shards spread across every host
+      # the pool names instead of queueing behind one self-hosted machine.
+      matrix: ${{ steps.size.outputs.matrix }}
       # The commit the shards mutate: the range's right end on a dispatch,
       # empty on a pull request (the checkout's default, its merge commit).
       ref: ${{ steps.diff.outputs.ref }}
@@ -203,9 +208,19 @@ jobs:
         id: size
         env:
           SRC: ${{ steps.diff.outputs.src }}
-        run: >
-          python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt
-          --config mutants-config.toml --github-output "$GITHUB_OUTPUT"
+          # The pool every shard draws its runner from, one `runs-on` value
+          # per shard round-robin (scripts/mutants-gate.py). Absent or empty
+          # falls back to GitHub's image; a malformed array fails the plan.
+          RUNNERS_FILE: ${{ runner.temp }}/shard-runners.json
+          # Through the environment, not template expansion: `${{ vars.* }}`
+          # inside the script would let the variable's quotes be eaten by the
+          # shell and its content parsed as shell, not JSON.
+          RUNNER_POOL: ${{ vars.PIXEL_MUTANTS_SHARD_RUNNERS }}
+        run: |
+          printf '%s' "$RUNNER_POOL" > "$RUNNERS_FILE"
+          python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt \
+            --config mutants-config.toml --runners "$RUNNERS_FILE" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Upload the diff and the listing
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -226,14 +241,17 @@ jobs:
     name: Mutants shard ${{ matrix.shard }}
     needs: plan
     if: needs.plan.outputs.mutants != '0' && needs.plan.outputs.duplicate != 'true'
-    # Compiling happens here tens of mutants at a time, which is where a self-hosted
-    # runner pays off most: PIXEL_RUNNER_LABELS (see ci.yml) moves the shards to it on
-    # every event, pull requests included. That is deliberate: the pre-push gate
-    # (scripts/mutants-remote-gate.sh) already ran this exact diff on the same host
-    # before the branch could be pushed, and the host holds no repository
-    # credentials — `contents: read` and `persist-credentials: false` below still
-    # bound what a shard could touch.
-    runs-on: ${{ vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
+    # Compiling happens here tens of mutants at a time, which is where a
+    # self-hosted runner pays off most. The PIXEL_MUTANTS_SHARD_RUNNERS
+    # repository variable names the pool the plan job dealt the shards over
+    # (round-robin, GitHub's image when unset): same-repository pull
+    # requests included, whose diff the maintainers' pre-push gate
+    # (scripts/mutants-remote-gate.sh) already ran on a gate host. A fork's
+    # pull request stays on GitHub's image: its code reaches a persistent
+    # host through no pre-push gate, and `contents: read` and
+    # `persist-credentials: false` do not isolate a host that outlives the
+    # job.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && matrix.runner || 'ubuntu-26.04' }}
     timeout-minutes: 90
     # The Test job's value (ci.yml), at the same job level: rust-cache hashes
     # it into the `linux-debug` key, so a shard without it would restore
@@ -244,8 +262,7 @@ jobs:
       # Every shard runs to the end even when another one has a survivor:
       # the author needs the whole list of MISSED lines from one push.
       fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       # A shard's `target/` grows with every mutant it rebuilds. PR #222's
       # single job filled the runner's disk at its 101st mutant, and the 546

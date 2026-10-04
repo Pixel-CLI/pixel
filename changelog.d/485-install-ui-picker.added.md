@@ -1,1 +1,0 @@
-**install:** `pixel install` ends in a green, gum-style summary box and `pixel config setup` picks every yes/no with the arrows; Enter at the save question now writes the answers instead of discarding them. ([#485](https://github.com/Pixel-CLI/pixel/pull/485))

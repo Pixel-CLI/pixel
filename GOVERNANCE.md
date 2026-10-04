@@ -41,6 +41,41 @@ neither needs the other's approval to do so.
 | `LivioGama/homebrew-tap` | @LivioGama |
 | Private vulnerability reports | @LivioGama, @navidemad |
 
+## Secrets and credentials
+
+The project's credentials are the three repository secrets above. The rules
+for them:
+
+- **Storage.** Only as GitHub encrypted repository secrets: never in the
+  repository, an issue, a pull request, a log or a chat. Secret scanning with
+  push protection is enabled on the repository to stop one being committed.
+- **Access.** Only the maintainers can create, read or replace a secret. Each
+  one is read by the workflow that needs it and passed through an environment
+  variable, never echoed: `HOMEBREW_TAP_TOKEN` by `release.yml` (publish and
+  smoke jobs), `PROJECTS_TOKEN` by `board-sync.yml`, `VT_API_KEY` by
+  `release.yml` (the VirusTotal job, which hands it to `curl` through a 0600
+  header file). A fork's pull request reaches no secret but the board sync's,
+  which never checks out the fork's code.
+- **Scope.** Each credential grants the least it needs: `HOMEBREW_TAP_TOKEN`
+  is a fine-grained token with Contents read/write on `LivioGama/homebrew-tap`
+  only; `PROJECTS_TOKEN` writes the project board; `VT_API_KEY` belongs to an
+  account used only for release scans.
+- **Rotation.** Tokens are created with an expiry (at most one year for
+  GitHub tokens) and replaced before it. Every credential is revoked at its
+  provider and replaced at once when a maintainer's access changes or when it
+  may have been exposed; the provider's usage log is then checked for misuse.
+
+## Granting access
+
+Write or admin access to this repository or to `LivioGama/homebrew-tap`
+(which the release workflow writes the Homebrew formula to), a seat in the
+Pixel-CLI organization, or access to a secret is granted only after both
+maintainers
+have reviewed the person's contributions (their merged pull requests and how
+they handle review) and agreed, in a pull request that updates this file.
+Access no longer needed is removed the same way, and the maintainers review
+the list above whenever one of them changes role.
+
 ## Contributors
 
 Anyone can contribute, from a fork: open a pull request from your fork's

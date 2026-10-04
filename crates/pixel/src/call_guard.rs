@@ -172,13 +172,18 @@ fn save_calls(calls_path: &Path, calls: &[CallEntry]) {
         })
         .collect();
     let body = serde_json::json!({ "calls": arr });
-    if let Some(parent) = calls_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(parent) = calls_path.parent()
+        && pixel_git::sidecar::private_dir(parent).is_err()
+    {
+        return;
     }
-    let tmp = calls_path.with_extension(format!("json.{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, serde_json::to_vec_pretty(&body).unwrap_or_default()).is_ok() {
-        let _ = std::fs::rename(&tmp, calls_path);
-    }
+    // A fresh temporary file, renamed over the name: a link committed at
+    // either name is replaced, never written through.
+    let _ = pixel_git::nofollow::write_replace(
+        calls_path,
+        &serde_json::to_vec_pretty(&body).unwrap_or_default(),
+        pixel_git::nofollow::PRIVATE_MODE,
+    );
 }
 
 /// Find the `.pixel` directory for a given path (walks up like the

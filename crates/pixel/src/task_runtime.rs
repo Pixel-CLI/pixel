@@ -5,9 +5,7 @@
 //! Claude task for a particular hook session. Corrupt or unavailable state is
 //! treated as absent so hook callers can always fail open.
 
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -34,8 +32,6 @@ const TARGET_ROW_BYTES: usize = 96;
 /// Bytes the render keeps after the task line: one target row, the
 /// no-targets note and the closing line.
 const RENDER_TAIL_RESERVE: usize = TARGET_ROW_BYTES + NO_TARGETS_NOTE.len() + PACKET_CLOSING.len();
-
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct TaskTarget {
@@ -338,16 +334,13 @@ fn save_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> 
     let parent = path
         .parent()
         .ok_or_else(|| format!("task runtime path has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temp = parent.join(format!(
-        ".pixel-task.{}.{}.tmp",
-        std::process::id(),
-        sequence
-    ));
+    pixel_git::sidecar::private_dir(parent)
+        .map_err(|e| format!("create {}: {e}", parent.display()))?;
     let body = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-    fs::write(&temp, body).map_err(|e| format!("write {}: {e}", temp.display()))?;
-    fs::rename(&temp, path).map_err(|e| format!("publish {}: {e}", path.display()))
+    // A fresh temporary file renamed over the name: a link committed at
+    // either name is replaced, never written through.
+    pixel_git::nofollow::write_replace(path, &body, pixel_git::nofollow::PRIVATE_MODE)
+        .map_err(|e| format!("publish {}: {e}", path.display()))
 }
 
 fn extract_targets(data: &Value) -> Vec<TaskTarget> {

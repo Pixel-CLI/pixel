@@ -10,7 +10,7 @@
 //! late line is simply lost rather than blocking, which fits an
 //! observability log (not a correctness-critical journal).
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
@@ -190,27 +190,18 @@ pub struct ActionLog {
 impl ActionLog {
     /// The action log path for a given repo/project root: `<root>/.pixel/actions.jsonl`.
     pub fn path_for_root(root: &Path) -> PathBuf {
-        root.join(".pixel").join(LOG_FILE_NAME)
+        pixel_git::sidecar::dir(root).join(LOG_FILE_NAME)
     }
 
     /// Spawn the background writer for `<root>/.pixel/actions.jsonl`,
-    /// creating the directory if needed. Never fails outwardly: on any setup
-    /// error, returns a no-op logger.
+    /// creating the owner-only directory if needed. Never fails outwardly:
+    /// on any setup error, a `.pixel` that is a link included, returns a
+    /// no-op logger.
     pub fn spawn_for_root(root: &Path) -> ActionLog {
-        let path = Self::path_for_root(root);
-        let Some(dir) = path.parent() else {
-            return ActionLog::noop();
-        };
-        if fs::create_dir_all(dir).is_err() {
+        if pixel_git::sidecar::private_dir(&pixel_git::sidecar::dir(root)).is_err() {
             return ActionLog::noop();
         }
-        // Ensure the .pixel directory is owner-only (0700).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
-        }
-        Self::spawn_at(path)
+        Self::spawn_at(Self::path_for_root(root))
     }
 
     /// Spawn the background writer for an explicit log file path.
@@ -314,33 +305,25 @@ fn writer_loop(path: PathBuf, rx: mpsc::Receiver<ActionEvent>, done_tx: Sender<(
 
 /// Open the log file for appending, creating it with 0600 permissions if
 /// it doesn't exist yet. The action log may contain fill values (passwords,
-/// OTPs) from flow replay, so it must not be world-readable.
+/// OTPs) from flow replay, so it must not be world-readable. A link at the
+/// log's name is refused, never written or chmodded through: a repository
+/// can commit one under `.pixel/`.
 fn open_log_file(path: &Path) -> Option<File> {
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
-    Some(file)
+    pixel_git::nofollow::open_append(path).ok()
 }
 
 /// If the log has grown past `MAX_LOG_BYTES`, rewrite it keeping only the
 /// most recent `MAX_KEPT_LINES` lines. Best-effort: any failure just leaves
 /// the file as-is (an unbounded log is still preferable to losing the file).
 fn rotate_if_needed(path: &Path) -> std::io::Result<()> {
-    let meta = match fs::metadata(path) {
+    let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(_) => return Ok(()),
     };
     if meta.len() <= MAX_LOG_BYTES {
         return Ok(());
     }
-    let file = File::open(path)?;
+    let file = pixel_git::nofollow::open_read(path)?;
     let reader = BufReader::new(file);
     let mut lines: Vec<String> = Vec::new();
     for line in reader.lines() {
@@ -351,28 +334,18 @@ fn rotate_if_needed(path: &Path) -> std::io::Result<()> {
         }
     }
     let start = lines.len().saturating_sub(MAX_KEPT_LINES);
-    let tmp = path.with_extension("jsonl.tmp");
-    {
-        let mut out = File::create(&tmp)?;
-        for line in &lines[start..] {
-            writeln!(out, "{line}")?;
-        }
-        out.flush()?;
+    let mut kept = Vec::new();
+    for line in &lines[start..] {
+        writeln!(kept, "{line}")?;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-    }
-    fs::rename(&tmp, path)?;
-    Ok(())
+    pixel_git::nofollow::write_replace(path, &kept, pixel_git::nofollow::PRIVATE_MODE)
 }
 
 /// Read back the last `limit` events from the log at `path` (oldest first
 /// within the returned window), for `pixel log`. Malformed lines are
 /// skipped rather than failing the whole read.
 pub fn tail(path: &Path, limit: usize) -> std::io::Result<Vec<ActionEvent>> {
-    let file = match File::open(path) {
+    let file = match pixel_git::nofollow::open_read(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
@@ -606,5 +579,86 @@ mod tests {
                 format!("n={}", MAX_KEPT_LINES + 499)
             );
         }
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// A file outside the repository, `0644`, that a committed link targets.
+    fn sentinel(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("victim.txt");
+        fs::write(&path, "victim content\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        path
+    }
+
+    #[test]
+    fn writer_should_leave_the_target_of_a_linked_log_untouched() {
+        let base = tempdir().unwrap();
+        let victim = sentinel(base.path());
+        let root = base.path().join("repo");
+        fs::create_dir_all(root.join(".pixel")).unwrap();
+        std::os::unix::fs::symlink(&victim, ActionLog::path_for_root(&root)).unwrap();
+
+        let mut log = ActionLog::spawn_for_root(&root);
+        log.log(ActionEvent::new("search", "pattern=main"));
+        log.finish_flush();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "victim content\n");
+        assert_eq!(mode_of(&victim), 0o644);
+    }
+
+    #[test]
+    fn spawn_for_root_should_neither_write_nor_chmod_through_a_linked_pixel_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempdir().unwrap();
+        let elsewhere = base.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o755)).unwrap();
+        let root = base.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join(".pixel")).unwrap();
+
+        let mut log = ActionLog::spawn_for_root(&root);
+        log.log(ActionEvent::new("search", "pattern=main"));
+        log.finish_flush();
+
+        assert_eq!(mode_of(&elsewhere), 0o755);
+        assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn rotate_if_needed_should_keep_the_newest_lines_in_an_owner_only_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("actions.jsonl");
+        let padding = "x".repeat(1024);
+        {
+            let mut f = File::create(&path).unwrap();
+            for i in 0..(MAX_KEPT_LINES + 1500) {
+                let ev = ActionEvent::new("search", format!("n={i} {padding}"));
+                writeln!(f, "{}", serde_json::to_string(&ev).unwrap()).unwrap();
+            }
+        }
+        assert!(fs::metadata(&path).unwrap().len() > MAX_LOG_BYTES);
+        rotate_if_needed(&path).unwrap();
+        let events = tail(&path, usize::MAX).unwrap();
+        assert_eq!(events.len(), MAX_KEPT_LINES);
+        assert_eq!(events[0].args, format!("n=1500 {padding}"));
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn tail_should_not_read_through_a_link() {
+        let base = tempdir().unwrap();
+        let target = base.path().join("other.jsonl");
+        let mut log = ActionLog::spawn_at(target.clone());
+        log.log(ActionEvent::new("search", "x"));
+        log.finish_flush();
+        let link = base.path().join("actions.jsonl");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(tail(&link, 10).is_err());
     }
 }

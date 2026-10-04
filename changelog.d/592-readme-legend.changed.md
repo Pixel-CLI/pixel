@@ -1,1 +1,0 @@
-**docs:** the README harness legend now maps every color the two mermaid flowcharts define, one per line — red (LLM), orange (`pixel classify`), green (Pixel-CLI), and yellow (`stop`, never commit unprompted) — with no trailing rules prose. ([#613](https://github.com/Pixel-CLI/pixel/pull/613))

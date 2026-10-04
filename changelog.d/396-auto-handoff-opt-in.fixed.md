@@ -1,1 +1,0 @@
-**hooks:** the Claude prompt hook no longer rejects an imperative coding prompt ("Add the story feature") with "foreground prompt handed off" while a hidden `claude` worker runs, in Claude Code or in Devin CLI (which runs `.claude/settings.json` hooks). ([#396](https://github.com/Pixel-CLI/pixel/pull/396))

@@ -1,1 +1,0 @@
-**install:** answering the setup metrics question, or running `pixel config metrics on --global`, now prints a note when a repo-level `metrics` setting contradicts the saved answer and still wins in the current repository, instead of leaving the 🟩 footer silently hidden behind a stale legacy `config.json`. ([#393](https://github.com/Pixel-CLI/pixel/pull/393))

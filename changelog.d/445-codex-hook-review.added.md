@@ -1,1 +1,0 @@
-**doctor:** `install.codex-hook-review` and `repo.codex-hook-review` report the Pixel hooks Codex skips because you have not reviewed them yet (Codex runs a user or project hook only after `/hooks`), naming each one and that step, instead of an all-green doctor over hooks that never run. ([#445](https://github.com/Pixel-CLI/pixel/pull/445))
