@@ -168,6 +168,36 @@ A finding here is a workflow change, not a pixel bug: its destination is
 CONTRIBUTING.md, `.agents/rules/*.md`, a script under `scripts/` or a CI
 workflow, and its report block gives the before/after numbers.
 
+**D. Adherence: do agents use Pixel, and use it well?** Whenever the
+question is whether a hook, prompt or routing change moved agent behaviour
+("coherence", « est-ce que l'agent utilise pixel », adoption), and in every
+retro whose window spans such a change. `adherence.py` reduces each session
+in a Pixel-indexed repository, Claude Code and Codex alike, to its retrieval
+events and prints per host (never pooled):
+
+```bash
+python3 .agents/skills/pixel-retro/adherence.py $W          # table
+python3 .agents/skills/pixel-retro/adherence.py $W --json   # for a before/after diff
+```
+
+the Pixel share of searches, how often the first search was Pixel, how often
+a Pixel call was followed straight away by a native search (its answer was
+not used), unbounded and wide reads overall and right after a Pixel call,
+and the editing sessions that ran `impact`/`who-calls`/`call-path` before
+their first edit. The baseline, `adherence.py 30d` on 2026-10-04, before the
+#703/#704/#706/#707/#711 fixes: Claude 482 sessions, Pixel share 0.011 (74
+Pixel against 6 488 native searches), first search Pixel 6 %, Pixel then
+native 63 %, unbounded reads right after Pixel 56 %, impact before the first
+edit 1 % (3/311); Codex 43 sessions, share 0.06, first search Pixel 21 %,
+Pixel then native 81 %, impact before the first edit 26 % (8/31). Read them
+with their limits:
+
+- **It counts, it does not judge.** A native search after Pixel can be the
+  right move (a string Pixel does not index); the A/B in `eval/` (#626) says
+  where Pixel should win, this says what agents did.
+- **Compare windows on the same host**, before and after the change, each
+  quoted with its command; a Codex number is never read against a Claude one.
+
 For each action-log error worth keeping, find its transcript turn with a
 distinctive token from `args` (a `--request-id`, a path, a pattern):
 `pixel recall search '<token>' --since $W`. The turns after it show the
