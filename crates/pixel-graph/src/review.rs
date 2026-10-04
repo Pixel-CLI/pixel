@@ -1025,6 +1025,43 @@ mod tests {
         );
     }
 
+    /// When the diff removes BOTH the symbol and its only call site, the
+    /// deleted symbol has no surviving reference: it stays a SUGGESTION even
+    /// though the stale index still holds the old `calls` edge (the fix
+    /// reconciles that edge with the working tree and drops it).
+    #[test]
+    fn review_marks_a_symbol_removed_with_its_only_call_a_suggestion() {
+        let dir = tmpdir("unanchored");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod del;\npub mod a;\n").unwrap();
+        std::fs::write(root.join("src/del.rs"), "pub fn doomed() -> i32 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn idle() -> i32 { crate::del::doomed() }\n",
+        )
+        .unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let store = store_for(root);
+
+        std::fs::remove_file(root.join("src/del.rs")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn idle() -> i32 { 0 }\n").unwrap();
+        let report = review(&store, root, None).expect("review runs");
+        let unanchored: Vec<&ReviewFinding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule == "unanchored-symbol")
+            .collect();
+        // The index still carries the idle->doomed edge; reconcile it with
+        // the working tree so the removed call site is not counted as a
+        // surviving reference.
+        assert_eq!(unanchored.len(), 1, "{report:?}");
+        assert_eq!(unanchored[0].severity, "MEDIUM", "{report:?}");
+        assert_eq!(unanchored[0].file.as_deref(), Some("src/del.rs"));
+    }
+
     #[test]
     fn review_on_a_clean_tree_emits_no_findings() {
         let dir = tmpdir("clean");

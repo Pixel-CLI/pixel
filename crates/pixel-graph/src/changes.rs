@@ -709,6 +709,20 @@ pub fn detect(
     detect_diffs(store, root, base_ref, &file_diffs, include_tests)
 }
 
+/// Whether the working-tree diff removed a call site at `line` (old-file
+/// coordinates) in `path`. An indexed `calls` edge is stale once its site no
+/// longer exists; counting it after the edit deleted both a symbol and its
+/// only call would re-raise a finished deletion to CONCERN on nothing but
+/// stale index state.
+fn call_site_removed(file_diffs: &[FileDiff], path: &str, line: u32) -> bool {
+    // A deleted file's diff reports its whole old side as `old_ranges`, so
+    // this covers a caller file removed outright and a modified file whose
+    // call line the hunk actually wrote over.
+    file_diffs
+        .iter()
+        .any(|fd| fd.old_path == path && fd.old_ranges.iter().any(|&(s, e)| line >= s && line <= e))
+}
+
 /// `detect` over an already-parsed diff: a caller that read the diff itself
 /// (`review`) shares the same change set instead of running a second
 /// `git diff` that could observe a newer tree. Without `--base` the diff is
@@ -773,14 +787,22 @@ pub(crate) fn detect_diffs(
                     proc_set.insert(p);
                 }
                 if let Some(caller) = symbol_by_id(store, e.src_id)? {
-                    consumers.insert(Consumer {
-                        of: sym.uid.clone(),
-                        path: file_path_by_id(store, caller.file_id)?,
-                        line: e.site_line,
-                        caller: Some(caller.uid),
-                        basis: "calls".to_string(),
-                        tier: Some(e.tier.as_str().to_string()),
-                    });
+                    let caller_path = file_path_by_id(store, caller.file_id)?;
+                    // A `calls` edge whose site the diff removed is stale:
+                    // the reference no longer exists in the working tree,
+                    // so it must not count as a live consumer (the deleted
+                    // symbol's HIGH would then be passable only with
+                    // `--no-verify`).
+                    if !call_site_removed(file_diffs, &caller_path, e.site_line) {
+                        consumers.insert(Consumer {
+                            of: sym.uid.clone(),
+                            path: caller_path,
+                            line: e.site_line,
+                            caller: Some(caller.uid),
+                            basis: "calls".to_string(),
+                            tier: Some(e.tier.as_str().to_string()),
+                        });
+                    }
                 }
             }
             let env = store.envelope_for_name(&sym.name)?;
