@@ -179,9 +179,24 @@ pub(crate) fn handle_hook(
             "host_policy",
             json!({"enforce":true}),
         )?;
+        // The marker is what an unanswered hook's fallback reads. When it
+        // cannot be written, the same call must not fail open: the fallback
+        // would find the marker provably absent and observe, so answer here
+        // as that enforced fallback would — deny the events an enforced
+        // ledger gates, let the rest through.
         let markers = root.join(ENFORCED_SESSIONS);
-        pixel_ops::durable::ensure_dir(&markers).map_err(error)?;
-        pixel_ops::durable::write_durably(&markers.join(&lock_name), b"").map_err(error)?;
+        let marked = pixel_ops::durable::ensure_dir(&markers)
+            .and_then(|()| pixel_ops::durable::write_durably(&markers.join(&lock_name), b""));
+        if (event == "stop" || (event == "pre-tool-use" && mutation))
+            && let Err(failure) = marked
+        {
+            return Ok(response(
+                &task,
+                "deny",
+                &format!("enforced-session marker persistence failed: {failure}"),
+                json!([]),
+            ));
+        }
     }
     task = store.status(&task.task_id).map_err(error)?;
     drop(binding_lock);
@@ -796,6 +811,65 @@ mod tests {
         std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
         assert!(fallback_enforced(&root.0, "claude", Some("s1")));
         assert!(!fallback_enforced(&root.0, "claude", Some("s2")));
+    }
+
+    #[test]
+    fn an_unwritable_marker_should_deny_what_an_enforced_ledger_gates() {
+        let root = Scratch::new();
+        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
+        // A read-only markers directory fails the durable write while the
+        // lookup still proves the marker absent — the state whose fallback
+        // releases the session.
+        let markers = root.0.join(ENFORCED_SESSIONS);
+        std::fs::create_dir_all(&markers).unwrap();
+        let mut permissions = std::fs::metadata(&markers).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&markers, permissions).unwrap();
+
+        // The task starts enforced: host_policy is recorded before the marker
+        // write, so the obligation survives the failure; a prompt-submit gates
+        // nothing, so its own answer continues normally.
+        let prompt =
+            json!({"session_id":"s1","prompt":"fix the parser bug in src/a.rs","mutation":false});
+        let started = handle_hook(&root.0, "claude", "prompt-submit", &prompt).unwrap();
+        assert_eq!(started["decision"], "observe", "{started}");
+
+        std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
+        // The settings no longer enforce, the task's host_policy record does,
+        // and the marker is provably absent — the fallback alone would observe.
+        assert!(!fallback_enforced(&root.0, "claude", Some("s1")));
+        let denied = handle_hook(
+            &root.0,
+            "claude",
+            "pre-tool-use",
+            &json!({"session_id":"s1","mutation":true}),
+        )
+        .unwrap();
+        assert_eq!(denied["decision"], "deny", "{denied}");
+        let stopped = handle_hook(
+            &root.0,
+            "claude",
+            "stop",
+            &json!({"session_id":"s1","mutation":false}),
+        )
+        .unwrap();
+        assert_eq!(stopped["decision"], "deny", "{stopped}");
+        // The marker failure denies only the gated events: a read-only
+        // pre-tool hook still answers as an observing ledger would.
+        let observed = handle_hook(
+            &root.0,
+            "claude",
+            "pre-tool-use",
+            &json!({"session_id":"s1","mutation":false}),
+        )
+        .unwrap();
+        assert_eq!(observed["decision"], "observe", "{observed}");
+
+        let mut permissions = std::fs::metadata(&markers).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&markers, permissions).unwrap();
     }
 
     #[test]

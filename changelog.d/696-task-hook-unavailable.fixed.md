@@ -1,1 +1,2 @@
 **task:** a task ledger that misses the hook deadline no longer denies more than an answering one: without `task.enforcement: enforce` or an enforced task on the session it only observes. Read-only `;`/`&&` sequences, `cd`/`nl`/`echo`, a trailing `2>/dev/null` and Claude's `Agent`/`TodoWrite` no longer count as edits — parallel subagents had their reads, launches and stops blocked.
+An enforced session whose marker cannot be written still denies the gated events instead of failing open.
