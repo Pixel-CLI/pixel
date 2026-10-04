@@ -4,13 +4,16 @@
 //! The classify-engine install step and configuration.
 //!
 //! `pixel install` proposes the classify engine — local (the Ollaya decision
-//! daemon on this Mac) or remote (a hosted LLM behind a key) — with each
+//! daemon on this Mac), remote (a hosted LLM behind a key), or Jev
+//! (TypeSafe's hosted decision model behind `TYPESAFE_API_KEY`) — with each
 //! option's measured accuracy in parentheses. Choosing local runs the
 //! auto-setup: the `ollaya` binary installed into a pixel-managed prefix,
 //! the recommended model pulled, and a recorded server launch that
 //! `pixel classify` auto-starts on demand. Choosing remote prompts for the
 //! provider's API key and stores it through the existing
-//! `pixel config remote-key` flow.
+//! `pixel config remote-key` flow; Jev prompts for its key directly. The
+//! choice is switchable later with `pixel config classify-engine` and
+//! `pixel config remote-key <preset>`.
 //!
 //! Everything interactive is gated on a TTY: a scripted install (CI, pipes)
 //! prints the choice it would have asked as a suggestion and moves on —
@@ -28,6 +31,7 @@ use std::path::PathBuf;
 /// remote preset).
 pub const LOCAL_LABEL: &str = "Local — Ollaya winnow:e4b on this Mac (offline, $0 per call; 0.722 typed-decisions accuracy vs Jev's 0.738)";
 pub const REMOTE_LABEL: &str = "Remote — hosted LLM behind your key (DeepSeek-v4.1-flash: 100% on the 14-item public coding exam; ~$0.0001/call, needs network)";
+pub const JEV_LABEL: &str = "Jev — TypeSafe's hosted decision model behind your TYPESAFE_API_KEY (0.738 typed-decisions accuracy, needs network)";
 
 /// Everything Ollaya owns lives under one pixel-managed prefix (binary,
 /// model store, installer, server log), never in the global PATH.
@@ -158,11 +162,12 @@ pub fn server_reachable_within(base: &str, cap: Duration) -> bool {
         .is_some_and(|addr| TcpStream::connect_timeout(&addr, cap).is_ok())
 }
 
-/// Parse the interactive answer ("1"/"2") into an engine choice.
+/// Parse the interactive answer ("1"/"2"/"3") into an engine choice.
 fn parse_choice(answer: &str) -> Option<&'static str> {
     match answer.trim() {
         "1" => Some("local"),
         "2" => Some("remote"),
+        "3" => Some("jev"),
         _ => None,
     }
 }
@@ -183,25 +188,28 @@ pub fn install_step(
         stored_engine(),
         setup_local,
         propose_remote_key,
+        propose_jev_key,
         &mut crate::select::TermiosRaw::default(),
         std::io::stdin().is_terminal(),
     )
 }
 
 #[allow(clippy::too_many_arguments)] // the seams are the point: tests inject each collaborator
-fn install_step_with<FLocal, FRemote>(
+fn install_step_with<FLocal, FRemote, FJev>(
     tty: bool,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
     stored: Option<String>,
     setup_local: FLocal,
     propose_remote_key: FRemote,
+    propose_jev_key: FJev,
     raw: &mut dyn crate::select::RawMode,
     stdin_is_terminal: bool,
 ) -> Result<(), String>
 where
     FLocal: FnOnce(&mut dyn std::io::Write) -> Result<(), String>,
     FRemote: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
+    FJev: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
 {
     if let Some(engine) = stored {
         writeln!(stdout, "classify engine: already configured as {engine:?} (change with `pixel config classify-engine <local|remote|auto>`)")
@@ -212,6 +220,7 @@ where
     if !tty {
         writeln!(stdout, "  [1] {LOCAL_LABEL}").map_err(|e| e.to_string())?;
         writeln!(stdout, "  [2] {REMOTE_LABEL}").map_err(|e| e.to_string())?;
+        writeln!(stdout, "  [3] {JEV_LABEL}").map_err(|e| e.to_string())?;
         writeln!(stdout, "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote>` or re-run `pixel install` in a terminal")
             .map_err(|e| e.to_string())?;
         return Ok(());
@@ -219,7 +228,7 @@ where
     // TTY: the arrow picker paints the option rows itself; EOF falls back
     // to the numbered prompt so a piped answer still lands.
     let picked = crate::select::pick(
-        &[LOCAL_LABEL, REMOTE_LABEL],
+        &[LOCAL_LABEL, REMOTE_LABEL, JEV_LABEL],
         stdin,
         stdout,
         raw,
@@ -228,10 +237,12 @@ where
     let choice = match picked {
         Some(0) => Some("local"),
         Some(1) => Some("remote"),
+        Some(2) => Some("jev"),
         Some(_) => None,
         None => {
             writeln!(stdout, "  [1] {LOCAL_LABEL}").map_err(|e| e.to_string())?;
             writeln!(stdout, "  [2] {REMOTE_LABEL}").map_err(|e| e.to_string())?;
+            writeln!(stdout, "  [3] {JEV_LABEL}").map_err(|e| e.to_string())?;
             write!(stdout, "Choice> ").map_err(|e| e.to_string())?;
             stdout.flush().map_err(|e| e.to_string())?;
             let mut line = String::new();
@@ -244,6 +255,7 @@ where
     match choice {
         Some("local") => setup_local(stdout),
         Some("remote") => propose_remote_key(stdin, stdout),
+        Some("jev") => propose_jev_key(stdin, stdout),
         _ => {
             writeln!(stdout, "classify engine: skipped — run `pixel config classify-engine <local|remote>` to choose later")
                 .map_err(|e| e.to_string())?;
@@ -257,18 +269,18 @@ fn propose_remote_key(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
 ) -> Result<(), String> {
-    propose_remote_key_with(stdin, stdout, |preset, key| {
+    propose_remote_key_with(stdin, stdout, |preset, key, model| {
         if let Some(key) = key {
             crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
         }
-        crate::config_cmd::set_classify_remote(preset)
+        crate::config_cmd::set_classify_remote_model(preset, model)
     })
 }
 
 fn propose_remote_key_with(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
-    store: impl FnOnce(crate::decide_remote::Preset, Option<&str>) -> Result<(), String>,
+    store: impl FnOnce(crate::decide_remote::Preset, Option<&str>, Option<String>) -> Result<(), String>,
 ) -> Result<(), String> {
     writeln!(
         stdout,
@@ -291,6 +303,67 @@ fn propose_remote_key_with(
             "unknown provider {provider:?} (openrouter, ollama, deepseek, opencode-go, jev, local)"
         ));
     };
+    // OpenCode Go's subscription carries the remote LLM and both Jev
+    // variants; every other preset has a single model line.
+    let model = if preset == crate::decide_remote::Preset::OpencodeGo {
+        opencode_go_model(stdin, stdout)?
+    } else {
+        None
+    };
+    propose_key_for(preset, model, stdin, stdout, store)
+}
+
+/// The OpenCode Go model choice: the subscription's remote LLM or one of
+/// the two Jev models it carries. `None` (an empty answer or `1`) keeps the
+/// preset default; an unrecognized answer is taken as a custom model id.
+fn opencode_go_model(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+) -> Result<Option<String>, String> {
+    writeln!(stdout, "OpenCode Go model:").map_err(|e| e.to_string())?;
+    writeln!(stdout, "  [1] deepseek-v4.1-flash — remote LLM").map_err(|e| e.to_string())?;
+    writeln!(stdout, "  [2] jev — the subscription's Jev decision model")
+        .map_err(|e| e.to_string())?;
+    writeln!(stdout, "  [3] jev-3 — Jev 3").map_err(|e| e.to_string())?;
+    write!(stdout, "Model [1]> ").map_err(|e| e.to_string())?;
+    stdout.flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    stdin
+        .read_line(&mut line)
+        .map_err(|e| format!("read model: {e}"))?;
+    Ok(match line.trim() {
+        "" | "1" => None,
+        "2" => Some("jev".to_string()),
+        "3" => Some("jev-3".to_string()),
+        custom => Some(custom.to_string()),
+    })
+}
+
+/// The Jev onboarding option: no provider question — Jev is the preset, the
+/// only input is its `TYPESAFE_API_KEY`.
+#[cfg_attr(test, mutants::skip)] // Config adapter; prompt and persistence dispatch are tested with injected storage.
+fn propose_jev_key(stdin: &mut dyn BufRead, stdout: &mut dyn std::io::Write) -> Result<(), String> {
+    propose_key_for(
+        crate::decide_remote::Preset::Jev,
+        None,
+        stdin,
+        stdout,
+        |preset, key, model| {
+            if let Some(key) = key {
+                crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+            }
+            crate::config_cmd::set_classify_remote_model(preset, model)
+        },
+    )
+}
+
+fn propose_key_for(
+    preset: crate::decide_remote::Preset,
+    model: Option<String>,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+    store: impl FnOnce(crate::decide_remote::Preset, Option<&str>, Option<String>) -> Result<(), String>,
+) -> Result<(), String> {
     let Some(var) = crate::decide_remote::key_env_name(preset, None) else {
         return Err(
             "the local preset needs no API key — choose it as the engine instead".to_string(),
@@ -307,7 +380,7 @@ fn propose_remote_key_with(
         .read_line(&mut key)
         .map_err(|e| format!("read key: {e}"))?;
     let key = key.trim();
-    store(preset, if key.is_empty() { None } else { Some(key) })?;
+    store(preset, if key.is_empty() { None } else { Some(key) }, model)?;
     if key.is_empty() {
         writeln!(stdout, "classify engine: remote selected, no key stored — set {var} or run `pixel config remote-key {} -` before classifying", preset.display())
             .map_err(|e| e.to_string())?;
@@ -865,7 +938,7 @@ mod tests {
     fn remote_key_prompt_reads_the_provider_from_the_supplied_reader() {
         let mut input = std::io::Cursor::new(b"unknown-provider\n".to_vec());
         let mut output = Vec::new();
-        let error = propose_remote_key_with(&mut input, &mut output, |_, _| {
+        let error = propose_remote_key_with(&mut input, &mut output, |_, _, _| {
             panic!("invalid provider must not be stored")
         })
         .unwrap_err();
@@ -879,36 +952,54 @@ mod tests {
 
     #[test]
     fn remote_setup_should_persist_the_selected_provider_even_without_a_key() {
-        for (input, expected, key) in [
+        for (input, expected, key, model) in [
             (
                 "deepseek\n test-secret \n",
                 crate::decide_remote::Preset::Deepseek,
                 Some("test-secret"),
+                None,
             ),
             (
                 "opencode-go\n\n",
                 crate::decide_remote::Preset::OpencodeGo,
                 None,
+                None,
+            ),
+            (
+                "opencode-go\n2\ngo-secret\n",
+                crate::decide_remote::Preset::OpencodeGo,
+                Some("go-secret"),
+                Some("jev"),
+            ),
+            (
+                "opencode-go\n3\n\n",
+                crate::decide_remote::Preset::OpencodeGo,
+                None,
+                Some("jev-3"),
             ),
             (
                 "  jev  \n typesafe-secret \n",
                 crate::decide_remote::Preset::Jev,
                 Some("typesafe-secret"),
+                None,
             ),
-            ("\n\n", crate::decide_remote::Preset::Openrouter, None),
+            ("\n\n", crate::decide_remote::Preset::Openrouter, None, None),
         ] {
             let mut stored = None;
             let mut output = Vec::new();
             propose_remote_key_with(
                 &mut std::io::Cursor::new(input),
                 &mut output,
-                |preset, value| {
-                    stored = Some((preset, value.map(str::to_string)));
+                |preset, value, model| {
+                    stored = Some((preset, value.map(str::to_string), model));
                     Ok(())
                 },
             )
             .unwrap();
-            assert_eq!(stored, Some((expected, key.map(str::to_string))));
+            assert_eq!(
+                stored,
+                Some((expected, key.map(str::to_string), model.map(str::to_string)))
+            );
             assert!(!String::from_utf8(output).unwrap().contains("test-secret"));
         }
     }
@@ -1061,6 +1152,7 @@ mod tests {
             Some("remote".to_string()),
             |_| panic!("stored setting must not start local setup"),
             |_, _| panic!("stored setting must not prompt for a key"),
+            |_, _| panic!("stored setting must not prompt for a jev key"),
             &mut FakeRaw,
             false,
         )
@@ -1079,6 +1171,7 @@ mod tests {
             None,
             |_| panic!("non-interactive install must not start local setup"),
             |_, _| panic!("non-interactive install must not prompt for a key"),
+            |_, _| panic!("non-interactive install must not prompt for a jev key"),
             &mut FakeRaw,
             false,
         )
@@ -1097,6 +1190,7 @@ mod tests {
             None,
             |stdout| writeln!(stdout, "local setup ran").map_err(|e| e.to_string()),
             |_, _| panic!("local choice must not prompt for a remote key"),
+            |_, _| panic!("local choice must not prompt for a jev key"),
             &mut FakeRaw,
             false,
         )
@@ -1119,6 +1213,7 @@ mod tests {
                 stdin.read_line(&mut provider).map_err(|e| e.to_string())?;
                 writeln!(stdout, "remote key for {}", provider.trim()).map_err(|e| e.to_string())
             },
+            |_, _| panic!("remote choice must not prompt for a jev key"),
             &mut FakeRaw,
             false,
         )
@@ -1127,6 +1222,25 @@ mod tests {
             String::from_utf8(output)
                 .unwrap()
                 .contains("remote key for provider input")
+        );
+
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"3\n".to_vec()),
+            &mut output,
+            None,
+            |_| panic!("jev choice must not start local setup"),
+            |_, _| panic!("jev choice must not ask for a provider"),
+            |_, stdout| writeln!(stdout, "jev key prompt ran").map_err(|e| e.to_string()),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("jev key prompt ran")
         );
     }
 

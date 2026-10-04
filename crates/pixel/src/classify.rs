@@ -816,6 +816,19 @@ fn resolve_remote_preset(
     flag.or(stored).unwrap_or_default()
 }
 
+/// The model the install step stored, when neither `--remote-model` nor
+/// `PIXEL_REMOTE_MODEL` names one — kept below both so an explicit override
+/// always wins over the onboarding choice.
+fn stored_remote_model_when_unset() -> Option<String> {
+    let env_set = std::env::var("PIXEL_REMOTE_MODEL")
+        .ok()
+        .is_some_and(|s| !s.is_empty());
+    if env_set {
+        return None;
+    }
+    crate::config_cmd::classify_remote_model()
+}
+
 /// The Ollaya engine config for one classify call. `--if-warm` gets the
 /// prompt hook's short whole-request cap: its warm check is a TCP connect
 /// only, so a daemon that accepts while it is still loading the model would
@@ -840,7 +853,10 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
         opts.remote_preset,
         crate::config_cmd::classify_remote_preset(),
     );
-    let remote_model = opts.remote_model.clone();
+    let remote_model = opts
+        .remote_model
+        .clone()
+        .or_else(stored_remote_model_when_unset);
     // `opts` moves into `run_with`; the engine opener still needs the flag.
     let if_warm = opts.if_warm;
     let stdin = std::io::stdin();
@@ -914,7 +930,7 @@ pub(crate) fn open_session(
     open_resolved(
         resolved,
         resolve_remote_preset(preset, crate::config_cmd::classify_remote_preset()),
-        model,
+        model.or_else(stored_remote_model_when_unset),
         false,
     )
 }
