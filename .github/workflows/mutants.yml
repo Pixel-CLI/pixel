@@ -18,7 +18,9 @@ name: Mutants
 # pull request: `gh workflow run mutants.yml -f diff_range=e8a4d14...372e1c4`
 # mutates the `crates/` part of that range in the tree of its right end, so
 # the diff still matches the source even after `main` moved on. It is how a
-# pull request merged without a verdict gets one afterwards (#222).
+# pull request merged without a verdict gets one afterwards (#222). The
+# range's right end must be in the history of the branch the run is
+# dispatched from (#674).
 on:
   pull_request:
     paths:
@@ -123,6 +125,16 @@ jobs:
             exit 1
           fi
           tip=$(git rev-parse --verify "${DIFF_RANGE#*...}^{commit}")
+          # The shards build and test the tip, inside this run's cache
+          # scope: the dispatched branch's, so `main`'s when dispatched from
+          # it. A tip outside that branch's history would run unmerged code
+          # where it can write cache entries every later `main` run
+          # restores (CodeQL actions/cache-poisoning, #674). The dispatch
+          # exists for merged pull requests, already in that history.
+          if ! git merge-base --is-ancestor "$tip" HEAD; then
+            echo "::error title=Range outside this branch::$tip is not in the history of $GITHUB_REF_NAME; dispatch from a branch that contains it"
+            exit 1
+          fi
           git diff "$DIFF_RANGE" -- crates/ > pr.diff
           git worktree add --detach "$RUNNER_TEMP/tip" "$tip"
           echo "ref=$tip" >> "$GITHUB_OUTPUT"

@@ -138,7 +138,9 @@ then totals the slices and fails when a mutant survived or a shard left its
 slice unjudged. Its summary names every survivor. A pull request merged
 without a verdict gets one afterwards from a manual run on its range, which
 mutates the tree of the range's right end:
-`gh workflow run mutants.yml -f diff_range=<base>...<head>`. To reproduce one
+`gh workflow run mutants.yml -f diff_range=<base>...<head>`. That end must be
+in the history of the branch the run is dispatched from (`main` by default);
+the plan job refuses any other. To reproduce one
 finding locally, scope the run to the function:
 
 ```bash
