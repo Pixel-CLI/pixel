@@ -11,7 +11,13 @@ language: "en-US"
 
 reviews:
   profile: "chill"
-  request_changes_workflow: false
+  # Approve once every CodeRabbit thread is resolved, the latest commit has
+  # been reviewed and no pre-merge check fails; until then the review stays
+  # "changes requested". The approval records that the findings were
+  # answered (CONTRIBUTING.md, "CodeRabbit reviews"), and OpenSSF Scorecard's
+  # Code-Review check counts approved changesets. It is a bot's approval:
+  # it does not replace a maintainer's review.
+  request_changes_workflow: true
   high_level_summary: true
   # A CLI's changes rarely form a sequence worth a diagram; the table of
   # changed files and the effort estimate carry the walkthrough.

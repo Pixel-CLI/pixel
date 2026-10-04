@@ -618,6 +618,13 @@ thread closed with no reply loses that reason — the next reader re-derives
 it from scratch, and nothing tells the reviewer it was wrong. Silence is
 not a decline.
 
+CodeRabbit approves the pull request once every one of its threads is
+resolved, the latest commit has been reviewed and no pre-merge check fails
+(`request_changes_workflow` in `.coderabbit.yaml`); until then its review
+reads "changes requested". The approval says the findings were answered,
+nothing more: it does not replace a maintainer's review, and it is what
+OpenSSF Scorecard's Code-Review check counts as a reviewed changeset.
+
 Read them, newest review last:
 
 ```bash
