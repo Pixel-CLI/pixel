@@ -157,6 +157,7 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
                 "guard --provider codex",
                 "guard --provider devin",
                 "guard --provider zcode",
+                "guard --provider cursor",
                 "guard --provider claude --delegate-rtk",
                 "composed-guard --provider codex",
                 "session-start",
@@ -173,6 +174,7 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
                 "post-tool-use --provider claude",
                 "metrics --provider claude",
                 "metrics --provider devin",
+                "metrics --provider cursor",
             ]
             .contains(verb)
                 || task_hook_verb(verb)
@@ -328,6 +330,27 @@ fn remove_matching_hooks(hooks: &mut Map<String, Value>, remove: impl Fn(&str) -
             !inner.is_empty()
         });
         !groups.is_empty()
+    });
+}
+
+/// Remove Pixel's flat-schema hook entries (Cursor's `hooks.<event>` arrays,
+/// where every entry carries its `command` directly with no nested `hooks`
+/// sub-array), matching by executable ownership via [`is_pixel_hook`] rather
+/// than a command substring. A foreign command whose text merely contains a
+/// pixel verb (say a tool named `run-hook guard-stats`) survives untouched.
+/// Deleted events drop out of the map; events left with a foreign entry stay.
+pub(crate) fn remove_flat_pixel_hooks(hooks: &mut Map<String, Value>, exe: &Path) {
+    hooks.retain(|_, entries| {
+        let Some(entries) = entries.as_array_mut() else {
+            return true;
+        };
+        entries.retain(|entry| {
+            !entry
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|c| is_pixel_hook(c, exe))
+        });
+        !entries.is_empty()
     });
 }
 
@@ -1781,6 +1804,44 @@ mod tests {
         ] {
             assert!(!is_pixel_hook(foreign, release()), "{foreign}");
         }
+    }
+
+    /// Cursor's flat `hooks.<event>` schema: Pixel's own commands go by
+    /// executable ownership, so a foreign command whose text merely contains
+    /// a pixel verb (e.g. `run-hook guard` or `run-hook metrics`) survives
+    /// an uninstall untouched.
+    #[test]
+    fn remove_flat_pixel_hooks_preserves_foreign_commands_that_mention_pixel_verbs() {
+        let exe = Path::new("/usr/local/bin/pixel");
+        let mut value = json!({
+            "preToolUse": [
+                { "command": "lint" },
+                { "command": "/opt/dev/bin/run-hook guard-stats" },
+                { "command": format!("{} run-hook guard", quoted_executable(exe)) },
+            ],
+            "postToolUse": [
+                { "command": "tidy" },
+                { "command": "some-tool run-hook metrics --provider cursor" },
+                { "command": format!(
+                    "{} run-hook metrics --provider cursor",
+                    quoted_executable(exe)
+                ) },
+            ],
+        });
+        remove_flat_pixel_hooks(value.as_object_mut().unwrap(), exe);
+        assert_eq!(
+            value,
+            json!({
+                "preToolUse": [
+                    { "command": "lint" },
+                    { "command": "/opt/dev/bin/run-hook guard-stats" },
+                ],
+                "postToolUse": [
+                    { "command": "tidy" },
+                    { "command": "some-tool run-hook metrics --provider cursor" },
+                ],
+            })
+        );
     }
 
     /// Installs before `pixel run-hook` registered bare scripts under
