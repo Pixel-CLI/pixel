@@ -249,16 +249,37 @@ fn graph_findings(report: &ChangesReport, caps: &mut Vec<String>) -> Vec<ReviewF
     }
 
     for u in &report.unanchored {
+        // A deleted symbol that nothing still names is a finished deletion:
+        // it can never anchor, so a CONCERN could only be bypassed. Keep the
+        // CONCERN for the case that can be fixed — a surviving same-name
+        // call or reference site (`unresolved_name` consumer).
+        let has_live_references = report.consumers.iter().any(|c| c.of == u.uid);
+        let (severity, evidence, fix_hint) = if has_live_references {
+            (
+                "HIGH",
+                format!(
+                    "deleted symbol {name} has no anchor in the current graph",
+                    name = u.name
+                ),
+                "confirm references to the deleted symbol were renamed or removed, or re-index",
+            )
+        } else {
+            (
+                "MEDIUM",
+                format!(
+                    "deleted symbol {name} has no anchor in the current graph; no references remain",
+                    name = u.name
+                ),
+                "deletion left no references; nothing to fix",
+            )
+        };
         out.push(ReviewFinding {
             rule: "unanchored-symbol".into(),
-            severity: "HIGH".into(),
+            severity: severity.into(),
             file: Some(u.path.clone()),
             line: Some(u.old_lines[0]),
-            evidence: format!(
-                "deleted symbol {name} has no anchor in the current graph",
-                name = u.name
-            ),
-            fix_hint: "confirm references to the deleted symbol were renamed or removed, or re-index",
+            evidence,
+            fix_hint,
         });
     }
 
@@ -925,10 +946,11 @@ mod tests {
         );
     }
 
-    /// A deleted symbol lives in no graph: the change is unanchored, HIGH,
-    /// and nothing claims the deletion introduced a secret.
+    /// A deleted symbol nothing still names is a finished deletion: it can
+    /// never anchor, so the finding is a SUGGESTION, not a CONCERN that only
+    /// `--no-verify` could clear. The evidence keeps the deletion.
     #[test]
-    fn review_marks_a_deleted_symbol_unanchored() {
+    fn review_marks_a_fully_removed_symbol_a_suggestion() {
         let dir = tmpdir("unanchored");
         let root = dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -949,7 +971,7 @@ mod tests {
             .filter(|f| f.rule == "unanchored-symbol")
             .collect();
         assert_eq!(unanchored.len(), 1, "{report:?}");
-        assert_eq!(unanchored[0].severity, "HIGH");
+        assert_eq!(unanchored[0].severity, "MEDIUM");
         assert_eq!(unanchored[0].file.as_deref(), Some("src/del.rs"));
         assert!(
             unanchored[0].evidence.contains("doomed"),
@@ -964,6 +986,42 @@ mod tests {
                 .iter()
                 .all(|f| f.rule != "possible-secret" || f.file.as_deref() != Some("src/del.rs")),
             "{report:?}"
+        );
+    }
+
+    /// A deleted symbol a call site still names is fixable — rename or
+    /// remove the reference — so it stays a CONCERN.
+    #[test]
+    fn review_marks_a_deleted_symbol_with_surviving_references_a_concern() {
+        let dir = tmpdir("unanchored");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod del;\npub mod a;\n").unwrap();
+        std::fs::write(root.join("src/del.rs"), "pub fn doomed() -> i32 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn idle() -> i32 { crate::del::doomed() }\n",
+        )
+        .unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let store = store_for(root);
+
+        std::fs::remove_file(root.join("src/del.rs")).unwrap();
+        let report = review(&store, root, None).expect("review runs");
+        let unanchored: Vec<&ReviewFinding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule == "unanchored-symbol")
+            .collect();
+        assert_eq!(unanchored.len(), 1, "{report:?}");
+        assert_eq!(unanchored[0].severity, "HIGH");
+        assert_eq!(unanchored[0].file.as_deref(), Some("src/del.rs"));
+        assert!(
+            unanchored[0].evidence.contains("doomed"),
+            "{}",
+            unanchored[0].evidence
         );
     }
 
