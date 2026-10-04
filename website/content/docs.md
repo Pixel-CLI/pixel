@@ -13,7 +13,7 @@ Pixel is a single binary for macOS and Linux. The install script is one line:
 curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 ```
 
-It runs [`scripts/install.sh`](https://github.com/Pixel-CLI/pixel/blob/main/scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It picks the archive for the machine it is running on, refuses that archive unless its SHA-256 matches the release's checksum, runs the binary once, and writes a single file into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`). With `DESTDIR` set, as for a package build, that file is staged under `$DESTDIR$PIXEL_INSTALL_DIR` instead. It edits no shell profile.
+It runs [`scripts/install.sh`](https://github.com/Pixel-CLI/pixel/blob/main/scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It picks the archive for the machine it is running on, refuses that archive unless its SHA-256 matches the release's checksum, runs the binary once, and writes a single file into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`). From the release after 0.7.0, a `DESTDIR` set for a package build stages that file under `$DESTDIR$PIXEL_INSTALL_DIR` instead; the 0.7.0 script ignores `DESTDIR`. It edits no shell profile.
 
 | Machine | Archive the script downloads |
 | --- | --- |
