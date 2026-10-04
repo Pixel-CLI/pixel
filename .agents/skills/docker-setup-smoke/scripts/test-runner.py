@@ -10,6 +10,14 @@ import tempfile
 import unittest
 
 
+def assert_pinned_base(case, build, image):
+    """The build names the base by tag and by a full sha256 digest, never by tag alone."""
+    case.assertIn(f'BASE_IMAGE={image}', build)
+    digests = [arg for arg in build if arg.startswith('BASE_DIGEST=')]
+    case.assertEqual(len(digests), 1, build)
+    case.assertRegex(digests[0], r'^BASE_DIGEST=[0-9a-f]{64}$')
+
+
 class RunnerContract(unittest.TestCase):
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory()
@@ -65,7 +73,7 @@ if sys.argv[1] == 'run':
                 self.assertIn('pixel-setup-smoke:source', run)
                 self.assertNotIn('refs/pull/427/merge', run)
                 build = [call for call in calls if call[0] == 'build'][-1]
-                self.assertTrue(any(arg.startswith('BASE=rust:1.98.1-bookworm@sha256:') for arg in build))
+                assert_pinned_base(self, build, 'rust:1.98.1-bookworm')
                 self.assertIn('pixel-setup-smoke:source', build)
 
     def test_release_mode_downloads_the_named_release(self):
@@ -77,15 +85,15 @@ if sys.argv[1] == 'run':
         self.assertIn('PIXEL_SOURCE_REF=', run)
         self.assertIn('pixel-setup-smoke:release', run)
         build = next(call for call in calls if call[0] == 'build')
-        self.assertTrue(any(arg.startswith('BASE=debian:bookworm-slim@sha256:') for arg in build))
+        assert_pinned_base(self, build, 'debian:bookworm-slim')
         evidence = next((self.root / 'repo/target/docker-setup-smoke').iterdir())
         self.assertIn('image: pixel-setup-smoke:release sha256:' + 'b' * 64,
                       (evidence / 'identity.txt').read_text())
 
     def test_distribution_modes_install_through_the_channel_a_new_user_would_use(self):
-        cases = [('--installer', 'installer.sh', 'tester', 'BASE=debian:bookworm-slim@sha256:',
+        cases = [('--installer', 'installer.sh', 'tester', 'debian:bookworm-slim',
                   'APT_SOURCE_PARTS=/etc/apt/sources.list.d/'),
-                 ('--brew', 'brew.sh', 'linuxbrew', 'BASE=homebrew/brew@sha256:',
+                 ('--brew', 'brew.sh', 'linuxbrew', 'homebrew/brew',
                   'APT_SOURCE_PARTS=/nonexistent')]
         for flag, bootstrap, user, base, apt in cases:
             with self.subTest(flag=flag):
@@ -97,7 +105,7 @@ if sys.argv[1] == 'run':
                 self.assertIn('PIXEL_RELEASE=latest', run)
                 self.assertIn(f'pixel-setup-smoke:{flag[2:]}', run)
                 build = [call for call in calls if call[0] == 'build'][-1]
-                self.assertTrue(any(arg.startswith(base) for arg in build))
+                assert_pinned_base(self, build, base)
                 self.assertIn(apt, build)
 
     def test_provenance_names_this_checkout_even_under_an_inherited_git_dir(self):
