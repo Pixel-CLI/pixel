@@ -309,12 +309,9 @@ function latestUserText(ctx: any) {
     : "";
 }
 
-// The brief carries the route every host renders (`execution_brief::
-// pretty_retrieval_route`) and whether the prompt asks about code at all.
-// A binary older than `retrieval_route_text` gives no route, never a guessed one.
 // The brief as the bootstrap budget sees it: the task first, then the
 // evidence. The route is injected on its own above it, so its copy and the
-// relevance flag (alphabetically ahead of \`task\` in the binary's JSON)
+// relevance flag (alphabetically ahead of `task` in the binary's JSON)
 // would only push the task out of the first BOOTSTRAP_BUDGET characters.
 function briefForBudget(stdout: string): string {
   try {
@@ -325,6 +322,9 @@ function briefForBudget(stdout: string): string {
   }
 }
 
+// The brief carries the route every host renders (`execution_brief::
+// pretty_retrieval_route`) and whether the prompt asks about code at all.
+// A binary older than `retrieval_route_text` gives no route, never a guessed one.
 function readBrief(stdout: string): { route: string | null; asksAboutCode: boolean } {
   try {
     const brief = JSON.parse(stdout);

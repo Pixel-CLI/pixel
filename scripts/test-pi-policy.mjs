@@ -57,7 +57,7 @@ switch (args[0]) {
   case "scope-task": console.log(JSON.stringify({padding: "x".repeat(settings.scopePadding ?? 0), targets:[{path:"src/main.rs"}]})); break;
   case "execution-brief": {
     // The shape \`pixel execution-brief --json\` emits (execution_brief::from_scope_task).
-    const quoted = "'" + args[1].replaceAll("'", "'\\''") + "'";
+    const quoted = "'" + args[1].replaceAll("'", "'\\\\''") + "'";
     const text = ["[PIXEL:EXECUTION_ROUTE]", "1. Run: rtk pixel find-code " + quoted,
       "   If it returns no usable or relevant result, run exactly once: rtk pixel find-code 'narrower behavior'",
       "2. Read: Read only a path returned by Pixel, in a maximum 40-line window around its line.",
