@@ -77,6 +77,8 @@ const PIXEL_HOOK_MARKERS: &[&str] = &[
     crate::codex_config::METRICS_HOOK_MARKER,
     crate::codex_config::PROMPT_SUBMIT_HOOK_MARKER,
     "run-hook guard --provider zcode",
+    "run-hook metrics --provider cursor",
+    "run-hook guard",
 ];
 
 /// Run `pixel uninstall`. Idempotent: safe to re-run.

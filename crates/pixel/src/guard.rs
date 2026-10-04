@@ -301,6 +301,9 @@ pub enum Provider {
     /// blocks on `permissionDecision: "deny"` by catching the plugin's throw,
     /// so this provider both rewrites and denies like Claude and Codex.
     Opencode,
+    /// Cursor's `postToolUse` hook: flat `{tool_name, tool_input, tool_output,
+    /// cwd, duration}` payload, `additional_context` (snake_case) response.
+    Cursor,
 }
 
 const MANIFEST_MAX_AGE_SECS: u64 = 24 * 3600;
@@ -568,8 +571,9 @@ fn provider_rewrite_with(
         Provider::Zcode => tool == "Bash" || tool == "exec",
         // OpenCode names the same tools as Claude but lowercases them.
         Provider::Opencode => matches!(tool, "bash" | "Bash"),
-        // Antigravity has no documented input rewrite contract.
-        Provider::Antigravity => return None,
+        // Antigravity has no documented input rewrite contract; Cursor's
+        // preToolUse goes through the implicit (provider-less) guard path.
+        Provider::Antigravity | Provider::Cursor => return None,
     };
     if !shell {
         return None;
@@ -3013,6 +3017,8 @@ fn post_tool_use_advisory(note: &str) -> serde_json::Value {
 const METRICS_SHELL_TOOLS: &[&str] = &[
     "Bash",
     "bash",
+    // Cursor's composer-mode shell tool.
+    "Shell",
     "shell",
     "local_shell",
     "unified_exec",
@@ -3062,9 +3068,13 @@ pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
 
 /// Whether the host already put the invocation's 🟩 box in the tool result.
 fn result_carries_metrics_box(payload: &Value) -> bool {
-    payload
-        .get("tool_response")
-        .is_some_and(|r| r.to_string().contains("🟩 pixel"))
+    // `tool_response` is the Claude/Codex/Devin field; Cursor's postToolUse
+    // sends the same idea as `tool_output` (a JSON-stringified result).
+    ["tool_response", "tool_output"].iter().any(|key| {
+        payload
+            .get(key)
+            .is_some_and(|r| r.to_string().contains("🟩 pixel"))
+    })
 }
 
 /// The hook's answer. A box missing from the result is replayed as
@@ -3076,7 +3086,15 @@ fn result_carries_metrics_box(payload: &Value) -> bool {
 /// silent dedupe.
 fn metrics_hook_response(provider: Option<Provider>, payload: &Value) -> Option<Value> {
     if !result_carries_metrics_box(payload) {
-        return metrics_hook_line(payload).map(|line| post_tool_use_advisory(&line));
+        return metrics_hook_line(payload).map(|line| {
+            if provider == Some(Provider::Cursor) {
+                // Cursor's postToolUse contract is flat snake_case; the
+                // Claude-style advisory shape is not mapped for this event.
+                serde_json::json!({"additional_context": line})
+            } else {
+                post_tool_use_advisory(&line)
+            }
+        });
     }
     (provider == Some(Provider::Claude))
         .then(|| metrics_record_line(payload))
@@ -6975,6 +6993,25 @@ mod tests {
         // Shown, but no record matches: nothing to finalize.
         shown["tool_input"] = serde_json::json!({"command": "pixel impact other.rs"});
         assert_eq!(metrics_hook_response(Some(Provider::Claude), &shown), None);
+    }
+
+    #[test]
+    fn cursor_metrics_response_uses_the_flat_additional_context_field() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("cursor");
+        let mut payload = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
+        payload["tool_name"] = serde_json::json!("Shell");
+        let line = metrics_hook_line(&payload).expect("seeded record");
+        assert_eq!(
+            metrics_hook_response(Some(Provider::Cursor), &payload),
+            Some(serde_json::json!({"additional_context": line}))
+        );
+        // The box inside Cursor's `tool_output` dedupes like `tool_response`.
+        payload["tool_output"] = serde_json::json!(line);
+        assert_eq!(
+            metrics_hook_response(Some(Provider::Cursor), &payload),
+            None
+        );
     }
 
     #[test]

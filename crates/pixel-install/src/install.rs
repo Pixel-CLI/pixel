@@ -208,6 +208,9 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         )?);
     }
     steps.push(crate::routing::install_zcode_at(&home, &exe, dry_run)?);
+    if home.join(".cursor").is_dir() {
+        steps.push(install_cursor_hooks(&home, &exe, dry_run)?);
+    }
 
     let green = steps
         .iter()
@@ -1083,6 +1086,58 @@ pub(crate) fn remove_shell_wrappers(
         status: CheckStatus::Green,
         summary: dry_run_summary(dry_run, "removed shell wrappers"),
         detail,
+    })
+}
+
+/// Cursor's flat hook schema (`hooks.<event>` is a plain array of
+/// `{command, matcher?}`): the guard goes on `preToolUse` — Cursor's payload
+/// carries no `hook_event_name`, so the guard treats it as an implicit
+/// PreToolUse — and the metrics relay on `postToolUse`, which answers with
+/// the Cursor-native `additional_context` field.
+fn install_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let path = home.join(crate::config::CURSOR_HOOKS_FILE);
+    if dry_run {
+        return Ok(InstallStep {
+            id: "hooks.cursor".into(),
+            status: CheckStatus::Green,
+            summary: format!(
+                "would configure pixel guard + metrics in {}",
+                path.display()
+            ),
+            detail: None,
+        });
+    }
+    let mut value = read_settings(&path)?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| crate::InstallError::InvalidSettings {
+            path: path.clone(),
+            reason: "hooks.json root is not an object".into(),
+        })?;
+    let hooks = root.entry("hooks").or_insert_with(|| serde_json::json!({}));
+    let hooks = hooks
+        .as_object_mut()
+        .ok_or_else(|| crate::InstallError::InvalidSettings {
+            path: path.clone(),
+            reason: "hooks is not an object".into(),
+        })?;
+    let guard = serde_json::json!({
+        "command": format!("'{}' run-hook guard", exe.display()),
+        "matcher": crate::config::GUARD_MATCHER,
+    });
+    let metrics = serde_json::json!({
+        "command": format!("'{}' run-hook metrics --provider cursor", exe.display()),
+    });
+    let pre = config::merge_flat_hook_entry(hooks.get("preToolUse"), "run-hook guard", guard);
+    hooks.insert("preToolUse".into(), pre);
+    let post = config::merge_flat_hook_entry(hooks.get("postToolUse"), "run-hook metrics", metrics);
+    hooks.insert("postToolUse".into(), post);
+    let backup = write_settings(&path, &value, dry_run)?;
+    Ok(InstallStep {
+        id: "hooks.cursor".into(),
+        status: CheckStatus::Green,
+        summary: "configured pixel guard + metrics in Cursor hooks.json".into(),
+        detail: Some(with_backup_note(format!("path={}", path.display()), backup)),
     })
 }
 
