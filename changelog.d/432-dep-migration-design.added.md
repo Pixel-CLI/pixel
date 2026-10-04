@@ -1,1 +1,0 @@
-**docs:** design proposal for `pixel dependency-swap`, a bulk dependency-migration op over a big tree (e.g. `~/`): deterministic digging over the shallow `DEFAULT_IGNORED_DIRS` index, an optional `pixel classify` guard at the margin, and a dry-run-first, boundaries-enforced safety contract. ([#611](https://github.com/Pixel-CLI/pixel/pull/611))

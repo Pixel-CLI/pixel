@@ -1,1 +1,0 @@
-**install:** releases are fetched from https://github.com/Pixel-CLI/pixel. `install.sh` is the install path for macOS and Linux, including GitHub Actions and `llms.txt`: it selects the archive, checks SHA-256, runs the binary, and appends to `GITHUB_PATH` when that variable is set. CI runs that script on both Linux runners.

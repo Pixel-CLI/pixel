@@ -1,1 +1,0 @@
-**website:** the "works with" grid drops Gemini CLI and Windsurf; the home claim now says the agent forms the pixel command line (the answer still comes from the index) and that `pixel classify` can run a local model; the About page tells Pixel's origin from Livio's side and the pixel-qa bot. ([#607](https://github.com/Pixel-CLI/pixel/pull/607))

@@ -1,1 +1,0 @@
-**feat:** Rust pushes run the local baseline (`cargo check --all-targets` on the committed candidate) before the remote mutation gate is invoked; the validation-loop rule and skill make the baseline a required rung, so a remote mutation verdict is trusted only for a candidate whose baseline passed. ([#610](https://github.com/Pixel-CLI/pixel/pull/610))

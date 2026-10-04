@@ -1,1 +1,0 @@
-**release:** each release attaches its signed build-provenance attestation as `pixel-vX.Y.Z.intoto.jsonl`, a Sigstore bundle covering every archive, Linux bottle and `install.sh`, so `gh attestation verify --bundle` checks a download without the GitHub attestations API (SECURITY.md, "Verifying a release"), and OpenSSF Scorecard counts the release as having provenance.

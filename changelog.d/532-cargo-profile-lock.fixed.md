@@ -1,1 +1,0 @@
-**cli:** `pixel self-update` also recognises a cargo build directory by the lock cargo takes beside the binary (`target/<profile>/.cargo-lock`), so a `target/` created by a build cache, where cargo writes no `CACHEDIR.TAG`, is no longer taken for an install and its binary overwritten. ([#532](https://github.com/Pixel-CLI/pixel/pull/532))

@@ -1,1 +1,0 @@
-**eval:** the never-worse gate scores all four harnesses — `eval/clis/codex.sh` runs `codex exec --json` against a per-arm CODEX_HOME (payload channel stripped or swapped), `eval/clis/pi.sh` scores `pi -p` as a coverage arm, and score.py parses both transcripts ([#508](https://github.com/Pixel-CLI/pixel/pull/508))

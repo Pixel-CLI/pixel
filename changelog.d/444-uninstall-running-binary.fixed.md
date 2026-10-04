@@ -1,1 +1,0 @@
-**install:** `pixel uninstall` removes the binary that runs it, so one installed by `install.sh` into `PIXEL_INSTALL_DIR` no longer stays behind under a green "no binary found"; a Homebrew or mise binary is left to its manager with the command that removes it, and `self-update` recognises Linuxbrew's Cellar. ([#444](https://github.com/Pixel-CLI/pixel/pull/444))

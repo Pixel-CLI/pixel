@@ -1,1 +1,0 @@
-**hooks:** the automatic prompt handoff is removed, with its `auto_handoff` switch and `PIXEL_AUTO_HANDOFF`: the Claude prompt hook only adds task context and never starts a worker or rejects a prompt. A leftover `auto_handoff: true` is ignored. ([#397](https://github.com/Pixel-CLI/pixel/pull/397))

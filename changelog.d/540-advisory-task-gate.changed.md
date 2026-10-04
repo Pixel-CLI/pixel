@@ -1,1 +1,0 @@
-**task:** the evidence gates are advisory by default — `task.enforcement` unset or `off`/`advisory` keeps tasks binding, recording and surfacing verdicts without ever denying a tool call or a stop; `task.enforcement: enforce` opts the repository into the hard gate.

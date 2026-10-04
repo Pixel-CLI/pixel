@@ -1,1 +1,0 @@
-**build:** \`ai-cli-readify\` is a dev tool, so it now compiles only behind the \`readify\` cargo feature and is absent from the shipped binary. The Test and Clippy lanes pass \`--features pixel-cli/readify\` so the tool stays tested and linted. ([#605](https://github.com/Pixel-CLI/pixel/pull/605))

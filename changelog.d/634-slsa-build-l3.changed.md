@@ -1,1 +1,0 @@
-**release:** archives, Linux bottles and `install.sh` are built and signed by the reusable `release-build.yml`, which makes their provenance SLSA Build Level 3; verify them with `--signer-workflow Pixel-CLI/pixel/.github/workflows/release-build.yml` (SECURITY.md).

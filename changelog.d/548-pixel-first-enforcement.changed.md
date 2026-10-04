@@ -1,3 +1,0 @@
-**install:** restore the Pixel-first retrieval mandate in the agent prompt and the AGENTS.md block (slim, fail-open — not the pre-#476 protocol), and give Codex and Claude Code a UserPromptSubmit hook whose Pixel-first guidance is always on in an indexed repository — Claude on a real host, Codex on every indexed prompt — so sessions attempt Pixel before native retrieval again; agy inherits the mandate through the shared prompt, Devin kept its own, and the guards stay non-blocking rewrites. The PostToolUse metrics relay now reaches the pixel call past the `rtk` shell wrapper and is wired into the Antigravity plugin (a PostToolUse entry), so the live `🟩` line surfaces again in Claude Code and in agy.
-
-[#548](https://github.com/Pixel-CLI/pixel/pull/548)

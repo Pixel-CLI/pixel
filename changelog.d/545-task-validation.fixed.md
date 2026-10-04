@@ -1,1 +1,0 @@
-**task:** Preserved inherited task hooks for renamed executables, kept supported read tools available during task-engine failures, and tightened verification coverage for task binding, evidence and completion. Mutation CI now uses disk-backed compiler temporary storage. ([#545](https://github.com/Pixel-CLI/pixel/pull/545))

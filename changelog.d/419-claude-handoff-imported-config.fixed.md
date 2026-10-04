@@ -1,2 +1,0 @@
-**hooks:** a session that only imports Claude's configuration never starts the Claude task runtime: Devin re-ran the `prompt-submit` entry with `--provider claude`, so with `auto_handoff` enabled an "Add …" prompt was rejected in Devin and handed to a Claude worker — that prompt now reaches Devin with its normal target and boundary context, and no Claude task packet is written for it.
- ([#419](https://github.com/Pixel-CLI/pixel/pull/419))

@@ -1,1 +1,0 @@
-**graph:** Rust literal environment reads (`env::var`, `env::var_os`, `env!`, `option_env!`) are indexed as `env_read` concepts, name only, so `find-code PIXEL_FLOW_DIR` lands on the reads; an all-caps query no longer stops at a lowercase same-letters function. `EXTRACTOR_VERSION` 12 rebuilds existing graphs. ([#525](https://github.com/Pixel-CLI/pixel/pull/525))

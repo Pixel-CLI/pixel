@@ -1,1 +1,0 @@
-**search:** `search-content -g`/`-t` filters in the daemon, before paging, in one request instead of re-reading up to 100 000 index rows; `--offset` and `next_offset` now count kept matches, as they do without a filter.
