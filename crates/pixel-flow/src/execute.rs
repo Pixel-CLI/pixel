@@ -402,6 +402,16 @@ fn exec_step(
                 .map_err(|e| format!("snapshot before fill failed: {e}"))?;
             let ref_id = find_ref_in_snapshot(&snapshot, &target)
                 .ok_or_else(|| format!("no element matching '{target}' found in snapshot"))?;
+            // A field that already holds the exact value is satisfied: the
+            // fill is a no-op, and re-issuing it makes the page look stuck
+            // (the Drive run of 2026-10-04 re-typed the same search six
+            // times and stalled out). Skip the send, say so.
+            if !value.is_empty() && field_holds_value(&snapshot, &ref_id, &value) {
+                log.push_str(&format!(
+                    "{indent}# field @{ref_id} already holds \"{value}\" — fill skipped\n"
+                ));
+                return Ok(true);
+            }
             log.push_str(&format!(
                 "{}agent-browser {} @{} \"{}\"\n",
                 indent, step.action, ref_id, value
@@ -554,6 +564,18 @@ fn run_agent_browser(args: &[&str]) -> Result<String, String> {
 ///   "button containing 'Continue with Google'"
 ///   "account matching user@example.com"
 ///   "input[type=email] or textbox matching 'Email'"
+/// Whether the snapshot line carrying `ref_id` shows the field already
+/// holding `value` (`- textbox "Search" [ref=e59]: filled text`).
+fn field_holds_value(snapshot: &str, ref_id: &str, value: &str) -> bool {
+    snapshot
+        .lines()
+        .filter(|line| line.contains(&format!("ref={ref_id}]")))
+        .any(|line| {
+            line.split_once(": ")
+                .is_some_and(|(_, held)| held.trim() == value.trim())
+        })
+}
+
 fn find_ref_in_snapshot(snapshot: &str, ref_hint: &str) -> Option<String> {
     // Extract quoted strings from the ref_hint — these are the search terms.
     // e.g. "button containing 'Continue with Google'" → ["Continue with Google"]
@@ -1396,6 +1418,31 @@ mod tests {
                 "{log}"
             );
         }
+    }
+
+    #[test]
+    fn a_field_already_holding_the_value_is_skipped_not_refilled() {
+        // The snapshot shows the field's current value after the colon.
+        let mut b = Scripted::new(vec![Ok("- textbox \"Search\" [ref=e59]: notion invoice\n")]);
+        let s = FlowStep {
+            ref_hint: Some("textbox matching 'Search'".into()),
+            value: Some("notion invoice".into()),
+            ..step("fill")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["snapshot", "-i"]], "no fill is sent");
+        assert!(log.contains("already holds \"notion invoice\""), "{log}");
+        // A different value still fills.
+        let mut b = Scripted::new(vec![Ok("- textbox \"Search\" [ref=e59]: notion invoice\n")]);
+        let s = FlowStep {
+            ref_hint: Some("textbox matching 'Search'".into()),
+            value: Some("other query".into()),
+            ..step("fill")
+        };
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls()[1], vec!["fill", "@e59", "other query"], "{log}");
     }
 
     #[test]

@@ -438,7 +438,12 @@ pub fn discover(
         let before = page;
         page = Observation::see(browser)?;
         let changed = page.changed_since(&before);
-        stalled = if changed || step.action == "wait" {
+        // A fill the executor skipped because the field already holds its
+        // value is a satisfied step, not a stalled one: it must not burn
+        // the stall bound, but the next decision has to hear that the
+        // field is done, so the run's state text carries the outcome.
+        let satisfied = step.action == "fill" && log.contains("already holds");
+        stalled = if changed || step.action == "wait" || satisfied {
             0
         } else {
             stalled + 1
@@ -571,11 +576,20 @@ pub fn state_text(page: &Observation, steps: &[TracedStep]) -> String {
     if shown > 0 {
         out.push_str("RECENT ACTIONS (oldest first):\n");
         for (index, step) in steps[steps.len() - shown..].iter().enumerate() {
+            // A skipped fill says so: the field already holds the value,
+            // and the next decision must not repeat it.
+            let satisfied = step.step.action == "fill" && step.log.contains("already holds");
+            let outcome = if satisfied {
+                " (done — the field already holds its value)"
+            } else {
+                ""
+            };
             out.push_str(&format!(
-                "{}. {} — {}\n",
+                "{}. {} — {}{}\n",
                 index + 1,
                 step.decision.label,
-                step.step.ref_hint.as_deref().unwrap_or("-")
+                step.step.ref_hint.as_deref().unwrap_or("-"),
+                outcome
             ));
         }
     }
@@ -914,6 +928,94 @@ mod tests {
             "the page stopped changing after 3 steps without progress"
         );
         assert!(trace.steps.iter().all(|step| !step.changed));
+    }
+
+    /// A fill the executor skipped because the field already holds its
+    /// value is satisfied, not stalled: it does not count toward the
+    /// bound, and the next decision's state text says the field is done.
+    #[test]
+    fn a_satisfied_fill_neither_stalls_nor_stays_unsaid() {
+        let mut browser = ScriptedBrowser::default();
+        browser.start();
+        browser.observe(URL, DUCK);
+        // A skipped fill takes one browser call: the pre-fill snapshot
+        // whose line shows the field already holding the value. Three
+        // times running — enough to block if the exemption were broken —
+        // then the engine gives up repeating and reports done.
+        for _ in 0..DEFAULT_MAX_STALLED {
+            browser.ok("- combobox \"Search with DuckDuckGo\" [ref=e185]: Zurich\n");
+            browser.observe(URL, DUCK);
+        }
+        let vars = [Var::new("query", "Zurich")];
+        let mut decider = ScriptedDecider::new(vec![
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("DONE", 1.0)])),
+        ]);
+        let trace = discover(
+            &mut browser,
+            &mut decider,
+            &request(&vars, Limits::default()),
+        )
+        .unwrap();
+
+        assert_eq!(trace.status, Status::Done, "{}", trace.detail);
+        assert_eq!(trace.steps.len(), 3);
+        assert!(
+            trace.steps.iter().all(|s| s.log.contains("already holds")),
+            "{}",
+            trace.steps[0].log
+        );
+        // The next decision heard that the field is satisfied.
+        let asked = decider.asked(2);
+        assert!(
+            asked.text.contains("the field already holds its value"),
+            "{}",
+            asked.text
+        );
+    }
+
+    /// A fill that IS sent — the field did not already hold the value —
+    /// and leaves the page unchanged is a real stall: only the skipped
+    /// kind is exempt.
+    #[test]
+    fn a_sent_fill_that_changes_nothing_stalls() {
+        let mut browser = ScriptedBrowser::default();
+        browser.start();
+        browser.observe(URL, DUCK);
+        // The field is empty (no `: value` on its line), so the fill is
+        // sent; the page then comes back identical. Three times running.
+        // The fill's executor shape is two calls: pre-fill snapshot, fill.
+        for _ in 0..DEFAULT_MAX_STALLED {
+            browser.ok("- combobox \"Search with DuckDuckGo\" [ref=e185]\n");
+            browser.ok("");
+            browser.observe(URL, DUCK);
+        }
+        let vars = [Var::new("query", "Zurich")];
+        let mut decider = ScriptedDecider::new(vec![
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+        ]);
+        let trace = discover(
+            &mut browser,
+            &mut decider,
+            &request(&vars, Limits::default()),
+        )
+        .unwrap();
+
+        assert_eq!(trace.status, Status::Blocked, "{}", trace.detail);
+        assert_eq!(
+            trace.detail,
+            "the page stopped changing after 3 steps without progress"
+        );
     }
 
     /// A step the browser refused did not run, so the cycle is lost and the
