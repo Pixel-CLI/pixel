@@ -22,6 +22,16 @@ pub struct ExecResult {
     pub error: Option<String>,
 }
 
+/// Everything one step execution reads and writes beside the step itself.
+pub struct StepCtx<'a> {
+    pub vars: &'a HashMap<String, String>,
+    pub flow: &'a Flow,
+    pub log: &'a mut String,
+    /// Set by a fill whose field already held the exact value: the caller
+    /// treats the step as satisfied without reading the log.
+    pub fill_skipped: bool,
+}
+
 /// Execute a flow by running agent-browser commands.
 ///
 /// `vars` is a map of `key=value` substitutions. Missing required vars
@@ -81,8 +91,14 @@ pub fn execute_step(
     browser: &mut dyn Browser,
 ) -> Result<(bool, bool, String), String> {
     let mut log = String::new();
-    let mut fill_skipped = false;
-    let executed = exec_step(step, 1, vars, flow, &mut log, 0, browser, &mut fill_skipped)?;
+    let mut ctx = StepCtx {
+        vars,
+        flow,
+        log: &mut log,
+        fill_skipped: false,
+    };
+    let executed = exec_step(step, 1, &mut ctx, 0, browser)?;
+    let fill_skipped = ctx.fill_skipped;
     Ok((executed, fill_skipped, log))
 }
 
@@ -153,7 +169,18 @@ pub(crate) fn execute_with(
 
     // Execute steps.
     for (i, step) in flow.steps.iter().enumerate() {
-        match exec_step(step, i + 1, vars, flow, &mut log, 0, browser, &mut false) {
+        match exec_step(
+            step,
+            i + 1,
+            &mut StepCtx {
+                vars,
+                flow,
+                log: &mut log,
+                fill_skipped: false,
+            },
+            0,
+            browser,
+        ) {
             Ok(executed) => {
                 if executed {
                     steps_executed += 1;
@@ -264,13 +291,14 @@ pub(crate) fn execute_with(
 fn exec_step(
     step: &FlowStep,
     num: usize,
-    vars: &HashMap<String, String>,
-    flow: &Flow,
-    log: &mut String,
+    ctx: &mut StepCtx<'_>,
     depth: usize,
     browser: &mut dyn Browser,
-    fill_skipped: &mut bool,
 ) -> Result<bool, String> {
+    let vars = ctx.vars;
+    let flow = ctx.flow;
+    let log = &mut *ctx.log;
+    let fill_skipped = &mut ctx.fill_skipped;
     let indent = "  ".repeat(depth);
     if let Some(r) = &step.rationale {
         log.push_str(&format!(
@@ -501,7 +529,7 @@ fn exec_step(
             };
             let mut any_executed = false;
             for (i, sub) in branch.iter().enumerate() {
-                match exec_step(sub, i + 1, vars, flow, log, depth + 1, browser, fill_skipped) {
+                match exec_step(sub, i + 1, ctx, depth + 1, browser) {
                     Ok(true) => any_executed = true,
                     Ok(false) => {}
                     Err(e) => return Err(e),
@@ -1121,7 +1149,18 @@ mod tests {
     fn run_step(step: &FlowStep, browser: &mut Scripted) -> (Result<bool, String>, String) {
         let flow = flow_with(vec![]);
         let mut log = String::new();
-        let result = exec_step(step, 1, &HashMap::new(), &flow, &mut log, 0, browser, &mut false);
+        let result = exec_step(
+            step,
+            1,
+            &mut StepCtx {
+                vars: &HashMap::new(),
+                flow: &flow,
+                log: &mut log,
+                fill_skipped: false,
+            },
+            0,
+            browser,
+        );
         (result, log)
     }
 
@@ -1221,7 +1260,19 @@ mod tests {
         };
         let mut log = String::new();
         let vars = HashMap::from([("p".to_string(), "login".to_string())]);
-        let r = exec_step(&s, 1, &vars, &flow_with(vec![]), &mut log, 0, &mut b, &mut false);
+        let flow = flow_with(vec![]);
+        let r = exec_step(
+            &s,
+            1,
+            &mut StepCtx {
+                vars: &vars,
+                flow: &flow,
+                log: &mut log,
+                fill_skipped: false,
+            },
+            0,
+            &mut b,
+        );
         assert_eq!(r, Ok(true));
         assert_eq!(
             b.calls(),
@@ -1466,7 +1517,9 @@ mod tests {
         // the ref block. The old `split_once(": ")` read past the label.
         let label = "Query: foo";
         // An already-held value must be skipped, not re-typed.
-        let mut b = Scripted::new(vec![Ok(format!("- textbox \"{label}\" [ref=e1]: bar\n"))]);
+        let mut b = Scripted::new(vec![Ok(Box::leak(
+            format!("- textbox \"{label}\" [ref=e1]: bar\n").into_boxed_str(),
+        ))]);
         let s = FlowStep {
             ref_hint: Some("textbox matching 'Query'".into()),
             value: Some("bar".into()),
@@ -1474,10 +1527,16 @@ mod tests {
         };
         let (r, log) = run_step(&s, &mut b);
         assert_eq!(r, Ok(true));
-        assert_eq!(b.calls(), vec![vec!["snapshot", "-i"]], "the held fill is skipped");
-        assert!(log.contains("ref=e1"), "{log}");
+        assert_eq!(
+            b.calls(),
+            vec![vec!["snapshot", "-i"]],
+            "the held fill is skipped"
+        );
+        assert!(log.contains("@e1"), "{log}");
         // A different value is sent exactly once.
-        let mut b = Scripted::new(vec![Ok(format!("- textbox \"{label}\" [ref=e1]: bar\n"))]);
+        let mut b = Scripted::new(vec![Ok(Box::leak(
+            format!("- textbox \"{label}\" [ref=e1]: bar\n").into_boxed_str(),
+        ))]);
         let s = FlowStep {
             ref_hint: Some("textbox matching 'Query'".into()),
             value: Some("baz".into()),
@@ -1497,7 +1556,19 @@ mod tests {
         };
         let vars = HashMap::from([("user_code".to_string(), "AB-CD".to_string())]);
         let mut log = String::new();
-        let r = exec_step(&s, 1, &vars, &flow_with(vec![]), &mut log, 0, &mut b, &mut false);
+        let flow = flow_with(vec![]);
+        let r = exec_step(
+            &s,
+            1,
+            &mut StepCtx {
+                vars: &vars,
+                flow: &flow,
+                log: &mut log,
+                fill_skipped: false,
+            },
+            0,
+            &mut b,
+        );
         assert_eq!(r, Ok(true));
         assert_eq!(b.calls()[1], vec!["fill", "@e8", "C"]);
     }
