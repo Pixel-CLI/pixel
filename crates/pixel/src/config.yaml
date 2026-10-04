@@ -67,5 +67,16 @@
 # Prefer an environment variable or read a key from stdin (keeps it out of
 # command history): pixel config remote-key openrouter -
 # Never commit credentials to a repository. pixel config masks stored keys.
+# The web-search setup stores the Perplexity key here too:
+#   remote_keys:
+#     perplexity: "<your-api-key>"
 # remote_keys:
 #   openrouter: "<your-api-key>"
+
+# Optional web search provider for `pixel web-search` — global settings only.
+# The free public chain (DuckDuckGo + Wikipedia) is the fallback; configuring
+# a provider keeps queries off public services. Environment overrides win:
+# PIXEL_WEB_SEARCH_URL and PERPLEXITY_API_KEY.
+# Run pixel config setup to choose a provider.
+# web_search:
+#   searxng_url: "https://searxng.example.com"

@@ -71,6 +71,7 @@ mod ultraflow_cmd;
 
 mod update_notice;
 mod web_search;
+mod web_search_setup;
 mod workspace_cmd;
 use pixel_actionlog::{InProcessReason, ServeRoute, ServeStep};
 use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service, failure_response};
