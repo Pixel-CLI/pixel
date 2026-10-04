@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::InstallError;
 use crate::config;
@@ -1205,6 +1206,13 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             pi_guard_check(root, crate::pi_project::guard_state(root))
         });
 
+        // Which web search provider the installed `pixel` resolves to, read
+        // straight from the environment and the global config file — never
+        // by spawning the binary, which would re-enter it from inside
+        // doctor. Listed here, between the repo checks and the daemon ones,
+        // to match catalogue order.
+        runner.check_status("web-search.provider", || web_search_provider_check(&home));
+
         runner.check(
             "daemon.health",
             || -> std::result::Result<DoctorCheckDetail, String> {
@@ -1379,12 +1387,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
         });
     }
-
-    // Which web search provider the installed binary resolves to. The
-    // binary's own `config overview` is the authority on the config the
-    // installed `pixel` reads (YAML + legacy JSON), same as
-    // `binary.executable` trusts it for `--version`.
-    runner.check_status("web-search.provider", || web_search_provider_check(&exe));
 
     let Runner {
         checks, skipped, ..
@@ -1773,33 +1775,32 @@ fn shell_path_check_within(
     ))
 }
 
-/// The `pixel config overview` line naming the resolved web-search provider.
-pub(crate) const WEB_SEARCH_PROVIDER_PREFIX: &str = "web-search provider: ";
-
-/// Which web search provider the installed binary resolves to. Green when
-/// one is configured; yellow, naming the setup command, when the public
-/// chain is the default. The binary's own `pixel config overview` is the
-/// authority (it reads YAML and legacy JSON through the installed binary's
-/// parser); an older binary that prints no such line reads as `none`.
+/// Which web search provider `pixel web-search` resolves to for `home`.
+/// Green when one is configured; yellow, naming the setup command, when the
+/// public chain is the default. The provider is read straight from the
+/// environment and the global config file (`~/.pixel/config.yaml`, or the
+/// legacy JSON) — never from a spawned `pixel`: the doctor contract tests
+/// run the check in-process against the test binary, and a subprocess would
+/// re-enter it with `config overview` as a rogue test filter.
 pub(crate) fn web_search_provider_check(
-    exe: &Path,
+    home: &Path,
 ) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
-    let out = Command::new(exe)
-        .args(["config", "overview"])
-        .output()
-        .map_err(|e| format!("failed to run `pixel config overview`: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "`pixel config overview` exited {}: {}",
-            out.status,
-            capped(
-                &one_line(&String::from_utf8_lossy(&out.stderr)),
-                STDERR_EXCERPT_CHARS
-            )
-        ));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    match web_search_provider_from(&text) {
+    web_search_provider_check_with(
+        home,
+        env_non_empty("PIXEL_WEB_SEARCH_URL"),
+        env_non_empty("PERPLEXITY_API_KEY"),
+    )
+}
+
+/// The check with the environment leg made explicit, so a test can drive
+/// the resolution without touching the process environment.
+fn web_search_provider_check_with(
+    home: &Path,
+    searxng_env: bool,
+    perplexity_env: bool,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    let doc = load_pixel_config(home)?;
+    match web_search_provider_from(searxng_env, perplexity_env, &doc) {
         "none" => Ok((
             CheckStatus::Yellow,
             DoctorCheckDetail {
@@ -1818,14 +1819,82 @@ pub(crate) fn web_search_provider_check(
     }
 }
 
-/// The provider name from the overview text, when it recognises the line;
-/// an unrecognised shape (including no line at all) reads as `none`.
-fn web_search_provider_from(output: &str) -> &str {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix(WEB_SEARCH_PROVIDER_PREFIX))
-        .filter(|provider| matches!(*provider, "searxng" | "perplexity" | "none"))
-        .unwrap_or("none")
+/// Resolve the provider the same way `pixel web-search` does: SearXNG when
+/// its env var or the stored `web_search.searxng_url` is present, else
+/// Perplexity when `PERPLEXITY_API_KEY` or `remote_keys.perplexity` is,
+/// else `none` (the public chain is the fallback).
+fn web_search_provider_from(searxng_env: bool, perplexity_env: bool, doc: &Value) -> &'static str {
+    let searxng_stored = doc
+        .get("web_search")
+        .and_then(|w| w.get("searxng_url"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if searxng_env || searxng_stored {
+        return "searxng";
+    }
+    let perplexity_stored = doc
+        .get("remote_keys")
+        .and_then(|k| k.get("perplexity"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if perplexity_env || perplexity_stored {
+        "perplexity"
+    } else {
+        "none"
+    }
+}
+
+/// A non-empty environment value, as the CLI reads it.
+fn env_non_empty(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
+/// The global pixel config as a JSON value: `~/.pixel/config.yaml` parsed
+/// with the same YAML engine the CLI uses, falling back to the legacy
+/// `config.json`, or an empty document when neither file exists. The two
+/// scalar keys the check reads never need more than the mapping shape, but a
+/// malformed file is an error rather than a silent `none` — doctor must not
+/// hide a config it cannot read.
+fn load_pixel_config(home: &Path) -> std::result::Result<Value, String> {
+    let yaml = home.join(".pixel/config.yaml");
+    if yaml.is_file() {
+        let text =
+            std::fs::read_to_string(&yaml).map_err(|e| format!("read {}: {e}", yaml.display()))?;
+        return parse_pixel_config(&text, &yaml);
+    }
+    let legacy = home.join(".pixel/config.json");
+    if legacy.is_file() {
+        let text = std::fs::read_to_string(&legacy)
+            .map_err(|e| format!("read {}: {e}", legacy.display()))?;
+        return parse_pixel_config(&text, &legacy);
+    }
+    Ok(serde_json::json!({}))
+}
+
+/// Parse one pixel config file: `null` (an empty file) reads as an empty
+/// document, anything other than a mapping is an error.
+fn parse_pixel_config(text: &str, path: &Path) -> std::result::Result<Value, String> {
+    let value: Value = if path.extension().is_some_and(|ext| ext == "json") {
+        serde_json::from_str(text).map_err(|_| ())
+    } else {
+        serde_saphyr::from_str(text).map_err(|_| ())
+    }
+    .map_err(|()| {
+        format!(
+            "invalid configuration {}; expected a YAML/JSON mapping",
+            path.display()
+        )
+    })?;
+    if value.is_null() {
+        return Ok(serde_json::json!({}));
+    }
+    if !value.is_object() {
+        return Err(format!(
+            "configuration {} must be a mapping",
+            path.display()
+        ));
+    }
+    Ok(value)
 }
 
 /// Runs the checks the selection keeps and records each outcome.
@@ -2587,10 +2656,10 @@ mod tests {
         CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary,
         PLACEHOLDER_DUMMY, Remedy, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL,
         age_secs, capped, catalogue_steps, claude_hooks_owner_check, extract_rule_commands,
-        fix_for, judge_repair, names_check, normalize_rule_command, one_line,
+        fix_for, judge_repair, load_pixel_config, names_check, normalize_rule_command, one_line,
         probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
         rtk_backup_check, run_repair, scenario_mismatches, selected, shell_path_check, shell_word,
-        spec, split_home_repairs, validate_selection, web_search_provider_check,
+        spec, split_home_repairs, validate_selection, web_search_provider_check_with,
         web_search_provider_from,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
@@ -3171,64 +3240,140 @@ mod tests {
     }
 
     /// The overview line is the only authority the check trusts: the three
-    /// provider words pass through, a missing or undocumented word reads as
-    /// `none` (an older binary degrades to the recommendation, never a red).
+    /// The resolution mirrors `pixel web-search`: SearXNG first — env or
+    /// stored — then Perplexity, then the public chain; an empty stored
+    /// value counts as absent.
     #[test]
-    fn web_search_provider_from_recognises_only_the_documented_words() {
-        let overview = |provider: &str| {
-            format!(
-                "global: /home/u/.pixel/config.yaml\nremote_keys.openrouter: set\nweb-search provider: {provider}\nSetup: pixel config setup (interactive global settings)\n"
-            )
+    fn web_search_provider_resolution_prefers_searxng_then_perplexity_then_the_chain() {
+        let stored = |searxng: bool, perplexity: bool| {
+            let mut doc = serde_json::json!({});
+            if searxng {
+                doc["web_search"] = serde_json::json!({ "searxng_url": "https://sx.test" });
+            }
+            if perplexity {
+                doc["remote_keys"] = serde_json::json!({ "perplexity": "sk-pplx" });
+            }
+            doc
         };
-        assert_eq!(web_search_provider_from(&overview("searxng")), "searxng");
         assert_eq!(
-            web_search_provider_from(&overview("perplexity")),
+            web_search_provider_from(true, false, &stored(false, false)),
+            "searxng"
+        );
+        assert_eq!(
+            web_search_provider_from(false, false, &stored(true, false)),
+            "searxng"
+        );
+        // A SearXNG env var or stored URL wins over a Perplexity key.
+        assert_eq!(
+            web_search_provider_from(true, false, &stored(false, true)),
+            "searxng"
+        );
+        assert_eq!(
+            web_search_provider_from(false, false, &stored(true, true)),
+            "searxng"
+        );
+        assert_eq!(
+            web_search_provider_from(false, true, &stored(false, false)),
             "perplexity"
         );
-        assert_eq!(web_search_provider_from(&overview("none")), "none");
-        assert_eq!(web_search_provider_from(&overview("mallory")), "none");
-        assert_eq!(web_search_provider_from("no such line\n"), "none");
+        assert_eq!(
+            web_search_provider_from(false, false, &stored(false, true)),
+            "perplexity"
+        );
+        assert_eq!(
+            web_search_provider_from(false, false, &stored(false, false)),
+            "none"
+        );
+        let empty = serde_json::json!({
+            "web_search": { "searxng_url": "" },
+            "remote_keys": { "perplexity": "" },
+        });
+        assert_eq!(web_search_provider_from(false, false, &empty), "none");
     }
 
-    /// The check runs the installed binary's own `config overview` and maps
-    /// its verdict: a configured provider is green, a `none` is a yellow
-    /// suggestion, a broken binary is red.
+    /// The global config reads as JSON either way: the YAML file (parsed
+    /// with the CLI's own engine) or the legacy `config.json`, and nothing
+    /// when neither exists; a file that is not a mapping is an error, not a
+    /// silent `none`.
     #[test]
-    fn web_search_provider_check_reads_the_binaries_own_overview() {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-doctor-web-search-{}", std::process::id()));
+    fn web_search_config_reads_yaml_legacy_json_or_absent() {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-doctor-web-search-config-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let make_binary = |tag: &str, body: &str| {
-            let exe = dir.join(tag);
-            std::fs::write(&exe, format!("#!/bin/sh\n{body}\n")).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            exe
-        };
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".pixel")).unwrap();
 
-        let (status, detail) = web_search_provider_check(&make_binary(
-            "green",
-            "printf 'web-search provider: searxng\\n'",
-        ))
+        assert_eq!(load_pixel_config(&home).unwrap(), serde_json::json!({}));
+
+        std::fs::write(
+            home.join(".pixel/config.yaml"),
+            "web_search:\n  searxng_url: https://sx.test\nremote_keys:\n  perplexity: pplx\n",
+        )
         .unwrap();
+        let doc = load_pixel_config(&home).unwrap();
+        assert_eq!(doc["web_search"]["searxng_url"], "https://sx.test");
+        assert_eq!(doc["remote_keys"]["perplexity"], "pplx");
+
+        std::fs::remove_file(home.join(".pixel/config.yaml")).unwrap();
+        std::fs::write(
+            home.join(".pixel/config.json"),
+            r#"{"web_search":{"searxng_url":"https://sx.test"}}"#,
+        )
+        .unwrap();
+        let doc = load_pixel_config(&home).unwrap();
+        assert_eq!(doc["web_search"]["searxng_url"], "https://sx.test");
+
+        // An empty YAML file is an empty document; anything that is not a
+        // mapping is an error the check must not gloss over.
+        std::fs::remove_file(home.join(".pixel/config.json")).unwrap();
+        std::fs::write(home.join(".pixel/config.yaml"), "").unwrap();
+        assert_eq!(load_pixel_config(&home).unwrap(), serde_json::json!({}));
+        std::fs::write(home.join(".pixel/config.yaml"), "web_search: [\n").unwrap();
+        assert!(
+            load_pixel_config(&home).is_err(),
+            "a malformed config is an error, not a silent none"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The check's verdict over a scratch home: `none` is a yellow
+    /// suggestion naming `pixel config setup`, a stored or env provider is
+    /// green, and an unreadable config is red.
+    #[test]
+    fn web_search_provider_check_reads_the_config_and_maps_its_verdict() {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-doctor-web-search-check-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".pixel")).unwrap();
+
+        let (status, detail) = web_search_provider_check_with(&home, false, false).unwrap();
+        assert_eq!(status, CheckStatus::Yellow, "{detail:?}");
+        assert_eq!(detail.detail.as_ref().unwrap()["provider"], "none");
+        assert!(detail.summary.contains("pixel config setup"), "{detail:?}");
+
+        let (status, detail) = web_search_provider_check_with(&home, false, true).unwrap();
+        assert_eq!(status, CheckStatus::Green, "{detail:?}");
+        assert_eq!(detail.detail.as_ref().unwrap()["provider"], "perplexity");
+
+        std::fs::write(
+            home.join(".pixel/config.yaml"),
+            "web_search:\n  searxng_url: https://sx.test\n",
+        )
+        .unwrap();
+        let (status, detail) = web_search_provider_check_with(&home, false, true).unwrap();
         assert_eq!(status, CheckStatus::Green, "{detail:?}");
         assert_eq!(detail.detail.as_ref().unwrap()["provider"], "searxng");
 
-        let (status, detail) = web_search_provider_check(&make_binary(
-            "none",
-            "printf 'web-search provider: none\\n'",
-        ))
-        .unwrap();
-        assert_eq!(status, CheckStatus::Yellow, "{detail:?}");
-        assert!(detail.summary.contains("pixel config setup"), "{detail:?}");
-
-        let err = web_search_provider_check(&make_binary("broken", "exit 1"))
-            .expect_err("a failing overview is red");
-        assert!(err.contains("exited"), "{err}");
+        std::fs::write(home.join(".pixel/config.yaml"), "web_search: [\n").unwrap();
+        let err = web_search_provider_check_with(&home, false, false)
+            .expect_err("a malformed config is red");
+        assert!(err.contains("invalid configuration"), "{err}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

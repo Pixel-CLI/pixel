@@ -2187,6 +2187,7 @@ dependencies = [
  "pixel-index",
  "pixel-proto",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "tempfile",
  "thiserror",
