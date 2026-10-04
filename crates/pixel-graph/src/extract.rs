@@ -3726,3 +3726,6 @@ fn free() {}
         );
     }
 }
+
+#[cfg(test)]
+mod contract_tests;
