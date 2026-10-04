@@ -1170,6 +1170,11 @@ mod tests {
                 fill_step("fill", "From", Some("Zurich"), Some("query")),
                 "value — a different value",
             ),
+            (
+                traced_fill("fill", "From", Some("Zurich"), Some("other"), true),
+                fill_step("fill", "From", Some("Zurich"), Some("query")),
+                "value_var — a different value source",
+            ),
         ];
         for (prior, current, row) in rows {
             assert!(
