@@ -55,8 +55,11 @@ fn converse(input: Vec<u8>) -> (Vec<serde_json::Value>, bool) {
         client
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
-        client.write_all(&input).unwrap();
-        client.shutdown(std::net::Shutdown::Write).unwrap();
+        // The daemon may close mid-input (an oversized line ends the
+        // connection at byte 65 537): a failed write is then the expected
+        // peer close, and the replies sent before it are still read below.
+        let _ = client.write_all(&input);
+        let _ = client.shutdown(std::net::Shutdown::Write);
         BufReader::new(&client)
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(&line.unwrap()).unwrap())
@@ -211,8 +214,13 @@ fn probe_ping_should_be_false_when_the_peer_is_gone() {
 fn probe_ping_should_be_false_when_the_peer_closes_without_answering() {
     let (server, mut client) = UnixStream::pair().unwrap();
     let reader = std::thread::spawn(move || {
+        // Bounded: a probe that never writes must fail the assertion below,
+        // not hang the suite on this read.
+        server
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let mut line = String::new();
-        BufReader::new(&server).read_line(&mut line).unwrap();
+        let _ = BufReader::new(&server).read_line(&mut line);
         // Read the ping, then hang up without a reply.
         line
     });

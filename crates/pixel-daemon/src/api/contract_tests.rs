@@ -22,22 +22,16 @@ fn tmpdir(tag: &str) -> PathBuf {
     d.canonicalize().unwrap()
 }
 
-/// Through `GitRunner`, the one sanctioned git spawner: this file is a
-/// separate module file, which `pixel-git`'s boundary walk reads as source.
+/// Through `GitRunner`, the one sanctioned git spawner (this file is a
+/// separate module file, which `pixel-git`'s boundary walk reads as
+/// source), isolated so an inherited `GIT_DIR` or global config cannot
+/// route the fixture's commands to another repository.
 fn git(dir: &Path, args: &[&str]) {
-    let out = pixel_git::GitRunner::new(dir)
-        .run_output(
-            args,
-            &[
-                ("GIT_AUTHOR_NAME", "t"),
-                ("GIT_AUTHOR_EMAIL", "t@t"),
-                ("GIT_COMMITTER_NAME", "t"),
-                ("GIT_COMMITTER_EMAIL", "t@t"),
-                ("GIT_CONFIG_GLOBAL", "/dev/null"),
-            ],
-        )
-        .unwrap();
-    assert!(out.success(), "git {args:?}: {out:?}");
+    let mut full = vec!["-c", "user.name=t", "-c", "user.email=t@t"];
+    full.extend_from_slice(args);
+    if let Err(error) = pixel_git::GitRunner::new(dir).run_isolated(&full) {
+        panic!("git {args:?}: {error}");
+    }
 }
 
 /// `login` is called once by `go`; `helper` is defined twice, so a bare
