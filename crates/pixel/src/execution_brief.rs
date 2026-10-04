@@ -196,7 +196,9 @@ pub fn retrieval_route(task: &str) -> Value {
         None => ("find-code", vec![task.clone()]),
     };
     let first = route_command(subcommand, &args);
-    let fallback_query = identifier.clone().unwrap_or_else(|| bounded_native_query(&task));
+    let fallback_query = identifier
+        .clone()
+        .unwrap_or_else(|| bounded_native_query(&task));
     let native_fallback = format!(
         "rtk rg -m 5 -n -F -- {} . | rtk sed -n '1,20p'",
         shell_quote(&fallback_query)
