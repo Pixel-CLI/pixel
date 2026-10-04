@@ -93,3 +93,20 @@ Pixel runs locally and processes repository data. Key security boundaries:
 
 - The daemon does not perform peer-credential checking on incoming socket connections. The 0700 directory permission is the primary access control. On a shared system where another user can bypass directory permissions (e.g. root), additional hardening may be needed.
 - The `fastembed` feature downloads models from Hugging Face at runtime. This is opt-in (enabled by default, can be disabled with `--no-default-features`).
+
+## Static analysis findings
+
+CodeQL (Rust, GitHub Actions, Python, JavaScript/TypeScript) runs on every
+pull request, every push to `main` and weekly; Clippy runs with warnings
+denied on every pull request. The remediation threshold:
+
+- A pull request does not merge with a new CodeQL finding of medium severity
+  or higher: it is fixed in the pull request, or dismissed in code scanning
+  with a written reason when it is a false positive or unreachable.
+- A finding of high or critical severity found on `main` (a new query, a
+  scan of older code) is fixed within 14 days, a medium one within 30 days;
+  low and note findings are fixed or dismissed with a reason at the next
+  release.
+- Clippy has no threshold: any warning fails CI.
+- Dependency findings (cargo-deny, osv-scanner) follow the dependency policy
+  in CONTRIBUTING.md.
