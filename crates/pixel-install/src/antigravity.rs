@@ -229,7 +229,15 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         fs::write(p_dir.join("skills/pixel/SKILL.md"), &skill_content)?;
         fs::write(p_dir.join("hooks.json"), &hooks_text)?;
     }
-    let cli_registered = run_agy_plugin(home, "install", Some(&cli_dir))?;
+    // `agy plugin install` requires `.agent-config/{plugin,install}` files in
+    // the *source* directory; passing the already-staged destination dir fails
+    // when the plugin is already registered. Skip the call when agy already
+    // lists `pixel` — the assets are freshly deployed above, so the
+    // registration is the only thing the call adds.
+    let cli_registered = match agy_pixel_registered(home) {
+        Ok(Some(true)) => true,
+        _ => run_agy_plugin(home, "install", Some(&cli_dir))?,
+    };
 
     Ok(InstallStep {
         id: "install.antigravity-plugin".into(),
