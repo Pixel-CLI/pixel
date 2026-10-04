@@ -110,11 +110,17 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          # The pinned nightly the campaign needs: .cargo/mutants.toml
+          # hands the test binary -Zunstable-options --fail-fast, which
+          # stable libtest rejects (scripts/mutants-toolchain.sh holds the
+          # local lanes' copy of this pin).
+          toolchain: nightly-2026-05-12
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          # Keyed by rust-cache on the compiler, so this is the nightly
+          # lane's own entry (the stable jobs' shared one does not fit).
           shared-key: linux-debug
           save-if: false
 

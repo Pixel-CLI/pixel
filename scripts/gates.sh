@@ -134,6 +134,11 @@ if [ "$MUTANTS" -eq 1 ]; then
     # scripts/mutants-preflight.sh take it; a stale local `main` would add
     # or drop mutants), the same order, the cargo arguments of
     # .cargo/mutants.toml and the pinned cargo-mutants version.
+    # The pinned nightly first: .cargo/mutants.toml hands the test binary
+    # --fail-fast, which stable libtest rejects
+    # (scripts/mutants-toolchain.sh).
+    # shellcheck source=/dev/null
+    . "$REPO/scripts/mutants-toolchain.sh"
     sh "$REPO/scripts/mutants-version-check.sh" "$REPO"
     diff_file="$(mktemp)"
     git diff "${PIXEL_MUTANTS_BASE:-origin/main}...HEAD" > "$diff_file"

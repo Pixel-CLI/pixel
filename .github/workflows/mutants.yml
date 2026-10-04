@@ -301,16 +301,26 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           # The SHA pin no longer names the toolchain through the ref, so
-          # it is passed explicitly (same channel as before).
-          toolchain: stable
+          # it is passed explicitly. The campaign runs on this pinned
+          # nightly, not stable: .cargo/mutants.toml hands the test binary
+          # -Zunstable-options --fail-fast (stop at the first failing
+          # test), which stable libtest rejects. The pin is dated so two
+          # campaigns a month apart run the same compiler; move it with the
+          # cargo-mutants pin above and scripts/mutants-toolchain.sh (the
+          # local lanes' copy of this pin). rust-cache keys on the
+          # toolchain, so the nightly shards start a cache lane of their
+          # own instead of fighting the stable jobs' entries.
+          toolchain: nightly-2026-05-12
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          # Same key as the CI test job: both build the Linux debug profile,
-          # and only that job (on pushes to main) writes the entry. This
-          # workflow runs on pull_request only, so `github.ref` is never a
-          # branch and it can never save; read-only by construction.
+          # Same key as the CI test job: both build the Linux debug profile.
+          # The shared entry is keyed by rust-cache on the compiler, so the
+          # stable Test + Format entry this job used to reuse does not fit
+          # the nightly toolchain above: the first nightly campaigns build
+          # cold and then warm their own lane, read-only by construction
+          # (pull_request never saves).
           shared-key: linux-debug
           save-if: false
 

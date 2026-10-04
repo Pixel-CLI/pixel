@@ -32,4 +32,19 @@ test_workspace = false
 # every mutant's run; --locked refuses a Cargo.lock another resolution would
 # rewrite. scripts/test-mutants-config.py holds both halves of that line.
 additional_cargo_args = ["--locked"]
-additional_cargo_test_args = ["--all-targets"]
+# After --all-targets the bare `--` hands the rest to the test binary, not
+# cargo: libtest stops a test target at its first failing test. A caught
+# mutant's suite is mostly spent finishing tests whose verdict the failure
+# already decided, and this cuts that; the timeout budget alone still
+# bounds a hanging mutant. The flag is nightly-only (stable libtest:
+# "only accepted on the nightly compiler with -Z unstable-options"), so
+# every lane that runs mutants also installs and exports the pinned
+# nightly in PIXEL_MUTANTS_TOOLCHAIN — the workflow install steps and
+# scripts/mutants-preflight.sh --run, which is also what the remote gate
+# host executes. `cargo mutants --list` never runs tests, so the listing
+# lanes stay on whatever toolchain they have. None of this changes which
+# mutants are generated. Nightlies after 2025-09-18 carry the flag
+# (rust-lang/rust#142859); the pin moves with the workflow's
+# cargo-mutants pin, and a rust-toolchain file is deliberately not added
+# (the rest of the repo builds on stable).
+additional_cargo_test_args = ["--all-targets", "--", "-Zunstable-options", "--fail-fast"]

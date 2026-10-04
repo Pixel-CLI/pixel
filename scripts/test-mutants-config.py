@@ -234,7 +234,16 @@ class OneProgramForEveryLane(unittest.TestCase):
     def test_the_config_carries_the_arguments_every_lane_shares(self):
         text = self.config()
         self.assertRegex(text, r'(?m)^additional_cargo_args = \["--locked"\]$')
-        self.assertRegex(text, r'(?m)^additional_cargo_test_args = \["--all-targets"\]$')
+        # After --all-targets the bare `--` hands the rest to the test
+        # binary: libtest --fail-fast, which needs the nightly pin the
+        # lanes install (scripts/mutants-toolchain.sh; the workflows'
+        # shard toolchains). The splice itself is pinned by the scratch
+        # proof recorded in .cargo/mutants.toml's own comments.
+        self.assertRegex(
+            text,
+            r'(?m)^additional_cargo_test_args = \["--all-targets", "--", '
+            r'"-Zunstable-options", "--fail-fast"\]$',
+        )
 
     def test_every_lane_is_found(self):
         for lane in LANES:
