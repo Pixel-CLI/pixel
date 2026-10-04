@@ -24,3 +24,19 @@ updates:
       # moves the SHA and the comment together.
       github-actions:
         patterns: ["*"]
+
+  # The arena base pins its image as `node:22@sha256:<index digest>`;
+  # Dependabot moves the digest when the tag is republished. The arm
+  # Dockerfiles build FROM the local pixel-arena-base, which no registry
+  # holds. The setup-smoke Dockerfile takes its base from run.sh as build
+  # arguments, so its digests are bumped by hand there.
+  - package-ecosystem: "docker"
+    directory: "/eval/arena"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "pixel-arena-base"
+      # The arms are compared on Node 22; a new major is a decision, not a bump.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]

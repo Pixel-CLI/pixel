@@ -105,7 +105,9 @@ echo "Evidence: $evidence"
     docker version
 } > "$evidence/identity.txt"
 # Only the environment is built: no context is sent, pixel is fetched at run time.
-if ! docker build --progress plain --build-arg "BASE=$base" \
+# The Dockerfile takes the digest apart from the name: a base without one fails the build.
+if ! docker build --progress plain \
+    --build-arg "BASE_IMAGE=${base%@sha256:*}" --build-arg "BASE_DIGEST=${base#*@sha256:}" \
     --build-arg "APT_SOURCE_PARTS=$apt_source_parts" --build-arg "NODE_VERSION=$node_version" \
     --build-arg "AGENT_PACKAGES=$agent_packages" --tag "$image" - \
     < "$scripts/Dockerfile" > "$evidence/build.log" 2>&1; then

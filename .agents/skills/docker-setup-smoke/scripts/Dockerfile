@@ -2,8 +2,11 @@
 # --agents, Node and the pinned agent CLIs. run.sh passes the pinned base
 # image; fetching or building pixel and the checks stay in `docker run`, so a
 # failed run still exports its evidence.
-ARG BASE
-FROM ${BASE}
+# The digest is its own argument so the FROM line pins by hash: a base passed
+# without a digest fails the build instead of pulling whatever the tag holds.
+ARG BASE_IMAGE
+ARG BASE_DIGEST
+FROM ${BASE_IMAGE}@sha256:${BASE_DIGEST}
 # homebrew/brew defaults to its linuxbrew user; the bootstrap runs as root.
 USER root
 # homebrew/brew adds a third-party apt source whose key rotation breaks
