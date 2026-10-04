@@ -100,6 +100,7 @@ step() {
 # either test would still have needed --force to be checked. 0.4.0's release
 # pull request went red twice on gates no local run could reach.
 step "release prepare contract" python3 scripts/test-prepare.py
+step "release candidate contract" python3 scripts/test-release-candidate.py
 step "gate runner contract" python3 scripts/test-gates.py
 step "pre-push contract" sh scripts/test-pre-push.sh
 step "mutants config contract" python3 scripts/test-mutants-config.py

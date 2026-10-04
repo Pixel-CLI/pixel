@@ -713,7 +713,11 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   request touching `crates/`, the manifests or the nextest profile, and on
   demand: line, region and function totals and one row per crate in the job
   summary, the report as the `coverage-summary` artifact; it fails on a red
-  test or on line coverage under 80%, the OpenSSF silver bar).
+  test or on line coverage under 90%, the OpenSSF gold bar; its `branches`
+  job runs the same suite on a dated nightly under `cargo llvm-cov
+  --branch` and writes branch and line totals, one row per crate, to its
+  summary; it uploads the raw JSON report as the `coverage-branch-summary`
+  artifact).
 - `fuzz/` is a cargo-fuzz crate with its own `[workspace]`, outside the
   root workspace (no root `cargo` command builds it). `graph_extract` feeds
   arbitrary source to `pixel_graph::extract::extract_file` (no panic, lines
@@ -745,6 +749,16 @@ no git, no network.
 After `verify`, the `fuzz` job calls `fuzz.yml` (every cargo-fuzz target,
 120 s each) on the tagged commit. The `assets` build needs both `verify`
 and `fuzz`, so no release is built from code that was not fuzzed.
+
+The release skill also runs `.agents/skills/release/check-candidate.py` on
+recorded base and prepare SHAs. Before merge it requires the fetched target
+to equal that base and a prepare-only diff without remaining fragments.
+Before tagging it requires the squash merge on the target history, its sole
+parent equal to that base, and its tree identical to the validated prepare
+head. Later target commits do not change which merge gets tagged. Its real
+Git contract runs in both `scripts/gates.sh` and CI
+(`scripts/test-release-candidate.py`). CI results and semantic changelog
+coverage remain separate release requirements.
 
 ## Build provenance
 
