@@ -233,6 +233,10 @@ mod tests {
         assert_eq!(human(1_024), "1.0 KiB");
         assert_eq!(human(1_048_576), "1.0 MiB");
         assert_eq!(human(1_073_741_824), "1.0 GiB");
+        // One below each threshold still names the smaller unit; this is the
+        // edge that kills the `N-1` literal mutant on the unit-table entry.
+        assert_eq!(human(1_048_575), "1024.0 KiB");
+        assert_eq!(human(1_073_741_823), "1024.0 MiB");
         assert_eq!(human(2_097_152), "2.0 MiB");
         assert_eq!(human(1_536), "1.5 KiB");
     }
