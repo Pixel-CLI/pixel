@@ -4,7 +4,10 @@
 
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -208,6 +211,9 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         )?);
     }
     steps.push(crate::routing::install_zcode_at(&home, &exe, dry_run)?);
+    if home.join(".cursor").is_dir() {
+        steps.push(install_cursor_hooks(&home, &exe, dry_run)?);
+    }
 
     let green = steps
         .iter()
@@ -1086,6 +1092,73 @@ pub(crate) fn remove_shell_wrappers(
     })
 }
 
+/// Cursor's flat hook schema (`hooks.<event>` is a plain array of
+/// `{command, matcher?}`): the guard goes on `preToolUse` — Cursor's payload
+/// carries no `hook_event_name`, so the guard treats it as an implicit
+/// PreToolUse — and the metrics relay on `postToolUse`, which answers with
+/// the Cursor-native `additional_context` field.
+fn install_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let path = home.join(crate::config::CURSOR_HOOKS_FILE);
+    // Validate the existing settings in both modes so a dry run honestly
+    // reports a red step when the file is unreadable or malformed; only the
+    // write (and backup/dir creation) is suppressed during a dry run.
+    let mut value = read_settings(&path)?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| crate::InstallError::InvalidSettings {
+            path: path.clone(),
+            reason: "hooks.json root is not an object".into(),
+        })?;
+    // Cursor documents `version` as required. A fresh install (read_settings
+    // returned `{}`) must carry it, and an existing value is preserved.
+    if root.get("version").is_none() {
+        root.insert("version".into(), serde_json::json!(1));
+    }
+    let hooks = root.entry("hooks").or_insert_with(|| serde_json::json!({}));
+    let hooks = hooks
+        .as_object_mut()
+        .ok_or_else(|| crate::InstallError::InvalidSettings {
+            path: path.clone(),
+            reason: "hooks is not an object".into(),
+        })?;
+    // Pixel owns the entry whose command runs through this executable; the
+    // marker is the executable itself, never the bare `run-hook guard` or
+    // `run-hook metrics` phrase, so an unrelated command that merely mentions
+    // either phrase is preserved (and replaced only if pixel really wrote it).
+    let exe_marker = crate::routing::quoted_executable(exe);
+    let guard = serde_json::json!({
+        "command": format!("{exe_marker} run-hook guard --provider cursor"),
+        "matcher": crate::config::GUARD_MATCHER,
+    });
+    let metrics = serde_json::json!({
+        "command": format!("{exe_marker} run-hook metrics --provider cursor"),
+    });
+    let pre = config::merge_flat_hook_entry(hooks.get("preToolUse"), &exe_marker, guard);
+    hooks.insert("preToolUse".into(), pre);
+    let post = config::merge_flat_hook_entry(hooks.get("postToolUse"), &exe_marker, metrics);
+    hooks.insert("postToolUse".into(), post);
+    let backup = write_settings(&path, &value, dry_run)?;
+    let summary = if dry_run {
+        format!(
+            "would configure pixel guard + metrics in {}",
+            path.display()
+        )
+    } else {
+        "configured pixel guard + metrics in Cursor hooks.json".into()
+    };
+    let detail = if dry_run {
+        None
+    } else {
+        Some(with_backup_note(format!("path={}", path.display()), backup))
+    };
+    Ok(InstallStep {
+        id: "hooks.cursor".into(),
+        status: CheckStatus::Green,
+        summary,
+        detail,
+    })
+}
+
 pub(crate) fn read_settings(path: &Path) -> Result<serde_json::Value> {
     match fs::read_to_string(path) {
         Ok(s) => Ok(serde_json::from_str(&s)?),
@@ -1106,12 +1179,70 @@ pub(crate) fn write_settings(
     if dry_run {
         return Ok(None);
     }
-    if let Some(parent) = path.parent() {
+    // A settings path that is a symlink into a managed dotfile must stay a
+    // symlink: write and rename the sibling temp onto the link's *target*, so
+    // the host keeps pointing at the managed file instead of being disconnected.
+    let resolved = resolve_symlink_target(path);
+    let target: &Path = resolved.as_deref().unwrap_or(path);
+    if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    let backup_path = config::backup_if_changing(path, serialized.as_bytes())?;
-    fs::write(path, serialized)?;
+    let backup_path = config::backup_if_changing(target, serialized.as_bytes())?;
+    // A live hooks file (Cursor's above all) is read by a concurrently
+    // running host; write to a uniquely named sibling temp and atomically
+    // rename so a mid-write reader never sees empty or partial JSON, and two
+    // concurrent writers never share (and truncate each other's) temp file.
+    let tmp = unique_temp_path(target);
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(&tmp)?;
+    file.write_all(serialized.as_bytes())?;
+    // Retain an existing settings file's permission bits (a 0600 credentials
+    // file must stay 0600); a brand-new file is already private because the
+    // temp was opened 0600 regardless of the ambient umask.
+    #[cfg(unix)]
+    if let Ok(meta) = fs::metadata(target) {
+        fs::set_permissions(&tmp, meta.permissions())?;
+    }
+    fs::rename(&tmp, target)?;
     Ok(backup_path)
+}
+
+/// The real file a settings path points at if it is a symlink, else `None`.
+fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_symlink() {
+        return None;
+    }
+    let target = fs::read_link(path).ok()?;
+    Some(if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or(Path::new("")).join(target)
+    })
+}
+
+/// A sibling temp file name unique to this process so concurrent writers of
+/// the same settings path can never collide on one shared temp file.
+fn unique_temp_path(path: &Path) -> PathBuf {
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map_or_else(|| "settings".into(), |n| n.to_string_lossy().into_owned());
+    let tmp_name = format!("{name}.pixel-tmp-{nanos}-{seq}");
+    match path.parent() {
+        Some(parent) => parent.join(tmp_name),
+        None => PathBuf::from(tmp_name),
+    }
 }
 
 pub(crate) fn dry_run_summary(dry_run: bool, summary: &str) -> String {
@@ -1362,3 +1493,213 @@ mod shell_resolution_tests;
 
 #[cfg(test)]
 mod shell_wrapper_strip_tests;
+
+#[cfg(test)]
+mod cursor_hooks_tests {
+    use super::{install_cursor_hooks, read_settings};
+
+    fn cursor_command(exe: &std::path::Path, verb: &str) -> String {
+        format!("{} run-hook {verb}", crate::routing::quoted_executable(exe))
+    }
+
+    fn commands_for(value: &serde_json::Value, event: &str) -> Vec<String> {
+        value["hooks"][event]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|entry| entry["command"].as_str())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn fresh_install_writes_version_and_both_flat_hook_commands() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = std::path::Path::new("/opt/pixel");
+        let step = install_cursor_hooks(home.path(), exe, false).unwrap();
+        assert!(step.summary.contains("configured"), "{}", step.summary);
+
+        let path = home.path().join(crate::config::CURSOR_HOOKS_FILE);
+        let value = read_settings(&path).unwrap();
+        // Cursor documents `version` as required; a fresh install must carry it.
+        assert_eq!(value["version"], serde_json::json!(1));
+        let pre = commands_for(&value, "preToolUse");
+        assert_eq!(
+            pre,
+            vec![cursor_command(exe, "guard --provider cursor")],
+            "{pre:?}"
+        );
+        assert_eq!(
+            value["hooks"]["preToolUse"][0]["matcher"],
+            serde_json::json!(crate::config::GUARD_MATCHER)
+        );
+        let post = commands_for(&value, "postToolUse");
+        assert_eq!(
+            post,
+            vec![cursor_command(exe, "metrics --provider cursor")],
+            "{post:?}"
+        );
+    }
+
+    #[test]
+    fn reinstall_preserves_version_and_foreign_entries_without_duplication() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = std::path::Path::new("/opt/pixel");
+        let path = home.path().join(crate::config::CURSOR_HOOKS_FILE);
+        // A pre-existing Cursor config: a non-1 version plus a foreign hook.
+        super::write_settings(
+            &path,
+            &serde_json::json!({
+                "version": 2,
+                "hooks": {
+                    "preToolUse": [{"command": "notify-send done"}]
+                }
+            }),
+            false,
+        )
+        .unwrap();
+
+        install_cursor_hooks(home.path(), exe, false).unwrap();
+        // Idempotence: a second install must not duplicate pixel's own entry.
+        install_cursor_hooks(home.path(), exe, false).unwrap();
+
+        let value = read_settings(&path).unwrap();
+        assert_eq!(value["version"], serde_json::json!(2));
+        let pre = commands_for(&value, "preToolUse");
+        assert_eq!(
+            pre,
+            vec![
+                "notify-send done".to_owned(),
+                cursor_command(exe, "guard --provider cursor"),
+            ],
+            "foreign preToolUse entries survive and pixel's stays singular: {pre:?}"
+        );
+    }
+
+    /// A foreign command that merely *mentions* `run-hook guard` (without
+    /// running through pixel's executable) must survive an install untouched,
+    /// while the actual pixel-owned entry is replaced and never duplicated.
+    #[test]
+    fn install_preserves_foreign_commands_that_mention_run_hook() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = std::path::Path::new("/opt/pixel");
+        let path = home.path().join(crate::config::CURSOR_HOOKS_FILE);
+        super::write_settings(
+            &path,
+            &serde_json::json!({
+                "hooks": {
+                    "preToolUse": [
+                        {"command": "some-tool run-hook guard --for-everyone"},
+                        {"command": cursor_command(exe, "guard --provider cursor")}
+                    ]
+                }
+            }),
+            false,
+        )
+        .unwrap();
+
+        install_cursor_hooks(home.path(), exe, false).unwrap();
+        let value = read_settings(&path).unwrap();
+        let pre = commands_for(&value, "preToolUse");
+        assert_eq!(
+            pre,
+            vec![
+                "some-tool run-hook guard --for-everyone".to_owned(),
+                cursor_command(exe, "guard --provider cursor"),
+            ],
+            "a foreign command mentioning 'run-hook guard' survives; the \
+             pixel entry is replaced, not duplicated: {pre:?}"
+        );
+    }
+
+    #[test]
+    fn dry_run_reports_planned_changes_without_writing() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = std::path::Path::new("/opt/pixel");
+        let step = install_cursor_hooks(home.path(), exe, true).unwrap();
+        assert!(step.summary.contains("would configure"), "{}", step.summary);
+        assert!(
+            !home.path().join(crate::config::CURSOR_HOOKS_FILE).exists(),
+            "dry-run must not create the hooks file"
+        );
+    }
+
+    /// A settings path that is a symlink into a dotfiles manager must stay a
+    /// symlink: the write updates the managed target, never replaces the link
+    /// (this is what `resolve_symlink_target` exists for).
+    #[cfg(unix)]
+    #[test]
+    fn write_settings_updates_a_symlink_target_and_keeps_the_link() {
+        use super::write_settings;
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("dotfiles");
+        std::fs::create_dir_all(&store).unwrap();
+        let managed = store.join("hooks.json");
+        std::fs::write(&managed, b"old").unwrap();
+        let path = dir.path().join("settings").join("hooks.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&managed, &path).unwrap();
+        write_settings(&path, &serde_json::json!({"a": 1}), false).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink survives the write"
+        );
+        assert_eq!(
+            std::fs::read(&managed).unwrap(),
+            br#"{
+  "a": 1
+}
+"#,
+            "the managed target, not the link, holds the new bytes"
+        );
+        // A broken symlink resolves too: the write lands on the target path.
+        let missing = dir.path().join("absent").join("hooks.json");
+        let broken = dir.path().join("settings").join("broken.json");
+        std::os::unix::fs::symlink(&missing, &broken).unwrap();
+        write_settings(&broken, &serde_json::json!({"b": 2}), false).unwrap();
+        assert_eq!(
+            std::fs::read(&missing).unwrap(),
+            br#"{
+  "b": 2
+}
+"#
+        );
+        assert!(
+            std::fs::symlink_metadata(&broken)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// The temp a settings write creates is private and unique, and the
+    /// replacement keeps an existing 0600 file private (the symlink test
+    /// pins the link; this one pins mode + no stray temp + backup).
+    #[cfg(unix)]
+    #[test]
+    fn write_settings_is_private_and_leaves_only_live_file_and_backup() {
+        use super::write_settings;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.json");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_settings(&path, &serde_json::json!({"a": 1}), false).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the replacement keeps the live file's mode");
+        let left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), 2, "only live file + backup remain: {left:?}");
+        assert!(
+            left.iter()
+                .any(|name| name.starts_with("hooks.json.pixel-bak.")),
+            "the pre-image was backed up: {left:?}"
+        );
+    }
+}

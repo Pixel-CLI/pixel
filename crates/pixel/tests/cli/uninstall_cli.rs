@@ -69,6 +69,24 @@ fn wrappers_only_removes_one_block_and_keeps_the_rest_installed() {
     assert!(!prompt.exists(), "a full uninstall removes the prompt");
 }
 
+/// Run `spawn` again while it fails with ETXTBSY: a binary this test just
+/// copied is "busy" as long as a child another test thread forked in the
+/// meantime still holds a copy of the write descriptor, until that child
+/// execs. Bounded, so a real error still surfaces within a second.
+fn output_unless_busy(
+    mut spawn: impl FnMut() -> std::io::Result<std::process::Output>,
+) -> std::io::Result<std::process::Output> {
+    for _ in 0..50 {
+        match spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            outcome => return outcome,
+        }
+    }
+    spawn()
+}
+
 /// `install.sh` with `PIXEL_INSTALL_DIR` puts the binary outside
 /// `~/.local/bin`: the CLI hands the library the binary that runs, so
 /// uninstall removes that one instead of reporting "no binary found".
@@ -79,14 +97,16 @@ fn uninstall_removes_the_binary_that_runs_it() {
     std::fs::create_dir_all(&dir).unwrap();
     let copy = dir.join("pixel");
     std::fs::copy(env!("CARGO_BIN_EXE_pixel"), &copy).unwrap();
-    let out = std::process::Command::new(&copy)
-        .args(["uninstall", "--shell", "zsh", "--json"])
-        .env("PIXEL_DAEMON_AUTO_START", "0")
-        .env("HOME", &*home)
-        .env("CODEX_HOME", home.join(".codex"))
-        .current_dir(&*home)
-        .output()
-        .unwrap();
+    let out = output_unless_busy(|| {
+        std::process::Command::new(&copy)
+            .args(["uninstall", "--shell", "zsh", "--json"])
+            .env("PIXEL_DAEMON_AUTO_START", "0")
+            .env("HOME", &*home)
+            .env("CODEX_HOME", home.join(".codex"))
+            .current_dir(&*home)
+            .output()
+    })
+    .unwrap();
     assert!(out.status.success(), "{out:?}");
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(!copy.exists(), "the running binary is removed: {report}");
