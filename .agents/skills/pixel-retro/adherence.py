@@ -17,8 +17,7 @@ commands Codex runs:
 
 Per host (never pooled) it prints: the Pixel share of searches, how often a
 session's first search was Pixel, how often a Pixel call was immediately
-followed by a native search (the agent did not trust or could not use the
-answer), unbounded and wide reads overall and right after a Pixel call, and
+followed by a native search as the very next event, unbounded and wide reads overall and right after a Pixel call, and
 how many editing sessions ran `impact`/`who-calls`/`call-path` before their
 first edit.
 
@@ -48,7 +47,7 @@ STRUCTURAL = {"impact", "who-calls", "call-path"}
 NATIVE_SEARCH = {"rg", "grep", "egrep", "fgrep", "ag", "ack"}
 WRAPPERS = {"rtk", "time", "nice", "command", "builtin", "exec", "env"}
 WIDE_READ = 150
-CODEX_CMD = re.compile(r'"cmd"\s*:\s*"((?:[^"\\]|\\.)*)"')
+CODEX_CMD = re.compile(r'["\']?\bcmd["\']?\s*:\s*"((?:[^"\\]|\\.)*)"')
 CODEX_TOOL = re.compile(r"tools\.(exec_command|apply_patch)\(")
 SEDP = re.compile(r"^(\d+)(?:,(\+?)(\d+|\$))?p$")
 
@@ -69,13 +68,70 @@ def parse_ts(value):
         return None
 
 
-def statements(command):
-    """Each `;`/`&&`/`||`/newline statement's first pipeline stage, as argv."""
-    out = []
-    for statement in re.split(r"\s*(?:&&|\|\||;|\n)\s*", command):
-        stage = statement.split("|", 1)[0].strip()
-        if not stage:
+def first_stages(command):
+    """The first pipeline stage of each statement, split on `;`, `&&`, `||`,
+    `|` and newlines outside quotes; here-document bodies are skipped, so
+    text that is only quoted or fed to a command is never read as one."""
+    stages, current, quote, starts = [], [], None, True
+    heredoc, pending = None, None
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if heredoc is not None:
+            end = command.find("\n", i)
+            line = command[i:] if end < 0 else command[i:end]
+            if line.strip() == heredoc:
+                heredoc = None
+            i = n if end < 0 else end + 1
             continue
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                current.append(command[i:i + 2])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            current.append(c)
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+            current.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            current.append(command[i:i + 2])
+            i += 2
+            continue
+        if command.startswith("<<", i):
+            m = re.match(r"<<-?\s*(['\"]?)([A-Za-z0-9_]+)\1", command[i:])
+            if m:
+                pending = m.group(2)
+                current.append(m.group(0))
+                i += len(m.group(0))
+                continue
+        two = command[i:i + 2]
+        separator = two if two in ("&&", "||") else (c if c in ";|\n" else None)
+        if separator:
+            if starts:
+                stages.append("".join(current))
+            current = []
+            starts = separator != "|"
+            i += len(separator)
+            if separator == "\n" and pending:
+                heredoc, pending = pending, None
+            continue
+        current.append(c)
+        i += 1
+    if starts:
+        stages.append("".join(current))
+    return [stage.strip() for stage in stages if stage.strip()]
+
+
+def statements(command):
+    """Each statement's first pipeline stage, as argv without wrappers."""
+    out = []
+    for stage in first_stages(command):
         try:
             words = shlex.split(stage)
         except ValueError:
@@ -105,14 +161,28 @@ def sed_width(args):
     return False, None
 
 
-def head_width(args):
+def head_width(program, args):
+    """Lines a `head`/`tail` prints; `None` for `head -n -N` (all but the last
+    N) and `tail -n +N` (from line N to the end), which are unbounded."""
+    count, skip = None, False
     for i, arg in enumerate(args):
-        if arg in ("-n", "--lines") and i + 1 < len(args) and args[i + 1].lstrip("+-").isdigit():
-            return int(args[i + 1].lstrip("+-"))
-        m = re.fullmatch(r"-n?(\d+)", arg) or re.fullmatch(r"--lines=(\d+)", arg)
-        if m:
-            return int(m.group(1))
-    return 10
+        if skip:
+            skip = False
+            continue
+        if arg in ("-n", "--lines") and i + 1 < len(args):
+            count, skip = args[i + 1], True
+        elif arg.startswith("--lines="):
+            count = arg.split("=", 1)[1]
+        elif re.fullmatch(r"-n[+-]?\d+", arg):
+            count = arg[2:]
+        elif re.fullmatch(r"-\d+", arg):
+            count = arg[1:]
+    if count is None:
+        return 10
+    if (program == "head" and count.startswith("-")) or (program == "tail" and count.startswith("+")):
+        return None
+    digits = count.lstrip("+-")
+    return int(digits) if digits.isdigit() else None
 
 
 def shell_events(command):
@@ -121,7 +191,10 @@ def shell_events(command):
     for words in statements(command):
         program = words[0].rsplit("/", 1)[-1]
         args = words[1:]
-        operands = [a for a in args if not a.startswith("-")]
+        # Operands: not an option or its value, not a redirection or its target.
+        operands = [a for i, a in enumerate(args)
+                    if not a.startswith(("-", "<", ">"))
+                    and not (i and args[i - 1] in ("-n", "--lines", "-c", ">", ">>", "<", "2>", "&>"))]
         if program in ("pixel", "pixel-dev") and args and args[0] in PIXEL_RETRIEVAL:
             events.append(("pixel", args[0]))
         elif program in NATIVE_SEARCH or (program == "git" and args[:1] == ["grep"]):
@@ -131,7 +204,7 @@ def shell_events(command):
         elif program in ("cat", "nl", "bat", "less") and operands:
             events.append(("read", None))
         elif program in ("head", "tail") and operands:
-            events.append(("read", head_width(args)))
+            events.append(("read", head_width(program, args)))
         elif program == "sed":
             is_read, width = sed_width(args)
             if is_read:
@@ -152,13 +225,15 @@ def claude_events(tool, inp):
     if tool == "Bash":
         return shell_events(str(inp.get("command", "")))
     if tool.startswith("mcp__") and "pixel" in tool.lower():
-        return [("pixel", tool.rsplit("__", 1)[-1])]
+        operation = tool.rsplit("__", 1)[-1].replace("_", "-")
+        return [("pixel", operation)] if operation in PIXEL_RETRIEVAL else []
     return []
 
 
 def read_claude(path, start):
-    """(cwd, events) of one Claude Code session file, events after `start`."""
-    cwd, events = None, []
+    """(cwd, events, active) of one Claude Code session file: events after
+    `start`, and whether the agent acted at all in the window."""
+    cwd, events, active = None, [], False
     with path.open(encoding="utf-8", errors="replace") as handle:
         lines = handle.readlines()
     for line in lines:
@@ -172,30 +247,53 @@ def read_claude(path, start):
         ts = parse_ts(entry.get("timestamp", ""))
         if ts is None or ts < start:
             continue
+        active = True
         content = (entry.get("message") or {}).get("content")
         for part in content if isinstance(content, list) else []:
             if part.get("type") == "tool_use":
                 events += claude_events(part.get("name", ""), part.get("input") or {})
-    return cwd, events
+    return cwd, events, active
+
+
+def call_arguments(script, start):
+    """The argument text of the call whose `(` ends at `start`, up to its
+    matching `)`, skipping JavaScript string contents."""
+    depth, quote, i = 1, None, start
+    while i < len(script) and depth:
+        c = script[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "'\"`":
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        i += 1
+    return script[start:i - 1]
 
 
 def exec_script_events(script):
     """Events of a Codex `exec` script, in call order: each
-    `tools.exec_command({"cmd": ...})` and each `tools.apply_patch(...)`."""
+    `tools.exec_command({cmd: ...})` and each `tools.apply_patch(...)`, each
+    command read from its own call's arguments."""
     events = []
     for call in CODEX_TOOL.finditer(script):
         if call.group(1) == "apply_patch":
             events.append(("edit", None))
             continue
-        cmd = CODEX_CMD.search(script, call.end())
+        cmd = CODEX_CMD.search(call_arguments(script, call.end()))
         if cmd:
             events += shell_events(json.loads(f'"{cmd.group(1)}"'))
     return events
 
 
 def read_codex(path, start):
-    """(cwd, events) of one Codex rollout, events after `start`."""
-    cwd, events = None, []
+    """(cwd, events, active) of one Codex rollout, as for `read_claude`."""
+    cwd, events, active = None, [], False
     with path.open(encoding="utf-8", errors="replace") as handle:
         lines = handle.readlines()
     for line in lines:
@@ -210,6 +308,7 @@ def read_codex(path, start):
         ts = parse_ts(entry.get("timestamp", ""))
         if entry.get("type") != "response_item" or ts is None or ts < start:
             continue
+        active = True
         kind, name = payload.get("type"), payload.get("name", "")
         if kind == "custom_tool_call" and name == "apply_patch":
             events.append(("edit", None))
@@ -226,7 +325,7 @@ def read_codex(path, start):
             events += shell_events(str(cmd))
         elif kind == "function_call" and name == "apply_patch":
             events.append(("edit", None))
-    return cwd, events
+    return cwd, events, active
 
 
 def indexed(cwd):
@@ -244,8 +343,7 @@ def indexed(cwd):
 def summarize(sessions):
     """Adherence counts over (events) lists of one host."""
     s = {"sessions": len(sessions), "pixel_calls": 0, "native_searches": 0, "sessions_with_search": 0,
-         "sessions_with_pixel": 0, "first_search_pixel": 0, "pixel_then_native": 0,
-         "pixel_then_search": 0, "reads": 0, "unbounded_reads": 0, "wide_reads": 0,
+         "sessions_with_pixel": 0, "first_search_pixel": 0, "pixel_then_native": 0, "reads": 0, "unbounded_reads": 0, "wide_reads": 0,
          "reads_after_pixel": 0, "unbounded_after_pixel": 0, "wide_after_pixel": 0,
          "edit_sessions": 0, "impact_before_edit": 0}
     widths_after_pixel = []
@@ -257,14 +355,11 @@ def summarize(sessions):
             s["sessions_with_search"] += 1
             s["first_search_pixel"] += searches[0][0] == "pixel"
         s["sessions_with_pixel"] += any(e[0] == "pixel" for e in events)
-        for current, following in zip(searches, searches[1:]):
-            if current[0] == "pixel":
-                s["pixel_then_search"] += 1
-                s["pixel_then_native"] += following[0] == "search"
-        after_pixel = False
-        for kind, detail in events:
-            if kind == "pixel":
-                after_pixel = True
+        # "Right after Pixel" means the very next event: nothing in between.
+        for previous, (kind, detail) in zip([None, *events], events):
+            after_pixel = previous is not None and previous[0] == "pixel"
+            if kind == "search":
+                s["pixel_then_native"] += after_pixel
             elif kind == "read":
                 unbounded, wide = detail is None, detail is not None and detail > WIDE_READ
                 s["reads"] += 1
@@ -276,9 +371,6 @@ def summarize(sessions):
                     s["wide_after_pixel"] += wide
                     if detail is not None:
                         widths_after_pixel.append(detail)
-                after_pixel = False
-            elif kind == "search":
-                after_pixel = False
         edits = [i for i, e in enumerate(events) if e[0] == "edit"]
         if edits:
             s["edit_sessions"] += 1
@@ -296,15 +388,15 @@ def collect(start, projects, codex_dir, all_repos):
         for path in sorted(directory.glob("*/*.jsonl")):
             if datetime.datetime.fromtimestamp(path.stat().st_mtime, UTC) < start:
                 continue
-            cwd, events = read_claude(path, start)
-            if events and (all_repos or indexed(cwd)):
+            cwd, events, active = read_claude(path, start)
+            if active and (all_repos or indexed(cwd)):
                 hosts["claude"].append(events)
     if codex_dir and codex_dir.is_dir():
         for path in sorted(codex_dir.glob("**/rollout-*.jsonl")):
             if datetime.datetime.fromtimestamp(path.stat().st_mtime, UTC) < start:
                 continue
-            cwd, events = read_codex(path, start)
-            if events and (all_repos or indexed(cwd)):
+            cwd, events, active = read_codex(path, start)
+            if active and (all_repos or indexed(cwd)):
                 hosts["codex"].append(events)
     return {host: summarize(sessions) for host, sessions in hosts.items()}
 
@@ -322,7 +414,7 @@ def render(window, result):
             f" (pixel share {s['pixel_share'] if s['pixel_share'] is not None else 'n/a'})",
             f"  first search was pixel: {pct(s['first_search_pixel'], s['sessions_with_search'])}",
             f"  sessions that called pixel: {pct(s['sessions_with_pixel'], s['sessions'])}",
-            f"  pixel call followed by a native search: {pct(s['pixel_then_native'], s['pixel_then_search'])}",
+            f"  pixel calls whose next event is a native search: {pct(s['pixel_then_native'], s['pixel_calls'])}",
             f"  unbounded reads: {pct(s['unbounded_reads'], s['reads'])};"
             f" wider than {WIDE_READ} lines: {pct(s['wide_reads'], s['reads'])}",
             f"  reads right after pixel: {s['reads_after_pixel']}, unbounded"

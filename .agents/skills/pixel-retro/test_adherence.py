@@ -42,6 +42,12 @@ class ShellClassification(unittest.TestCase):
         self.assertEqual(ad.shell_events("rtk pixel find-code 'x' 2>&1 | head -40"), [("pixel", "find-code")])
         self.assertEqual(ad.shell_events("pixel status"), [], "status is not retrieval")
 
+    def test_quoted_text_and_heredoc_bodies_are_not_commands(self):
+        self.assertEqual(ad.shell_events('echo "noise; pixel impact X; rg foo"'), [])
+        self.assertEqual(ad.shell_events("echo 'a | grep b' && rg c"), [("search", "rg")])
+        heredoc = "cat <<'EOF' > notes.md\npixel impact Foo\nrg needle\nEOF\nrg after"
+        self.assertEqual(ad.shell_events(heredoc), [("search", "rg")])
+
     def test_native_searches_in_any_statement(self):
         self.assertEqual(ad.shell_events("cd /repo && rg -n foo src; git grep bar"),
                          [("search", "rg"), ("search", "git")])
@@ -57,6 +63,10 @@ class ShellClassification(unittest.TestCase):
         self.assertEqual(ad.shell_events("cat a.rs"), [("read", None)])
         self.assertEqual(ad.shell_events("head -n 30 a.rs"), [("read", 30)])
         self.assertEqual(ad.shell_events("tail a.rs"), [("read", 10)])
+        self.assertEqual(ad.shell_events("head -n -40 a.rs"), [("read", None)], "all but the last 40")
+        self.assertEqual(ad.shell_events("tail -n +40 a.rs"), [("read", None)], "from line 40 on")
+        self.assertEqual(ad.shell_events("tail -n 40 a.rs"), [("read", 40)])
+        self.assertEqual(ad.shell_events("head -25 a.rs"), [("read", 25)])
         self.assertEqual(ad.shell_events("cat"), [], "no operand reads stdin")
 
     def test_claude_tools(self):
@@ -64,12 +74,22 @@ class ShellClassification(unittest.TestCase):
         self.assertEqual(ad.claude_events("Read", {"file_path": "a", "offset": 10}), [("read", None)])
         self.assertEqual(ad.claude_events("Grep", {}), [("search", "Grep")])
         self.assertEqual(ad.claude_events("MultiEdit", {}), [("edit", None)])
-        self.assertEqual(ad.claude_events("mcp__pixel__find_code", {}), [("pixel", "find_code")])
+        self.assertEqual(ad.claude_events("mcp__pixel__find_code", {}), [("pixel", "find-code")])
+        self.assertEqual(ad.claude_events("mcp__pixel__who_calls", {}), [("pixel", "who-calls")])
+        self.assertEqual(ad.claude_events("mcp__pixel__status", {}), [], "status is not retrieval")
 
     def test_codex_exec_scripts_keep_call_order(self):
         script = ('const a = await tools.exec_command({"cmd":"rg -n foo src","workdir":"/r"});\n'
                   'await tools.apply_patch("*** Begin Patch");\n'
                   'const b = await tools.exec_command({"cmd":"pixel impact \\"Foo::bar\\"","workdir":"/r"});')
+        self.assertEqual(ad.exec_script_events(script),
+                         [("search", "rg"), ("edit", None), ("pixel", "impact")])
+
+    def test_each_codex_call_reads_its_own_command(self):
+        # An unquoted key on the first call must not borrow the next call's command.
+        script = ('await tools.exec_command({cmd: "rg -n foo src"});\n'
+                  'await tools.apply_patch("x");\n'
+                  'await tools.exec_command({"cmd": "pixel impact Bar"});')
         self.assertEqual(ad.exec_script_events(script),
                          [("search", "rg"), ("edit", None), ("pixel", "impact")])
 
@@ -90,13 +110,20 @@ class Summary(unittest.TestCase):
         self.assertEqual(s["pixel_share"], 0.5)
         self.assertEqual((s["first_search_pixel"], s["sessions_with_search"]), (1, 2))
         self.assertEqual(s["sessions_with_pixel"], 2)
-        self.assertEqual((s["pixel_then_native"], s["pixel_then_search"]), (1, 1))
+        self.assertEqual(s["pixel_then_native"], 1, "of 2 Pixel calls")
         self.assertEqual((s["reads"], s["unbounded_reads"], s["wide_reads"]), (3, 1, 1))
         # The read after `search-content` follows a native search, so it is not
         # a read after Pixel; the 40-line read after `impact` is.
         self.assertEqual((s["reads_after_pixel"], s["unbounded_after_pixel"]), (1, 0))
         self.assertEqual(s["median_read_width_after_pixel"], 40)
         self.assertEqual((s["impact_before_edit"], s["edit_sessions"]), (1, 2))
+
+    def test_after_pixel_means_the_very_next_event(self):
+        s = ad.summarize([[("pixel", "find-code"), ("edit", None), ("search", "rg"), ("read", None)]])
+        self.assertEqual(s["pixel_then_native"], 0, "an edit came in between")
+        self.assertEqual(s["reads_after_pixel"], 0)
+        s = ad.summarize([[("pixel", "find-code"), ("read", 30), ("pixel", "impact"), ("search", "Grep")]])
+        self.assertEqual((s["reads_after_pixel"], s["pixel_then_native"]), (1, 1))
 
     def test_empty_host_reports_no_share(self):
         s = ad.summarize([])
@@ -119,6 +146,8 @@ class Collect(unittest.TestCase):
                 claude_use(2, "Grep", {"pattern": "foo"}, str(indexed)),
             ]))
             (projects / "p" / "s2.jsonl").write_text(claude_use(1, "Grep", {"pattern": "x"}, str(plain)))
+            # Active in the window, in the indexed repository, with no retrieval at all.
+            (projects / "p" / "s3.jsonl").write_text(claude_use(3, "TodoWrite", {}, str(indexed)))
             codex = tmp / "codex" / "2026" / "10" / "01"
             codex.mkdir(parents=True)
             (codex / "rollout-a.jsonl").write_text("\n".join([
@@ -127,10 +156,12 @@ class Collect(unittest.TestCase):
             ]))
             start = T0 - datetime.timedelta(hours=1)
             result = ad.collect(start, [projects], tmp / "codex", all_repos=False)
-            self.assertEqual(result["claude"]["sessions"], 1, "the plain repository is not counted")
+            self.assertEqual(result["claude"]["sessions"], 2,
+                             "the plain repository is not counted; an active session without retrieval is")
+            self.assertEqual(result["claude"]["sessions_with_pixel"], 1)
             self.assertEqual((result["claude"]["pixel_calls"], result["claude"]["native_searches"]), (1, 1))
             self.assertEqual((result["codex"]["pixel_calls"], result["codex"]["native_searches"]), (0, 1))
-            self.assertEqual(ad.collect(start, [projects], tmp / "codex", all_repos=True)["claude"]["sessions"], 2)
+            self.assertEqual(ad.collect(start, [projects], tmp / "codex", all_repos=True)["claude"]["sessions"], 3)
             later = T0 + datetime.timedelta(minutes=5)
             self.assertEqual(ad.collect(later, [projects], tmp / "codex", all_repos=True)["claude"]["sessions"], 0,
                              "events before the window start are not counted")

@@ -181,20 +181,22 @@ python3 .agents/skills/pixel-retro/adherence.py $W --json   # for a before/after
 ```
 
 the Pixel share of searches, how often the first search was Pixel, how often
-a Pixel call was followed straight away by a native search (its answer was
-not used), unbounded and wide reads overall and right after a Pixel call,
-and the editing sessions that ran `impact`/`who-calls`/`call-path` before
-their first edit. The baseline, `adherence.py 30d` on 2026-10-04, before the
-#703/#704/#706/#707/#711 fixes: Claude 482 sessions, Pixel share 0.011 (74
-Pixel against 6 488 native searches), first search Pixel 6 %, Pixel then
-native 63 %, unbounded reads right after Pixel 56 %, impact before the first
-edit 1 % (3/311); Codex 43 sessions, share 0.06, first search Pixel 21 %,
-Pixel then native 81 %, impact before the first edit 26 % (8/31). Read them
+a Pixel call's very next event was a native search, unbounded and wide reads
+overall and right after a Pixel call, and the editing sessions that ran
+`impact`/`who-calls`/`call-path` before their first edit. The baseline,
+`adherence.py 30d` on 2026-10-04, before the #703/#704/#706/#707/#711 fixes:
+Claude 503 sessions, Pixel share 0.011 (74 Pixel against 6 458 native
+searches), first search Pixel 6 %, a native search right after Pixel 32 %
+(24/74), unbounded reads right after Pixel 50 %, impact before the first edit
+1 % (3/311); Codex 76 sessions, share 0.059 (85 against 1 350), first search
+Pixel 20 %, a native search right after Pixel 22 %, impact before the first
+edit 65 % (20/31). Read them
 with their limits:
 
-- **It counts, it does not judge.** A native search after Pixel can be the
-  right move (a string Pixel does not index); the A/B in `eval/` (#626) says
-  where Pixel should win, this says what agents did.
+- **It records order, not intent.** A native search right after Pixel is a
+  sequence, not proof the answer went unused: it can be the right move (a
+  string Pixel does not index). The A/B in `eval/` (#626) says where Pixel
+  should win; this says what agents did.
 - **Compare windows on the same host**, before and after the change, each
   quoted with its command; a Codex number is never read against a Claude one.
 
