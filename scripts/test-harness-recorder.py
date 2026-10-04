@@ -235,6 +235,13 @@ class RecorderContract(unittest.TestCase):
         bare = self.root / "harness-recordings-media.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        # Release gates discard the global Git config. This fixture owns its
+        # identity and signing policy so the real commit/push path still runs.
+        for key, value in (("user.name", "Recorder test"),
+                           ("user.email", "recorder@example.invalid"),
+                           ("commit.gpgsign", "false")):
+            subprocess.run(["git", "-C", str(self.repo), "config", key, value],
+                           check=True)
         # A GitHub-shaped configured URL so the recorder derives owner/repo
         # from remote.origin.url; rewritten to the local bare repo so the
         # plumbing below still talks to it.
