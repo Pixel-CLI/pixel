@@ -18,6 +18,13 @@ on:
   pull_request_target:
     types: [opened, reopened, closed]
 
+# The job reads the PR from the event payload and writes the board with
+# PROJECTS_TOKEN: `GITHUB_TOKEN` is never used, so it gets no scope at all.
+# Without this line, `pull_request_target` would hand it the repository's
+# default scopes beside an untrusted PR body (OpenSSF Scorecard
+# Token-Permissions).
+permissions: {}
+
 concurrency:
   group: board-sync-${{ github.event.pull_request.number }}
   cancel-in-progress: true

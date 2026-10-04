@@ -22,14 +22,21 @@ on:
         required: false
         default: 'Create the "story" feature'
 
+# Read-only at the top: the write scopes belong to the one job that uses
+# them, so a job added later does not inherit them (OpenSSF Scorecard
+# Token-Permissions).
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   grid:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
+    permissions:
+      # git push of the recordings to the harness-recordings-media branch.
+      contents: write
+      # gh pr view / gh pr edit of the PR body that carries the grid.
+      pull-requests: write
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
         with:

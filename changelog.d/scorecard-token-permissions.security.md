@@ -1,0 +1,1 @@
+**ci:** workflow tokens follow least privilege: `board-sync.yml` gives `GITHUB_TOKEN` no scope (it writes the board with `PROJECTS_TOKEN`), and `cancel-stale.yml` and `harness-grid.yml` keep a read-only top level and grant their write scopes to the one job that uses them (OpenSSF Scorecard Token-Permissions).
