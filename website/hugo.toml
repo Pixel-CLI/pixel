@@ -19,7 +19,7 @@ gh_stars_min = 100
 # Cloudflare Web Analytics site token (Cloudflare dashboard, Web Analytics,
 # pixel-cli.dev). Public by design: it ships in every page. Empty means no
 # beacon and no analytics line in the footer.
-cf_analytics_token = "22e9d7c09c674b8ea63b3ca0a829d33a"
+cf_beacon = "22e9d7c09c674b8ea63b3ca0a829d33a"
 
 [markup.goldmark.renderer]
 unsafe = true

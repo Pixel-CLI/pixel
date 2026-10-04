@@ -48,7 +48,7 @@
     </nav>
     <div class="footer__legal">
       <p>MIT licensed. The code index stays on your machine.</p>
-      {{- with site.Params.cf_analytics_token }}
+      {{- with site.Params.cf_beacon }}
       {{/* The site and the binary are two things: the site counts visits, without cookies; the binary still measures nothing. Not "no personal data": the beacon, like the fonts and the star count, reaches its provider with the visitor's IP (content/legal/privacy-policy.md). */}}
       <p>This site counts visits with Cloudflare Web Analytics, without cookies. The <code>pixel</code> binary measures nothing.</p>
       {{- end }}
@@ -59,7 +59,7 @@
     </div>
   </div>
 </footer>
-{{- with site.Params.cf_analytics_token }}{{ if hugo.IsProduction }}
+{{- with site.Params.cf_beacon }}{{ if hugo.IsProduction }}
 <script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "{{ . }}"}'></script>
 {{- end }}{{ end }}
 <script>

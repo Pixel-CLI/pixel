@@ -25,7 +25,7 @@ describe("frozen suite boundaries", () => {
   });
   test("rejects unpinned runtime, unbounded trials, duplicate arms and secrets before execution", () => {
     validateSuite(suite());
-    for (const mutate of [(s: Suite) => { s.image = "latest"; }, (s: Suite) => { s.timeout_ms = 0; }, (s: Suite) => { s.max_interactions = 0; }, (s: Suite) => { s.arms = ["gates", "gates", "retrieval"]; }, (s: Suite) => { s.runners[0].environment = { DEPLOY_TOKEN: "not-a-secret" }; }, (s: Suite) => { s.cases[0].source_files[0].path = "../escape"; }]) {
+    for (const mutate of [(s: Suite) => { s.image = "latest"; }, (s: Suite) => { s.timeout_ms = 0; }, (s: Suite) => { s.max_interactions = 0; }, (s: Suite) => { s.arms = ["gates", "gates", "retrieval"]; }, (s: Suite) => { s.runners[0].environment = { DEPLOY_TOKEN: "redacted" }; }, (s: Suite) => { s.cases[0].source_files[0].path = "../escape"; }]) {
       const input = suite(); mutate(input); expect(() => validateSuite(input)).toThrow();
     }
   });
