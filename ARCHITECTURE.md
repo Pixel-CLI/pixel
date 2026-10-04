@@ -713,7 +713,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   request touching `crates/`, the manifests or the nextest profile, and on
   demand: line, region and function totals and one row per crate in the job
   summary, the report as the `coverage-summary` artifact; it fails on a red
-  test or on line coverage under 80%, the OpenSSF silver bar).
+  test or on line coverage under 90%, the OpenSSF gold bar; its `branches`
+  job runs the same suite on a dated nightly under `cargo llvm-cov
+  --branch` and writes branch and line totals, one row per crate, to its
+  summary and the `coverage-branch-summary` artifact).
 - `fuzz/` is a cargo-fuzz crate with its own `[workspace]`, outside the
   root workspace (no root `cargo` command builds it). `graph_extract` feeds
   arbitrary source to `pixel_graph::extract::extract_file` (no panic, lines
