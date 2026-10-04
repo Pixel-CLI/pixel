@@ -833,7 +833,7 @@ fn wait_for_navigation(
     for _ in 0..polls {
         browser.pause(NAV_POLL);
         match browser.run(&["get", "url"]) {
-            Ok(url) if !url.trim().is_empty() && Some(url.trim()) != before => return,
+            Ok(url) if !url.trim().is_empty() && Some(url.trim()) != before.map(str::trim) => return,
             // An answer that is empty or failing twice running is a
             // browser that is not answering, not a page that is moving:
             // the poll stops rather than burning its bound on it.

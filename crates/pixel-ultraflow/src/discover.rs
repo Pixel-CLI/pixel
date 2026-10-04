@@ -643,9 +643,8 @@ mod tests {
         let mut browser = ScriptedBrowser::default();
         browser.start();
         browser.observe(URL, DUCK);
-        // The fill's executor shape: pre-fill snapshot, URL probe, fill.
+        // The fill's executor shape: pre-fill snapshot, fill.
         browser.ok("- combobox \"Search with DuckDuckGo\" [ref=e185]");
-        browser.ok("");
         browser.ok("");
         browser.observe("https://duckduckgo.com/?q=Zurich", DUCK);
         let vars = [Var::new("query", "Zurich")];
@@ -665,6 +664,8 @@ mod tests {
         assert_eq!(step.step.action, "fill");
         assert_eq!(step.step.value.as_deref(), Some("Zurich"));
         assert_eq!(step.step.value_var.as_deref(), Some("query"));
+        assert_eq!(step.url_after, "https://duckduckgo.com/?q=Zurich");
+        assert_eq!(step.snapshot_after, DUCK);
         assert_eq!(
             browser.calls()[6],
             ["snapshot", "-i"],
