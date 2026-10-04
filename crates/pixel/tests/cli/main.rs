@@ -31,6 +31,7 @@ mod rescue_cli;
 mod run_recipe_cli;
 mod scope_task_precision;
 mod search_compat_cli;
+mod space_cli;
 mod support;
 mod targets_cli;
 mod task_cli;

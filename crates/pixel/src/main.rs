@@ -58,6 +58,7 @@ mod search_compat;
 mod search_filter;
 mod serve_trace;
 mod sniper_cmd;
+mod space_cmd;
 mod task_bridge;
 mod task_commands;
 mod task_config;
@@ -718,6 +719,22 @@ enum Command {
         top: u32,
         #[arg(long)]
         json: bool,
+    },
+    /// Audit how much disk the pixel index (`.pixel/`) takes across every
+    /// project under this tree: per-project shard size plus the accumulated
+    /// total, and a one-shot `--delete` cleanup of the rebuildable shards.
+    Space {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Emit structured JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+        /// Remove every found index shard after a single confirmation.
+        #[arg(long)]
+        delete: bool,
+        /// Skip the deletion confirmation (assume yes).
+        #[arg(long)]
+        yes: bool,
     },
     /// Make a repository ready for agent work: index, graph, and warm daemon.
     #[command(alias = "ready")]
@@ -5556,6 +5573,12 @@ fn run_command(
         Command::Audit { path, top, json } => {
             audit_cmd::run(audit_cmd::AuditOptions { path, top, json })
         }
+        Command::Space {
+            path,
+            json,
+            delete,
+            yes,
+        } => space_cmd::run(path, json, delete, yes),
         Command::Workspace { cmd } => workspace_cmd::run(cmd),
         Command::IndexPack {
             out,
