@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::InstallError;
 use crate::config;
@@ -96,6 +97,9 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("install.legacy-wrappers", FIX_INSTALL),
     entry("rule.parity", FIX_INSTALL),
     entry("rule.scenarios", FIX_INSTALL),
+    // The setup step is interactive and needs the user at a terminal, so
+    // the check names it in the message but leaves `--fix` out of it.
+    entry("web-search.provider", None),
     entry("repo.task-hook-observations", None),
     entry("repo.codex-config", FIX_REPO_INSTALL),
     entry("repo.codex-hooks", FIX_REPO_INSTALL),
@@ -838,6 +842,14 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             ))
         });
     }
+
+    // Which web search provider the installed `pixel` resolves to, read
+    // straight from the environment and the global config file — never
+    // by spawning the binary, which would re-enter it from inside
+    // doctor. Runs for every invocation, not only inside a repository,
+    // so a bare `pixel doctor` still reports no provider when one is not
+    // configured.
+    runner.check_status("web-search.provider", || web_search_provider_check(&home));
 
     if let Some(root) = &options.repo_root {
         runner.check("repo.task-hook-observations", || {
@@ -1764,6 +1776,132 @@ fn shell_path_check_within(
     ))
 }
 
+/// Which web search provider `pixel web-search` resolves to for `home`.
+/// Green when one is configured; yellow, naming the setup command, when the
+/// public chain is the default. The provider is read straight from the
+/// environment and the global config file (`~/.pixel/config.yaml`, or the
+/// legacy JSON) — never from a spawned `pixel`: the doctor contract tests
+/// run the check in-process against the test binary, and a subprocess would
+/// re-enter it with `config overview` as a rogue test filter.
+pub(crate) fn web_search_provider_check(
+    home: &Path,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    web_search_provider_check_with(
+        home,
+        env_non_empty("PIXEL_WEB_SEARCH_URL"),
+        env_non_empty("PERPLEXITY_API_KEY"),
+    )
+}
+
+/// The check with the environment leg made explicit, so a test can drive
+/// the resolution without touching the process environment.
+fn web_search_provider_check_with(
+    home: &Path,
+    searxng_env: bool,
+    perplexity_env: bool,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    let doc = load_pixel_config(home)?;
+    match web_search_provider_from(searxng_env, perplexity_env, &doc) {
+        "none" => Ok((
+            CheckStatus::Yellow,
+            DoctorCheckDetail {
+                summary: "no web search provider configured — the free public chain replies; run `pixel config setup` to configure SearXNG or Perplexity"
+                    .to_string(),
+                detail: Some(serde_json::json!({ "provider": "none" })),
+            },
+        )),
+        provider => Ok((
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: format!("web search provider: {provider}"),
+                detail: Some(serde_json::json!({ "provider": provider })),
+            },
+        )),
+    }
+}
+
+/// Resolve the provider the same way `pixel web-search` does: SearXNG when
+/// its env var or the stored `web_search.searxng_url` is present, else
+/// Perplexity when `PERPLEXITY_API_KEY` or `remote_keys.perplexity` is,
+/// else `none` (the public chain is the fallback).
+fn web_search_provider_from(searxng_env: bool, perplexity_env: bool, doc: &Value) -> &'static str {
+    let searxng_stored = doc
+        .get("web_search")
+        .and_then(|w| w.get("searxng_url"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if searxng_env || searxng_stored {
+        return "searxng";
+    }
+    let perplexity_stored = doc
+        .get("remote_keys")
+        .and_then(|k| k.get("perplexity"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if perplexity_env || perplexity_stored {
+        "perplexity"
+    } else {
+        "none"
+    }
+}
+
+/// A non-empty environment value, as the CLI reads it. Mirrors
+/// `web_search::normalize_base`: a value counts only when it is valid UTF-8
+/// and non-empty, so a non-UTF-8 `PIXEL_WEB_SEARCH_URL`/`PERPLEXITY_API_KEY`
+/// does not make `pixel doctor` report a provider `pixel web-search` would
+/// not select.
+fn env_non_empty(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| v.into_string().ok().is_some_and(|s| !s.is_empty()))
+}
+
+/// The global pixel config as a JSON value: `~/.pixel/config.yaml` parsed
+/// with the same YAML engine the CLI uses, falling back to the legacy
+/// `config.json`, or an empty document when neither file exists. The two
+/// scalar keys the check reads never need more than the mapping shape, but a
+/// malformed file is an error rather than a silent `none` — doctor must not
+/// hide a config it cannot read.
+fn load_pixel_config(home: &Path) -> std::result::Result<Value, String> {
+    let yaml = home.join(".pixel/config.yaml");
+    if yaml.is_file() {
+        let text =
+            std::fs::read_to_string(&yaml).map_err(|e| format!("read {}: {e}", yaml.display()))?;
+        return parse_pixel_config(&text, &yaml);
+    }
+    let legacy = home.join(".pixel/config.json");
+    if legacy.is_file() {
+        let text = std::fs::read_to_string(&legacy)
+            .map_err(|e| format!("read {}: {e}", legacy.display()))?;
+        return parse_pixel_config(&text, &legacy);
+    }
+    Ok(serde_json::json!({}))
+}
+
+/// Parse one pixel config file: `null` (an empty file) reads as an empty
+/// document, anything other than a mapping is an error.
+fn parse_pixel_config(text: &str, path: &Path) -> std::result::Result<Value, String> {
+    let value: Value = if path.extension().is_some_and(|ext| ext == "json") {
+        serde_json::from_str(text).map_err(|_| ())
+    } else {
+        serde_saphyr::from_str(text).map_err(|_| ())
+    }
+    .map_err(|()| {
+        format!(
+            "invalid configuration {}; expected a YAML/JSON mapping",
+            path.display()
+        )
+    })?;
+    if value.is_null() {
+        return Ok(serde_json::json!({}));
+    }
+    if !value.is_object() {
+        return Err(format!(
+            "configuration {} must be a mapping",
+            path.display()
+        ));
+    }
+    Ok(value)
+}
+
 /// Runs the checks the selection keeps and records each outcome.
 struct Runner<'a> {
     only: &'a [String],
@@ -2519,14 +2657,16 @@ pub use pixel_daemon::daemon::socket_path as daemon_socket_path;
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use super::env_non_empty;
     use super::{
         CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary,
         PLACEHOLDER_DUMMY, Remedy, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL,
         age_secs, capped, catalogue_steps, claude_hooks_owner_check, extract_rule_commands,
-        fix_for, judge_repair, names_check, normalize_rule_command, one_line,
+        fix_for, judge_repair, load_pixel_config, names_check, normalize_rule_command, one_line,
         probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
         rtk_backup_check, run_repair, scenario_mismatches, selected, shell_path_check, shell_word,
-        spec, split_home_repairs, validate_selection,
+        spec, split_home_repairs, validate_selection, web_search_provider_check_with,
+        web_search_provider_from,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
@@ -3103,6 +3243,226 @@ mod tests {
         assert!(err.contains("did not answer within"), "{err}");
         assert!(err.contains(&format!("{timeout:?}")), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The overview line is the only authority the check trusts: the three
+    /// The resolution mirrors `pixel web-search`: SearXNG first — env or
+    /// stored — then Perplexity, then the public chain; an empty stored
+    /// value counts as absent.
+    #[test]
+    fn web_search_provider_resolution_prefers_searxng_then_perplexity_then_the_chain() {
+        let stored = |searxng: bool, perplexity: bool| {
+            let mut doc = serde_json::json!({});
+            if searxng {
+                doc["web_search"] = serde_json::json!({ "searxng_url": "https://sx.test" });
+            }
+            if perplexity {
+                doc["remote_keys"] = serde_json::json!({ "perplexity": "sk-pplx" });
+            }
+            doc
+        };
+        assert_eq!(
+            web_search_provider_from(true, false, &stored(false, false)),
+            "searxng"
+        );
+        assert_eq!(
+            web_search_provider_from(false, false, &stored(true, false)),
+            "searxng"
+        );
+        // A SearXNG env var or stored URL wins over a Perplexity key.
+        assert_eq!(
+            web_search_provider_from(true, false, &stored(false, true)),
+            "searxng"
+        );
+        assert_eq!(
+            web_search_provider_from(false, false, &stored(true, true)),
+            "searxng"
+        );
+        assert_eq!(
+            web_search_provider_from(false, true, &stored(false, false)),
+            "perplexity"
+        );
+        assert_eq!(
+            web_search_provider_from(false, false, &stored(false, true)),
+            "perplexity"
+        );
+        assert_eq!(
+            web_search_provider_from(false, false, &stored(false, false)),
+            "none"
+        );
+        let empty = serde_json::json!({
+            "web_search": { "searxng_url": "" },
+            "remote_keys": { "perplexity": "" },
+        });
+        assert_eq!(web_search_provider_from(false, false, &empty), "none");
+    }
+
+    /// The env wrapper is the one path the resolution tests cannot reach
+    /// with literal flags: a real `pixel doctor` reads the provider env
+    /// vars itself. Each assertion pins one guard mutation (non-empty wins,
+    /// empty is absent, unset is absent).
+    #[test]
+    fn web_search_env_flags_drive_the_provider_check() {
+        let home = tempfile::tempdir().unwrap();
+        let provider = || {
+            let (_, check) = super::web_search_provider_check(home.path()).unwrap();
+            check.detail.unwrap()["provider"]
+                .as_str()
+                .unwrap_or("?")
+                .to_string()
+        };
+        // SAFETY: nextest isolates one process per test (this repo's
+        // nextest config relies on exactly that), so mutating the process
+        // env here races with no other test.
+        unsafe {
+            std::env::set_var("PIXEL_WEB_SEARCH_URL", "https://sx.test");
+        };
+        // SAFETY: nextest isolates one process per test (this repo's
+        // nextest config relies on exactly that), so mutating the process
+        // env here races with no other test.
+        unsafe {
+            std::env::remove_var("PERPLEXITY_API_KEY");
+        };
+        assert_eq!(provider(), "searxng");
+        // An empty value counts as absent, exactly like the CLI.
+        // SAFETY: nextest isolates one process per test (this repo's
+        // nextest config relies on exactly that), so mutating the process
+        // env here races with no other test.
+        unsafe {
+            std::env::set_var("PIXEL_WEB_SEARCH_URL", "");
+        };
+        assert_eq!(provider(), "none");
+        // Unset leaves the public chain as the fallback.
+        // SAFETY: nextest isolates one process per test (this repo's
+        // nextest config relies on exactly that), so mutating the process
+        // env here races with no other test.
+        unsafe {
+            std::env::remove_var("PIXEL_WEB_SEARCH_URL");
+        };
+        assert_eq!(provider(), "none");
+    }
+
+    /// The global config reads as JSON either way: the YAML file (parsed
+    /// with the CLI's own engine) or the legacy `config.json`, and nothing
+    /// when neither exists; a file that is not a mapping is an error, not a
+    /// silent `none`.
+    #[test]
+    fn web_search_config_reads_yaml_legacy_json_or_absent() {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-doctor-web-search-config-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".pixel")).unwrap();
+
+        assert_eq!(load_pixel_config(&home).unwrap(), serde_json::json!({}));
+
+        std::fs::write(
+            home.join(".pixel/config.yaml"),
+            "web_search:\n  searxng_url: https://sx.test\nremote_keys:\n  perplexity: pplx\n",
+        )
+        .unwrap();
+        let doc = load_pixel_config(&home).unwrap();
+        assert_eq!(doc["web_search"]["searxng_url"], "https://sx.test");
+        assert_eq!(doc["remote_keys"]["perplexity"], "pplx");
+
+        std::fs::remove_file(home.join(".pixel/config.yaml")).unwrap();
+        std::fs::write(
+            home.join(".pixel/config.json"),
+            r#"{"web_search":{"searxng_url":"https://sx.test"}}"#,
+        )
+        .unwrap();
+        let doc = load_pixel_config(&home).unwrap();
+        assert_eq!(doc["web_search"]["searxng_url"], "https://sx.test");
+
+        // An empty YAML file is an empty document; anything that is not a
+        // mapping is an error the check must not gloss over.
+        std::fs::remove_file(home.join(".pixel/config.json")).unwrap();
+        std::fs::write(home.join(".pixel/config.yaml"), "").unwrap();
+        assert_eq!(load_pixel_config(&home).unwrap(), serde_json::json!({}));
+        std::fs::write(home.join(".pixel/config.yaml"), "web_search: [\n").unwrap();
+        assert!(
+            load_pixel_config(&home).is_err(),
+            "a malformed config is an error, not a silent none"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The check's verdict over a scratch home: `none` is a yellow
+    /// suggestion naming `pixel config setup`, a stored or env provider is
+    /// green, and an unreadable config is red.
+    #[test]
+    fn web_search_provider_check_reads_the_config_and_maps_its_verdict() {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-doctor-web-search-check-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".pixel")).unwrap();
+
+        let (status, detail) = web_search_provider_check_with(&home, false, false).unwrap();
+        assert_eq!(status, CheckStatus::Yellow, "{detail:?}");
+        assert_eq!(detail.detail.as_ref().unwrap()["provider"], "none");
+        assert!(detail.summary.contains("pixel config setup"), "{detail:?}");
+
+        let (status, detail) = web_search_provider_check_with(&home, false, true).unwrap();
+        assert_eq!(status, CheckStatus::Green, "{detail:?}");
+        assert_eq!(detail.detail.as_ref().unwrap()["provider"], "perplexity");
+
+        std::fs::write(
+            home.join(".pixel/config.yaml"),
+            "web_search:\n  searxng_url: https://sx.test\n",
+        )
+        .unwrap();
+        let (status, detail) = web_search_provider_check_with(&home, false, true).unwrap();
+        assert_eq!(status, CheckStatus::Green, "{detail:?}");
+        assert_eq!(detail.detail.as_ref().unwrap()["provider"], "searxng");
+
+        std::fs::write(home.join(".pixel/config.yaml"), "web_search: [\n").unwrap();
+        let err = web_search_provider_check_with(&home, false, false)
+            .expect_err("a malformed config is red");
+        assert!(err.contains("invalid configuration"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `env_non_empty` drives the env leg of the check: a value counts as
+    /// configured only when it is present, valid UTF-8, and non-empty. The
+    /// stored-config tests go through `web_search_provider_check_with` with
+    /// explicit booleans, so this raw read needs its own cases. A dedicated
+    /// name keeps the `PIXEL_WEB_SEARCH_URL`/`PERPLEXITY_API_KEY` the CLI
+    /// really reads untouched.
+    #[test]
+    fn env_non_empty_counts_only_a_present_non_empty_utf8_value() {
+        use std::os::unix::ffi::OsStringExt;
+        const VAR: &str = "PIXEL_QR_DOCTOR_WEB_SEARCH_PROBE";
+
+        // SAFETY: nextest runs one process per test (this repo's nextest
+        // config leans on exactly that), so the process env below races
+        // with no other test.
+        unsafe { std::env::remove_var(VAR) };
+        assert!(!env_non_empty(VAR), "absent counts as not configured");
+
+        // SAFETY: see the comment above; same isolation guarantees.
+        unsafe { std::env::set_var(VAR, "") };
+        assert!(!env_non_empty(VAR), "empty counts as not configured");
+
+        // SAFETY: see the comment above; same isolation guarantees.
+        unsafe { std::env::set_var(VAR, "https://sx.test") };
+        assert!(env_non_empty(VAR), "non-empty counts as configured");
+
+        // A value the CLI cannot read as UTF-8 is unusable, so it too counts
+        // as not configured rather than selecting a provider.
+        let non_utf8 = std::ffi::OsString::from_vec(vec![0xf0, 0x28, 0x8c, 0x28]);
+        // SAFETY: see the comment above; same isolation guarantees.
+        unsafe { std::env::set_var(VAR, non_utf8) };
+        assert!(!env_non_empty(VAR), "non-UTF-8 counts as not configured");
+
+        // SAFETY: see the comment above; same isolation guarantees.
+        unsafe { std::env::remove_var(VAR) };
     }
 
     /// A stalled shell must not outlive the probe: `bounded_output` returns

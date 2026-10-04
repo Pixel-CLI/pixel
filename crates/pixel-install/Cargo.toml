@@ -16,6 +16,7 @@ pixel-index = { path = "../pixel-index" }
 pixel-facts = { path = "../pixel-facts" }
 pixel-git = { path = "../pixel-git" }
 serde = { version = "1", features = ["derive"] }
+serde-saphyr = "1.3"
 serde_json = "1"
 thiserror = "2"
 toml_edit = "0.25.15"
