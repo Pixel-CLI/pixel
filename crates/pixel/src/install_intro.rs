@@ -2,9 +2,12 @@
 //! the gate that decides whether a person is there to watch, and the loop
 //! that holds the terminal while they do. Any key skips it, Ctrl-C
 //! included: signals are off while it plays, so the install still runs.
+//! A terminating signal (SIGTERM/SIGHUP) is caught so the terminal is
+//! handed back before the process exits.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use pixel_install::intro::{self, Canvas, Intro};
@@ -62,12 +65,15 @@ pub(crate) enum Outcome {
 }
 
 /// Play the intro on `screen`, `clock` giving the seconds since the start,
-/// until [`intro::END`] or the first key. Every run that drew a frame
-/// leaves the alternate screen before it returns.
+/// until [`intro::END`] or the first key. A termination signal recorded in
+/// `terminate` ends it early through this same path, so `LEAVE` is written
+/// and the [`Tty`] drops. Every run that drew a frame leaves the alternate
+/// screen before it returns.
 pub(crate) fn run(
     screen: &mut dyn Screen,
     clock: &mut dyn FnMut() -> f32,
     truecolor: bool,
+    terminate: &AtomicI32,
 ) -> Outcome {
     let Some(mut shown) = screen
         .size()
@@ -79,6 +85,11 @@ pub(crate) fn run(
     let mut intro = Intro::new();
     let mut prev: Option<Canvas> = None;
     let outcome = loop {
+        // A termination signal pending from `play`'s handler ends the intro
+        // as a skip, so the terminal is handed back before the process dies.
+        if terminate.load(Ordering::Relaxed) != 0 {
+            break Outcome::Skipped;
+        }
         let t = clock();
         if t > intro::END {
             break Outcome::Finished;
@@ -100,6 +111,67 @@ pub(crate) fn run(
     };
     screen.write(intro::LEAVE);
     outcome
+}
+
+/// A terminating signal delivered while the intro played; `0` means none.
+/// The intro loop watches it, and `play` re-raises it once the terminal is
+/// handed back. Only ever written-from/read in signal-handler-safe spots.
+static TERMINATE: AtomicI32 = AtomicI32::new(0);
+
+/// The signals whose normal action is to end the process; catching them lets
+/// the terminal be restored before they take effect.
+const TERMINATE_SIGNALS: [libc::c_int; 2] = [libc::SIGTERM, libc::SIGHUP];
+
+/// The pending termination signal, if any, clearing it.
+fn take_terminate() -> Option<libc::c_int> {
+    let sig = TERMINATE.swap(0, Ordering::SeqCst);
+    (sig != 0).then_some(sig)
+}
+
+/// The handler `play` installs for [`TERMINATE_SIGNALS`]: records the signal
+/// so the intro loop breaks and the terminal is handed back, then `play`
+/// re-raises it. `SA_RESETHAND` restores the default on entry, so the
+/// re-raised signal actually terminates.
+#[cfg_attr(test, mutants::skip)] // libc adapter; its single store is tested via `run`
+extern "C" fn on_terminate(sig: libc::c_int) {
+    TERMINATE.store(sig, Ordering::SeqCst);
+}
+
+/// Catches [`TERMINATE_SIGNALS`] for as long as it is alive; dropping it
+/// restores the actions it put in place.
+struct TerminateGuard {
+    prev: [libc::sigaction; 2],
+}
+
+impl TerminateGuard {
+    #[cfg_attr(test, mutants::skip)] // libc adapter; the flag logic is tested pure
+    fn install() -> Option<Self> {
+        let mut prev: [libc::sigaction; 2] =
+            std::array::from_fn(|_| unsafe { std::mem::zeroed() });
+        let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
+        act.sa_sigaction = on_terminate as usize;
+        act.sa_flags = libc::SA_RESETHAND;
+        // SAFETY: a zeroed mask the call fills in; the mask is for the
+        // blocked-during-handler set, and the handler only stores an int.
+        unsafe { libc::sigemptyset(&mut act.sa_mask) };
+        for (i, sig) in TERMINATE_SIGNALS.iter().enumerate() {
+            // SAFETY: `act` is valid, and `prev[i]` a buffer sigaction fills.
+            if unsafe { libc::sigaction(*sig, &act, &mut prev[i]) } != 0 {
+                return None;
+            }
+        }
+        Some(Self { prev })
+    }
+}
+
+impl Drop for TerminateGuard {
+    #[cfg_attr(test, mutants::skip)] // libc adapter
+    fn drop(&mut self) {
+        for (i, sig) in TERMINATE_SIGNALS.iter().enumerate() {
+            // SAFETY: restoring the action `install` read for this signal.
+            unsafe { libc::sigaction(*sig, &self.prev[i], std::ptr::null_mut()) };
+        }
+    }
 }
 
 /// Key input for the intro: no line buffering, no echo, and no signals, so
@@ -202,13 +274,28 @@ pub(crate) fn play() {
     let Some(mut tty) = Tty::open() else {
         return;
     };
+    // Catch SIGTERM/SIGHUP so a terminating signal hands the terminal back
+    // before the process exits, instead of leaving the alternate screen up
+    // or stdin in raw mode.
+    let guard = TerminateGuard::install();
     let start = Instant::now();
     let mut clock = || start.elapsed().as_secs_f32();
     run(
         &mut tty,
         &mut clock,
         truecolor(std::env::var_os("COLORTERM").as_deref()),
+        &TERMINATE,
     );
+    // `run` wrote `LEAVE` on every break; dropping the Tty now restores the
+    // raw-mode stdin. Only then re-raise a caught signal, with the handler
+    // and disposition the guard put back. No signal means a plain return.
+    drop(tty);
+    if let Some(sig) = take_terminate() {
+        drop(guard);
+        // SAFETY: `raise` delivers to our own process; the handler for this
+        // signal is restored, so it terminates as it would have.
+        unsafe { libc::raise(sig) };
+    }
 }
 
 #[cfg(test)]
@@ -327,11 +414,14 @@ mod tests {
     #[test]
     fn a_small_terminal_draws_nothing() {
         let mut fake = Fake::new(&[Some((63, 40))], &[]);
-        assert_eq!(run(&mut fake, &mut clock(&[0.0]), true), Outcome::NotShown);
+        assert_eq!(
+            run(&mut fake, &mut clock(&[0.0]), true, &AtomicI32::new(0)),
+            Outcome::NotShown
+        );
         assert!(fake.written.is_empty());
         let mut unknown = Fake::new(&[None], &[]);
         assert_eq!(
-            run(&mut unknown, &mut clock(&[0.0]), true),
+            run(&mut unknown, &mut clock(&[0.0]), true, &AtomicI32::new(0)),
             Outcome::NotShown
         );
         assert!(unknown.written.is_empty());
@@ -340,7 +430,8 @@ mod tests {
     #[test]
     fn it_plays_to_the_end_and_gives_the_screen_back() {
         let mut fake = Fake::new(&[BIG], &[]);
-        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0, intro::END]), true);
+        let outcome =
+            run(&mut fake, &mut clock(&[0.0, 1.0, intro::END]), true, &AtomicI32::new(0));
         assert_eq!(outcome, Outcome::Finished);
         assert_eq!(fake.written.first().map(String::as_str), Some(intro::ENTER));
         assert_eq!(fake.written.last().map(String::as_str), Some(intro::LEAVE));
@@ -356,9 +447,27 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_terminate_signal_skips_and_hands_the_screen_back() {
+        let terminate = AtomicI32::new(libc::SIGTERM);
+        let mut fake = Fake::new(&[BIG], &[]);
+        let outcome = run(&mut fake, &mut clock(&[0.0]), true, &terminate);
+        assert_eq!(outcome, Outcome::Skipped);
+        assert_eq!(fake.written.first().map(String::as_str), Some(intro::ENTER));
+        assert_eq!(fake.written.last().map(String::as_str), Some(intro::LEAVE));
+    }
+
+    #[test]
+    fn take_terminate_returns_and_clears_the_signal() {
+        assert_eq!(take_terminate(), None);
+        TERMINATE.store(libc::SIGHUP, Ordering::SeqCst);
+        assert_eq!(take_terminate(), Some(libc::SIGHUP));
+        assert_eq!(take_terminate(), None);
+    }
+
+    #[test]
     fn a_key_skips_the_rest() {
         let mut fake = Fake::new(&[BIG], &[false, true]);
-        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0, 2.0, 3.0]), true);
+        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0, 2.0, 3.0]), true, &AtomicI32::new(0));
         assert_eq!(outcome, Outcome::Skipped);
         assert_eq!(fake.frames(), 2);
         assert_eq!(fake.written.last().map(String::as_str), Some(intro::LEAVE));
@@ -367,7 +476,7 @@ mod tests {
     #[test]
     fn a_resize_repaints_from_scratch() {
         let mut fake = Fake::new(&[BIG, BIG, Some((120, 30))], &[]);
-        let outcome = run(&mut fake, &mut clock(&[1.0, 1.0]), false);
+        let outcome = run(&mut fake, &mut clock(&[1.0, 1.0]), false, &AtomicI32::new(0));
         assert_eq!(outcome, Outcome::Finished);
         let clear = fake.written.iter().position(|w| w == intro::CLEAR);
         assert_eq!(clear, Some(2), "{:?}", fake.written);
@@ -380,7 +489,7 @@ mod tests {
     #[test]
     fn a_terminal_that_shrinks_mid_run_is_released() {
         let mut fake = Fake::new(&[BIG, BIG, Some((40, 10))], &[]);
-        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0, 2.0]), true);
+        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0, 2.0]), true, &AtomicI32::new(0));
         assert_eq!(outcome, Outcome::Shrunk);
         assert_eq!(fake.frames(), 1);
         assert_eq!(fake.written.last().map(String::as_str), Some(intro::LEAVE));
@@ -389,7 +498,7 @@ mod tests {
     #[test]
     fn a_lost_size_keeps_the_last_one() {
         let mut fake = Fake::new(&[BIG, BIG, None], &[]);
-        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0]), true);
+        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0]), true, &AtomicI32::new(0));
         assert_eq!(outcome, Outcome::Finished);
         assert_eq!(fake.frames(), 2);
         assert!(!fake.written.iter().any(|w| w == intro::CLEAR));
