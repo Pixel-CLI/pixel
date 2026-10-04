@@ -16,3 +16,13 @@ Always loaded: the only sanctioned release path.
   Release workflow run — is the `release` skill's trigger. Do not improvise
   the steps; the skill encodes them and its scratchpad record
   (`release-x.y.z.md`) survives a context reset.
+
+- **Keep the validated candidate exact.** Record base and prepare SHAs; run
+  the skill's candidate guard before merge and before tag. Base drift means
+  renewed changelog coverage and gates, never a `BEHIND` bypass.
+- **Security releases start privately.** Read the skill's
+  `references/security-release.md` before naming a patched version or
+  importing an advisory. Validate the private diff before import; verify the
+  release before publishing the advisory and embargoed threat-model details.
+  A protection exception needs explicit maintainer authorization and verified
+  restoration; a refused client merge is handed off, not retried blindly.

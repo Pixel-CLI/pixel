@@ -40,8 +40,10 @@ class CandidateContract(unittest.TestCase):
         self.git('commit', '-q', '--allow-empty', '-m', 'fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def run_guard(self, tip, merge=None):
+    def run_guard(self, tip, merge=None, maintenance=False):
         args = ['python3', str(SCRIPT), self.base, self.head, '--tip', tip]
+        if maintenance:
+            args += ["--maintenance"]
         if merge:
             args += ['--merge', merge]
         return subprocess.run(args, cwd=self.repo, env=self.env, capture_output=True, text=True)
@@ -97,6 +99,23 @@ class CandidateContract(unittest.TestCase):
         result = self.run_guard(self.base)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('unreleased changelog fragments', result.stderr)
+
+    def test_maintenance_allows_a_backport_but_keeps_the_exact_candidate(self):
+        self.git('switch', '-q', 'prepare')
+        self.write('code.py', 'validated backport')
+        self.head = self.commit()
+        self.assertNotEqual(self.run_guard(self.base).returncode, 0)
+        result = self.run_guard(self.base, maintenance=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.git('switch', '-q', 'main')
+        merge = self.squash()
+        result = self.run_guard(merge, merge, maintenance=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.write('code.py', 'different patch')
+        self.git('add', '-A')
+        self.git('commit', '-q', '--amend', '--no-edit')
+        changed = self.git('rev-parse', 'HEAD')
+        self.assertNotEqual(self.run_guard(changed, changed, maintenance=True).returncode, 0)
 
     def test_missing_or_empty_candidate_cannot_pass(self):
         for head in (self.base, 'does-not-exist'):

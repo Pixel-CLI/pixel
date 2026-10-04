@@ -737,6 +737,8 @@ A `security` fragment may link an advisory under
 public pull request: importing a private advisory patch produces no public
 PR number. Keep that URL in the entry even while the advisory is a draft;
 publish and verify the advisory after the corrected release is available.
+The release skill's [private advisory procedure](.agents/skills/release/references/security-release.md)
+sets version selection, private validation and disclosure order.
 Other sections still require the pull request reference.
 
 An entry is written to be scanned in a released section, not read as a note:
