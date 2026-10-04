@@ -221,8 +221,51 @@ fn load_plain_sig(gpx_dir: &Path) -> Option<String> {
 }
 
 fn save_plain_sig(gpx_dir: &Path, sig: &str) {
-    let _ = std::fs::create_dir_all(gpx_dir);
-    let _ = std::fs::write(plain_sig_path(gpx_dir), sig);
+    if pixel_git::sidecar::private_dir(gpx_dir).is_ok() {
+        let _ = pixel_git::nofollow::write_replace(
+            &plain_sig_path(gpx_dir),
+            sig.as_bytes(),
+            pixel_git::nofollow::PRIVATE_MODE,
+        );
+    }
+}
+
+/// Which candidate paths a search may read: plain relative paths whose
+/// directory, links resolved, lies inside the root. Shard paths are checked
+/// when a shard opens, but a directory link committed beside them could
+/// still lead a read outside; one resolution per directory, memoised for
+/// the search.
+struct Containment {
+    root: PathBuf,
+    canonical_root: Option<PathBuf>,
+    dirs: std::collections::HashMap<PathBuf, bool>,
+}
+
+impl Containment {
+    fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            canonical_root: root.canonicalize().ok(),
+            dirs: std::collections::HashMap::new(),
+        }
+    }
+
+    fn admits(&mut self, rel: &str) -> bool {
+        if !pixel_git::repo_path::is_normal_relative(rel) {
+            return false;
+        }
+        let Some(parent) = Path::new(rel).parent() else {
+            return false;
+        };
+        let (root, canonical_root) = (&self.root, &self.canonical_root);
+        *self.dirs.entry(parent.to_path_buf()).or_insert_with(|| {
+            canonical_root.as_ref().is_some_and(|canonical_root| {
+                root.join(parent)
+                    .canonicalize()
+                    .is_ok_and(|dir| dir.starts_with(canonical_root))
+            })
+        })
+    }
 }
 
 /// True iff `p` is a regular file (not a symlink, not a directory). Symlinks
@@ -463,6 +506,10 @@ impl IndexSet {
         bypass_cache: bool,
     ) -> Result<Self, IndexSetError> {
         let started = Instant::now();
+        // A `.pixel/` that is a link or that git tracks came from the
+        // repository: its shards, extractor id and anchor included, are not
+        // pixel's to trust.
+        pixel_git::sidecar::check(root)?;
         let gpx_dir = root.join(SHARD_DIR);
         let base_path = gpx_dir.join(SHARD_FILE);
         let head = gitsync::rev_parse_head(root);
@@ -888,6 +935,8 @@ impl IndexSet {
         if let Some(filter) = filter {
             candidates.retain(|rel| filter.keeps(rel));
         }
+        let mut contained = Containment::new(&self.root);
+        candidates.retain(|rel| contained.admits(rel));
         let verifier = Verifier::new(pattern)?;
 
         // Limited verification searches sorted files until one match beyond
@@ -2229,6 +2278,124 @@ mod tests {
             .unwrap();
         assert_eq!(all.len(), 5, "without a filter every file matches");
         drop(set);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Gram hashes of `text`, as the shard stores them.
+    fn hashes_of(text: &[u8]) -> Vec<u64> {
+        let mut hits = Vec::new();
+        ex().grams(text, &mut hits);
+        hits.iter().map(|hit| hit.hash).collect()
+    }
+
+    /// A shard listing a path under a committed directory link must not
+    /// lead a search outside the repository: the base is forged with the
+    /// right extractor and anchor, as a hostile `.pixel/` could be.
+    #[test]
+    fn search_should_not_read_through_a_directory_link_a_forged_shard_names() {
+        let _cache = IsolatedCache::new("containment");
+        let dir = scratch("containment-repo");
+        let outside = scratch("containment-outside");
+        std::fs::write(outside.join("secret.txt"), "fn outsideNeedle() {}\n").unwrap();
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn insideNeedle() {}\n").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        drop(IndexSet::open_or_build(&dir, ex()).unwrap());
+
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        let mut forged = ShardBuilder::new(&ex().id());
+        forged.set_commit_oid(&head);
+        forged.add_file("a.rs", hashes_of(b"fn insideNeedle() {}\n"));
+        forged.add_file("link/secret.txt", hashes_of(b"fn outsideNeedle() {}\n"));
+        forged.write(&dir.join(SHARD_DIR).join(SHARD_FILE)).unwrap();
+
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(
+            set.open_timings().base,
+            BaseSource::Reused,
+            "the forged base is used"
+        );
+        let (inside, _) = set.search("insideNeedle", None).unwrap();
+        assert_eq!(inside.len(), 1);
+        for limit in [None, Some(10)] {
+            let (outside_hits, _) = set
+                .search_page_filtered("outsideNeedle", 0, limit, None, None)
+                .unwrap();
+            assert!(
+                outside_hits.is_empty(),
+                "read through the link: {outside_hits:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn containment_should_admit_plain_paths_inside_the_root_only() {
+        let dir = scratch("containment-unit");
+        let outside = scratch("containment-unit-outside");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("out")).unwrap();
+        std::os::unix::fs::symlink(dir.join("src"), dir.join("in")).unwrap();
+        let mut contained = Containment::new(&dir);
+        assert!(contained.admits("a.rs"));
+        assert!(contained.admits("src/a.rs"));
+        assert!(contained.admits("in/a.rs"), "a link that stays inside");
+        assert!(!contained.admits("out/a.rs"));
+        assert!(!contained.admits("../a.rs"));
+        assert!(!contained.admits("/etc/passwd"));
+        assert!(
+            !contained.admits("missing/a.rs"),
+            "an unresolvable directory"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn open_or_build_should_refuse_a_pixel_dir_the_repository_tracks() {
+        let _cache = IsolatedCache::new("tracked-pixel");
+        let dir = scratch("tracked-pixel");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::create_dir_all(dir.join(SHARD_DIR)).unwrap();
+        std::fs::write(dir.join(SHARD_DIR).join("state.json"), "{}").unwrap();
+        git(&dir, &["add", "-f", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let Err(IndexSetError::Io(error)) = IndexSet::open_or_build(&dir, ex()) else {
+            panic!("a tracked .pixel must be refused");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains(".pixel/state.json"), "{error}");
+        assert!(
+            !dir.join(SHARD_DIR).join(SHARD_FILE).exists(),
+            "nothing was built into it"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Outside git the base is reused only while the stored walk signature
+    /// matches: the signature must be written (owner-only) after a build.
+    #[test]
+    fn a_gitless_base_should_be_reused_until_the_tree_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        let _cache = IsolatedCache::new("plain-sig");
+        let dir = scratch("plain-sig");
+        std::fs::write(dir.join("a.rs"), "fn plainNeedle() {}\n").unwrap();
+        let first = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(first.open_timings().base, BaseSource::BuiltFromWalk);
+        drop(first);
+        let sig = plain_sig_path(&dir.join(SHARD_DIR));
+        let mode = std::fs::metadata(&sig).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o600);
+        let again = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(again.open_timings().base, BaseSource::Reused);
+        drop(again);
+        std::fs::write(dir.join("a.rs"), "fn changedNeedle() {}\n").unwrap();
+        let rebuilt = IndexSet::open_or_build(&dir, ex()).unwrap();
+        assert_eq!(rebuilt.open_timings().base, BaseSource::BuiltFromWalk);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

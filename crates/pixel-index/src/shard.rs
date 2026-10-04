@@ -28,7 +28,7 @@
 //! regex verification is authoritative.
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -174,13 +174,9 @@ impl ShardBuilder {
     pub fn write(mut self, dest: &Path) -> Result<(), ShardError> {
         let tmp: PathBuf = dest.with_extension("tmp");
         if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-            // Ensure the .pixel directory is owner-only (0700).
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
-            }
+            // Owner-only (0700), and never created or chmodded through a
+            // link.
+            pixel_git::sidecar::private_dir(parent)?;
         }
         match fs::remove_file(&tmp) {
             Ok(()) => {}
@@ -283,7 +279,8 @@ pub struct Shard {
 
 impl Shard {
     pub fn open(path: &Path) -> Result<Self, ShardError> {
-        let file = File::open(path)?;
+        // Never through a link: a repository can commit one at the name.
+        let file = pixel_git::nofollow::open_read(path)?;
         // SAFETY: Mmap::map is unsafe because the file could change under the
         // mapping. Shards are written to a temp path and renamed into place
         // (`Shard::write`), so a mapped file is never modified; every offset
@@ -381,6 +378,11 @@ impl Shard {
             }
             let path = std::str::from_utf8(&fbuf[pos..pos + len])
                 .map_err(|_| ShardError::Corrupt("path not utf8"))?;
+            // Search joins every path to the root and reads it: a path that
+            // could leave the repository makes the whole shard untrusted.
+            if !pixel_git::repo_path::is_normal_relative(path) {
+                return Err(ShardError::Corrupt("file path leaves the repository"));
+            }
             files.push(path.to_string());
             pos += len;
         }
@@ -756,6 +758,46 @@ mod tests {
 
         assert_eq!(std::fs::read(&external).unwrap(), b"unchanged");
         assert_eq!(Shard::open(&dest).unwrap().file_count(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gpx-shard-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn open_should_refuse_a_shard_whose_paths_leave_the_repository() {
+        use super::{Shard, ShardBuilder, ShardError};
+        let dir = scratch("escape");
+        for escaping in ["../../.aws/credentials", "/etc/passwd", "a/./b"] {
+            let path = dir.join("forged.shard");
+            let mut builder = ShardBuilder::new("ex");
+            builder.add_file("ok.rs", vec![1]);
+            builder.add_file(escaping, vec![2]);
+            builder.write(&path).unwrap();
+            assert!(
+                matches!(Shard::open(&path), Err(ShardError::Corrupt(reason)) if reason == "file path leaves the repository"),
+                "{escaping} accepted"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn open_should_refuse_a_shard_reached_through_a_link() {
+        use super::{Shard, ShardBuilder, ShardError};
+        let dir = scratch("link");
+        let real = dir.join("real.shard");
+        let mut builder = ShardBuilder::new("ex");
+        builder.add_file("ok.rs", vec![1]);
+        builder.write(&real).unwrap();
+        assert_eq!(Shard::open(&real).unwrap().files(), ["ok.rs"]);
+        let link = dir.join("base.shard");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(matches!(Shard::open(&link), Err(ShardError::Io(_))));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

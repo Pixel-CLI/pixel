@@ -14,6 +14,7 @@
 //! file only collide if the graph itself confused them.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use serde::Serialize;
@@ -203,8 +204,7 @@ pub fn plan(
         by_file.entry(site.path.clone()).or_default().push(site);
     }
     for (path, sites) in by_file {
-        let abs = root.join(&path);
-        let content = match std::fs::read(&abs) {
+        let content = match read_confined(root, &path) {
             Ok(c) => c,
             Err(e) => {
                 for s in &sites {
@@ -257,9 +257,8 @@ pub fn apply(
 ) -> Result<Vec<String>, String> {
     let mut written = Vec::new();
     for (path, edits) in &plan.files {
-        let abs = root.join(path);
         let mut content =
-            std::fs::read(&abs).map_err(|e| format!("rename: cannot read {path}: {e}"))?;
+            read_confined(root, path).map_err(|e| format!("rename: cannot read {path}: {e}"))?;
         for edit in edits.iter().rev() {
             // Re-verify before touching bytes: the file may have changed
             // between plan and apply (watcher-driven reindex, a user edit).
@@ -274,10 +273,28 @@ pub fn apply(
                 new_name.as_bytes().iter().copied(),
             );
         }
-        std::fs::write(&abs, &content).map_err(|e| format!("rename: cannot write {path}: {e}"))?;
+        write_confined(root, path, &content)
+            .map_err(|e| format!("rename: cannot write {path}: {e}"))?;
         written.push(path.clone());
     }
     Ok(written)
+}
+
+/// Read the source file at `rel` under `root`. The path comes from the
+/// graph database, which a hostile clone can supply: it must stay inside
+/// the root and must not be a link.
+fn read_confined(root: &Path, rel: &str) -> std::io::Result<Vec<u8>> {
+    let mut content = Vec::new();
+    pixel_git::nofollow::open_read(&pixel_git::repo_path::confine(root, rel)?)?
+        .read_to_end(&mut content)?;
+    Ok(content)
+}
+
+/// Rewrite the source file at `rel` under `root` in place (its mode and
+/// inode kept), under the same confinement as [`read_confined`].
+fn write_confined(root: &Path, rel: &str, content: &[u8]) -> std::io::Result<()> {
+    pixel_git::nofollow::open_rewrite(&pixel_git::repo_path::confine(root, rel)?)?
+        .write_all(content)
 }
 
 /// Verify one nominated site against the fresh parse and push its edits.
@@ -759,6 +776,65 @@ mod tests {
         assert!(apply(&dir, &plan, "foo", "baz").is_err());
         assert_eq!(std::fs::read(dir.join("a.rs")).unwrap(), b"fn qux() {}\n");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Paths in a rename plan come from the graph database, which a hostile
+    /// clone can supply: a link at the file, a `..` path and a path through
+    /// a directory link all leave the file outside the root untouched,
+    /// content and mode.
+    #[test]
+    fn apply_should_not_write_outside_the_root_or_through_a_link() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("repo");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.rs");
+        std::fs::write(&victim, b"fn foo() {}\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim, root.join("a.rs")).unwrap();
+        symlink(&outside, root.join("dir")).unwrap();
+        for path in ["a.rs", "../outside/victim.rs", "dir/victim.rs"] {
+            let mut plan = RenamePlan::default();
+            plan.files.insert(
+                path.to_string(),
+                vec![RenameEdit {
+                    line: 1,
+                    start_byte: 3,
+                    end_byte: 6,
+                    kind: SiteKind::Definition,
+                }],
+            );
+            assert!(apply(&root, &plan, "foo", "baz").is_err(), "{path} written");
+            assert_eq!(std::fs::read(&victim).unwrap(), b"fn foo() {}\n", "{path}");
+            let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, 0o644, "{path}");
+        }
+    }
+
+    /// The rewrite is in place: an executable file stays executable.
+    #[test]
+    fn apply_should_keep_the_mode_of_the_rewritten_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tool.rs");
+        std::fs::write(&file, b"fn foo() {}\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut plan = RenamePlan::default();
+        plan.files.insert(
+            "tool.rs".to_string(),
+            vec![RenameEdit {
+                line: 1,
+                start_byte: 3,
+                end_byte: 6,
+                kind: SiteKind::Definition,
+            }],
+        );
+        apply(dir.path(), &plan, "foo", "baz").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"fn baz() {}\n");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o755);
     }
 
     /// A real graph built from source files: a definition, a resolved call,

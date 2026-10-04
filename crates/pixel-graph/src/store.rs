@@ -483,6 +483,20 @@ impl ExecCached for Connection {
     }
 }
 
+/// The path SQLite opens with `SQLITE_OPEN_NOFOLLOW`, which refuses a link
+/// at any component. Links above the db's directory are resolved, so a
+/// legitimate prefix such as macOS's `/var` -> `/private/var` still opens;
+/// the directory itself (`.pixel`) and the file keep the refusal, so a
+/// `.pixel` or a db committed as a link is never opened through.
+fn nofollow_path(parent: &Path, name: &std::ffi::OsStr) -> std::path::PathBuf {
+    match (parent.parent(), parent.file_name()) {
+        (Some(grandparent), Some(dir)) => grandparent
+            .canonicalize()
+            .map_or_else(|_| parent.join(name), |above| above.join(dir).join(name)),
+        _ => parent.join(name),
+    }
+}
+
 /// One `imports` table row — shared by [`GraphStore::imports_to_file`] and
 /// [`GraphStore::imports_from`] so both query directions read the same shape.
 fn import_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImportRow> {
@@ -498,16 +512,12 @@ fn import_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImportRow> {
 
 impl GraphStore {
     pub fn open(path: &Path) -> Result<Self> {
-        // NOFOLLOW rejects a path with ANY symlinked component (newer SQLite),
-        // which breaks legitimate symlinked prefixes like macOS's /var ->
-        // /private/var in $TMPDIR. Canonicalize the parent directory so only
-        // the db file itself keeps the no-symlink protection.
         let path = match (path.parent(), path.file_name()) {
-            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
-                let _ = std::fs::create_dir_all(parent);
-                parent
-                    .canonicalize()
-                    .map_or_else(|_| path.to_path_buf(), |p| p.join(name))
+            (Some(parent), Some(name)) => {
+                if std::fs::symlink_metadata(parent).is_err() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                nofollow_path(parent, name)
             }
             _ => path.to_path_buf(),
         };
@@ -533,9 +543,7 @@ impl GraphStore {
     /// Open an existing graph without migrations or write privileges.
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let path = match (path.parent(), path.file_name()) {
-            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => parent
-                .canonicalize()
-                .map_or_else(|_| path.to_path_buf(), |parent| parent.join(name)),
+            (Some(parent), Some(name)) => nofollow_path(parent, name),
             _ => path.to_path_buf(),
         };
         let conn = Connection::open_with_flags(
@@ -2311,5 +2319,42 @@ mod tests {
             ]
         );
         assert!(decode_bindings("").is_empty());
+    }
+
+    /// A `.pixel` or a graph db that is a link (a repository can commit
+    /// either) is never opened through: the link target keeps its bytes and
+    /// its directory stays empty.
+    #[test]
+    fn open_should_refuse_a_linked_pixel_dir_or_db() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("repo");
+        let elsewhere = base.path().join("elsewhere");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        symlink(&elsewhere, root.join(".pixel")).unwrap();
+        let db = root.join(".pixel/graph.v2.db");
+        assert!(GraphStore::open(&db).is_err());
+        assert!(GraphStore::open_read_only(&db).is_err());
+        assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
+
+        let real = base.path().join("real");
+        std::fs::create_dir_all(real.join(".pixel")).unwrap();
+        let victim = base.path().join("victim.db");
+        std::fs::write(&victim, b"").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim, real.join(".pixel/graph.v2.db")).unwrap();
+        assert!(GraphStore::open(&real.join(".pixel/graph.v2.db")).is_err());
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"",
+            "an empty file became a db"
+        );
+
+        // A plain directory under a linked prefix still opens.
+        let linked_root = base.path().join("linked-root");
+        symlink(&real, &linked_root).unwrap();
+        std::fs::remove_file(real.join(".pixel/graph.v2.db")).unwrap();
+        GraphStore::open(&linked_root.join(".pixel/graph.v2.db")).unwrap();
     }
 }

@@ -198,17 +198,23 @@ pub fn reconcile(root: &Path, opts: &ReconcileOptions) -> Result<Value, String> 
 /// `pixel sync-branch` has reported a conflict and should allow raw `git rebase`
 /// as an escape hatch. Cleared on successful reconcile or by `pixel scope-task --clear`.
 fn write_conflict_state(root: &Path, conflict_count: usize) {
-    let pixel_dir = root.join(".pixel");
-    let _ = std::fs::create_dir_all(&pixel_dir);
+    let pixel_dir = pixel_git::sidecar::dir(root);
+    if pixel_git::sidecar::private_dir(&pixel_dir).is_err() {
+        return;
+    }
     let state = json!({
         "conflict_count": conflict_count,
         "written_unix": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
     });
-    let _ = std::fs::write(
-        pixel_dir.join("reconcile-conflict.json"),
-        serde_json::to_string_pretty(&state).unwrap_or_default(),
+    // Replaced by rename, never written through a link at the name.
+    let _ = pixel_git::nofollow::write_replace(
+        &pixel_dir.join("reconcile-conflict.json"),
+        serde_json::to_string_pretty(&state)
+            .unwrap_or_default()
+            .as_bytes(),
+        pixel_git::nofollow::PRIVATE_MODE,
     );
 }
 

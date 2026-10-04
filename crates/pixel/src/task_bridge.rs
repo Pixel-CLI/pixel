@@ -42,13 +42,8 @@ pub(crate) fn handle_hook(
     let binding_dir = root.join(".pixel/tasks/session-locks");
     pixel_ops::durable::ensure_dir(&binding_dir).map_err(error)?;
     let lock_name = pixel_task::digest(&(provider, &session)).map_err(error)?;
-    let binding_lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(binding_dir.join(&lock_name))
-        .map_err(error)?;
+    let binding_lock =
+        pixel_git::nofollow::open_lock(&binding_dir.join(&lock_name)).map_err(error)?;
     binding_lock.lock_exclusive().map_err(error)?;
     let prompt = session_prompt(root, &lock_name, event, payload)?;
     let existing = if let Some(id) = payload["task_id"].as_str() {
@@ -629,12 +624,7 @@ fn observed(
 ) -> Result<(), String> {
     let path = root.join(".pixel/task-hook-observations.json");
     pixel_ops::durable::ensure_dir(&root.join(".pixel")).map_err(error)?;
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.join(".pixel/task-hook-observations.lock"))
+    let lock = pixel_git::nofollow::open_lock(&root.join(".pixel/task-hook-observations.lock"))
         .map_err(error)?;
     lock.lock_exclusive().map_err(error)?;
     let mut value: Value = match std::fs::read(&path) {

@@ -2903,16 +2903,17 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
         .and_then(Value::as_array)
         .map_or(1, Vec::len);
     if let Some(parent) = manifest_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        pixel_git::sidecar::private_dir(parent)
+            .map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    let tmp = manifest_path.with_extension("json.tmp");
-    std::fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+    // A fresh temporary file renamed over the name: a link committed at
+    // either name is replaced, never written through.
+    pixel_git::nofollow::write_replace(
+        manifest_path,
+        &serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+        pixel_git::nofollow::PRIVATE_MODE,
     )
-    .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, manifest_path)
-        .map_err(|e| format!("publish {}: {e}", manifest_path.display()))?;
+    .map_err(|e| format!("publish {}: {e}", manifest_path.display()))?;
     Ok(active)
 }
 

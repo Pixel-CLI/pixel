@@ -15,6 +15,16 @@ use serde::{Deserialize, Serialize};
 
 use pixel_git::GitRunner;
 
+/// SQLite flags of an open of the existing history db: read-write, no
+/// mutex (one connection per thread), and never through a link at the db
+/// file (`SQLITE_OPEN_NOFOLLOW`).
+const OPEN_EXISTING: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
+    .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    .union(OpenFlags::SQLITE_OPEN_NOFOLLOW);
+
+/// [`OPEN_EXISTING`], creating the db when it is absent.
+const OPEN_OR_CREATE: OpenFlags = OPEN_EXISTING.union(OpenFlags::SQLITE_OPEN_CREATE);
+
 /// The on-disk history database file name, relative to the repo root.
 pub const HISTORY_DB_FILE: &str = "history.db";
 
@@ -286,17 +296,19 @@ impl FactsStore {
     /// a repaired date whose diff the window has not yet taken out.
     pub(crate) fn open_with(root: &Path, limits: &HistoryLimits) -> Result<Self> {
         let root = root.to_path_buf();
-        let pixel_dir = root.join(".pixel");
-        std::fs::create_dir_all(&pixel_dir)?;
-        // Ensure the .pixel directory is owner-only (0700) — it contains
-        // history.db, index shards, and actions.jsonl, some of which may
-        // carry fill values (passwords, OTPs) from flow replay.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&pixel_dir, std::fs::Permissions::from_mode(0o700));
-        }
-        let path = pixel_dir.join(HISTORY_DB_FILE);
+        // A `.pixel/` that is a link or that git tracks came from the
+        // repository: its db, marker included, is not pixel's to trust.
+        pixel_git::sidecar::check(&root)?;
+        let pixel_dir = pixel_git::sidecar::dir(&root);
+        // Owner-only (0700): it holds history.db, index shards, and
+        // actions.jsonl, some of which may carry fill values (passwords,
+        // OTPs) from flow replay.
+        pixel_git::sidecar::private_dir(&pixel_dir)?;
+        // SQLite's NOFOLLOW refuses a link at any component, `/var` ->
+        // `/private/var` included: resolve the directory once, so only the
+        // db file itself keeps the no-link protection.
+        let pixel_dir = pixel_dir.canonicalize()?;
+        let db = pixel_dir.join(HISTORY_DB_FILE);
         // Cross-process guard: without this, two concurrent pixel processes
         // (e.g. two agent sessions both running `pixel index --history`
         // against the same repo) can race the rebuild-decision + delete +
@@ -305,36 +317,33 @@ impl FactsStore {
         // those exact inodes, which SQLite surfaces as "disk I/O error"
         // rather than a lock-contention error. Held only for this open
         // sequence, not for the store's lifetime, so it doesn't serialize
-        // ongoing query traffic.
+        // ongoing query traffic. Opened without following a link, and never
+        // truncated: a lock needs no content.
         let lock_path = pixel_dir.join(format!("{HISTORY_DB_FILE}.lock"));
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&lock_path)?;
+        let lock_file = pixel_git::nofollow::open_lock(&lock_path)?;
         lock_file.lock()?;
         // Self-healing: rebuild on structural corruption OR a schema-version
         // mismatch OR a pre-versioned DB that already has rows. The db is
         // derived data, never load-bearing for correctness, so wiping it is
         // always safe — and this auto-heals every poisoned DB on next open
         // with no manual `rm` required.
-        let rebuild = Self::needs_rebuild(&path).unwrap_or(true);
+        let rebuild = Self::needs_rebuild(&db).unwrap_or(true);
         let (conn, upgraded) = if rebuild {
-            Self::remove_db(&path);
-            Self::open_conn(&path)?
+            Self::remove_db(&db);
+            Self::open_conn(&db)?
         } else {
-            match Self::open_conn(&path) {
+            match Self::open_conn(&db) {
                 Ok(opened) => opened,
                 Err(_) => {
-                    Self::remove_db(&path);
-                    Self::open_conn(&path)?
+                    Self::remove_db(&db);
+                    Self::open_conn(&db)?
                 }
             }
         };
         let mut store = FactsStore {
             conn,
             runner: GitRunner::new(&root),
-            path,
+            path: history_db_path(&root),
             root,
         };
         if upgraded {
@@ -367,14 +376,12 @@ impl FactsStore {
         }
         // READ_WRITE (not READ_ONLY) so a WAL-mode db with a live -wal file is
         // readable; the file exists so CREATE is unnecessary.
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        // Security: verify the _pixel_marker table exists and has the correct
-        // value. A db planted by a hostile repo (git add -f .pixel/history.db)
-        // will not have this marker and is wiped before any of its data is
-        // trusted or parsed.
+        let conn = Connection::open_with_flags(path, OPEN_EXISTING)?;
+        // The _pixel_marker table tells pixel's own db from a foreign or
+        // stale one, which is wiped before any of its data is used. It is no
+        // defence against a crafted db, whose marker anyone can write: a db
+        // committed under `.pixel/` is refused before this point, by
+        // `pixel_git::sidecar::check` in `open_with`.
         let has_marker: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='_pixel_marker'",
@@ -426,12 +433,7 @@ impl FactsStore {
 
     /// The connection, and whether it upgraded a version-2 db in place.
     fn open_conn(path: &Path) -> Result<(Connection, bool)> {
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        let conn = Connection::open_with_flags(path, OPEN_OR_CREATE)?;
         // Before the first table exists, or it has no effect: freed pages
         // are then tracked so `incremental_vacuum` can hand them back after
         // an eviction, instead of the file keeping its largest size forever.
@@ -764,7 +766,7 @@ INSERT OR IGNORE INTO _pixel_marker (key, val) VALUES ('created_by', 'pixel-fact
 
 /// `root/.pixel/history.db`.
 pub fn history_db_path(root: &Path) -> PathBuf {
-    root.join(".pixel").join(HISTORY_DB_FILE)
+    pixel_git::sidecar::dir(root).join(HISTORY_DB_FILE)
 }
 
 /// Shorten an oid to the conventional 12-char display form.
@@ -1021,5 +1023,61 @@ mod tests {
         drop(store);
         let store = FactsStore::open_with(root, &window).unwrap();
         assert_eq!(store.index_state().total_commits, 0, "version 1 rebuilt");
+    }
+
+    /// A `0644` file outside the repository, the target of a planted link.
+    fn sentinel(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("victim.txt");
+        std::fs::write(&path, "victim content\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        path
+    }
+
+    fn assert_intact(victim: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "victim content\n");
+        let mode = std::fs::metadata(victim).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o644);
+    }
+
+    #[test]
+    fn open_should_not_truncate_the_target_of_a_linked_lock() {
+        let (dir, _, _) = two_commit_repo();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = sentinel(outside.path());
+        std::fs::create_dir_all(dir.path().join(".pixel")).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join(".pixel/history.db.lock")).unwrap();
+        assert!(FactsStore::open(dir.path()).is_err());
+        assert_intact(&victim);
+    }
+
+    #[test]
+    fn open_should_replace_a_linked_db_without_touching_its_target() {
+        let (dir, _, _) = two_commit_repo();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = sentinel(outside.path());
+        std::fs::create_dir_all(dir.path().join(".pixel")).unwrap();
+        let db = history_db_path(dir.path());
+        std::os::unix::fs::symlink(&victim, &db).unwrap();
+        let store = FactsStore::open(dir.path()).unwrap();
+        assert_eq!(store.index_state().total_commits, 0);
+        assert_intact(&victim);
+        assert!(std::fs::symlink_metadata(&db).unwrap().is_file());
+    }
+
+    #[test]
+    fn open_should_refuse_a_history_db_the_repository_tracks() {
+        let (dir, _, _) = two_commit_repo();
+        let root = dir.path();
+        drop(FactsStore::open(root).unwrap());
+        git(root, &["add", "-f", ".pixel/history.db"]);
+        let before = std::fs::read(history_db_path(root)).unwrap();
+        let Err(FactsError::Io(error)) = FactsStore::open(root) else {
+            panic!("a tracked .pixel must be refused");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains(".pixel/history.db"), "{error}");
+        assert_eq!(std::fs::read(history_db_path(root)).unwrap(), before);
     }
 }

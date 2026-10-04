@@ -1,7 +1,6 @@
 //! Bounded local ranking over deterministic legal routes; every fallback preserves gates.
 
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -49,12 +48,7 @@ pub(crate) fn route(
     let cache_id = format!("route-{key}");
     let locks = root.join(".pixel/tasks/route-locks");
     pixel_ops::durable::ensure_dir(&locks).map_err(error)?;
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(locks.join(format!("{}-{key}", task.task_id)))
+    let lock = pixel_git::nofollow::open_lock(&locks.join(format!("{}-{key}", task.task_id)))
         .map_err(error)?;
     lock.lock_exclusive().map_err(error)?;
     let events = store.events(&task.task_id).map_err(error)?;

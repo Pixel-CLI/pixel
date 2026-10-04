@@ -9,7 +9,7 @@
 //! The lock is advisory (`flock`) and automatically released when the file
 //! descriptor is closed (process exit, panic, or explicit drop).
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::path::Path;
 
@@ -120,14 +120,9 @@ impl BuildLock {
     /// until it is available. The `.pixel` directory is created if missing.
     pub fn acquire(root: &Path) -> io::Result<Self> {
         let dir = root.join(SHARD_DIR);
-        std::fs::create_dir_all(&dir)?;
+        pixel_git::sidecar::private_dir(&dir)?;
         ensure_pixel_gitignored(root);
-        let lock_path = dir.join("build.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
+        let file = pixel_git::nofollow::open_lock(&dir.join("build.lock"))?;
         file.lock_exclusive()?;
         Ok(BuildLock { _file: file })
     }
@@ -136,14 +131,9 @@ impl BuildLock {
     /// if the lock is held by another process.
     pub fn try_acquire(root: &Path) -> io::Result<Option<Self>> {
         let dir = root.join(SHARD_DIR);
-        std::fs::create_dir_all(&dir)?;
+        pixel_git::sidecar::private_dir(&dir)?;
         ensure_pixel_gitignored(root);
-        let lock_path = dir.join("build.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
+        let file = pixel_git::nofollow::open_lock(&dir.join("build.lock"))?;
         match file.try_lock_exclusive() {
             Ok(()) => Ok(Some(BuildLock { _file: file })),
             Err(_) => Ok(None),

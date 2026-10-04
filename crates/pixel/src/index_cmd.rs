@@ -17,6 +17,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use pixel_daemon::api::GRAPH_DB_FILE;
+use pixel_facts::store::HISTORY_DB_FILE;
 use pixel_index::index::SHARD_DIR;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -85,12 +86,12 @@ fn pack_list(shard_dir: &Path, include_history: bool) -> Vec<PathBuf> {
     let mut names: Vec<String> = vec![GRAPH_DB_FILE.to_string()];
     names.extend(INDEX_FILES.iter().map(ToString::to_string));
     if include_history {
-        names.push("history.db".to_string());
+        names.push(HISTORY_DB_FILE.to_string());
     }
     // SQLite sidecars must travel with their db or the pack loses pages.
     let mut dbs = vec![GRAPH_DB_FILE];
     if include_history {
-        dbs.push("history.db");
+        dbs.push(HISTORY_DB_FILE);
     }
     for db in dbs {
         names.push(format!("{db}-wal"));
@@ -166,6 +167,17 @@ fn pack(root: &Path, out: &Path, include_history: bool) -> Result<Value, String>
     }))
 }
 
+/// Whether `name` is a file `pack` can write ([`pack_list`]): the index
+/// files, and the graph and history databases with their SQLite sidecars;
+/// nothing else.
+fn packable(name: &str) -> bool {
+    INDEX_FILES.contains(&name)
+        || [GRAPH_DB_FILE, HISTORY_DB_FILE].iter().any(|db| {
+            name.strip_prefix(db)
+                .is_some_and(|rest| matches!(rest, "" | "-wal" | "-shm"))
+        })
+}
+
 /// A pack source is a URL only when it opens with http(s):// — anything
 /// else is a filesystem path.
 fn is_url(source: &str) -> bool {
@@ -227,7 +239,10 @@ fn unpack(root: &Path, source: &str, force: bool) -> Result<Value, String> {
                     .map_err(|e| format!("index unpack: manifest: {e}"))?,
             );
         } else if let Some(file) = name.strip_prefix("files/") {
-            if file.contains('/') || file.is_empty() {
+            // Only the files `pack` writes may land in `.pixel/`: a pack is
+            // fetched from a path or a URL, and a member named `targets.json`
+            // or `..` would be a write the index never asked for.
+            if !packable(file) {
                 return Err(format!("index unpack: unsafe member {name}"));
             }
             blobs.push((file.to_string(), body));
@@ -254,10 +269,16 @@ fn unpack(root: &Path, source: &str, force: bool) -> Result<Value, String> {
     }
 
     let shard_dir = root.join(SHARD_DIR);
+    // The same trust check as every store open: a `.pixel/` the repository
+    // commits is not one to install an index into.
+    pixel_git::sidecar::check(root).map_err(|e| format!("index unpack: {e}"))?;
     let tmp_dir = shard_dir.join(format!(".unpack-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("index unpack: {e}"))?;
+    pixel_git::sidecar::private_dir(&tmp_dir).map_err(|e| format!("index unpack: {e}"))?;
     for (name, body) in &staged {
-        std::fs::write(tmp_dir.join(name), body)
+        let stage = tmp_dir.join(name);
+        let _ = std::fs::remove_file(&stage);
+        pixel_git::nofollow::create_new(&stage, pixel_git::nofollow::PRIVATE_MODE)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, body))
             .map_err(|e| format!("index unpack: stage {name}: {e}"))?;
     }
     let mut landed = Vec::new();
@@ -447,6 +468,65 @@ mod tests {
         let err = unpack(&dst, pack_file.to_str().unwrap(), true).unwrap_err();
         assert!(err.contains("unsafe member"), "{err}");
         let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    /// Only the files `pack` writes may land: a fetched pack naming
+    /// `targets.json` or `config.yaml` is refused before anything is staged.
+    #[test]
+    fn unpack_should_refuse_a_member_pack_never_writes() {
+        for member in [
+            "targets.json",
+            "config.yaml",
+            "state.json.bak",
+            "history.db-journal",
+        ] {
+            let dst = scratch("foreign");
+            let mut tar_bytes = Vec::new();
+            {
+                let mut builder = tar::Builder::new(&mut tar_bytes);
+                let body = b"planted";
+                let mut header = tar::Header::new_gnu();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, format!("files/{member}"), body.as_slice())
+                    .unwrap();
+                builder.finish().unwrap();
+            }
+            let pack_file = dst.join("foreign.pxpack");
+            std::fs::write(&pack_file, &tar_bytes).unwrap();
+            let err = unpack(&dst, pack_file.to_str().unwrap(), true).unwrap_err();
+            assert!(err.contains("unsafe member"), "{member}: {err}");
+            let staged: Vec<_> = std::fs::read_dir(dst.join(SHARD_DIR)).unwrap().collect();
+            assert!(staged.is_empty(), "{member}: {staged:?}");
+            let _ = std::fs::remove_dir_all(&dst);
+        }
+    }
+
+    #[test]
+    fn packable_should_accept_every_name_pack_list_can_produce() {
+        let root = scratch("packable");
+        let shard = root.join(SHARD_DIR);
+        for db in [GRAPH_DB_FILE, HISTORY_DB_FILE] {
+            for suffix in ["", "-wal", "-shm"] {
+                std::fs::write(shard.join(format!("{db}{suffix}")), b"x").unwrap();
+            }
+        }
+        for name in INDEX_FILES {
+            std::fs::write(shard.join(name), b"x").unwrap();
+        }
+        let listed = pack_list(&shard, true);
+        assert_eq!(listed.len(), 9);
+        for path in listed {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            assert!(packable(&name), "{name}");
+        }
+        assert!(
+            !packable("graph.db"),
+            "an older schema's graph never travels"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `head_matches` compares the packed head with the checkout's — both

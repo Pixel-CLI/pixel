@@ -18,6 +18,7 @@ mutants = { workspace = true }
 # that feature alone pulls the `image` crate with every codec (rav1e, exr,
 # tiff, png…), 64 crates in the CLI's dependency graph.
 fastembed = { version = "7", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+pixel-git = { path = "../pixel-git" }
 pixel-graph = { path = "../pixel-graph" }
 pixel-index = { path = "../pixel-index" }
 pixel-rank = { path = "../pixel-rank" }

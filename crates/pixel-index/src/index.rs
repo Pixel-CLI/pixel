@@ -18,7 +18,8 @@ use crate::posting::resolve_query;
 use crate::shard::{Shard, ShardBuilder, ShardError};
 use crate::verify::{MatchLine, Verifier, VerifyError};
 
-pub const SHARD_DIR: &str = ".pixel";
+/// Pixel's per-repository state directory (`pixel_git::sidecar`).
+pub const SHARD_DIR: &str = pixel_git::sidecar::DIR_NAME;
 pub const SHARD_FILE: &str = "base.shard";
 pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -87,6 +88,11 @@ pub fn credential_path(path: &Path) -> bool {
     name.starts_with(".env")
         || name.ends_with(".env")
         || name.starts_with("credentials.")
+        // `~/.aws/credentials`, `~/.netrc`, git's credential store.
+        || matches!(
+            name.as_str(),
+            "credentials" | ".netrc" | "_netrc" | ".git-credentials"
+        )
         // Extensionless too: `secret_token` or `client_secret` holds the
         // value itself as often as `app_secret.yaml` does.
         || name.contains("secret")
@@ -794,6 +800,11 @@ mod tests {
             // Extensionless secret-named files carry the value itself.
             "secret_token",
             "deploy/client_secret",
+            ".aws/credentials",
+            "credentials",
+            ".netrc",
+            "home/_netrc",
+            ".git-credentials",
             "SECRET",
         ];
         for path in positives {
@@ -805,6 +816,9 @@ mod tests {
         let negatives = [
             "src/main.rs",
             "src/credentials_helper.rs",
+            "src/credentials_store/mod.rs",
+            "netrc.md",
+            ".git-credentials-helper.sh",
             "Cargo.toml",
             "config.yaml",
             "deploy/notes.md",

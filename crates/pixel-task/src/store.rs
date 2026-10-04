@@ -95,13 +95,7 @@ impl Store {
         {
             return Err(Error::Invalid("task directory escapes task store".into()));
         }
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(directory.join("lock"))?;
+        let lock = pixel_git::nofollow::open_lock(&directory.join("lock"))?;
         lock.try_lock_exclusive()
             .map_err(|_| Error::Busy(task_id.into()))?;
         Ok(TaskLock(lock))
@@ -735,6 +729,7 @@ impl Store {
             .create(true)
             .truncate(false)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(directory.join("journal.jsonl"))?;
         let mut prior = Vec::new();
         journal.read_to_end(&mut prior)?;
