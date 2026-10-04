@@ -634,6 +634,51 @@ Pull request body, in this order:
 Keep PRs to one concern. A change over roughly 400 lines of diff or mixing
 concerns should be split into a stack of PRs.
 
+### Code review
+
+Every change reaches `main` through a pull request; the `main` ruleset
+refuses a direct push. A pull request is reviewed in two passes, and merges
+only when both are done.
+
+**How it is reviewed.**
+
+1. **Automated review, on every pull request that is not a draft.**
+   CodeRabbit reviews the diff against this file, `.agents/rules/` and the
+   rust-guidelines skill (next section); `pixel review-gate` runs the
+   deterministic checks before every push (the pre-push hook enforces it);
+   CI runs the gates of the Definition of done, the mutation gate on the
+   diff, CodeQL, cargo-deny and, for the code they cover, fuzzing.
+2. **A maintainer's review.** A maintainer (GOVERNANCE.md) reads every pull
+   request before it merges: a contributor's from a fork, after approving
+   its CI run; their own, once the automated pass is answered. The
+   maintainers decide alone or together as GOVERNANCE.md describes.
+
+**What the reviewer checks.**
+
+- **It is worth having**: one concern, tied to its task (`Task <n>`), and
+  the change is the smallest that does the job.
+- **It is correct**: the code does what the body says, including the
+  failure paths, and the tests prove it: each new behaviour has a test that
+  fails without it, and no `MISSED` mutant is left in the diff.
+- **It is safe**: a change that crosses a trust boundary of
+  `docs/threat-model.md` updates the matching threat, and the arguments of
+  `docs/assurance-case.md` still hold; no secret reaches a log, a test
+  fixture or an action log unmasked; new input is validated where it
+  enters.
+- **It is maintainable**: it reads like the code around it, follows the
+  lint table and `.agents/rules/rust-style.md`, and uses the named
+  constants rather than copies (`.agents/rules/change-propagation.md`).
+- **It is documented**: the changelog fragment, `ARCHITECTURE.md`, the
+  agent prompt and the user docs say what changed, and the body states how
+  it was verified and what was not run.
+
+**What is acceptable.** A pull request merges when every Definition of
+done line holds, the required status checks are green, `pixel review-gate`
+reports no `BLOCKER` or `CONCERN`, every CodeRabbit finding has an answer in
+its thread, and the maintainer who merges it has read the diff. Anything
+less is sent back with what is missing (see "Things that will get a PR sent
+back").
+
 ### CodeRabbit reviews
 
 CodeRabbit reviews pull requests into any base branch — `main`,
@@ -826,6 +871,15 @@ what happened, the steps to reproduce, the output of `pixel --version` (release,
 commit and target) and the platform and install method. Questions and ideas go
 to [GitHub Discussions](https://github.com/Pixel-CLI/pixel/discussions).
 Vulnerabilities never go in a public issue: see the next section.
+
+## Small tasks for new contributors
+
+Issues labelled [`good first issue`](https://github.com/Pixel-CLI/pixel/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+are small, self-contained and described well enough to start without
+knowing the whole code base: a missing test the threat model names, a
+bounded fix, a documentation gap. Comment on the issue to take it, then
+follow this file; `help wanted` marks the ones the maintainers would most
+like help with.
 
 ## Security
 
