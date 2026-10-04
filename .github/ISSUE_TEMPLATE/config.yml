@@ -1,0 +1,11 @@
+# The web chooser offers the bug form and the two links below, so a report
+# carries its version, platform and steps; maintainers still file issues
+# through `gh issue create` or the API, which this setting does not affect.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Pixel-CLI/pixel/security/advisories/new
+    about: Privately, through a GitHub security advisory. Never in a public issue.
+  - name: Ask a question or share an idea
+    url: https://github.com/Pixel-CLI/pixel/discussions
+    about: Usage questions and proposals go to GitHub Discussions.

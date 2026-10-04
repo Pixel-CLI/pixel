@@ -178,6 +178,7 @@ flowchart TD
 - [Benchmarks](https://pixel-cli.dev/benchmarks/): every number with its method, losses included
 - [ARCHITECTURE.md](ARCHITECTURE.md): crates and the full command surface
 - [CONTRIBUTING.md](CONTRIBUTING.md): build from source, gates, pull requests
+- [Report a bug](https://github.com/Pixel-CLI/pixel/issues/new?template=bug_report.yml): the issue form asks for the version, the platform and the steps to reproduce; vulnerabilities go through [SECURITY.md](SECURITY.md) instead
 
 MIT licensed. See [`NOTICE`](NOTICE) for attribution.
 
