@@ -428,6 +428,9 @@ the `/tmp/pixel-bench-*` scratch.
 
 ## Repository map
 
+[GOVERNANCE.md](GOVERNANCE.md) lists the maintainers, their roles and who
+holds each sensitive resource.
+
 The project spans two repositories: [Pixel-CLI/pixel](https://github.com/Pixel-CLI/pixel),
 the source, and [LivioGama/homebrew-tap](https://github.com/LivioGama/homebrew-tap),
 which holds the Homebrew formula the release workflow pushes on each tag when
