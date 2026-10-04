@@ -73,12 +73,20 @@ for status in queued in_progress; do
         [ -z "$rows" ] && break
         while IFS=$'\t' read -r id head event created; do
             [ -z "$id" ] && continue
+            # Never this sweep's own run: cancelling it mid-loop leaves the
+            # rest of the list standing.
+            [ "$id" = "${GITHUB_RUN_ID:-}" ] && continue
+            # pull_request_target runs (the board sync) execute the base
+            # branch's workflow on the close/merge event itself: they record
+            # the pull request's outcome instead of validating its head, so a
+            # merge must not cancel them (it left merged tasks In Progress).
+            [ "$event" = "pull_request_target" ] && continue
             [ -n "$branch" ] && [ "$head" != "$branch" ] && continue
             # The periodic closed-PR sweep only touches pull-request runs
             # whose branch has no open PR; push/dispatch on main stays.
             if [ "$closed" -eq 1 ]; then
                 case "$event" in
-                    pull_request|pull_request_target) ;;
+                    pull_request) ;;
                     *) continue ;;
                 esac
                 [ "$head" = "main" ] && continue
