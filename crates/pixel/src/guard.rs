@@ -6933,6 +6933,23 @@ mod tests {
         assert!(line.contains("#000002"), "{line}");
     }
 
+    /// Two zero-duration records at the same instant share a boundary on
+    /// both sides: the strict `<` overlap test keeps the newest record
+    /// attributable (the `<=` variant would see the shared point as an
+    /// overlap and suppress it).
+    #[test]
+    fn metrics_hook_line_keeps_a_zero_duration_record_at_the_same_instant() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("same-instant");
+        let start = pixel_actionlog::now_ms().saturating_sub(60_000);
+        fixture.record_interval("impact", "impact src/login.rs", "x-000001", start, 0);
+        fixture.record_interval("impact", "impact src/login.rs", "x-000002", start, 0);
+        let line =
+            metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs")))
+                .unwrap();
+        assert!(line.contains("#00000"), "{line}");
+    }
+
     #[test]
     fn metrics_hook_response_dedupes_except_for_claude_users() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
