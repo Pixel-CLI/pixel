@@ -408,7 +408,8 @@ the `/tmp/pixel-bench-*` scratch.
 
 The project spans two repositories: [Pixel-CLI/pixel](https://github.com/Pixel-CLI/pixel),
 the source, and [LivioGama/homebrew-tap](https://github.com/LivioGama/homebrew-tap),
-which holds the Homebrew formula the release workflow writes on every tag.
+which holds the Homebrew formula the release workflow pushes on each tag when
+the `HOMEBREW_TAP_TOKEN` secret is set (it warns and skips the tap otherwise).
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full map. The short version:
 
