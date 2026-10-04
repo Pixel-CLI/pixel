@@ -180,12 +180,32 @@ const mayMutate = (tool: string, input: any): boolean => {
   if (tool === "pixel" || tool === "pixel_project") return !["scope_task", "list_areas", "search_content", "find_code", "impact", "pack_context", "what_changed", "review_changes"].includes(input?.action);
   if (!["Bash", "bash", "shell", "local_shell", "unified_exec", "exec_command"].includes(tool)) return !["Read", "read", "Glob", "glob", "Grep", "grep", "WebSearch", "web_search", "WebFetch", "web_fetch", "AskUserQuestion", "ls", "find", "list_dir", "grep_search", "file_search", "view_file"].includes(tool);
   const command = String(input?.command ?? input?.cmd ?? "");
+  // Proven reads, alone, piped or sequenced: every leaf is judged (task_hook.rs `shell_mutates`).
   const segments = splitShellSegments(command);
-  if (!segments || segments.slice(1).some((segment) => !segment.piped)) return true;
+  if (!segments) return true;
   return segments.some((segment) => taskLeafMutates(segment.text, segments.length === 1));
 };
+// `sed -n` printing one line or range, the bounded read Pixel advises (task_hook.rs `sed_read`).
+const printRange = (script: string): boolean => {
+  const line = (text: string) => text === "$" || /^[0-9]+$/.test(text);
+  if (!script.endsWith("p")) return false;
+  const [start, end, ...rest] = script.slice(0, -1).split(",");
+  return rest.length === 0 && line(start) && (end === undefined || line(end.startsWith("+") ? end.slice(1) : end));
+};
+const sedRead = (args: string[]): boolean => {
+  let quiet = false;
+  let script: string | undefined;
+  for (const arg of args) {
+    if (["-n", "--quiet", "--silent"].includes(arg)) quiet = true;
+    else if (["-E", "-r", "--regexp-extended"].includes(arg)) continue;
+    else if (arg.startsWith("-")) return false;
+    else if (script === undefined) script = arg;
+  }
+  return quiet && script !== undefined && printRange(script);
+};
 const taskLeafMutates = (command: string, recovery: boolean): boolean => {
-  let words = tokenizeShell(command, true);
+  // Discarding diagnostics writes nothing; any other redirection stays gated.
+  let words = tokenizeShell(command.endsWith(" 2>/dev/null") ? command.slice(0, -" 2>/dev/null".length) : command, true);
   if (!words?.length) return true;
   const base = (name: string) => name.split("/").at(-1);
   if (base(words[0]) === "rtk") words = words.slice(words[1] === "proxy" ? 2 : 1);
@@ -194,7 +214,8 @@ const taskLeafMutates = (command: string, recovery: boolean): boolean => {
   if (["rg", "grep"].includes(base(words[0] ?? "") ?? "")) return !searchRead(words.slice(1));
   if (base(words[0] ?? "") === "sort") return !sortRead(words.slice(1));
   if (base(words[0] ?? "") === "uniq") return !uniqRead(words.slice(1));
-  return !["pwd", "true", "false", "cat", "head", "tail", "wc", "ls", "read"].includes(base(words[0] ?? "") ?? "");
+  if (base(words[0] ?? "") === "sed") return !sedRead(words.slice(1));
+  return !["pwd", "true", "false", "cat", "head", "tail", "wc", "ls", "read", "cd", "nl", "echo"].includes(base(words[0] ?? "") ?? "");
 };
 
 // Authority, completion budgets and deduplication live in the task engine.

@@ -139,9 +139,14 @@ fn imported_claude_task_entries_should_stay_silent_without_suppressing_codex() {
     }
 }
 
-#[test]
-fn stalled_native_gate_should_deny_and_exit_before_the_host_deadline() {
-    let root = repo("held-session-lock");
+/// Holds the session's binding lock so the task evaluator stalls, sends one
+/// `Write` through the real hook, and returns its output once the holder is
+/// released. Asserts the hook answered on its watchdog, inside the host deadline.
+fn stalled_write(tag: &str, settings: Option<&str>) -> (Scratch, Value) {
+    let root = repo(tag);
+    if let Some(settings) = settings {
+        fs::write(root.join(".pixel/config.yaml"), settings).unwrap();
+    }
     let directory = root.join(".pixel/tasks/session-locks");
     fs::create_dir_all(&directory).unwrap();
     let lock_name = pixel_task::digest(&("codex", "stalled-session")).unwrap();
@@ -185,6 +190,17 @@ fn stalled_native_gate_should_deny_and_exit_before_the_host_deadline() {
         elapsed < Duration::from_secs(9),
         "hook exceeded its host deadline margin: {elapsed:?}"
     );
+    assert_eq!(
+        fs::read_to_string(root.join("source.txt")).unwrap(),
+        "original\n"
+    );
+    (root, output)
+}
+
+#[test]
+fn stalled_native_gate_should_deny_enforced_edits_before_the_host_deadline() {
+    let (_root, output) =
+        stalled_write("held-session-lock", Some("task:\n  enforcement: enforce\n"));
     assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
     assert!(
@@ -193,10 +209,14 @@ fn stalled_native_gate_should_deny_and_exit_before_the_host_deadline() {
             .unwrap()
             .contains("unavailable")
     );
-    assert_eq!(
-        fs::read_to_string(root.join("source.txt")).unwrap(),
-        "original\n"
-    );
+}
+
+#[test]
+fn stalled_native_gate_should_only_observe_an_unenforced_session() {
+    // An answering ledger only observes edits without enforcement; a stalled
+    // one must not deny more.
+    let (_root, output) = stalled_write("held-unenforced-lock", None);
+    assert_eq!(output, json!({}));
 }
 
 fn requested(events: &[TelemetryEvent]) -> Vec<&TelemetryEvent> {

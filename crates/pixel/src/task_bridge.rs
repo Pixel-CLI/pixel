@@ -15,6 +15,29 @@ use serde_json::{Value, json};
 
 use crate::task_commands::{error, observe};
 
+/// One empty file per provider/session whose task recorded enforced gates,
+/// named like its `session-locks/` entry. The hook's fallback reads it when
+/// the ledger cannot answer in time, without opening the store.
+const ENFORCED_SESSIONS: &str = ".pixel/tasks/enforced-sessions";
+
+/// Whether a hook whose ledger did not answer would have been enforced:
+/// `task.enforcement: enforce` in the repository settings (unreadable
+/// settings count as enforced), or a session `handle_hook` marked enforced.
+/// A session enforced before the marker existed is marked by its next answered
+/// hook; until then its configuration alone decides.
+pub(crate) fn fallback_enforced(root: &Path, provider: &str, session: Option<&str>) -> bool {
+    if crate::task_config::enabled(root).unwrap_or(true) {
+        return true;
+    }
+    let Some(session) = session.filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    session_key(session)
+        .and_then(|session| pixel_task::digest(&(provider, &session)).map_err(error))
+        .ok()
+        .is_none_or(|name| root.join(ENFORCED_SESSIONS).join(name).exists())
+}
+
 pub(crate) fn handle_hook(
     root: &Path,
     provider: &str,
@@ -148,6 +171,9 @@ pub(crate) fn handle_hook(
             "host_policy",
             json!({"enforce":true}),
         )?;
+        let markers = root.join(ENFORCED_SESSIONS);
+        pixel_ops::durable::ensure_dir(&markers).map_err(error)?;
+        pixel_ops::durable::write_durably(&markers.join(&lock_name), b"").map_err(error)?;
     }
     task = store.status(&task.task_id).map_err(error)?;
     drop(binding_lock);
@@ -706,6 +732,57 @@ mod tests {
             "the isolated child must run the named test: {}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+
+    #[test]
+    fn fallback_should_enforce_only_configured_or_marked_sessions() {
+        let root = Scratch::new();
+        // No settings, no marker: a ledger that answered would only observe.
+        assert!(!fallback_enforced(&root.0, "claude", Some("session-a")));
+        assert!(!fallback_enforced(&root.0, "claude", None));
+        assert!(!fallback_enforced(&root.0, "claude", Some("")));
+
+        let name = pixel_task::digest(&("claude", session_key("session-a").unwrap())).unwrap();
+        std::fs::create_dir_all(root.0.join(ENFORCED_SESSIONS)).unwrap();
+        std::fs::write(root.0.join(ENFORCED_SESSIONS).join(name), b"").unwrap();
+        assert!(fallback_enforced(&root.0, "claude", Some("session-a")));
+        // The marker is per provider and per session.
+        assert!(!fallback_enforced(&root.0, "codex", Some("session-a")));
+        assert!(!fallback_enforced(&root.0, "claude", Some("session-b")));
+
+        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
+        assert!(fallback_enforced(&root.0, "codex", None));
+        std::fs::write(&config, "task:\n  enforcement: sometimes\n").unwrap();
+        assert!(
+            fallback_enforced(&root.0, "codex", None),
+            "unreadable settings count as enforced"
+        );
+        std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
+        assert!(!fallback_enforced(&root.0, "codex", Some("session-a")));
+    }
+
+    #[test]
+    fn an_enforced_hook_should_leave_the_marker_its_fallback_reads() {
+        let root = Scratch::new();
+        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
+        let prompt =
+            json!({"session_id":"s1","prompt":"fix the parser bug in src/a.rs","mutation":false});
+        handle_hook(&root.0, "claude", "prompt-submit", &prompt).unwrap();
+        assert!(
+            !root.0.join(ENFORCED_SESSIONS).exists(),
+            "advisory sessions leave no marker"
+        );
+
+        std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
+        handle_hook(&root.0, "claude", "prompt-submit", &prompt).unwrap();
+        // Enforcement turned off afterwards: the task keeps its obligations, and
+        // so does the fallback that cannot open the store.
+        std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
+        assert!(fallback_enforced(&root.0, "claude", Some("s1")));
+        assert!(!fallback_enforced(&root.0, "claude", Some("s2")));
     }
 
     #[test]
