@@ -723,7 +723,9 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   job runs the same suite on a dated nightly under `cargo llvm-cov
   --branch` and writes branch and line totals, one row per crate, to its
   summary; it uploads the raw JSON report as the `coverage-branch-summary`
-  artifact).
+  artifact and the per-line lcov report as `coverage-branch-lcov`, which
+  `scripts/coverage-uncovered-branches.py` turns into uncovered branches per
+  file and line).
 - `fuzz/` is a cargo-fuzz crate with its own `[workspace]`, outside the
   root workspace (no root `cargo` command builds it). `graph_extract` feeds
   arbitrary source to `pixel_graph::extract::extract_file` (no panic, lines

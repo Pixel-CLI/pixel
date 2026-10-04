@@ -206,6 +206,10 @@ jobs:
         run: |
           cargo +"$NIGHTLY" llvm-cov report --branch --json --summary-only \
             --output-path target/coverage-branch.json
+          # Per-line branch records (BRDA) for picking test targets:
+          # scripts/coverage-uncovered-branches.py reads this file.
+          cargo +"$NIGHTLY" llvm-cov report --branch --lcov \
+            --output-path target/coverage-branch.lcov
           python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           import json
           from collections import defaultdict
@@ -242,6 +246,14 @@ jobs:
         with:
           name: coverage-branch-summary
           path: target/coverage-branch.json
+          if-no-files-found: ignore
+
+      - name: Upload the per-line branch report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-branch-lcov
+          path: target/coverage-branch.lcov
           if-no-files-found: ignore
 
       - name: Tests passed
