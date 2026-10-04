@@ -2590,7 +2590,8 @@ mod tests {
         fix_for, judge_repair, names_check, normalize_rule_command, one_line,
         probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
         rtk_backup_check, run_repair, scenario_mismatches, selected, shell_path_check, shell_word,
-        spec, split_home_repairs, validate_selection,
+        spec, split_home_repairs, validate_selection, web_search_provider_check,
+        web_search_provider_from,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
