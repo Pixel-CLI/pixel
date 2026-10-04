@@ -2667,6 +2667,7 @@ mod tests {
         spec, split_home_repairs, validate_selection, web_search_provider_check_with,
         web_search_provider_from,
     };
+    use super::env_non_empty;
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
 
@@ -3381,6 +3382,34 @@ mod tests {
         assert!(err.contains("invalid configuration"), "{err}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `env_non_empty` drives the env leg of the check: a value counts as
+    /// configured only when it is present, valid UTF-8, and non-empty. The
+    /// stored-config tests go through `web_search_provider_check_with` with
+    /// explicit booleans, so this raw read needs its own cases. A dedicated
+    /// name keeps the `PIXEL_WEB_SEARCH_URL`/`PERPLEXITY_API_KEY` the CLI
+    /// really reads untouched.
+    #[test]
+    fn env_non_empty_counts_only_a_present_non_empty_utf8_value() {
+        const VAR: &str = "PIXEL_QR_DOCTOR_WEB_SEARCH_PROBE";
+
+        unsafe { std::env::remove_var(VAR) };
+        assert!(!env_non_empty(VAR), "absent counts as not configured");
+
+        unsafe { std::env::set_var(VAR, "") };
+        assert!(!env_non_empty(VAR), "empty counts as not configured");
+
+        unsafe { std::env::set_var(VAR, "https://sx.test") };
+        assert!(env_non_empty(VAR), "non-empty counts as configured");
+
+        // A value the CLI cannot read as UTF-8 is unusable, so it too counts
+        // as not configured rather than selecting a provider.
+        let non_utf8 = std::ffi::OsString::from_vec(vec![0xf0, 0x28, 0x8c, 0x28]);
+        unsafe { std::env::set_var(VAR, non_utf8) };
+        assert!(!env_non_empty(VAR), "non-UTF-8 counts as not configured");
+
+        unsafe { std::env::remove_var(VAR) };
     }
 
     /// A stalled shell must not outlive the probe: `bounded_output` returns
