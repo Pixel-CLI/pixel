@@ -344,10 +344,10 @@ const PASTE_CLOSE: &str = "</pasted_content";
 pub(crate) fn typed_text(prompt: &str) -> String {
     let mut typed = String::new();
     let mut rest = prompt;
-    while let Some(start) = rest.find(PASTE_OPEN) {
+    while let Some(start) = find_tag(rest, PASTE_OPEN) {
         typed.push_str(&rest[..start]);
         let after = &rest[start + PASTE_OPEN.len()..];
-        let Some(close) = after.find(PASTE_CLOSE) else {
+        let Some(close) = find_tag(after, PASTE_CLOSE) else {
             return typed;
         };
         let tail = &after[close + PASTE_CLOSE.len()..];
@@ -358,6 +358,21 @@ pub(crate) fn typed_text(prompt: &str) -> String {
     }
     typed.push_str(rest);
     typed
+}
+
+/// The first `tag` that ends at a tag boundary (`>` or whitespace), so a
+/// longer name such as `</pasted_contentious>` is not taken for it.
+fn find_tag(haystack: &str, tag: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(found) = haystack[from..].find(tag) {
+        let at = from + found;
+        let next = haystack[at + tag.len()..].chars().next();
+        if next.is_none_or(|ch| ch == '>' || ch.is_whitespace()) {
+            return Some(at);
+        }
+        from = at + tag.len();
+    }
+    None
 }
 
 /// A token that can only be a name in code: `a::b`, `snake_case`, `camelCase`
@@ -1047,6 +1062,17 @@ mod tests {
             ),
             "a b c"
         );
+        // A longer tag name neither opens nor closes a block.
+        assert_eq!(
+            typed_text("<pasted_content>q </pasted_contentious>check guard.rs</pasted_content>x"),
+            " x"
+        );
+        assert_eq!(
+            typed_text("see <pasted_contents> here"),
+            "see <pasted_contents> here"
+        );
+        // A tag cut off by the end of the prompt still opens a block.
+        assert_eq!(typed_text("a <pasted_content"), "a ");
         // A block that ends the prompt leaves no trailing separator.
         assert_eq!(typed_text("x<pasted_content>y</pasted_content>"), "x");
         assert_eq!(
