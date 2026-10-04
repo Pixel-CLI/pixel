@@ -304,6 +304,10 @@ pub enum Provider {
     /// Cursor's `postToolUse` hook: flat `{tool_name, tool_input, tool_output,
     /// cwd, duration}` payload, `additional_context` (snake_case) response.
     Cursor,
+    /// GitHub Copilot CLI hooks: camelCase payload (`toolName`, `toolArgs`,
+    /// `toolResult.textResultForLlm`), top-level `additionalContext`
+    /// response.
+    Copilot,
 }
 
 const MANIFEST_MAX_AGE_SECS: u64 = 24 * 3600;
@@ -573,7 +577,9 @@ fn provider_rewrite_with(
         Provider::Opencode => matches!(tool, "bash" | "Bash"),
         // Antigravity has no documented input rewrite contract; Cursor's
         // preToolUse goes through the implicit (provider-less) guard path.
-        Provider::Antigravity | Provider::Cursor => return None,
+        // Copilot's rewrites use a different field (`modifiedArgs`) the
+        // guard does not emit yet — deny-only for now.
+        Provider::Antigravity | Provider::Cursor | Provider::Copilot => return None,
     };
     if !shell {
         return None;
@@ -661,6 +667,29 @@ fn opencode_tool_input(mut payload: Value) -> Value {
 
 /// Normalize Antigravity's documented toolCall payload at the provider boundary.
 fn provider_payload(provider: Provider, mut payload: Value) -> Value {
+    // Copilot CLI sends camelCase fields; normalize to the shared
+    // snake_case shape the rest of the guard reads.
+    if provider == Provider::Copilot {
+        if payload.get("tool_name").is_none()
+            && let Some(value) = payload.get("toolName").cloned()
+        {
+            payload["tool_name"] = value;
+        }
+        if payload.get("tool_input").is_none()
+            && let Some(value) = payload.get("toolArgs").cloned()
+        {
+            // The CLI hook docs describe `toolArgs` as a JSON string; the
+            // SDK sends the object itself. Accept both.
+            payload["tool_input"] = match value.as_str().and_then(|s| {
+                let parsed: Result<Value, _> = serde_json::from_str(s);
+                parsed.ok()
+            }) {
+                Some(parsed) => parsed,
+                None => value,
+            };
+        }
+        return payload;
+    }
     if provider == Provider::Antigravity
         && let Some(call) = payload.get("toolCall")
     {
@@ -788,7 +817,12 @@ fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
             "repository read: use exec with pixel search-content or pixel pack-context <uid>"
                 .into(),
         ),
-        "read" | "view_file" | "notebook_read" if path.is_some() && !bounded_read(input) => {
+        // `view` is Copilot CLI's file-read tool (its camelCase payload is
+        // normalized to `tool_name="view"` upstream). Like the other reads,
+        // an unbounded in-repo read is a policy denial.
+        "read" | "view" | "view_file" | "notebook_read"
+            if path.is_some() && !bounded_read(input) =>
+        {
             Some(REPO_READ_REASON.into())
         }
         _ => None,
@@ -1212,6 +1246,17 @@ fn enforce_deny(provider: Provider, reason: &str) -> Value {
             "user_message": reason,
             "agent_message": reason,
             "additional_context": reason,
+        }),
+        // Copilot reads a flat `permissionDecision`; the Claude-style
+        // envelope is emitted alongside for the VS Code-compatible shape.
+        Provider::Copilot => serde_json::json!({
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
         }),
         _ => serde_json::json!({
             "hookSpecificOutput": {
@@ -3112,22 +3157,27 @@ pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
 /// Whether the host already put the invocation's 🟩 box in the tool result.
 fn result_carries_metrics_box(payload: &Value) -> bool {
     // `tool_response` is the Claude/Codex/Devin field; Cursor's postToolUse
-    // sends the same idea as `tool_output` (a JSON-stringified result).
-    ["tool_response", "tool_output"].iter().any(|key| {
-        payload
-            .get(key)
-            .is_some_and(|r| r.to_string().contains("🟩 pixel"))
-    })
+    // sends the same idea as `tool_output` (a JSON-stringified result);
+    // Copilot nests it under `toolResult.textResultForLlm` — the serialized
+    // contains-check reaches the nested text field.
+    ["tool_response", "tool_output", "toolResult"]
+        .iter()
+        .any(|key| {
+            payload
+                .get(key)
+                .is_some_and(|r| r.to_string().contains("🟩 pixel"))
+        })
 }
 
 /// The provider-shaped envelope for a replayed metrics line: Cursor's
-/// postToolUse contract is flat snake_case `additional_context`; every
-/// other host takes the Claude-style advisory shape.
+/// postToolUse contract is flat snake_case `additional_context` and
+/// Copilot's is flat camelCase `additionalContext`; every other host takes
+/// the Claude-style advisory shape.
 fn metrics_relay_response(provider: Option<Provider>, line: &str) -> Value {
-    if provider == Some(Provider::Cursor) {
-        serde_json::json!({"additional_context": line})
-    } else {
-        post_tool_use_advisory(line)
+    match provider {
+        Some(Provider::Cursor) => serde_json::json!({"additional_context": line}),
+        Some(Provider::Copilot) => serde_json::json!({"additionalContext": line}),
+        _ => post_tool_use_advisory(line),
     }
 }
 

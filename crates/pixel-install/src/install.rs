@@ -210,6 +210,14 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             &home, &exe, dry_run,
         )?);
     }
+    // Copilot CLI keeps user-level hooks in `~/.copilot/hooks/*.json`;
+    // pixel writes a dedicated `pixel.json` rather than merging into
+    // foreign hook files.
+    if crate::copilot_config::copilot_hooks_dir(&home).is_some() {
+        steps.push(crate::copilot_config::install_copilot_hooks(
+            &home, &exe, dry_run,
+        )?);
+    }
     steps.push(crate::routing::install_zcode_at(&home, &exe, dry_run)?);
     if home.join(".cursor").is_dir() {
         steps.push(install_cursor_hooks(&home, &exe, dry_run)?);
