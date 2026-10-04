@@ -12,6 +12,7 @@ owner_repo=${PIXEL_REPO:-Pixel-CLI/pixel}
 branch=
 all=0
 older_than=0
+closed=0
 apply=0
 
 usage() {
@@ -30,17 +31,28 @@ while [ $# -gt 0 ]; do
         --repo) owner_repo=$2; shift 2 ;;
         --branch) branch=$2; shift 2 ;;
         --all) all=1; shift ;;
+        --closed) closed=1; shift ;;
         --older-than) older_than=$2; shift 2 ;;
         --apply) apply=1; shift ;;
         *) usage; exit 2 ;;
     esac
 done
 
-if [ -z "$branch" ] && [ "$all" -ne 1 ]; then
-    echo "cancel-stale: pick --branch NAME or --all" >&2
+if [ -z "$branch" ] && [ "$all" -ne 1 ] && [ "$closed" -ne 1 ]; then
+    echo "cancel-stale: pick --branch NAME, --all or --closed" >&2
     usage
     exit 2
 fi
+
+# For --closed: the set of branches with an open pull request. Any run whose
+# head branch is not in it validates a closed/merged PR and is cancelled —
+# this catches post-close pushes to deleted branches, which the
+# pull_request:[closed] event (a point-in-time snapshot) cannot see.
+open_branches=""
+if [ "$closed" -eq 1 ]; then
+    open_branches=$(gh api "repos/$owner_repo/pulls?state=open&per_page=100" --jq '.[] | .head.ref' | sort -u)
+fi
+
 
 older() {
     python3 - "$1" "$2" <<'PY'
@@ -62,6 +74,19 @@ for status in queued in_progress; do
         while IFS=$'\t' read -r id head event created; do
             [ -z "$id" ] && continue
             [ -n "$branch" ] && [ "$head" != "$branch" ] && continue
+            # The periodic closed-PR sweep only touches pull-request runs
+            # whose branch has no open PR; push/dispatch on main stays.
+            if [ "$closed" -eq 1 ]; then
+                case "$event" in
+                    pull_request|pull_request_target) ;;
+                    *) continue ;;
+                esac
+                [ "$head" = "main" ] && continue
+                if printf '%s\n' "$open_branches" | grep -qx "$head"; then continue; fi
+                # Runs queued for days are undispatchable ghosts the cancel
+                # API refuses (409) — skip them so the sweep stays quiet.
+                if older "$created" 2880; then continue; fi
+            fi
             # --older-than keeps fresh runs and purges only the backlog
             # (older() exits 0 when the run is past the cutoff).
             if [ "$older_than" -gt 0 ] && ! older "$created" "$older_than"; then

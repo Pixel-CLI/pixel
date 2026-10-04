@@ -11,6 +11,12 @@ name: Cancel stale runs
 on:
   pull_request:
     types: [closed]
+  # The close event is a point-in-time snapshot: a post-close push to a
+  # deleted branch (or a superseded queue entry) fires no new event. A
+  # periodic sweep catches those, so the runner queue never grows on runs
+  # whose PR is already closed.
+  schedule:
+    - cron: '*/10 * * * *'
 
 permissions:
   actions: write
@@ -23,8 +29,13 @@ jobs:
         with:
           ref: main
       - name: Cancel this PR's queued and in-progress runs
-        if: github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         run: bash scripts/cancel-stale-runs.sh --branch "$PR_HEAD" --apply
         env:
           GH_TOKEN: ${{ github.token }}
           PR_HEAD: ${{ github.event.pull_request.head.ref }}
+      - name: Cancel runs whose PR is already closed
+        if: github.event_name == 'schedule'
+        run: bash scripts/cancel-stale-runs.sh --closed --apply
+        env:
+          GH_TOKEN: ${{ github.token }}
