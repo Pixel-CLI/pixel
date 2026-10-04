@@ -1,0 +1,37 @@
+{
+  "id": "ab-git-shard-cap",
+  "suite": "ab626",
+  "task_class": "git-ops",
+  "mode": "answer",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 30,
+  "prompt": "From this repository's git history up to HEAD: which commit raised the CI mutation gate's cap on parallel shard jobs to 15 (short SHA, date and pull request number), what was the cap before it, and how many commits does HEAD have since the v0.6.1 tag?",
+  "must": [
+    {
+      "pattern": "f12011b",
+      "points": 3,
+      "why": "the commit"
+    },
+    {
+      "pattern": "\\b543\\b",
+      "points": 2,
+      "why": "its pull request"
+    },
+    {
+      "pattern": "2026-10-03|Oct(?:ober)?\\.? 3\\b|3 Oct",
+      "points": 1,
+      "why": "its date"
+    },
+    {
+      "pattern": "\\b10\\b[^\\n]{0,60}\\b15\\b|\\b10\\s*(?:->|→|to)\\s*15|(?:was|previously|before)[^\\n]{0,30}\\b10\\b",
+      "points": 2,
+      "why": "the previous cap"
+    },
+    {
+      "pattern": "\\b177\\b",
+      "points": 3,
+      "why": "git rev-list --count v0.6.1..HEAD"
+    }
+  ],
+  "never": []
+}

@@ -7,6 +7,7 @@ Usage: build_codex_cfg.py <input-config.toml> <output-config.toml> <mode> [paylo
 
 mode baseline: drop the pixel-managed block from developer_instructions entirely.
 mode payload:  swap the managed block's content for the payload file's text.
+mode keep:     copy the config unchanged (the installed block).
 Everything outside the markers stays byte-identical.
 """
 import sys
@@ -18,6 +19,10 @@ END = "<!-- pixel:managed:end -->"
 def main() -> None:
     src, dst, mode = sys.argv[1], sys.argv[2], sys.argv[3]
     text = open(src, encoding="utf-8").read()
+    if mode == "keep":
+        # The installed block as `pixel install` wrote it (quiet/full arms).
+        open(dst, "w", encoding="utf-8").write(text)
+        return
     b = text.find(BEGIN)
     e = text.find(END)
     if b == -1 or e == -1 or e < b:

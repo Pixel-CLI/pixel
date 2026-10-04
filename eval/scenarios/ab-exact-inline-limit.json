@@ -1,0 +1,58 @@
+{
+  "id": "ab-exact-inline-limit",
+  "suite": "ab626",
+  "task_class": "exact-identifier",
+  "mode": "answer",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 30,
+  "prompt": "What is `CLAUDE_INLINE_CONTEXT_LIMIT`, where is it defined, and what does pixel do with its session-start prompt when the prompt would not fit under it?",
+  "must": [
+    {
+      "pattern": "guard\\.rs",
+      "points": 3,
+      "why": "definition file (crates/pixel/src/guard.rs)"
+    },
+    {
+      "pattern": "10[_ ,]?000",
+      "points": 3,
+      "why": "the value"
+    },
+    {
+      "pattern": "UTF-?16",
+      "points": 1,
+      "why": "the unit it counts"
+    },
+    {
+      "pattern": "DEFERRABLE_SECTIONS",
+      "points": 2,
+      "why": "what is dropped first"
+    },
+    {
+      "pattern": "When native tools are right|Reading results",
+      "points": 1,
+      "why": "the deferrable sections by name"
+    },
+    {
+      "pattern": "fit_prompt",
+      "points": 2,
+      "why": "the fitting function"
+    },
+    {
+      "pattern": "persisted-output|2\\s?KB",
+      "points": 1,
+      "why": "why: past the limit Claude Code shows a preview"
+    },
+    {
+      "pattern": "freshness",
+      "points": 1,
+      "why": "the freshness line is budgeted first"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "CLAUDE_INLINE_CONTEXT_LIMIT[^\\n]{0,40}\\b(?:2000|2 ?KB|12[_ ,]?487)\\b",
+      "penalty": 2,
+      "why": "wrong value"
+    }
+  ]
+}

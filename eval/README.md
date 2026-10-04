@@ -6,52 +6,230 @@ with no pixel guidance at all.
 
 ## Shape
 
-- `scenarios/*.json` — one natural question each, with a pattern rubric
-  (`must` = earned points, `never` = penalties for known-wrong claims).
-- `run.sh` — builds a scratch worktree + Claude config per arm, deploys the
-  arm's payload to `~/.local/share/pixel/agent-prompt.md` (backed up, restored
-  on exit), runs the CLIs, then scores.
+- `scenarios/*.json` — one natural task each. Answer tasks carry a pattern
+  rubric (`must` = earned points, `never` = penalties for known-wrong
+  claims); edit tasks (`"mode": "edit"`) carry a held-out `verifier`.
+  `lib/scenario.py` documents every field and `check`s a corpus.
+- `heldout/<id>/` — the edit tasks' verifiers, and each answer task's
+  `reference-answer.md`, which its rubric must score at full marks without
+  a penalty (the offline test enforces it). run.sh copies a verifier in only
+  after the agent exits; the scratch worktree never contains `eval/`.
+- `run.sh` — builds a scratch worktree + Claude/Codex config per arm, deploys
+  the arm's payload to `~/.local/share/pixel/agent-prompt.md` (backed up,
+  restored on exit), runs the CLIs in counterbalanced arm order, runs the
+  verifiers, then scores.
 - `score.py` — mechanical scoring of transcripts (answered? pattern hits?
-  turns/tokens/cost). No LLM judge: reproducible.
+  verifier verdict? turns/tokens/cost, pixel and native-search calls, read
+  width after a pixel hit). No LLM judge: reproducible.
+- `report.py` — host × task-class win/tie/loss against `baseline`, paired by
+  scenario and repetition, plus pixel adoption per arm.
 - `gate.py --candidate <arm> --baseline baseline` — PASS only if the
   candidate answers every scenario, scores >= baseline everywhere, and burns
   <= 1.5x baseline turns. Any single regression fails.
+- `fixtures/` — offline stand-ins for `claude`, `codex` and `pixel`;
+  `scripts/test-agent-ab-harness.py` drives the whole pipeline with them.
 
 ## Arms
 
-| arm | hooks | AGENTS.md block | session-start payload |
-| --- | --- | --- | --- |
-| `baseline` | none | stripped | n/a |
-| `on` | one clean pixel set | committed (current `RULES_BODY`) | deployed asset (14.3 KB today — Claude Code truncates it to a ~2 KB preview) |
-| `v<name>` | one clean pixel set | `variants/<name>/rules-body.md` | `variants/<name>/agent-prompt.md` |
+| arm | hooks | AGENTS.md block | session-start payload | pixel binary + `.pixel` index |
+| --- | --- | --- | --- | --- |
+| `baseline` | none | stripped | n/a | hidden (`BASELINE_PIXEL=hidden`, default): `pixel` on PATH answers "command not found", no index, no pixel skill |
+| `quiet` | the installed set filtered to `run-hook session-start` / `post-compaction` (global and repo-local) | `pixel install --repo` | the deployed prompt | present |
+| `full` | every hook the operator's `pixel install` wrote + `pixel install --repo` (Claude guard, Codex composed guard) | `pixel install --repo` | the deployed prompt | present |
+| `on` | one clean pixel set | committed (current `RULES_BODY`) | `variants/frozen-main` | present |
+| `v<name>` | one clean pixel set | `variants/<name>/rules-body.md` | `variants/<name>/agent-prompt.md` | present |
+
+`quiet` and `full` differ in the hook set alone (prompt-submit task packet,
+metrics relay, post-edit relay, guard, task events). `baseline` and `quiet`
+differ in the whole pixel integration: that is the "Opus alone vs Opus +
+Pixel" comparison. `BASELINE_PIXEL=present` gives the earlier baseline
+(binary and index reachable, no doctrine), which the tables below used.
+
+For Codex, `quiet` keeps the installed `developer_instructions` block and the
+repo-local `session-start` hook; its global hooks file has no session-start
+entry, so none of it survives the filter.
 
 ## Run
 
 ```bash
-CLIS=claude ARMS="baseline on" eval/run.sh          # defaults: 3 scenarios, 20-turn budget
+CLIS=claude ARMS="baseline on" eval/run.sh          # defaults: 3 scenarios, 12-turn budget
 CLIS=claude ARMS="vslim" eval/run.sh                # then:
 python3 eval/gate.py --results eval/results --scenarios-dir eval/scenarios --candidate vslim
 ```
 
+`REPS=n` repeats every cell; `ORDER_SEED` (default: `SUITE`, else `eval`)
+fixes the arm order. Each (rep, host, scenario) cell runs its arms in the
+order `lib/arm_order.py` derives — the controlled runner's
+sha256-permutation-and-rotation, generalised to any arm count — so over
+every `len(ARMS)` reps each arm holds each position once.
+
 ## CLIs
 
-`claude` is the scored default (headless `-p`, stream-json). `agy` works via
+`claude` is the scored default (headless `-p`, stream-json,
+`--model "$CLAUDE_MODEL"`, default `claude-opus-5-5`). `agy` works via
 `-p --output-format stream-json` (its global pixel plugin is toggled off for
-non-`on` arms and restored). `codex` runs `exec --json --sandbox read-only`
-with per-arm isolation: build_arm renders a CODEX_HOME whose
-`developer_instructions` pixel block is stripped (baseline) or swapped for the
-arm payload, plus a copy of `auth.json`. `pi` runs `-p` as a **coverage arm**:
-its pixel integration is a global extension with no per-arm config isolation
-yet, so pi rows measure the installed state rather than arm variants —
-per-arm pi isolation is the known follow-up. Any CLI can also plug in by
-dropping an executable `eval/clis/<name>.sh` that reads `$WT`, `$CFG`,
-`$PROMPT`, `$OUT`, `$MAX_TURNS` and writes the run's transcript to `$OUT`;
-run.sh picks it up automatically and skips the CLI with rc 9 until it exists.
+non-`on` arms and restored). `codex` runs `exec --json --ephemeral
+--model "$CODEX_MODEL" -c model_reasoning_effort="$CODEX_REASONING"`
+(defaults `gpt-5.6-terra`, `medium`) with `--dangerously-bypass-hook-trust`
+(the per-arm hooks file sits at a scratch path no `/hooks` review trusted)
+and, by default, `--dangerously-bypass-approvals-and-sandbox` — the same
+authority Claude's `--dangerously-skip-permissions` run has; a read-only
+sandbox blocks the edit tasks' builds and pixel's own `.pixel/` writes
+(`CODEX_SANDBOX=read-only` restores the old behaviour). build_arm renders a
+CODEX_HOME whose `developer_instructions` pixel block is stripped
+(baseline), swapped for the arm payload (variants) or kept (quiet/full),
+plus a copy of `auth.json` and the arm's `hooks.json`. `pi` runs `-p` as a
+**coverage arm**: its pixel integration is a global extension with no
+per-arm config isolation yet, so pi rows measure the installed state rather
+than arm variants. Any CLI can also plug in by dropping an executable
+`eval/clis/<name>.sh` that reads `$WT`, `$CFG`, `$PROMPT`, `$OUT`,
+`$MAX_TURNS` and writes the run's transcript to `$OUT`; run.sh picks it up
+automatically and skips the CLI with rc 9 until it exists.
 
 ## Results
 
-Transcripts land in `results/` (gitignored). `results/scores.json` is the
-machine-readable scoreboard consumed by `gate.py`.
+Transcripts land in `results/` (gitignored; `RESULTS=` points elsewhere).
+`results/scores.json` is the machine-readable scoreboard consumed by
+`gate.py` and `report.py`.
+
+```
+results/
+  .identity              the campaign identity; a different campaign refuses to reuse the dir
+  campaign.json          arms, hosts, scenarios, reps, seed, models, host and pixel versions
+  setup.jsonl            per pinned commit: index build and prepare-repo time, .pixel size
+  rep-N/<scenario>-<arm>.<cli>.jsonl        the host's native transcript
+  rep-N/<scenario>-<arm>.<cli>.run.json     run identity: commit, model, cli_version, position,
+                                            wall_ms, warm_ms, exit_code, hook-file hashes
+  rep-N/<scenario>-<arm>.<cli>.verify.json  edit tasks: passed, rc, wall_ms, heldout_sha256
+  rep-N/<scenario>-<arm>.<cli>.{err,verify.log,warm.log,actions.jsonl}
+  scores.json            one row per run (score.py)
+```
+
+A row that cannot be measured stays `null`: Codex reports no cost, a
+transcript without usage has no token counts, and `report.py` counts a pair
+with an unknown quality as `unknown`, never as a tie.
+
+## The #626 round: Pixel against no Pixel, per host and task class
+
+Scenarios with `"suite": "ab626"` (14) are pinned to commits of this
+repository; the answers and line numbers hold for those trees only.
+
+| scenario | task_class | mode | pinned | verifier |
+| --- | --- | --- | --- | --- |
+| `ab-exact-protocol-version` | exact-identifier | answer | `cdca0c3` | rubric |
+| `ab-exact-inline-limit` | exact-identifier | answer | `cdca0c3` | rubric |
+| `ab-concept-output-cap` | concept | answer | `cdca0c3` | rubric |
+| `ab-concept-graph-freshness` | concept | answer | `cdca0c3` | rubric |
+| `ab-impact-failure-response` | callers-impact | answer | `cdca0c3` | rubric (includes a test site the graph does not list) |
+| `ab-impact-tree-delta` | callers-impact | answer | `cdca0c3` | rubric |
+| `ab-rename-graph-db-file` | rename | edit | `cdca0c3` | no word `GRAPH_DB_FILE` left in tracked files, 13 files renamed, value kept, `cargo check` of 3 crates |
+| `ab-rename-mutants-per-shard` | rename | edit | `cdca0c3` | no word `MUTANTS_PER_SHARD` left (Python, YAML, Markdown), shard arithmetic unchanged |
+| `ab-bugfix-ts-overflow` | bugfix | edit | `e99939b` (parent of `313bb53`) | held-out test file + crate unit tests |
+| `ab-bugfix-global-excludes` | bugfix | edit | `4aa6790` (parent of `2732fa2`) | held-out test file + crate unit tests |
+| `ab-feature-ts-units` | feature | edit | `cdca0c3` | held-out test file + help/error strings + crate unit tests |
+| `ab-git-shard-cap` | git-ops | answer | `cdca0c3` | rubric |
+| `ab-config-nextest` | non-code | answer | `cdca0c3` | rubric |
+| `ab-explain-daemon-route` | explanation | answer | `cdca0c3` | rubric |
+
+Each held-out verifier was checked before freezing: the two bug-fix tests
+fail at their pinned parent and pass with the historical fix applied, and the
+feature test fails at `cdca0c3` and passes with a reference implementation.
+Each answer rubric was checked the other way: its reference answer, written
+against the pinned tree, earns every point, and a wrong claim it names
+(`ENVELOPE_PROTOCOL_VERSION` is 13, "the CI run passes", a daemon calling the
+uncached `tree_delta`) costs points. `lib/scenario.py check` refuses a pinned
+commit that already contains its own scenario or verifier.
+
+### Commands
+
+One campaign per host, so each has its own identity and results directory
+and the two are never pooled. A shared `SCRATCH` reuses the per-commit
+indexes and the warm build caches between them. `pixel install` must have
+run on the machine: `quiet` and `full` start from the installed hooks.
+
+```bash
+SCRATCH=/tmp/pixel-ab626 RESULTS=eval/results/ab626-claude \
+  CLIS=claude CLAUDE_MODEL=claude-opus-5-5 \
+  ARMS="baseline quiet full" SUITE=ab626 REPS=3 eval/run.sh
+python3 eval/report.py --results eval/results/ab626-claude --json eval/results/ab626-claude/report.json
+
+SCRATCH=/tmp/pixel-ab626 RESULTS=eval/results/ab626-codex \
+  CLIS=codex CODEX_MODEL=gpt-5.6-terra CODEX_REASONING=medium \
+  ARMS="baseline quiet full" SUITE=ab626 REPS=3 eval/run.sh
+python3 eval/report.py --results eval/results/ab626-codex --json eval/results/ab626-codex/report.json
+```
+
+An interrupted campaign resumes with the same command: a cell whose
+transcript, `.run.json` and identity match is skipped. Changing the model,
+a host version, the arms, the reps or the seed changes the identity, and
+run.sh refuses the old directory instead of mixing the two. When done:
+`rm -rf /tmp/pixel-ab626 && git worktree prune`.
+
+The offline proof of the same pipeline, no model call (about 3 minutes):
+
+```bash
+python3 scripts/test-agent-ab-harness.py
+```
+
+### Reading the report
+
+For each host, one row per (task class, arm): `n` paired runs, wins / ties /
+losses against the baseline run of the same scenario and repetition (tie
+margin ±0.05 quality, `--tie-margin`), the mean quality difference with its
+min–max, an exact sign test on wins against losses, and the median per-pair
+ratio of wall time, tokens and tool calls (with how many pairs had both
+sides measured). The `all` row pools the classes of that host only. With
+2 scenarios × 3 reps = 6 pairs per cell, the smallest two-sided sign-test
+p-value is 0.03 (6 wins, 0 losses); 5–1 gives 0.22. A cell verdict is a
+direction to look at, not a finding: read it beside the min–max and the
+transcripts.
+
+The adoption table counts, per arm, runs that called pixel at all, pixel
+calls against native searches (`grep`, `rg`, `git grep`, Grep, Glob), and
+the width of every read that followed a pixel `path:line` hit (median lines,
+and how many read the whole file).
+
+### Cost estimate (not measured on this corpus)
+
+Basis: the 22 Opus 5.5 runs of `docs/bench/problem-trace/runs.json` (Claude
+Code 2.1.286, `claude-opus-5-5`, effort medium, one locate-only task on this
+repository): `total_cost_usd` median $0.36 (range $0.28–$0.53), 8–11 turns,
+about 45 s each. At Opus 5.5's list price ($4 / $20 per million input /
+output tokens, cache reads $0.20) such a run is roughly 0.3–0.4 M input
+tokens, mostly cache reads, and a few thousand output tokens. The edit tasks
+have no measured basis; they are assumed to cost 2–5× an answer task, 3× in
+the central figure (more turns, build and test output in context). Codex:
+the October n1 round ("Earlier results" below) measured 163–341 K input
+tokens per answer run on the same repository; `codex exec` reports no price,
+and with ChatGPT sign-in (`auth.json`) the runs draw on the plan's limits
+rather than a per-token bill.
+
+| per host, 14 scenarios × 3 arms × 3 reps = 126 runs | answer runs (81) | edit runs (45) | total |
+| --- | --- | --- | --- |
+| Claude, $ (Claude Code's own figure) | ≈ $29 ($23–43) | ≈ $49 ($32–81) | **≈ $80 ($55–125)** |
+| Claude, input tokens | ≈ 28 M | ≈ 45 M | ≈ 75 M, mostly cache reads |
+| Codex, input tokens | ≈ 20 M | ≈ 35 M | ≈ 55 M; $ unknown |
+| wall time, sequential | ≈ 1 h | ≈ 3–4 h | ≈ 4–5 h per host, plus index builds and cold `cargo` builds (one build cache per arm and pinned commit; keep about 30 GB of disk free) |
+
+Replace this estimate with the measured `cost_usd` and token sums of
+`scores.json` once the round has run.
+
+### Known confounds
+
+- The repository's own `AGENTS.md`, `.agents/rules` and `.claude/rules`
+  mention pixel in every arm; only the managed block is stripped from the
+  baseline. A baseline pixel attempt fails fast and shows up in its
+  transcript and adoption row.
+- Operator-wide settings that are not pixel's travel into every arm alike:
+  `~/.claude/CLAUDE.md`, non-pixel Claude skills and plugins, and the whole
+  `~/.codex/config.toml` (including any `model_instructions_file`).
+- The verifiers are hidden from the scratch worktree, not from the
+  machine: an agent that searched the harness checkout by absolute path
+  could find them.
+- `ab-bugfix-ts-overflow` and `ab-feature-ts-units` touch the same function
+  at different commits.
+
+## Earlier results
 
 ### Measured on this branch (claude / deepseek-v4-flash, 20-turn budget, Sept 2026)
 

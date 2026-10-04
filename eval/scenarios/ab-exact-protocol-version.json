@@ -1,0 +1,53 @@
+{
+  "id": "ab-exact-protocol-version",
+  "suite": "ab626",
+  "task_class": "exact-identifier",
+  "mode": "answer",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 30,
+  "prompt": "What value is `PROTOCOL_VERSION` set to, where is it defined, and what does the pixel CLI do when the daemon answering on a repository's socket reports a different protocol version (older or newer)?",
+  "must": [
+    {
+      "pattern": "pixel-daemon/src/api\\.rs",
+      "points": 3,
+      "why": "definition file"
+    },
+    {
+      "pattern": "PROTOCOL_VERSION[^\\n]{0,60}\\b13\\b|\\b13\\b[^\\n]{0,40}PROTOCOL_VERSION|(?:is|=|set to|value(?: is)?:?)\\s*`?13\\b",
+      "points": 3,
+      "why": "the value"
+    },
+    {
+      "pattern": "classify_ping|probe_daemon|DaemonProbe",
+      "points": 2,
+      "why": "the probe that compares versions"
+    },
+    {
+      "pattern": "crates/pixel/src/main\\.rs",
+      "points": 1,
+      "why": "where the CLI side lives"
+    },
+    {
+      "pattern": "retire_stale_daemon|shut(?:s|ting)?\\s+(?:it\\s+)?down|Shutdown",
+      "points": 2,
+      "why": "an older daemon is shut down and replaced"
+    },
+    {
+      "pattern": "DaemonProbe::Newer|Declined|newer[^\\n]{0,120}(?:left (?:alone|running)|in[- ]process|not (?:shut|stopp?ed|kill))",
+      "points": 2,
+      "why": "a newer daemon is left alone"
+    },
+    {
+      "pattern": "in[- ]process|Service::open",
+      "points": 1,
+      "why": "the command then runs in process"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "ENVELOPE_PROTOCOL_VERSION[^\\n]{0,40}\\b13\\b",
+      "penalty": 2,
+      "why": "the envelope schema version is 1, a different constant"
+    }
+  ]
+}

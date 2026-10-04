@@ -1,0 +1,53 @@
+{
+  "id": "ab-impact-tree-delta",
+  "suite": "ab626",
+  "task_class": "callers-impact",
+  "mode": "answer",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 30,
+  "prompt": "Is `pixel_graph::build::tree_delta` (the uncached variant) still used by production code? If we deleted it, what would break?",
+  "must": [
+    {
+      "pattern": "pixel-bench/benches/tree_delta\\.rs|benches/tree_delta",
+      "points": 3,
+      "why": "the one non-test caller"
+    },
+    {
+      "pattern": "tree_delta_cached",
+      "points": 2,
+      "why": "what production uses instead"
+    },
+    {
+      "pattern": "\\bno\\b[^\\n]{0,80}production|not used (?:by|in) production|only (?:used )?(?:by|in) (?:the )?(?:tests?|bench)|tests? and (?:the )?bench",
+      "points": 2,
+      "why": "the verdict"
+    },
+    {
+      "pattern": "build\\.rs[^\\n]{0,80}tests?|tests?[^\\n]{0,80}build\\.rs|unit tests?",
+      "points": 1,
+      "why": "pixel-graph's own tests call it"
+    },
+    {
+      "pattern": "pixel-daemon/src/api\\.rs|ensure_graph|bridge::tree_delta_cached",
+      "points": 1,
+      "why": "the daemon's production path"
+    },
+    {
+      "pattern": "tree_delta_with",
+      "points": 1,
+      "why": "the shared implementation"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "bridge::tree_delta\\b(?!_cached)",
+      "penalty": 2,
+      "why": "the daemon bridge only wraps the cached variant"
+    },
+    {
+      "pattern": "(?:production|daemon) (?:code )?(?:still )?calls? `?tree_delta`?(?!_cached)",
+      "penalty": 2,
+      "why": "production does not call the uncached variant"
+    }
+  ]
+}

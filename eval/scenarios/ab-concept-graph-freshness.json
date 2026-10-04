@@ -1,0 +1,63 @@
+{
+  "id": "ab-concept-graph-freshness",
+  "suite": "ab626",
+  "task_class": "concept",
+  "mode": "answer",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 30,
+  "prompt": "After I edit a few source files and no pixel daemon is running, how does pixel bring its code graph up to date on the next graph query, and when does it rebuild the whole graph instead?",
+  "must": [
+    {
+      "pattern": "tree_delta",
+      "points": 2,
+      "why": "the drift measurement"
+    },
+    {
+      "pattern": "apply_tree_delta|incremental_update",
+      "points": 2,
+      "why": "the incremental apply"
+    },
+    {
+      "pattern": "hash",
+      "points": 1,
+      "why": "per-file content hashes"
+    },
+    {
+      "pattern": "PIXEL_GRAPH_INCREMENTAL_MAX_PCT",
+      "points": 2,
+      "why": "the threshold knob"
+    },
+    {
+      "pattern": "DEFAULT_GRAPH_INCREMENTAL_MAX_PCT|\\b20\\s?%|\\b20 percent|default(?:s)?(?: is| of| to)?:?\\s*`?20\\b",
+      "points": 2,
+      "why": "its default"
+    },
+    {
+      "pattern": "no_signature|freshness signature|no signature",
+      "points": 1,
+      "why": "a db without signature is rebuilt"
+    },
+    {
+      "pattern": "pixel-graph/src/build\\.rs",
+      "points": 2,
+      "why": "where the delta lives"
+    },
+    {
+      "pattern": "pixel-daemon/src/api\\.rs|ensure_graph",
+      "points": 1,
+      "why": "where the decision is taken"
+    },
+    {
+      "pattern": "re-?resolv",
+      "points": 1,
+      "why": "calls into changed files are re-resolved"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "(?:every|each) (?:edit|change|graph (?:query|command))[^\\n]{0,40}(?:rebuild|full build)|rebuilds? (?:the )?(?:whole|entire|full) graph (?:on|after) every",
+      "penalty": 2,
+      "why": "drift under the threshold is applied incrementally"
+    }
+  ]
+}

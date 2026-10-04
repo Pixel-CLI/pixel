@@ -1,0 +1,53 @@
+{
+  "id": "ab-config-nextest",
+  "suite": "ab626",
+  "task_class": "non-code",
+  "mode": "answer",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 30,
+  "prompt": "In this repository's CI, how long can a single test run before nextest reports it as slow, and when is it killed? And what happens to a test that fails and then passes when retried — does the CI run pass?",
+  "must": [
+    {
+      "pattern": "nextest\\.toml",
+      "points": 1,
+      "why": "the config file"
+    },
+    {
+      "pattern": "\\b60\\s?s\\b|60 seconds|one minute|1 minute",
+      "points": 1,
+      "why": "slow at 60 s"
+    },
+    {
+      "pattern": "\\b180\\s?s\\b|180 seconds|3 minutes|three minutes",
+      "points": 3,
+      "why": "killed at 180 s (terminate-after = 3 periods)"
+    },
+    {
+      "pattern": "terminate-after",
+      "points": 1,
+      "why": "the key"
+    },
+    {
+      "pattern": "retries\\s*=\\s*1|one retry|1 retry|retried once|retries once|retry once",
+      "points": 2,
+      "why": "the ci profile retries once"
+    },
+    {
+      "pattern": "flaky-result|FLAKY",
+      "points": 1,
+      "why": "flaky handling"
+    },
+    {
+      "pattern": "(?:still )?fails?(?: the)? (?:CI )?run|run (?:still )?fails|does not pass|doesn't pass|is not green|not (?:a )?pass|counts? as (?:a )?fail",
+      "points": 3,
+      "why": "a flaky pass still fails the run"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "\\brun (?:still |then )?(?:passes|succeeds|is green)\\b|\\bCI (?:still |then )?(?:passes|succeeds|is green)\\b",
+      "penalty": 2,
+      "why": "flaky-result = fail: the run fails"
+    }
+  ]
+}

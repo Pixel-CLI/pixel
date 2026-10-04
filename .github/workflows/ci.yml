@@ -255,6 +255,7 @@ jobs:
           ^\.github/workflows/
           ^\.agents/skills/release/
           ^\.agents/skills/pixel-retro/
+          ^eval/
           ^\.cargo/mutants\.toml$
           (^|/)Cargo\.toml$
           ^Cross\.toml$
@@ -491,6 +492,11 @@ jobs:
       - name: Mutation gate config contract (no module silently excluded)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-mutants-config.py
+
+      # The agent A/B harness end to end against fixture CLIs: no model call.
+      - name: Agent A/B harness contract (fixture claude/codex/pixel, disposable repo)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-agent-ab-harness.py
 
       - name: Retro lead-time contract (synthetic transcripts, no network)
         if: ${{ needs.changes.outputs.scripts == 'true' }}

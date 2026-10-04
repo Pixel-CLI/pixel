@@ -1,0 +1,63 @@
+{
+  "id": "ab-concept-output-cap",
+  "suite": "ab626",
+  "task_class": "concept",
+  "mode": "answer",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 30,
+  "prompt": "What stops a pixel command from flooding an agent's context with a huge answer, how can that limit be changed, and what does a `--json` answer look like when it hits the limit?",
+  "must": [
+    {
+      "pattern": "256\\s?(?:KB|KiB|k\\b)|256 \\* 1024|262[,_ ]?144",
+      "points": 2,
+      "why": "the default cap"
+    },
+    {
+      "pattern": "PIXEL_OUTPUT_CAP_BYTES",
+      "points": 3,
+      "why": "the override"
+    },
+    {
+      "pattern": "\\b0\\b[^\\n]{0,60}(?:lift|disabl|unlimit|no cap|remov)|(?:lift|disabl)[^\\n]{0,60}\\b0\\b",
+      "points": 1,
+      "why": "0 lifts the cap"
+    },
+    {
+      "pattern": "truncated_arrays",
+      "points": 2,
+      "why": "the structural-cut metadata"
+    },
+    {
+      "pattern": "cap_bytes",
+      "points": 1,
+      "why": "the cap echoed in the answer"
+    },
+    {
+      "pattern": "largest arrays?|shorten|trim(?:s|med|ming)? (?:the )?(?:largest|arrays)",
+      "points": 1,
+      "why": "how the cut is made"
+    },
+    {
+      "pattern": "print_data|stdout_byte_cap|STDOUT_BYTE_CAP|truncate_structurally|render_data",
+      "points": 2,
+      "why": "the code that enforces it"
+    },
+    {
+      "pattern": "crates/pixel/src/main\\.rs",
+      "points": 1,
+      "why": "where"
+    },
+    {
+      "pattern": "partial",
+      "points": 1,
+      "why": "the last-resort wrapper"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "PIXEL_OUTPUT_CAP_BYTES[^\\n]{0,60}\\b0\\b[^\\n]{0,40}(?:disables output|prints nothing|suppress)",
+      "penalty": 2,
+      "why": "0 lifts the cap, it does not silence output"
+    }
+  ]
+}

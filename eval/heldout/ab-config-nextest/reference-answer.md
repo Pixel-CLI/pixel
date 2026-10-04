@@ -1,0 +1,1 @@
+`.config/nextest.toml`: `slow-timeout = { period = "60s", terminate-after = 3 }` — a test is reported slow after 60 s and killed after 3 periods, i.e. 180 s. The `ci` profile sets `retries = 1` and `flaky-result = "fail"`: a test that fails then passes on retry is reported FLAKY and still fails the run.

@@ -1,0 +1,16 @@
+{
+  "id": "ab-feature-ts-units",
+  "suite": "ab626",
+  "task_class": "feature",
+  "mode": "edit",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 60,
+  "prompt": "`pixel list-errors since --ts <window>` accepts windows in seconds, minutes, hours and days (`30s`, `5m`, `2h`, `1d`, or a bare number of seconds). Add two units: weeks (`w`, e.g. `2w`) and milliseconds (`ms`, e.g. `250ms`). Existing units must keep working, invalid or overflowing values must still be rejected without panicking, and both the `--ts` help text and the bad-duration error message must list the new units.",
+  "warm": "cargo test -q -p pixel-session --no-run",
+  "verifier": {
+    "script": "check.sh",
+    "timeout_s": 1200
+  },
+  "must": [],
+  "never": []
+}

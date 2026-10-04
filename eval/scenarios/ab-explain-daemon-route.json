@@ -1,0 +1,73 @@
+{
+  "id": "ab-explain-daemon-route",
+  "suite": "ab626",
+  "task_class": "explanation",
+  "mode": "answer",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 30,
+  "prompt": "Explain what happens, step by step, when an agent runs `pixel search-content` in a repository whose pixel daemon is not running yet. How is the request served, and how can that automatic behaviour be turned off?",
+  "must": [
+    {
+      "pattern": "\\bexecute\\b",
+      "points": 1,
+      "why": "the CLI entry"
+    },
+    {
+      "pattern": "\\bping|probe",
+      "points": 1,
+      "why": "the socket probe"
+    },
+    {
+      "pattern": "daemon start",
+      "points": 2,
+      "why": "the spawned command"
+    },
+    {
+      "pattern": "--foreground",
+      "points": 1,
+      "why": "spawned in the foreground mode, in the background"
+    },
+    {
+      "pattern": "(?:5|five)\\s?(?:s\\b|sec|seconds)",
+      "points": 1,
+      "why": "waits up to five seconds"
+    },
+    {
+      "pattern": "in[- ]process|Service::open",
+      "points": 2,
+      "why": "the fallback"
+    },
+    {
+      "pattern": "PIXEL_DAEMON_AUTO_START",
+      "points": 2,
+      "why": "the env switch"
+    },
+    {
+      "pattern": "daemon_auto_start",
+      "points": 1,
+      "why": "the config switch"
+    },
+    {
+      "pattern": "auto_start_daemon|route_through_daemon",
+      "points": 1,
+      "why": "the code"
+    },
+    {
+      "pattern": "crates/pixel/src/main\\.rs",
+      "points": 1,
+      "why": "where"
+    },
+    {
+      "pattern": "Envelope|same (?:answer|response|result)",
+      "points": 1,
+      "why": "both paths answer alike"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "(?:command|search|request) fails (?:when|if) (?:the|no) daemon",
+      "penalty": 2,
+      "why": "it falls back in process"
+    }
+  ]
+}
