@@ -1264,6 +1264,38 @@ mod tests {
         assert!(!overlaps(&[], 6, 8), "no symbol, no anchor");
     }
 
+    /// `call_site_removed` is true only when a matching file's removed span
+    /// actually covers the line: a path-only match is nothing (another
+    /// file's removed lines do not delete this call), and a line floated
+    /// near but outside a range is not removed. Both disjuncts are asserted
+    /// so a relaxed `&&` (widened to `||`) fails the contract.
+    #[test]
+    fn call_site_removed_needs_matching_path_and_covered_line() {
+        let removed = |path: &str, old_ranges: Vec<(u32, u32)>| FileDiff {
+            path: path.to_string(),
+            old_path: path.to_string(),
+            status: FileStatus::Modified,
+            new_ranges: Vec::new(),
+            added_ranges: Vec::new(),
+            old_ranges,
+            text: true,
+        };
+        let diffs = vec![removed("src/b.ts", vec![(10, 12)])];
+        // Inside the matching file's removed range: removed, bounds inclusive.
+        assert!(call_site_removed(&diffs, "src/b.ts", 11));
+        assert!(call_site_removed(&diffs, "src/b.ts", 10), "first line");
+        assert!(call_site_removed(&diffs, "src/b.ts", 12), "last line");
+        // The path must match a diff that removed the line: this file's call
+        // site is untouched even though another file lost those lines.
+        assert!(!call_site_removed(&diffs, "src/a.ts", 11));
+        // The line must fall inside the range, not merely be comparable to
+        // one of its bounds.
+        assert!(!call_site_removed(&diffs, "src/b.ts", 9), "one before");
+        assert!(!call_site_removed(&diffs, "src/b.ts", 13), "one after");
+        // No removed lines reported for a diff that deleted nothing.
+        assert!(!call_site_removed(&[removed("src/b.ts", vec![])], "src/b.ts", 11));
+    }
+
     /// The file cap is reported hit when the graph exactly fills it: the
     /// walk stops at the cap, so a full graph cannot be told apart from a
     /// truncated one, and claiming completeness there would be a lie.
