@@ -64,11 +64,14 @@ switch (args[0]) {
       "3. If both Pixel calls do not converge, use: rtk rg -m 5 -n -F -- 'task' . | rtk sed -n '1,20p'",
       "4. Validate: After an edit, run the smallest relevant test for the changed behavior; read-only tasks need no test.",
       "[/PIXEL:EXECUTION_ROUTE]"].join("\\n");
+    // Keys in the binary's order: serde_json sorts them, so the route text
+    // comes before \`task\`.
     console.log(JSON.stringify({
-      version: 1, task: args[1], padding: "x".repeat(settings.scopePadding ?? 0),
       asks_about_code: settings.asksAboutCode ?? true,
-      ...(settings.legacyBrief ? {} : { retrieval_route_text: text }),
+      padding: "x".repeat(settings.scopePadding ?? 0),
       retrieval_route: { first_command: "rtk pixel find-code " + quoted },
+      ...(settings.legacyBrief ? {} : { retrieval_route_text: text }),
+      task: args[1], version: 1,
       workstreams: [{ path: "src/main.rs", tier: "P0" }],
     }));
     break;
@@ -164,6 +167,14 @@ switch (args[0]) {
     }
   });
 
+  await check("the task leads the budgeted brief, ahead of the route copy", async () => {
+    const h = await host("advisory");
+    const prompt = "Trace callers of the parser entry point " + "and its consumers ".repeat(80);
+    const content = (await h.boot(prompt)).message.content;
+    assert.ok(content.includes(JSON.stringify(prompt)), "the whole task survives the budget");
+    assert.doesNotMatch(content, /retrieval_route_text|asks_about_code/);
+    assert.equal(content.match(/\[PIXEL:EXECUTION_ROUTE\]/g).length, 1, "the route appears once");
+  });
   await check("a prompt that asks nothing about code gets the repository state only", async () => {
     const h = await host("advisory");
     configure({ asksAboutCode: false });

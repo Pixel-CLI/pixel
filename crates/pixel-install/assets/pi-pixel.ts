@@ -312,6 +312,19 @@ function latestUserText(ctx: any) {
 // The brief carries the route every host renders (`execution_brief::
 // pretty_retrieval_route`) and whether the prompt asks about code at all.
 // A binary older than `retrieval_route_text` gives no route, never a guessed one.
+// The brief as the bootstrap budget sees it: the task first, then the
+// evidence. The route is injected on its own above it, so its copy and the
+// relevance flag (alphabetically ahead of \`task\` in the binary's JSON)
+// would only push the task out of the first BOOTSTRAP_BUDGET characters.
+function briefForBudget(stdout: string): string {
+  try {
+    const { task, retrieval_route, retrieval_route_text, asks_about_code, ...rest } = JSON.parse(stdout);
+    return JSON.stringify(task === undefined ? rest : { task, ...rest });
+  } catch {
+    return stdout;
+  }
+}
+
 function readBrief(stdout: string): { route: string | null; asksAboutCode: boolean } {
   try {
     const brief = JSON.parse(stdout);
@@ -994,6 +1007,7 @@ export default function activate(pi: ExtensionAPI) {
       for (const text of [scope, repo]) rememberPaths(parseEvidence(text), resolvedPaths, root);
       const brief = routeAvailable ? readBrief(scope) : { route: null, asksAboutCode: true };
       const routeText = brief.route;
+      const evidence = routeAvailable ? briefForBudget(scope) : scope;
       state.pixelHealthy = true;
       // A prompt that asks nothing about code (git, a release, a pasted thread)
       // gets the repository state only: no route, no targets, as on Claude/Codex.
@@ -1013,7 +1027,7 @@ export default function activate(pi: ExtensionAPI) {
       return {
         message: {
           customType: "pixel-bootstrap", display: false,
-          content: `PIXEL TASK CONTEXT (deterministic, from pixel ${contextOperation} + repo-state):\n\n${routeText ?? "Pixel execution route unavailable; continue normally and keep retrieval non-blocking."}\n\n${scope.slice(0, BOOTSTRAP_BUDGET)}${scope.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}${intentText ? `\n\n${intentText}` : ""}`,
+          content: `PIXEL TASK CONTEXT (deterministic, from pixel ${contextOperation} + repo-state):\n\n${routeText ?? "Pixel execution route unavailable; continue normally and keep retrieval non-blocking."}\n\n${evidence.slice(0, BOOTSTRAP_BUDGET)}${evidence.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}${intentText ? `\n\n${intentText}` : ""}`,
         },
       };
     } catch (error) {
