@@ -635,10 +635,11 @@ fn held_on_line<'a>(line: &'a str, ref_id: &str) -> Option<&'a str> {
     // The value agent-browser attributes to a field sits in the field's
     // *own* bracket block (`[value="notion invoice", ref=e59]`); a
     // `[value=...]` inside a label must not count as the field's contents.
-    if close < line.len() && let Some(open) = unquoted_before(line, close, '[') {
-        if let Some(value) = attr_value(&line[open + 1..close]) {
-            return Some(value);
-        }
+    if close < line.len()
+        && let Some(open) = unquoted_before(line, close, '[')
+        && let Some(value) = attr_value(&line[open + 1..close])
+    {
+        return Some(value);
     }
     // A page can also spell the value after the closing bracket. The block
     // may carry more attributes than the ref (`[ref=e59, required]: Zurich`),
