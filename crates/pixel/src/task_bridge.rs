@@ -25,9 +25,20 @@ const ENFORCED_SESSIONS: &str = ".pixel/tasks/enforced-sessions";
 /// settings count as enforced), or a session `handle_hook` marked enforced.
 /// A marker lookup that fails counts as enforced. A session enforced before the
 /// marker existed is marked by its next answered hook; until then its
-/// configuration alone decides.
+/// configuration alone decides. `PIXEL_TASK_POLICY=retrieval` disables the
+/// configured enforcement exactly as it does in `handle_hook`.
 pub(crate) fn fallback_enforced(root: &Path, provider: &str, session: Option<&str>) -> bool {
-    if crate::task_config::enabled(root).unwrap_or(true) {
+    let retrieval = std::env::var("PIXEL_TASK_POLICY").is_ok_and(|policy| policy == "retrieval");
+    fallback_enforced_under(root, provider, session, retrieval)
+}
+
+fn fallback_enforced_under(
+    root: &Path,
+    provider: &str,
+    session: Option<&str>,
+    retrieval: bool,
+) -> bool {
+    if !retrieval && crate::task_config::enabled(root).unwrap_or(true) {
         return true;
     }
     let Some(session) = session.filter(|id| !id.is_empty()) else {
@@ -184,9 +195,15 @@ pub(crate) fn handle_hook(
         // would find the marker provably absent and observe, so answer here
         // as that enforced fallback would — deny the events an enforced
         // ledger gates, let the rest through.
+        // Written once: every later enforced hook finds it and skips the fsyncs.
         let markers = root.join(ENFORCED_SESSIONS);
-        let marked = pixel_ops::durable::ensure_dir(&markers)
-            .and_then(|()| pixel_ops::durable::write_durably(&markers.join(&lock_name), b""));
+        let marker = markers.join(&lock_name);
+        let marked = if marker.try_exists().unwrap_or(false) {
+            Ok(())
+        } else {
+            pixel_ops::durable::ensure_dir(&markers)
+                .and_then(|()| pixel_ops::durable::write_durably(&marker, b""))
+        };
         if (event == "stop" || (event == "pre-tool-use" && mutation))
             && let Err(failure) = marked
         {
@@ -776,6 +793,16 @@ mod tests {
         let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
         std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
         assert!(fallback_enforced(&root.0, "codex", None));
+        // The retrieval policy turns configured enforcement off in an answering
+        // ledger, so the fallback must not enforce it either; a marked session
+        // still keeps its obligations.
+        assert!(!fallback_enforced_under(&root.0, "codex", None, true));
+        assert!(fallback_enforced_under(
+            &root.0,
+            "claude",
+            Some("session-a"),
+            true
+        ));
         std::fs::write(&config, "task:\n  enforcement: sometimes\n").unwrap();
         assert!(
             fallback_enforced(&root.0, "codex", None),
@@ -811,6 +838,42 @@ mod tests {
         std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
         assert!(fallback_enforced(&root.0, "claude", Some("s1")));
         assert!(!fallback_enforced(&root.0, "claude", Some("s2")));
+    }
+
+    #[test]
+    fn an_existing_marker_should_not_be_rewritten_by_later_enforced_hooks() {
+        let root = Scratch::new();
+        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
+        // A directory in the marker's place exists for the fallback but cannot
+        // be replaced by a file (EISDIR even for root): a hook that rewrote the
+        // marker on every call would fail here and deny for persistence.
+        let marker = root
+            .0
+            .join(ENFORCED_SESSIONS)
+            .join(pixel_task::digest(&("claude", session_key("s1").unwrap())).unwrap());
+        std::fs::create_dir_all(&marker).unwrap();
+        let prompt =
+            json!({"session_id":"s1","prompt":"fix the parser bug in src/a.rs","mutation":false});
+        handle_hook(&root.0, "claude", "prompt-submit", &prompt).unwrap();
+        let stopped = handle_hook(
+            &root.0,
+            "claude",
+            "stop",
+            &json!({"session_id":"s1","mutation":false}),
+        )
+        // Past the marker the scratch (not a git repository) fails reconcile;
+        // only a marker failure answers before it.
+        .unwrap_or_else(|failure| json!({"reason": failure}));
+        assert!(
+            !stopped["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("marker persistence failed"),
+            "{stopped}"
+        );
+        assert!(fallback_enforced(&root.0, "claude", Some("s1")));
     }
 
     #[test]
