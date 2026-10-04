@@ -232,3 +232,6 @@ mod tests {
         assert!(ts > 1_577_836_800, "{ts}"); // 2020-01-01T00:00:00Z
     }
 }
+
+#[cfg(test)]
+mod contract_tests;
