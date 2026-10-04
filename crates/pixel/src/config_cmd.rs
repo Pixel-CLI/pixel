@@ -1352,7 +1352,9 @@ mod tests {
                 &mut Vec::new(),
                 false,
                 &KeyReader::inert(),
-                |_, _| panic!("cancelled or disabled setup must never invoke the classify installer"),
+                |_, _| {
+                    panic!("cancelled or disabled setup must never invoke the classify installer")
+                },
                 |_, _| Ok(()),
             )
             .unwrap();

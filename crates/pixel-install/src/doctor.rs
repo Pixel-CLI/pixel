@@ -3181,7 +3181,10 @@ mod tests {
             )
         };
         assert_eq!(web_search_provider_from(&overview("searxng")), "searxng");
-        assert_eq!(web_search_provider_from(&overview("perplexity")), "perplexity");
+        assert_eq!(
+            web_search_provider_from(&overview("perplexity")),
+            "perplexity"
+        );
         assert_eq!(web_search_provider_from(&overview("none")), "none");
         assert_eq!(web_search_provider_from(&overview("mallory")), "none");
         assert_eq!(web_search_provider_from("no such line\n"), "none");
@@ -3192,7 +3195,8 @@ mod tests {
     /// suggestion, a broken binary is red.
     #[test]
     fn web_search_provider_check_reads_the_binaries_own_overview() {
-        let dir = std::env::temp_dir().join(format!("pixel-doctor-web-search-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("pixel-doctor-web-search-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let make_binary = |tag: &str, body: &str| {
@@ -3206,13 +3210,19 @@ mod tests {
             exe
         };
 
-        let (status, detail) =
-            web_search_provider_check(&make_binary("green", "printf 'web-search provider: searxng\\n'")).unwrap();
+        let (status, detail) = web_search_provider_check(&make_binary(
+            "green",
+            "printf 'web-search provider: searxng\\n'",
+        ))
+        .unwrap();
         assert_eq!(status, CheckStatus::Green, "{detail:?}");
         assert_eq!(detail.detail.as_ref().unwrap()["provider"], "searxng");
 
-        let (status, detail) =
-            web_search_provider_check(&make_binary("none", "printf 'web-search provider: none\\n'")).unwrap();
+        let (status, detail) = web_search_provider_check(&make_binary(
+            "none",
+            "printf 'web-search provider: none\\n'",
+        ))
+        .unwrap();
         assert_eq!(status, CheckStatus::Yellow, "{detail:?}");
         assert!(detail.summary.contains("pixel config setup"), "{detail:?}");
 

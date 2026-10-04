@@ -77,8 +77,11 @@ fn install_step_with(
         Some("searxng") => ask_searxng_url(stdin, stdout, store_searxng),
         Some("perplexity") => ask_perplexity_key(stdin, stdout, store_key),
         _ => {
-            writeln!(stdout, "web search provider: skipped — the free public chain stays the fallback")
-                .map_err(|e| e.to_string())?;
+            writeln!(
+                stdout,
+                "web search provider: skipped — the free public chain stays the fallback"
+            )
+            .map_err(|e| e.to_string())?;
             Ok(())
         }
     }
@@ -102,8 +105,11 @@ fn ask_searxng_url(
         .map_err(|e| format!("read URL: {e}"))?;
     let url = url.trim();
     if url.is_empty() {
-        writeln!(stdout, "web search provider: skipped (no URL) — the free public chain stays the fallback")
-            .map_err(|e| e.to_string())?;
+        writeln!(
+            stdout,
+            "web search provider: skipped (no URL) — the free public chain stays the fallback"
+        )
+        .map_err(|e| e.to_string())?;
         return Ok(());
     }
     store(url)?;
@@ -129,8 +135,11 @@ fn ask_perplexity_key(
         .map_err(|e| format!("read key: {e}"))?;
     let key = key.trim();
     if key.is_empty() {
-        writeln!(stdout, "web search provider: skipped (no key) — the free public chain stays the fallback")
-            .map_err(|e| e.to_string())?;
+        writeln!(
+            stdout,
+            "web search provider: skipped (no key) — the free public chain stays the fallback"
+        )
+        .map_err(|e| e.to_string())?;
         return Ok(());
     }
     store(key)?;
@@ -204,9 +213,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stored, None);
-        assert!(String::from_utf8(output)
-            .unwrap()
-            .contains("skipped (no URL)"));
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("skipped (no URL)")
+        );
     }
 
     #[test]
@@ -252,8 +263,10 @@ mod tests {
             |_| panic!("skip must not store a key"),
         )
         .unwrap();
-        assert!(String::from_utf8(output)
-            .unwrap()
-            .contains("the free public chain stays the fallback"));
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("the free public chain stays the fallback")
+        );
     }
 }

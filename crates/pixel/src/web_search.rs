@@ -60,8 +60,7 @@ pub struct Hit {
 /// stored `web_search.searxng_url`.
 #[cfg_attr(test, mutants::skip)] // thin config adapter; resolution is tested via `search_with`
 fn searxng_base() -> Option<String> {
-    normalize_base(std::env::var_os(SEARXNG_ENV))
-        .or_else(crate::config_cmd::web_search_searxng_url)
+    normalize_base(std::env::var_os(SEARXNG_ENV)).or_else(crate::config_cmd::web_search_searxng_url)
 }
 
 /// The configured Perplexity API key, if any: the env var wins, then the
@@ -788,7 +787,7 @@ mod tests {
                 searxng,
                 ONE_DDG_HIT,
                 ONE_WIKI_HIT,
-                ONE_PERPLEXITY_HIT,
+                Ok(ONE_PERPLEXITY_HIT),
             );
             let hits = search_with("q", 8, Some("https://sx.test"), Some("sk-pplx"), &fetch);
             assert_eq!(hits, Vec::<Hit>::new(), "{searxng:?}");
@@ -870,7 +869,10 @@ mod tests {
         let recorded = requests.borrow();
         let request = &recorded[0];
         assert_eq!(request.url, PERPLEXITY_URL);
-        assert_eq!(request.authorization, Some("Bearer sk-pplx-secret".to_string()));
+        assert_eq!(
+            request.authorization,
+            Some("Bearer sk-pplx-secret".to_string())
+        );
         let body: Value = serde_json::from_str(request.post_body.as_deref().unwrap()).unwrap();
         assert_eq!(body["query"], "q");
         assert_eq!(body["max_results"], 3);
@@ -884,13 +886,8 @@ mod tests {
         // up from DuckDuckGo or Wikipedia.
         for perplexity in [Err("401 unauthorized"), Ok(r#"{"search_results":[]}"#)] {
             let calls = std::cell::RefCell::new(Vec::new());
-            let fetch = recording_fetch(
-                &calls,
-                Err("unused"),
-                ONE_DDG_HIT,
-                ONE_WIKI_HIT,
-                perplexity,
-            );
+            let fetch =
+                recording_fetch(&calls, Err("unused"), ONE_DDG_HIT, ONE_WIKI_HIT, perplexity);
             let hits = search_with("q", 8, None, Some("sk-pplx"), &fetch);
             assert_eq!(hits, Vec::<Hit>::new(), "{perplexity:?}");
             assert_eq!(*calls.borrow(), [PERPLEXITY_URL], "{perplexity:?}");
