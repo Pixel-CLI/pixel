@@ -146,9 +146,16 @@ struct TerminateGuard {
 impl TerminateGuard {
     #[cfg_attr(test, mutants::skip)] // libc adapter; the flag logic is tested pure
     fn install() -> Option<Self> {
-        let mut prev: [libc::sigaction; 2] = std::array::from_fn(|_| unsafe { std::mem::zeroed() });
-        let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
-        act.sa_sigaction = on_terminate as usize;
+        let zeroed = || {
+            // SAFETY: zeroed memory is a valid (if meaningless) sigaction
+            // buffer that sigaction or sigemptyset immediately overwrites.
+            unsafe { std::mem::zeroed() }
+        };
+        let mut prev: [libc::sigaction; 2] = std::array::from_fn(|_| zeroed());
+        let mut act: libc::sigaction = zeroed();
+        // SAFETY: the handler's address, what `sa_sigaction` stores; the
+        // signature matches the `sa_sigaction` shape the flags select.
+        act.sa_sigaction = on_terminate as *const () as usize;
         act.sa_flags = libc::SA_RESETHAND;
         // SAFETY: a zeroed mask the call fills in; the mask is for the
         // blocked-during-handler set, and the handler only stores an int.
@@ -429,7 +436,12 @@ mod tests {
     #[test]
     fn it_plays_to_the_end_and_gives_the_screen_back() {
         let mut fake = Fake::new(&[BIG], &[]);
-        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0, intro::END]), true, &AtomicI32::new(0));
+        let outcome = run(
+            &mut fake,
+            &mut clock(&[0.0, 1.0, intro::END]),
+            true,
+            &AtomicI32::new(0),
+        );
         assert_eq!(outcome, Outcome::Finished);
         assert_eq!(fake.written.first().map(String::as_str), Some(intro::ENTER));
         assert_eq!(fake.written.last().map(String::as_str), Some(intro::LEAVE));
@@ -465,7 +477,12 @@ mod tests {
     #[test]
     fn a_key_skips_the_rest() {
         let mut fake = Fake::new(&[BIG], &[false, true]);
-        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0, 2.0, 3.0]), true, &AtomicI32::new(0));
+        let outcome = run(
+            &mut fake,
+            &mut clock(&[0.0, 1.0, 2.0, 3.0]),
+            true,
+            &AtomicI32::new(0),
+        );
         assert_eq!(outcome, Outcome::Skipped);
         assert_eq!(fake.frames(), 2);
         assert_eq!(fake.written.last().map(String::as_str), Some(intro::LEAVE));
@@ -474,7 +491,12 @@ mod tests {
     #[test]
     fn a_resize_repaints_from_scratch() {
         let mut fake = Fake::new(&[BIG, BIG, Some((120, 30))], &[]);
-        let outcome = run(&mut fake, &mut clock(&[1.0, 1.0]), false, &AtomicI32::new(0));
+        let outcome = run(
+            &mut fake,
+            &mut clock(&[1.0, 1.0]),
+            false,
+            &AtomicI32::new(0),
+        );
         assert_eq!(outcome, Outcome::Finished);
         let clear = fake.written.iter().position(|w| w == intro::CLEAR);
         assert_eq!(clear, Some(2), "{:?}", fake.written);
@@ -487,7 +509,12 @@ mod tests {
     #[test]
     fn a_terminal_that_shrinks_mid_run_is_released() {
         let mut fake = Fake::new(&[BIG, BIG, Some((40, 10))], &[]);
-        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0, 2.0]), true, &AtomicI32::new(0));
+        let outcome = run(
+            &mut fake,
+            &mut clock(&[0.0, 1.0, 2.0]),
+            true,
+            &AtomicI32::new(0),
+        );
         assert_eq!(outcome, Outcome::Shrunk);
         assert_eq!(fake.frames(), 1);
         assert_eq!(fake.written.last().map(String::as_str), Some(intro::LEAVE));

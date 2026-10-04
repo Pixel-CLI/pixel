@@ -131,9 +131,10 @@ fn sd_round_box(px: f32, py: f32, bx: f32, by: f32, r: f32) -> f32 {
     qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
 }
 
-/// A ramp glyph at `v` in `[0, 1]`, dense at 0.
+/// A ramp glyph at `v` in `[0, 1]`, dense at 0. No clamp needed on the
+/// index: `clamp01` caps the product at the last glyph.
 fn ramp_at(v: f32) -> char {
-    RAMP[((clamp01(v) * (RAMP.len() - 1) as f32) as usize).min(RAMP.len() - 1)]
+    RAMP[(clamp01(v) * (RAMP.len() - 1) as f32) as usize]
 }
 
 /// A ramp glyph picked by a hash in `[0, 1)`.
@@ -307,6 +308,12 @@ pub fn fits(cols: u16, rows: u16) -> bool {
 fn draw_window(c: &mut Canvas, win: &Win, title: &[(&str, Rgb, bool)], border: Rgb) {
     c.fill(win.x, win.y, win.w, win.h, TERM);
     let (x0, y0, x1, y1) = (win.x, win.y, win.x + win.w - 1, win.y + win.h - 1);
+    // Corners first, edges last: an edge range that wrongly steps onto a
+    // corner cell then paints over it, and a corner assertion sees it.
+    c.put(x0, y0, '╭', border, false);
+    c.put(x1, y0, '╮', border, false);
+    c.put(x0, y1, '╰', border, false);
+    c.put(x1, y1, '╯', border, false);
     for x in x0 + 1..x1 {
         c.put(x, y0, '─', border, false);
         c.put(x, y1, '─', border, false);
@@ -315,10 +322,6 @@ fn draw_window(c: &mut Canvas, win: &Win, title: &[(&str, Rgb, bool)], border: R
         c.put(x0, y, '│', border, false);
         c.put(x1, y, '│', border, false);
     }
-    c.put(x0, y0, '╭', border, false);
-    c.put(x1, y0, '╮', border, false);
-    c.put(x0, y1, '╰', border, false);
-    c.put(x1, y1, '╯', border, false);
     let mut x = x0 + 3;
     c.put(x0 + 2, y0, ' ', border, false);
     for &(s, fg, bold) in title {
@@ -365,15 +368,17 @@ impl Line {
 }
 
 /// `text` with every `word` painted `hit`: what a bare grep matched.
+/// `split_once` consumes the match by construction, so a mutated bound
+/// yields a wrong split a test can see, never a backwards slice that spins.
 fn highlight(text: &str, word: &str, fg: Rgb, hit: Rgb) -> Vec<Seg> {
     let mut segs = Vec::new();
     let mut rest = text;
-    while let Some(j) = rest.find(word) {
-        if j > 0 {
-            segs.push(seg(&rest[..j], fg, false));
+    while let Some((before, after)) = rest.split_once(word) {
+        if !before.is_empty() {
+            segs.push(seg(before, fg, false));
         }
         segs.push(seg(word, hit, false));
-        rest = &rest[j + word.len()..];
+        rest = after;
     }
     segs.push(seg(rest, fg, false));
     segs

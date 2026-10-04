@@ -87,6 +87,11 @@ fn ramp_glyphs_run_dense_to_sparse() {
     assert_eq!(ramp_at(1.0), '·');
     assert_eq!(ramp_at(-1.0), '@');
     assert_eq!(ramp_at(2.0), '·');
+    assert_eq!(
+        ramp_at(0.95),
+        ':',
+        "the factor (len - 1) keeps the last step"
+    );
     assert_eq!(ramp_pick(0.0), '@');
     assert_eq!(ramp_pick(0.5), '+');
     assert_eq!(ramp_pick(0.999), '·');
@@ -147,6 +152,57 @@ fn fits_needs_64_by_18() {
     assert_eq!(Intro::new().frame(63, 18, 1.0), None);
 }
 
+#[test]
+fn the_window_draws_its_corners_then_edges() {
+    let c = at(1.0);
+    // the frame of the act-1 window (6, 2, 88, 24), the corners on the four
+    // exact cells and the edges filling the runs between them
+    assert_eq!(c.get(6, 2).map(|cell| cell.ch), Some('╭'));
+    assert_eq!(c.get(93, 2).map(|cell| cell.ch), Some('╮'));
+    assert_eq!(c.get(6, 25).map(|cell| cell.ch), Some('╰'));
+    assert_eq!(c.get(93, 25).map(|cell| cell.ch), Some('╯'));
+    assert_eq!(c.get(30, 2).map(|cell| cell.ch), Some('─'));
+    assert_eq!(c.get(30, 25).map(|cell| cell.ch), Some('─'));
+    assert_eq!(c.get(6, 10).map(|cell| cell.ch), Some('│'));
+    assert_eq!(c.get(93, 10).map(|cell| cell.ch), Some('│'));
+}
+
+#[test]
+fn a_prompt_already_typed_shows_it_whole() {
+    // the minimum window: y + 2 and y * 2 land on different rows, so a
+    // flipped offset is visible
+    let win = Win::fit(i32::from(MIN_COLS), i32::from(MIN_ROWS)).expect("the minimum fits");
+    let mut c = Canvas::new(MIN_COLS, MIN_ROWS);
+    c.fill(0, 0, i32::from(MIN_COLS), i32::from(MIN_ROWS), TERM);
+    draw_prompt(&mut c, &win, 0.0, 0.0, 0.0);
+    // typed zero means already there: the whole task is drawn, in green
+    assert!(
+        c.row_text(win.y + 2)
+            .contains("› retry a leased push when the remote branch moved")
+    );
+    assert_eq!(c.get(win.cx0, win.y + 2).map(|cell| cell.fg), Some(GREEN));
+}
+
+#[test]
+fn a_decode_line_shows_its_char_at_the_reveal_instant() {
+    let win = Win::fit(i32::from(COLS), i32::from(ROWS)).expect("the window fits");
+    let mut c = Canvas::new(COLS, ROWS);
+    c.fill(0, 0, i32::from(COLS), i32::from(ROWS), TERM);
+    let line = Line {
+        at: 1.0,
+        segs: vec![seg("x", INK, false)],
+        typed: 0.0,
+        decode: true,
+    };
+    let boundary = line.at + 0.05 + 0.22 * hash3(0, 0, 0);
+    draw_line(&mut c, &win, win.log_top, &line, boundary, 0);
+    assert_eq!(
+        c.get(win.cx0, win.log_top).map(|cell| cell.ch),
+        Some('x'),
+        "at exactly its reveal instant a char is itself, not a ramp glyph"
+    );
+}
+
 // ── act 1 ───────────────────────────────────────────────────────────────────
 
 #[test]
@@ -162,6 +218,25 @@ fn highlight_paints_every_match() {
             ("lease", CORAL),
             ("", NOISE)
         ]
+    );
+}
+
+#[test]
+fn read_steps_render_their_lines_plain() {
+    let lines = scene1_lines();
+    let segs = lines
+        .iter()
+        .find(|l| {
+            l.segs
+                .get(1)
+                .is_some_and(|s| s.text.starts_with("//! `push`"))
+        })
+        .map(|l| &l.segs)
+        .expect("the Read step's first output line");
+    // a bare Read is not a grep: none of its output is painted as a hit
+    assert!(
+        segs.iter().all(|s| s.fg != CORAL),
+        "Read output carries no coral hits"
     );
 }
 
