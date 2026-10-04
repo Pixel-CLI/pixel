@@ -1114,6 +1114,11 @@ fn install_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Instal
             path: path.clone(),
             reason: "hooks.json root is not an object".into(),
         })?;
+    // Cursor documents `version` as required. A fresh install (read_settings
+    // returned `{}`) must carry it, and an existing value is preserved.
+    if root.get("version").is_none() {
+        root.insert("version".into(), serde_json::json!(1));
+    }
     let hooks = root.entry("hooks").or_insert_with(|| serde_json::json!({}));
     let hooks = hooks
         .as_object_mut()
@@ -1122,11 +1127,14 @@ fn install_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Instal
             reason: "hooks is not an object".into(),
         })?;
     let guard = serde_json::json!({
-        "command": format!("'{}' run-hook guard", exe.display()),
+        "command": format!("{} run-hook guard", crate::routing::quoted_executable(exe)),
         "matcher": crate::config::GUARD_MATCHER,
     });
     let metrics = serde_json::json!({
-        "command": format!("'{}' run-hook metrics --provider cursor", exe.display()),
+        "command": format!(
+            "{} run-hook metrics --provider cursor",
+            crate::routing::quoted_executable(exe)
+        ),
     });
     let pre = config::merge_flat_hook_entry(hooks.get("preToolUse"), "run-hook guard", guard);
     hooks.insert("preToolUse".into(), pre);
@@ -1165,7 +1173,12 @@ pub(crate) fn write_settings(
         fs::create_dir_all(parent)?;
     }
     let backup_path = config::backup_if_changing(path, serialized.as_bytes())?;
-    fs::write(path, serialized)?;
+    // A live hooks file (Cursor's above all) is read by a concurrently
+    // running host; write to a sibling temp and atomically rename so a
+    // mid-write reader never sees empty or partial JSON.
+    let tmp = path.with_extension("pixel-tmp");
+    fs::write(&tmp, serialized)?;
+    fs::rename(&tmp, path)?;
     Ok(backup_path)
 }
 
