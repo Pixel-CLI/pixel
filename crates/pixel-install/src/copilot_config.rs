@@ -177,16 +177,46 @@ mod tests {
         let pre = &doc["hooks"]["preToolUse"][0];
         assert_eq!(pre["type"], "exec");
         assert_eq!(pre["exec"], path);
+        assert_eq!(pre["timeoutSec"], 10);
         assert_eq!(
             pre["args"],
             serde_json::json!(["run-hook", "guard", "--provider", "copilot"])
         );
         let post = &doc["hooks"]["postToolUse"][0];
         assert_eq!(post["exec"], path);
+        assert_eq!(post["timeoutSec"], 10);
         assert_eq!(
             post["args"],
             serde_json::json!(["run-hook", "metrics", "--provider", "copilot"])
         );
+    }
+
+    #[test]
+    fn install_skips_when_copilot_has_never_run() {
+        let home = tempfile::tempdir().unwrap();
+        // No ~/.copilot directory: pixel install must not fabricate config
+        // for a tool that is not installed, and must not create it either.
+        let step = install_copilot_hooks(home.path(), Path::new("/tmp/pixel"), false).unwrap();
+        assert!(step.summary.contains("skipped"), "{}", step.summary);
+        assert_eq!(step.status, CheckStatus::Green);
+        assert!(!home.path().join(HOOKS_DIR).exists());
+    }
+
+    #[test]
+    fn dry_run_previews_changes_without_writing() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".copilot")).unwrap();
+        let installed = home.path().join(HOOKS_DIR).join(HOOKS_FILE);
+        // Install dry-run reports the action but writes nothing.
+        let step = install_copilot_hooks(home.path(), Path::new("/tmp/pixel"), true).unwrap();
+        assert!(step.summary.contains("would"), "{}", step.summary);
+        assert!(!installed.exists());
+        // The real install lands, then a remove dry-run leaves it in place.
+        install_copilot_hooks(home.path(), Path::new("/tmp/pixel"), false).unwrap();
+        assert!(installed.exists());
+        let step = remove_copilot_hooks(home.path(), true).unwrap();
+        assert!(step.summary.contains("would"), "{}", step.summary);
+        assert!(installed.exists());
     }
 
     #[test]
