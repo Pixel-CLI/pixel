@@ -1,1 +1,0 @@
-**search:** a truncated `pixel search-content` states the row/byte cap once in prose mode: the `⚠ results truncated` line stays and the bounded-result note no longer repeats it, while caps the warning does not name (credential-shaped matches hidden) still surface. `--json` keeps the full basis. ([#472](https://github.com/Pixel-CLI/pixel/pull/472))

@@ -1,1 +1,0 @@
-**graph:** `review-gate` now anchors `producer-reader-divergence` findings at the changed producer and names the untouched reader's `path:line` in the evidence. ([#548](https://github.com/Pixel-CLI/pixel/pull/548))

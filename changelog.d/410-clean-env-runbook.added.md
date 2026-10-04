@@ -1,1 +1,0 @@
-**docs:** one-line clean-environment runbook in `docs/clean-environment.md`: the `docker-setup-smoke` skill spins up, runs and tears down the fresh-install smoke test in a disposable Linux container. ([#609](https://github.com/Pixel-CLI/pixel/pull/609))

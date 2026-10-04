@@ -1,1 +1,0 @@
-**readme:** the README now leads with what Pixel replaces — every deterministic step of repository work — and teaches the harness as two mermaid flows: the retrieval loop (contract in, cited lines out, `search-meaning` as the one LLM-backed path) and a feature build from `scope-task` through the `review-gate` fix loop to `commit-and-push`.

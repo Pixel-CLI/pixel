@@ -1,1 +1,0 @@
-**context:** `pack-context` gives each neighbour the richest layer the budget holds instead of degrading all at once, names what it omits, and marks a target body cut at 60 lines (`… body cut after line N; full body: path:a-b`, `truncated: true`). The text fits the escaped JSON size, so it is no longer clipped mid-line. ([#523](https://github.com/Pixel-CLI/pixel/pull/523))

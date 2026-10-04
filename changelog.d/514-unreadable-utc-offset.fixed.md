@@ -1,1 +1,0 @@
-**facts:** a commit whose author offset SQLite cannot read (`+518:00`, from a `+51800` in the git object) is stored as the same instant in UTC, so the history window evicts it and `diff_coverage_since` no longer reports its date; an existing `history.db` is repaired in place on open, without a rebuild. ([#514](https://github.com/Pixel-CLI/pixel/pull/514))

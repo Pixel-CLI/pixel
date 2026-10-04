@@ -1,1 +1,0 @@
-**install:** the pi project extension adds the same task-intent line as the Claude prompt hook to its bootstrap: `pixel classify --task-intent --if-warm` runs beside scope-task and repo-state under a 500 ms kill deadline, and a cold engine, an error, malformed output, a slow answer or p < 0.5 leaves the bootstrap without it ([#374](https://github.com/Pixel-CLI/pixel/pull/374)).

@@ -1,1 +1,0 @@
-**graph:** `what-changed` judges each symbol against its file's base (`added` for a function added to a modified file, `change_basis`, `signature_changed`), lists the call sites that may be affected (`consumers`, paged with `--offset`), and reports `base: "index"` instead of `"HEAD"` when no `--base` is given. ([#524](https://github.com/Pixel-CLI/pixel/pull/524))

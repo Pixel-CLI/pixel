@@ -1,1 +1,0 @@
-**security:** pixel no longer follows a symbolic link it finds under `.pixel/`, refuses a `.pixel/` that is a link or that the repository tracks in git (delete it to continue), keeps every path it reads from the index or the graph inside the repository, and hides `credentials`, `.netrc` and `.git-credentials` from search (GHSA-c9f5-vxc4-wjph).

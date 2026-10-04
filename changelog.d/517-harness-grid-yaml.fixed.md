@@ -1,1 +1,0 @@
-**ci:** harness-grid.yml parses again — the run summary's inline python sat at column 0 and left the `run:` block scalar, so GitHub rejected the workflow on every push. Inputs pass through `env:` and the summary reads the shoot script's repo-local output directory instead of a personal path. ([#604](https://github.com/Pixel-CLI/pixel/pull/604))

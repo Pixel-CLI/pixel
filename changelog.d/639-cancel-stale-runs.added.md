@@ -1,1 +1,0 @@
-**ci:** cancel a PR's stale runs on merge and add a queue-purge script ([#https://github.com/Pixel-CLI/pixel/pull/640](https://github.com/Pixel-CLI/pixel/pull/https://github.com/Pixel-CLI/pixel/pull/640))
