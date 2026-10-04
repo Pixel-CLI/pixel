@@ -81,7 +81,7 @@ A sentence on the site is a claim. Before it enters a mock:
 | answer quality, agent speed, cost | the same audit: no public claim without a protocol it names; the 2026-09-30 audit withdrew the agent-trial gains |
 | an agent "just works" | `website/data/agents.toml` `wiring`: `install` is automatic, `plugin` is the agent's own mechanism, `rules` is a manual copy (Cursor, Windsurf) |
 | languages | `website/layouts/partials/languages.html` (the one list; FAQ and hero read it) |
-| platforms | the `target:` matrix of `.github/workflows/release.yml` (macOS is Apple Silicon only) |
+| platforms | the `target:` matrix of `.github/workflows/release-build.yml` (macOS is Apple Silicon only) |
 | privacy, network | `website/data/objections.toml` ("Nothing you did not ask for"), `pixel classify` (off by default, `ARCHITECTURE.md`) |
 | what a command prints | run it on the bench's pinned file: `curl -fsSL https://raw.githubusercontent.com/<repo>/<commit>/<path> -o f && pixel list-signatures f --metrics off`; the byte count ÷ 4 must match the row |
 

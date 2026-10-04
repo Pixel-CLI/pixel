@@ -7,7 +7,7 @@
 
 [graph]
 # The targets pixel is built and tested for: the release matrix
-# (release.yml: two musl targets and Apple Silicon), CI (x86_64 Linux) and
+# (release-build.yml: two musl targets and Apple Silicon), CI (x86_64 Linux) and
 # Intel Macs. Restricting the graph drops the Windows-only crates, whose
 # four parallel `windows-sys` majors would otherwise dominate the
 # duplicate report for a platform nothing here builds.

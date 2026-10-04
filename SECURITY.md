@@ -20,18 +20,26 @@ You will receive a response within 48 hours.
 ## Verifying a release
 
 Every release archive and its `install.sh` carry a signed build-provenance
-attestation from `.github/workflows/release.yml`, run on the release tag on a
-GitHub-hosted runner. The `.sha256` file beside each archive only proves the
-download is intact; the attestation proves who built it. With the GitHub CLI:
+attestation from `.github/workflows/release-build.yml`, the reusable workflow
+that builds and signs the release on its tag on a GitHub-hosted runner. The
+`.sha256` file beside each archive only proves the download is intact; the
+attestation proves who built it. With the GitHub CLI:
 
 ```bash
 gh attestation verify pixel-vX.Y.Z-aarch64-apple-darwin.tar.gz --repo Pixel-CLI/pixel \
-  --signer-workflow Pixel-CLI/pixel/.github/workflows/release.yml \
+  --signer-workflow Pixel-CLI/pixel/.github/workflows/release-build.yml \
   --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
 ```
 
 The same command verifies `install.sh` before you pipe it into `sh`.
 Releases before the first attested one have no attestation.
+
+Signing in a reusable workflow is what makes this SLSA Build Level 3: the
+signing identity belongs to `release-build.yml`, which holds no secret, and
+`release.yml`, which publishes the release and holds the Homebrew tap token,
+cannot sign. Releases up to v0.6.1 were built and signed by `release.yml`
+itself (Build Level 2); verify them with `release.yml` as the signer
+workflow, under the owner below.
 
 v0.6.0 and v0.6.1 were signed before the repository moved from
 `LivioGama/pixel` to `Pixel-CLI/pixel`, and their attestations stayed with

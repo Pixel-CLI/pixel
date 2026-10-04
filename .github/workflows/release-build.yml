@@ -1,0 +1,174 @@
+name: Release build
+
+# Builds, packages and signs everything a release publishes, called by
+# release.yml once its `verify` job has passed on the tag. It lives in its own
+# reusable workflow for SLSA Build Level 3: the attestation's signer is this
+# file, not the caller, so the caller's steps (the tap token, the publication)
+# cannot reach the signing identity, and `gh attestation verify
+# --signer-workflow Pixel-CLI/pixel/.github/workflows/release-build.yml`
+# accepts only what this file built. It holds no secret.
+#
+# The github context is the caller's: GITHUB_REF is the release tag here too.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# Same value as ci.yml, cross-build.yml and release.yml: rust-cache hashes
+# every CARGO_* variable into its key, and a called workflow does not inherit
+# the caller's env, so a missing value here would miss their caches.
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-26.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-26.04
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # The SHA pin no longer names the toolchain through the ref, so
+          # it is passed explicitly (same channel as before).
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      # Restores what cross-build.yml saved on main for this target (shared
+      # key release-<target>): the dependencies arrive compiled, and only the
+      # workspace crates and the thin-LTO link are left. Never saves: a tag's
+      # cache is unreadable by the next tag.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          save-if: false
+
+      # Prebuilt binary instead of `cargo install cross`. cross compiles inside
+      # its own Docker image (musl toolchain included), so no host packages.
+      - name: Install cross (Linux musl)
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+        with:
+          tool: cross
+
+      # fastembed (ONNX) has no musl build; model2vec is pure Rust and does,
+      # so the Linux binaries keep a working semantic channel.
+      - name: Build (Linux musl via cross, model2vec only)
+        if: runner.os == 'Linux'
+        run: cross build --release --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
+
+      - name: Build (macOS native)
+        if: runner.os == 'macOS'
+        run: cargo build --release --locked --target ${{ matrix.target }} -p pixel-cli
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          TARGET="${{ matrix.target }}"
+          ARCHIVE="pixel-${VERSION}-${TARGET}.tar.gz"
+          STAGING="pixel-${VERSION}-${TARGET}"
+          mkdir -p "$STAGING/bin"
+          cp "target/${TARGET}/release/pixel" "$STAGING/bin/"
+          cp README.md LICENSE "$STAGING/"
+          tar czf "$ARCHIVE" "$STAGING"
+          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pixel-${{ matrix.target }}
+          path: |
+            pixel-*.tar.gz
+            pixel-*.tar.gz.sha256
+
+  attest:
+    name: Package and attest
+    needs: build
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      # Provenance attestation: the OIDC token Sigstore exchanges for a
+      # short-lived signing certificate naming this workflow, and the write
+      # that stores the signed attestation on the repository.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
+
+      - name: Download the archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: pixel-*
+          path: artifacts
+          merge-multiple: true
+
+      # pixel.rb and the two Linux bottles: the musl binary laid out as a keg,
+      # which Homebrew pours where a formula without a bottle would need a C
+      # compiler. The script checks each archive against its .sha256 and is
+      # held by scripts/test-homebrew-formula.py, which CI runs on every pull
+      # request that touches it, so this step changes without a tag.
+      - name: Generate the Homebrew formula and the Linux bottles
+        run: python3 scripts/homebrew-formula.py "${GITHUB_REF#refs/tags/}" artifacts .
+
+      # pixel-core.rb: the formula a homebrew-core pull request carries,
+      # built from the source archive GitHub serves for this tag (its sha256
+      # is only known once the tag exists). homebrew-core.yml builds and
+      # audits the same formula from source on every change to it.
+      - name: Generate the homebrew-core formula (build from source)
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          curl -fsSL --retry 3 -o source.tar.gz \
+            "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          python3 scripts/homebrew-core-formula.py "$TAG" source.tar.gz pixel-core.rb
+
+      # SLSA build provenance for what a user downloads and runs: each
+      # archive, each Linux bottle Homebrew pours, and install.sh, which the
+      # README pipes into sh. The .sha256 files ship beside the archives in
+      # the same release, so they prove the download was not corrupted, never
+      # who built it; an attestation is signed by this workflow on this tag
+      # and checked with `gh attestation verify` (SECURITY.md). Before the
+      # hand-off on purpose: a signing failure stops the release instead of
+      # publishing it unattested. release.yml's smoke job verifies both
+      # subjects after publication.
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/pixel-*.tar.gz
+            pixel-*.bottle.tar.gz
+            scripts/install.sh
+
+      # Everything release.yml publishes, in one artifact: the attested
+      # files themselves, not a rebuild or a second checkout of them.
+      - name: Stage the release assets
+        run: |
+          mkdir release-assets
+          cp artifacts/pixel-*.tar.gz artifacts/pixel-*.tar.gz.sha256 \
+            pixel-*.bottle.tar.gz pixel.rb pixel-core.rb scripts/install.sh \
+            release-assets/
+          ls -l release-assets
+
+      - name: Upload the release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-assets
+          path: release-assets/

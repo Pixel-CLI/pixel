@@ -275,7 +275,7 @@ jobs:
 
   # The branch's install.sh, on the two Linux runners the release publishes
   # a musl archive for. It downloads the latest release (the archives
-  # release.yml builds), checks the checksum, runs the binary, and must
+  # release-build.yml builds), checks the checksum, runs the binary, and must
   # leave that binary on PATH for the next step. A script PR that skips
   # this installs a file the contract tests never executed.
   linux-install:
@@ -341,8 +341,8 @@ jobs:
           persist-credentials: false
 
       # First, before anything is installed: a floating tag in release.yml
-      # would run unreviewed code next to the tap token and the signing
-      # identity. Contract in scripts/test-verify-action-pins.py below.
+      # or release-build.yml would run unreviewed code next to the tap token
+      # or the signing identity. Contract in scripts/test-verify-action-pins.py below.
       - name: Action pins (every uses on a full commit SHA)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/verify-action-pins.py

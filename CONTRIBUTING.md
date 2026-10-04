@@ -194,7 +194,7 @@ so does a `release-x.y.z` prepare PR into `main`, whose merge commit's push
 run is the one the tag waits for. A pull request into `main` builds the
 `dev-release` profile (no thin LTO, 16 codegen units): it proves the same
 link, features and `--locked` resolution in a fraction of the time, while
-the push to `main` builds both profiles, `release` with release.yml's exact
+the push to `main` builds both profiles, `release` with release-build.yml's exact
 commands, each in its own job and cache entry (`release-<target>`, which
 the tag's build restores, and `dev-release-<target>`, which pull requests
 restore).
@@ -761,11 +761,13 @@ Steps 1 to 3 are `.agents/skills/release/prepare.sh x.y.z`.
    the three points above (the same command gates the release workflow
    before anything is built).
 4. Commit as `release: prepare x.y.z`.
-5. Tag `vx.y.z` and push the tag. `.github/workflows/release.yml` builds
+5. Tag `vx.y.z` and push the tag. `.github/workflows/release.yml` calls
+   `.github/workflows/release-build.yml`, which builds
    `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and
-   `aarch64-apple-darwin`, uploads tarballs with `.sha256` files, and
-   generates the Homebrew formula with real hashes and its two Linux
-   bottles (`scripts/homebrew-formula.py`). `fail-fast: true`
+   `aarch64-apple-darwin`, generates the Homebrew formula with real hashes
+   and its two Linux bottles (`scripts/homebrew-formula.py`) and signs their
+   provenance; `release.yml` then uploads the tarballs with their `.sha256`
+   files. `fail-fast: true`
    means a partial build failure publishes nothing.
 6. Only the latest release receives security fixes.
 
