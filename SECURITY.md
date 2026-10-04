@@ -70,6 +70,38 @@ gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --owner LivioGama
   --source-ref refs/tags/v0.6.1 --deny-self-hosted-runners
 ```
 
+### Reproducing a release build
+
+Release binaries are built reproducibly: the same tag, rebuilt with the same
+Rust toolchain and the same `cross` version, gives a byte-identical `pixel`.
+`scripts/release-build-env.sh` sets what would otherwise vary between two
+builds: `SOURCE_DATE_EPOCH`, the commit's time, for the build date
+`pixel --version` prints, and `RUSTFLAGS` remapping the checkout and
+`CARGO_HOME` out of the binary's panic messages and debug information.
+`release-build.yml` builds every release with it, and
+`.github/workflows/reproducible-build.yml` builds the
+`x86_64-unknown-linux-musl` binary twice, from two checkouts at different
+paths, and fails unless the two match. To rebuild a Linux release yourself
+(Docker, a Rust toolchain, and the `rustc` version that release's
+`pixel --version` prints):
+
+```bash
+git clone https://github.com/Pixel-CLI/pixel && cd pixel && git switch --detach vX.Y.Z
+cargo install cross --locked --version 0.2.5   # the version release-build.yml pins
+eval "$(scripts/release-build-env.sh)"
+cross +1.NN.N build --release --locked --no-default-features --features model2vec \
+  --target x86_64-unknown-linux-musl -p pixel-cli
+sha256sum target/x86_64-unknown-linux-musl/release/pixel
+tar -xzOf pixel-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz \
+  pixel-vX.Y.Z-x86_64-unknown-linux-musl/bin/pixel | sha256sum
+```
+
+Compare the binary, not the archive: `tar` records file times. The
+`aarch64-unknown-linux-musl` binary rebuilds the same way with its target;
+the `aarch64-apple-darwin` one is built with the same environment, but no CI
+job compares two of its builds. Releases cut before this script existed
+embed their build day and the runner's paths, and do not reproduce.
+
 ### Software bill of materials
 
 Releases after v0.6.1 attach a CycloneDX 1.5 JSON SBOM beside each archive,

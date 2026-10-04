@@ -1,0 +1,119 @@
+name: Reproducible build
+
+# Builds the x86_64-unknown-linux-musl release binary twice from one commit,
+# in two checkouts at different paths, with release-build.yml's exact command
+# and environment (scripts/release-build-env.sh), and fails unless the two
+# binaries are byte-identical: the evidence behind SECURITY.md, "Reproducing
+# a release build" (OpenSSF build_repeatable). Neither build restores a
+# cache, so each compiles every crate itself. One lane is enough to catch an
+# input that varies by path or by date; the other two release lanes share
+# the environment, not this proof.
+#
+# Two release builds of every crate cost about as much as a release, so the
+# job runs only on what can change the result -- the build environment, the
+# profile, build.rs, this file -- weekly to catch a dependency or toolchain
+# update that brings its own nondeterminism, and on demand.
+# scripts/test-release-build-env.py holds the command equal to
+# release-build.yml's.
+on:
+  pull_request:
+    paths:
+      - ".cargo/**"
+      - ".github/workflows/release-build.yml"
+      - ".github/workflows/reproducible-build.yml"
+      - "Cargo.toml"
+      - "Cross.toml"
+      - "crates/pixel/build.rs"
+      - "rust-toolchain*"
+      - "scripts/release-build-env.sh"
+  schedule:
+    - cron: "37 4 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  twice:
+    name: Build twice and compare
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The job never pushes: do not leave the token in .git/config.
+          persist-credentials: false
+
+      # The second checkout: a copy taken before anything is built, at
+      # another path. The two builds share the commit, the toolchain, the
+      # cross image and CARGO_HOME (whose path is remapped), nothing else.
+      - name: Second checkout at another path
+        run: cp -a "$GITHUB_WORKSPACE" "$RUNNER_TEMP/pixel-second"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: ${{ env.TARGET }}
+
+      # The version release-build.yml pins.
+      - name: Install cross
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        with:
+          tool: cross@0.2.5
+
+      - name: Build in the first checkout
+        run: |
+          eval "$(scripts/release-build-env.sh)"
+          echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=$RUSTFLAGS"
+          cross build --release --locked --no-default-features --features model2vec --target "$TARGET" -p pixel-cli
+          sha256sum "target/$TARGET/release/pixel" | cut -d' ' -f1 > "$RUNNER_TEMP/first.sha256"
+
+      - name: Build in the second checkout
+        working-directory: ${{ runner.temp }}/pixel-second
+        run: |
+          eval "$(scripts/release-build-env.sh)"
+          echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=$RUSTFLAGS"
+          cross build --release --locked --no-default-features --features model2vec --target "$TARGET" -p pixel-cli
+          sha256sum "target/$TARGET/release/pixel" | cut -d' ' -f1 > "$RUNNER_TEMP/second.sha256"
+
+      - name: Compare
+        run: |
+          first=$(cat "$RUNNER_TEMP/first.sha256")
+          second=$(cat "$RUNNER_TEMP/second.sha256")
+          {
+            echo "### Reproducible build ($TARGET)"
+            echo
+            echo "| Checkout | sha256 of \`pixel\` |"
+            echo "| --- | --- |"
+            echo "| \`$GITHUB_WORKSPACE\` | \`$first\` |"
+            echo "| \`$RUNNER_TEMP/pixel-second\` | \`$second\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "first:  $first"
+          echo "second: $second"
+          if [ "$first" != "$second" ]; then
+            echo "::error::the two builds of $GITHUB_SHA differ; the binaries are in the run's artifact for diffoscope"
+            exit 1
+          fi
+
+      - name: Keep both binaries for diffoscope
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/differing"
+          cp "target/$TARGET/release/pixel" "$RUNNER_TEMP/differing/pixel-first" || true
+          cp "$RUNNER_TEMP/pixel-second/target/$TARGET/release/pixel" "$RUNNER_TEMP/differing/pixel-second" || true
+
+      - name: Upload both binaries
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: reproducible-build-differing
+          path: ${{ runner.temp }}/differing/
