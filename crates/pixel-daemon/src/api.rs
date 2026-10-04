@@ -7,7 +7,7 @@
 //! centralized in the `bridge` module at the bottom so integration drift is
 //! a one-line fix per call site.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -540,6 +540,17 @@ impl Service {
             &mut self.graph_failures,
             &format!("graph update failed for {rel}: {error}"),
         );
+    }
+
+    /// The HEAD the text index was opened at and every path its overlay
+    /// answers for: what a watch registered late must re-read besides
+    /// `git status`.
+    pub(crate) fn index_catch_up(&self) -> (Option<String>, BTreeSet<String>) {
+        let index = self.index.read().expect("index lock poisoned");
+        (
+            index.opened_head().map(str::to_owned),
+            index.overlay_paths(),
+        )
     }
 
     /// Count a `notify` backend error reported by the transport loop.

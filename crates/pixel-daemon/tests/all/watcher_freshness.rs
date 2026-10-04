@@ -153,6 +153,17 @@ impl Corpus for GatedCorpus {
     fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
         self.service.apply_changes(changes);
     }
+
+    // The watch registers on its own thread, so the edit below can land
+    // before it is live; the wrapped `Service` catches up only if the
+    // wrapper forwards the callback.
+    fn watch_ready(&mut self) {
+        self.service.watch_ready();
+    }
+
+    fn watcher_error(&mut self, error: &str) {
+        self.service.watcher_error(error);
+    }
 }
 
 #[test]

@@ -99,6 +99,9 @@ pub struct IndexSet {
     delta_tombstones: HashSet<String>,
     overlay: Overlay,
     open_timings: OpenTimings,
+    /// HEAD when the set was opened: the commit base ∪ delta covers. The
+    /// overlay follows the working tree from there, HEAD moves included.
+    head: Option<String>,
 }
 
 /// Whole milliseconds in `elapsed`, saturating rather than wrapping on a
@@ -666,6 +669,7 @@ impl IndexSet {
             delta: None,
             delta_tombstones: HashSet::new(),
             overlay: Overlay::new(),
+            head: head.clone(),
             open_timings: OpenTimings {
                 base: base_source,
                 base_ms,
@@ -718,6 +722,24 @@ impl IndexSet {
     /// What the open that produced this set cost, layer by layer.
     pub fn open_timings(&self) -> OpenTimings {
         self.open_timings
+    }
+
+    /// HEAD when the set was opened (`None` outside a git repository): the
+    /// commit base ∪ delta answers for, whatever HEAD has moved to since.
+    pub fn opened_head(&self) -> Option<&str> {
+        self.head.as_deref()
+    }
+
+    /// Every path the overlay answers for instead of base ∪ delta: the
+    /// working-tree edits seen at open or refreshed since. Re-reading them
+    /// is what notices an edit that was discarded with no event observed.
+    pub fn overlay_paths(&self) -> BTreeSet<String> {
+        self.overlay
+            .files
+            .keys()
+            .chain(&self.overlay.tombstones)
+            .cloned()
+            .collect()
     }
 
     /// Build or reuse the delta layer covering `base_oid..head_oid`.
