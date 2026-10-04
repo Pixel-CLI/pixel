@@ -4,7 +4,10 @@
 
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -1096,17 +1099,9 @@ pub(crate) fn remove_shell_wrappers(
 /// the Cursor-native `additional_context` field.
 fn install_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let path = home.join(crate::config::CURSOR_HOOKS_FILE);
-    if dry_run {
-        return Ok(InstallStep {
-            id: "hooks.cursor".into(),
-            status: CheckStatus::Green,
-            summary: format!(
-                "would configure pixel guard + metrics in {}",
-                path.display()
-            ),
-            detail: None,
-        });
-    }
+    // Validate the existing settings in both modes so a dry run honestly
+    // reports a red step when the file is unreadable or malformed; only the
+    // write (and backup/dir creation) is suppressed during a dry run.
     let mut value = read_settings(&path)?;
     let root = value
         .as_object_mut()
@@ -1126,29 +1121,38 @@ fn install_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Instal
             path: path.clone(),
             reason: "hooks is not an object".into(),
         })?;
+    // Pixel owns the entry whose command runs through this executable; the
+    // marker is the executable itself, never the bare `run-hook guard` or
+    // `run-hook metrics` phrase, so an unrelated command that merely mentions
+    // either phrase is preserved (and replaced only if pixel really wrote it).
+    let exe_marker = crate::routing::quoted_executable(exe);
     let guard = serde_json::json!({
-        "command": format!(
-            "{} run-hook guard --provider cursor",
-            crate::routing::quoted_executable(exe)
-        ),
+        "command": format!("{exe_marker} run-hook guard --provider cursor"),
         "matcher": crate::config::GUARD_MATCHER,
     });
     let metrics = serde_json::json!({
-        "command": format!(
-            "{} run-hook metrics --provider cursor",
-            crate::routing::quoted_executable(exe)
-        ),
+        "command": format!("{exe_marker} run-hook metrics --provider cursor"),
     });
-    let pre = config::merge_flat_hook_entry(hooks.get("preToolUse"), "run-hook guard", guard);
+    let pre = config::merge_flat_hook_entry(hooks.get("preToolUse"), &exe_marker, guard);
     hooks.insert("preToolUse".into(), pre);
-    let post = config::merge_flat_hook_entry(hooks.get("postToolUse"), "run-hook metrics", metrics);
+    let post = config::merge_flat_hook_entry(hooks.get("postToolUse"), &exe_marker, metrics);
     hooks.insert("postToolUse".into(), post);
     let backup = write_settings(&path, &value, dry_run)?;
+    let summary = if dry_run {
+        format!("would configure pixel guard + metrics in {}", path.display())
+    } else {
+        "configured pixel guard + metrics in Cursor hooks.json".into()
+    };
+    let detail = if dry_run {
+        None
+    } else {
+        Some(with_backup_note(format!("path={}", path.display()), backup))
+    };
     Ok(InstallStep {
         id: "hooks.cursor".into(),
         status: CheckStatus::Green,
-        summary: "configured pixel guard + metrics in Cursor hooks.json".into(),
-        detail: Some(with_backup_note(format!("path={}", path.display()), backup)),
+        summary,
+        detail,
     })
 }
 
@@ -1172,17 +1176,71 @@ pub(crate) fn write_settings(
     if dry_run {
         return Ok(None);
     }
-    if let Some(parent) = path.parent() {
+    // A settings path that is a symlink into a managed dotfile must stay a
+    // symlink: write and rename the sibling temp onto the link's *target*, so
+    // the host keeps pointing at the managed file instead of being disconnected.
+    let resolved = resolve_symlink_target(path);
+    let target: &Path = resolved.as_deref().unwrap_or(path);
+    if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    let backup_path = config::backup_if_changing(path, serialized.as_bytes())?;
+    let backup_path = config::backup_if_changing(target, serialized.as_bytes())?;
     // A live hooks file (Cursor's above all) is read by a concurrently
-    // running host; write to a sibling temp and atomically rename so a
-    // mid-write reader never sees empty or partial JSON.
-    let tmp = path.with_extension("pixel-tmp");
-    fs::write(&tmp, serialized)?;
-    fs::rename(&tmp, path)?;
+    // running host; write to a uniquely named sibling temp and atomically
+    // rename so a mid-write reader never sees empty or partial JSON, and two
+    // concurrent writers never share (and truncate each other's) temp file.
+    let tmp = unique_temp_path(target);
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(&tmp)?;
+    file.write_all(serialized.as_bytes())?;
+    // Retain an existing settings file's permission bits (a 0600 credentials
+    // file must stay 0600); a brand-new file is already private because the
+    // temp was opened 0600 regardless of the ambient umask.
+    #[cfg(unix)]
+    if let Ok(meta) = fs::metadata(target) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, meta.permissions())?;
+    }
+    fs::rename(&tmp, target)?;
     Ok(backup_path)
+}
+
+/// The real file a settings path points at if it is a symlink, else `None`.
+fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_symlink() {
+        return None;
+    }
+    let target = fs::read_link(path).ok()?;
+    Some(if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or(Path::new("")).join(target)
+    })
+}
+
+/// A sibling temp file name unique to this process so concurrent writers of
+/// the same settings path can never collide on one shared temp file.
+fn unique_temp_path(path: &Path) -> PathBuf {
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map_or_else(|| "settings".into(), |n| n.to_string_lossy().into_owned());
+    let tmp_name = format!("{name}.pixel-tmp-{nanos}-{seq}");
+    match path.parent() {
+        Some(parent) => parent.join(tmp_name),
+        None => PathBuf::from(tmp_name),
+    }
 }
 
 pub(crate) fn dry_run_summary(dry_run: bool, summary: &str) -> String {
@@ -1513,6 +1571,42 @@ mod cursor_hooks_tests {
                 cursor_command(exe, "guard --provider cursor"),
             ],
             "foreign preToolUse entries survive and pixel's stays singular: {pre:?}"
+        );
+    }
+
+    /// A foreign command that merely *mentions* `run-hook guard` (without
+    /// running through pixel's executable) must survive an install untouched,
+    /// while the actual pixel-owned entry is replaced and never duplicated.
+    #[test]
+    fn install_preserves_foreign_commands_that_mention_run_hook() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = std::path::Path::new("/opt/pixel");
+        let path = home.path().join(crate::config::CURSOR_HOOKS_FILE);
+        super::write_settings(
+            &path,
+            &serde_json::json!({
+                "hooks": {
+                    "preToolUse": [
+                        {"command": "some-tool run-hook guard --for-everyone"},
+                        {"command": cursor_command(exe, "guard --provider cursor")}
+                    ]
+                }
+            }),
+            false,
+        )
+        .unwrap();
+
+        install_cursor_hooks(home.path(), exe, false).unwrap();
+        let value = read_settings(&path).unwrap();
+        let pre = commands_for(&value, "preToolUse");
+        assert_eq!(
+            pre,
+            vec![
+                "some-tool run-hook guard --for-everyone".to_owned(),
+                cursor_command(exe, "guard --provider cursor"),
+            ],
+            "a foreign command mentioning 'run-hook guard' survives; the \
+             pixel entry is replaced, not duplicated: {pre:?}"
         );
     }
 

@@ -620,11 +620,11 @@ fn provider_rewrite_with(
 /// Which repository's configuration layers decide the policy: the call's
 /// working directory, resolved the way every `pixel config` lookup resolves it.
 fn policy_root(payload: &Value) -> Option<PathBuf> {
-    let cwd = payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())?;
+    // Resolve the working directory the same way enforcement does, so an
+    // empty `cwd` (Cursor sends `cwd: ""`) still falls back to
+    // `workspace_roots` instead of silently reading global policy.
+    let input = payload.get("tool_input").unwrap_or(&Value::Null);
+    let cwd = provider_cwd(payload, input)?;
     crate::discover_root(&cwd).ok()
 }
 
@@ -3167,11 +3167,12 @@ fn metrics_record_line(payload: &Value) -> Option<String> {
     if !METRICS_SHELL_TOOLS.contains(&tool) {
         return None;
     }
-    let command = tool_command_text(payload.get("tool_input")?)?;
-    let payload_cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
-        || std::env::current_dir().unwrap_or_default(),
-        PathBuf::from,
-    );
+    let tool_input = payload.get("tool_input")?;
+    let command = tool_command_text(tool_input)?;
+    // Resolve the working directory the way enforcement does, so an empty
+    // `cwd` (Cursor sends `cwd: ""`) falls back to `workspace_roots` and the
+    // workspace's `.pixel` is still found for the metrics lookup.
+    let payload_cwd = provider_cwd(payload, tool_input).unwrap_or_default();
     // A leading `cd dir &&` selects where the invocation actually ran:
     // the record's cwd is that effective directory, not the tool cwd.
     let (effective_cwd, effective_cmd) = strip_cd_prefix(&command, &payload_cwd);
@@ -7160,6 +7161,24 @@ mod tests {
             metrics_hook_response(Some(Provider::Cursor), &payload),
             None
         );
+    }
+
+    /// Cursor sends `cwd: ""` on Shell calls and names the repo only in
+    /// `workspace_roots`; the metrics relay must still resolve the workspace
+    /// and find the matching record instead of silently returning no line.
+    #[test]
+    fn cursor_metrics_lookup_falls_back_to_workspace_roots_on_empty_cwd() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("cursor-roots");
+        let payload = serde_json::json!({
+            "tool_name": "Shell",
+            "tool_input": { "command": "pixel impact src/login.rs" },
+            "cwd": "",
+            "workspace_roots": [fixture.root.display().to_string()],
+        });
+        let line = metrics_hook_line(&payload)
+            .expect("an empty cwd still resolves the workspace via workspace_roots");
+        assert!(line.starts_with("🟩 pixel impact"), "{line}");
     }
 
     #[test]
