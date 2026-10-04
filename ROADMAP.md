@@ -1,10 +1,11 @@
 # Roadmap
 
 What Pixel intends to do, and not do, from October 2026 to October 2027.
-It states a direction, not a promise: the maintainers (GOVERNANCE.md)
-revise it when that direction changes, and at least once a year. Day-to-day
-work is tracked on [project 3](https://github.com/users/LivioGama/projects/3);
-each theme below links the issues that carry it.
+It states a direction, not a promise: the maintainers
+([GOVERNANCE.md](GOVERNANCE.md)) revise it when that direction changes,
+and at least once a year. Day-to-day work is tracked on
+[project 3](https://github.com/users/LivioGama/projects/3); each theme
+below links the issues that carry it.
 
 ## Direction
 
@@ -44,13 +45,13 @@ too.
   Best Practices silver level.
 - **Releases.** Frequent small releases from `main`, each with its notes,
   signed provenance and SBOM; only the latest release receives security
-  fixes (SECURITY.md).
+  fixes ([SECURITY.md](SECURITY.md)).
 
 ## Not planned
 
 - **No account, no hosted service, no telemetry.** Pixel runs on the
   user's machine and sends nothing on its own beyond the release check
-  SECURITY.md describes.
+  [SECURITY.md](SECURITY.md) describes.
 - **No MCP server.** 0.7.0 removed them; every capability is a CLI command
   that agents call through their shell and Pixel's hooks.
 - **No model in the default path.** Deterministic retrieval stays the
