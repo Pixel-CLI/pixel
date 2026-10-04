@@ -672,6 +672,7 @@ mod tests {
             url_before: String::new(),
             url_after: String::new(),
             changed,
+            fill_skipped: false,
             log: String::new(),
         }
     }
