@@ -14,7 +14,9 @@ class CandidateContract(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.repo = Path(self.tmp.name)
-        self.env = {**os.environ, 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_NOSYSTEM': '1'}
+        context = {'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+                   'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_PREFIX'}
+        self.env = {**{k: v for k, v in os.environ.items() if k not in context}, 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_NOSYSTEM': '1'}
         self.git('init', '-qb', 'main')
         self.git('config', 'user.name', 'Release test')
         self.git('config', 'user.email', 'release@example.invalid')
@@ -97,6 +99,18 @@ class CandidateContract(unittest.TestCase):
         result = self.run_guard(self.base)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('unreleased changelog fragments', result.stderr)
+
+    def test_inherited_git_context_cannot_redirect_the_candidate_guard(self):
+        foreign = self.repo / 'foreign'
+        foreign.mkdir()
+        subprocess.run(['git', 'init', '-q', str(foreign)], env=self.env, check=True)
+        self.env.update({'GIT_DIR': str(foreign / '.git'),
+                         'GIT_WORK_TREE': str(foreign),
+                         'GIT_INDEX_FILE': str(foreign / '.git/index')})
+        result = self.run_guard(self.base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # An unrelated tip must still fail after cleaning the environment.
+        self.assertNotEqual(self.run_guard(self.head).returncode, 0)
 
     def test_missing_or_empty_candidate_cannot_pass(self):
         for head in (self.base, 'does-not-exist'):

@@ -9,23 +9,30 @@ This does not attest CI, approvals or semantic changelog completeness.
 """
 
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import sys
 
 
+# These redirect Git away from the repository in the invocation directory.
+GIT_CONTEXT = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+               "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"}
+GIT_ENV = {key: value for key, value in os.environ.items() if key not in GIT_CONTEXT}
+
+
 def git(*args):
-    return subprocess.check_output(["git", *args], text=True).strip()
+    return subprocess.check_output(["git", *args], text=True, env=GIT_ENV).strip()
 
 
 def check(base, head, tip, merge):
     base, head, tip = (git("rev-parse", "--verify", f"{ref}^{{commit}}")
                        for ref in (base, head, tip))
-    subprocess.run(["git", "merge-base", "--is-ancestor", base, head], check=True)
+    subprocess.run(["git", "merge-base", "--is-ancestor", base, head], check=True, env=GIT_ENV)
     if base == head:
         raise ValueError("prepare head must contain a release commit")
     scope = Path(__file__).resolve().parents[3] / "scripts/release-prepare-only.py"
-    subprocess.run([sys.executable, str(scope), base, head], check=True)
+    subprocess.run([sys.executable, str(scope), base, head], check=True, env=GIT_ENV)
     fragments = git("ls-tree", "-r", "--name-only", head, "changelog.d").splitlines()
     if any(path.endswith(".md") for path in fragments):
         raise ValueError("candidate still contains unreleased changelog fragments")
@@ -34,7 +41,7 @@ def check(base, head, tip, merge):
             raise ValueError("base moved: refresh candidate and changelog coverage, then revalidate")
     else:
         merge = git("rev-parse", "--verify", f"{merge}^{{commit}}")
-        subprocess.run(["git", "merge-base", "--is-ancestor", merge, tip], check=True)
+        subprocess.run(["git", "merge-base", "--is-ancestor", merge, tip], check=True, env=GIT_ENV)
         if git("show", "-s", "--format=%P", merge) != base:
             raise ValueError("merge parent differs from recorded base; candidate is stale")
         if git("rev-parse", f"{head}^{{tree}}") != git("rev-parse", f"{merge}^{{tree}}"):
