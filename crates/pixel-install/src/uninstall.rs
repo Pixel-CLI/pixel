@@ -134,6 +134,7 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         remove_gemini_hooks(&home, &exe, dry_run)?,
         remove_zcode_hooks(&home, dry_run)?,
         remove_cursor_hooks(&home, &exe, dry_run)?,
+        crate::copilot_config::remove_copilot_hooks(&home, dry_run)?,
         remove_pi_extension(&home, dry_run)?,
         // 5. Remove pixel hooks from project-level .codex/hooks.json files.
         remove_project_codex_hooks(&home, &exe, dry_run)?,
