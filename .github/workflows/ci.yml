@@ -257,11 +257,14 @@ jobs:
           ^crates/pixel-install/assets/pi-pixel\.ts$
           EOF
 
-          # Only the dependency graph feeds cargo-deny.
+          # Only the dependency graph feeds cargo-deny; osv-scanner.toml and
+          # its checker feed the advisory-list step of the same job.
           cat > deps.re <<'EOF'
           (^|/)Cargo\.toml$
           ^Cargo\.lock$
           ^deny\.toml$
+          ^osv-scanner\.toml$
+          ^scripts/check-advisory-ignores\.py$
           EOF
 
           flag() { grep -Eqf "$1" changed.txt && echo true || echo false; }
@@ -685,6 +688,11 @@ jobs:
       # advisory database is fetched by cargo-deny itself.
       - name: cargo deny check
         run: cargo deny check
+
+      # Scorecard's Vulnerabilities check reads osv-scanner.toml, not
+      # deny.toml: the two must accept the same advisories.
+      - name: Advisory ignores agree (deny.toml, osv-scanner.toml)
+        run: python3 scripts/check-advisory-ignores.py
 
   # The green verdict the changes job's skip guard reads (#590): every lane
   # above ran green on this exact tree, so the tree is recorded in the cache

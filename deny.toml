@@ -25,16 +25,20 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# osv-scanner.toml repeats this list for OpenSSF Scorecard, which reads that
+# file and not this one; scripts/check-advisory-ignores.py (the `deny` CI
+# job) fails when the two lists differ.
 ignore = [
     # `paste` is archived upstream (proc-macro only, no runtime code). It
-    # reaches the tree through `tokenizers`, itself pulled by both
-    # `fastembed` and `model2vec-rs`; the fix is theirs (tokenizers 0.23
-    # moved to `pastey`; 0.21, model2vec-rs's pin, has not).
-    { id = "RUSTSEC-2024-0436", reason = "transitive via tokenizers 0.21 <- model2vec-rs; proc-macro, no runtime surface" },
+    # reaches the tree through `tokenizers`, both majors of it: 0.21 pulled
+    # by `model2vec-rs` and 0.23 by `fastembed`. The fix is upstream's:
+    # tokenizers 0.23.2, the latest release, still depends on `paste`.
+    { id = "RUSTSEC-2024-0436", reason = "transitive via tokenizers 0.21 <- model2vec-rs and 0.23 <- fastembed; proc-macro, no runtime surface" },
     # `number_prefix` (byte-size formatting) is unmaintained. Pulled by
-    # `indicatif` 0.17 <- `hf-hub` 0.4 <- `model2vec-rs`; pixel never
-    # calls it. Goes away when model2vec-rs moves to hf-hub 0.5.
-    { id = "RUSTSEC-2025-0119", reason = "transitive via indicatif 0.17 <- hf-hub 0.4 <- model2vec-rs; formatting helper, unused by pixel" },
+    # `indicatif` 0.17, through both `hf-hub` 0.4 and `tokenizers` 0.21, each
+    # <- `model2vec-rs`; pixel never calls it. Goes away when model2vec-rs
+    # moves to hf-hub 0.5 and tokenizers 0.23 (0.3.0, the latest, has not).
+    { id = "RUSTSEC-2025-0119", reason = "transitive via indicatif 0.17 <- hf-hub 0.4 and tokenizers 0.21 <- model2vec-rs; formatting helper, unused by pixel" },
 ]
 
 [licenses]

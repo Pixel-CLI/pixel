@@ -22,7 +22,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] `cargo fmt --all -- --check` exits 0.
 - [ ] `cargo test --workspace` exits 0.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
-- [ ] `cargo deny check` exits 0 (skip when `Cargo.lock` did not change); a new exception in `deny.toml` carries its reason.
+- [ ] `cargo deny check` exits 0 (skip when `Cargo.lock` did not change); a new advisory exception in `deny.toml` carries its reason and is repeated in `osv-scanner.toml` (`python3 scripts/check-advisory-ignores.py`).
 - [ ] New behaviour has a test that fails if the behaviour is removed.
 - [ ] The `Mutants` CI job reports no `MISSED` mutant on the pull request (see "Mutation testing"); a local run is optional.
 - [ ] A `changelog.d/<slug>.<section>.md` fragment carries the entry, opening on its scope (`**graph:** …`), under 500 bytes (skip for pure refactors, CI/deps chores, and changes to the website alone, `website/` and its data, which ship nothing in the tool). Write it once, in the same push as the change: the pull request's link is left out, and the release cut appends it from the merge commit's `(#<n>)`. `prepare.sh --check`, which CI runs on every pull request, refuses a missing scope or an entry over 900.
@@ -112,7 +112,10 @@ embedding stacks excepted), crates.io as the only source. A finding is fixed
 by changing the dependency, or documented in `deny.toml` next to the
 exception with its reason; the CI job fails on anything else. `cargo deny
 check` needs the network for the advisory database and is not part of
-`scripts/gates.sh`.
+`scripts/gates.sh`. An advisory accepted in `deny.toml` is also listed, with
+its reason, in `osv-scanner.toml`: OpenSSF Scorecard scans `Cargo.lock` with
+osv-scanner, which never reads `deny.toml`, and the same CI job runs
+`scripts/check-advisory-ignores.py` to fail when the two lists differ.
 
 `scripts/gates.sh` runs the same commands (nextest when installed, `cargo
 test` otherwise) (plus `--mutants` for the

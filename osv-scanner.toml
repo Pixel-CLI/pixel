@@ -1,0 +1,15 @@
+# osv-scanner configuration, read from next to Cargo.lock. OpenSSF Scorecard's
+# Vulnerabilities check scans the lockfile with osv-scanner and honours this
+# file; it never reads deny.toml. Each entry repeats an `[advisories] ignore`
+# entry of deny.toml with its reason, where the full justification lives;
+# scripts/check-advisory-ignores.py (the `deny` CI job) fails when the two
+# lists differ. Both advisories are informational "unmaintained" notices,
+# not vulnerabilities.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "paste is unmaintained: transitive via tokenizers 0.21 <- model2vec-rs and 0.23 <- fastembed; proc-macro, no runtime surface"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0119"
+reason = "number_prefix is unmaintained: transitive via indicatif 0.17 <- hf-hub 0.4 and tokenizers 0.21 <- model2vec-rs; formatting helper, unused by pixel"
