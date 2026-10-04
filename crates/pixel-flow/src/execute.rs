@@ -1092,6 +1092,18 @@ mod tests {
         assert!(!field_holds_value(snapshot, "e59", "Zurich"));
     }
 
+    /// `unquoted_after` closes the attribute block at the first `]` that is
+    /// *outside* a quoted run: a `]` inside a quoted value (here `[CH]`
+    /// within `"Zurich [CH]"`) is skipped, so the fill-skip reads the
+    /// field's value and not a truncated one. Quotes toggled by the match
+    /// arm and the unquoted guard are both exercised: drop either and this
+    /// test points at the wrong bracket.
+    #[test]
+    fn unquoted_after_skips_a_closing_bracket_inside_a_quoted_run() {
+        let line = "- textbox \"City\" [value=\"Zurich [CH]\"]";
+        assert_eq!(line.get(unquoted_after(line, 0, ']')..), Some("]"));
+    }
+
     /// The block may carry attributes beyond the ref; the `: value` suffix
     /// starts at the block's closing bracket, not at the first comma, so
     /// `[ref=e59, required]: Zurich` is still read as holding `Zurich`.
