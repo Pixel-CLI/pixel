@@ -249,16 +249,37 @@ fn graph_findings(report: &ChangesReport, caps: &mut Vec<String>) -> Vec<ReviewF
     }
 
     for u in &report.unanchored {
+        // A deleted symbol that nothing still names is a finished deletion:
+        // it can never anchor, so a CONCERN could only be bypassed. Keep the
+        // CONCERN for the case that can be fixed — a surviving same-name
+        // call or reference site (`unresolved_name` consumer).
+        let has_live_references = report.consumers.iter().any(|c| c.of == u.uid);
+        let (severity, evidence, fix_hint) = if has_live_references {
+            (
+                "HIGH",
+                format!(
+                    "deleted symbol {name} has no anchor in the current graph",
+                    name = u.name
+                ),
+                "confirm references to the deleted symbol were renamed or removed, or re-index",
+            )
+        } else {
+            (
+                "MEDIUM",
+                format!(
+                    "deleted symbol {name} has no anchor in the current graph; no references remain",
+                    name = u.name
+                ),
+                "deletion left no references; nothing to fix",
+            )
+        };
         out.push(ReviewFinding {
             rule: "unanchored-symbol".into(),
-            severity: "HIGH".into(),
+            severity: severity.into(),
             file: Some(u.path.clone()),
             line: Some(u.old_lines[0]),
-            evidence: format!(
-                "deleted symbol {name} has no anchor in the current graph",
-                name = u.name
-            ),
-            fix_hint: "confirm references to the deleted symbol were renamed or removed, or re-index",
+            evidence,
+            fix_hint,
         });
     }
 
@@ -925,10 +946,11 @@ mod tests {
         );
     }
 
-    /// A deleted symbol lives in no graph: the change is unanchored, HIGH,
-    /// and nothing claims the deletion introduced a secret.
+    /// A deleted symbol nothing still names is a finished deletion: it can
+    /// never anchor, so the finding is a SUGGESTION, not a CONCERN that only
+    /// `--no-verify` could clear. The evidence keeps the deletion.
     #[test]
-    fn review_marks_a_deleted_symbol_unanchored() {
+    fn review_marks_a_fully_removed_symbol_a_suggestion() {
         let dir = tmpdir("unanchored");
         let root = dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -949,7 +971,7 @@ mod tests {
             .filter(|f| f.rule == "unanchored-symbol")
             .collect();
         assert_eq!(unanchored.len(), 1, "{report:?}");
-        assert_eq!(unanchored[0].severity, "HIGH");
+        assert_eq!(unanchored[0].severity, "MEDIUM");
         assert_eq!(unanchored[0].file.as_deref(), Some("src/del.rs"));
         assert!(
             unanchored[0].evidence.contains("doomed"),
@@ -963,6 +985,134 @@ mod tests {
                 .findings
                 .iter()
                 .all(|f| f.rule != "possible-secret" || f.file.as_deref() != Some("src/del.rs")),
+            "{report:?}"
+        );
+    }
+
+    /// A deleted symbol a call site still names is fixable — rename or
+    /// remove the reference — so it stays a CONCERN.
+    #[test]
+    fn review_marks_a_deleted_symbol_with_surviving_references_a_concern() {
+        let dir = tmpdir("unanchored");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod del;\npub mod a;\n").unwrap();
+        std::fs::write(root.join("src/del.rs"), "pub fn doomed() -> i32 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn idle() -> i32 { crate::del::doomed() }\n",
+        )
+        .unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let store = store_for(root);
+
+        std::fs::remove_file(root.join("src/del.rs")).unwrap();
+        let report = review(&store, root, None).expect("review runs");
+        let unanchored: Vec<&ReviewFinding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule == "unanchored-symbol")
+            .collect();
+        assert_eq!(unanchored.len(), 1, "{report:?}");
+        assert_eq!(unanchored[0].severity, "HIGH");
+        assert_eq!(unanchored[0].file.as_deref(), Some("src/del.rs"));
+        assert!(
+            unanchored[0].evidence.contains("doomed"),
+            "{}",
+            unanchored[0].evidence
+        );
+    }
+
+    /// When the diff removes BOTH the symbol and its only call site, the
+    /// deleted symbol has no surviving reference: it stays a SUGGESTION even
+    /// though the stale index still holds the old `calls` edge (the fix
+    /// reconciles that edge with the working tree and drops it).
+    #[test]
+    fn review_marks_a_symbol_removed_with_its_only_call_a_suggestion() {
+        let dir = tmpdir("unanchored");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod del;\npub mod a;\n").unwrap();
+        std::fs::write(root.join("src/del.rs"), "pub fn doomed() -> i32 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn idle() -> i32 { crate::del::doomed() }\n",
+        )
+        .unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let store = store_for(root);
+
+        std::fs::remove_file(root.join("src/del.rs")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn idle() -> i32 { 0 }\n").unwrap();
+        let report = review(&store, root, None).expect("review runs");
+        let unanchored: Vec<&ReviewFinding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule == "unanchored-symbol")
+            .collect();
+        // The index still carries the idle->doomed edge; reconcile it with
+        // the working tree so the removed call site is not counted as a
+        // surviving reference.
+        assert_eq!(unanchored.len(), 1, "{report:?}");
+        assert_eq!(unanchored[0].severity, "MEDIUM", "{report:?}");
+        assert_eq!(unanchored[0].file.as_deref(), Some("src/del.rs"));
+    }
+
+    /// A consumer that names a DIFFERENT deleted symbol must not raise an
+    /// unrelated deletion: `has_live_references` keys on the consumer's
+    /// `of`, not on the mere presence of any consumer. Hoisting that
+    /// predicate to a constant `true` would loop every unanchored symbol
+    /// into HIGH the moment ANY consumer survives — this test pins the
+    /// per-symbol cost of that mutant.
+    #[test]
+    fn review_only_clears_the_concern_for_a_symbol_whose_own_references_survived() {
+        let dir = tmpdir("unanchored");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub mod a;\npub mod b;\npub fn keeper() -> i32 { crate::b::beta() }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn alpha() -> i32 { 1 }\n").unwrap();
+        std::fs::write(root.join("src/b.rs"), "pub fn beta() -> i32 { 2 }\n").unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let store = store_for(root);
+
+        // Delete both files: `beta` keeps a live call site in the untouched
+        // `lib.rs` (a surviving consumer), `alpha` has none anywhere.
+        std::fs::remove_file(root.join("src/a.rs")).unwrap();
+        std::fs::remove_file(root.join("src/b.rs")).unwrap();
+        let report = review(&store, root, None).expect("review runs");
+        let unanchored: Vec<&ReviewFinding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule == "unanchored-symbol")
+            .collect();
+        assert_eq!(unanchored.len(), 2, "{report:?}");
+        // `report.consumers` is non-empty (the surviving beta call site), so
+        // a predicate coerced to `true` would wrongly make EVERY deletion
+        // HIGH. `alpha` has no surviving reference and must stay MEDIUM.
+        assert_eq!(
+            unanchored
+                .iter()
+                .find(|f| f.file.as_deref() == Some("src/a.rs"))
+                .map(|f| f.severity.as_str()),
+            Some("MEDIUM"),
+            "{report:?}"
+        );
+        assert_eq!(
+            unanchored
+                .iter()
+                .find(|f| f.file.as_deref() == Some("src/b.rs"))
+                .map(|f| f.severity.as_str()),
+            Some("HIGH"),
             "{report:?}"
         );
     }
