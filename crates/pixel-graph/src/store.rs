@@ -2351,10 +2351,13 @@ mod tests {
             "an empty file became a db"
         );
 
-        // A plain directory under a linked prefix still opens.
+        // A plain directory under a linked prefix still opens, for writing
+        // and read-only alike (macOS's `/var` -> `/private/var` is such a
+        // prefix): only the `.pixel` directory and the file keep the refusal.
         let linked_root = base.path().join("linked-root");
         symlink(&real, &linked_root).unwrap();
         std::fs::remove_file(real.join(".pixel/graph.v2.db")).unwrap();
         GraphStore::open(&linked_root.join(".pixel/graph.v2.db")).unwrap();
+        GraphStore::open_read_only(&linked_root.join(".pixel/graph.v2.db")).unwrap();
     }
 }
