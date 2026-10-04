@@ -1349,6 +1349,71 @@ mod tests {
             crate::decide_ollaya::OLLAYA_BASIS
         );
         assert!(ollaya.decide_battery("state").is_err());
+
+        // Hosted Jev rides the same trait: metadata disclosed, confidence
+        // carried in the snapshot, battery refused — the remote contract
+        // with Jev's own basis.
+        let mut jev = crate::decide_jev::Jev::with_post(
+            crate::decide_jev::JevConfig {
+                model_name: "test-jev".to_string(),
+                key: Some("tsk-test".to_string()),
+                ..Default::default()
+            },
+            |_config, _body| {
+                Ok(json!({
+                    "model": "test-jev",
+                    "answers": {"q1": {"type": "choice", "choice": "yes",
+                                       "probabilities": {"yes": 0.9, "no": 0.1},
+                                       "confidence": 0.8}},
+                    "usage": {}
+                }))
+            },
+        );
+        let jev_probs = jev.decide(&spec).unwrap();
+        let jev_document = document(&jev, &spec, &jev_probs);
+        assert_eq!(
+            jev_probs["yes"], 0.9,
+            "the hosted distribution passes through"
+        );
+        assert_eq!(jev_document["snapshot"]["model"], "test-jev");
+        assert_eq!(jev_document["snapshot"]["provider"], "jev");
+        assert_eq!(jev_document["snapshot"]["deterministic"], false);
+        assert_eq!(jev_document["snapshot"]["confidence"], 0.8);
+        assert_eq!(
+            jev_document["epistemics"]["basis"],
+            crate::decide_jev::JEV_BASIS
+        );
+        assert!(jev.decide_battery("state").is_err());
+    }
+
+    /// The `Jev` preset must dispatch to the TypeSafe adapter, not the
+    /// chat-completion one: the two disclose different bases, so a routing
+    /// mistake is observable without any network.
+    #[test]
+    fn open_resolved_routes_the_jev_preset_to_the_typesafe_engine() {
+        // The hosted engine refuses to open without a key; the value is
+        // never asserted on or printed.
+        unsafe { std::env::set_var("TYPESAFE_API_KEY", "tsk-routing-test") };
+        let jev = open_resolved(
+            crate::classify_setup::ResolvedEngine::Remote,
+            crate::decide_remote::Preset::Jev,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(jev.provider(), Some("jev"));
+        assert_eq!(jev.basis(), crate::decide_jev::JEV_BASIS);
+        // Chat presets keep the chat adapter — the local preset needs no
+        // key at all, so the same resolution path must still open it.
+        let chat = open_resolved(
+            crate::classify_setup::ResolvedEngine::Remote,
+            crate::decide_remote::Preset::Local,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(chat.basis(), REMOTE_BASIS);
+        unsafe { std::env::remove_var("TYPESAFE_API_KEY") };
     }
 
     /// A criterion missing its `label=` prefix is rejected with the declared

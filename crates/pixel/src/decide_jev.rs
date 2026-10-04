@@ -82,8 +82,11 @@ impl Jev {
         }
     }
 
+    /// Test handle: the same `Jev` with a scripted transport. `pub(crate)`
+    /// so classify.rs's adapter tests can drive the `DecisionEngine` trait
+    /// impl without a network.
     #[cfg(test)]
-    fn with_post(
+    pub(crate) fn with_post(
         config: JevConfig,
         post: impl Fn(&JevConfig, &Value) -> Result<Value, String> + 'static,
     ) -> Jev {

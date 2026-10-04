@@ -590,7 +590,20 @@ mod tests {
         assert_eq!(Preset::parse_name("OpenRouter"), Some(Preset::Openrouter));
         assert_eq!(Preset::parse_name("opencode_go"), Some(Preset::OpencodeGo));
         assert_eq!(Preset::parse_name("  DEEPSEEK  "), Some(Preset::Deepseek));
+        assert_eq!(Preset::parse_name("jev"), Some(Preset::Jev));
         assert_eq!(Preset::parse_name("not-a-provider"), None);
+    }
+
+    #[test]
+    fn key_value_hands_the_resolved_key_to_custom_transports() {
+        // Hosted Jev builds its own transport from a resolved `Config`; the
+        // key must survive resolution without re-reading the environment.
+        let keyed =
+            resolve_config_from(Preset::Jev, None, Some("tsk-resolved".into()), env_of(&[]))
+                .unwrap();
+        assert_eq!(keyed.key_value().as_deref(), Some("tsk-resolved"));
+        let keyless = resolve_config_from(Preset::Jev, None, None, env_of(&[]));
+        assert!(keyless.is_err(), "Jev always needs a key");
     }
 
     #[test]

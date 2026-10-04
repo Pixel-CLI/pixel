@@ -430,4 +430,69 @@ mod tests {
             "http://localhost:8080/api/v4/secrets/TYPESAFE_API_KEY?projectId=proj-7&environment=prod&type=shared"
         );
     }
+
+    #[test]
+    fn empty_configured_variables_count_as_absent_not_as_values() {
+        // An empty value is what `set FOO=` produces in a shell; treating
+        // it as set would turn a stray export into a half-configured error
+        // or an empty bearer token.
+        let empty_token = env_of(&[
+            ("INFISICAL_TOKEN", ""),
+            ("PIXEL_INFISICAL_PROJECT_ID", "proj-7"),
+        ]);
+        let error = settings_from(Preset::Jev, &empty_token).unwrap_err();
+        assert!(error.contains("INFISICAL_TOKEN"), "{error}");
+        let empty_project = env_of(&[
+            ("INFISICAL_TOKEN", "st-token"),
+            ("PIXEL_INFISICAL_PROJECT_ID", ""),
+        ]);
+        let error = settings_from(Preset::Jev, &empty_project).unwrap_err();
+        assert!(error.contains("PIXEL_INFISICAL_PROJECT_ID"), "{error}");
+    }
+
+    /// One loopback response server with a deadline, so a missing
+    /// connection fails the assertion instead of hanging.
+    fn http_once(status: &str, reply: String) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let status = status.to_string();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0; 1024];
+                let received = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+                return;
+            }
+        });
+        (base, server)
+    }
+
+    #[test]
+    fn http_get_returns_the_body_and_maps_statuses_for_the_seam() {
+        let (base, server) = http_once("200 OK", r#"{"secret":{"secretValue":"v"}}"#.to_string());
+        let body = http_get(&format!("{base}/api/v4/secrets/TYPESAFE_API_KEY"), "st-t").unwrap();
+        assert_eq!(body, r#"{"secret":{"secretValue":"v"}}"#);
+        server.join().unwrap();
+
+        let (base, server) = http_once("404 Not Found", "{}".to_string());
+        let error = http_get(&format!("{base}/api/v4/secrets/NOPE"), "st-t").unwrap_err();
+        assert_eq!(error, HttpError::Status(404));
+        server.join().unwrap();
+    }
 }
