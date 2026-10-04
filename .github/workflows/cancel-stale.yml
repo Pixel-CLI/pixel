@@ -1,0 +1,30 @@
+name: Cancel stale runs
+
+# A merged (or closed) pull request cannot benefit from the validations
+# still queued or running for its head: the branch is gone, so the verdict
+# would apply to a commit nobody will ever look at. Cancel those runs so
+# the runner queue (a2 drains one job at a time) never serves work whose
+# answer is moot. `concurrency` in the heavy workflows already covers the
+# same-branch repush; this covers the merge/close that fires no new job to
+# supersede the old ones. Manual purge from a checkout:
+#   bash scripts/cancel-stale-runs.sh --all --older-than 60 --apply
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cancel:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+      - name: Cancel this PR's queued and in-progress runs
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: bash scripts/cancel-stale-runs.sh --branch "$PR_HEAD" --apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_HEAD: ${{ github.event.pull_request.head.ref }}
