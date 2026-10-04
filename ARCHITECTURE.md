@@ -641,7 +641,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
     contract scripts (installer, gate runner, pre-push baseline, mutation
     pre-push and remote host, release prepare, Homebrew formula and Linux
-    bottles, homebrew-core formula,
+    bottles, release SBOM, homebrew-core formula,
     nightly mutants, mutants
     config, action pins, advisory ignores, clean, cancel-stale sweep), the
     pixel-retro lead-time contract (`.agents/skills/pixel-retro/test_lead_time.py`)
@@ -660,11 +660,16 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   test) and `release-build.yml`, the reusable workflow it calls to build the
   archives, write the formula and the Linux bottles with
   `scripts/homebrew-formula.py` and the homebrew-core formula with
-  `scripts/homebrew-core-formula.py`, and sign their provenance (it is the
+  `scripts/homebrew-core-formula.py`, write each archive's CycloneDX SBOM
+  `pixel-<tag>-<target>.cdx.json` (cargo-cyclonedx, narrowed by
+  `scripts/release-sbom.py` to the crates `cargo tree -p pixel-cli` compiles
+  for that target and feature set, from the build matrix's `features`), and
+  sign their provenance, the SBOMs among the subjects (it is the
   attestation's signer, which makes the provenance SLSA Build Level 3; the
   signed Sigstore bundle ships as the release asset `pixel-<tag>.intoto.jsonl`,
   the suffix Scorecard's Signed-Releases check reads as provenance, and the
-  smoke test verifies it with `gh attestation verify --bundle`), `homebrew-core.yml` (that formula
+  smoke test verifies it, the archive and its SBOM with `gh attestation
+  verify`, with and without `--bundle`), `homebrew-core.yml` (that formula
   built from source, `brew test`, `brew audit --strict --new`, on macOS and
   Linux),
   `release-prepare-scope.yml`, `pages.yml` (the website) and `scorecard.yml`

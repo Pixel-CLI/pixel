@@ -70,6 +70,36 @@ gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --owner LivioGama
   --source-ref refs/tags/v0.6.1 --deny-self-hosted-runners
 ```
 
+### Software bill of materials
+
+Releases after v0.6.1 attach a CycloneDX 1.5 JSON SBOM beside each archive,
+`pixel-vX.Y.Z-<target>.cdx.json`. It lists the crates that target's binary
+compiles, with their versions, licences and package URLs, and their
+dependency graph: the Linux archives are built with `--no-default-features
+--features model2vec`, the macOS one with the default features (fastembed
+and its ONNX Runtime included), so the two SBOMs differ. Build-time crates
+(build scripts, procedural macros) are listed; dev-dependencies are not. The
+Linux bottles hold the binary of the matching Linux archive, so that
+archive's SBOM describes them. `release-build.yml` writes it with
+cargo-cyclonedx, then keeps only the crates `cargo tree -p pixel-cli`
+resolves for that target and feature set: `cargo metadata`, which
+cargo-cyclonedx reads, also lists optional dependencies the build never
+compiles. Native code a crate bundles (the ONNX Runtime `ort-sys` links on
+macOS) appears as that crate, not as a component of its own; the Rust
+standard library and the target's C library are not listed.
+
+Each SBOM is a subject of the release's provenance attestation, so the
+commands above verify it like an archive, with or without `--bundle`:
+
+```bash
+gh attestation verify pixel-vX.Y.Z-aarch64-apple-darwin.cdx.json --repo Pixel-CLI/pixel \
+  --signer-workflow Pixel-CLI/pixel/.github/workflows/release-build.yml \
+  --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
+```
+
+A verified SBOM can then go to any CycloneDX consumer, a vulnerability
+scanner for instance: `grype sbom:pixel-vX.Y.Z-aarch64-apple-darwin.cdx.json`.
+
 ### VirusTotal reports
 
 Each release's notes end with a `VirusTotal` section linking the report of
