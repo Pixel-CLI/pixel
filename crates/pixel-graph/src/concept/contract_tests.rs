@@ -227,6 +227,22 @@ fn plain_strings_should_need_three_words_and_twelve_chars() {
 }
 
 #[test]
+fn plain_strings_should_be_dropped_below_either_floor_and_kept_at_both() {
+    // Floors: 3 words and 12 characters, both inclusive.
+    let src = concat!(
+        "const a = \"two longwordsonly\";\n", // 2 words, 17 chars
+        "const b = \"a b c\";\n",             // 3 words, 5 chars
+        "const c = \"ab cd efghi\";\n",       // 3 words, 11 chars
+        "const d = \"ab cd efghij\";\n",      // 3 words, 12 chars
+    );
+    let strings = of_kind(
+        &extract_concepts("src/a.ts", src.as_bytes()),
+        ConceptKind::String,
+    );
+    assert_eq!(strings, vec!["ab cd efghij"]);
+}
+
+#[test]
 fn template_strings_should_index_each_static_fragment_that_is_long_enough() {
     let strings = of_kind(&ts_concepts(), ConceptKind::String);
     assert!(

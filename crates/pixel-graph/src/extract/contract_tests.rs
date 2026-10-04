@@ -169,11 +169,9 @@ fn symbol_sig_should_be_capped_at_200_bytes_on_a_char_boundary() {
     let src = format!("fn {name}() {{}}\n");
     let fx = extract("a.rs", &src);
     let sig = &fx.symbols[0].sig;
-    assert!(sig.len() <= 200, "sig is {} bytes", sig.len());
-    assert!(
-        sig.len() >= 199,
-        "sig keeps all whole characters up to the cap"
-    );
+    // `fn ` is 3 bytes and each `é` 2, so byte 200 falls inside a character:
+    // the cut keeps the 98 whole ones before it, 199 bytes.
+    assert_eq!(sig.len(), 199, "{sig}");
     assert!(sig.starts_with("fn é"));
 }
 
