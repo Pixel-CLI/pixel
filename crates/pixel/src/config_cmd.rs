@@ -572,8 +572,13 @@ fn setup_with_install(
     if !setup_with_keys(path, input, output, color, keys)? {
         return Ok(false);
     }
-    install_web_search(input, output)?;
+    // The web-search and classify steps configure unrelated features, so a
+    // web-search failure must not keep the classify installer from running.
+    // Run the web-search step, hold any error, and report it only after the
+    // classify step has had its turn.
+    let web_search_result = install_web_search(input, output);
     if !classify_enabled_in(&crate::config_file::load(path)?)? {
+        web_search_result?;
         return Ok(true);
     }
     if let Err(error) = install(input, output) {
@@ -584,6 +589,7 @@ fn setup_with_install(
         }
         return Err(error);
     }
+    web_search_result?;
     Ok(true)
 }
 
@@ -1335,6 +1341,32 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn web_search_failure_should_not_block_the_classify_installer() {
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        write(&path, "metrics: 'on'\nclassify: {enabled: true}\n");
+        let mut classify_runs = 0;
+        let error = setup_with_install(
+            &path,
+            &mut std::io::Cursor::new("n\n\n\n\n\ny\ny\n"),
+            &mut Vec::new(),
+            false,
+            &KeyReader::inert(),
+            |_, _| {
+                classify_runs += 1;
+                Ok(())
+            },
+            |_, _| Err("could not ask the web search provider".into()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            classify_runs, 1,
+            "a web-search failure must not keep the classify installer from running"
+        );
+        assert_eq!(error, "could not ask the web search provider");
     }
 
     #[test]

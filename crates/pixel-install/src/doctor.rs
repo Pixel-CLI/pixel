@@ -97,6 +97,9 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("install.legacy-wrappers", FIX_INSTALL),
     entry("rule.parity", FIX_INSTALL),
     entry("rule.scenarios", FIX_INSTALL),
+    // The setup step is interactive and needs the user at a terminal, so
+    // the check names it in the message but leaves `--fix` out of it.
+    entry("web-search.provider", None),
     entry("repo.task-hook-observations", None),
     entry("repo.codex-config", FIX_REPO_INSTALL),
     entry("repo.codex-hooks", FIX_REPO_INSTALL),
@@ -106,9 +109,6 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("repo.pixel-first", FIX_REPO_INSTALL),
     entry("repo.claude-hooks", FIX_REPO_INSTALL),
     entry("repo.pi-guard", FIX_REPO_INSTALL),
-    // The setup step is interactive and needs the user at a terminal, so
-    // the check names it in the message but leaves `--fix` out of it.
-    entry("web-search.provider", None),
     entry("daemon.health", Some("pixel daemon start {root}")),
     entry(
         "daemon.epistemics",
@@ -843,6 +843,14 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         });
     }
 
+    // Which web search provider the installed `pixel` resolves to, read
+    // straight from the environment and the global config file — never
+    // by spawning the binary, which would re-enter it from inside
+    // doctor. Runs for every invocation, not only inside a repository,
+    // so a bare `pixel doctor` still reports no provider when one is not
+    // configured.
+    runner.check_status("web-search.provider", || web_search_provider_check(&home));
+
     if let Some(root) = &options.repo_root {
         runner.check("repo.task-hook-observations", || {
             task_hook_observations(root)
@@ -1205,13 +1213,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         runner.check_status("repo.pi-guard", || {
             pi_guard_check(root, crate::pi_project::guard_state(root))
         });
-
-        // Which web search provider the installed `pixel` resolves to, read
-        // straight from the environment and the global config file — never
-        // by spawning the binary, which would re-enter it from inside
-        // doctor. Listed here, between the repo checks and the daemon ones,
-        // to match catalogue order.
-        runner.check_status("web-search.provider", || web_search_provider_check(&home));
 
         runner.check(
             "daemon.health",
@@ -1844,9 +1845,14 @@ fn web_search_provider_from(searxng_env: bool, perplexity_env: bool, doc: &Value
     }
 }
 
-/// A non-empty environment value, as the CLI reads it.
+/// A non-empty environment value, as the CLI reads it. Mirrors
+/// `web_search::normalize_base`: a value counts only when it is valid UTF-8
+/// and non-empty, so a non-UTF-8 `PIXEL_WEB_SEARCH_URL`/`PERPLEXITY_API_KEY`
+/// does not make `pixel doctor` report a provider `pixel web-search` would
+/// not select.
 fn env_non_empty(name: &str) -> bool {
-    std::env::var_os(name).is_some_and(|v| !v.is_empty())
+    std::env::var_os(name)
+        .is_some_and(|v| v.into_string().ok().is_some_and(|s| !s.is_empty()))
 }
 
 /// The global pixel config as a JSON value: `~/.pixel/config.yaml` parsed

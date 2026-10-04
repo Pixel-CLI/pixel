@@ -75,7 +75,15 @@ fn install_step_with(
         .map_err(|e| format!("read choice: {e}"))?;
     match parse_choice(&line) {
         Some("searxng") => ask_searxng_url(stdin, stdout, store_searxng),
-        Some("perplexity") => ask_perplexity_key(stdin, stdout, store_key),
+        Some("perplexity") => {
+            // Picker-specific only: switching to Perplexity must deactivate
+            // a stored SearXNG, or `pixel web-search` and `pixel config`
+            // would keep resolving SearXNG above it. The general setters
+            // (and the `PIXEL_WEB_SEARCH_URL` override) keep their
+            // coexistence behaviour.
+            store_searxng("")?;
+            ask_perplexity_key(stdin, stdout, store_key)
+        }
         _ => {
             writeln!(
                 stdout,
@@ -116,8 +124,47 @@ fn ask_searxng_url(
     writeln!(stdout, "web search provider: searxng — URL stored").map_err(|e| e.to_string())
 }
 
+/// Disable echo for one secret read, restoring the terminal on drop. Unlike
+/// [`crate::prompt_key::RawGuard`], canonical mode (the line discipline
+/// `read_line` relies on) is kept: only `ECHO` is cleared, so the key is
+/// typed blind but still line-buffered. `None` when stdin is not a
+/// configurable terminal (a pipe, a CI run); the caller then reads with
+/// echo, as it would on a redirect.
+struct EchoGuard {
+    original: libc::termios,
+}
+
+impl EchoGuard {
+    #[cfg_attr(test, mutants::skip)] // libc adapter; needs a real tty to matter
+    fn new() -> Option<Self> {
+        // SAFETY: zeroed memory is a valid (if meaningless) termios buffer
+        // that the tcgetattr call immediately overwrites.
+        let mut original: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: a single tcgetattr on stdin with a valid, zeroed buffer.
+        if unsafe { libc::tcgetattr(0, &mut original) } != 0 {
+            return None;
+        }
+        let mut muted = original;
+        muted.c_lflag &= !libc::ECHO;
+        // SAFETY: TCSANOW applies the descriptor's own modified settings.
+        if unsafe { libc::tcsetattr(0, libc::TCSANOW, &muted) } != 0 {
+            return None;
+        }
+        Some(Self { original })
+    }
+}
+
+impl Drop for EchoGuard {
+    #[cfg_attr(test, mutants::skip)] // libc adapter; the restore needs a real tty to observe
+    fn drop(&mut self) {
+        // SAFETY: restoring the settings this guard read from stdin.
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.original) };
+    }
+}
+
 /// The Perplexity key prompt: an empty answer stores nothing, exactly like
-/// `pixel config remote-key`'s empty-key rule.
+/// `pixel config remote-key`'s empty-key rule. The echo is muted while the
+/// key is typed, so it never lands in terminal scrollback or a recording.
 fn ask_perplexity_key(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
@@ -130,6 +177,7 @@ fn ask_perplexity_key(
     .map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;
     let mut key = String::new();
+    let _mute = EchoGuard::new();
     stdin
         .read_line(&mut key)
         .map_err(|e| format!("read key: {e}"))?;
@@ -221,20 +269,27 @@ mod tests {
     }
 
     #[test]
-    fn perplexity_choice_stores_the_key_and_never_echoes_it() {
+    fn perplexity_choice_stores_the_key_clears_searxng_and_never_echoes_it() {
+        let mut cleared = None;
         let mut stored = None;
         let mut output = Vec::new();
         install_step_with(
             true,
             &mut std::io::Cursor::new(b"2\npplx-secret-key\n".to_vec()),
             &mut output,
-            |_| panic!("the Perplexity choice must not store a SearXNG URL"),
+            |url| {
+                cleared = Some(url.to_string());
+                Ok(())
+            },
             |key| {
                 stored = Some(key.to_string());
                 Ok(())
             },
         )
         .unwrap();
+        // Switching to Perplexity deactivates a stored SearXNG so it wins
+        // the provider precedence instead of masking the new choice.
+        assert_eq!(cleared, Some(String::new()));
         assert_eq!(stored, Some("pplx-secret-key".to_string()));
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("web search provider: perplexity — key stored"));
