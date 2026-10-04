@@ -89,6 +89,10 @@ jobs:
     name: Publish release + formula
     needs: assets
     runs-on: ubuntu-26.04
+    # Whether the tap was updated, for the smoke job: a plain flag, so the tap
+    # token itself never reaches the job that runs the published artefacts.
+    outputs:
+      tap: ${{ steps.tap.outputs.published }}
     # Publication only: the signing permissions stay with release-build.yml.
     permissions:
       contents: write
@@ -178,6 +182,15 @@ jobs:
         if: env.HOMEBREW_TAP_TOKEN == ''
         run: echo "::warning::HOMEBREW_TAP_TOKEN is not set; update Formula/pixel.rb in LivioGama/homebrew-tap by hand from the pixel.rb release asset."
 
+      - name: Record whether the tap was published
+        id: tap
+        run: |
+          if [ -n "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Post-publish smoke test: installs what was just published, the ways the
   # README installs it, on each target's own runner, and checks it is the
   # tagged build. `pixel --version` must print `pixel x.y.z` and `commit:
@@ -202,7 +215,6 @@ jobs:
             os: macos-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - name: Write the version check
         run: |
@@ -274,7 +286,7 @@ jobs:
       # url instead, the formula counts as a build from source and needs a C
       # compiler. A runner image without Homebrew skips the check.
       - name: Homebrew tap (Linux bottle)
-        if: runner.os == 'Linux' && env.HOMEBREW_TAP_TOKEN != ''
+        if: runner.os == 'Linux' && needs.release.outputs.tap == 'true'
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
@@ -298,7 +310,7 @@ jobs:
       # macOS is the one target with no other install path than the tap for
       # most users; it has no bottle and installs from its archive.
       - name: Homebrew tap
-        if: runner.os == 'macOS' && env.HOMEBREW_TAP_TOKEN != ''
+        if: runner.os == 'macOS' && needs.release.outputs.tap == 'true'
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"

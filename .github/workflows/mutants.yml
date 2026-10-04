@@ -227,13 +227,14 @@ jobs:
     needs: plan
     if: needs.plan.outputs.mutants != '0' && needs.plan.outputs.duplicate != 'true'
     # Compiling happens here tens of mutants at a time, which is where a self-hosted
-    # runner pays off most: PIXEL_RUNNER_LABELS (see ci.yml) moves the shards to it on
-    # every event, pull requests included. That is deliberate: the pre-push gate
-    # (scripts/mutants-remote-gate.sh) already ran this exact diff on the same host
-    # before the branch could be pushed, and the host holds no repository
-    # credentials — `contents: read` and `persist-credentials: false` below still
-    # bound what a shard could touch.
-    runs-on: ${{ vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
+    # runner pays off most: PIXEL_RUNNER_LABELS (see ci.yml) moves the shards to it
+    # for pushes, dispatches and pull requests from branches of this repository,
+    # whose diff the maintainers' pre-push gate (scripts/mutants-remote-gate.sh)
+    # already ran on that host. A fork's pull request stays on GitHub's image:
+    # its code reaches the persistent host through no pre-push gate, and
+    # `contents: read` and `persist-credentials: false` do not isolate a host
+    # that outlives the job.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
     timeout-minutes: 90
     # The Test job's value (ci.yml), at the same job level: rust-cache hashes
     # it into the `linux-debug` key, so a shard without it would restore
