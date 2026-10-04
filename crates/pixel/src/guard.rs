@@ -3160,11 +3160,13 @@ fn result_carries_metrics_box(payload: &Value) -> bool {
     // sends the same idea as `tool_output` (a JSON-stringified result);
     // Copilot nests it under `toolResult.textResultForLlm` — the serialized
     // contains-check reaches the nested text field.
-    ["tool_response", "tool_output", "toolResult"].iter().any(|key| {
-        payload
-            .get(key)
-            .is_some_and(|r| r.to_string().contains("🟩 pixel"))
-    })
+    ["tool_response", "tool_output", "toolResult"]
+        .iter()
+        .any(|key| {
+            payload
+                .get(key)
+                .is_some_and(|r| r.to_string().contains("🟩 pixel"))
+        })
 }
 
 /// The provider-shaped envelope for a replayed metrics line: Cursor's
