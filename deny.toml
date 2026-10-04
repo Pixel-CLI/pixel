@@ -75,6 +75,14 @@ crate = "model2vec-rs"
 expression = "MIT"
 license-files = [{ path = "LICENSE", hash = 0x6fd19d50 }]
 
+# libfuzzer-sys vendors LLVM's libFuzzer, under the University of
+# Illinois/NCSA licence (`(MIT OR Apache-2.0) AND NCSA`). Only the fuzz/
+# workspace depends on it (fuzz.yml checks that workspace with this file);
+# nothing pixel ships links it.
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
+
 [licenses.private]
 ignore = true
 

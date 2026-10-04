@@ -1,0 +1,6 @@
+ex
+defmodule App.Worker do
+  alias App.Repo
+  def start(args), do: GenServer.start_link(__MODULE__, args)
+  defp fetch(id), do: Repo.get(User, id)
+end

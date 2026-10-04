@@ -1,0 +1,6 @@
+ts
+import { greet, farewell as bye } from "./a";
+import * as util from "../util";
+export class Greeter { constructor(private name: string) {} hello(): string { return greet(this.name); } }
+export const run = (xs: number[]) => xs.map((x) => util.double(x));
+function main() { new Greeter("a").hello(); bye(); }

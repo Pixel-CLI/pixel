@@ -1,0 +1,8 @@
+py
+from .models import User as U
+import os.path
+class Service(Base):
+    def run(self, user: U) -> None:
+        self.save(os.path.join("a", user.name))
+def main():
+    Service().run(U())

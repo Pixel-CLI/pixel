@@ -1,0 +1,2 @@
+(ab|cd){2,}x?yz+
+abcdyzz

@@ -1,0 +1,4 @@
+java
+package a.b;
+import java.util.List;
+public class Repo implements Store { private final List<String> xs; public Repo() { xs = List.of(); } @Override public String get(int i) { return xs.get(i); } }

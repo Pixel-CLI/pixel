@@ -1,0 +1,5 @@
+swift
+import Foundation
+protocol Store { func get(_ k: String) -> Int? }
+final class Cache: Store { func get(_ k: String) -> Int? { return dict[k] } }
+func run() { let c = Cache(); print(c.get("a") ?? 0) }

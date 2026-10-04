@@ -1,0 +1,6 @@
+go
+package main
+import ("fmt"; s "strings")
+type Server struct { name string }
+func (s *Server) Start() error { return fmt.Errorf("x %s", s.name) }
+func main() { srv := &Server{}; srv.Start(); s.ToUpper("a") }

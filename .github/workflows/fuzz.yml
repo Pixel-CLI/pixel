@@ -1,0 +1,179 @@
+# Fuzz: runs every cargo-fuzz target under fuzz/ (`cargo fuzz list`) for a
+# bounded time and fails on any crash, uploading the reproducers.
+#
+# The targets feed untrusted input to code that must not fail on it:
+# `graph_extract` gives arbitrary source to pixel-graph's tree-sitter
+# extraction, `search_plan` checks that pixel-index's query plan never drops
+# a document the verifier's regex matches. Each target's invariants are in
+# its header (fuzz/fuzz_targets/*.rs).
+#
+# A pull request touching a target or the code it fuzzes gets 60 seconds per
+# target; the weekly run and a manual one get 600 (or the `seconds` input).
+# The corpus grows across scheduled runs in the Actions cache; the seeds
+# under fuzz/seeds/ are tracked.
+#
+# A crash: download the `fuzz-artifacts-*` artifact of the run, then
+# `cargo +nightly fuzz run <target> <crash-file>` reproduces it and
+# `cargo +nightly fuzz tmin <target> <crash-file>` minimises it.
+#
+# OpenSSF Scorecard's Fuzzing check finds the targets by their
+# `libfuzzer_sys` import; this workflow is what makes them more than a
+# string match.
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/fuzz.yml"
+      - "fuzz/**"
+      # The fuzzed crates, the one both depend on, the workspace manifest
+      # their `workspace = true` dependencies resolve from, and the policy
+      # the dependency check below applies.
+      - "crates/pixel-graph/**"
+      - "crates/pixel-index/**"
+      - "crates/pixel-git/**"
+      - "Cargo.toml"
+      - "deny.toml"
+  schedule:
+    - cron: "23 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds of fuzzing per target (1 to 1200)"
+        required: false
+        default: "600"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '60' || inputs.seconds || '600' }}
+    steps:
+      # Before any build: libFuzzer reads -max_total_time=0 as "no limit",
+      # and two targets past 1200 s each would outlast the job's timeout.
+      - name: Check the duration
+        run: |
+          case "$FUZZ_SECONDS" in
+            '' | *[!0-9]*) echo "::error::seconds must be a whole number, got '$FUZZ_SECONDS'"; exit 1 ;;
+          esac
+          if [ "$FUZZ_SECONDS" -lt 1 ] || [ "$FUZZ_SECONDS" -gt 1200 ]; then
+            echo "::error::seconds must be between 1 and 1200, got $FUZZ_SECONDS"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # The pin is the action's commit used everywhere else; the ref
+          # does not name the toolchain, so it is passed explicitly.
+          # cargo-fuzz needs nightly for the sanitizer and coverage flags.
+          toolchain: nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+        with:
+          tool: cargo-fuzz@0.13.2
+          # install-action ships no manifest for cargo-fuzz: build it from
+          # its crates.io source rather than fetch a third-party binary.
+          fallback: cargo-install
+
+      # The root `cargo deny check` sees the root workspace only; this one
+      # applies the same deny.toml (advisories, licences, sources,
+      # duplicates) to what the fuzz build compiles and runs.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+        with:
+          tool: cargo-deny
+
+      - name: Fuzz dependency policy
+        run: cargo deny --manifest-path fuzz/Cargo.toml --config deny.toml check
+
+      - name: Restore the corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Build the targets
+        run: cargo fuzz build
+
+      - name: Run each target
+        run: |
+          # Not -e: a crashing target is recorded and the next one still runs.
+          set +e -uo pipefail
+          # A run that fuzzed nothing must not pass: no target listed, or a
+          # target that never reported its executions, fails the job.
+          if ! targets=$(cargo fuzz list) || [ -z "$targets" ]; then
+            echo "::error::cargo fuzz list found no target"
+            exit 1
+          fi
+          failed=()
+          {
+            echo "| Target | Seconds | Executions | Result |"
+            echo "| --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for target in $targets; do
+            corpus=("fuzz/corpus/$target")
+            mkdir -p "${corpus[0]}"
+            if [ -d "fuzz/seeds/$target" ]; then
+              corpus+=("fuzz/seeds/$target")
+            fi
+            echo "::group::$target ($FUZZ_SECONDS s)"
+            # -timeout: an input running 30 s is a hang the daemon would
+            # share, not a slow machine (inputs stay under 4 KiB).
+            cargo fuzz run "$target" "${corpus[@]}" -- \
+              -max_total_time="$FUZZ_SECONDS" -timeout=30 -print_final_stats=1 \
+              2>&1 | tee "fuzz-$target.log"
+            status=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            runs=$(sed -n 's/^stat::number_of_executed_units: *//p' "fuzz-$target.log" | tail -n 1)
+            if [ "$status" -eq 0 ] && [ -n "$runs" ] && [ "$runs" -gt 0 ]; then
+              result="no crash"
+            elif [ "$status" -eq 0 ]; then
+              result="**failed** (no execution reported)"
+              failed+=("$target")
+              echo "::error::fuzz target $target exited 0 without reporting an execution"
+            else
+              result="**failed** (exit $status)"
+              failed+=("$target")
+              echo "::error::fuzz target $target failed; the reproducer is in the fuzz-artifacts artifact"
+            fi
+            echo "| \`$target\` | $FUZZ_SECONDS | ${runs:-?} | $result |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "failed targets: ${failed[*]}"
+            exit 1
+          fi
+
+      # Only the default branch's runs grow the shared corpus; a pull
+      # request reads it and leaves it alone.
+      - name: Save the corpus
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-artifacts-${{ github.run_attempt }}
+          path: |
+            fuzz/artifacts/
+            fuzz-*.log
+          if-no-files-found: ignore
