@@ -3,8 +3,9 @@
 
 An advisory accepted by cargo-deny but absent from osv-scanner.toml stays a
 Scorecard finding; one only osv-scanner.toml hides was never reviewed by the
-cargo-deny policy. Both must fail the deny job, as must an osv-scanner entry
-with no reason, while this repository's two files pass.
+cargo-deny policy. Both must fail the deny job, as must an entry in either
+file with no reason (deny.toml's bare-string form included) or an id listed
+twice, while this repository's two files pass.
 """
 from pathlib import Path
 import subprocess
@@ -18,7 +19,7 @@ DENY = """[advisories]
 version = 2
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "proc-macro" },
-    "RUSTSEC-2025-0119",
+    { id = "RUSTSEC-2025-0119", reason = "formatting helper" },
 ]
 """
 
@@ -45,7 +46,7 @@ class AdvisoryIgnores(unittest.TestCase):
         result = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_identical_lists_pass_with_either_deny_entry_form(self):
+    def test_identical_lists_with_reasons_pass(self):
         result = self.check(DENY, BOTH)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("2 advisory ignore(s) agree", result.stdout)
@@ -67,6 +68,22 @@ class AdvisoryIgnores(unittest.TestCase):
         result = self.check(DENY, BOTH.replace('reason = "proc-macro"', 'reason = "  "'))
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr.strip(), "RUSTSEC-2024-0436: osv-scanner.toml entry has no reason")
+
+
+    def test_a_bare_string_deny_entry_fails_for_want_of_a_reason(self):
+        bare = DENY.replace('{ id = "RUSTSEC-2025-0119", reason = "formatting helper" }', '"RUSTSEC-2025-0119"')
+        result = self.check(bare, BOTH)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr.strip(), "RUSTSEC-2025-0119: deny.toml entry has no reason")
+
+    def test_a_duplicate_id_cannot_hide_a_sibling_without_a_reason(self):
+        duplicate = '[[IgnoredVulns]]\nid = "RUSTSEC-2024-0436"\n\n' + BOTH
+        result = self.check(DENY, duplicate)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr.strip().splitlines(), [
+            "RUSTSEC-2024-0436: osv-scanner.toml entry has no reason",
+            "RUSTSEC-2024-0436: listed twice in osv-scanner.toml",
+        ])
 
 
 if __name__ == "__main__":
