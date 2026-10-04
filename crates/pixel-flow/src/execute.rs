@@ -1600,6 +1600,7 @@ mod tests {
         let mut b = Scripted::new(vec![Ok(Box::leak(
             "- textbox \"Other\" [value=\"notion invoice\", ref=e60]\n\
              - textbox \"Search\" [ref=e59]\n"
+                .to_owned()
                 .into_boxed_str(),
         ))]);
         let s = FlowStep {
