@@ -659,7 +659,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   archives, write the formula and the Linux bottles with
   `scripts/homebrew-formula.py` and the homebrew-core formula with
   `scripts/homebrew-core-formula.py`, and sign their provenance (it is the
-  attestation's signer, which makes the provenance SLSA Build Level 3), `homebrew-core.yml` (that formula
+  attestation's signer, which makes the provenance SLSA Build Level 3; the
+  signed Sigstore bundle ships as the release asset `pixel-<tag>.intoto.jsonl`,
+  the suffix Scorecard's Signed-Releases check reads as provenance, and the
+  smoke test verifies it with `gh attestation verify --bundle`), `homebrew-core.yml` (that formula
   built from source, `brew test`, `brew audit --strict --new`, on macOS and
   Linux),
   `release-prepare-scope.yml`, `pages.yml` (the website) and `scorecard.yml`

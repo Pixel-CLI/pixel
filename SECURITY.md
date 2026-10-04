@@ -34,6 +34,21 @@ gh attestation verify pixel-vX.Y.Z-aarch64-apple-darwin.tar.gz --repo Pixel-CLI/
 The same command verifies `install.sh` before you pipe it into `sh`.
 Releases before the first attested one have no attestation.
 
+Releases after v0.6.1 also attach the attestation itself as
+`pixel-vX.Y.Z.intoto.jsonl`: the Sigstore bundle of that one attestation,
+covering every archive, Linux bottle and `install.sh` of the release.
+`--bundle` checks a file against it instead of fetching the attestation
+from GitHub, with the same identity flags; adding a trusted root saved
+beforehand with `gh attestation trusted-root > trusted_root.jsonl` makes the
+check fully offline:
+
+```bash
+gh attestation verify pixel-vX.Y.Z-aarch64-apple-darwin.tar.gz --repo Pixel-CLI/pixel \
+  --bundle pixel-vX.Y.Z.intoto.jsonl --custom-trusted-root trusted_root.jsonl \
+  --signer-workflow Pixel-CLI/pixel/.github/workflows/release-build.yml \
+  --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
+```
+
 Signing in a reusable workflow is what makes this SLSA Build Level 3: the
 signing identity belongs to `release-build.yml`, which holds no secret, and
 `release.yml`, which publishes the release and holds the Homebrew tap token,
@@ -43,11 +58,13 @@ workflow, under the owner below.
 
 v0.6.0 and v0.6.1 were signed before the repository moved from
 `LivioGama/pixel` to `Pixel-CLI/pixel`, and their attestations stayed with
-the former owner: `--repo Pixel-CLI/pixel` answers `HTTP 404` for them.
-Verify those two under the name they were built as:
+the former owner: `--repo` answers `HTTP 404` for them, under either name,
+since it looks attestations up by the repository's id, which now belongs to
+`Pixel-CLI/pixel`. Verify those two by the owner they were built under,
+the signer workflow still pinning the repository:
 
 ```bash
-gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --repo LivioGama/pixel \
+gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --owner LivioGama \
   --signer-workflow LivioGama/pixel/.github/workflows/release.yml \
   --source-ref refs/tags/v0.6.1 --deny-self-hosted-runners
 ```
