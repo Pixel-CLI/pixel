@@ -4,8 +4,9 @@
 # test_statement_coverage80 asks for at least 80% statement coverage measured
 # by a FLOSS tool; this job is the measurement (task #732).
 #
-# Informational for now: no threshold fails the job, only a red test does.
-# A gate is added once the measured total is known to hold above the bar.
+# The job fails when line coverage drops under 80%, the criterion's bar (the
+# first run, 37219909593, measured 91.97% of lines and 91.01% of regions),
+# and when a test is red. The summary is written first either way.
 #
 # The suite is the one CI's Test job runs (nextest `ci` profile, the
 # `readify` feature), so the number covers what CI tests. The CLI tests spawn
@@ -135,3 +136,8 @@ jobs:
         env:
           TEST_STATUS: ${{ steps.test.outputs.status }}
         run: test "$TEST_STATUS" = 0
+
+      # test_statement_coverage80: llvm-cov's lines are the closest measure
+      # of statements it reports.
+      - name: Line coverage at least 80%
+        run: cargo llvm-cov report --summary-only --fail-under-lines 80 > /dev/null
