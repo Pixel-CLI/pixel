@@ -30,6 +30,11 @@ pub(crate) fn hooks_path(home: &Path) -> PathBuf {
     antigravity_config_dir(home).join("hooks.json")
 }
 
+/// Tool names the PreToolUse guard fires on: every retrieval or read tool
+/// Antigravity may call, matching the set `run-hook guard` judges. A tool
+/// outside this matcher reaches the model unguarded.
+const PRE_TOOL_MATCHER: &str = "run_command|grep_search|find_by_name|find_file_by_name|list_dir|file_search|view_file|read|read_file|notebook_read";
+
 pub(crate) fn config_path(home: &Path) -> PathBuf {
     antigravity_config_dir(home).join("config.json")
 }
@@ -83,10 +88,16 @@ fn agy_pixel_registered_with(executable: &OsStr, home: &Path) -> Result<Option<b
         ))
         .into());
     }
-    if String::from_utf8_lossy(&output.stdout).trim() == "No imported plugins." {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.trim();
+    if stdout.is_empty() || stdout == "No imported plugins." {
         return Ok(Some(false));
     }
-    let listing: Value = serde_json::from_slice(&output.stdout)?;
+    // A list output we cannot parse is unknown, not an error: registration
+    // stays a best-effort probe and the caller falls back to `plugin install`.
+    let Ok(listing) = serde_json::from_str::<Value>(stdout) else {
+        return Ok(None);
+    };
     Ok(Some(
         listing
             .get("imports")
@@ -188,7 +199,7 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
             "enabled": true,
             "PreToolUse": [
                 {
-                    "matcher": "run_command|grep_search|find_by_name|view_file",
+                    "matcher": PRE_TOOL_MATCHER,
                     "hooks": [
                         {
                             "type": "command",
@@ -229,7 +240,15 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         fs::write(p_dir.join("skills/pixel/SKILL.md"), &skill_content)?;
         fs::write(p_dir.join("hooks.json"), &hooks_text)?;
     }
-    let cli_registered = run_agy_plugin(home, "install", Some(&cli_dir))?;
+    // `agy plugin install` requires `.agent-config/{plugin,install}` files in
+    // the *source* directory; passing the already-staged destination dir fails
+    // when the plugin is already registered. Skip the call when agy already
+    // lists `pixel` — the assets are freshly deployed above, so the
+    // registration is the only thing the call adds.
+    let cli_registered = match agy_pixel_registered(home)? {
+        Some(true) => true,
+        Some(false) | None => run_agy_plugin(home, "install", Some(&cli_dir))?,
+    };
 
     Ok(InstallStep {
         id: "install.antigravity-plugin".into(),
@@ -324,7 +343,7 @@ pub fn install_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         "enabled": true,
         "PreToolUse": [
             {
-                "matcher": "run_command|grep_search|find_by_name|view_file",
+                "matcher": PRE_TOOL_MATCHER,
                 "hooks": [
                     {
                         "type": "command",
@@ -812,7 +831,7 @@ mod tests {
         let fake_agy = tmp.path().join("agy");
         fs::write(
             &fake_agy,
-            "#!/bin/sh\nif [ \"$*\" = \"plugin list\" ]; then printf '{\\\"imports\\\":[{\\\"name\\\":\\\"pixel\\\"}]}'; exit 0; fi\nexit 9\n",
+            "#!/bin/sh\nif [ \"$*\" = \"plugin list\" ]; then printf '%s' '{\"imports\":[{\"name\":\"pixel\"}]}'; exit 0; fi\nexit 9\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&fake_agy).unwrap().permissions();
@@ -968,7 +987,11 @@ mod tests {
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         if present == "yes" {
-            fake_agy(&bin.join("agy"), "");
+            // `agy plugin list` must answer with its imports JSON: the deploy
+            // path reads the listing to skip `agy plugin install` for a
+            // plugin that agy already lists. An empty answer is not that
+            // contract — it would fail the listing's JSON parse.
+            fake_agy(&bin.join("agy"), r#"{"imports":[]}"#);
         }
         // PATH holds only the fixture: a developer's real agy cannot leak in.
         // SAFETY: single-purpose child spawned just for this assertion.

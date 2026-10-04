@@ -1,4 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["./.opencode/plugins/pixel.mjs"]
+  "plugin": ["./.opencode/plugins/pixel.mjs"],
+  "model": "wafer.ai/GLM-5.2"
 }

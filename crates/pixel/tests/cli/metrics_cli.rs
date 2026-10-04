@@ -11,6 +11,15 @@ use serde_json::{Value, json};
 const PIXEL: &str = env!("CARGO_BIN_EXE_pixel");
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn execution_brief_is_visible_in_cli_help() {
+    let fixture = Fixture::new();
+    let help = fixture.run(&["--help"]);
+    assert!(help.status.success(), "{help:?}");
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(stdout.contains("execution-brief"), "{stdout}");
+}
+
 struct Fixture(PathBuf);
 
 impl Fixture {
@@ -482,6 +491,147 @@ fn an_empty_search_from_a_subdirectory_names_the_root_and_claims_no_saving() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!stderr.contains("matches under"), "{extra:?}: {stderr}");
     }
+}
+
+#[test]
+fn an_empty_exact_search_should_run_one_task_aware_find_code_fallback() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["build-index"]));
+
+    let output = fixture
+        .command()
+        .args([
+            "search-content",
+            "-F",
+            "missing_exact_pixel_literal",
+            "--fallback-query",
+            "Trace callers of login_user",
+            "--no-daemon",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("login_user"), "{stdout}");
+    assert!(stdout.contains("Confidence:"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .matches("ran one task-aware find-code fallback")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("0 matches under"), "{stderr}");
+    assert_eq!(metric_lines(&output).len(), 1, "{stderr}");
+    assert_eq!(fixture.events("search-content").len(), 1);
+}
+
+/// When the task-aware fallback also finds nothing, the empty-answer note
+/// still lands on stderr — replacing the exact search with one fallback
+/// query must not silence the report that no match was found.
+#[test]
+fn an_exhausted_fallback_still_reports_the_empty_answer_note() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["build-index"]));
+
+    let output = fixture
+        .command()
+        .args([
+            "search-content",
+            "-F",
+            "missing_exact_pixel_literal",
+            "--fallback-query",
+            "mzzqxwv xorffle gazonk 4f9",
+            "--no-daemon",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "No matches found.", "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ran one task-aware find-code fallback"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "0 matches under {}; repo root {}",
+            fixture.0.display(),
+            fixture.0.display()
+        )),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn an_exact_hit_should_not_run_fallback_when_call_count_warning_is_present() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["build-index"]));
+    let session = format!("metrics-cli-fallback-{}", std::process::id());
+
+    let mut final_output = None;
+    for pattern in ["l", "lo", "log", "login", "login_", "login_user"] {
+        let output = fixture
+            .command()
+            .env("PIXEL_SESSION_ID", &session)
+            .args([
+                "search-content",
+                "-F",
+                pattern,
+                "--fallback-query",
+                "Trace callers of login_user",
+                "--no-daemon",
+            ])
+            .output()
+            .unwrap();
+        assert_success(&output);
+        final_output = Some(output);
+    }
+
+    let output = final_output.unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("login_user"), "{stdout}");
+    assert!(!stdout.contains("Confidence:"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("prior calls in 10 minutes"), "{stderr}");
+    assert!(
+        !stderr.contains("ran one task-aware find-code fallback"),
+        "{stderr}"
+    );
+}
+
+/// The task-aware fallback is a first-page recovery: on a later page
+/// (`--offset > 0`) the skip guard must hold even when that page holds zero
+/// matches, so paging an empty exact search cannot silently re-run the
+/// fallback query.
+#[test]
+fn the_task_aware_fallback_skips_nonzero_pages() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["build-index"]));
+
+    let output = fixture
+        .command()
+        .args([
+            "search-content",
+            "-F",
+            "missing_exact_pixel_literal",
+            "--offset",
+            "1",
+            "--fallback-query",
+            "mzzqxwv xorffle gazonk 4f9",
+            "--no-daemon",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("ran one task-aware find-code fallback"),
+        "paging an empty exact search must not run the task-aware fallback: {stderr}"
+    );
 }
 
 /// `find-code --json` on an overview prompt answers with an empty match list

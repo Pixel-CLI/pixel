@@ -37,7 +37,7 @@
 // timeout, malformed output, an unrecognised payload: all of them resolve to
 // "no opinion" and the call proceeds exactly as it would without this plugin.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 /** Absolute path to the pixel that installed this file. */
 const PIXEL_BIN = __PIXEL_BIN__;
@@ -193,4 +193,109 @@ export const PixelGuardPlugin = async ({ client, directory }) => {
   };
 };
 
-export default PixelGuardPlugin;
+// Keep a V2-native route tool alongside the V1 guard. OpenCode V2 does not
+// load V1 plugin functions, while V1.18.29+ accepts the `server` property on
+// this dual-entrypoint object. The route tool itself is deliberately
+// fail-open: a missing binary or stale index is returned as a native-tool
+// fallback, never thrown from a hook.
+function metricsBox(stderr) {
+  const lines = String(stderr ?? "").split("\n");
+  const start = lines.findIndex((line) => line.includes("🟩") && line.toLowerCase().includes("pixel"));
+  if (start < 0) return "";
+  const rest = lines.slice(start);
+  const end = rest.findIndex((line) => line.trimStart().startsWith("└"));
+  return rest.slice(0, end < 0 ? rest.length : end + 1).join("\n").trim();
+}
+
+function executionBrief(task, directory, run = spawnSync, pixelBin = process.env.PIXEL_BIN || PIXEL_BIN) {
+  const result = run(pixelBin, ["execution-brief", task, "--json"], {
+    cwd: directory,
+    encoding: "utf8",
+    timeout: TIMEOUT_MS,
+    maxBuffer: 2_000_000,
+    env: { ...process.env },
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(result.error?.message ?? result.stderr?.trim() ?? `pixel exited ${result.status}`);
+  }
+  return { route: JSON.parse(result.stdout), metrics: metricsBox(result.stderr) };
+}
+
+const PixelRoutePluginV2 = {
+  id: "pixel",
+
+  async setup(ctx, spawnProcess = spawnSync) {
+    const registrations = [];
+    const runBrief = (task, directory) => executionBrief(task, directory, spawnProcess);
+    try {
+      const registration = await ctx.tool.transform((editor) => {
+        editor.add({
+            name: "pixel",
+            description:
+              "Get Pixel's deterministic task route first: one populated starting command, " +
+              "ordered bounded reads, fallback, and minimal validation. Returns route JSON " +
+              "plus the exact metrics line for this invocation.",
+            input: {
+              type: "object",
+              properties: {
+                action: { type: "string", enum: ["execution_brief"] },
+                task: {
+                  type: "string",
+                  description: "the task to turn into an ordered retrieval route",
+                },
+              },
+              required: ["action", "task"],
+              additionalProperties: false,
+            },
+            async execute(input, context) {
+              const task = typeof input?.task === "string" ? input.task.trim() : "";
+              if (input?.action !== "execution_brief" || !task) {
+                return {
+                  content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                      error: "execution_brief requires a task; continue with native tools if no route is available",
+                    }),
+                  }],
+                };
+              }
+              try {
+                const directory = context?.directory ?? ctx.location?.directory ?? process.cwd();
+                const { route, metrics } = runBrief(task, directory);
+                const content = [{
+                  type: "text",
+                  text: JSON.stringify({ action: "execution_brief", task, route }),
+                }];
+                if (metrics) content.push({ type: "text", text: metrics });
+                return { content };
+              } catch (error) {
+                return {
+                  content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                      action: "execution_brief",
+                      task,
+                      error: String(error),
+                      fallback: "Pixel route unavailable; continue with native tools.",
+                    }),
+                  }],
+                };
+              }
+            },
+        });
+      });
+      if (registration?.dispose) registrations.push(registration);
+    } catch {
+      // A tool API mismatch must not make OpenCode startup fail.
+    }
+    return () => {
+      for (const registration of registrations) {
+        try { registration.dispose(); } catch {}
+      }
+    };
+  },
+};
+
+// V1.18.29+ reads `server`; V2 reads `id` + `setup`. The implementations are
+// intentionally separate because OpenCode's V2 API is not a V1 translation.
+export default { ...PixelRoutePluginV2, server: PixelGuardPlugin };
