@@ -55,19 +55,27 @@ switch (args[0]) {
   case "status": console.log(JSON.stringify({index:{base_files:1},graph:{present:true},facts:{fresh:true}})); break;
   case "config": console.log(JSON.stringify({policy: settings.policy ?? "advisory", source: "repo"})); break;
   case "scope-task": console.log(JSON.stringify({padding: "x".repeat(settings.scopePadding ?? 0), targets:[{path:"src/main.rs"}]})); break;
-  case "execution-brief": console.log(JSON.stringify({
-    task: args[1], padding: "x".repeat(settings.scopePadding ?? 0), workstreams: [{ path: "src/main.rs", tier: "P0" }], route: {
-      first_command: "rtk pixel find-code " + JSON.stringify(args[1]),
-      steps: [
-        { order: 1, action: "retrieve", command: "rtk pixel find-code " + JSON.stringify(args[1]) },
-        { order: 2, action: "read_result", max_lines: 40, command: "read the first returned path:line only" },
-        { order: 3, action: "validate", command: "verify the answer against the bounded evidence" },
-      ],
-      retry: { after: "first result is unresolved, capped, or irrelevant", command: "rtk pixel find-code 'narrower behavior'" },
-      fallback: { after_pixel_calls: 2, command: "rtk rg -n -F -- 'task' ." },
-      on_unavailable: "Pixel is advisory; continue with native tools and report that retrieval was unavailable.",
-    },
-  })); break;
+  case "execution-brief": {
+    // The shape \`pixel execution-brief --json\` emits (execution_brief::from_scope_task).
+    const quoted = "'" + args[1].replaceAll("'", "'\\\\''") + "'";
+    const text = ["[PIXEL:EXECUTION_ROUTE]", "1. Run: rtk pixel find-code " + quoted,
+      "   If it returns no usable or relevant result, run exactly once: rtk pixel find-code 'narrower behavior'",
+      "2. Read: Read only a path returned by Pixel, in a maximum 40-line window around its line.",
+      "3. If both Pixel calls do not converge, use: rtk rg -m 5 -n -F -- 'task' . | rtk sed -n '1,20p'",
+      "4. Validate: After an edit, run the smallest relevant test for the changed behavior; read-only tasks need no test.",
+      "[/PIXEL:EXECUTION_ROUTE]"].join("\\n");
+    // Keys in the binary's order: serde_json sorts them, so the route text
+    // comes before \`task\`.
+    console.log(JSON.stringify({
+      asks_about_code: settings.asksAboutCode ?? true,
+      padding: "x".repeat(settings.scopePadding ?? 0),
+      retrieval_route: { first_command: "rtk pixel find-code " + quoted },
+      ...(settings.legacyBrief ? {} : { retrieval_route_text: text }),
+      task: args[1], version: 1,
+      workstreams: [{ path: "src/main.rs", tier: "P0" }],
+    }));
+    break;
+  }
   case "repo-state": console.log(JSON.stringify({branch:"fixture"})); break;
   case "find-code": console.log(JSON.stringify(settings.findAmbiguous ? {confidence:"ranked",matches:[{path:"src/a.rs",raw:"main",symbol_kind:"function"},{path:"src/b.rs",raw:"main",symbol_kind:"function"}]} : {padding: "x".repeat(settings.findPadding ?? 0), confidence:"resolved",matches:[{path:"src/found.rs",raw:"main",symbol_kind:"function"}]})); break;
   case "classify": {
@@ -159,18 +167,44 @@ switch (args[0]) {
     }
   });
 
+  await check("the task leads the budgeted brief, ahead of the route copy", async () => {
+    const h = await host("advisory");
+    const prompt = "Trace callers of the parser entry point " + "and its consumers ".repeat(80);
+    const content = (await h.boot(prompt)).message.content;
+    assert.ok(content.includes(JSON.stringify(prompt)), "the whole task survives the budget");
+    assert.doesNotMatch(content, /retrieval_route_text|asks_about_code/);
+    assert.equal(content.match(/\[PIXEL:EXECUTION_ROUTE\]/g).length, 1, "the route appears once");
+  });
+  await check("a prompt that asks nothing about code gets the repository state only", async () => {
+    const h = await host("advisory");
+    configure({ asksAboutCode: false });
+    const boot = await h.boot("go to branch main and pull the latest changes");
+    const content = boot.message.content;
+    assert.match(content, /^PIXEL REPO STATE/);
+    assert.match(content, /"branch":"fixture"/);
+    assert.doesNotMatch(content, /PIXEL:EXECUTION_ROUTE|src\/main\.rs|TASK CONTEXT/);
+    configure();
+  });
+  await check("a brief without the shared route text injects no guessed route", async () => {
+    const h = await host("advisory");
+    configure({ legacyBrief: true });
+    const content = (await h.boot("Find the behavior that decides native repository reads")).message.content;
+    assert.doesNotMatch(content, /PIXEL:EXECUTION_ROUTE/);
+    assert.match(content, /Pixel execution route unavailable/);
+    configure();
+  });
   await check("prompt bootstrap injects an ordered populated route and the agent uses its bounded result", async () => {
     const h = await host("enforce");
     const prompt = "Find the behavior that decides native repository reads and explain its guard";
     const boot = await h.boot(prompt);
     const route = boot.message.content;
-    assert.match(route, /DETERMINISTIC PIXEL ROUTE/);
-    assert.ok(route.indexOf("1. retrieve:") < route.indexOf("2. read_result (maximum 40 lines):"));
-    assert.ok(route.indexOf("2. read_result (maximum 40 lines):") < route.indexOf("3. validate:"));
-    assert.ok(route.includes(`rtk pixel find-code ${JSON.stringify(prompt)}`));
-    assert.match(route, /Retry only if the first result is unresolved, capped, or irrelevant/);
-    assert.match(route, /After two nonconverging Pixel calls, use: rtk rg/);
-    assert.match(route, /If Pixel is unavailable: Pixel is advisory/);
+    // The same rendered route Claude, Codex and Devin receive.
+    assert.match(route, /\[PIXEL:EXECUTION_ROUTE\]\n1\. Run: rtk pixel find-code /);
+    assert.ok(route.includes(`rtk pixel find-code '${prompt}'`));
+    assert.ok(route.indexOf("1. Run:") < route.indexOf("2. Read:"));
+    assert.ok(route.indexOf("2. Read:") < route.indexOf("3. If both Pixel calls do not converge"));
+    assert.match(route, /maximum 40-line window/);
+    assert.match(route, /\[\/PIXEL:EXECUTION_ROUTE\]/);
     const briefCall = calls().findLast(([name]) => name === "execution-brief");
     assert.equal(briefCall[1], prompt, "the exact current prompt reaches execution-brief");
     assert.deepEqual(briefCall.slice(-2), ["--metrics", "off"], "bootstrap probes suppress metrics by design");
