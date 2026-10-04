@@ -1393,6 +1393,9 @@ mod tests {
     fn open_resolved_routes_the_jev_preset_to_the_typesafe_engine() {
         // The hosted engine refuses to open without a key; the value is
         // never asserted on or printed.
+        // SAFETY: this test's env mutation runs before the threads that
+        // read the variable are spawned, and the variable is unset again
+        // at the end; no other test in this binary reads TYPESAFE_API_KEY.
         unsafe { std::env::set_var("TYPESAFE_API_KEY", "tsk-routing-test") };
         let jev = open_resolved(
             crate::classify_setup::ResolvedEngine::Remote,
@@ -1413,6 +1416,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(chat.basis(), REMOTE_BASIS);
+        // SAFETY: restoring the machine state the test found at start; the
+        // variable is not read by any other test in this binary.
         unsafe { std::env::remove_var("TYPESAFE_API_KEY") };
     }
 
