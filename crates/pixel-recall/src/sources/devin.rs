@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Devin CLI adapter — SQLite store at `~/.local/share/devin/cli/sessions.db`.
 //!
 //! `message_nodes` is a per-session message FOREST (node_id/parent_node_id)

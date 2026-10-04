@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Output parsers for the `sniper run` command wrapper.
 
 pub mod generic;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel uninstall --wrappers-only`: the flag reaches the library through
 //! the CLI and limits the run to the one shell-wrapper step, so the fix
 //! `pixel doctor` names for a stray block never takes the install with it.

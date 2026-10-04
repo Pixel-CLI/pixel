@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `review` — show repo changes as structured items, INCLUDING conflicted
 //! paths (fixes usable-git's blind spot where `review` filtered conflicts
 //! to zero items).

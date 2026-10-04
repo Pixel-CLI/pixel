@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # The build environment that makes a release binary reproducible: the same
 # commit, built with the same toolchain and the same cross image, gives the
 # same bytes wherever the checkout and CARGO_HOME sit.

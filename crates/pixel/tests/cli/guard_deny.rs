@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration: `pixel run-hook guard` rewrites equivalent searches and emits
 //! non-blocking guidance for operations that Pixel cannot safely rewrite.
 

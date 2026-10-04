@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The pi guard of `pixel install --repo`: one extension file under the
 //! repository's `.pi/extensions/`, the directory pi auto-discovers project
 //! extensions from once the project is trusted (pi 0.87,

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use super::{Cli, READ_ONLY_COMMANDS, read_only_invocation};
 use clap::CommandFactory;
 

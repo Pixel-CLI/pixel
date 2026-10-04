@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Index orchestration for Phase 1: walk a tree, build a shard, search it.
 //!
 //! Git anchoring (base/delta/overlay layering) replaces the plain-walk build

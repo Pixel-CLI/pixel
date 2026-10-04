@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `empty_exact_page_is_complete`: only a complete first empty page may be
 //! replaced by the task-aware fallback — a truncated empty page is partial
 //! evidence and must not trigger it.

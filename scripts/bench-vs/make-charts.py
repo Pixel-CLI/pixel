@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Render the benchmark figures as SVG, light and dark, from the raw rows.
 
 The numbers are read from docs/bench/vs-*/raw/, never retyped, so a figure can

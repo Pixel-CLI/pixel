@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `history` — commit history with detail levels and byte caps.
 
 use std::path::Path;

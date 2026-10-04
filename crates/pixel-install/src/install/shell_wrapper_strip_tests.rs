@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use super::{PIXEL_MANAGED_BEGIN, PIXEL_MANAGED_END, strip_shell_wrappers};
 use crate::InstallError;
 

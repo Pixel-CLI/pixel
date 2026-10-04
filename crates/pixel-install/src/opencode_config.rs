@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! OpenCode integration through `~/.config/opencode/AGENTS.md` and the
 //! `~/.config/opencode/plugins/` directory.
 //!

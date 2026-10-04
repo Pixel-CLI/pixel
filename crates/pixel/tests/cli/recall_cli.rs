@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel recall` end to end on a scratch corpus: one Claude transcript
 //! under a throwaway `HOME`, indexed by the binary, then read back through
 //! `search`, `show`, `status` and `context`. These are the commands the

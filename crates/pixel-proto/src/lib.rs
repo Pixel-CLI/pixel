@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel-proto` — the shared contract crate for the `pixel` project.
 //!
 //! Holds ONLY typed contracts: the response envelope, error codes, the

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The four agents: the argv of each one's functional probe, and what its
 //! output means.
 //!

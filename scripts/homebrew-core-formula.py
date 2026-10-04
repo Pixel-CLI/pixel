@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Write the homebrew-core formula of a release: pixel built from source.
 
     python3 scripts/homebrew-core-formula.py <tag> <source-tarball> <out-file>

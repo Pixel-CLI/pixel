@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Bounded local ranking over deterministic legal routes; every fallback preserves gates.
 
 use std::collections::BTreeMap;

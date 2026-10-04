@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Group the slow read ops of a window by how they were served.
 
 Usage: python3 slow.py <window> <actions.jsonl>... [--min-ms 5000]

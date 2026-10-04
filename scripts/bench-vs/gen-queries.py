@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Build a natural-language retrieval set from the repo's OWN doc comments.
 
 CodeSearchNet's design, applied locally: the query is a doc comment written by

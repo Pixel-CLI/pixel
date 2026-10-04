@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `publish` — stage files, commit, and optionally push.
 //!
 //! Crash-safe: runs under repository lock + operation journal, AND under a

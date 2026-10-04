@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Append-only lexical segments over turn text.
 //!
 //! Each segment is a standard GPXSHARD (pixel-index) whose "path" strings

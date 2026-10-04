@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Source-bound preparation and review using Pixel's existing deterministic operations.
 
 use std::collections::BTreeSet;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! CLI round-trip: `gitpixel scope-task` writes the enforcement manifest,
 //! `--clear` removes it, `--no-manifest` leaves none.
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Credential redaction for anything captured from a git subprocess
 //! (primarily stderr embedded in `GitError::NonZeroExit`) before it can ever
 //! be logged, displayed, or surfaced to a caller.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Plays [`pixel_install::intro`] full screen before the install banner:
 //! the gate that decides whether a person is there to watch, and the loop
 //! that holds the terminal while they do. Any key skips it, Ctrl-C

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration tests for pixel-facts: store, ingest, search, lifecycle,
 //! poison detection, and index_state progress reporting.
 

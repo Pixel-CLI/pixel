@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel plan` command — deterministic todo list generation.
 //!
 //! The daemon owns the graph: the findings come from the `plan` op, which

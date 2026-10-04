@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration tests for `changes::detect` affected-test mapping
 //! (`suggested_tests`): test files reached by walking UPSTREAM callers of
 //! changed symbols, plus changed test files themselves.

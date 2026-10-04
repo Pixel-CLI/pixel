@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `gitpixel sniper` — one-look error capture queries. Thin dispatch over
 //! `pixel_session::query` plus the
 //! generic one-record ingest path (`report`) the JS adapters shell to.

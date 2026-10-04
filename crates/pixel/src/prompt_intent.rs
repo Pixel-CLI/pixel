@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Task-intent verdict for the prompt hook: the harness classifies, the model never has to.
 //!
 //! On each Claude prompt the hook asks the local decision daemon which kind

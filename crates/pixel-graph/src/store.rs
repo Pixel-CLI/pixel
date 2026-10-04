@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! SQLite persistence — THE schema contract for the graph crate.
 //!
 //! `extract`/`resolve`/`build` write through this API; analyses read through

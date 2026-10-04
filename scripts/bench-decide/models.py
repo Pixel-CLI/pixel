@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Model adapters for the decide bake-off (protocol: docs/bench/decide-bakeoff-protocol.md).
 
 Every adapter exposes:  name, load(), decide(spec) -> {label: prob}.

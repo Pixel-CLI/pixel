@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/release-sbom.py, the step release-build.yml runs to
 write the SBOM published beside each release archive, checked without a tag.
 

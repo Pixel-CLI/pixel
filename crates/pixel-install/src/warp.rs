@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Retirement of the Warp MCP server entry older installs wrote.
 //!
 //! Up to 0.6.1, `pixel install --repo` added a `pixel mcp` server to Warp's

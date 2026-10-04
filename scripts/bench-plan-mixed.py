@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Experimental conservative PlanQuery jobs; not wired into Pixel defaults."""
 import argparse
 import hashlib

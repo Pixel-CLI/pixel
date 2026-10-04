@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! A repository can commit `.pixel/`, links included. Pixel must then
 //! neither write, truncate nor chmod through those links, nor trust the
 //! directory's content: these tests run the built binary on a fresh clone

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel web-search` — deterministic web retrieval, no LLM.
 //!
 //! The plan-refinement gate needs an external answer for terms the index

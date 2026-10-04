@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration tests for what `changes::detect` says about each changed
 //! symbol (`change`, `change_basis`, `signature_changed`) and about the call
 //! sites the change may affect (`consumers`), against a real repository and

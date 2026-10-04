@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel coverage` — per-language graph coverage.
 //!
 //! Compares the files the index policy can see on disk (via

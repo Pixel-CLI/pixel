@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Aggregate raw benchmark rows into the tables that go in the write-up.
 
 Reports per-corpus means and the per-case spread. Nothing here rounds a loss

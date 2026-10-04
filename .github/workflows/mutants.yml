@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: Mutants
 
 # Mutation testing on the code a pull request touches. cargo-mutants rewrites

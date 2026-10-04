@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Prepare a release commit's content, without committing or pushing anything.
 #
 #   .agents/skills/release/prepare.sh 0.2.5          # or v0.2.5

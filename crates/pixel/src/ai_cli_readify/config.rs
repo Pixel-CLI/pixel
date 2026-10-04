@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The per-agent config writers.
 //!
 //! Each writer merges rather than replaces: an agent's config holds the

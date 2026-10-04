@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Candidate verification: run the real regex over candidate files.
 //!
 //! The index is a filter, not an oracle — every candidate is re-checked with

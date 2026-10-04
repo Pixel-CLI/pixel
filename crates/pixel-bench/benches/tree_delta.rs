@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Cost of the whole-tree freshness check.
 //!
 //! `pixel_graph::build::tree_delta(root, db)` is what the daemon runs when it

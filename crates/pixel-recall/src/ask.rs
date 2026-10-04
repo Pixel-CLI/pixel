@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Hybrid natural-language retrieval: lexical word-match channel + semantic
 //! KNN channel, fused with RRF, grouped by session.
 

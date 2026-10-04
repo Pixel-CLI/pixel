@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract tests for scoring, leakage checks and name-set semantics."""
 import importlib.util
 from pathlib import Path

@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # A cheap local compile proves the candidate builds before the remote mutation
 # gate spends a runner on it. Mutation coverage is then proved off this machine:
 # the gate

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Path tracing — BFS shortest path between two symbols over outgoing
 //! `calls` + `has_method` edges; reports the deepest reachable node on failure.
 

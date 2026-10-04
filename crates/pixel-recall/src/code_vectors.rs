@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Content-addressed store of the chunk vectors `pixel search-meaning` embeds.
 //!
 //! Lives under `<root>/.pixel/code-vectors/` of an indexed repository (the

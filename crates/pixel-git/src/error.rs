@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Error type for every `pixel-git` operation.
 //!
 //! Mirrors the manual `Display`/`Error` pattern used elsewhere in this

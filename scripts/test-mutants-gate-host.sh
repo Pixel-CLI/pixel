@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Contract for the remote host side of the pre-push mutation gate. It uses a
 # disposable worker home and stubs only git: no SSH, Cargo, or mutation run.
 set -eu

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Gemini (Antigravity CLI) adapter: the single prompt-history file at
 //! `~/.gemini/antigravity-cli/history.jsonl`. Each line is one user prompt:
 //! `{display, timestamp: unix ms, workspace, conversationId}`. Lines group

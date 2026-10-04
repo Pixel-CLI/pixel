@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Durable, bounded task packets for Claude Code hook delivery.
 //!
 //! This store is deliberately separate from `.pixel/targets.json`: targets is

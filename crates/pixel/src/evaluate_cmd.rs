@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel evaluate` — bounded predicate evaluation with a witness.
 //!
 //! The daemon owns the answer; this module owns the argument surface, the

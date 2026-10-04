@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Shapes shared by the Ruby test-runner parsers (Minitest, RSpec): one
 //! failure record, the backtrace-line grammar, and the project-path filter.
 

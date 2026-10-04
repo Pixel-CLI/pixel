@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Parser for `tsc --pretty false` diagnostics:
 //! `path(line,col): error TS1234: message`
 

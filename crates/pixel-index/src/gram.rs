@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Sparse n-gram extraction (convex-hull / monotonic-stack selection).
 //!
 //! Independent Rust implementation of the algorithm described by ClickHouse

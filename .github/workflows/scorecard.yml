@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # OpenSSF Scorecard: scores the repository's supply-chain practices (pinned
 # actions, token permissions, branch protection, signed releases, ...) and
 # publishes the result to api.scorecard.dev, which serves the README badge.

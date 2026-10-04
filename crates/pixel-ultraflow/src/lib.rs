@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! pixel-ultraflow — the classify-driven browser loop over saved flows.
 //!
 //! The loop borrowed from `browser-use/jev-ultrafast`, with `pixel classify`

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Benchmark support: a real-source corpus builder shared by benches.
 
 /// Concatenated real Rust source from this workspace, repeated up to

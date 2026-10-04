@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Antigravity integration module.
 //!
 //! Deploys the Pixel plugin to both the IDE and CLI plugin directories,

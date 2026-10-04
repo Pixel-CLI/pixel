@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 set -eu
 # The published installer always resolves the latest release, so this mode
 # tests whatever that is today; the evidence records the version it chose.

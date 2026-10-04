@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel evaluate` end to end: the exit-code contract and the JSON shape.
 //!
 //! The exit codes carry a distinction prose cannot: `0` means the predicate

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel audit` — what an agent reads to learn what this repository's
 //! largest source files contain, whole against `pixel list-signatures`.
 //!

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! pixel-graph — symbols, imports, tiered call resolution, analyses.
 //!
 //! Module ownership (parallel development contract — do not fold modules

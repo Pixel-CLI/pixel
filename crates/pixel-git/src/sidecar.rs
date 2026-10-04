@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The trust boundary of a repository's `.pixel/` directory.
 //!
 //! Everything pixel keeps per repository (index shards, the graph and

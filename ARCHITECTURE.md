@@ -648,6 +648,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 - CI (`.github/workflows/ci.yml`) classifies the diff first, so a job whose
   paths did not change skips its steps, then runs in parallel:
   - **Test + Format**: action-pin verification (`scripts/verify-action-pins.py`),
+    the SPDX header check (`scripts/check-spdx.py`, on every diff),
     `cargo fmt --check`, `cargo nextest run --profile ci`
     (`.config/nextest.toml`: one process per test, retry once but fail on
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
@@ -656,7 +657,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     pre-push and remote host, release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
     nightly mutants, mutants
-    config, action pins, advisory ignores, clean, cancel-stale sweep, harness-grid dispatch input,
+    config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
     reproducible release build environment), the
     pixel-retro lead-time and adherence contracts
     (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`)
@@ -707,13 +708,17 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   `fuzz.yml` (`cargo deny` on the `fuzz/` workspace with the root
   `deny.toml`, then every cargo-fuzz target on nightly: 60 s each on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
-  root `Cargo.toml` or `deny.toml`, 600 s weekly and on demand, crash
-  reproducers uploaded) and `coverage.yml` (the Test job's nextest suite
+  root `Cargo.toml` or `deny.toml`, 600 s weekly and on demand, 120 s when
+  `release.yml` calls it on a `v*` tag, crash reproducers uploaded) and `coverage.yml` (the Test job's nextest suite
   under `cargo llvm-cov`, doctests aside, on every push to `main`, on a pull
   request touching `crates/`, the manifests or the nextest profile, and on
   demand: line, region and function totals and one row per crate in the job
   summary, the report as the `coverage-summary` artifact; it fails on a red
-  test or on line coverage under 80%, the OpenSSF silver bar).
+  test or on line coverage under 90%, the OpenSSF gold bar; its `branches`
+  job runs the same suite on a dated nightly under `cargo llvm-cov
+  --branch` and writes branch and line totals, one row per crate, to its
+  summary; it uploads the raw JSON report as the `coverage-branch-summary`
+  artifact).
 - `fuzz/` is a cargo-fuzz crate with its own `[workspace]`, outside the
   root workspace (no root `cargo` command builds it). `graph_extract` feeds
   arbitrary source to `pixel_graph::extract::extract_file` (no panic, lines
@@ -741,6 +746,10 @@ reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
 `CHANGELOG.md` and reports three checks (`cli-version`, `cargo-lock`,
 `changelog`), exit 1 on any failure. Pure functions over file contents;
 no git, no network.
+
+After `verify`, the `fuzz` job calls `fuzz.yml` (every cargo-fuzz target,
+120 s each) on the tagged commit. The `assets` build needs both `verify`
+and `fuzz`, so no release is built from code that was not fuzzed.
 
 The release skill also runs `.agents/skills/release/check-candidate.py` on
 recorded base and prepare SHAs. Before merge it requires the fetched target

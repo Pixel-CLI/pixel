@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Publish recovery store — long-lived recovery state for `publish` so
 //! crashes can resume. Port of usable-git's `publish-recovery.ts`.
 //!

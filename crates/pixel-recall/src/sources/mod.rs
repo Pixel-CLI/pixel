@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Source adapters: one per LLM CLI transcript store.
 
 pub mod claude;

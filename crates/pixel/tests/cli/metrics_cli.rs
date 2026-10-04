@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Real CLI metrics boundaries: invocation-local accounting, never stream decoration.
 use std::collections::HashSet;
 use std::fs;

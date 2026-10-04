@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Working-tree change mapping: `pixel what-changed` vs `gitnexus detect-changes`.
 
 Ground truth is constructed, not inferred: the harness edits a known set of

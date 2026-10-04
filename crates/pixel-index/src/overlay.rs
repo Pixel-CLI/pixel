@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! In-memory dirty overlay: gram sets for files newer than any shard.
 //!
 //! Populated at open from `git status --porcelain` and updated live by the

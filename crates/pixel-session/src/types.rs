@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Record types for the sniper error sink — THE shapes shared by store,
 //! query layer and CLI.
 

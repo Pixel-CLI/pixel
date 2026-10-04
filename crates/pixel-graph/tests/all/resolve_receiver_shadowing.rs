@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration tests for the receiver rules: a qualified call from a file
 //! whose own same-name function is the callee must not resolve to itself,
 //! and a receiver path that names exactly one candidate's type

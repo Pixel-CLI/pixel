@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Single-key terminal input for the interactive setup: the arrows move
 //! between Yes and No, Enter confirms, and `y`/`n` answer outright — the
 //! inquirer-style pick instead of typing a letter and pressing Enter.

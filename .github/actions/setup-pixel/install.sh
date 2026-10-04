@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 set -euo pipefail
 
 fail() { echo "::error::$*" >&2; exit 1; }

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! opencode adapter — SQLite store at `~/.local/share/opencode/opencode.db`.
 //!
 //! Also hosts the shared "opencode-like" schema logic (session / message /

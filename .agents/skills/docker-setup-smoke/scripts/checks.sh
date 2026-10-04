@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 set -eu
 # The bootstrap names the binary's directory and whether pixel owns it.
 # shellcheck source=/dev/null

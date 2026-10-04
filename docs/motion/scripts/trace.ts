@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 // Turns the runs scripts/record-demo.sh wrote into the traces the
 // AgentDemo composition replays: src/demo/{vanilla,pixel}.json.
 //

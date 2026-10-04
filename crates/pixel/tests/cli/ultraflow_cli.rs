@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel ultraflow`'s outer contract: which verb exists, what it refuses
 //! before it touches a browser or a model, and where a flow comes from.
 //!

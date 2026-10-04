@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel -V` / `pixel --version`: the one-line form stays exactly
 //! `pixel x.y.z` (the Homebrew formula test and `pixel doctor` read it), and
 //! the long form carries the build provenance `build.rs` captured. The test

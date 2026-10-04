@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Reclaim the disk a pixel checkout spends on what it can rebuild.
 #
 #   scripts/clean.sh                 # build: target/ + tree scratch, every worktree

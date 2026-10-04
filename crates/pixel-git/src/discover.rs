@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Repo-root discovery: walk up from a starting file/dir looking for `.git`.
 //!
 //! Mirrors the `.git` ancestor-walk half of `pixel-cli::main::discover_root`

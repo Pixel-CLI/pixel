@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Exact, deliberately narrow native-search compatibility for hook routing.
 //! Unsupported inputs execute the original search; ordinary `pixel search`
 //! keeps its richer, bounded interface. Never emit a partial native result.

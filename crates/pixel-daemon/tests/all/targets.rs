@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration: the `targets` op over a real fixture repo — index + graph
 //! built for real, list closed, tiers assigned, output deterministic.
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Single integration-test binary for `pixel-ops`: each former `tests/<name>.rs`
 //! is a module here, so cargo links one executable instead of one per file.
 

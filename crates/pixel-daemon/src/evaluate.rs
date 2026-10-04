@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel evaluate`: symbol resolution, the snapshot contract, and the
 //! conversion from a graph evaluation to the wire envelope.
 //!

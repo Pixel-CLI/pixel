@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use super::*;
 
 /// A terminal the window fills to its caps: 88×24 at (6, 2), centre (50, 14).

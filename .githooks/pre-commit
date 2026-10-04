@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Keep `cargo fmt --all -- --check` (CI: Test + Format) from ever failing a
 # review round again: format first, and if anything moved, block the commit
 # so the diff can be staged deliberately rather than smuggled in unreviewed.

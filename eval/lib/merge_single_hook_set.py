@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Stdin: Claude settings JSON. Stdout: JSON with a pixel hook set added.
 Default (no arg or "quiet"): session-start + post-compaction only — no
 prompt-submit packet, no relays. Pass "full" for the complete lifecycle set."""

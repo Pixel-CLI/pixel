@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Re-run the commits that run.sh could not measure (errors.txt). Before #307
 # the pixel under test appended `.pixel/` to a tracked .gitignore that lacked
 # it, and that edit blocked the next checkout; measure now undoes it after

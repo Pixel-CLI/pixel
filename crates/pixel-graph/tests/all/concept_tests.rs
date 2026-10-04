@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration tests for pixel-graph concept extraction + resolve cascade.
 
 use std::fs;

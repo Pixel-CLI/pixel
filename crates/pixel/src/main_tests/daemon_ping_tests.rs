@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use super::*;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;

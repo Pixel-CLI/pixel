@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Codex's own app-server, asked rather than impersonated.
 //!
 //! A readiness probe has to know whether the hooks installed for a workspace

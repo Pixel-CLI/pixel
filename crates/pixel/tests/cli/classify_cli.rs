@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel classify` outer-routing errors exercised without opening the model.
 
 use std::io::{Read, Write};

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: Mutants nightly
 
 # The whole tree, one slice a night: the pull-request gate (mutants.yml)

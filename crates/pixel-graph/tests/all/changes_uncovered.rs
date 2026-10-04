@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration tests for `changes::detect`'s coverage report:
 //! `uncovered_changes` (changed ranges no symbol maps) and `unanchored`
 //! (symbols the change touched in the base that the graph no longer holds).

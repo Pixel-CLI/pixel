@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Bulk-export integration tests against a small fake ingested corpus.
 
 use std::path::Path;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The dynamic action space: one option per legal operation-target pair.
 //!
 //! This is the shape the whole loop is built on. A cycle is not asked

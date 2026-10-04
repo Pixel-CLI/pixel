@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel-rank` — the pure fusion core for `pixel scope-task` and (later) ranked
 //! `search`/`resolve`.
 //!

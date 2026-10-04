@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: harness-grid
 
 # Generate the four harness videos (Claude Code, Codex, pi, Antigravity)

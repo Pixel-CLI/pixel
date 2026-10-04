@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Refuses a local cargo-mutants other than the version the Mutants workflow
 # pins. Two releases can generate different mutants for the same diff, and
 # classify the same outcome differently, so a local run on another version

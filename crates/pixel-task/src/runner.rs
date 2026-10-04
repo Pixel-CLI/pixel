@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Execute frozen checks in private source workspaces and capture factual receipts.
 
 use std::collections::BTreeMap;

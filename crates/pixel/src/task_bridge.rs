@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Shared host lifecycle binding and accounting. Native hooks are an integration boundary.
 
 use std::fs::OpenOptions;

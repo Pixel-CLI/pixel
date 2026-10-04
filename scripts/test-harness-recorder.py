@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/harness-recorder.sh: what a recording run produces.
 
 Every case runs the real script against stub binaries placed on PATH — a

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Codex CLI adapter: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` plus
 //! `~/.codex/archived_sessions/*.jsonl`. Envelope per line:
 //! `{timestamp, type, payload}`. Only `session_meta` and `response_item`

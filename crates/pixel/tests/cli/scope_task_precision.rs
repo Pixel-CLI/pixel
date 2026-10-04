@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Pinned-history precision harness for `pixel scope-task`.
 //!
 //! Every case is a real commit of this repository: the task text an agent

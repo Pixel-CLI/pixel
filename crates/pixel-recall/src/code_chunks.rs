@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Where `pixel search-meaning` cuts a code file into the chunks it embeds
 //! and scores lexically: along the file's symbols.
 //!
