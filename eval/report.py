@@ -24,6 +24,7 @@ import argparse
 import json
 import math
 import statistics
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -58,7 +59,12 @@ def compare(rows, baseline, margin):
     """{host: {task_class: {arm: cell}}} with "all" pooling classes within a host."""
     cells = {}
     for r in rows:
-        cells[(r["cli"], r["scenario"], r.get("rep"), r["arm"])] = r
+        key = (r["cli"], r["scenario"], r.get("rep"), r["arm"])
+        if key in cells:
+            # Two runs without a rep (legacy transcripts outside rep-N) share
+            # a key: say so instead of silently keeping the last one.
+            print(f"report: duplicate run {key}; only the last is compared", file=sys.stderr)
+        cells[key] = r
     out = defaultdict(lambda: defaultdict(dict))
     arms = sorted({r["arm"] for r in rows} - {baseline})
     hosts = sorted({r["cli"] for r in rows})

@@ -353,6 +353,10 @@ def load_result(path: Path, cli: str):
                 "input_tokens": (r.get("usage") or {}).get("input_tokens"),
                 "cost_usd": None,
             }
+    if cli == "claude" and not metrics:
+        # Interrupted: no result event. Still count its tool calls, as the
+        # codex path does, so adoption numbers keep the run.
+        metrics = {"answered": False, "turns": None, **UNKNOWN_USAGE}
     if metrics and cli == "claude":
         parts = [metrics.get(k) for k in ("input_tokens", "cache_read_tokens", "cache_creation_tokens")]
         metrics["total_input_tokens"] = sum(parts) if all(p is not None for p in parts) else None

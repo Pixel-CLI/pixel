@@ -160,7 +160,6 @@ AGY_BACKUP="$(mktemp -t pixel-eval-agy.XXXXXX)"
 EXCLUDE_FILE="$(git -C "$REPO" rev-parse --path-format=absolute --git-path info/exclude)"
 EXCLUDE_BACKUP="$(mktemp -t pixel-eval-exclude.XXXXXX)"
 EXCLUDE_EXISTED=0
-[ -f "$EXCLUDE_FILE" ] && { cp "$EXCLUDE_FILE" "$EXCLUDE_BACKUP"; EXCLUDE_EXISTED=1; }
 # The deployed-prompt swap is machine-global: serialize the whole campaign
 # (backup → swaps → CLI runs → restore) against other campaigns and installs.
 PROMPT_LOCK="$(dirname "$DEPLOY_PROMPT")/.eval-prompt.lock"
@@ -183,7 +182,10 @@ acquire_prompt_lock() {
 }
 release_prompt_lock() { rm -rf "$PROMPT_LOCK" 2>/dev/null || true; }
 acquire_prompt_lock
+# Both backups under the lock: a campaign waiting on it must not copy the
+# holder's install entries, then write them back after the holder restored.
 [ -f "$DEPLOY_PROMPT" ] && cp "$DEPLOY_PROMPT" "$DEPLOY_BACKUP"
+[ -f "$EXCLUDE_FILE" ] && { cp "$EXCLUDE_FILE" "$EXCLUDE_BACKUP"; EXCLUDE_EXISTED=1; }
 restore() {
   release_prompt_lock
   if [ -s "$DEPLOY_BACKUP" ] && ! cmp -s "$DEPLOY_BACKUP" "$DEPLOY_PROMPT"; then
@@ -506,6 +508,7 @@ run_one() {  # rep scenario cli arm position
   if ! python3 "$EVAL_DIR/lib/host_reached.py" "$out" "${out%.jsonl}.err"; then
     echo "eval/run.sh: $cli never reached the model in $scenario/$arm rep $rep (see $out); stopping the campaign" >&2
     rm -f "$meta"
+    "$PIXEL_BIN" daemon stop "$wt" >/dev/null 2>&1 || true
     exit 3
   fi
   # Pixel's own action log is a second witness of what the agent ran.
@@ -535,7 +538,9 @@ for rep in $(seq 1 "$REPS"); do
     [ -f "$SCEN_DIR/$scenario.json" ] || { echo "no scenario $scenario in $SCEN_DIR" >&2; exit 2; }
     for cli in $CLIS; do
       pos=0
-      for arm in $(python3 "$EVAL_DIR/lib/arm_order.py" "$ORDER_SEED" "$((rep - 1))" "$cli/$scenario" $ARMS); do
+      # Assigned first: `set -e` ignores a failing substitution in a for list.
+      order="$(python3 "$EVAL_DIR/lib/arm_order.py" "$ORDER_SEED" "$((rep - 1))" "$cli/$scenario" $ARMS)"
+      for arm in $order; do
         pos=$((pos + 1))
         run_one "$rep" "$scenario" "$cli" "$arm" "$pos"
       done

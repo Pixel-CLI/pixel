@@ -18,7 +18,9 @@ eval/controlled.ts computes, and the transcript metrics on hand-written
 commands.
 """
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -38,6 +40,7 @@ import filter_hooks  # noqa: E402
 import scenario  # noqa: E402
 import score  # noqa: E402
 import host_reached  # noqa: E402
+import report  # noqa: E402
 
 ARMS = ["baseline", "quiet", "full"]
 
@@ -123,6 +126,34 @@ class UnitContracts(unittest.TestCase):
         self.assertFalse(answered([{"type": "turn.started"}, message, {"type": "turn.completed"}, reconnect]))
         self.assertFalse(answered([{"type": "turn.started"}, message, {"type": "turn.failed"},
                                    {"type": "turn.completed"}]))
+
+    def test_an_interrupted_claude_run_keeps_its_tool_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s-a.claude.jsonl"
+            path.write_text(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash",
+                 "input": {"command": "pixel search-content -F NEEDLE"}}]}}) + "\n")
+            metrics = score.load_result(path, "claude")[1]
+        self.assertFalse(metrics["answered"])
+        self.assertEqual(metrics["pixel_calls"], 1)
+        self.assertIsNone(metrics["input_tokens"])
+
+    def test_the_baseline_settings_disable_an_enabled_pixel_plugin(self):
+        settings = {"enabledPlugins": {"pixel@pixel-cli": True, "other@market": True},
+                    "hooks": {"SessionStart": [{"hooks": [{"command": "pixel run-hook session-start"}]}]}}
+        out = subprocess.run([sys.executable, str(EVAL / "lib/strip_pixel_hooks.py")],
+                             input=json.dumps(settings), capture_output=True, text=True, check=True)
+        stripped = json.loads(out.stdout)
+        self.assertEqual(stripped["enabledPlugins"], {"other@market": True})
+        self.assertNotIn("SessionStart", stripped.get("hooks", {}))
+
+    def test_the_report_names_runs_that_share_a_cell(self):
+        row = {"cli": "claude", "scenario": "s", "rep": None, "arm": "on", "task_class": "concept",
+               "score": 1, "max": 1}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            report.compare([row, dict(row), {**row, "arm": "baseline"}], "baseline", 0.0)
+        self.assertIn("duplicate run ('claude', 's', None, 'on')", err.getvalue())
 
     def test_arm_order_matches_the_controlled_runner(self):
         # bun: armOrder(seed, rep, case) from eval/controlled.ts, arms
