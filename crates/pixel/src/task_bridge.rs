@@ -23,8 +23,9 @@ const ENFORCED_SESSIONS: &str = ".pixel/tasks/enforced-sessions";
 /// Whether a hook whose ledger did not answer would have been enforced:
 /// `task.enforcement: enforce` in the repository settings (unreadable
 /// settings count as enforced), or a session `handle_hook` marked enforced.
-/// A session enforced before the marker existed is marked by its next answered
-/// hook; until then its configuration alone decides.
+/// A marker lookup that fails counts as enforced. A session enforced before the
+/// marker existed is marked by its next answered hook; until then its
+/// configuration alone decides.
 pub(crate) fn fallback_enforced(root: &Path, provider: &str, session: Option<&str>) -> bool {
     if crate::task_config::enabled(root).unwrap_or(true) {
         return true;
@@ -35,7 +36,14 @@ pub(crate) fn fallback_enforced(root: &Path, provider: &str, session: Option<&st
     session_key(session)
         .and_then(|session| pixel_task::digest(&(provider, &session)).map_err(error))
         .ok()
-        .is_none_or(|name| root.join(ENFORCED_SESSIONS).join(name).exists())
+        // An unreadable marker is not an absent one: only a lookup that proves
+        // absence releases the session.
+        .is_none_or(|name| {
+            root.join(ENFORCED_SESSIONS)
+                .join(name)
+                .try_exists()
+                .unwrap_or(true)
+        })
 }
 
 pub(crate) fn handle_hook(
@@ -760,6 +768,11 @@ mod tests {
         );
         std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
         assert!(!fallback_enforced(&root.0, "codex", Some("session-a")));
+        // A marker directory that cannot be read through (here: a file in its
+        // place, ENOTDIR even for root) proves nothing, so it enforces.
+        std::fs::remove_dir_all(root.0.join(ENFORCED_SESSIONS)).unwrap();
+        std::fs::write(root.0.join(ENFORCED_SESSIONS), b"not a directory").unwrap();
+        assert!(fallback_enforced(&root.0, "codex", Some("session-a")));
     }
 
     #[test]
