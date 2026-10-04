@@ -1142,6 +1142,18 @@ fn metrics_relay_speaks_copilots_camelcase_contract() {
     let line = response["additionalContext"].as_str().unwrap();
     assert!(line.starts_with("🟩 pixel impact"), "{line}");
     assert_eq!(response, json!({"additionalContext":line}));
+    // `toolArgs` can also arrive as the JSON string the CLI docs describe;
+    // parsing it must relay the same flat additionalContext.
+    let response = relay(&json!({
+        "sessionId":"s", "timestamp":0,
+        "toolName":"bash",
+        "toolArgs":"{\"command\":\"pixel impact src/lib.rs\"}",
+        "toolResult":{"resultType":"success","textResultForLlm":"impact: 0 dependants"},
+        "cwd":dir.as_ref()
+    }));
+    let line = response["additionalContext"].as_str().unwrap();
+    assert!(line.starts_with("🟩 pixel impact"), "{line}");
+    assert_eq!(response, json!({"additionalContext":line}));
     // Box already merged into `textResultForLlm`: silent dedupe.
     assert_eq!(
         relay(&copilot(&format!("impact: 0 dependants\n{line}"))),
@@ -1184,6 +1196,38 @@ fn copilot_guard_denies_retrieval_bypass_with_the_flat_decision_envelope() {
         "cwd":dir.as_ref()
     });
     assert_eq!(guard("copilot", &read, &envs), Value::Null);
+    // The CLI documents `toolArgs` as a JSON string; the string-parsing path
+    // must deny the same retrieval bypass.
+    let str_event = json!({
+        "toolName":"bash",
+        "toolArgs":"{\"command\":\"grep -n needle src/lib.rs\"}",
+        "cwd":dir.as_ref()
+    });
+    let response = guard("copilot", &str_event, &envs);
+    assert_eq!(response["permissionDecision"], "deny", "{response}");
+    assert!(
+        response["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .starts_with("pixel policy:"),
+        "{response}"
+    );
+    // Copilot's `view` tool reads files: an unbounded in-repo read is denied
+    // under enforce policy like the other read-carrying tools.
+    let view = json!({
+        "toolName":"view",
+        "toolArgs":{"path":"src/lib.rs"},
+        "cwd":dir.as_ref()
+    });
+    let response = guard("copilot", &view, &envs);
+    assert_eq!(response["permissionDecision"], "deny", "{response}");
+    assert!(
+        response["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .starts_with("pixel policy:"),
+        "{response}"
+    );
 }
 
 /// The lone bounded-sed approval stops at the repository: absolute paths,
