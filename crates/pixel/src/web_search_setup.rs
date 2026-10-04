@@ -42,12 +42,15 @@ pub fn install_step(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
 ) -> Result<(), String> {
+    let mut terminal = TermiosEcho;
     install_step_with(
         tty,
         stdin,
         stdout,
         crate::config_cmd::set_web_search_searxng_url,
         crate::config_cmd::set_web_search_perplexity_key,
+        crate::config_cmd::remove_web_search_searxng_url,
+        &mut terminal,
     )
 }
 
@@ -57,6 +60,8 @@ fn install_step_with(
     stdout: &mut dyn Write,
     store_searxng: impl FnOnce(&str) -> Result<(), String>,
     store_key: impl FnOnce(&str) -> Result<(), String>,
+    remove_searxng: impl FnOnce() -> Result<(), String>,
+    terminal: &mut dyn EchoFlag,
 ) -> Result<(), String> {
     writeln!(stdout, "Web search provider:").map_err(|e| e.to_string())?;
     writeln!(stdout, "  [1] {SEARXNG_LABEL}").map_err(|e| e.to_string())?;
@@ -76,13 +81,18 @@ fn install_step_with(
     match parse_choice(&line) {
         Some("searxng") => ask_searxng_url(stdin, stdout, store_searxng),
         Some("perplexity") => {
-            // Picker-specific only: switching to Perplexity must deactivate
-            // a stored SearXNG, or `pixel web-search` and `pixel config`
-            // would keep resolving SearXNG above it. The general setters
-            // (and the `PIXEL_WEB_SEARCH_URL` override) keep their
-            // coexistence behaviour.
-            store_searxng("")?;
-            ask_perplexity_key(stdin, stdout, store_key)
+            let stored = ask_perplexity_key(stdin, stdout, store_key, terminal)?;
+            if stored {
+                // Picker-specific only: switching to Perplexity must
+                // deactivate a stored SearXNG, or `pixel web-search` and
+                // `pixel config` would keep resolving SearXNG above it. The
+                // field is deleted rather than emptied (`validate` rejects
+                // an empty `searxng_url`), and only after a non-empty key
+                // was actually stored — an empty key or a failed read
+                // leaves the working SearXNG provider in place.
+                remove_searxng()?;
+            }
+            Ok(())
         }
         _ => {
             writeln!(
@@ -124,19 +134,49 @@ fn ask_searxng_url(
     writeln!(stdout, "web search provider: searxng — URL stored").map_err(|e| e.to_string())
 }
 
-/// Disable echo for one secret read, restoring the terminal on drop. Unlike
-/// [`crate::prompt_key::RawGuard`], canonical mode (the line discipline
-/// `read_line` relies on) is kept: only `ECHO` is cleared, so the key is
-/// typed blind but still line-buffered. `None` when stdin is not a
-/// configurable terminal (a pipe, a CI run); the caller then reads with
-/// echo, as it would on a redirect.
-struct EchoGuard {
-    original: libc::termios,
+/// The terminal's echo flag behind a seam: production is a libc termios
+/// adapter on fd 0, tests substitute an in-memory fake so the "the key is
+/// typed blind, then echo is restored" contract is observable without a tty.
+trait EchoFlag {
+    /// Whether echo is currently enabled.
+    fn echoed(&self) -> bool;
+    /// Clear echo, returning the previous state, or `None` when the
+    /// terminal cannot be muted (a pipe, a CI run, a failed termios call).
+    fn mute(&mut self) -> Option<bool>;
+    /// Restore echo to a previously captured state.
+    fn restore(&mut self, prior: bool);
 }
 
-impl EchoGuard {
-    #[cfg_attr(test, mutants::skip)] // libc adapter; needs a real tty to matter
-    fn new() -> Option<Self> {
+/// The pure part of muting: clip the `ECHO` flag. Canonical mode (the line
+/// discipline `read_line` relies on) is kept — only `ECHO` is cleared, so
+/// the key is typed blind but still line-buffered. Extracted so a mutation
+/// that leaves echo enabled is caught by a unit test instead of hiding
+/// behind a real-tty adapter skip.
+fn with_echo_clipped(termios: libc::termios) -> libc::termios {
+    let mut muted = termios;
+    muted.c_lflag &= !libc::ECHO;
+    muted
+}
+
+/// Production echo control: libc termios on stdin (fd 0). Muting changes
+/// only the `ECHO` flag; restoring flips that one flag back.
+struct TermiosEcho;
+
+impl EchoFlag for TermiosEcho {
+    #[cfg_attr(test, mutants::skip)] // libc adapter; the flag logic is tested pure via `with_echo_clipped`
+    fn echoed(&self) -> bool {
+        // SAFETY: zeroed memory is a valid (if meaningless) termios buffer
+        // that the tcgetattr call immediately overwrites.
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: a single tcgetattr on stdin with a valid, zeroed buffer.
+        if unsafe { libc::tcgetattr(0, &mut termios) } != 0 {
+            return true; // unknown state → assume echo stays on
+        }
+        termios.c_lflag & libc::ECHO != 0
+    }
+
+    #[cfg_attr(test, mutants::skip)] // libc adapter; the flag logic is tested pure via `with_echo_clipped`
+    fn mute(&mut self) -> Option<bool> {
         // SAFETY: zeroed memory is a valid (if meaningless) termios buffer
         // that the tcgetattr call immediately overwrites.
         let mut original: libc::termios = unsafe { std::mem::zeroed() };
@@ -144,32 +184,67 @@ impl EchoGuard {
         if unsafe { libc::tcgetattr(0, &mut original) } != 0 {
             return None;
         }
-        let mut muted = original;
-        muted.c_lflag &= !libc::ECHO;
+        let muted = with_echo_clipped(original);
         // SAFETY: TCSANOW applies the descriptor's own modified settings.
         if unsafe { libc::tcsetattr(0, libc::TCSANOW, &muted) } != 0 {
             return None;
         }
-        Some(Self { original })
+        Some(original.c_lflag & libc::ECHO != 0)
+    }
+
+    #[cfg_attr(test, mutants::skip)] // libc adapter; the restore needs a real tty to observe
+    fn restore(&mut self, prior: bool) {
+        // SAFETY: zeroed memory is a valid (if meaningless) termios buffer
+        // that the tcgetattr call immediately overwrites.
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: a single tcgetattr on stdin with a valid, zeroed buffer.
+        if unsafe { libc::tcgetattr(0, &mut termios) } != 0 {
+            return;
+        }
+        if prior {
+            termios.c_lflag |= libc::ECHO;
+        } else {
+            termios.c_lflag &= !libc::ECHO;
+        }
+        // SAFETY: TCSANOW applies the descriptor's own modified settings.
+        let _ = unsafe { libc::tcsetattr(0, libc::TCSANOW, &termios) };
     }
 }
 
-impl Drop for EchoGuard {
-    #[cfg_attr(test, mutants::skip)] // libc adapter; the restore needs a real tty to observe
+/// Mute echo for the duration of a scope, restoring it on drop — so a panic
+/// or an early return never leaves the terminal typing blind.
+struct MuteGuard<'a> {
+    terminal: &'a mut dyn EchoFlag,
+    prior: bool,
+}
+
+impl<'a> MuteGuard<'a> {
+    /// Clear echo, or fail closed: a terminal that cannot be muted must not
+    /// read a secret with echo on (CWE-549).
+    fn new(terminal: &'a mut dyn EchoFlag) -> Result<Self, String> {
+        let prior = terminal
+            .mute()
+            .ok_or_else(|| "could not disable terminal echo for key input".to_string())?;
+        Ok(Self { terminal, prior })
+    }
+}
+
+impl Drop for MuteGuard<'_> {
     fn drop(&mut self) {
-        // SAFETY: restoring the settings this guard read from stdin.
-        unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.original) };
+        self.terminal.restore(self.prior);
     }
 }
 
 /// The Perplexity key prompt: an empty answer stores nothing, exactly like
 /// `pixel config remote-key`'s empty-key rule. The echo is muted while the
 /// key is typed, so it never lands in terminal scrollback or a recording.
+/// Returns whether a non-empty key was accepted and stored.
 fn ask_perplexity_key(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
     store: impl FnOnce(&str) -> Result<(), String>,
-) -> Result<(), String> {
+    terminal: &mut dyn EchoFlag,
+) -> Result<bool, String> {
     write!(
         stdout,
         "Perplexity API key (stored in the global Pixel config, never printed)> "
@@ -177,7 +252,7 @@ fn ask_perplexity_key(
     .map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;
     let mut key = String::new();
-    let _mute = EchoGuard::new();
+    let _mute = MuteGuard::new(terminal)?;
     stdin
         .read_line(&mut key)
         .map_err(|e| format!("read key: {e}"))?;
@@ -188,15 +263,62 @@ fn ask_perplexity_key(
             "web search provider: skipped (no key) — the free public chain stays the fallback"
         )
         .map_err(|e| e.to_string())?;
-        return Ok(());
+        return Ok(false);
     }
     store(key)?;
-    writeln!(stdout, "web search provider: perplexity — key stored").map_err(|e| e.to_string())
+    writeln!(stdout, "web search provider: perplexity — key stored").map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An in-memory echo flag; `mutable: false` makes `mute` refuse, the
+    /// pipe / CI / failed-`tcsetattr` case. `muted` is an interior-mutable
+    /// mirror of the live state the test observes without holding a second
+    /// borrow on the terminal.
+    struct FakeEcho {
+        echoed: bool,
+        mutable: bool,
+        muted: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    impl FakeEcho {
+        fn live() -> Self {
+            Self {
+                echoed: true,
+                mutable: true,
+                muted: std::rc::Rc::new(std::cell::Cell::new(false)),
+            }
+        }
+        fn unmutable() -> Self {
+            Self {
+                echoed: true,
+                mutable: false,
+                muted: std::rc::Rc::new(std::cell::Cell::new(false)),
+            }
+        }
+    }
+
+    impl EchoFlag for FakeEcho {
+        fn echoed(&self) -> bool {
+            self.echoed
+        }
+        fn mute(&mut self) -> Option<bool> {
+            if !self.mutable {
+                return None;
+            }
+            let prior = self.echoed;
+            self.echoed = false;
+            self.muted.set(true);
+            Some(prior)
+        }
+        fn restore(&mut self, prior: bool) {
+            self.echoed = prior;
+            self.muted.set(false);
+        }
+    }
 
     #[test]
     fn the_choice_parser_accepts_exactly_one_and_two() {
@@ -217,6 +339,8 @@ mod tests {
             &mut output,
             |_| panic!("non-interactive install must not store a SearXNG URL"),
             |_| panic!("non-interactive install must not store a key"),
+            || panic!("non-interactive install must not remove SearXNG"),
+            &mut FakeEcho::live(),
         )
         .unwrap();
         let text = String::from_utf8(output).unwrap();
@@ -240,6 +364,8 @@ mod tests {
                 Ok(())
             },
             |_| panic!("the SearXNG choice must not store a key"),
+            || panic!("the SearXNG choice must not remove SearXNG"),
+            &mut FakeEcho::live(),
         )
         .unwrap();
         assert_eq!(stored, Some("https://sx.test".to_string()));
@@ -258,6 +384,8 @@ mod tests {
                 Ok(())
             },
             |_| panic!("an empty URL must not store a key"),
+            || panic!("an empty URL must not remove SearXNG"),
+            &mut FakeEcho::live(),
         )
         .unwrap();
         assert_eq!(stored, None);
@@ -269,31 +397,118 @@ mod tests {
     }
 
     #[test]
-    fn perplexity_choice_stores_the_key_clears_searxng_and_never_echoes_it() {
-        let mut cleared = None;
+    fn perplexity_choice_stores_the_key_removes_searxng_and_never_echoes_it() {
+        // A stored key removes the stale SearXNG URL so Perplexity wins the
+        // provider precedence instead of SearXNG masking it.
+        let mut removed = false;
         let mut stored = None;
         let mut output = Vec::new();
         install_step_with(
             true,
             &mut std::io::Cursor::new(b"2\npplx-secret-key\n".to_vec()),
             &mut output,
-            |url| {
-                cleared = Some(url.to_string());
-                Ok(())
-            },
+            |_| panic!("the Perplexity choice must not store a SearXNG URL"),
             |key| {
                 stored = Some(key.to_string());
                 Ok(())
             },
+            || {
+                removed = true;
+                Ok(())
+            },
+            &mut FakeEcho::live(),
         )
         .unwrap();
-        // Switching to Perplexity deactivates a stored SearXNG so it wins
-        // the provider precedence instead of masking the new choice.
-        assert_eq!(cleared, Some(String::new()));
         assert_eq!(stored, Some("pplx-secret-key".to_string()));
+        assert!(removed, "a stored key removes the stale SearXNG URL");
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("web search provider: perplexity — key stored"));
         assert!(!text.contains("pplx-secret-key"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_perplexity_key_leaves_searxng_active() {
+        // An empty key deactivates nothing: the working SearXNG provider is
+        // kept until a non-empty Perplexity key is actually stored.
+        let mut removed = false;
+        let mut stored = false;
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"2\n\n".to_vec()),
+            &mut output,
+            |_| panic!("an empty key must not store a SearXNG URL"),
+            |_| {
+                stored = true;
+                Ok(())
+            },
+            || {
+                removed = true;
+                Ok(())
+            },
+            &mut FakeEcho::live(),
+        )
+        .unwrap();
+        assert!(!stored, "an empty key stores nothing");
+        assert!(!removed, "an empty key keeps the working SearXNG provider");
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("skipped (no key)")
+        );
+    }
+
+    #[test]
+    fn key_input_mutes_echo_while_reading_and_restores_it_afterward() {
+        let terminal = std::rc::Rc::new(std::cell::RefCell::new(FakeEcho::live()));
+        let muted = std::rc::Rc::clone(&terminal.borrow().muted);
+        let mut stored = None;
+        let mut output = Vec::new();
+        let ok = ask_perplexity_key(
+            &mut std::io::Cursor::new(b"pplx-secret\n".to_vec()),
+            &mut output,
+            |key| {
+                // The read happens under the same guard as the store, so
+                // echo must still be muted here.
+                assert!(muted.get(), "echo must be muted during the key read");
+                stored = Some(key.to_string());
+                Ok(())
+            },
+            &mut *terminal.borrow_mut(),
+        )
+        .unwrap();
+        assert!(ok, "a non-empty key is accepted");
+        assert_eq!(stored, Some("pplx-secret".to_string()));
+        assert!(!muted.get(), "echo restored after the key read");
+    }
+
+    #[test]
+    fn key_input_fails_closed_when_echo_cannot_be_disabled() {
+        let mut terminal = FakeEcho::unmutable();
+        let mut output = Vec::new();
+        let err = ask_perplexity_key(
+            &mut std::io::Cursor::new(b"pplx-secret\n".to_vec()),
+            &mut output,
+            |_| panic!("echo not muted: the key must never be read"),
+            &mut terminal,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("could not disable terminal echo"),
+            "{err}"
+        );
+        // Nothing was read, so the key never reached a store.
+        assert!(terminal.echoed(), "echo was never toggled");
+    }
+
+    #[test]
+    fn clipping_is_what_hides_echo() {
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        termios.c_lflag |= libc::ECHO;
+        let muted = with_echo_clipped(termios);
+        assert_eq!(muted.c_lflag & libc::ECHO, 0, "echo flag cleared");
+        // Every other flag survives: canonical mode is kept for `read_line`.
+        assert_eq!(muted.c_lflag, termios.c_lflag & !libc::ECHO);
     }
 
     #[test]
@@ -306,6 +521,8 @@ mod tests {
                 &mut output,
                 |_| panic!("a skipped choice must not store a URL"),
                 |_| panic!("a skipped choice must not store a key"),
+                || panic!("a skipped choice must not remove SearXNG"),
+                &mut FakeEcho::live(),
             )
             .unwrap();
         }
@@ -316,6 +533,8 @@ mod tests {
             &mut output,
             |_| panic!("skip must not store a URL"),
             |_| panic!("skip must not store a key"),
+            || panic!("skip must not remove SearXNG"),
+            &mut FakeEcho::live(),
         )
         .unwrap();
         assert!(

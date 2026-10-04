@@ -1052,6 +1052,22 @@ pub fn set_web_search_searxng_url(url: &str) -> Result<(), String> {
     })
 }
 
+/// Remove a stored SearXNG URL when the web-search setup switches to
+/// another provider. Unlike writing an empty value, this leaves a
+/// configuration that `validate` accepts: an empty `searxng_url` is
+/// rejected as a non-empty-string violation.
+pub fn remove_web_search_searxng_url() -> Result<(), String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    write_doc(&path, |doc| {
+        if let Some(web_search) = doc.get_mut("web_search").and_then(Value::as_object_mut) {
+            web_search.remove("searxng_url");
+            if web_search.is_empty() {
+                doc.as_object_mut().map(|root| root.remove("web_search"));
+            }
+        }
+    })
+}
+
 /// The Perplexity API key the web-search setup stored, under
 /// `remote_keys.perplexity` — the same secret store, in the same 0600
 /// global file, that `pixel config remote-key` writes. Never echoed back.
@@ -2119,6 +2135,27 @@ mod tests {
              web_search: {searxng_url: https://sx.test}\nremote_keys: {perplexity: pplx}",
         );
         validate(&path).unwrap();
+    }
+
+    #[test]
+    fn removing_the_searxng_url_leaves_a_config_validated_by_validate() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let cfg = home.0.join(".pixel/config.yaml");
+
+        set_web_search_searxng_url("https://sx.test").unwrap();
+        validate(&cfg).unwrap();
+        remove_web_search_searxng_url().unwrap();
+        assert!(web_search_searxng_url().is_none(), "field removed, not emptied");
+        // `validate` accepts the removed state — an empty `searxng_url`
+        // would be rejected, and would stall every later `pixel config setup`.
+        validate(&cfg).unwrap();
+        write(&cfg, "web_search: {searxng_url: ''}");
+        assert!(validate(&cfg).is_err(), "empty searxng_url stays rejected");
+
+        restore_home(saved);
     }
 
     #[test]
