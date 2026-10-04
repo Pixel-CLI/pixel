@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Read-only guard between prepare, merge and tag. Run from the repository root.
 
 Usage: check-candidate.py BASE PREPARE_HEAD --tip FETCHED_BASE [--merge MERGE]
