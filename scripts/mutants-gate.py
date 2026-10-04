@@ -53,6 +53,15 @@ MUTANTS_PER_SHARD = 10
 #: mutants, shards grow beyond `MUTANTS_PER_SHARD`: a 658-mutant diff puts
 #: 44 on each shard, about 20 minutes against the job's 90-minute limit.
 MAX_SHARDS = 15
+#: The default `runs-on` value for every shard: GitHub's hosted image. The
+#: `PIXEL_MUTANTS_SHARD_RUNNERS` repository variable can replace it with a
+#: JSON array of `runs-on` values (self-hosted labels among them); the pool
+#: is then assigned round-robin, one member per shard, so a pool of one
+#: behaves exactly like the old single-host routing. A pool member that is
+#: offline queues its own shards instead of failing them -- the same way a
+#: lone busy host always has -- and moving capacity or retiring a host is a
+#: variable edit, not a workflow change.
+DEFAULT_RUNNER = "ubuntu-26.04"
 
 #: `outcomes.json` summaries, by the name the report prints for them.
 OUTCOME_NAMES = {
@@ -149,6 +158,51 @@ def shard_matrix(mutants: int) -> list[str]:
     """
     count = shard_count(mutants)
     return [f"{k}/{count}" for k in range(count)]
+
+
+def runner_pool(runners: list[str] | None) -> list[str]:
+    """The validated shard-runner pool: non-empty strings, or the default.
+
+    An empty or blank entry would ask GitHub for a runner whose labels are
+    the empty string and queue forever, so the whole variable is rejected
+    rather than partly honored. Every member must be a string: a `null`
+    silently dropped here would route its shards somewhere their operator
+    never configured, and a number or dict is a mistyped variable, not a
+    label. The all-blank fallback stays: an unset variable and an empty
+    string mean the same thing.
+    """
+    members = runners or []
+    for member in members:
+        if not isinstance(member, str):
+            raise ValueError(f"pool member is not a string: {member!r}")
+    pool = [r.strip() for r in members if r.strip()]
+    return pool or [DEFAULT_RUNNER]
+
+
+def shard_runners(mutants: int, runners: list[str] | None) -> list[str]:
+    """The `runs-on` value per `--shard k/n`, assigned round-robin.
+
+    Consecutive slices of the mutant list are independent jobs, so which
+    host takes which shard matters only for load: round-robin spreads a
+    matrix evenly and keeps each shard on exactly one host (a shard's
+    `target/` is rebuilt per job, and the outcome cache is per-tree, not
+    per-host).
+    """
+    pool = runner_pool(runners)
+    return [pool[k % len(pool)] for k in range(shard_count(mutants))]
+
+
+def shard_include(mutants: int, runners: list[str] | None) -> list[dict[str, str]]:
+    """The shard matrix as GitHub reads it: one `{shard, runner}` per job.
+
+    Emitted as the matrix's `include`, so the workflow's `runs-on` reads
+    `matrix.runner` instead of zipping two parallel lists through an index
+    dimension.
+    """
+    return [
+        {"shard": shard, "runner": runner}
+        for shard, runner in zip(shard_matrix(mutants), shard_runners(mutants, runners))
+    ]
 
 
 def tally(root: Path) -> tuple[Counter[str], list[str]]:
@@ -302,6 +356,12 @@ def main(argv: list[str] | None = None) -> int:
         help="append `mutants=<count>` and `shards=<JSON list of k/n>` here",
     )
     parser.add_argument(
+        "--runners",
+        type=Path,
+        help="file holding the `PIXEL_MUTANTS_SHARD_RUNNERS` JSON array; "
+        "absent or empty means the GitHub-hosted default",
+    )
+    parser.add_argument(
         "--outcomes-root",
         type=Path,
         help="directory holding one mutants.out per shard; fail unless every "
@@ -315,9 +375,32 @@ def main(argv: list[str] | None = None) -> int:
     status, message = verdict(mutants, mutable)
 
     if args.github_output:
+        runners = None
+        if args.runners and args.runners.is_file():
+            text = args.runners.read_text(errors="replace").strip()
+            if text:
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    parsed = None
+                if not isinstance(parsed, list):
+                    print(
+                        "::error title=Bad PIXEL_MUTANTS_SHARD_RUNNERS::"
+                        f"expected a JSON array of runs-on values, got {text!r}"
+                    )
+                    return 1
+                try:
+                    runners = runner_pool(parsed)
+                except ValueError as bad_pool:
+                    print(
+                        "::error title=Bad PIXEL_MUTANTS_SHARD_RUNNERS::"
+                        f"expected a JSON array of runs-on values: {bad_pool}"
+                    )
+                    return 1
         with args.github_output.open("a") as fh:
             fh.write(f"mutants={mutants}\n")
             fh.write(f"shards={json.dumps(shard_matrix(mutants))}\n")
+            fh.write(f"matrix={json.dumps({'include': shard_include(mutants, runners)})}\n")
 
     report = render(status, message, mutants, mutable)
     failure = None

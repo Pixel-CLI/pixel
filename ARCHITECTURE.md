@@ -666,7 +666,12 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     `scripts/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
     reads, accepts the same advisories as `deny.toml`).
 - Other workflows: `mutants.yml` (the `Mutants in diff` gate on every pull
-  request touching `crates/`, sharded), `mutants-nightly.yml` (a whole-tree
+  request touching `crates/`, sharded over the `PIXEL_MUTANTS_SHARD_RUNNERS`
+  runner pool — a JSON array of `runs-on` values the plan job deals
+  round-robin per shard through `scripts/mutants-gate.py`, GitHub-hosted
+  `ubuntu-26.04` when the variable is unset or empty, so capacity moves
+  with a variable edit and no shard queues behind one busy self-hosted
+  host), `mutants-nightly.yml` (a whole-tree
   rotation), `cross-build.yml` (the three release lanes), `release.yml`
   (on a tag: `verify`, then publication, the tap and the post-publish smoke
   test) and `release-build.yml`, the reusable workflow it calls to build the
