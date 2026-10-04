@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <b>−94.5% median read volume</b> on 8 large files · one install, zero commands to learn · no account, no API key, no telemetry.
+  <b>−94.5% median read volume for outline questions</b> on 8 large files · one install, zero commands to learn · no account, no API key, no telemetry.
 </p>
 
 <p align="center">
@@ -33,7 +33,7 @@
 The animation illustrates a workflow; it is not a timed agent comparison.
 [Agent trials and their limits](https://pixel-cli.dev/benchmarks/#on-whole-agent-tasks) include a newer Opus trial with hooks that found no speed gain on one task.
 
-- **A local index of signatures and callers that your agent queries before it greps**: 94.5% less read volume (median) than whole-file reads on 8 large open-source files. [How we measure](https://pixel-cli.dev/benchmarks/#well-known-files)
+- **A local index of signatures and callers that your agent queries before it greps**: 94.5% less read volume (median) for outline questions using `pixel list-signatures` than whole-file reads on 8 large open-source files. [How we measure](https://pixel-cli.dev/benchmarks/#well-known-files)
 - **One install, zero commands to learn**: you keep prompting as usual. Works with Claude Code, Codex, Pi, Cursor, Copilot CLI, OpenCode, Devin and Antigravity.
 - **No account. No API key. No telemetry.** Your code stays on your machine.
 - **13 languages, MIT**, macOS (Apple Silicon) and Linux, signed releases.
