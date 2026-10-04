@@ -110,7 +110,7 @@ attestation above is what proves where it came from.
 
 ## Security model
 
-Pixel runs locally and processes repository data. [docs/threat-model.md](docs/threat-model.md) is the full threat model and attack surface analysis: actors, trust boundaries, each threat with its mitigation in the code and its residual risk. Key security boundaries:
+Pixel runs locally and processes repository data. [docs/threat-model.md](docs/threat-model.md) is the full threat model and attack surface analysis: actors, trust boundaries, each threat with its mitigation in the code and its residual risk. [docs/assurance-case.md](docs/assurance-case.md) argues from it why the requirements below hold: the secure design principles applied and the common weaknesses countered. Key security boundaries:
 
 - **Daemon socket**: per-user directory (0700) on Linux, per-user TMPDIR on macOS. Socket file is 0600. No cross-user access.
 - **A `.pixel/` that comes from the repository**: `.pixel/` holds pixel's derived state and is git-ignored, but a repository can still commit it, symbolic links included. Before the index, graph and history stores read anything there (and before `pixel index unpack` installs into it), pixel refuses a `.pixel` that is a symbolic link or that holds files git tracks (`git ls-files .pixel` prints something), and names the command that removes it. The integrity checks inside those files (the history db's `_pixel_marker` table, extractor ids, the graph freshness signature) only tell pixel's current files from stale or foreign ones; they can be forged and are not a trust check.
