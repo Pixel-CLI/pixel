@@ -238,12 +238,23 @@ fn parse_line(body: &str) -> Option<Element> {
     let name = first_quoted(rest).unwrap_or_default();
     let reference = attr(&attrs, "ref")?;
     let checked = attr(&attrs, "checked").map(|value| value != "false");
+    // agent-browser echoes a field's current value after the attribute
+    // block (`- textbox "Search" [ref=e59]: filled text`). The element
+    // table prints it; parse it too, so a decision can see the field is
+    // already satisfied (issue #638).
+    let echoed = rest
+        .split_once(&format!("ref={reference}]"))
+        .and_then(|(_, after)| after.strip_prefix(": "))
+        .map(str::trim)
+        .filter(|held| !held.is_empty())
+        .map(str::to_string);
+    let value = attr(&attrs, "value").or(echoed);
     Some(Element {
         slot: None,
         reference,
         role: role.to_string(),
         name,
-        value: attr(&attrs, "value"),
+        value,
         checked,
         disabled: has_bare(&attrs, "disabled"),
         clickable: rest.contains("clickable"),
