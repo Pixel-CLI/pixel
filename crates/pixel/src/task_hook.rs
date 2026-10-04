@@ -503,11 +503,17 @@ fn sed_read(args: &[String]) -> bool {
 /// is given, the first positional operand. File operands are not scripts —
 /// sed decides which operand is the script, and the rest are input files.
 /// `--line-length`/`-l` consume a separate value argument so it is not
-/// mistaken for a positional. `--` ends the options only: the first operand
-/// after it is still the script when none came before.
+/// mistaken for a positional — but only a number: BSD sed's `-l` takes no
+/// value, so `sed -l 'w out' f` runs `w out` there, and a non-numeric operand
+/// stays a script candidate. `--` ends the options only: the first operand
+/// after it is still the script when none came before. A positional that
+/// precedes every `-e` is scanned as well: BSD sed (and GNU sed under
+/// `POSIXLY_CORRECT`) stops option parsing at the first operand, so
+/// `sed 'w out' -e p f` runs `w out` there.
 fn sed_scripts(args: &[String]) -> impl Iterator<Item = &str> {
     let mut scripts: Vec<&str> = Vec::new();
     let mut has_explicit = false;
+    let mut positional_before_explicit = false;
     let mut first_positional: Option<&str> = None;
     let mut after_dd = false;
     let mut iter = args.iter();
@@ -536,12 +542,21 @@ fn sed_scripts(args: &[String]) -> impl Iterator<Item = &str> {
                 scripts.push(rest);
             }
         } else if arg == "-l" || arg == "--line-length" {
-            iter.next();
+            if iter
+                .as_slice()
+                .first()
+                .is_some_and(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+            {
+                iter.next();
+            }
         } else if !arg.starts_with('-') && first_positional.is_none() {
             first_positional = Some(arg.as_str());
+            positional_before_explicit = !has_explicit;
         }
     }
-    if !has_explicit && let Some(script) = first_positional {
+    if (!has_explicit || positional_before_explicit)
+        && let Some(script) = first_positional
+    {
         scripts.push(script);
     }
     scripts.into_iter()
@@ -1402,6 +1417,49 @@ mod tests {
                 "{tool}"
             );
         }
+    }
+
+    fn assert_sed_denied(command: &str) {
+        assert!(shell_mutates(command), "{command}");
+        assert_eq!(
+            unavailable(
+                TaskHookEvent::PreToolUse,
+                Some(&json!({"tool_name":"Bash","tool_input":{"command":command}}))
+            )["decision"],
+            "deny",
+            "{command}"
+        );
+    }
+
+    #[test]
+    fn sed_line_length_should_consume_only_a_numeric_value() {
+        // BSD sed's `-l` takes no value: the next operand is the script it
+        // runs, so swallowing it as a line length hid a write on macOS.
+        for command in [
+            "sed -n -l 'w out' file.rs",
+            "sed -l 'e touch marker' file.rs",
+            "sed -n --line-length 'w out' file.rs",
+        ] {
+            assert_sed_denied(command);
+        }
+        // A numeric value is still consumed, so the script after it is read.
+        assert!(!shell_mutates("sed -n -l 72 '1,20p' west.rs"));
+    }
+
+    #[test]
+    fn sed_positional_before_expression_should_be_scanned_as_a_script() {
+        // BSD sed stops option parsing at the first operand: there the
+        // operand before `-e` is the script and `-e p` are input files.
+        for command in [
+            "sed 'w out' -e p file.rs",
+            "sed -n 'e touch marker' --expression=p file.rs",
+            "sed events.rs -e '1,20p'",
+        ] {
+            assert_sed_denied(command);
+        }
+        // Operands after the first `-e` are files on every sed.
+        assert!(!shell_mutates("sed -n -e '1,20p' west.rs events.rs"));
+        assert!(!shell_mutates("sed -n '1,20p' -e '2,30p' west.rs"));
     }
 
     #[test]
