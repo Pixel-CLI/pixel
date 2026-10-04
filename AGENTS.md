@@ -4,7 +4,7 @@
 
 ## Mutation Testing Loop
 
-- Mutation testing runs twice, both off the laptop: the pre-push gate (`scripts/mutants-remote-gate.sh`) bundles the committed diff to the gate host (default the ssh alias `a2`) and blocks the push on the campaign's verdict against a warm `target/`; the `Mutants` workflow then re-runs the same diff's shards on the same host and fails the pull request on any surviving mutant.
+- Mutation testing runs twice, both off the laptop: the pre-push gate (`scripts/mutants-remote-gate.sh`) bundles the committed diff to the gate host (default the ssh alias `pixel-gate`) and blocks the push on the campaign's verdict against a warm `target/`; the `Mutants` workflow then re-runs the same diff's shards on the same host and fails the pull request on any surviving mutant.
 - Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the gate host and the workflow's runners are for.
 - The loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push. A blocked push already lists the `MISSED`/`TIMEOUT` lines from the gate host — fix them and push again; the traveling outcome cache (`target/mutants-preflight/`) makes the retry re-test only the survivors. A PR opened after a green push has `Mutants in diff` necessarily green.
 - A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.

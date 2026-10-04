@@ -32,7 +32,7 @@ if ! printf '%s\n' "$changed" | grep -Eq '^crates/.*\.rs$'; then
     exit 0
 fi
 
-host=${PIXEL_MUTANTS_GATE_HOST:-a2}
+host=${PIXEL_MUTANTS_GATE_HOST:-pixel-gate}
 remote_script=${PIXEL_MUTANTS_GATE_SCRIPT:-pixel-mutants-gate}
 
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/pixel-mutants-gate.XXXXXX") \

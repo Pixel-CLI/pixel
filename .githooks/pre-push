@@ -6,7 +6,7 @@
 # gate spends a runner on it. Mutation coverage is then proved off this machine:
 # the gate
 # script bundles the committed diff to the gate host (PIXEL_MUTANTS_GATE_HOST,
-# default a2) where the campaign runs against a warm target/, and the push is
+# default pixel-gate) where the campaign runs against a warm target/, and the push is
 # blocked on the remote verdict. Nothing mutant-related compiles or runs
 # locally; CI's Mutants in diff remains the required merge gate.
 set -eu

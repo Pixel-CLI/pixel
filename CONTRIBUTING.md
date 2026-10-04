@@ -167,7 +167,7 @@ before the remote mutation campaign can report an unjudged baseline. Nothing
 mutant-related compiles or runs locally: the hook then
 bundles the committed three-dot diff and its exact base commit to the gate
 host (`PIXEL_MUTANTS_GATE_HOST`,
-default the ssh alias `a2`), which checks it out and executes the same campaign
+default the ssh alias `pixel-gate`), which checks it out and executes the same campaign
 CI's shards run — `scripts/mutants-preflight.sh --run` — against a warm
 `target/`, seeded with the traveling outcome cache (`target/mutants-preflight/`,
 carried to the host and back so a re-push after a fix re-tests only the

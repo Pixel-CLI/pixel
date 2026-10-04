@@ -19,7 +19,7 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 | `test-gates.py` | `python3 scripts/test-gates.py` | contract of `gates.sh` (stub cargo in a throwaway repo) |
 | `mutants-preflight.sh` | `scripts/mutants-preflight.sh --check\|--ack\|--run [regex]` | local mutation-list review and optional throwaway-worktree campaign; the tracked hook uses the remote gate instead |
 | `test-mutants-preflight.sh` | `sh scripts/test-mutants-preflight.sh` | contract of the mutation exposure pre-push gate (stub cargo, disposable repo) |
-| `mutants-remote-gate.sh` | `scripts/mutants-remote-gate.sh` | tracked pre-push entry point; bundles the exact committed diff and base for the gate host's mutation campaign (`PIXEL_MUTANTS_GATE_HOST`, default the ssh alias `a2`) |
+| `mutants-remote-gate.sh` | `scripts/mutants-remote-gate.sh` | tracked pre-push entry point; bundles the exact committed diff and base for the gate host's mutation campaign (`PIXEL_MUTANTS_GATE_HOST`, default the ssh alias `pixel-gate`) |
 | `mutants-gate.py` | `python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt` | the `Mutants` plan/report script; sizes the shard matrix and deals each shard a runner from the `PIXEL_MUTANTS_SHARD_RUNNERS` pool (JSON array of `runs-on` values, round-robin; GitHub-hosted when unset) |
 | `mutants-gate-host.sh` | `pixel-mutants-gate <base-oid> <head-oid>` | remote pre-push gate endpoint; pins the campaign to the client's bundled base and head |
 | `test-mutants-gate-host.sh` | `sh scripts/test-mutants-gate-host.sh` | contract that the remote gate host keeps the bundled base through to mutation preflight |
