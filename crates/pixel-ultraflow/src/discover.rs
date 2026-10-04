@@ -124,6 +124,11 @@ pub struct Cycle {
     pub terminal: Option<Status>,
     /// Set when a typed field had no value available to it.
     pub undetermined: Option<String>,
+    /// Set when the chosen fill was already satisfied: the field held the
+    /// resolved value in this cycle's own observation. No step runs, the
+    /// stall counter does not advance, and the message names the field —
+    /// the next decision reads it from the state text.
+    pub satisfied: Option<String>,
     /// Decisions this cycle spent: the page decision, plus a value one.
     pub decisions: usize,
 }
@@ -221,6 +226,7 @@ pub fn one_cycle(
     vars: &[Var],
     history: &[TracedStep],
     page: &Observation,
+    satisfied_note: Option<&str>,
 ) -> Result<Cycle, String> {
     let budget = decider.option_budget();
     let space = ActionSpace::of(&page.elements, budget);
@@ -228,7 +234,10 @@ pub fn one_cycle(
     // path. One that does not fit is never truncated silently: the same
     // cycle runs through the two-stage space (operation, then target),
     // whose only truncation is a named target list. See [`twostage`].
-    let text = state_text(page, history);
+    let text = match satisfied_note {
+        Some(note) => format!("{}\nNOTE: {note}", state_text(page, history)),
+        None => state_text(page, history),
+    };
     let context = context_of(goal);
     let mut decisions = 0usize;
     let (choice, record) = if space.truncated().is_empty() {
@@ -299,6 +308,7 @@ pub fn one_cycle(
             terminal: Some(terminal),
             undetermined: None,
             decisions,
+            satisfied: None,
         });
     }
 
@@ -314,7 +324,32 @@ pub fn one_cycle(
         // Asking costs a decision whether or not it finds a value.
         decisions += 1;
         match value::choose(decider, goal, element, vars, budget)? {
-            ValueChoice::Value(resolved) => given = Some(resolved),
+            ValueChoice::Value(resolved) => {
+                // The element table carries the field's current value: when
+                // it already equals the resolved one, the fill is satisfied.
+                // Deciding here — from the observation this cycle was asked
+                // about — closes the gap where the executor's own snapshot
+                // renders the value differently and re-sends the fill (the
+                // Drive rerun of 2026-10-04, issue #638: 40 re-fills).
+                if element.value.as_deref().map(str::trim) == Some(resolved.value.trim())
+                    && !resolved.value.trim().is_empty()
+                {
+                    return Ok(Cycle {
+                        decision: record,
+                        step: None,
+                        value: None,
+                        terminal: None,
+                        undetermined: None,
+                        satisfied: Some(format!(
+                            "{} already holds \"{}\" — the fill is done, choose another operation",
+                            element.describe(),
+                            resolved.value
+                        )),
+                        decisions,
+                    });
+                }
+                given = Some(resolved);
+            }
             ValueChoice::Undetermined { detail } => {
                 return Ok(Cycle {
                     decision: record,
@@ -323,6 +358,7 @@ pub fn one_cycle(
                     terminal: None,
                     undetermined: Some(detail),
                     decisions,
+                    satisfied: None,
                 });
             }
         }
@@ -344,6 +380,7 @@ pub fn one_cycle(
         terminal: None,
         undetermined: None,
         decisions,
+        satisfied: None,
     })
 }
 
@@ -369,6 +406,8 @@ pub fn discover(
     let mut decisions = 0usize;
     let mut stalled = 0usize;
     let mut refused: Vec<String> = Vec::new();
+    let mut satisfied_note: Option<String> = None;
+    let mut satisfied = 0usize;
     let mut status = Status::Budget;
     let mut detail = format!(
         "stopped after {} steps without reaching DONE",
@@ -376,7 +415,14 @@ pub fn discover(
     );
 
     for _ in 0..request.limits.max_steps {
-        let cycle = one_cycle(decider, request.goal, request.vars, &steps, &page)?;
+        let cycle = one_cycle(
+            decider,
+            request.goal,
+            request.vars,
+            &steps,
+            &page,
+            satisfied_note.as_deref(),
+        )?;
         decisions += cycle.decisions;
         if let Some(terminal) = cycle.terminal {
             status = terminal;
@@ -388,6 +434,22 @@ pub fn discover(
                 _ => "the decision reported that no option can make progress".to_string(),
             };
             break;
+        }
+        if let Some(satisfied_detail) = cycle.satisfied {
+            // The fill this cycle chose is already done. No step runs, no
+            // stall is counted, and the next decision's question carries
+            // the note. A run that keeps choosing the satisfied fill is a
+            // loop all the same: the same bound ends it, named honestly.
+            satisfied_note = Some(satisfied_detail.clone());
+            satisfied += 1;
+            if satisfied >= request.limits.max_stalled {
+                status = Status::Blocked;
+                detail =
+                    format!("{satisfied} decisions re-chose a filled field: {satisfied_detail}");
+                break;
+            }
+            stalled = 0;
+            continue;
         }
         if let Some(detail) = cycle.undetermined {
             // A field with no available value is where the caller has to
@@ -408,6 +470,12 @@ pub fn discover(
                 cycle.decision.label
             ));
         };
+        // A real step breaks the run of consecutive satisfied fills: the
+        // bound below counts only re-chooses, not every fill a run happens
+        // to find already done along the way, and the note no longer bleeds
+        // into the decisions that follow it.
+        satisfied_note = None;
+        satisfied = 0;
 
         let snapshot_before = page.snapshot.clone();
         let (executed, fill_skipped, log) = match execute_step(&step, &vars, &shell, browser) {
@@ -982,6 +1050,98 @@ mod tests {
             "{}",
             asked.text
         );
+    }
+
+    /// The loop-level satisfied check (#638): when the element TABLE shows
+    /// the field already holding the resolved value — whatever the
+    /// executor's own pre-fill snapshot renders — the cycle produces no
+    /// step, does not stall, and the next decision's question carries the
+    /// note. A run that still re-chooses the fill is bounded and named.
+    #[test]
+    fn a_field_holding_the_value_in_the_element_table_is_satisfied() {
+        // The combobox echoes the value in the observation itself.
+        let duck_filled = "- link \"Learn about DuckDuckGo\" [ref=e80]\n\
+                           - combobox \"Search with DuckDuckGo\" [ref=e185]: Zurich\n\
+                           - button \"Search\" [ref=e186]";
+        let mut browser = ScriptedBrowser::default();
+        browser.start();
+        browser.observe(URL, duck_filled);
+        // Every cycle observes the same filled page; no executor calls
+        // happen at all — the fill never runs.
+        for _ in 0..4 {
+            browser.observe(URL, duck_filled);
+        }
+        let vars = [Var::new("query", "Zurich")];
+        let mut decider = ScriptedDecider::new(vec![
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("DONE", 1.0)])),
+        ]);
+        let trace = match discover(
+            &mut browser,
+            &mut decider,
+            &request(&vars, Limits::default()),
+        ) {
+            Ok(t) => t,
+            Err(e) => panic!("discover failed: {e}; calls: {:?}", browser.calls()),
+        };
+
+        assert_eq!(trace.status, Status::Done, "{}", trace.detail);
+        assert_eq!(trace.steps.len(), 0, "a satisfied fill records no step");
+        // The second page decision saw the note.
+        let asked = decider.asked(2);
+        assert!(asked.text.contains("already holds"), "{}", asked.text);
+        assert!(
+            asked.text.contains("choose another operation"),
+            "{}",
+            asked.text
+        );
+        // No fill was ever sent to the browser: the calls are all opens,
+        // observations and their polls.
+        assert!(
+            browser.calls().iter().all(|call| call[0] != "fill"),
+            "{:?}",
+            browser.calls()
+        );
+    }
+
+    /// And when the engine ignores the note and keeps re-choosing the
+    /// satisfied fill, the same bound ends the run — named for what it is,
+    /// not mistaken for a page stall.
+    #[test]
+    fn an_engine_that_rechooses_a_satisfied_fill_is_bounded() {
+        let duck_filled = "- link \"Learn about DuckDuckGo\" [ref=e80]\n\
+                           - combobox \"Search with DuckDuckGo\" [ref=e185]: Zurich\n\
+                           - button \"Search\" [ref=e186]";
+        let mut browser = ScriptedBrowser::default();
+        browser.start();
+        browser.observe(URL, duck_filled);
+        for _ in 0..6 {
+            browser.observe(URL, duck_filled);
+        }
+        let vars = [Var::new("query", "Zurich")];
+        let mut answers = Vec::new();
+        for _ in 0..DEFAULT_MAX_STALLED {
+            answers.push(Ok(distribution(&[("TYPE 2", 0.9)])));
+            answers.push(Ok(distribution(&[("VAR query", 0.8)])));
+        }
+        let mut decider = ScriptedDecider::new(answers);
+        let trace = discover(
+            &mut browser,
+            &mut decider,
+            &request(&vars, Limits::default()),
+        )
+        .unwrap();
+
+        assert_eq!(trace.status, Status::Blocked);
+        assert!(
+            trace.detail.contains("re-chose a filled field"),
+            "{}",
+            trace.detail
+        );
+        assert!(trace.steps.is_empty());
     }
 
     /// A fill that IS sent — the field did not already hold the value —

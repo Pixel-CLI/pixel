@@ -1,0 +1,1 @@
+**ultraflow:** fields that already contain their requested values are skipped without executing a step. If repeated selections reach the configured limit, the run stops as blocked and explains why. (#642)
