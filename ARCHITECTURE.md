@@ -618,6 +618,11 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 
 ## Testing and gates
 
+- The public `.github/actions/setup-pixel` composite action installs a checksum-verified
+  release into runner temporary storage and optionally prepares indexes without a
+  daemon. `setup-pixel.yml` smoke-tests real releases on Linux x64/ARM64 and
+  macOS ARM64; `scripts/test-setup-pixel.py` checks installer failure contracts.
+
 - Unit tests live next to the code in each crate. `pixel-daemon` tests build
   small git fixtures in a temp dir and call `Service::handle` directly.
 - CLI integration tests in `crates/pixel/tests/cli/` (one binary, one module per file) invoke the built binary

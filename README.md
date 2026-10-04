@@ -166,3 +166,8 @@ flowchart TD
 - [CONTRIBUTING.md](CONTRIBUTING.md): build from source, gates, pull requests
 
 MIT licensed. See [`NOTICE`](NOTICE) for attribution.
+
+### GitHub Actions
+
+Prepare Pixel for CI agents with the reusable [setup action](docs/github-actions.md):
+verified release installation and daemon-free indexing on Linux and macOS ARM64.

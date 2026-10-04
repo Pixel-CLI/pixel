@@ -1,0 +1,45 @@
+name: Setup Pixel
+description: Install a verified Pixel release and prepare repository indexes for CI agents.
+inputs:
+  version:
+    description: 'Exact release tag (vX.Y.Z). Required so upgrades remain reviewable.'
+    required: true
+  path:
+    description: Repository directory, relative to the workspace or absolute.
+    default: '.'
+  prepare:
+    description: 'Build text and code indexes without a daemon. Set false for install only.'
+    default: 'true'
+outputs:
+  version:
+    description: Installed release tag.
+    value: ${{ steps.install.outputs.version }}
+  bin:
+    description: Absolute path to the installed executable.
+    value: ${{ steps.install.outputs.bin }}
+  report:
+    description: Absolute path to prepare-repo JSON (empty for install only).
+    value: ${{ steps.prepare.outputs.report }}
+runs:
+  using: composite
+  steps:
+    - name: Install verified Pixel release
+      id: install
+      shell: bash
+      env:
+        PIXEL_ACTION_VERSION: ${{ inputs.version }}
+        PIXEL_ACTION_PREPARE: ${{ inputs.prepare }}
+      run: bash "$GITHUB_ACTION_PATH/install.sh"
+    - name: Prepare Pixel indexes
+      id: prepare
+      if: inputs.prepare == 'true'
+      shell: bash
+      env:
+        PIXEL_ACTION_PATH: ${{ inputs.path }}
+        PIXEL_ACTION_BIN: ${{ steps.install.outputs.bin }}
+        PIXEL_DAEMON_AUTO_START: '0'
+      run: |
+        report=$(mktemp "$RUNNER_TEMP/pixel-ready.XXXXXX")
+        "$PIXEL_ACTION_BIN" prepare-repo "$PIXEL_ACTION_PATH" --no-daemon --metrics off --json > "$report"
+        cat "$report"
+        echo "report=$report" >> "$GITHUB_OUTPUT"
