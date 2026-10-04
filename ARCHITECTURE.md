@@ -673,9 +673,11 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   (CodeQL on every pull request into `main`, every push to `main` and
   weekly: Rust, the workflows, Python and JavaScript/TypeScript, all with
   `build-mode: none`, results to code scanning and the `CodeQL` check) and
-  `fuzz.yml` (every cargo-fuzz target under `fuzz/` on nightly: 60 s each on
-  a pull request touching `fuzz/`, `pixel-graph`, `pixel-index` or
-  `pixel-git`, 600 s weekly and on demand, crash reproducers uploaded).
+  `fuzz.yml` (`cargo deny` on the `fuzz/` workspace with the root
+  `deny.toml`, then every cargo-fuzz target on nightly: 60 s each on a pull
+  request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
+  root `Cargo.toml` or `deny.toml`, 600 s weekly and on demand, crash
+  reproducers uploaded).
 - `fuzz/` is a cargo-fuzz crate with its own `[workspace]`, outside the
   root workspace (no root `cargo` command builds it). `graph_extract` feeds
   arbitrary source to `pixel_graph::extract::extract_file` (no panic, lines
