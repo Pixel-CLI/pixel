@@ -620,15 +620,15 @@ fn compose_context_appends_existing_note_after_foreign_ones() {
 }
 
 /// Shell segments split on the separators a shell honours, never inside
-/// quotes: `pixel search 'a|b'` stays one invocation.
+/// quotes: `pixel search-content 'a|b'` stays one invocation.
 #[test]
 fn shell_segments_split_outside_quotes_only() {
     assert_eq!(
-        shell_segments("cd x && pixel search 'a|b' | head; echo \"x;y\"\nls"),
+        shell_segments("cd x && pixel search-content 'a|b' | head; echo \"x;y\"\nls"),
         vec![
             "cd x ",
             "",
-            " pixel search 'a|b' ",
+            " pixel search-content 'a|b' ",
             " head",
             " echo \"x;y\"",
             "ls"
@@ -1631,8 +1631,8 @@ fn safe_command_chain_splits_known_operators_only() {
         Some(vec!["pixel a", "pixel b", "echo x", "pixel c 2>&1"])
     );
     assert_eq!(
-        split_safe_command_chain("pixel search 'a;b' && echo \"c&&d\""),
-        Some(vec!["pixel search 'a;b'", "echo \"c&&d\""])
+        split_safe_command_chain("pixel search-content 'a;b' && echo \"c&&d\""),
+        Some(vec!["pixel search-content 'a;b'", "echo \"c&&d\""])
     );
     for command in [
         "pixel a &",
