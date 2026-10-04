@@ -88,10 +88,12 @@ paths, and fails unless the two match. To rebuild a Linux release yourself
 ```bash
 git clone https://github.com/Pixel-CLI/pixel && cd pixel && git switch --detach vX.Y.Z
 cargo install cross --locked --version 0.2.5   # the version release-build.yml pins
-eval "$(scripts/release-build-env.sh)"
+env_lines=$(scripts/release-build-env.sh) && eval "$env_lines"
 cross +1.NN.N build --release --locked --no-default-features --features model2vec \
   --target x86_64-unknown-linux-musl -p pixel-cli
 sha256sum target/x86_64-unknown-linux-musl/release/pixel
+gh release download vX.Y.Z --repo Pixel-CLI/pixel \
+  --pattern 'pixel-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz'
 tar -xzOf pixel-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz \
   pixel-vX.Y.Z-x86_64-unknown-linux-musl/bin/pixel | sha256sum
 ```

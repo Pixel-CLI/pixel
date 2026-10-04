@@ -9,21 +9,38 @@ name: Reproducible build
 # input that varies by path or by date; the other two release lanes share
 # the environment, not this proof.
 #
-# Two release builds of every crate cost about as much as a release, so the
-# job runs only on what can change the result -- the build environment, the
-# profile, build.rs, this file -- weekly to catch a dependency or toolchain
-# update that brings its own nondeterminism, and on demand.
-# scripts/test-release-build-env.py holds the command equal to
-# release-build.yml's.
+# Two release builds of every crate take about ten minutes (run
+# 37220247466), so a pull request runs the job only when it changes what
+# most often brings nondeterminism: the build environment, the profile,
+# build.rs, this file, and the dependency graph (Cargo.lock, every crate's
+# manifest: a new dependency brings its own build script and C code). Any
+# other Rust source change is checked on the push to main that merges it,
+# before a tag can build it; weekly catches a toolchain update, and a run
+# can be started on demand. scripts/test-release-build-env.py holds the
+# command equal to release-build.yml's.
 on:
   pull_request:
     paths:
       - ".cargo/**"
       - ".github/workflows/release-build.yml"
       - ".github/workflows/reproducible-build.yml"
+      - "Cargo.lock"
       - "Cargo.toml"
       - "Cross.toml"
+      - "crates/*/Cargo.toml"
       - "crates/pixel/build.rs"
+      - "rust-toolchain*"
+      - "scripts/release-build-env.sh"
+  push:
+    branches: [main]
+    paths:
+      - ".cargo/**"
+      - ".github/workflows/release-build.yml"
+      - ".github/workflows/reproducible-build.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Cross.toml"
+      - "crates/**"
       - "rust-toolchain*"
       - "scripts/release-build-env.sh"
   schedule:
@@ -33,6 +50,8 @@ on:
 permissions:
   contents: read
 
+# On main a run in flight finishes and only the newest queued push waits
+# behind it: its tree holds every merge a superseded run would have built.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -70,9 +89,12 @@ jobs:
         with:
           tool: cross@0.2.5
 
+      # Assign, then eval: `eval "$(...)"` would run an empty string and
+      # build without the environment if the script failed.
       - name: Build in the first checkout
         run: |
-          eval "$(scripts/release-build-env.sh)"
+          env_lines=$(scripts/release-build-env.sh)
+          eval "$env_lines"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=$RUSTFLAGS"
           cross build --release --locked --no-default-features --features model2vec --target "$TARGET" -p pixel-cli
           sha256sum "target/$TARGET/release/pixel" | cut -d' ' -f1 > "$RUNNER_TEMP/first.sha256"
@@ -80,7 +102,8 @@ jobs:
       - name: Build in the second checkout
         working-directory: ${{ runner.temp }}/pixel-second
         run: |
-          eval "$(scripts/release-build-env.sh)"
+          env_lines=$(scripts/release-build-env.sh)
+          eval "$env_lines"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=$RUSTFLAGS"
           cross build --release --locked --no-default-features --features model2vec --target "$TARGET" -p pixel-cli
           sha256sum "target/$TARGET/release/pixel" | cut -d' ' -f1 > "$RUNNER_TEMP/second.sha256"

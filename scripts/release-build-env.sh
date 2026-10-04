@@ -17,12 +17,17 @@
 # rust-cache hashes RUSTFLAGS into its key) and reproducible-build.yml all run
 # it from the checkout's root. SECURITY.md, "Reproducing a release build".
 #
-# Usage, from the checkout's root:
-#   eval "$(scripts/release-build-env.sh)"      # export lines for a shell
+# Usage, from anywhere in the checkout (the remap names its root):
+#   env_lines=$(scripts/release-build-env.sh) && eval "$env_lines"
 #   scripts/release-build-env.sh --github-env   # appends to $GITHUB_ENV
+# Assign first, then eval: `eval "$(...)"` runs an empty string, and
+# succeeds, when the script fails.
 set -eu
 
-root=$(pwd -P)
+# The worktree root, physical: rustc sees the real path, and a remap of the
+# caller's subdirectory or of a symlinked spelling would match nothing.
+top=$(git rev-parse --show-toplevel)
+root=$(cd "$top" && pwd -P)
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 
 # RUSTFLAGS splits on whitespace, and the export lines quote with '.

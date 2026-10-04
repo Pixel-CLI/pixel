@@ -678,8 +678,9 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   `reproducible-build.yml` (the `x86_64-unknown-linux-musl` release binary
   built twice from two checkouts at different paths, no cache, failing
   unless the two sha256 match; on pull requests touching the build
-  environment, the root `Cargo.toml`, `crates/pixel/build.rs` or
-  `release-build.yml`, weekly and on demand), `release.yml`
+  environment, `Cargo.lock`, a `Cargo.toml`, `crates/pixel/build.rs` or
+  `release-build.yml`, on pushes to `main` touching any of them or
+  `crates/**`, weekly and on demand), `release.yml`
   (on a tag: `verify`, then publication, the tap and the post-publish smoke
   test) and `release-build.yml`, the reusable workflow it calls to build the
   archives, write the formula and the Linux bottles with

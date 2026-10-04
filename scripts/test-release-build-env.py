@@ -121,6 +121,23 @@ class ScriptOutput(unittest.TestCase):
         self.assertIn(f"--remap-path-prefix={self.repo}=/pixel", res.stdout)
         self.assertNotIn(f"{link}=", res.stdout)
 
+    def test_run_from_a_subdirectory_remaps_the_checkout_root(self):
+        # cargo compiles every crate of the checkout, not only the caller's
+        # directory: a remap of the subdirectory leaves the root's path in.
+        sub = self.repo / "crates" / "pixel"
+        sub.mkdir(parents=True)
+        res = run(sub, CARGO_HOME=self.cargo_home, PWD=str(sub))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"--remap-path-prefix={self.repo}=/pixel ", res.stdout)
+        self.assertNotIn(f"{sub}=", res.stdout)
+
+    def test_outside_a_checkout_fails_without_output(self):
+        outside = self.base / "not-a-repo"
+        outside.mkdir()
+        res = run(outside, CARGO_HOME=self.cargo_home, GIT_CEILING_DIRECTORIES=str(self.base))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(res.stdout, "")
+
     def test_path_with_whitespace_is_refused_before_writing(self):
         spaced = self.base / "with space"
         make_repo(spaced)
@@ -139,6 +156,81 @@ class ScriptOutput(unittest.TestCase):
         res = run(self.repo, "--github", CARGO_HOME=self.cargo_home)
         self.assertEqual(res.returncode, 2)
         self.assertEqual(res.stdout, "")
+
+
+def run_block(workflow: str, step: str) -> str:
+    """The `run: |` block of the step named `step`, dedented."""
+    lines = (WORKFLOWS / workflow).read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == f"- name: {step}")
+    run_at = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "run: |")
+    key_indent = len(lines[run_at]) - len(lines[run_at].lstrip())
+    body = []
+    for line in lines[run_at + 1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= key_indent:
+            break
+        body.append(line)
+    indent = min(len(l) - len(l.lstrip()) for l in body if l.strip())
+    return "\n".join(l[indent:] for l in body) + "\n"
+
+
+class BuildSteps(unittest.TestCase):
+    """reproducible-build.yml's two build steps, run as Actions runs them
+    (`bash -e`), with the environment script and cross stubbed."""
+
+    STEPS = ("Build in the first checkout", "Build in the second checkout")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "scripts").mkdir()
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.calls = self.root / "cross-calls"
+        cross = self.bin / "cross"
+        cross.write_text(
+            '#!/bin/sh\nprintf "%s|%s\\n" "$SOURCE_DATE_EPOCH" "$RUSTFLAGS" >> "$CALLS"\n'
+            'mkdir -p "target/$TARGET/release" && echo bin > "target/$TARGET/release/pixel"\n'
+        )
+        cross.chmod(0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def stub_env_script(self, body: str) -> None:
+        script = self.root / "scripts" / "release-build-env.sh"
+        script.write_text("#!/bin/sh\n" + body)
+        script.chmod(0o755)
+
+    def run_step(self, step: str) -> subprocess.CompletedProcess:
+        env = dict(
+            os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", CALLS=str(self.calls),
+            TARGET="x86_64-unknown-linux-musl", RUNNER_TEMP=str(self.root),
+        )
+        env.pop("RUSTFLAGS", None)
+        env.pop("SOURCE_DATE_EPOCH", None)
+        return subprocess.run(
+            ["bash", "-e", "-c", run_block("reproducible-build.yml", step)],
+            cwd=self.root, env=env, capture_output=True, text=True,
+        )
+
+    def test_failing_environment_script_stops_the_build(self):
+        # `eval "$(script)"` would eval an empty string, succeed, and build
+        # both sides without the environment: equal, and proving nothing.
+        self.stub_env_script("echo broken >&2\nexit 1\n")
+        for step in self.STEPS:
+            with self.subTest(step=step):
+                res = self.run_step(step)
+                self.assertNotEqual(res.returncode, 0)
+                self.assertFalse(self.calls.exists(), "cross ran without the environment")
+
+    def test_environment_reaches_cross(self):
+        self.stub_env_script("printf \"export SOURCE_DATE_EPOCH='7'\\nexport RUSTFLAGS='-x'\\n\"\n")
+        for step in self.STEPS:
+            with self.subTest(step=step):
+                self.calls.unlink(missing_ok=True)
+                res = self.run_step(step)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(self.calls.read_text(), "7|-x\n")
 
 
 class Wiring(unittest.TestCase):
