@@ -15,7 +15,7 @@
 //! Perplexity key under `remote_keys.perplexity`, the same secret store
 //! `pixel config remote-key` uses — 0600, never echoed back.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
 /// SearXNG — your own instance, queries stay private.
 pub const SEARXNG_LABEL: &str = "SearXNG — your own instance (queries stay private; recommended)";
@@ -53,6 +53,7 @@ pub fn install_step(
         crate::config_cmd::remove_web_search_searxng_url,
         &mut terminal,
         &mut raw,
+        std::io::stdin().is_terminal(),
     )
 }
 
@@ -66,6 +67,7 @@ fn install_step_with(
     remove_searxng: impl FnOnce() -> Result<(), String>,
     terminal: &mut dyn EchoFlag,
     raw: &mut dyn crate::select::RawMode,
+    stdin_is_terminal: bool,
 ) -> Result<(), String> {
     writeln!(stdout, "Web search provider:").map_err(|e| e.to_string())?;
     if !tty {
@@ -79,7 +81,7 @@ fn install_step_with(
     // TTY: the arrow picker paints the option rows itself. EOF falls back
     // to the numbered prompt so a piped answer still lands.
     let options = [SEARXNG_LABEL, PERPLEXITY_LABEL, SKIP_LABEL];
-    let picked = crate::select::pick(&options, stdin, stdout, raw)?;
+    let picked = crate::select::pick(&options, stdin, stdout, raw, stdin_is_terminal)?;
     let choice = match picked {
         Some(0) => Some("searxng"),
         Some(1) => Some("perplexity"),
@@ -387,6 +389,7 @@ mod tests {
             || panic!("non-interactive install must not remove SearXNG"),
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         let text = String::from_utf8(output).unwrap();
@@ -413,6 +416,7 @@ mod tests {
             || panic!("the SearXNG choice must not remove SearXNG"),
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert_eq!(stored, Some("https://sx.test".to_string()));
@@ -434,6 +438,7 @@ mod tests {
             || panic!("an empty URL must not remove SearXNG"),
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert_eq!(stored, None);
@@ -466,6 +471,7 @@ mod tests {
             },
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert_eq!(stored, Some("pplx-secret-key".to_string()));
@@ -497,6 +503,7 @@ mod tests {
             },
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(!stored, "an empty key stores nothing");
@@ -577,6 +584,7 @@ mod tests {
             || panic!("a skipped choice must not remove SearXNG"),
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         let mut output = Vec::new();
@@ -589,6 +597,7 @@ mod tests {
             || panic!("skip must not remove SearXNG"),
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(
@@ -611,6 +620,7 @@ mod tests {
             || panic!("skipping must not remove SearXNG"),
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         let text = String::from_utf8_lossy(&output);
@@ -632,6 +642,7 @@ mod tests {
             || panic!("SearXNG must not remove SearXNG"),
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(String::from_utf8_lossy(&output).contains("skipped (no URL)"));
@@ -655,6 +666,7 @@ mod tests {
             || Ok(()),
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         // "2" is a valid quick-pick digit — it stores without touching the
@@ -673,6 +685,7 @@ mod tests {
             || Ok(()),
             &mut FakeEcho::live(),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert_eq!(stored, None, "empty input falls through to skip");

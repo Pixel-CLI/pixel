@@ -19,6 +19,9 @@ enum Key {
     Down,
     Choose,
     Digit(usize),
+    /// Ctrl-C (`0x03`): with `ISIG` cleared in raw mode the terminal hands the
+    /// byte to us instead of terminating, so the picker reports a cancellation.
+    Cancel,
     Ignore,
     /// The first byte of a CSI escape (`ESC [`); the next byte resolves.
     EscapeStart,
@@ -65,6 +68,7 @@ impl Keys {
                 }
                 // A bare `[` is ordinary input — `ESC [` is handled above.
                 b'\r' | b'\n' => Key::Choose,
+                0x03 => Key::Cancel,
                 b'j' => Key::Down,
                 b'k' => Key::Up,
                 b'0'..=b'9' => Key::Digit((byte - b'0') as usize),
@@ -158,12 +162,16 @@ fn repaint(
 /// the caller falls back to the numbered prompt or a default).
 ///
 /// `raw` toggles fd-0 raw mode for the pick; production is [`TermiosRaw`],
-/// tests drive the pure parts directly.
+/// tests drive the pure parts directly. `stdin_is_terminal` says whether the
+/// input is a live TTY: on one a digit must select immediately, while piped
+/// input that is already buffered must have its trailing newline drained so
+/// the scripted answer does not leak into the next prompt.
 pub fn pick(
     options: &[&str],
     keys: &mut dyn BufRead,
     stdout: &mut dyn Write,
     raw: &mut dyn RawMode,
+    stdin_is_terminal: bool,
 ) -> Result<Option<usize>, String> {
     if options.is_empty() {
         return Ok(None);
@@ -172,38 +180,50 @@ pub fn pick(
     let _restore = RawRestore(raw);
     let cols = terminal_width();
     write!(stdout, "\x1b[?25l").map_err(|e| e.to_string())?; // hide cursor
-    let mut current = 0usize;
-    for (index, label) in options.iter().enumerate() {
-        writeln!(stdout, "{}", row(index, current, label, cols)).map_err(|e| e.to_string())?;
-    }
-    stdout.flush().map_err(|e| e.to_string())?;
-    let mut decoder = Keys::new();
-    let mut byte = [0u8; 1];
-    let chosen = loop {
-        match keys.read(&mut byte) {
-            Ok(0) | Err(_) => break None,
-            Ok(_) => match decoder.feed(byte[0]) {
-                Key::Up => {
-                    current = current.saturating_sub(1);
-                    repaint(stdout, options, current, cols)?;
-                }
-                Key::Down => {
-                    current = (current + 1).min(options.len() - 1);
-                    repaint(stdout, options, current, cols)?;
-                }
-                Key::Digit(digit) if digit >= 1 && digit <= options.len() => {
-                    // Swallow the rest of the digit's line so a scripted
-                    // answer does not leak its newline into the next prompt.
-                    let _ = keys.read_until(b'\n', &mut Vec::new());
-                    break Some(digit - 1);
-                }
-                Key::Choose => break Some(current),
-                _ => {}
-            },
+    // On a live terminal the stdin buffer is empty after the digit byte, so a
+    // digit must select immediately. Only piped input already holds a trailing
+    // newline that would leak into the next prompt, so drain it there only.
+    let drain_digit_line = !stdin_is_terminal;
+    let result = (|| -> Result<Option<usize>, String> {
+        let mut current = 0usize;
+        for (index, label) in options.iter().enumerate() {
+            writeln!(stdout, "{}", row(index, current, label, cols)).map_err(|e| e.to_string())?;
         }
-    };
-    write!(stdout, "\x1b[?25h").map_err(|e| e.to_string())?; // show cursor
-    Ok(chosen)
+        stdout.flush().map_err(|e| e.to_string())?;
+        let mut decoder = Keys::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match keys.read(&mut byte) {
+                Ok(0) | Err(_) => return Ok(None),
+                Ok(_) => match decoder.feed(byte[0]) {
+                    Key::Up => {
+                        current = current.saturating_sub(1);
+                        repaint(stdout, options, current, cols)?;
+                    }
+                    Key::Down => {
+                        current = (current + 1).min(options.len() - 1);
+                        repaint(stdout, options, current, cols)?;
+                    }
+                    Key::Digit(digit) if digit >= 1 && digit <= options.len() => {
+                        if drain_digit_line {
+                            // Swallow the rest of the digit's line so a
+                            // scripted answer does not leak its newline into
+                            // the next prompt.
+                            let _ = keys.read_until(b'\n', &mut Vec::new());
+                        }
+                        return Ok(Some(digit - 1));
+                    }
+                    Key::Choose => return Ok(Some(current)),
+                    Key::Cancel => return Err("cancelled".to_string()),
+                    _ => {}
+                },
+            }
+        }
+    })();
+    // Show the cursor on every return, success or error. (`?` elsewhere would
+    // skip this write; the restore is what unfreezes the hanging cursor.)
+    let _ = write!(stdout, "\x1b[?25h");
+    result
 }
 
 /// Leaves the injected [`RawMode`] on drop, whatever exit `pick` takes.
@@ -241,7 +261,10 @@ impl RawMode for TermiosRaw {
                 return Err("tcgetattr failed".into());
             }
             let mut raw = saved;
-            raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+            // ISIG off too: otherwise Ctrl-C raises SIGINT and terminates
+            // before `RawRestore` restores termios, leaving echo off and the
+            // cursor hidden. With it cleared the byte reaches the decoder.
+            raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
             raw.c_cc[libc::VMIN] = 1;
             raw.c_cc[libc::VTIME] = 0;
             if libc::tcsetattr(0, libc::TCSANOW, &raw) != 0 {
@@ -315,7 +338,7 @@ mod tests {
     fn picked(options: &[&str], input: &[u8]) -> (Option<usize>, String) {
         let mut keys = std::io::Cursor::new(input.to_vec());
         let mut out = Vec::new();
-        let result = pick(options, &mut keys, &mut out, &mut NoopRaw).unwrap();
+        let result = pick(options, &mut keys, &mut out, &mut NoopRaw, false).unwrap();
         (result, String::from_utf8_lossy(&out).into_owned())
     }
 
@@ -338,6 +361,42 @@ mod tests {
         // Up from the top stays on the first row.
         let (top, _) = picked(&options, b"\x1b[A\x1b[B\r");
         assert_eq!(top, Some(1));
+    }
+
+    #[test]
+    fn control_c_cancels_the_pick() {
+        // With ISIG cleared, Ctrl-C arrives as a byte; the caller gets a
+        // cancellation error, not None (EOF reverts to a numbered prompt).
+        let mut keys = std::io::Cursor::new(b"\x03".to_vec());
+        let mut out = Vec::new();
+        let result = pick(&["a", "b"], &mut keys, &mut out, &mut NoopRaw, false);
+        assert_eq!(result.unwrap_err(), "cancelled");
+        // Even on cancellation the cursor is restored (`\x1b[?25h` is written).
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.ends_with("\x1b[?25h"), "{text:?}");
+    }
+
+    #[test]
+    fn a_digit_on_piped_input_still_drains_the_rest_of_the_line() {
+        // Piped input (not a terminal): the digit selects, and the rest of
+        // the buffered line up to the newline is swallowed so it does not
+        // leak into the next prompt.
+        let mut keys = std::io::Cursor::new(b"2Q\n".to_vec());
+        let mut out = Vec::new();
+        let result = pick(&["a", "b"], &mut keys, &mut out, &mut NoopRaw, false).unwrap();
+        assert_eq!(result, Some(1));
+        assert_eq!(keys.position(), 3, "piped line after the digit is drained");
+    }
+
+    #[test]
+    fn a_digit_on_a_terminal_selects_immediately_and_leaves_following_input() {
+        // On a live TTY the stdin buffer is empty after the digit byte, so
+        // the digit picks at once and nothing more is consumed.
+        let mut keys = std::io::Cursor::new(b"2Q\n".to_vec());
+        let mut out = Vec::new();
+        let result = pick(&["a", "b"], &mut keys, &mut out, &mut NoopRaw, true).unwrap();
+        assert_eq!(result, Some(1));
+        assert_eq!(keys.position(), 1, "a digit on a terminal returns immediately");
     }
 
     #[test]
@@ -375,7 +434,7 @@ mod tests {
         {
             let mut keys = std::io::Cursor::new(b"\r".to_vec());
             let mut out = Vec::new();
-            let result = pick(&["a"], &mut keys, &mut out, &mut Tracking(left.clone()));
+            let result = pick(&["a"], &mut keys, &mut out, &mut Tracking(left.clone()), false);
             assert_eq!(result.unwrap(), Some(0));
             // `_restore` drops inside `pick`, so leave already ran.
             assert!(left.get(), "raw mode restored on success");

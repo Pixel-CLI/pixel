@@ -16,7 +16,7 @@
 //! `pixel classify` always wins.
 
 use serde_json::{Value, json};
-use std::io::BufRead;
+use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 
 /// Install-time proposal text, with each option's measured accuracy in
@@ -181,6 +181,7 @@ pub fn install_step(
         setup_local,
         propose_remote_key,
         &mut crate::select::TermiosRaw::default(),
+        std::io::stdin().is_terminal(),
     )
 }
 
@@ -193,6 +194,7 @@ fn install_step_with<FLocal, FRemote>(
     setup_local: FLocal,
     propose_remote_key: FRemote,
     raw: &mut dyn crate::select::RawMode,
+    stdin_is_terminal: bool,
 ) -> Result<(), String>
 where
     FLocal: FnOnce(&mut dyn std::io::Write) -> Result<(), String>,
@@ -213,7 +215,13 @@ where
     }
     // TTY: the arrow picker paints the option rows itself; EOF falls back
     // to the numbered prompt so a piped answer still lands.
-    let picked = crate::select::pick(&[LOCAL_LABEL, REMOTE_LABEL], stdin, stdout, raw)?;
+    let picked = crate::select::pick(
+        &[LOCAL_LABEL, REMOTE_LABEL],
+        stdin,
+        stdout,
+        raw,
+        stdin_is_terminal,
+    )?;
     let choice = match picked {
         Some(0) => Some("local"),
         Some(1) => Some("remote"),
@@ -1046,6 +1054,7 @@ mod tests {
             |_| panic!("stored setting must not start local setup"),
             |_, _| panic!("stored setting must not prompt for a key"),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(
@@ -1063,6 +1072,7 @@ mod tests {
             |_| panic!("non-interactive install must not start local setup"),
             |_, _| panic!("non-interactive install must not prompt for a key"),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(
@@ -1080,6 +1090,7 @@ mod tests {
             |stdout| writeln!(stdout, "local setup ran").map_err(|e| e.to_string()),
             |_, _| panic!("local choice must not prompt for a remote key"),
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(
@@ -1101,6 +1112,7 @@ mod tests {
                 writeln!(stdout, "remote key for {}", provider.trim()).map_err(|e| e.to_string())
             },
             &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(
