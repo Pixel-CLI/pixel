@@ -45,31 +45,31 @@ impl Keys {
                 self.escape = 0;
                 if byte == b'[' {
                     self.escape = 2;
-                    return Key::EscapeStart;
+                    Key::EscapeStart
+                } else {
+                    Key::EscapeOther
                 }
-                return Key::EscapeOther;
             }
             2 => {
                 self.escape = 0;
-                return match byte {
+                match byte {
                     b'A' => Key::Up,
                     b'B' => Key::Down,
                     _ => Key::EscapeOther,
-                };
+                }
             }
-            _ => {}
-        }
-        match byte {
-            0x1b => {
-                self.escape = 1;
-                Key::EscapeStart
-            }
-            // A bare `[` is ordinary input — `ESC [` is handled above.
-            b'\r' | b'\n' => Key::Choose,
-            b'j' => Key::Down,
-            b'k' => Key::Up,
-            b'0'..=b'9' => Key::Digit((byte - b'0') as usize),
-            _ => Key::Ignore,
+            _ => match byte {
+                0x1b => {
+                    self.escape = 1;
+                    Key::EscapeStart
+                }
+                // A bare `[` is ordinary input — `ESC [` is handled above.
+                b'\r' | b'\n' => Key::Choose,
+                b'j' => Key::Down,
+                b'k' => Key::Up,
+                b'0'..=b'9' => Key::Digit((byte - b'0') as usize),
+                _ => Key::Ignore,
+            },
         }
     }
 }
