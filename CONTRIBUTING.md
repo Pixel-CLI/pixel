@@ -732,6 +732,13 @@ number opening the slug, is kept as written. The file
 holds the entry's text and nothing else, without the leading `-`. A second
 file is a second entry.
 
+A `security` fragment may link an advisory under
+`https://github.com/Pixel-CLI/pixel/security/advisories/GHSA-…` instead of a
+public pull request: importing a private advisory patch produces no public
+PR number. Keep that URL in the entry even while the advisory is a draft;
+publish and verify the advisory after the corrected release is available.
+Other sections still require the pull request reference.
+
 An entry is written to be scanned in a released section, not read as a note:
 
 ```

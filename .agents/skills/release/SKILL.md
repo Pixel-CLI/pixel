@@ -191,11 +191,15 @@ carries a bullet of its own. Otherwise it:
    no number opening the slug) gets ` ([#<n>](…))` appended from the
    first-parent commit that added it (`(#<n>)` or `Merge pull request #<n>`),
    and one whose commit names none refuses the cut before any write: name the
-   pull request in that fragment's text, then re-run;
+   pull request in that fragment's text, then re-run. A `security` entry may
+   instead link this repository's GHSA (including a draft); an advisory import
+   has no public PR number;
 3. runs `cargo update --workspace` so `Cargo.lock` follows;
-4. lists the pull requests merged into `main` since the last tag, then
-   the commits since the tag that belong to no merged pull request (a push
-   straight to `main`);
+4. lists the pull requests merged into `main` since the last tag that the
+   candidate contains, then its commits in no merged pull request. The
+   inventory is collected before any writes, using GitHub's canonical repo
+   name (an old transferred remote may search empty). A failed, capped or
+   contradictory lookup refuses the cut; repair it before rerunning;
 5. runs `cargo run -q -p pixel-cli -- check-release vx.y.z --repo .`, the
    verify job's command, from the tree. It uses the tree's CLI on purpose: an
    installed 0.2.4 binary only knows the old `release-check` name.

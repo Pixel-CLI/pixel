@@ -29,11 +29,16 @@ MANIFESTS = [
 GH = """#!/usr/bin/env python3
 import json, os, subprocess, sys
 args = sys.argv[1:]
+if os.environ.get("FIXTURE_GH_FAIL") == args[0]:
+    sys.exit(1)
 if args[:2] == ["pr", "list"]:
     # Pull requests merge into main: a listing on any other base (the retired
     # develop) finds none, so a script still asking for it lists nothing.
     base = args[args.index("--base") + 1] if "--base" in args else None
-    prs = json.loads(open(os.environ["FIXTURE_PRS"]).read()) if base == "main" else []
+    repo = args[args.index("--repo") + 1] if "--repo" in args else "old/fixture"
+    prs = json.loads(open(os.environ["FIXTURE_PRS"]).read()) if base == "main" and repo == "example/fixture" else []
+    if os.environ.get("FIXTURE_EMPTY_SEARCH"):
+        prs = []
     expr = args[args.index("--jq") + 1]
     out = subprocess.run(["jq", "-r", expr], input=json.dumps(prs),
                          capture_output=True, text=True, check=True)
@@ -41,7 +46,10 @@ if args[:2] == ["pr", "list"]:
 elif args[:2] == ["repo", "view"]:
     print("example/fixture")
 elif args[:1] == ["api"]:
-    print("1")
+    sha = args[1].split("/")[-2]
+    for pr in json.loads(open(os.environ["FIXTURE_PRS"]).read()):
+        if pr["mergeCommit"]["oid"] == sha:
+            print(pr["number"])
 else:
     sys.exit(1)
 """
@@ -108,7 +116,7 @@ class PrepareContract(unittest.TestCase):
     def prepare(self):
         shutil.copy(PREPARE, self.repo / "prepare.sh")
         self.git("add", "prepare.sh")
-        self.git("commit", "-qm", "script")
+        self.git("commit", "--allow-empty", "-qm", "script")
         return subprocess.run(
             ["sh", "prepare.sh", "0.2.0", "--date", "2026-02-01"],
             cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=30,
@@ -148,7 +156,7 @@ class PrepareContract(unittest.TestCase):
         result = self.prepare()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.listed(result.stdout), ["#12 fix: thing", "#13 fix: elsewhere"])
+        self.assertEqual(self.listed(result.stdout), ["#12 fix: thing"])
 
     def test_nothing_unreleased_says_none(self):
         released = self.merge_pr("release-0.1.0", "released.txt")
@@ -164,6 +172,51 @@ class PrepareContract(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.listed(result.stdout), ["(none)"])
+
+    def test_a_transferred_repo_lists_only_prs_in_the_candidate(self):
+        """The old remote can fetch but searches empty; later merges must not
+        be described as part of a frozen candidate either."""
+        self.git("remote", "add", "origin", "https://github.com/old/fixture.git")
+        self.git("tag", "v0.1.0")
+        self.write("changelog.d/12-fix.fixed.md", "**thing:** fixed.\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fix: thing (#12)")
+        candidate = self.git("rev-parse", "HEAD")
+        self.git("switch", "-q", "-c", "later")
+        self.write("later.txt", "not in the release\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "feat: later (#13)")
+        later = self.git("rev-parse", "HEAD")
+        self.git("switch", "-q", "main")
+        self.prs.write_text(json.dumps([
+            {"number": 12, "title": "fix: thing", "mergeCommit": {"oid": candidate}},
+            {"number": 13, "title": "feat: later", "mergeCommit": {"oid": later}},
+        ]))
+        result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.listed(result.stdout), ["#12 fix: thing"])
+
+    def test_incomplete_inventory_refuses_before_cutting(self):
+        """An API failure, truncated search or false empty result must not
+        consume fragments and leave an apparently complete release."""
+        self.git("tag", "v0.1.0")
+        self.write("changelog.d/12-fix.fixed.md", "**thing:** fixed.\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fix: thing (#12)")
+        pr = {"number": 12, "title": "fix: thing",
+              "mergeCommit": {"oid": self.git("rev-parse", "HEAD")}}
+        before = self.changelog()
+        for failure in ("repo", "pr", "api", "limit", "empty"):
+            with self.subTest(failure=failure):
+                self.prs.write_text(json.dumps([pr] * (1000 if failure == "limit" else 1)))
+                self.env["FIXTURE_GH_FAIL"] = failure
+                self.env["FIXTURE_EMPTY_SEARCH"] = "1" if failure == "empty" else ""
+                result = self.prepare()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("incomplete release inventory", result.stderr)
+                self.assertEqual(self.changelog(), before)
+                self.assertEqual(self.fragments(), ["12-fix.fixed.md"])
+                self.assertIn('version = "0.1.0"', (self.repo / "crates/a/Cargo.toml").read_text())
 
     def test_the_fragments_become_the_release_section_by_section(self):
         """One fragment per entry, filed under the heading its name names."""
@@ -273,6 +326,32 @@ class PrepareContract(unittest.TestCase):
             "\n- **thing:** linked. ([#13](https://github.com/Pixel-CLI/pixel/pull/13))\n",
             changelog)
         self.assertNotIn("/pull/42", changelog)
+
+    def test_an_advisory_import_keeps_its_security_reference_without_a_public_pr(self):
+        entry = "**security:** refuse hostile sidecars. ([GHSA-c9f5-vxc4-wjph](https://github.com/Pixel-CLI/pixel/security/advisories/GHSA-c9f5-vxc4-wjph))\n"
+        self.write("changelog.d/trust.security.md", entry)
+        self.git("add", ".")
+        self.git("commit", "-qm", "Merge commit from fork")
+        result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("### Security\n- " + entry, self.changelog())
+        self.assertNotIn("/pull/", self.changelog())
+        self.assertEqual(self.fragments(), [])
+
+    def test_only_a_complete_own_advisory_url_on_security_waives_the_pr_reference(self):
+        own = "https://github.com/Pixel-CLI/pixel/security/advisories/GHSA-c9f5-vxc4-wjph"
+        for section, link in (
+            ("fixed", own),
+            ("security", "GHSA-c9f5-vxc4-wjph"),
+            ("security", own.replace("Pixel-CLI/pixel", "someone/else")),
+            ("security", own + "extra"),
+            ("security", own[:-1]),
+        ):
+            with self.subTest(section=section, link=link):
+                name = "trust." + section + ".md"
+                self.write("changelog.d/" + name, "**security:** fix. (" + link + ")\n")
+                self.assert_refused_before_any_write(name, "no commit added it")
+                (self.repo / "changelog.d" / name).unlink()
 
     def assert_refused_before_any_write(self, name, reason):
         """No entry ships without its reference: the cut stops on `name`,

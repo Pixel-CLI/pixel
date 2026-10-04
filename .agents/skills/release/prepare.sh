@@ -12,7 +12,7 @@
 #    `<slug>.<section>.md` with a section from SECTIONS and a first line that
 #    carries the entry, opens on its scope and fits HARD_LIMIT; an entry that
 #    names no pull request takes its link from the commit that merged it
-#    (the cut refuses one whose commit names none), an optional
+#    (Security may instead link this repository's GHSA), an optional
 #    `_highlights.md` carries no `## ` heading and fits HIGHLIGHTS_LIMIT, and
 #    `## [Unreleased]` carries no `- ` entry;
 # 3. every workspace member's `[package] version` is set to x.y.z (the
@@ -23,9 +23,9 @@
 # 5. `cargo update --workspace` refreshes Cargo.lock for the members only;
 # 6. the fragments this run released are listed next to the pull requests
 #    merged into main since the last tag, so each user-visible one can be
-#    matched to an entry by eye, then the commits since the tag that no
-#    merged pull request contains (pushed straight to main, so nobody filed
-#    an entry for them); skipped when `gh` is missing or offline;
+#    matched to an entry by eye, then commits in no merged PR. Resolve the
+#    canonical GitHub repository and collect this inventory before any write;
+#    a failed or capped lookup refuses the cut;
 # 7. `pixel check-release` runs from the tree exactly as the Release
 #    workflow's verify job runs it;
 # 8. `scripts/release-prepare-only.py HEAD` checks that the uncommitted diff
@@ -234,7 +234,15 @@ for fragment in changelog.d/*.md; do
     # row, #253-#255, when it was only a warning). In the text it is the pull
     # request's URL, not any `#<n>`: `Fixes issue #42` names an issue and
     # would otherwise pass for the reference.
-    if ! grep -Eq '/pull/[0-9]+' "$fragment" && ! printf '%s' "${fragment##*/}" | grep -Eq '^[0-9]+-'; then
+    # Advisory imports have no public PR. Only Security entries may use this
+    # repository's advisory URL instead; an unrelated URL or a bare GHSA id
+    # must not silently waive the reference requirement.
+    has_advisory=0
+    if [ "$section" = security ] &&
+        grep -Eq 'https://github\.com/Pixel-CLI/pixel/security/advisories/GHSA-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}([[:space:])]|$)' "$fragment"; then
+        has_advisory=1
+    fi
+    if [ "$has_advisory" -eq 0 ] && ! grep -Eq '/pull/[0-9]+' "$fragment" && ! printf '%s' "${fragment##*/}" | grep -Eq '^[0-9]+-'; then
         UNLINKED_COUNT=$((UNLINKED_COUNT + 1))
         if [ "$CHECK" -eq 0 ]; then
             pr="$(merged_pull_request "$fragment")"
@@ -314,6 +322,52 @@ fi
 if [ "$FRAGMENT_COUNT" -eq 0 ]; then
     echo "prepare.sh: changelog.d/ holds no fragment; write one entry per user-visible change as changelog.d/<slug>.<section>.md" >&2
     exit 1
+fi
+
+# Resolve the canonical repository before searching: a transferred remote's
+# old name still fetches, but gh's PR search can return an empty success (#720).
+# Collect the complete candidate inventory before the cut makes any writes.
+LAST_TAG="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
+CANDIDATE="$(git rev-parse HEAD)"
+UNRELEASED=""
+DIRECT=""
+incomplete_inventory() {
+    echo "prepare.sh: incomplete release inventory: $*; no release files written" >&2
+    exit 1
+}
+if [ -n "$LAST_TAG" ]; then
+    NWO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" \
+        || incomplete_inventory "cannot resolve the canonical GitHub repository"
+    [ -n "$NWO" ] || incomplete_inventory "empty canonical repository"
+    SINCE="$(git log -1 --format=%cI "$LAST_TAG")"
+    PR_LIMIT=1000
+    PRS="$(gh pr list --repo "$NWO" --state merged --base main --search "merged:>$SINCE" --limit "$PR_LIMIT" \
+        --json number,title,mergeCommit --jq '.[] | "\(.mergeCommit.oid) #\(.number) \(.title)"')" \
+        || incomplete_inventory "cannot list merged PRs in $NWO"
+    PR_COUNT="$(printf '%s\n' "$PRS" | awk 'NF { n++ } END { print n + 0 }')"
+    [ "$PR_COUNT" -lt "$PR_LIMIT" ] || incomplete_inventory "PR search reached its $PR_LIMIT limit; paginate the inventory before cutting"
+    # GitHub may already know merges newer than this candidate or on a
+    # different line. Dates alone do not say what this release contains.
+    UNRELEASED="$(printf '%s\n' "$PRS" | while read -r oid pr; do
+        [ -n "$oid" ] || continue
+        if git merge-base --is-ancestor "$oid" "$CANDIDATE" 2>/dev/null &&
+            ! git merge-base --is-ancestor "$oid" "$LAST_TAG" 2>/dev/null; then
+            printf '  %s\n' "$pr"
+        fi
+    done)"
+    # No date or count cap on local commits: an older authored fix may be
+    # new to this line. PR association errors are unknown, never "none".
+    for sha in $(git log --no-merges --cherry-pick --right-only --format=%H "$LAST_TAG...$CANDIDATE"); do
+        merged="$(gh api "repos/$NWO/commits/$sha/pulls" --paginate \
+            --jq '.[] | select(.merged_at != null) | .number')" \
+            || incomplete_inventory "cannot resolve PRs for $sha"
+        if [ -z "$merged" ]; then
+            DIRECT="${DIRECT}${DIRECT:+
+}  $(git log -1 --format='%h %an: %s' "$sha")"
+        elif [ -z "$UNRELEASED" ]; then
+            incomplete_inventory "PR search is empty but $sha belongs to a merged PR"
+        fi
+    done
 fi
 
 MEMBERS="$(sed -n '/^members *= *\[/,/\]/p' Cargo.toml | grep -o '"[^"]*"' | tr -d '"')"
@@ -410,50 +464,13 @@ echo "members bumped:"
 for m in $MEMBERS; do printf '  %s\n' "$m"; done
 echo
 
-# Highest version tag, not `git describe`: v0.2.4's commit is not an
-# ancestor of main (it was replayed there before the history was unified), so
-# describe can answer an older tag and the list reaches back a release too far.
-LAST_TAG="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
-if [ -n "$LAST_TAG" ] && command -v gh >/dev/null 2>&1; then
-    SINCE="$(git log -1 --format=%cI "$LAST_TAG")"
-    if PRS="$(gh pr list --state merged --base main --search "merged:>$SINCE" --limit 200 \
-        --json number,title,mergeCommit --jq '.[] | "\(.mergeCommit.oid) #\(.number) \(.title)"' 2>/dev/null)"; then
-        # The search goes by date, and the tagged commit is usually the merge
-        # of the previous prepare PR, committed a second before GitHub records
-        # its merged_at (v0.2.5: 16:39:14 vs 16:39:15), so that PR comes back.
-        # Keep only the pull requests whose merge commit the tag does not
-        # contain; one whose merge commit is not in this clone stays listed.
-        UNRELEASED="$(printf '%s\n' "$PRS" | while read -r oid pr; do
-            [ -n "$oid" ] || continue
-            git merge-base --is-ancestor "$oid" "$LAST_TAG" 2>/dev/null || printf '  %s\n' "$pr"
-        done)"
-        echo "pull requests merged into main since $LAST_TAG; each user-visible one needs a changelog.d/ fragment, one of those released above:"
-        if [ -n "$UNRELEASED" ]; then printf '%s\n' "$UNRELEASED"; else echo "  (none)"; fi
-    else
-        echo "prepare.sh: could not list the pull requests merged since $LAST_TAG (gh offline or unauthenticated); check the fragments released above against them by hand"
-    fi
+if [ -n "$LAST_TAG" ]; then
+    echo "pull requests merged into main since $LAST_TAG, contained in candidate $CANDIDATE; each user-visible one needs an entry:"
+    if [ -n "$UNRELEASED" ]; then printf '%s\n' "$UNRELEASED"; else echo "  (none)"; fi
     echo
-    # A commit pushed straight to main never appears above. The commits
-    # since the tag are taken by patch, not by date or ancestry: an old tag
-    # need not be an ancestor of main (v0.2.4's commit was replayed), and a
-    # commit authored before the tag can still be missing from it. The commits API
-    # lists the pull requests containing a commit, open ones included: only a
-    # merged one counts.
-    NWO="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
-    if [ -n "$NWO" ]; then
-        DIRECT=""
-        for sha in $(git log --no-merges --cherry-pick --right-only --format=%H "$LAST_TAG...HEAD" | head -n 200); do
-            merged="$(gh api "repos/$NWO/commits/$sha/pulls" \
-                --jq 'map(select(.merged_at != null)) | length' 2>/dev/null || echo "?")"
-            if [ "$merged" = "0" ]; then
-                DIRECT="$DIRECT
-  $(git log -1 --format='%h %an: %s' "$sha")"
-            fi
-        done
-        echo "commits since $LAST_TAG in no merged pull request (no one filed a changelog entry for them):"
-        if [ -n "$DIRECT" ]; then printf '%s\n' "$DIRECT" | sed '/^$/d'; else echo "  (none)"; fi
-        echo
-    fi
+    echo "commits since $LAST_TAG in no merged pull request (review each for a missing entry):"
+    if [ -n "$DIRECT" ]; then printf '%s\n' "$DIRECT"; else echo "  (none)"; fi
+    echo
 fi
 
 cargo run -q -p pixel-cli -- check-release "v$VERSION" --repo .
