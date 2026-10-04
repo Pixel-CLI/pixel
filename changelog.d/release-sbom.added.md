@@ -1,0 +1,1 @@
+**release:** every release archive ships with its CycloneDX SBOM, `pixel-<tag>-<target>.cdx.json`: the crates that target's binary compiles with its own feature set, licences and dependency graph included, signed by the release's build-provenance attestation so `gh attestation verify` checks it like the archive (SECURITY.md).

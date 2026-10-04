@@ -455,6 +455,12 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-homebrew-formula.py
 
+      # release-build.yml narrows each archive's SBOM with this script: it is
+      # checked here, on every pull request, not first on a tag.
+      - name: Release SBOM contract (synthetic cargo-cyclonedx output and cargo tree)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-release-sbom.py
+
       # The homebrew-core formula release.yml attaches to every release;
       # homebrew-core.yml builds and audits it from source.
       - name: homebrew-core formula contract (build from source, no prebuilt binary)

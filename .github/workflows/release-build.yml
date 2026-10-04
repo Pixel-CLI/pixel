@@ -28,13 +28,21 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
+        # features: the cargo feature flags of the target's build, read by
+        # the build and by the SBOM, which must describe that exact feature
+        # set. fastembed (ONNX) has no musl build; model2vec is pure Rust and
+        # does, so the Linux binaries keep a working semantic channel.
+        # cross-build.yml spells the same flags in its build commands.
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-26.04
+            features: --no-default-features --features model2vec
           - target: aarch64-unknown-linux-musl
             os: ubuntu-26.04
+            features: --no-default-features --features model2vec
           - target: aarch64-apple-darwin
             os: macos-latest
+            features: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -67,15 +75,13 @@ jobs:
         with:
           tool: cross
 
-      # fastembed (ONNX) has no musl build; model2vec is pure Rust and does,
-      # so the Linux binaries keep a working semantic channel.
       - name: Build (Linux musl via cross, model2vec only)
         if: runner.os == 'Linux'
-        run: cross build --release --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
+        run: cross build --release --locked ${{ matrix.features }} --target ${{ matrix.target }} -p pixel-cli
 
       - name: Build (macOS native)
         if: runner.os == 'macOS'
-        run: cargo build --release --locked --target ${{ matrix.target }} -p pixel-cli
+        run: cargo build --release --locked ${{ matrix.features }} --target ${{ matrix.target }} -p pixel-cli
 
       - name: Package
         run: |
@@ -89,6 +95,34 @@ jobs:
           tar czf "$ARCHIVE" "$STAGING"
           shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
 
+      # The SBOM published beside the archive (OSPS-QA-02.02):
+      # pixel-<tag>-<target>.cdx.json, CycloneDX 1.5 JSON. cargo-cyclonedx
+      # reads `cargo metadata`, which resolves features across the whole
+      # workspace and over-includes optional dependencies (68 crates on the
+      # 0.6.1 Linux build, the ort and OpenSSL stack among them); `cargo tree
+      # -p` resolves them as the build does, and release-sbom.py keeps only
+      # the crates it lists, failing when one the build compiles is absent.
+      # Its name matches none of the pixel-*.tar.gz globs downstream.
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        with:
+          tool: cargo-cyclonedx@0.5.9
+
+      - name: SBOM
+        env:
+          TARGET: ${{ matrix.target }}
+          FEATURES: ${{ matrix.features }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # shellcheck disable=SC2086 # FEATURES is a list of cargo flags
+          cargo cyclonedx --manifest-path crates/pixel/Cargo.toml --describe binaries \
+            --format json --spec-version 1.5 --target "$TARGET" $FEATURES
+          # shellcheck disable=SC2086
+          cargo tree --locked -p pixel-cli --target "$TARGET" $FEATURES \
+            -e normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/sbom-tree.txt"
+          python3 scripts/release-sbom.py crates/pixel/pixel_bin.cdx.json \
+            "$RUNNER_TEMP/sbom-tree.txt" "$TAG" "$TARGET" "pixel-${TAG}-${TARGET}.cdx.json"
+
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -96,6 +130,7 @@ jobs:
           path: |
             pixel-*.tar.gz
             pixel-*.tar.gz.sha256
+            pixel-*.cdx.json
 
   attest:
     name: Package and attest
@@ -140,21 +175,35 @@ jobs:
             "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
           python3 scripts/homebrew-core-formula.py "$TAG" source.tar.gz pixel-core.rb
 
+      # The SBOM glob below would sign an empty set without complaint: a
+      # build job that uploaded its archive without its SBOM stops here.
+      - name: Check every archive has its SBOM
+        run: |
+          for archive in artifacts/pixel-*.tar.gz; do
+            if [ ! -s "${archive%.tar.gz}.cdx.json" ]; then
+              echo "::error::no SBOM beside $archive; the release would ship it without one"
+              exit 1
+            fi
+          done
+
       # SLSA build provenance for what a user downloads and runs: each
       # archive, each Linux bottle Homebrew pours, and install.sh, which the
-      # README pipes into sh. The .sha256 files ship beside the archives in
-      # the same release, so they prove the download was not corrupted, never
-      # who built it; an attestation is signed by this workflow on this tag
-      # and checked with `gh attestation verify` (SECURITY.md). Before the
-      # hand-off on purpose: a signing failure stops the release instead of
-      # publishing it unattested. release.yml's smoke job verifies both
-      # subjects after publication.
+      # README pipes into sh, plus each archive's SBOM, so the SBOM a user
+      # reads is provably the one this workflow wrote for that tag. The
+      # .sha256 files ship beside the archives in the same release, so they
+      # prove the download was not corrupted, never who built it; an
+      # attestation is signed by this workflow on this tag and checked with
+      # `gh attestation verify` (SECURITY.md). Before the hand-off on
+      # purpose: a signing failure stops the release instead of publishing
+      # it unattested. release.yml's smoke job verifies the archive, its
+      # SBOM and install.sh after publication.
       - name: Attest build provenance
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             artifacts/pixel-*.tar.gz
+            artifacts/pixel-*.cdx.json
             pixel-*.bottle.tar.gz
             scripts/install.sh
 
@@ -173,6 +222,7 @@ jobs:
         run: |
           mkdir release-assets
           cp artifacts/pixel-*.tar.gz artifacts/pixel-*.tar.gz.sha256 \
+            artifacts/pixel-*.cdx.json \
             pixel-*.bottle.tar.gz pixel.rb pixel-core.rb scripts/install.sh \
             release-assets/
           if [ ! -s "$BUNDLE" ]; then
