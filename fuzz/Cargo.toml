@@ -1,0 +1,48 @@
+# cargo-fuzz targets (`cargo fuzz list`), run by .github/workflows/fuzz.yml.
+#
+# The empty `[workspace]` table makes this crate its own workspace root, so
+# the root workspace's `cargo build`, `cargo test`, `cargo clippy` and
+# `cargo mutants` never compile it: building a fuzz target needs a nightly
+# toolchain and the libFuzzer runtime, which the root gates do not have.
+# No `Cargo.lock` is committed (see .gitignore): each run resolves the newest
+# semver-compatible versions, so a stale second lockfile never drags an
+# advisory into the scans of the repository.
+[package]
+name = "pixel-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# The matcher `pixel_index::verify::Verifier` searches with: the oracle of
+# `search_plan` is the production matcher, not a lookalike.
+grep-matcher = "0.1.9"
+grep-regex = "0.1.14"
+pixel-graph = { path = "../crates/pixel-graph" }
+pixel-index = { path = "../crates/pixel-index" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+# Symbols in the crash backtraces cargo fuzz prints.
+debug = 1
+
+[[bin]]
+name = "graph_extract"
+path = "fuzz_targets/graph_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "search_plan"
+path = "fuzz_targets/search_plan.rs"
+test = false
+doc = false
+bench = false

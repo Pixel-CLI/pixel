@@ -1,0 +1,6 @@
+rs
+use crate::store::{open, push as leased};
+mod inner { use super::*; pub fn helper() -> u32 { leased(1) } }
+pub struct Point { x: i32 }
+impl Display for Point { fn fmt(&self, f: &mut Formatter) -> Result { write!(f, "{}", self.x) } }
+fn main() { let p = Point { x: 1 }; p.fmt(); inner::helper(); }

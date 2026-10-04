@@ -1,0 +1,3 @@
+cs
+using System.Linq;
+namespace App { public class Repo : IRepo { public int Count() => items.Where(x => x.Ok).Count(); void Save() { Log("x"); } } }

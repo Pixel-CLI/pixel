@@ -1,0 +1,5 @@
+js
+const fs = require("fs");
+module.exports = function load(path) { return JSON.parse(fs.readFileSync(path)); };
+class Store { get(k) { return this.map.get(k); } }
+schema.plugin(tenantScopePlugin);

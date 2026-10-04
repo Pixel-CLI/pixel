@@ -1,0 +1,5 @@
+c
+#include "util.h"
+struct node { int v; struct node *next; };
+static int sum(struct node *n) { return n ? n->v + sum(n->next) : 0; }
+int main(void) { return sum(make_list(3)); }

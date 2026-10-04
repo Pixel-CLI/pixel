@@ -1,0 +1,9 @@
+target/
+# Written by `cargo fuzz run`: the growing corpus (CI keeps it in the
+# Actions cache), crash reproducers and coverage reports. Hand-picked
+# starting inputs live in seeds/, which is tracked.
+corpus/
+artifacts/
+coverage/
+# Resolved on each run; see the comment at the top of Cargo.toml.
+Cargo.lock

@@ -1,0 +1,10 @@
+rb
+require_relative "base"
+module Billing
+  class Invoice < ApplicationRecord
+    has_many :lines
+    before_save :total
+    def total; lines.sum(&:amount); end
+    def self.build(attrs) = new(attrs).tap(&:save!)
+  end
+end

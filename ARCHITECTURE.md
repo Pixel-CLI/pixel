@@ -672,7 +672,16 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   to `api.scorecard.dev` and the findings to code scanning) and `codeql.yml`
   (CodeQL on every pull request into `main`, every push to `main` and
   weekly: Rust, the workflows, Python and JavaScript/TypeScript, all with
-  `build-mode: none`, results to code scanning and the `CodeQL` check).
+  `build-mode: none`, results to code scanning and the `CodeQL` check) and
+  `fuzz.yml` (every cargo-fuzz target under `fuzz/` on nightly: 60 s each on
+  a pull request touching `fuzz/`, `pixel-graph`, `pixel-index` or
+  `pixel-git`, 600 s weekly and on demand, crash reproducers uploaded).
+- `fuzz/` is a cargo-fuzz crate with its own `[workspace]`, outside the
+  root workspace (no root `cargo` command builds it). `graph_extract` feeds
+  arbitrary source to `pixel_graph::extract::extract_file` (no panic, lines
+  inside the file, `enclosing_index` inside `symbols`); `search_plan` checks
+  that `pixel_index::plan::plan_pattern` never drops a document the
+  verifier's `grep_regex` matcher matches, for both gram extractors.
 - Local agent validation uses targeted checks during editing and the full
   gates once a reviewable unit is ready (CONTRIBUTING.md, "Agent validation
   workflow"). Background gates validate an unchanged checkout or a committed

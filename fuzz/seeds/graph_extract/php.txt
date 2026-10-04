@@ -1,0 +1,6 @@
+php
+<?php
+namespace App\Http;
+use App\Models\User;
+class Controller { public function show(int $id): User { return User::find($id)->load("posts"); } }
+function helper() { return new Controller(); }

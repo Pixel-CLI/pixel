@@ -1,0 +1,6 @@
+lua
+local util = require("util")
+local M = {}
+function M.run(x) return util.double(x) end
+local function helper() return M.run(2) end
+return M

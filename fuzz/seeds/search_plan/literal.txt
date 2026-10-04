@@ -1,0 +1,2 @@
+handleClick
+onClick={handleClick}

@@ -1,0 +1,2 @@
+[A-Z][a-z]+Error\b
+raise ValueError("x")

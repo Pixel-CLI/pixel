@@ -1,0 +1,4 @@
+tsx
+import React from "react";
+export function Button({ onClick }: Props) { return <button onClick={onClick}>Save</button>; }
+export const Page = () => <div><Button onClick={() => save()} /><span>text</span></div>;
