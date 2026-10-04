@@ -164,6 +164,24 @@ for path in args:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(path_file.read_text().splitlines(), [str(self.destination)])
 
+    def test_destdir_stages_the_install_and_leaves_the_final_directory_alone(self):
+        # A package build or image layer installs into a staging root: the
+        # binary goes under DESTDIR, the real INSTALL_DIR is never touched,
+        # and PATH still names the directory the binary will live in.
+        staging = self.root / "staging"
+        path_file = self.root / "github_path"
+        self.env["DESTDIR"] = str(staging)
+        self.env["GITHUB_PATH"] = str(path_file)
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        staged = Path(str(staging) + str(self.destination)) / "pixel"
+        installed = subprocess.check_output([str(staged)], text=True, timeout=5)
+        self.assertEqual(installed.strip(), "isolated-pixel-9.8.7")
+        self.assertFalse(self.destination.exists(), "DESTDIR install wrote INSTALL_DIR")
+        self.assertEqual(list(staged.parent.glob(".pixel.tmp.*")), [])
+        self.assertEqual(path_file.read_text().splitlines(), [str(self.destination)])
+        self.assertIn(f"for {self.destination}/pixel", result.stdout)
+
     def test_checksum_failure_preserves_previous_install(self):
         self.destination.mkdir()
         installed = self.destination / "pixel"
