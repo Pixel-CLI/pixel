@@ -453,15 +453,22 @@ pub fn discover(
         // 2026-10-04 re-filled 38 times and hit `# budget: stopped after
         // 40 steps`).
         let satisfied = fill_skipped;
+        // A satisfied fill is repeated when *any* earlier step already
+        // recorded the same satisfied fill — not only the immediately
+        // preceding one — so a rerun alternating between two already-filled
+        // fields still counts each repetition toward the stall bound.
         let repeated = satisfied
-            && steps.last().is_some_and(|prev| {
+            && steps.iter().any(|prev| {
                 prev.fill_skipped
                     && prev.step.action == step.action
                     && prev.step.ref_hint == step.ref_hint
                     && prev.step.value == step.value
                     && prev.step.value_var == step.value_var
             });
-        stalled = if step.action == "wait" || changed || (satisfied && !repeated) {
+        // Only the first sighting's page movement (or a wait step) clears
+        // the bound: a repeated satisfied fill keeps counting as a stall
+        // even when an unrelated page change sets `changed`.
+        stalled = if step.action == "wait" || (!repeated && (changed || satisfied)) {
             0
         } else {
             stalled + 1
@@ -634,6 +641,24 @@ mod tests {
     const DUCK_FILLED: &str = "- link \"Learn about DuckDuckGo\" [ref=e80]\n\
                                - combobox \"Search with DuckDuckGo\" [value=\"Zurich\", ref=e185]\n\
                                - button \"Search\" [ref=e186]";
+    /// Two already-filled fields a rerun can alternate between: neither
+    /// fill matches the immediately preceding step, but each matches an
+    /// earlier one. `from` fills slot 2, `to` fills slot 3.
+    const DUCK_TWO_FILLED: &str = "- link \"Learn about DuckDuckGo\" [ref=e80]\n\
+                                  - combobox \"From\" [value=\"Zurich\", ref=e185]\n\
+                                  - combobox \"To\" [value=\"Madrid\", ref=e190]\n\
+                                  - button \"Search\" [ref=e186]";
+
+    /// A filled search page whose unrelated button label differs per call,
+    /// so `changed` reads true between observations while the search box
+    /// keeps holding its value.
+    fn page(button: &str) -> String {
+        format!(
+            "- link \"Learn about DuckDuckGo\" [ref=e80]\n\
+             - combobox \"Search with DuckDuckGo\" [value=\"Zurich\", ref=e185]\n\
+             - button \"Search {button}\" [ref=e186]"
+        )
+    }
 
     pub(crate) fn request<'a>(vars: &'a [Var], limits: Limits) -> DiscoverRequest<'a> {
         DiscoverRequest {
@@ -1039,6 +1064,119 @@ mod tests {
             trace.status,
             Status::Blocked,
             "the stall bound ends the rerun, not the budget: {}",
+            trace.detail
+        );
+        assert!(!trace.detail.contains("budget"), "{}", trace.detail);
+        assert!(
+            browser.calls().iter().all(|call| call[0] != "fill"),
+            "a satisfied rerun never calls fill: {:?}",
+            browser.calls()
+        );
+        assert_eq!(trace.steps.len(), DEFAULT_MAX_STALLED + 1);
+        assert!(
+            trace
+                .steps
+                .iter()
+                .all(|s| s.fill_skipped && s.log.contains("already holds")),
+            "{}",
+            trace.steps[0].log
+        );
+    }
+
+    /// A rerun alternating between two already-filled fields is still a
+    /// stall: each satisfied fill matches an *earlier* step with the same
+    /// action, hint and value (not only the immediately preceding step), so
+    /// the alternating repeats accumulate toward the bound instead of
+    /// resetting it every cycle and burning the step budget.
+    #[test]
+    fn a_rerun_alternating_two_satisfied_fills_stalls_at_the_bound() {
+        let mut browser = ScriptedBrowser::default();
+        browser.start();
+        browser.observe(URL, DUCK_TWO_FILLED);
+        for _ in 0..DEFAULT_MAX_STALLED + 2 {
+            browser.ok("- combobox \"From\" [value=\"Zurich\", ref=e185]\n");
+            browser.observe(URL, DUCK_TWO_FILLED);
+            browser.ok("- combobox \"To\" [value=\"Madrid\", ref=e190]\n");
+            browser.observe(URL, DUCK_TWO_FILLED);
+        }
+        let vars = [Var::new("from", "Zurich"), Var::new("to", "Madrid")];
+        let mut decider = ScriptedDecider::new(vec![
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR from", 0.8)])),
+            Ok(distribution(&[("TYPE 3", 0.9)])),
+            Ok(distribution(&[("VAR to", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR from", 0.8)])),
+            Ok(distribution(&[("TYPE 3", 0.9)])),
+            Ok(distribution(&[("VAR to", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR from", 0.8)])),
+        ]);
+        let trace = discover(
+            &mut browser,
+            &mut decider,
+            &request(&vars, Limits::default()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            trace.status,
+            Status::Blocked,
+            "alternating satisfied fills still stall: {}",
+            trace.detail
+        );
+        assert!(!trace.detail.contains("budget"), "{}", trace.detail);
+        assert!(
+            browser.calls().iter().all(|call| call[0] != "fill"),
+            "a satisfied rerun never calls fill: {:?}",
+            browser.calls()
+        );
+        assert_eq!(trace.steps.len(), DEFAULT_MAX_STALLED + 2);
+        assert!(
+            trace
+                .steps
+                .iter()
+                .all(|s| s.fill_skipped && s.log.contains("already holds")),
+            "{}",
+            trace.steps[0].log
+        );
+    }
+
+    /// A repeated satisfied fill still counts toward the stall bound when an
+    /// unrelated element changes the page each cycle: page movement clears
+    /// the bound only for a fill that is not a repetition of an earlier one,
+    /// so a changing button must not let the run burn the step budget.
+    #[test]
+    fn a_repeated_satisfied_fill_stalls_despite_page_changes() {
+        let mut browser = ScriptedBrowser::default();
+        browser.start();
+        browser.observe(URL, &page("a"));
+        for i in 0..DEFAULT_MAX_STALLED + 1 {
+            browser.ok("- combobox \"Search with DuckDuckGo\" [value=\"Zurich\", ref=e185]\n");
+            browser.observe(URL, &page(&i.to_string()));
+        }
+        let vars = [Var::new("query", "Zurich")];
+        let mut decider = ScriptedDecider::new(vec![
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+        ]);
+        let trace = discover(
+            &mut browser,
+            &mut decider,
+            &request(&vars, Limits::default()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            trace.status,
+            Status::Blocked,
+            "a repeated satisfied fill stalls even as the page changes: {}",
             trace.detail
         );
         assert!(!trace.detail.contains("budget"), "{}", trace.detail);

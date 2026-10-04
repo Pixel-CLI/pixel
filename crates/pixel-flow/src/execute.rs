@@ -626,30 +626,58 @@ fn held_on_line<'a>(line: &'a str, ref_id: &str) -> Option<&'a str> {
     if !after[..delimiter].is_empty() {
         return None;
     }
-    // The value agent-browser attributes to a field sits in its own bracket
-    // block (`[value="notion invoice", ref=e59]`).
-    if let Some(value) = attr_value_in_line(line) {
-        return Some(value);
+    // The bracket block that carries the ref: `]` closes it at the first
+    // unquoted `]` after the ref, and `[` opens it at the matching unquoted
+    // `[` before that close. A `]` inside a quoted value (a field that holds
+    // "Zurich [CH]") or a sibling `[value=...]` in a label does not move
+    // those boundaries.
+    let close = unquoted_after(line, at + needle.len(), ']');
+    // The value agent-browser attributes to a field sits in the field's
+    // *own* bracket block (`[value="notion invoice", ref=e59]`); a
+    // `[value=...]` inside a label must not count as the field's contents.
+    if close < line.len() && let Some(open) = unquoted_before(line, close, '[') {
+        if let Some(value) = attr_value(&line[open + 1..close]) {
+            return Some(value);
+        }
     }
-    // A page can also spell the value after the closing bracket. A quoted
-    // label may itself contain `: `, so the suffix starts at that `]`, not
-    // the first colon-space.
-    after[delimiter..]
+    // A page can also spell the value after the closing bracket. The block
+    // may carry more attributes than the ref (`[ref=e59, required]: Zurich`),
+    // so the suffix starts at that `]`, not at the first comma. A quoted
+    // label may itself contain `: `, so the suffix starts at the block close.
+    line[close..]
         .strip_prefix(']')
         .and_then(|tail| tail.strip_prefix(": "))
 }
 
-/// The `value="..."` attribute inside a snapshot line's bracket blocks,
-/// when the line renders one. Mirrors the observation parser: the value is
-/// quoted to its closing quote, or bare to the next `,` or space.
-fn attr_value_in_line(line: &str) -> Option<&str> {
-    let mut rest = line;
-    while let Some((_, after_open)) = rest.split_once('[') {
-        let (span, tail) = after_open.split_once(']')?; // an unclosed `[` opens nothing
-        if let Some(value) = attr_value(span) {
-            return Some(value);
+/// The index of the first `needle` at or after `start` that is not inside a
+/// `"..."` run, or `line.len()` when the run never closes out of one.
+fn unquoted_after(line: &str, start: usize, needle: char) -> usize {
+    let mut at = start;
+    let mut quoted = false;
+    for c in line[start..].chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if c == needle && !quoted => return at,
+            _ => {}
         }
-        rest = tail;
+        at += c.len_utf8();
+    }
+    line.len()
+}
+
+/// The index of the last `needle` at or before `end` that is not inside a
+/// `"..."` run, or `None` when there is none.
+fn unquoted_before(line: &str, end: usize, needle: char) -> Option<usize> {
+    let mut at = end;
+    let mut quoted = false;
+    while at > 0 {
+        let c = line[..at].chars().next_back().unwrap();
+        at -= c.len_utf8();
+        match c {
+            '"' => quoted = !quoted,
+            c if c == needle && !quoted => return Some(at),
+            _ => {}
+        }
     }
     None
 }
@@ -1050,6 +1078,35 @@ mod tests {
         let snapshot = "- heading \"Welcome\" [ref=e1]";
         let ref_id = find_ref_in_snapshot(snapshot, "button containing 'Submit'");
         assert_eq!(ref_id, None);
+    }
+
+    /// A field whose current contents contain a `]` (`Zurich [CH]`) is
+    /// still recognized as held: the bracket that closes the attribute
+    /// block is the one outside the quoted value, so the executor never
+    /// re-sends the fill.
+    #[test]
+    fn field_holds_a_value_that_contains_a_closing_bracket() {
+        let snapshot = "- textbox \"City\" [value=\"Zurich [CH]\", ref=e59]";
+        assert!(field_holds_value(snapshot, "e59", "Zurich [CH]"));
+        assert!(!field_holds_value(snapshot, "e59", "Zurich"));
+    }
+
+    /// The block may carry attributes beyond the ref; the `: value` suffix
+    /// starts at the block's closing bracket, not at the first comma, so
+    /// `[ref=e59, required]: Zurich` is still read as holding `Zurich`.
+    #[test]
+    fn field_holds_value_from_a_suffix_after_a_block_with_more_attributes() {
+        let snapshot = "- textbox \"City\" [ref=e59, required]: Zurich";
+        assert!(field_holds_value(snapshot, "e59", "Zurich"));
+    }
+
+    /// A `[value=...]` block inside a *label* renders as the label's own
+    /// text, not as the field's contents: the empty `[ref=e59]` field must
+    /// not be treated as satisfied, or the needed fill would be skipped.
+    #[test]
+    fn a_value_block_in_a_label_does_not_count_as_the_field_contents() {
+        let snapshot = "- textbox \"Type [value=Zurich]\" [ref=e59]";
+        assert!(!field_holds_value(snapshot, "e59", "Zurich"));
     }
 
     #[test]
