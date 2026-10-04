@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Offline stand-in for `codex exec --json ...` (no model).
+
+Used by scripts/test-agent-ab-harness.py through eval/clis/codex.sh's
+CODEX_BIN. Same deterministic agent as fake-claude, in codex's event shape:
+command_execution items wrapped in `bash -lc`, an agent_message, and a
+turn.completed carrying usage — except on a `[nousage]` prompt, where the
+usage object is missing, so the scorer has to report it as unknown.
+Appends what it saw (argv flags, CODEX_HOME hooks, repo .codex hooks) to
+$FAKE_LOG.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def arg(flag):
+    argv = sys.argv[1:]
+    return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else None
+
+
+def hook_verbs(*paths):
+    verbs = []
+    for path in paths:
+        try:
+            doc = json.loads(Path(path).read_text())
+        except (OSError, ValueError):
+            continue
+        for groups in (doc.get("hooks") or {}).values():
+            for group in groups:
+                for hook in group.get("hooks", []):
+                    m = re.search(r"run-hook\s+([\w-]+)", hook.get("command", ""))
+                    if m:
+                        verbs.append(m.group(1))
+    return sorted(set(verbs))
+
+
+def main():
+    if "--version" in sys.argv:
+        print("codex-cli 0.0.0-fake")
+        return
+    prompt = sys.argv[-1]
+    cwd = Path(arg("-C") or os.getcwd())
+    home = Path(os.environ.get("CODEX_HOME", ""))
+    pixel = shutil.which("pixel")
+    pixel_ok = bool(pixel) and subprocess.run([pixel, "--version"], capture_output=True).returncode == 0
+    config = (home / "config.toml").read_text() if (home / "config.toml").exists() else ""
+    with open(os.environ["FAKE_LOG"], "a") as log:
+        log.write(json.dumps({
+            "host": "codex", "model": arg("--model"), "config_overrides": [a for a in sys.argv if a.startswith("model_reasoning")],
+            "hook_trust_bypass": "--dangerously-bypass-hook-trust" in sys.argv,
+            "arm": home.parent.name.removeprefix("cfg-"), "prompt": prompt[:40],
+            "pixel_ok": pixel_ok, "dot_pixel": (cwd / ".pixel").is_dir(),
+            "eval_visible": (cwd / "eval").exists(),
+            "managed_block": "pixel:managed:begin" in config,
+            "hooks": hook_verbs(home / "hooks.json", cwd / ".codex/hooks.json"),
+        }) + "\n")
+    events = [{"type": "thread.started", "thread_id": "fake"}, {"type": "turn.started"}]
+    target = cwd / "src/lib.rs"
+
+    def run(command, output):
+        events.append({"type": "item.completed", "item": {
+            "id": f"i{len(events)}", "type": "command_execution", "command": f"bash -lc '{command}'",
+            "aggregated_output": output, "exit_code": 0, "status": "completed"}})
+
+    if pixel_ok:
+        run("pixel search-content -F NEEDLE .", "src/lib.rs:3:pub const NEEDLE: u32 = 1;")
+        run("sed -n 1,20p src/lib.rs", target.read_text())
+        answer = "NEEDLE is defined in src/lib.rs:3 (line 3)."
+    else:
+        run("rg -n NEEDLE", "src/lib.rs:3:pub const NEEDLE: u32 = 1;")
+        run("cat src/lib.rs", target.read_text())
+        answer = "NEEDLE is somewhere in src/lib.rs."
+    if prompt.startswith("[edit]") and pixel_ok:
+        target.write_text(target.read_text().replace("BUG", "FIXED"))
+        events.append({"type": "item.completed", "item": {"id": "edit", "type": "file_change", "status": "completed"}})
+        answer = "Fixed the marker in src/lib.rs."
+    events.append({"type": "item.completed", "item": {"id": "msg", "type": "agent_message", "text": answer}})
+    turn = {"type": "turn.completed"}
+    if "[nousage]" not in prompt:
+        turn["usage"] = {"input_tokens": 2000, "cached_input_tokens": 1500, "output_tokens": 60}
+    events.append(turn)
+    for event in events:
+        print(json.dumps(event))
+
+
+if __name__ == "__main__":
+    main()

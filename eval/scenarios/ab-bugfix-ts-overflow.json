@@ -1,0 +1,16 @@
+{
+  "id": "ab-bugfix-ts-overflow",
+  "suite": "ab626",
+  "task_class": "bugfix",
+  "mode": "edit",
+  "commit": "e99939b23a313f697dcba5299439dcac6636023a",
+  "max_turns": 60,
+  "prompt": "The session time-window parser behind `--ts` (values such as `30s`, `5m`, `2h`, `1d`, or a bare number of seconds) panics on some inputs instead of rejecting them: a non-ASCII unit such as `5é`, or just `é`, crashes, and a huge value such as `9223372036854775807d` overflows. Make every invalid or unrepresentable window be rejected the way other bad durations are, without panicking, while every window that fits keeps working (for example `9223372036854775s`).",
+  "warm": "cargo test -q -p pixel-session --no-run",
+  "verifier": {
+    "script": "check.sh",
+    "timeout_s": 1200
+  },
+  "must": [],
+  "never": []
+}

@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Offline stand-in for `claude -p ... --output-format stream-json` (no model).
+
+Used by scripts/test-agent-ab-harness.py through run.sh's CLAUDE_BIN. It
+plays a deterministic agent whose behaviour depends only on what the arm
+gave it, so the pipeline's arm isolation shows in the scores:
+
+- `pixel` runnable on PATH (quiet/full): one `pixel search-content` call with
+  a `path:line` hit, then a bounded Read (limit 20) of that file, then the
+  full answer; on an `[edit]` prompt it fixes src/lib.rs.
+- `pixel` missing (baseline): a Grep call, a whole-file Read, a partial
+  answer, and no fix.
+
+Every invocation appends one JSON line to $FAKE_LOG describing what it saw:
+argv flags, the arm's hook verbs, the cwd's .pixel / eval/ presence.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def arg(flag):
+    argv = sys.argv[1:]
+    return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else None
+
+
+def hook_verbs(*paths):
+    verbs = []
+    for path in paths:
+        try:
+            doc = json.loads(Path(path).read_text())
+        except (OSError, ValueError):
+            continue
+        for groups in (doc.get("hooks") or {}).values():
+            for group in groups:
+                for hook in group.get("hooks", []):
+                    m = re.search(r"run-hook\s+([\w-]+)", hook.get("command", ""))
+                    if m:
+                        verbs.append(m.group(1))
+    return sorted(set(verbs))
+
+
+def deployed_prompt():
+    """The first line of the prompt a session-start hook would emit now."""
+    path = Path.home() / ".local/share/pixel/agent-prompt.md"
+    return path.read_text().splitlines()[0] if path.exists() else None
+
+
+def main():
+    if "--version" in sys.argv:
+        print("9.9.9 (Fake Claude)")
+        return
+    prompt = arg("-p") or ""
+    cwd = Path.cwd()
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    pixel = shutil.which("pixel")
+    pixel_ok = bool(pixel) and subprocess.run([pixel, "--version"], capture_output=True).returncode == 0
+    with open(os.environ["FAKE_LOG"], "a") as log:
+        log.write(json.dumps({
+            "host": "claude", "model": arg("--model"), "max_turns": arg("--max-turns"),
+            "arm": Path(cfg).name.removeprefix("cfg-"), "prompt": prompt[:40],
+            "pixel_ok": pixel_ok, "dot_pixel": (cwd / ".pixel").is_dir(),
+            "eval_visible": (cwd / "eval").exists(), "warm_marker": (cwd / ".warm-marker").exists(),
+            "hooks": hook_verbs(Path(cfg) / "settings.json", cwd / ".claude/settings.local.json"),
+            "skills": sorted(p.name for p in (Path(cfg) / "skills").glob("*")),
+            "cargo_target": os.environ.get("CARGO_TARGET_DIR"),
+            "deployed_prompt": deployed_prompt(),
+        }) + "\n")
+    events = [{"type": "system", "subtype": "init", "model": arg("--model"), "cwd": str(cwd)}]
+
+    def tool(i, name, args, output):
+        events.append({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": f"t{i}", "name": name, "input": args}]}})
+        events.append({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": f"t{i}", "content": output}]}})
+
+    target = cwd / "src/lib.rs"
+    if pixel_ok:
+        tool(1, "Bash", {"command": "pixel search-content -F NEEDLE ."}, "src/lib.rs:3:pub const NEEDLE: u32 = 1;")
+        tool(2, "Read", {"file_path": str(target), "offset": 1, "limit": 20}, target.read_text())
+        answer = "NEEDLE is defined in src/lib.rs:3 (line 3)."
+    else:
+        tool(1, "Grep", {"pattern": "NEEDLE"}, "src/lib.rs")
+        tool(2, "Read", {"file_path": str(target)}, target.read_text())
+        answer = "NEEDLE is somewhere in src/lib.rs."
+    if prompt.startswith("[edit]") and pixel_ok:
+        target.write_text(target.read_text().replace("BUG", "FIXED"))
+        tool(3, "Edit", {"file_path": str(target)}, "ok")
+        answer = "Fixed the marker in src/lib.rs."
+    events.append({"type": "result", "subtype": "success", "result": answer,
+                   "num_turns": 3 if pixel_ok else 4, "duration_ms": 1234,
+                   "total_cost_usd": 0.01 if pixel_ok else 0.02,
+                   "usage": {"input_tokens": 100, "cache_read_input_tokens": 1000,
+                             "cache_creation_input_tokens": 50, "output_tokens": 40}})
+    for event in events:
+        print(json.dumps(event))
+
+
+if __name__ == "__main__":
+    main()

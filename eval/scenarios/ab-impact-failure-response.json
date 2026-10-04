@@ -1,0 +1,63 @@
+{
+  "id": "ab-impact-failure-response",
+  "suite": "ab626",
+  "task_class": "callers-impact",
+  "mode": "answer",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 30,
+  "prompt": "We want to change `failure_response` so it takes a typed error-code enum instead of a free-form op name string. List every call site that would have to change, with file and line, and say which are production code and which are tests.",
+  "must": [
+    {
+      "pattern": "pixel-daemon/src/daemon\\.rs",
+      "points": 2,
+      "why": "four production sites in handle_conn"
+    },
+    {
+      "pattern": "handle_conn",
+      "points": 1,
+      "why": "the caller there"
+    },
+    {
+      "pattern": "recall_service\\.rs",
+      "points": 2,
+      "why": "RecallService::handle"
+    },
+    {
+      "pattern": "crates/pixel/src/main\\.rs|write_failure_envelope",
+      "points": 2,
+      "why": "the CLI's failure envelope"
+    },
+    {
+      "pattern": "\\b925\\b|handle_inner",
+      "points": 1,
+      "why": "the api.rs production site"
+    },
+    {
+      "pattern": "recall_cmd\\.rs",
+      "points": 2,
+      "why": "a test site in the pixel crate (graph lists it under no caller)"
+    },
+    {
+      "pattern": "recall_cli\\.rs",
+      "points": 1,
+      "why": "integration-test site"
+    },
+    {
+      "pattern": "\\b5175\\b",
+      "points": 1,
+      "why": "api.rs test site"
+    },
+    {
+      "pattern": "\\b(?:639|651|658|676)\\b",
+      "points": 1,
+      "why": "daemon.rs line numbers"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "pixel-(?:install|proto|graph|index|git|ops|session)/src[^\\n]{0,80}failure_response",
+      "penalty": 2,
+      "why": "no other crate calls it"
+    }
+  ]
+}

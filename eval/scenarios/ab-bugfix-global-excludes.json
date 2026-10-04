@@ -1,0 +1,16 @@
+{
+  "id": "ab-bugfix-global-excludes",
+  "suite": "ab626",
+  "task_class": "bugfix",
+  "mode": "edit",
+  "commit": "4aa6790456e1f462ba5a4fb31e2e2323583b6733",
+  "max_turns": 60,
+  "prompt": "Files go missing from pixel's index on some developers' machines: when a developer's personal global git excludes file (`core.excludesFile`) lists a directory such as `.claude/`, every file under it disappears from indexing, recall and the code graph, although the project itself does not ignore it. The project's own `.gitignore` files must keep applying, but a developer's personal global excludes must not hide project files from pixel's file walk. Fix it.",
+  "warm": "cargo test -q -p pixel-index --no-run",
+  "verifier": {
+    "script": "check.sh",
+    "timeout_s": 1500
+  },
+  "must": [],
+  "never": []
+}

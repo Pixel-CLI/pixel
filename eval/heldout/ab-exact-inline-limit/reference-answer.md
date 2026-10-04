@@ -1,0 +1,3 @@
+`CLAUDE_INLINE_CONTEXT_LIMIT` is 10_000, defined in `crates/pixel/src/guard.rs`. It is the longest SessionStart `additionalContext` Claude Code passes inline, counted in UTF-16 units; past it the model only gets a `<persisted-output>` 2 KB preview.
+
+`session_start_envelope` budgets the freshness line first and calls `fit_prompt`: if the prompt is too long, the `DEFERRABLE_SECTIONS` ("## When native tools are right", then "## Reading results") are removed one by one and a closing line names them and the deployed prompt's path; if it still does not fit, trailing sections go, and finally the text is cut at a character boundary.

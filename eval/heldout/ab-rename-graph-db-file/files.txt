@@ -1,0 +1,13 @@
+.agents/rules/architecture-doc.md
+.agents/rules/change-propagation.md
+ARCHITECTURE.md
+crates/pixel-daemon/src/api.rs
+crates/pixel-install/src/doctor.rs
+crates/pixel-install/tests/install_tests.rs
+crates/pixel/src/audit_cmd.rs
+crates/pixel/src/coverage_cmd.rs
+crates/pixel/src/guard.rs
+crates/pixel/src/index_cmd.rs
+crates/pixel/src/main.rs
+crates/pixel/src/space_cmd.rs
+crates/pixel/tests/cli/post_edit_cli.rs

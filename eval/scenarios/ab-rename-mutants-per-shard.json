@@ -1,0 +1,15 @@
+{
+  "id": "ab-rename-mutants-per-shard",
+  "suite": "ab626",
+  "task_class": "rename",
+  "mode": "edit",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 40,
+  "prompt": "Rename the CI mutation gate's shard-size constant `MUTANTS_PER_SHARD` to `MUTANTS_PER_JOB` everywhere it appears — Python code, comments, workflow files and documentation — without changing its value or the gate's behaviour.",
+  "verifier": {
+    "script": "check.sh",
+    "timeout_s": 120
+  },
+  "must": [],
+  "never": []
+}

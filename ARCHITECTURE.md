@@ -663,7 +663,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     bottles, release SBOM, homebrew-core formula,
     nightly mutants, mutants
     config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
-    reproducible release build environment), the
+    reproducible release build environment, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
     (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`)
     and the Bun Pi-policy contract (`scripts/test-pi-policy.mjs`);

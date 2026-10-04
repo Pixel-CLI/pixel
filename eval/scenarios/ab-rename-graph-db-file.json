@@ -1,0 +1,16 @@
+{
+  "id": "ab-rename-graph-db-file",
+  "suite": "ab626",
+  "task_class": "rename",
+  "mode": "edit",
+  "commit": "cdca0c3b66899cc307ddfe88b22942cc33319b5b",
+  "max_turns": 60,
+  "prompt": "Rename the constant `GRAPH_DB_FILE` to `GRAPH_DB_FILENAME` across the whole repository: its definition, every Rust use and import, doc comments, and every Markdown mention. Its value must not change, and the workspace must still compile, tests included.",
+  "warm": "cargo check -q -p pixel-daemon -p pixel-install -p pixel-cli --all-targets",
+  "verifier": {
+    "script": "check.sh",
+    "timeout_s": 1800
+  },
+  "must": [],
+  "never": []
+}

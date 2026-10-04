@@ -1,0 +1,1 @@
+Commit f12011b, 2026-10-03, "feat(mutants): iterate local preflight reruns, cap shards at 15" (#543) raised `MAX_SHARDS` from 10 to 15 (10 since #223). HEAD has 177 commits since v0.6.1 (`git rev-list --count v0.6.1..HEAD`).

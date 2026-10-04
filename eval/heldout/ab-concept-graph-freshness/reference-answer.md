@@ -1,0 +1,3 @@
+On the next graph command, `ensure_graph_inner` in `crates/pixel-daemon/src/api.rs` calls `tree_delta_cached` (`crates/pixel-graph/src/build.rs`, `tree_delta`): one walk compares each file's content hash with the stored ones. Fresh: nothing to do. Drift: if the changed+removed files are within `PIXEL_GRAPH_INCREMENTAL_MAX_PCT` percent of the indexed files (`DEFAULT_GRAPH_INCREMENTAL_MAX_PCT` = 20 %), it applies the delta with `apply_tree_delta` (incremental update): re-extracts the edited files, drops removed ones and re-resolves calls that targeted them.
+
+It rebuilds the whole graph when the db is missing, has no freshness signature (`no_signature`, e.g. another extractor version), is unreadable, or the drift exceeds the threshold (`0` always rebuilds).
