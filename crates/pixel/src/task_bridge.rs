@@ -824,9 +824,13 @@ mod tests {
         // releases the session.
         let markers = root.0.join(ENFORCED_SESSIONS);
         std::fs::create_dir_all(&markers).unwrap();
-        let mut permissions = std::fs::metadata(&markers).unwrap().permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&markers, permissions).unwrap();
+        let original = std::fs::metadata(&markers).unwrap().permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut locked = original.clone();
+            locked.set_mode(locked.mode() & !0o222);
+            std::fs::set_permissions(&markers, locked).unwrap();
+        }
 
         // The task starts enforced: host_policy is recorded before the marker
         // write, so the obligation survives the failure; a prompt-submit gates
@@ -867,9 +871,7 @@ mod tests {
         .unwrap();
         assert_eq!(observed["decision"], "observe", "{observed}");
 
-        let mut permissions = std::fs::metadata(&markers).unwrap().permissions();
-        permissions.set_readonly(false);
-        std::fs::set_permissions(&markers, permissions).unwrap();
+        std::fs::set_permissions(&markers, original).unwrap();
     }
 
     #[test]
