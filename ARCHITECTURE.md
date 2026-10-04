@@ -664,7 +664,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   Linux),
   `release-prepare-scope.yml`, `pages.yml` (the website) and `scorecard.yml`
   (OpenSSF Scorecard on every push to `main` and weekly: publishes the score
-  to `api.scorecard.dev` and the findings to code scanning).
+  to `api.scorecard.dev` and the findings to code scanning) and `codeql.yml`
+  (CodeQL on every pull request into `main`, every push to `main` and
+  weekly: Rust, the workflows, Python and JavaScript/TypeScript, all with
+  `build-mode: none`, results to code scanning and the `CodeQL` check).
 - Local agent validation uses targeted checks during editing and the full
   gates once a reviewable unit is ready (CONTRIBUTING.md, "Agent validation
   workflow"). Background gates validate an unchanged checkout or a committed
