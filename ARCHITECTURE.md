@@ -708,7 +708,12 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   `deny.toml`, then every cargo-fuzz target on nightly: 60 s each on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
   root `Cargo.toml` or `deny.toml`, 600 s weekly and on demand, crash
-  reproducers uploaded).
+  reproducers uploaded) and `coverage.yml` (the Test job's nextest suite
+  under `cargo llvm-cov`, doctests aside, on every push to `main`, on a pull
+  request touching `crates/`, the manifests or the nextest profile, and on
+  demand: line, region and function totals and one row per crate in the job
+  summary, the report as the `coverage-summary` artifact; it fails on a red
+  test or on line coverage under 80%, the OpenSSF silver bar).
 - `fuzz/` is a cargo-fuzz crate with its own `[workspace]`, outside the
   root workspace (no root `cargo` command builds it). `graph_extract` feeds
   arbitrary source to `pixel_graph::extract::extract_file` (no panic, lines
