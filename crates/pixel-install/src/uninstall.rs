@@ -703,7 +703,7 @@ fn remove_zcode_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
 // Step 3e: remove Cursor hooks (flat schema)
 // -------------------------------------------------------------------------
 
-fn remove_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+pub(crate) fn remove_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let config_path = home.join(config::CURSOR_HOOKS_FILE);
     if !config_path.is_file() {
         return Ok(InstallStep {

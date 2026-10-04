@@ -619,6 +619,10 @@ fn provider_rewrite_with(
 
 /// Which repository's configuration layers decide the policy: the call's
 /// working directory, resolved the way every `pixel config` lookup resolves it.
+/// The same resolution [`provider_cwd`] applies for enforcement — Cursor sends
+/// `cwd: ""` with the repository in `workspace_roots`, and a policy lookup
+/// through the empty path would read the global configuration instead of the
+/// workspace's, silently diverging from the enforcement decision.
 fn policy_root(payload: &Value) -> Option<PathBuf> {
     // Resolve the working directory the same way enforcement does, so an
     // empty `cwd` (Cursor sends `cwd: ""`) still falls back to
@@ -5828,6 +5832,49 @@ mod tests {
     }
 
     #[test]
+    fn policy_root_resolves_the_workspace_through_provider_cwd() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-guard-policy-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("repo/.pixel")).unwrap();
+        let root = canonical(&dir.join("repo"));
+        // The workspace's own policy layer decides.
+        std::fs::write(root.join(".pixel/config.yaml"), "policy: enforce\n").unwrap();
+        let payload = serde_json::json!({
+            "cwd": "",
+            "workspace_roots": [root],
+        });
+        assert_eq!(
+            policy_root(&payload),
+            Some(root.clone()),
+            "empty cwd with workspace_roots resolves the workspace"
+        );
+        assert_eq!(
+            policy_mode(&payload),
+            crate::config_cmd::PolicyMode::Enforce,
+            "policy reads the workspace layer, not the global one"
+        );
+        // A non-empty payload cwd still wins, with no workspace_roots.
+        let payload = serde_json::json!({"cwd": root.display().to_string()});
+        assert_eq!(policy_root(&payload), Some(root.clone()));
+        // An empty cwd with no workspace_roots falls back to the process
+        // cwd, then to `None` when that is not a repository.
+        let empty = serde_json::json!({"cwd": ""});
+        assert_eq!(
+            policy_root(&empty),
+            crate::discover_root(&std::env::current_dir().unwrap_or_default()).ok(),
+            "no workspace_roots: the fallback matches the enforcement path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn scoping_sees_grep_file_before_rewrite() {
         // Ordering guarantee: in run(), check_bash (which applies the
         // manifest scoping via single_reader_target) executes BEFORE any
@@ -7009,6 +7056,33 @@ mod tests {
             metrics_hook_line(&fixture.payload(serde_json::json!("pixel impact src/login.rs")))
                 .unwrap();
         assert!(line.starts_with("🟩 pixel impact ❀"), "{line}");
+    }
+
+    #[test]
+    fn cursor_metrics_relay_resolves_the_workspace_from_empty_cwd() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("cursor-empty-cwd");
+        // The documented Cursor shell payload: `cwd: ""` with the repository
+        // in `workspace_roots`, the hook process running outside the
+        // workspace. The record lookup must still find the workspace's
+        // action log, or the relay never fires for Cursor.
+        let payload = serde_json::json!({
+            "tool_name": "Shell",
+            "tool_input": { "command": "pixel impact src/login.rs" },
+            "cwd": "",
+            "workspace_roots": [fixture.root],
+        });
+        let line =
+            metrics_hook_line(&payload).expect("the workspace resolves through workspace_roots");
+        assert!(line.starts_with("🟩 pixel impact ❀"), "{line}");
+        // Without workspace_roots and with an empty cwd there is no
+        // workspace to look up from the fixture dir: nothing to relay.
+        let payload = serde_json::json!({
+            "tool_name": "Shell",
+            "tool_input": { "command": "pixel impact src/login.rs" },
+            "cwd": "",
+        });
+        assert_eq!(metrics_hook_line(&payload), None);
     }
 
     #[test]

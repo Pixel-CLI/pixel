@@ -1139,7 +1139,10 @@ fn install_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Instal
     hooks.insert("postToolUse".into(), post);
     let backup = write_settings(&path, &value, dry_run)?;
     let summary = if dry_run {
-        format!("would configure pixel guard + metrics in {}", path.display())
+        format!(
+            "would configure pixel guard + metrics in {}",
+            path.display()
+        )
     } else {
         "configured pixel guard + metrics in Cursor hooks.json".into()
     };
@@ -1204,7 +1207,6 @@ pub(crate) fn write_settings(
     // temp was opened 0600 regardless of the ambient umask.
     #[cfg(unix)]
     if let Ok(meta) = fs::metadata(target) {
-        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&tmp, meta.permissions())?;
     }
     fs::rename(&tmp, target)?;
@@ -1619,6 +1621,85 @@ mod cursor_hooks_tests {
         assert!(
             !home.path().join(crate::config::CURSOR_HOOKS_FILE).exists(),
             "dry-run must not create the hooks file"
+        );
+    }
+
+    /// A settings path that is a symlink into a dotfiles manager must stay a
+    /// symlink: the write updates the managed target, never replaces the link
+    /// (this is what `resolve_symlink_target` exists for).
+    #[cfg(unix)]
+    #[test]
+    fn write_settings_updates_a_symlink_target_and_keeps_the_link() {
+        use super::write_settings;
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("dotfiles");
+        std::fs::create_dir_all(&store).unwrap();
+        let managed = store.join("hooks.json");
+        std::fs::write(&managed, b"old").unwrap();
+        let path = dir.path().join("settings").join("hooks.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&managed, &path).unwrap();
+        write_settings(&path, &serde_json::json!({"a": 1}), false).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink survives the write"
+        );
+        assert_eq!(
+            std::fs::read(&managed).unwrap(),
+            br#"{
+  "a": 1
+}
+"#,
+            "the managed target, not the link, holds the new bytes"
+        );
+        // A broken symlink resolves too: the write lands on the target path.
+        let missing = dir.path().join("absent").join("hooks.json");
+        let broken = dir.path().join("settings").join("broken.json");
+        std::os::unix::fs::symlink(&missing, &broken).unwrap();
+        write_settings(&broken, &serde_json::json!({"b": 2}), false).unwrap();
+        assert_eq!(
+            std::fs::read(&missing).unwrap(),
+            br#"{
+  "b": 2
+}
+"#
+        );
+        assert!(
+            std::fs::symlink_metadata(&broken)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// The temp a settings write creates is private and unique, and the
+    /// replacement keeps an existing 0600 file private (the symlink test
+    /// pins the link; this one pins mode + no stray temp + backup).
+    #[cfg(unix)]
+    #[test]
+    fn write_settings_is_private_and_leaves_only_live_file_and_backup() {
+        use super::write_settings;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.json");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_settings(&path, &serde_json::json!({"a": 1}), false).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the replacement keeps the live file's mode");
+        let left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), 2, "only live file + backup remain: {left:?}");
+        assert!(
+            left.iter()
+                .any(|name| name.starts_with("hooks.json.pixel-bak.")),
+            "the pre-image was backed up: {left:?}"
         );
     }
 }
