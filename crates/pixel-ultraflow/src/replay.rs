@@ -634,7 +634,12 @@ mod tests {
             ..Default::default()
         }]);
         let mut browser = ScriptedBrowser::default();
+        // The click's executor shape: pre-click snapshot, URL probe, the
+        // click, then two empty poll reads to the two-empty stop.
         browser.ok("- button \"Continue\" [ref=e5]");
+        browser.ok("");
+        browser.ok("");
+        browser.ok("");
         browser.ok("");
         browser.observe(URL, PAGE);
         let mut decider = ScriptedDecider::new(vec![]);
@@ -643,7 +648,7 @@ mod tests {
         assert_eq!(report.steps_executed, 1);
         assert_eq!(report.steps_skipped, 0);
         assert_eq!(browser.calls()[0], ["snapshot", "-i"]);
-        assert_eq!(browser.calls()[1], ["click", "@e5"]);
+        assert_eq!(browser.calls()[2], ["click", "@e5"]);
         assert!(
             report.log.contains("agent-browser click @e5"),
             "{}",

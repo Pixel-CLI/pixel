@@ -122,13 +122,14 @@ fn flow_json_lifecycle_emits_documents_and_executes_only_when_requested() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["success"], true, "{value}");
     let calls = std::fs::read_to_string(fixture.0.join("calls")).unwrap();
+    // The open's first browser call is the URL probe the navigation poll
+    // compares against; the open itself follows. (The stub logs every arg,
+    // session flag included.)
     assert!(
-        calls
-            .lines()
-            .next()
-            .unwrap()
-            .contains("open https://example.test")
+        calls.lines().next().unwrap().ends_with("get url"),
+        "{calls}"
     );
+    assert!(calls.contains("open https://example.test"), "{calls}");
     let deleted = fixture.run(&["flow", "delete", "audit", "--json"], false);
     assert!(deleted.status.success(), "{deleted:?}");
     assert!(serde_json::from_slice::<serde_json::Value>(&deleted.stdout).is_ok());

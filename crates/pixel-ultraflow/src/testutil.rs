@@ -113,8 +113,13 @@ pub struct ScriptedBrowser {
 }
 
 impl ScriptedBrowser {
-    /// Queue the `open` a discovery run makes before its first look.
+    /// Queue the `open` a discovery run makes before its first look, with
+    /// the URL probe the executor reads before it and the two poll answers
+    /// after it (the two-empty stop ends the poll at once).
     pub fn start(&mut self) {
+        self.ok("about:blank");
+        self.ok("");
+        self.ok("");
         self.ok("");
     }
 
@@ -132,6 +137,18 @@ impl ScriptedBrowser {
     /// Queue one failing command.
     pub fn fail(&mut self, error: &str) {
         self.answers.push_back(Err(error.to_string()));
+    }
+
+    /// Queue one click as the executor issues it: the pre-click snapshot
+    /// that resolves the ref, the URL probe, the click itself, and two
+    /// poll answers of "" — the two-empty stop ends the poll at once, so
+    /// the next queued answer is the loop's own next call.
+    pub fn click(&mut self, snapshot: &str) {
+        self.ok(snapshot);
+        self.ok("");
+        self.ok("");
+        self.ok("");
+        self.ok("");
     }
 
     pub fn calls(&self) -> Vec<Vec<&str>> {
