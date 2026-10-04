@@ -44,7 +44,7 @@ fn bypass_repo() -> PathBuf {
 /// tool, with the Pixel alternative pointed at the indexed root: the agent
 /// learns which command to run instead, in the repository it is working in.
 #[test]
-fn bypass_advisories_name_the_search_tool_and_the_indexed_root() {
+fn bypass_advisory_should_name_tool_and_root_when_a_search_tool_reads_the_repo() {
     let root = bypass_repo();
     let cases = [
         (
@@ -121,7 +121,7 @@ fn bypass_advisories_name_the_search_tool_and_the_indexed_root() {
 /// same advisory as the bare tool: an agent cannot step around the guard by
 /// spelling the binary differently.
 #[test]
-fn bypass_advisories_see_through_paths_and_wrapper_words() {
+fn bypass_advisory_should_fire_when_the_tool_is_spelled_by_path_or_wrapper() {
     let root = bypass_repo();
     for (cmd, tool) in [
         ("/usr/bin/egrep needle", "egrep"),
@@ -146,7 +146,7 @@ fn bypass_advisories_see_through_paths_and_wrapper_words() {
 /// `find`/`xargs` that runs no search. A false advisory teaches the agent to
 /// ignore the real ones.
 #[test]
-fn bypass_advisories_stay_silent_on_lookalikes() {
+fn bypass_advisory_should_stay_silent_when_the_command_only_looks_like_a_search() {
     let root = bypass_repo();
     for cmd in [
         "",
@@ -191,7 +191,7 @@ fn bypass_advisories_stay_silent_on_lookalikes() {
 /// `find -name` is file discovery: the advisory offers both the content
 /// search and `pixel scope-task`, each pointed at the indexed root.
 #[test]
-fn find_by_name_points_at_search_and_scope_task() {
+fn find_name_advisory_should_offer_search_and_scope_task_when_discovering_files() {
     let root = bypass_repo();
     let lines = bypass_advisory_lines("find . -name '*.rs'", &root, &root).unwrap();
     assert_eq!(
@@ -209,7 +209,7 @@ fn find_by_name_points_at_search_and_scope_task() {
 /// a source directory or a source file that exists. Listing docs, reading
 /// prose, a missing path or a flag-only call are ordinary shell use.
 #[test]
-fn reader_advisories_fire_only_on_existing_source() {
+fn reader_advisory_should_fire_only_when_existing_source_is_browsed() {
     let root = bypass_repo();
     let advised =
         |cmd: &str| bypass_advisory_lines(cmd, &root, &root).map(|lines| lines[0].clone());
@@ -264,7 +264,7 @@ fn reader_advisories_fire_only_on_existing_source() {
 /// The legacy "BLOCKED" headline becomes an advisory that says the call
 /// proceeds: the guard informs, it never forces a retry.
 #[test]
-fn non_blocking_advisory_rewrites_the_headline_and_says_it_proceeds() {
+fn non_blocking_advisory_should_say_the_call_proceeds_when_rewriting_a_block() {
     let lines = non_blocking_advisory_lines(&strings(&[
         "BLOCKED by pixel-guard: sed used as a search tool — BLOCKED twice.",
         "  pixel search-content x",
@@ -287,7 +287,7 @@ fn non_blocking_advisory_rewrites_the_headline_and_says_it_proceeds() {
 /// `grep` hidden inside a shell wrapper is judged like a bare one; anything
 /// that is not a `-c` invocation is left as typed.
 #[test]
-fn shell_wrappers_unwrap_to_their_script_only_for_c_flags() {
+fn unwrap_shell_c_should_return_the_script_only_when_a_c_flag_wraps_it() {
     for (cmd, script) in [
         ("bash -lc \"grep -rn foo .\"", "grep -rn foo ."),
         ("/bin/zsh -c 'rg needle'", "rg needle"),
@@ -306,7 +306,7 @@ fn shell_wrappers_unwrap_to_their_script_only_for_c_flags() {
 /// forms give the script the shell would run; any other JSON type is no
 /// command at all.
 #[test]
-fn command_text_reads_strings_and_argv_arrays() {
+fn command_text_should_give_the_script_when_sent_as_string_or_argv() {
     use serde_json::json;
     for (value, text) in [
         (json!("bash -lc 'grep foo .'"), "grep foo ."),
@@ -327,7 +327,7 @@ fn command_text_reads_strings_and_argv_arrays() {
 /// a shell argv keeps every token but the script, and an argv the guard
 /// cannot place a script into is left alone rather than re-quoted.
 #[test]
-fn rewritten_command_value_replaces_only_the_shell_script() {
+fn rewritten_command_value_should_replace_only_the_script_when_a_shell_wraps_it() {
     use serde_json::json;
     assert_eq!(
         rewritten_command_value(&json!("grep x"), "pixel search-content x".into()),
@@ -358,7 +358,7 @@ fn rewritten_command_value_replaces_only_the_shell_script() {
 /// Devin and OpenCode take the bare rewrite. An allow sent to the others
 /// would grant more than the rewrite asked for.
 #[test]
-fn rewrite_json_grants_allow_only_where_the_host_requires_it() {
+fn rewrite_json_should_grant_allow_only_when_the_host_requires_it() {
     use serde_json::json;
     let input = json!({"command": "pixel search-content x ."});
     for provider in [Provider::Codex, Provider::Zcode] {
@@ -389,7 +389,7 @@ fn rewrite_json_grants_allow_only_where_the_host_requires_it() {
 /// with `toolArgs` accepted as a JSON string or an object; fields the host
 /// already sent in snake_case win.
 #[test]
-fn copilot_payload_is_normalized_without_overwriting_snake_case() {
+fn copilot_payload_should_be_normalized_when_fields_are_camel_case() {
     use serde_json::json;
     let string_args = provider_payload(
         Provider::Copilot,
@@ -422,7 +422,7 @@ fn copilot_payload_is_normalized_without_overwriting_snake_case() {
 /// directory comes from the call's `Cwd`, else the first workspace path.
 /// Other providers' payloads pass through untouched.
 #[test]
-fn antigravity_tool_call_is_lifted_into_the_shared_fields() {
+fn antigravity_payload_should_lift_the_tool_call_when_one_is_present() {
     use serde_json::json;
     let with_cwd = provider_payload(
         Provider::Antigravity,
@@ -462,7 +462,7 @@ fn antigravity_tool_call_is_lifted_into_the_shared_fields() {
 /// The working directory a call runs in: the payload `cwd`, else Cursor's
 /// first workspace root, joined with the tool's own `workdir`/`cwd`/`Cwd`.
 #[test]
-fn provider_cwd_joins_the_tool_directory_onto_the_host_cwd() {
+fn provider_cwd_should_join_the_tool_directory_when_one_is_given() {
     use serde_json::json;
     let empty = json!({});
     assert_eq!(
@@ -505,7 +505,7 @@ fn provider_cwd_joins_the_tool_directory_onto_the_host_cwd() {
 /// OpenCode's camelCase `filePath` is aliased to `file_path` for the read
 /// arms, never overwriting a `file_path` the host already sent.
 #[test]
-fn opencode_file_path_alias_never_overwrites() {
+fn opencode_input_should_alias_file_path_when_none_was_sent() {
     use serde_json::json;
     assert_eq!(
         opencode_tool_input(json!({"tool_input": {"filePath": "a.rs"}})),
@@ -526,7 +526,7 @@ fn opencode_file_path_alias_never_overwrites() {
 /// merge: empty output, a Codex PreToolUse response, or a legacy `block`
 /// turned into a deny. Anything else disables composition (None).
 #[test]
-fn foreign_hook_output_keeps_only_mergeable_shapes() {
+fn foreign_hook_output_should_be_kept_only_when_mergeable() {
     use serde_json::json;
     assert_eq!(foreign_hook_output(Value::Null), Some(Value::Null));
     assert_eq!(
@@ -566,7 +566,7 @@ fn foreign_hook_output_keeps_only_mergeable_shapes() {
 /// either the nested or the flat spelling) is a mutation, so Pixel must not
 /// layer its own rewrite on top; a denial is recognised in both spellings.
 #[test]
-fn foreign_mutation_and_denial_are_read_in_both_spellings() {
+fn foreign_mutation_should_be_detected_when_either_spelling_is_used() {
     use serde_json::json;
     for mutating in [
         json!({"hookSpecificOutput": {"updatedInput": {"command": "x"}}}),
@@ -596,7 +596,7 @@ fn foreign_mutation_and_denial_are_read_in_both_spellings() {
 /// Foreign hooks' context notes are carried into the composed response,
 /// before a note the response already holds; no notes leaves it untouched.
 #[test]
-fn compose_context_appends_existing_note_after_foreign_ones() {
+fn compose_context_should_append_the_existing_note_when_foreign_notes_exist() {
     use serde_json::json;
     let response = json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "pixel"}});
     assert_eq!(compose_context(response.clone(), &[]), response);
@@ -622,7 +622,7 @@ fn compose_context_appends_existing_note_after_foreign_ones() {
 /// Shell segments split on the separators a shell honours, never inside
 /// quotes: `pixel search-content 'a|b'` stays one invocation.
 #[test]
-fn shell_segments_split_outside_quotes_only() {
+fn shell_segments_should_split_only_when_the_separator_is_unquoted() {
     assert_eq!(
         shell_segments("cd x && pixel search-content 'a|b' | head; echo \"x;y\"\nls"),
         vec![
@@ -641,7 +641,7 @@ fn shell_segments_split_outside_quotes_only() {
 /// absolute path, the side build's name and a `bash -lc` wrapper; the
 /// `PIXEL_METRICS=` value travels with it. A non-pixel command is none.
 #[test]
-fn pixel_invocation_resolves_launchers_paths_and_side_build() {
+fn pixel_invocation_should_be_found_when_behind_launchers_paths_or_wrappers() {
     let found = |cmd: &str| pixel_invocation(cmd);
     assert_eq!(
         found("sudo env PIXEL_METRICS=0 /opt/bin/pixel impact x"),
@@ -673,7 +673,7 @@ fn pixel_invocation_resolves_launchers_paths_and_side_build() {
 /// that take a value (`-C`, `-c`) and those that do not; a bare `git` names
 /// no subcommand.
 #[test]
-fn git_invocations_skip_global_flags_and_their_values() {
+fn git_invocations_should_skip_global_flags_when_finding_the_subcommand() {
     assert_eq!(
         git_invocations(
             "git -C /repo -c core.pager=cat --no-pager reset --hard; ls | git stash drop"
@@ -696,7 +696,7 @@ fn git_invocations_skip_global_flags_and_their_values() {
 /// `--force` and `-` are not clusters, and a cluster with punctuation is not
 /// read as flags.
 #[test]
-fn short_cluster_has_reads_only_real_clusters() {
+fn short_cluster_has_should_match_only_when_the_token_is_a_real_cluster() {
     for (token, c, expected) in [
         ("-fd", 'f', true),
         ("-Df", 'D', true),
@@ -716,7 +716,7 @@ fn short_cluster_has_reads_only_real_clusters() {
 /// merge-state exits that must stay open, and a reset to a branch that
 /// suggests `checkout -B` with the current branch name.
 #[test]
-fn destructive_tier_covers_long_delete_merge_and_branch_reset() {
+fn destructive_tier_should_deny_when_deleting_merging_or_resetting_to_a_branch() {
     let root = scratch("destructive");
     std::fs::create_dir_all(root.join(".git")).unwrap();
     std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/topic\n").unwrap();
@@ -773,7 +773,7 @@ fn destructive_tier_covers_long_delete_merge_and_branch_reset() {
 /// Relative refs and OIDs of every accepted length are data loss when reset
 /// to; names that only start like a ref, or are not all hex, are branches.
 #[test]
-fn branch_like_refs_exclude_relative_refs_and_every_oid_length() {
+fn is_branch_like_should_be_false_when_the_ref_is_relative_or_an_oid() {
     for (r, branch) in [
         ("HEAD@{2}", false),
         ("HEAD^2", false),
@@ -794,7 +794,7 @@ fn branch_like_refs_exclude_relative_refs_and_every_oid_length() {
 /// when that directory exists; quotes are stripped and relative paths
 /// resolve against the cwd.
 #[test]
-fn cd_and_git_c_targets_resolve_existing_directories_only() {
+fn cd_and_git_c_targets_should_resolve_only_when_the_directory_exists() {
     let root = scratch("cd-target");
     std::fs::create_dir_all(root.join("sub dir")).unwrap();
     std::fs::create_dir_all(root.join("other")).unwrap();
@@ -840,7 +840,7 @@ fn cd_and_git_c_targets_resolve_existing_directories_only() {
 /// A conflict reported by `pixel sync-branch` is the one escape hatch for
 /// raw `git rebase`; it exists exactly when its marker file does.
 #[test]
-fn reconcile_conflict_pending_follows_the_marker_file() {
+fn reconcile_conflict_should_be_pending_only_when_the_marker_file_exists() {
     let root = scratch("reconcile");
     assert!(!reconcile_conflict_pending(&root));
     std::fs::create_dir_all(root.join(".pixel/reconcile-conflict.json")).unwrap();
@@ -857,7 +857,7 @@ fn reconcile_conflict_pending_follows_the_marker_file() {
 /// and the sed/awk program; compound, looping, substituted or multi-file
 /// commands name no single target.
 #[test]
-fn single_reader_target_names_one_file_or_none() {
+fn single_reader_target_should_name_the_file_only_when_one_file_is_read() {
     let root = bypass_repo();
     let lib = root.join("src/lib.rs");
     for cmd in [
@@ -897,7 +897,7 @@ fn single_reader_target_names_one_file_or_none() {
 /// token and drop empty segments, so a quoted commit message can never open
 /// a phantom command.
 #[test]
-fn tokenizers_respect_quotes_and_drop_empty_segments() {
+fn tokenizers_should_keep_quoted_text_whole_when_it_holds_separators() {
     assert_eq!(
         simple_tokenize("  a 'b c' \"d'e\"  f"),
         strings(&["a", "b c", "d'e", "f"])
@@ -919,7 +919,7 @@ fn tokenizers_respect_quotes_and_drop_empty_segments() {
 /// Shell-safe text stays bare so roots read naturally; anything else is
 /// single-quoted with embedded quotes escaped, and empty text is `''`.
 #[test]
-fn shell_quote_leaves_safe_text_bare_and_escapes_the_rest() {
+fn shell_quote_should_leave_text_bare_only_when_it_is_shell_safe() {
     for (raw, quoted) in [
         ("/repo/a_b-c.d:e=f+g@h~i", "/repo/a_b-c.d:e=f+g@h~i"),
         ("", "''"),
@@ -935,7 +935,7 @@ fn shell_quote_leaves_safe_text_bare_and_escapes_the_rest() {
 /// reproduced: listing, counting, inverting, only-matching and max-count
 /// flags refuse the rewrite; a quote in the pattern is escaped.
 #[test]
-fn search_can_replace_refuses_output_changing_flags() {
+fn search_can_replace_should_refuse_when_a_flag_changes_the_output() {
     assert_eq!(
         search_can_replace("it's", &strings(&["-A"]), "/repo"),
         Some("pixel search-content 'it'\\''s' /repo --context 5".into())
@@ -963,7 +963,7 @@ fn search_can_replace_refuses_output_changing_flags() {
 /// `cd <dir> &&` moves the effective cwd and leaves the body; a `cd` without
 /// an unquoted `&&`, or no `cd` at all, leaves both untouched.
 #[test]
-fn strip_cd_prefix_moves_cwd_only_for_a_cd_and_chain() {
+fn strip_cd_prefix_should_move_cwd_only_when_cd_is_chained_with_and() {
     let cwd = Path::new("/w");
     assert_eq!(
         strip_cd_prefix("cd /abs && rg x", cwd),
@@ -984,7 +984,7 @@ fn strip_cd_prefix_moves_cwd_only_for_a_cd_and_chain() {
 /// `limit` or a start/end pair in either spelling; anything else is a
 /// whole-file read.
 #[test]
-fn bounded_read_accepts_only_stated_windows_up_to_200_lines() {
+fn bounded_read_should_hold_only_when_a_window_of_at_most_200_lines_is_stated() {
     use serde_json::json;
     for (input, bounded) in [
         (json!({"limit": 200}), true),
@@ -1007,7 +1007,7 @@ fn bounded_read_accepts_only_stated_windows_up_to_200_lines() {
 /// `head`/`tail` counts are bounded at 1..=200; awk programs that redirect,
 /// pipe or shell out are writes, not reads.
 #[test]
-fn head_counts_and_awk_writes_are_classified() {
+fn head_count_and_awk_write_should_be_classified_when_judging_reads() {
     for (count, bounded) in [
         ("1", true),
         ("200", true),
@@ -1042,7 +1042,7 @@ fn manifest(root: &Path, files: &[&str]) -> Manifest {
 /// orientation files and anything outside the scoped repo; any other path in
 /// the repo is outside the manifest.
 #[test]
-fn manifest_scoping_allows_targets_orientation_and_outside_paths() {
+fn manifest_scoping_should_allow_a_path_when_targeted_orientation_or_outside() {
     let root = scratch("scoping");
     std::fs::create_dir_all(root.join("src/parse")).unwrap();
     std::fs::create_dir_all(root.join("docs")).unwrap();
@@ -1078,7 +1078,7 @@ fn manifest_scoping_allows_targets_orientation_and_outside_paths() {
 /// The edit mandate exempts paths outside the indexed repo, Pixel's state
 /// and orientation files; source inside the repo is not exempt.
 #[test]
-fn edit_mandate_exempts_only_outside_state_and_orientation() {
+fn edit_mandate_should_exempt_a_path_only_when_outside_state_or_orientation() {
     let root = Path::new("/repo");
     for (path, exempt) in [
         ("/other/a.rs", true),
@@ -1099,7 +1099,7 @@ fn edit_mandate_exempts_only_outside_state_and_orientation() {
 /// (shortened to 70 characters) and the commands that refresh or end
 /// scoping.
 #[test]
-fn scoping_and_mandate_advisories_name_path_tasks_and_commands() {
+fn scoping_advisory_should_name_path_tasks_and_commands_when_out_of_scope() {
     let root = Path::new("/repo");
     let mut m = manifest(root, &["a.rs", "b.rs"]);
     m.tasks.push(TaskEntry {
@@ -1129,7 +1129,7 @@ fn scoping_and_mandate_advisories_name_path_tasks_and_commands() {
 
 /// Manifest file entries need a string path; the tier defaults to empty.
 #[test]
-fn manifest_files_need_a_path_and_default_the_tier() {
+fn manifest_files_should_be_kept_only_when_they_carry_a_path() {
     use serde_json::json;
     assert_eq!(
         parse_manifest_files(&[
@@ -1150,7 +1150,7 @@ fn manifest_files_need_a_path_and_default_the_tier() {
 /// listing, Antigravity included), read tools, and source extensions; a
 /// write, prose or config is none of them.
 #[test]
-fn tool_and_file_classes_are_closed_lists() {
+fn tool_and_file_classes_should_match_only_when_listed() {
     for tool in [
         "Grep",
         "grep",
@@ -1199,7 +1199,7 @@ fn tool_and_file_classes_are_closed_lists() {
 /// A result already showing the metrics box makes a relay a duplicate, in
 /// each host's result field; a result without it does not.
 #[test]
-fn metrics_box_is_detected_in_every_result_field() {
+fn metrics_box_should_be_detected_when_any_result_field_shows_it() {
     use serde_json::json;
     for key in ["tool_response", "tool_output", "toolResult"] {
         assert!(
@@ -1216,7 +1216,7 @@ fn metrics_box_is_detected_in_every_result_field() {
 /// The binary name is its last path component, and exactly one layer of
 /// matching outer quotes is stripped: `'a"` is not a quoted string.
 #[test]
-fn normalize_and_strip_helpers_are_exact() {
+fn normalize_and_strip_should_remove_one_layer_when_applied() {
     assert_eq!(normalize_bin("/usr/bin/grep"), "grep");
     assert_eq!(normalize_bin("grep"), "grep");
     assert_eq!(normalize_bin("dir/"), "");
@@ -1259,7 +1259,7 @@ fn policy_payload(tool: &str, input: Value, cwd: &Path) -> Value {
 /// the read reason (Devin's names its `exec` route), and a bounded read, a
 /// read outside the repository or a pathless read get none.
 #[test]
-fn enforce_reason_judges_discovery_and_unbounded_reads_by_tool() {
+fn enforce_reason_should_judge_discovery_and_unbounded_reads_when_the_repo_is_indexed() {
     use serde_json::json;
     let root = indexed_repo("enforce-tools");
     let lib = root.join("src/lib.rs");
@@ -1367,7 +1367,7 @@ fn enforce_reason_judges_discovery_and_unbounded_reads_by_tool() {
 /// repository without a shard (a bare `.pixel` is not an index), or a shell
 /// call that carries its own environment.
 #[test]
-fn enforce_reason_stays_out_of_unjudged_calls() {
+fn enforce_reason_should_stay_silent_when_the_call_is_not_policy_judged() {
     use serde_json::json;
     let root = indexed_repo("enforce-unjudged");
     let read =
@@ -1418,7 +1418,7 @@ fn enforce_reason_stays_out_of_unjudged_calls() {
 /// `CommandLine` and as a string or an argv array, reaches the same leaf
 /// judgement: `cat` of a repository file is a repository read.
 #[test]
-fn enforce_reason_reads_every_shell_tool_spelling() {
+fn enforce_reason_should_judge_the_command_when_any_shell_tool_spelling_is_used() {
     use serde_json::json;
     let root = indexed_repo("enforce-shells");
     for tool in [
@@ -1459,7 +1459,7 @@ fn enforce_reason_reads_every_shell_tool_spelling() {
 /// change or a wrapper word could move relative operands, and when the
 /// syntax is outside the bounded parser.
 #[test]
-fn enforce_shell_leaves_cd_wrappers_and_unparsed_syntax_native() {
+fn enforce_shell_should_stay_native_when_cd_wrappers_or_unparsed_syntax_appear() {
     let root = indexed_repo("enforce-compound");
     for command in [
         "cd src && cat lib.rs",
@@ -1485,7 +1485,7 @@ fn enforce_shell_leaves_cd_wrappers_and_unparsed_syntax_native() {
 /// Pixel equivalents, past global options and their values; any argument
 /// after the subcommand, another subcommand or no subcommand stays native.
 #[test]
-fn enforce_leaf_maps_bare_git_inspection_to_pixel() {
+fn enforce_leaf_should_name_the_pixel_command_when_git_inspection_is_bare() {
     let root = indexed_repo("enforce-git");
     let leaf = |words: &[&str]| enforce_leaf("", &strings(words), false, &root, &root, false);
     for (words, alternative) in [
@@ -1523,7 +1523,7 @@ fn enforce_leaf_maps_bare_git_inspection_to_pixel() {
 /// Listing is judged only with the listing flags the leaf understands, and
 /// a non-enforcing host judges `find` only in its `find DIR -name X` shape.
 #[test]
-fn enforce_leaf_listing_and_find_shapes() {
+fn enforce_leaf_should_judge_listing_and_find_only_when_the_shape_is_understood() {
     let root = indexed_repo("enforce-listing");
     let leaf = |words: &[&str], enforce: bool| {
         enforce_leaf("", &strings(words), false, &root, &root, enforce)
@@ -1557,7 +1557,7 @@ fn enforce_leaf_listing_and_find_shapes() {
 /// any expansion, redirection or chaining character disqualifies it, and so
 /// does any other program.
 #[test]
-fn static_echo_is_a_literal_echo_only() {
+fn static_echo_should_hold_only_when_the_echo_is_literal() {
     for (command, literal) in [
         ("echo ---", true),
         ("echo 'section two'", true),
@@ -1580,7 +1580,7 @@ fn static_echo_is_a_literal_echo_only() {
 /// non-empty window of at most 200 lines and a path that is neither a flag
 /// nor credential-shaped.
 #[test]
-fn bounded_sed_shape_accepts_only_the_exact_window_print() {
+fn bounded_sed_shape_should_match_only_when_the_window_print_is_exact() {
     for (command, shape) in [
         ("sed -n '1,200p' src/lib.rs", Some((1, 200, "src/lib.rs"))),
         ("rtk sed -n 5,9p a.rs", Some((5, 9, "a.rs"))),
@@ -1610,7 +1610,7 @@ fn bounded_sed_shape_accepts_only_the_exact_window_print() {
 /// Splitting at a separator ignores quoted separators and refuses an
 /// escape or an unterminated quote rather than guessing.
 #[test]
-fn split_unquoted_refuses_escapes_and_open_quotes() {
+fn split_unquoted_should_refuse_when_an_escape_or_open_quote_appears() {
     assert_eq!(
         split_unquoted("a|'b|c'|\"d|e\"", '|'),
         Some(vec!["a", "'b|c'", "\"d|e\""])
@@ -1625,7 +1625,7 @@ fn split_unquoted_refuses_escapes_and_open_quotes() {
 /// and refuses a bare `&`, a trailing operator, an empty stage or an open
 /// quote.
 #[test]
-fn safe_command_chain_splits_known_operators_only() {
+fn safe_command_chain_should_split_only_when_the_operators_are_known() {
     assert_eq!(
         split_safe_command_chain("pixel a; pixel b && echo x || pixel c 2>&1"),
         Some(vec!["pixel a", "pixel b", "echo x", "pixel c 2>&1"])
@@ -1653,7 +1653,7 @@ fn safe_command_chain_splits_known_operators_only() {
 /// plain pattern is not a path, and a missing relative path in a path role
 /// passes on its typed name.
 #[test]
-fn words_must_stay_inside_the_repository_when_they_name_paths() {
+fn word_should_stay_inside_the_repository_when_it_names_a_path() {
     let root = indexed_repo("word-in-repo");
     std::fs::write(root.join(".env"), "K=v\n").unwrap();
     let outside = scratch("word-outside");
@@ -1690,7 +1690,7 @@ fn words_must_stay_inside_the_repository_when_they_name_paths() {
 /// Only the bare names `pixel`/`pixel-dev`, or an absolute path that is this
 /// very executable, are Pixel; any other path is some other program.
 #[test]
-fn pixel_program_is_the_bare_name_or_this_executable() {
+fn pixel_program_should_match_only_when_bare_or_this_executable() {
     assert!(is_pixel_program("pixel"));
     assert!(is_pixel_program("pixel-dev"));
     assert!(!is_pixel_program("pixelate"));
