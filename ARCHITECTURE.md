@@ -654,7 +654,9 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   `scripts/homebrew-core-formula.py`), `homebrew-core.yml` (that formula
   built from source, `brew test`, `brew audit --strict --new`, on macOS and
   Linux),
-  `release-prepare-scope.yml` and `pages.yml` (the website).
+  `release-prepare-scope.yml`, `pages.yml` (the website) and `scorecard.yml`
+  (OpenSSF Scorecard on every push to `main` and weekly: publishes the score
+  to `api.scorecard.dev` and the findings to code scanning).
 - Local agent validation uses targeted checks during editing and the full
   gates once a reviewable unit is ready (CONTRIBUTING.md, "Agent validation
   workflow"). Background gates validate an unchanged checkout or a committed
