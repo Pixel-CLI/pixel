@@ -643,14 +643,16 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     pre-push and remote host, release prepare, Homebrew formula and Linux
     bottles, homebrew-core formula,
     nightly mutants, mutants
-    config, action pins, clean), the
+    config, action pins, advisory ignores, clean), the
     pixel-retro lead-time contract (`.agents/skills/pixel-retro/test_lead_time.py`)
     and the Bun Pi-policy contract (`scripts/test-pi-policy.mjs`);
   - **Lint**: `cargo clippy --all-targets` with warnings denied, then
     `cargo check` of the two reduced feature lanes (`--no-default-features`,
     `model2vec` only);
   - **MSRV**, **Ranking gates** (the NDCG@10 bench in test mode) and
-    **Dependency policy** (`cargo deny`).
+    **Dependency policy** (`cargo deny`, then
+    `scripts/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
+    reads, accepts the same advisories as `deny.toml`).
 - Other workflows: `mutants.yml` (the `Mutants in diff` gate on every pull
   request touching `crates/`, sharded), `mutants-nightly.yml` (a whole-tree
   rotation), `cross-build.yml` (the three release lanes), `release.yml`
