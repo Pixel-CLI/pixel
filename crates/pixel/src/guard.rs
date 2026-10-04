@@ -678,7 +678,18 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
     let base = payload
         .get("cwd")
         .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
         .map(PathBuf::from)
+        // Cursor sends `cwd: ""` on Shell calls and puts the repo in
+        // `workspace_roots` instead (observed on cursor-agent 2026.10.01).
+        .or_else(|| {
+            payload
+                .get("workspace_roots")
+                .and_then(Value::as_array)
+                .and_then(|roots| roots.first())
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+        })
         .or_else(|| std::env::current_dir().ok())?;
     Some(
         input
@@ -708,7 +719,7 @@ fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
         .get("hook_event_name")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if !is_guard_event(payload, event) || event == "PostToolUse" {
+    if !is_guard_event(payload, event) || event.eq_ignore_ascii_case("posttooluse") {
         return None;
     }
     let tool = payload.get("tool_name")?.as_str()?;
@@ -733,6 +744,8 @@ fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
         "Bash"
             | "bash"
             | "shell"
+            // Cursor's composer shell tool.
+            | "Shell"
             | "unified_exec"
             | "local_shell"
             | "exec_command"
@@ -1233,6 +1246,14 @@ fn policy_response(
                 "Pixel suggestion: {reason}. Original call proceeds."
             )))
         }
+        // Cursor's preToolUse injects `additional_context` (documented on
+        // the deny path, accepted on pass-through); its own permissions
+        // stay authoritative — advisory only.
+        PolicyMode::Advisory if provider == Provider::Cursor => Some(serde_json::json!({
+            "additional_context": format!(
+                "Pixel suggestion: {reason}. Original call proceeds."
+            )
+        })),
         _ => None,
     }
 }
@@ -2653,7 +2674,7 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     // into a *delivered fact*: the PreToolUse doctrine says "run pixel impact
     // before editing a symbol", butthe bench shows agents don't. Here the
     // dependants arrive after the edit, unsolicited.
-    if event == "PostToolUse" {
+    if event.eq_ignore_ascii_case("posttooluse") {
         post_tool_use_blast_radius(&anchor, idx_root.as_deref(), tool);
         std::process::exit(0);
     }
@@ -2788,17 +2809,26 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
 }
 
 /// Accept Claude Code's/Codex's/Devin's/zcode's `PreToolUse`, Gemini's
-/// `BeforeTool`, and Cursor's `preToolUse` hook events. Cursor's payload
-/// carries no `hook_event_name` field at all (verified against the
-/// installed `cursor-agent` bundle: the `preToolUse` handler builds its
-/// hook-script stdin from exactly `{conversation_id, generation_id, model,
-/// tool_name, tool_input, tool_use_id, cwd}` — no event-name key) because
+/// `BeforeTool`, and Cursor's `preToolUse` hook events. Older cursor-agent
+/// builds sent no `hook_event_name` field at all (the `preToolUse` handler
+/// built the hook-script stdin from exactly `{conversation_id, generation_id,
+/// model, tool_name, tool_input, tool_use_id, cwd}`); cursor-agent 2026.10.01
+/// was observed sending `hook_event_name: "preToolUse"` verbatim — so the
+/// camelCase name is also accepted above. Either way
 /// pixel is only ever wired into Cursor's `preToolUse` array, so the event
 /// is already implicit from which array invoked us. Treat the payload
 /// shape itself (`tool_name` + `tool_input` present, no explicit event
 /// name) as an implicit PreToolUse.
 fn is_guard_event(payload: &Value, event: &str) -> bool {
-    if event == "PreToolUse" || event == "BeforeTool" || event == "PostToolUse" {
+    // Cursor >=2026.10 sends camelCase `preToolUse`/`postToolUse` in
+    // `hook_event_name` (observed live, cursor-agent 2026.10.01); older
+    // builds omit the field entirely, which is the implicit-shape arm below.
+    if event == "PreToolUse"
+        || event == "BeforeTool"
+        || event == "PostToolUse"
+        || event == "preToolUse"
+        || event == "postToolUse"
+    {
         return true;
     }
     event.is_empty() && payload.get("tool_name").is_some() && payload.get("tool_input").is_some()
@@ -3086,6 +3116,17 @@ fn result_carries_metrics_box(payload: &Value) -> bool {
     })
 }
 
+/// The provider-shaped envelope for a replayed metrics line: Cursor's
+/// postToolUse contract is flat snake_case `additional_context`; every
+/// other host takes the Claude-style advisory shape.
+fn metrics_relay_response(provider: Option<Provider>, line: &str) -> Value {
+    if provider == Some(Provider::Cursor) {
+        serde_json::json!({"additional_context": line})
+    } else {
+        post_tool_use_advisory(line)
+    }
+}
+
 /// The hook's answer. A box missing from the result is replayed as
 /// `additionalContext` for every provider. A box already in the result is a
 /// duplicate for the model, so it is dropped, except for Claude Code: its
@@ -3095,15 +3136,7 @@ fn result_carries_metrics_box(payload: &Value) -> bool {
 /// silent dedupe.
 fn metrics_hook_response(provider: Option<Provider>, payload: &Value) -> Option<Value> {
     if !result_carries_metrics_box(payload) {
-        return metrics_hook_line(payload).map(|line| {
-            if provider == Some(Provider::Cursor) {
-                // Cursor's postToolUse contract is flat snake_case; the
-                // Claude-style advisory shape is not mapped for this event.
-                serde_json::json!({"additional_context": line})
-            } else {
-                post_tool_use_advisory(&line)
-            }
-        });
+        return metrics_hook_line(payload).map(|line| metrics_relay_response(provider, &line));
     }
     (provider == Some(Provider::Claude))
         .then(|| metrics_record_line(payload))
@@ -5317,6 +5350,36 @@ mod tests {
     }
 
     #[test]
+    fn cursor_advises_with_flat_additional_context_without_blocking() {
+        let (root, source) = indexed_large_source("cursor-advisory-read");
+        // The real cursor-agent 2026.10 payload: camelCase event name,
+        // `cwd: ""`, repository in `workspace_roots`.
+        let payload = serde_json::json!({
+            "hook_event_name": "preToolUse",
+            "tool_name": "Shell",
+            "tool_input": {"command": format!("cat {}", source.display())},
+            "cwd": "",
+            "workspace_roots": [root],
+        });
+
+        let response = policy_response(
+            Provider::Cursor,
+            &payload,
+            crate::config_cmd::PolicyMode::Advisory,
+        )
+        .expect("advisory mode still injects guidance for Cursor");
+        let context = response["additional_context"]
+            .as_str()
+            .expect("Cursor contract is flat additional_context");
+        assert!(context.contains("Pixel suggestion:"), "{context}");
+        assert!(context.contains("Original call proceeds"), "{context}");
+        assert!(response.get("permission").is_none());
+        assert!(response.get("hookSpecificOutput").is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn devin_allows_bounded_large_repository_reads_without_advisory() {
         let (root, source) = indexed_large_source("devin-bounded-read");
         for range in [
@@ -5719,6 +5782,48 @@ mod tests {
         // shape must NOT be treated as a guard event.
         let unrelated = serde_json::json!({"foo": "bar"});
         assert!(!is_guard_event(&unrelated, ""));
+    }
+
+    #[test]
+    fn accepts_cursor_payload_with_camelcase_event_name() {
+        // cursor-agent 2026.10.01 was observed sending
+        // `hook_event_name: "preToolUse"` (camelCase) — a value the
+        // earlier allowlist silently dropped, disabling the guard.
+        let payload = serde_json::json!({
+            "hook_event_name": "preToolUse",
+            "tool_name": "Shell",
+            "tool_input": {"command": "ls"},
+            "cwd": ""
+        });
+        assert!(is_guard_event(&payload, "preToolUse"));
+        // The postToolUse variant must be a guard event for the gate but is
+        // still skipped by the event.eq_ignore_ascii_case("posttooluse")
+        // checks in the response paths.
+        assert!(is_guard_event(&payload, "postToolUse"));
+    }
+
+    #[test]
+    fn cursor_empty_cwd_falls_back_to_workspace_roots() {
+        // Observed on cursor-agent 2026.10.01: Shell preToolUse payloads
+        // carry `cwd: ""` and put the repository in `workspace_roots`.
+        let payload = serde_json::json!({
+            "cwd": "",
+            "workspace_roots": ["/repo/from/cursor"]
+        });
+        let input = serde_json::json!({"command": "ls", "cwd": ""});
+        assert_eq!(
+            provider_cwd(&payload, &input),
+            Some(PathBuf::from("/repo/from/cursor"))
+        );
+        // A non-empty payload cwd still wins over workspace_roots.
+        let payload = serde_json::json!({
+            "cwd": "/real/cwd",
+            "workspace_roots": ["/repo/from/cursor"]
+        });
+        assert_eq!(
+            provider_cwd(&payload, &input),
+            Some(PathBuf::from("/real/cwd"))
+        );
     }
 
     #[test]
@@ -7016,6 +7121,26 @@ mod tests {
         );
         assert_eq!(response["additional_context"], response["agent_message"]);
         assert!(response.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn metrics_relay_response_switches_on_the_cursor_contract() {
+        let advisory = post_tool_use_advisory("line");
+        assert_eq!(
+            metrics_relay_response(Some(Provider::Cursor), "line"),
+            serde_json::json!({"additional_context": "line"})
+        );
+        // Every non-Cursor provider — including the None fallback — keeps
+        // the Claude-style advisory envelope; a flipped comparison here
+        // would hand Cursor a shape it cannot read and vice versa.
+        for provider in [
+            None,
+            Some(Provider::Claude),
+            Some(Provider::Codex),
+            Some(Provider::Devin),
+        ] {
+            assert_eq!(metrics_relay_response(provider, "line"), advisory);
+        }
     }
 
     #[test]
