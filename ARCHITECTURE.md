@@ -623,6 +623,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   release into runner temporary storage and optionally prepares indexes without a
   daemon. `setup-pixel.yml` smoke-tests real releases on Linux x64/ARM64 and
   macOS ARM64; `scripts/test-setup-pixel.py` checks installer failure contracts.
+- After publication, `release.yml`'s `virustotal` job submits the three
+  release archives to VirusTotal and appends a link to each report (by
+  sha256) to the release notes; without the `VT_API_KEY` secret it only emits
+  a notice.
 
 - Unit tests live next to the code in each crate. `pixel-daemon` tests build
   small git fixtures in a temp dir and call `Service::handle` directly.
