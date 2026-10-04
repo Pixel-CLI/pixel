@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `GraphStore::symbols_by_name` with a scope: the store-level contract that
 //! `pixel evaluate --in` rests on.
 //!

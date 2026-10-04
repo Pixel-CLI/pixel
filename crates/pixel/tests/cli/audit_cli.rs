@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel audit` through the binary: every row it prints is the one a user
 //! re-derives with `pixel list-signatures <file>` and `wc -c`, which is the
 //! promise the report's footer makes.

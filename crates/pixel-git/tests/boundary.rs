@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The git boundary: `pixel-git` is the only crate that spawns `git` in
 //! production code, and inside it only `runner.rs` does. Every other crate —
 //! and every other module of `pixel-git` — goes through `GitRunner`, so

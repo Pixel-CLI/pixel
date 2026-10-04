@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! pixel-flow — deterministic browser flow runtime for LLM agents.
 //!
 //! Saves, retrieves, lists, revises, and runs proven agent-browser paths

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Tracked state for `pixel plan`: `.pixel/plan.json`.
 //!
 //! A plan run produces findings; the state file turns them into a checklist

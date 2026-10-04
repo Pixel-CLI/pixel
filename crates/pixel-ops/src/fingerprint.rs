@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! File fingerprinting — byte-exact port of usable-git's
 //! `src/git/status.ts` (porcelain v2 parsing) + `src/git/fingerprint.ts`
 //! (the fingerprint hash itself).

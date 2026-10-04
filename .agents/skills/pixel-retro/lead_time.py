@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Lead time of the pixel repository's own pull requests, from Claude Code transcripts.
 
 Usage: python3 lead_time.py <window> [--projects DIR]... [--no-gh] [--json]

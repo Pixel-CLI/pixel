@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel run-hook prompt-submit` — bounded task context and independent boundary detection.
 //!
 //! Fires on every `UserPromptSubmit` hook event. Embeds the new prompt and

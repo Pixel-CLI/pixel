@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `excavate.rs` — history-wide discovery ("rescue v2"). Returns candidates
 //! as (commit, path, hunk span) INCLUDING deleted files (`status='D'` rows
 //! carry removed text). `last_good` = newest commit where the path exists with

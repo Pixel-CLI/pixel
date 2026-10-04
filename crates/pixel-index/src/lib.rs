@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! pixel-index — sparse n-gram text index for the pixel sidecar.
 //!
 //! Phase 0 surface: gram extraction (`gram`), window weighting (`weights`),

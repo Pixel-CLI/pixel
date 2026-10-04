@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `diff` — structured diff between two refs or working tree.
 
 use std::path::Path;

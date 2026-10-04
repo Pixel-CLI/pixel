@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Edit AGENTS.md (cwd) managed pixel block. Args: mode(strip|replace) [body-file]"""
 import sys
 

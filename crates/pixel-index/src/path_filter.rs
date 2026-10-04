@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The path filter behind `pixel search-content -g/--glob` and `-t/--type`:
 //! which repo-relative paths a search keeps. It lives in the index so the
 //! daemon's search applies it to the candidate files before paging, the

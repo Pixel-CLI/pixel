@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Agent-config rewrite helpers for `pixel install` / `pixel migrate`.
 //!
 //! Finds the Claude/agent config files (CLAUDE.md, AGENTS.md, settings.json),

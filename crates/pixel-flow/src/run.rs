@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Run engine — emit ready-to-run agent-browser commands from a flow.
 
 use std::collections::HashMap;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The pre-rename command names stay accepted until 1.0.
 //!
 //! The clean-break rename (08268b0) broke every consumer that tracked

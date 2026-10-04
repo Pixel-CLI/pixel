@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # pixel smoke test — exercises the INSTALLED pixel end to end: CLI surface,
 # the guard hook's advisory contract across agent tool names, session-start,
 # doctor, the install surface, the help of the mandatory workflows, and the

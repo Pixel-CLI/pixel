@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The discovery loop: observe the page, ask one question, act, record.
 //!
 //! One decision per cycle, whose options are the operation-target pairs the

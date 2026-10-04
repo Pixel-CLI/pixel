@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `run-recipe --kind locate`: one call that resolves a phrase, shows the
 //! context of what it singles out, lists the test files among the callers,
 //! and says how far the answer gets, the same through the daemon and in

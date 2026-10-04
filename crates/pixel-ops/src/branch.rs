@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `branch` — create a new branch from the current HEAD and switch to it.
 //!
 //! Switching is not optional: without it, a caller that creates a branch and

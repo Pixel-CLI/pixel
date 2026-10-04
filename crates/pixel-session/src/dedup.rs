@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Message normalization + stable dedup hashing.
 //!
 //! Dedup identity: `sha256(surface + kind + normalize(message) + top3AppFrames)`.

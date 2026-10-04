@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Pi agent adapter: `<agent dir>/sessions/<encoded-cwd>/*.jsonl`, where the
 //! agent dir is `$PI_CODING_AGENT_DIR` or `~/.pi/agent`.
 //! Records are flat `{type, timestamp, ...}` lines — `session` carries the

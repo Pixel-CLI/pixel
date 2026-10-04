@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: Cancel stale runs
 
 # A merged (or closed) pull request cannot benefit from the validations

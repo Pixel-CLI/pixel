@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Immutable on-disk gram shard.
 //!
 //! Single-file format, mmapped read side, atomic publish (tmp + fsync +

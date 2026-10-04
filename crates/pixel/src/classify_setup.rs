@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The classify-engine install step and configuration.
 //!
 //! `pixel install` proposes the classify engine — local (the Ollaya decision

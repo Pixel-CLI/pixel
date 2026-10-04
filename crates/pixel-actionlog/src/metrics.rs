@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Workflow estimator v2. These are policy assumptions, not measured averages:
 //! 4 KiB per distinct returned evidence file and 1 KiB per native command or
 //! returned relationship inspected. Known evidence bytes replace file assumptions.

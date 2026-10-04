@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 // The website's identity (website/assets/css/main.css), so the animations
 // read as part of the same page: forest-green ground, coral for what an
 // agent wastes, green for what Pixel hands back, Handjet for display text.

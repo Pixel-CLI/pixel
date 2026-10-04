@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Tests for literal-call extraction and private native-command receipts."""
 import hashlib
 import importlib.util

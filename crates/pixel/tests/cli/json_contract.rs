@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! CLI output contract for `--json`.
 //!
 //! Agents parse `pixel … --json` stdout with a JSON parser. The contract

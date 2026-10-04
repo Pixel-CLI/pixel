@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel check-release`: exit code and output contract against a fixture
 //! workspace. The checks themselves are unit-tested in the `pixel-release`
 //! crate; this pins what the release workflow relies on:

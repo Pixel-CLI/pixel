@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """How agents actually retrieve in Pixel-indexed repositories, from their transcripts.
 
 Usage: python3 adherence.py <window> [--projects DIR]... [--codex DIR] [--all-repos] [--json]

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Strict source manifests and private copies used by task verification.
 
 use std::collections::{BTreeMap, BTreeSet};

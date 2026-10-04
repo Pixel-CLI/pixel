@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Many blobs through one `git cat-file --batch` process.
 //!
 //! [`GitRunner::show_blob`] spawns one git per blob, and a caller that also

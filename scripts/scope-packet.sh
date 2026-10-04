@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Reproduces the task packet the Pixel arm of the Problem chapter's recording
 # received (docs/bench/problem-trace.md), and prints it with the index size.
 #

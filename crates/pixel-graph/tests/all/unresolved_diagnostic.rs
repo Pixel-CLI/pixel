@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Human-run diagnostic over `unresolved_calls` in a built graph db.
 //!
 //! The epistemic envelope says *that* N call sites went unresolved; it does

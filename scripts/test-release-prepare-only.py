@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/release-prepare-only.py: CI skips its gates on a
 release-prepare pull request only when the diff is what prepare.sh writes.
 

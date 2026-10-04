@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `review-gate` — a deterministic pre-review pass over the working-tree
 //! diff, or the branch merge-base diff on a feature branch.
 //!

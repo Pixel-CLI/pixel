@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use super::*;
 
 fn task_entry(id_src: &str, created: u64, path: &str) -> Value {

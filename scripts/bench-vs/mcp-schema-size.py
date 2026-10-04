@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Measure what an MCP server costs in context before it answers anything.
 
 Drives a real stdio handshake (initialize -> notifications/initialized ->

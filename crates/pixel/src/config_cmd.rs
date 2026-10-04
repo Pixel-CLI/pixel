@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel config` — persistent layered settings.
 //!
 //! The `metrics` key controls whether the live 🟩 footer is emitted on

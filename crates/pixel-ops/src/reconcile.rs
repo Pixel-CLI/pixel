@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `reconcile` — Engine 4: one-call deterministic branch sync.
 //!
 //! Eliminates OID transcription: the snapshot inside the lock supplies all

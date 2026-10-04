@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::sync::{Arc, Barrier};

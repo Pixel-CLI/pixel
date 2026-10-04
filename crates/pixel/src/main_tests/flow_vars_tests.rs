@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use super::*;
 
 /// The `--account` shortcut picks the account variable the flow itself

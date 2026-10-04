@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel_index::plan::plan_pattern` against the matcher that verifies it.
 //!
 //! A search pattern comes from whoever calls `pixel search-content` (an

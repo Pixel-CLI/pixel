@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel evaluate`: the snapshot contract, the resolution policy and the
 //! statuses they produce.
 //!

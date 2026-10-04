@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Shared cache for commit-anchored base shards.
 //!
 //! Git worktrees at the same commit produce byte-identical base shards (the

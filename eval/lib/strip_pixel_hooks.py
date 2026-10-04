@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Stdin: Claude settings JSON. Stdout: same JSON with every pixel-ish hook entry removed."""
 import json, sys
 

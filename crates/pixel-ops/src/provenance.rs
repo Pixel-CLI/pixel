@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `provenance` — per-region blame attribution for a single file.
 //!
 //! Answers "who introduced this?" / "was this touched by me or already like

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The decision seam: one bounded question, one answer.
 //!
 //! Production answers through `pixel classify` — a remote chat completion

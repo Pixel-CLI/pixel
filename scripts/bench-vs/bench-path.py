@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Call-path finding: `pixel call-path` vs `gitnexus trace`.
 
 Each case is a (caller, callee) pair whose call site was located in the source

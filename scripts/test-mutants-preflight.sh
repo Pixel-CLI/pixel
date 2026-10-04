@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Contract for the fast mutation-exposure preflight, using a disposable repo
 # and a fake cargo so no mutation campaign or build runs.
 set -eu

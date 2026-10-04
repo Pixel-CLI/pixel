@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Test doubles for the two seams: the decision engine and the browser.
 //!
 //! Both answer from a queue, so every arm of the loop is reachable without

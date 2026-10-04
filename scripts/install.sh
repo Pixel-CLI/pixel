@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # pixel install script — downloads the latest release binary from GitHub.
 # Usage: curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 # (published as an asset of every release; main may be ahead of the latest release)

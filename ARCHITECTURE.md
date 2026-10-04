@@ -648,6 +648,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 - CI (`.github/workflows/ci.yml`) classifies the diff first, so a job whose
   paths did not change skips its steps, then runs in parallel:
   - **Test + Format**: action-pin verification (`scripts/verify-action-pins.py`),
+    the SPDX header check (`scripts/check-spdx.py`, on every diff),
     `cargo fmt --check`, `cargo nextest run --profile ci`
     (`.config/nextest.toml`: one process per test, retry once but fail on
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
@@ -656,7 +657,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     pre-push and remote host, release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
     nightly mutants, mutants
-    config, action pins, advisory ignores, clean, cancel-stale sweep, harness-grid dispatch input,
+    config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
     reproducible release build environment), the
     pixel-retro lead-time and adherence contracts
     (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`)

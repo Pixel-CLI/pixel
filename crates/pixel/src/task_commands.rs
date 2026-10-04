@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Commands for durable task evidence; legacy Claude packet commands remain compatible.
 
 use std::io::{IsTerminal, Write};

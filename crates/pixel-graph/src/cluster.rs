@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Clustering — label propagation over an undirected symbol adjacency
 //! (calls ∪ has_method ∪ symbol-level imports ∪ file-import projection),
 //! persisted to `clusters`/`cluster_members`.

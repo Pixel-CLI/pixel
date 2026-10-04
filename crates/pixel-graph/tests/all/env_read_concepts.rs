@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `env_read` concepts: the literal environment-variable names Rust code
 //! reads, extracted, stored with their owner, resolved by name, and kept
 //! current by an incremental update.

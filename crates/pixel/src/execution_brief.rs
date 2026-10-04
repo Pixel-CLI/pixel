@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Deterministic, bounded projection of `scope-task` evidence for agents.
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The web-search provider install step and configuration.
 //!
 //! `pixel install` (through the interactive global setup) and `pixel config

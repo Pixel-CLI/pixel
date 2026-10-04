@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of adherence.py: which call counts as what, and which numbers come out.
 
 Its numbers decide whether a hook, prompt or routing change moved agent

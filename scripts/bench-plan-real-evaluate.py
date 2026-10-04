@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Evaluate frozen routers on independently annotated, captured real requests."""
 import argparse
 import hashlib

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Run one Codex control and one Pixel-enabled Codex candidate side by side.
 # Both arms start from detached worktrees at the same committed revision.
 set -euo pipefail

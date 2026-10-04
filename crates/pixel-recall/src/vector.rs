@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! i8-quantized vector segments with exact brute-force KNN.
 //!
 //! Same publish discipline as the text shards (magic/version header,

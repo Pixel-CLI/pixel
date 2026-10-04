@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Repository identity — one canonical key per repository.
 //!
 //! The repository lock and the operation journal must agree on what "this

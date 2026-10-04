@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/homebrew-formula.py, the step release.yml runs to write
 the Homebrew formula and the Linux bottles, checked without a tag.
 

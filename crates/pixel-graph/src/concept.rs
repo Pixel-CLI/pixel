@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Engine 1 — concept extraction + normalization.
 //!
 //! A second "concept pass" alongside `extract::extract_file`: it produces

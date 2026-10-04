@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Ref-injection defense, ported from `pixel-cli`'s `rescue_cmd::validate_ref`
 //! (the strictest of the three original checks) so every consumer of
 //! `pixel-git` gets the same guarantee consistently, instead of each call

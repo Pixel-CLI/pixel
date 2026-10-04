@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Decide whether a `Mutants` run actually gated anything, and say so.
 
 `cargo mutants --in-diff` exits 0 both when every mutant was caught and when

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Repository lock — serialize mutations per repository.
 //!
 //! Port of usable-git's `repository-lock.ts`. Uses a directory + owner.json

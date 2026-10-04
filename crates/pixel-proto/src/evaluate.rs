@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Wire contract of `pixel evaluate`: bounded predicate evaluation with a witness.
 //!
 //! Every answer is one JSON object, a tagged union on `kind`:

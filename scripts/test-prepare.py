@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of .agents/skills/release/prepare.sh: the pull requests it lists.
 
 Runs the real script inside a disposable workspace repository with stub

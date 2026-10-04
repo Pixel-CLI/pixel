@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: Cross-build
 
 # The release lanes, built exactly as release-build.yml builds them: musl through

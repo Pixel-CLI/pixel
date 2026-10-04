@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Bulk export of ingested sessions to one file per session (md/jsonl).
 //!
 //! Exports what the corpus already holds — never re-reads raw agent stores.

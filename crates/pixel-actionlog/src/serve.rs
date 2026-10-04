@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! How an invocation's requests reached an answer: through a running daemon,
 //! through one it had to start, or in its own process — and where the time
 //! went on the way. A slow line in `actions.jsonl` is only diagnosable when

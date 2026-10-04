@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Fixture-based correctness tests for Engine 3 (activity + session +
 //! error-sink rerank signals). These exercise real inputs — a real git repo
 //! with backdated commits, realistic session-event timelines, realistic

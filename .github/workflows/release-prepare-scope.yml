@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: Release-prepare scope
 
 # Decides whether this run is a release-prepare pull request into main,

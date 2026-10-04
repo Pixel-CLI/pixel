@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! NDCG@10 relevance benchmark for pixel search, measured over a real
 //! labeled query set on this workspace's `pixel-graph` crate.
 //!

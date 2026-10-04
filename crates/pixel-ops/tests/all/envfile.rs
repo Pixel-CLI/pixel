@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration tests for the `envfile` op — additive-only .env mutations.
 //!
 //! The hard invariant under test throughout: NO serialized output, error

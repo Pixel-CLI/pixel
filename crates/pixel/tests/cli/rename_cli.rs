@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel rename` end-to-end: a real subprocess against a real repo fixture.
 //! The assertions read the files back off disk — JSON shape alone would not
 //! prove the rewrite happened.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use super::{parse_dscl_user_shell, parse_passwd_shell, resolve_shell_from};
 
 /// The order is override, account, `$SHELL`: an agent's tool shell in

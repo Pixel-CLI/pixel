@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! pixel-daemon — transport-agnostic service (`api`) and the Unix-socket
 //! NDJSON daemon with fs watching (`daemon`).
 

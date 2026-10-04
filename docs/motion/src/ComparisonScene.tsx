@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 import {AbsoluteFill, useCurrentFrame} from 'remotion';
 import {C, F, PX} from './theme';
 import {Badge, Defs, dotX, halo, LocalMark, LoopArrow, Node, NodeSpec, Panel, Rail, RailProgress, TravelDot} from './parts';

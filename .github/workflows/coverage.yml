@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Coverage: runs the workspace test suite under cargo-llvm-cov (source-based
 # LLVM coverage) and writes the line and region totals, then one row per
 # crate, to the job summary. The OpenSSF Best Practices silver criterion

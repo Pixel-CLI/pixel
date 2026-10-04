@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Query-layer behavior: what `pixel list-errors` reads back from the store.
 
 use std::fs;

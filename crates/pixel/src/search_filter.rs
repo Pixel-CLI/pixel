@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The ripgrep flags agents reach for on `pixel search-content`: `-g/--glob`,
 //! `-t/--type` and `-l/--files-with-matches`. Recorded Opus and Sonnet runs
 //! passed `--glob`, `--path` and `--file` and got a usage error, each costing

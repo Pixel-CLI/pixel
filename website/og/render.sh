@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Renders the share card, website/assets/og.png (1200x630, the ratio X,
 # LinkedIn and Slack draw), from og/card.html and the token wall's row of
 # data/read_savings.toml. Re-run it whenever that row changes: the card's

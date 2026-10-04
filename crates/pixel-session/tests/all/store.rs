@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Store integration tests: paths, permissions, dedup upsert, retention,
 //! self-heal, WAL concurrency.
 

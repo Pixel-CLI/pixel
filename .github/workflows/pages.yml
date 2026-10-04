@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: Pages
 
 # Builds website/ with Hugo and publishes it to GitHub Pages. The site reads

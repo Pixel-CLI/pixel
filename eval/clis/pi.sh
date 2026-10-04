@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Pi runner for the eval loop. Reads $WT $PROMPT $OUT. v1 limitation: pi's
 # pixel integration is a global extension (no per-arm config isolation yet),
 # so pi measures the installed state, not per-arm variants. Writes a single

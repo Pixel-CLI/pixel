@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use serde::{Deserialize, Serialize};
 
 /// How completely a source was searched for a query.

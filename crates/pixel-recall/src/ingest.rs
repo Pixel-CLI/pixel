@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Ingest orchestration: discover → classify → parse → store, one
 //! transaction per session, resumable by construction.
 

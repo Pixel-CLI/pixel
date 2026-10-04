@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Cursor CLI adapter:
 //! `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`.
 //! Records carry no timestamps at all — every turn gets the file's mtime

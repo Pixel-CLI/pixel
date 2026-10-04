@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! pixel-facts — M3 / Engine 2: history-wide fact & diff ingest, search,
 //! lifecycle, and rescue-v2 discovery. Owns `.pixel/history.db` plus trigram
 //! history segments, with a dedicated low-priority ingest thread that never

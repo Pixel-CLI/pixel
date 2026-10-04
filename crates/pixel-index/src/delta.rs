@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Delta-layer state sidecar (`.pixel/state.json`).
 //!
 //! Records which commit the base shard is pinned to, which commit the delta

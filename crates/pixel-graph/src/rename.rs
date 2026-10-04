@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel rename` — IDE-style symbol rename, graph-driven and tree-sitter
 //! verified.
 //!

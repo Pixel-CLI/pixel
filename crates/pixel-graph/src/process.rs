@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Process discovery — entry-point-seeded BFS traces over `calls` edges,
 //! persisted to `processes`/`process_steps` and readable back as summaries.
 

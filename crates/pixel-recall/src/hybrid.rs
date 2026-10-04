@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Reciprocal-rank fusion of the lexical and semantic channels.
 //!
 //! RRF needs no score calibration (trigram counts and cosine sims have

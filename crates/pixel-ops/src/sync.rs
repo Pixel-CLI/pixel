@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `sync` — explicit-refspec fetch (idempotent, outside journal transitions).
 
 use std::path::Path;

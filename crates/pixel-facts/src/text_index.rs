@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `text_index.rs` — candidate lookup in the trigram FTS5 indexes
 //! (`diff_fts` over hunk text, `path_fts` over changed paths).
 //!

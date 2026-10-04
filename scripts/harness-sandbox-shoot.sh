@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # harness-sandbox-shoot.sh — one command: sandbox up, latest pixel, four
 # harnesses shooting one natural prompt, four videos on the PR, live 2x2
 # grid, auto-attached.

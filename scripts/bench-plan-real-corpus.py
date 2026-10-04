@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Select a fixed real-request corpus from retained GitHub API captures."""
 import argparse
 import hashlib

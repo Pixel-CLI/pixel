@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Narrow a cargo-cyclonedx SBOM to what one release archive compiles.
 
     python3 scripts/release-sbom.py <raw.cdx.json> <cargo-tree.txt> <tag> <target> <out.cdx.json>

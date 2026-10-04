@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel space` contract: audit disk taken by `.pixel/` shards across a
 //! tree (table and `--json`), and `--delete --yes` remove them.
 

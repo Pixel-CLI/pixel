@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # harness-grid-movie.sh — ONE movie of the live 2x2 harness wall.
 #
 #   scripts/harness-grid-movie.sh [PR] [prompt]

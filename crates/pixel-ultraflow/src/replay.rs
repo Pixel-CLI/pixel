@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Replay: follow a saved flow, and decide its conditions with classify.
 //!
 //! This is the other half of the loop. Discovery writes a flow whose

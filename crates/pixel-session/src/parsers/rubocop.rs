@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Parser for RuboCop's default (progress/simple) formatter:
 //! `path:line:col: C: [Correctable] Cop/Name: message`, one line per
 //! offense, then `N files inspected, N offenses detected`.

@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 set -eu
 # Homebrew's prefix belongs to linuxbrew and is not readable by other users,
 # so that user runs both the formula install and the checks, as on a Mac

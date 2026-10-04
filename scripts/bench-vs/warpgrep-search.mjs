@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 // WarpGrep arm for bench-retrieval.py: one search, JSON on stdout.
 // usage: MORPH_API_KEY=... MORPH_SDK_DIR=<dir> node warpgrep-search.mjs "<query>" <repoRoot>
 // MORPH_SDK_DIR is where `npm install @morphllm/morphsdk` ran; the SDK stays

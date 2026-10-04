@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Pre-push mutants gate that runs the campaign off the laptop. The committed
 # three-dot diff is bundled to the gate host (default: ssh alias `a2`), which
 # checks it out, seeds the shared mutant-outcome cache and executes the same

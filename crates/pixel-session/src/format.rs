@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Compact human formatting for the CLI (the `--json` path bypasses this and
 //! serializes the query-layer structs directly).
 

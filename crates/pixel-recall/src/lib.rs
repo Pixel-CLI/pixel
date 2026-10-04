@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! pixel-recall — machine-wide LLM transcript retrieval corpus.
 //!
 //! Ingests every parseable CLI transcript store (Claude Code, Codex,

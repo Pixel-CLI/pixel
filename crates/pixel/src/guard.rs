@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel run-hook guard` — provider-aware, exact-subset search routing.
 //! Explicit providers preserve unsupported calls silently. The policy is
 //! advisory by default; `pixel config policy enforce` (or PIXEL_POLICY=enforce)

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Aggregate retrieval rows into the table used in the write-up.
 
 Every arm is reported on every metric; a case where an arm returned nothing

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Per-file tree-sitter extraction: symbols, call sites, import specs.
 //!
 //! Pragmatic node-kind walks per language family. Any grammar failure

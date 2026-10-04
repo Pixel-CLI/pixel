@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Arena entrypoint: per-arm repo preparation (indexing + codex wiring), then
 # the scored codex run. $ARM_TOOL selects the arm; $PROMPT/$OUT are the task.
 set -uo pipefail

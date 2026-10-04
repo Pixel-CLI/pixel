@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Generate impact/caller ground truth for the pixel-vs-GitNexus benchmark.
 
 Ground truth is deliberately mechanical and re-derivable: for a symbol with

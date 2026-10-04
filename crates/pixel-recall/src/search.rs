@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Lexical search over the turn corpus: trigram candidates from the
 //! segments, authoritative regex verification against `turns.text`.
 //!

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Import-spec → file resolution. Best-effort per language family;
 //! `None` is an acceptable answer (the import simply stays unresolved).
 

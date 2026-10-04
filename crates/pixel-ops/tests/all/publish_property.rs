@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Property-based test over `publish`, in the spirit of usable-git's
 //! `publish-property.test.ts`: instead of the crash matrix's 6 hand-picked
 //! cells, vary the fixture (which candidate files are pre-staged, which

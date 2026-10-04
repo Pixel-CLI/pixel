@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Extract narrow observed plan calls via Pixel recall, not transcript files."""
 import argparse
 import hashlib

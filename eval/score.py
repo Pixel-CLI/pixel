@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Score eval transcripts against scenario rubrics.
 
 Claude arms: stream-json (last `result` event carries the answer + metrics).

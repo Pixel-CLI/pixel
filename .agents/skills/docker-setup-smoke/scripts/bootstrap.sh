@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 set -eu
 case "$(uname -m)" in
     aarch64) target=aarch64-unknown-linux-musl ;;

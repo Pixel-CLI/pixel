@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Run the impact/blast-radius benchmark: pixel vs GitNexus, same cases.
 
 Both tools are asked the same question (upstream callers of a symbol, depth 3)

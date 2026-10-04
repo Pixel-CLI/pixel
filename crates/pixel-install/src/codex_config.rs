@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Codex integration through `~/.codex/config.toml`.
 //!
 //! Codex reads the `developer_instructions` key of its config file and

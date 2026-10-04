@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel ai-cli-readify` at the command line: the contract a caller sees.
 //!
 //! The command's job is to say what is true, so the tests here are about

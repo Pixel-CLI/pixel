@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Persistent async action log — a durable, append-only JSONL record of what
 //! pixel itself did on each invocation (command, outcome, error, duration),
 //! so a session can be self-assessed later without re-deriving it from

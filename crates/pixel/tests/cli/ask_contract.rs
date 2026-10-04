@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Repository ask's real CLI boundary; retrieval failures must never silently skip.
 #[cfg(feature = "model2vec")]
 #[test]

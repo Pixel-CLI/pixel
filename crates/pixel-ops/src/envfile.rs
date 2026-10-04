@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `envfile` — additive-only, key-level .env mutations with snapshots.
 //!
 //! Closes the gap the global rule keeps getting violated: env files must
