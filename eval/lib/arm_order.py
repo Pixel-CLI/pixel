@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Counterbalanced arm order for one (repetition, host/scenario) cell.
 
 Port of `armOrder` in eval/controlled.ts ("sha256-permutation-three-

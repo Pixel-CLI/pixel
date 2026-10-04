@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Held-out contract for ab-bugfix-global-excludes (copied in after the agent
 //! exits). Mirrors the test of the historical fix 2732fa2 through the public
 //! API; its own test binary, so setting GIT_CONFIG_GLOBAL races nothing.

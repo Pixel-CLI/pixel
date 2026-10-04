@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Read scenario fields for run.sh, and validate a scenario corpus.
 
   scenario.py get <scenario.json> <key> [default]   print one field ("" if absent)

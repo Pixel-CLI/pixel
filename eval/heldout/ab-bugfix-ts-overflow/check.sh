@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Held-out check for ab-bugfix-ts-overflow (pinned to e99939b, the parent of
 # the historical fix 313bb53). Runs in the agent's worktree after the agent
 # exits: adds a test target the agent never saw, then runs it and the

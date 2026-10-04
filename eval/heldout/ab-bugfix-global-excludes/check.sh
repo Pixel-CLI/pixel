@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Held-out check for ab-bugfix-global-excludes (pinned to 4aa6790, the parent
 # of the historical fix 2732fa2). Runs in the agent's worktree after the
 # agent exits: adds a test target the agent never saw, then runs it and the

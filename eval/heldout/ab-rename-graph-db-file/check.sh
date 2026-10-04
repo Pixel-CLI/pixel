@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Held-out check for ab-rename-graph-db-file. Runs in the agent's worktree
 # after the agent exits ($HELDOUT = this directory's copy).
 # Passes when: no whole-word GRAPH_DB_FILE is left in any tracked file

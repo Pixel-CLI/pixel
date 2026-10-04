@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Merge fields into a JSON sidecar (run.sh's per-run and campaign records).
 
   record.py <file.json> key=value ... key:=<json> ... key@=<file>

@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Held-out check for ab-feature-ts-units. Runs in the agent's worktree after
 # the agent exits: a test target the agent never saw, the crate's own unit
 # tests, and the two user-facing strings that list the units.

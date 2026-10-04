@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of the agent A/B harness (eval/run.sh, score.py, report.py), offline.
 
 No model is called. The whole pipeline runs against fixture CLIs

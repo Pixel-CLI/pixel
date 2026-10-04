@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Held-out contract for ab-bugfix-ts-overflow (copied in after the agent exits).
 //! Mirrors the tests of the historical fix 313bb53 through the public API.
 

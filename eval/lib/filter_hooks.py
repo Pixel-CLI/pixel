@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Filter the pixel entries of a hooks document for one arm.
 
 Stdin: a Claude `settings.json` / `settings.local.json` or a Codex

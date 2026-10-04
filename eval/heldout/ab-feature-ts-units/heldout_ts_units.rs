@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Held-out contract for ab-feature-ts-units (copied in after the agent exits).
 
 use pixel_session::query::parse_duration_ms;

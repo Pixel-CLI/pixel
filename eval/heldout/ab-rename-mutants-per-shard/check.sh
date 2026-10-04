@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Held-out check for ab-rename-mutants-per-shard. Runs in the agent's
 # worktree after the agent exits ($HELDOUT = this directory's copy).
 # Passes when no whole-word MUTANTS_PER_SHARD is left in any tracked file,

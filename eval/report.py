@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Turn results/scores.json into the host × task-class verdict against baseline.
 
   report.py --results eval/results [--baseline baseline] [--tie-margin 0.05] [--json out.json]
