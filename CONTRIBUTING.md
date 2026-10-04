@@ -8,6 +8,9 @@ checklist as the contract for your pull request.
 
 - Architecture, crate map, wire contract: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Security model and vulnerability reporting: [SECURITY.md](SECURITY.md)
+- How we treat each other, and how to report a problem: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Where the project is heading, and what it will not do:
+  [ROADMAP.md](ROADMAP.md)
 - Agent rules for this repo, whatever the tool: [AGENTS.md](AGENTS.md) (the
   loops) and [`.agents/rules/`](.agents/rules/) (scoped rules: mutation-gate-proof
   code, test hygiene, long campaigns, the lint idioms) and [`.agents/skills/`](.agents/skills/)
@@ -732,6 +735,13 @@ cancelled CI run per pull request (#550). A link written in the text, or a
 number opening the slug, is kept as written. The file
 holds the entry's text and nothing else, without the leading `-`. A second
 file is a second entry.
+
+A `security` fragment may link an advisory under
+`https://github.com/Pixel-CLI/pixel/security/advisories/GHSA-…` instead of a
+public pull request: importing a private advisory patch produces no public
+PR number. Keep that URL in the entry even while the advisory is a draft;
+publish and verify the advisory after the corrected release is available.
+Other sections still require the pull request reference.
 
 A `security` fragment may link an advisory under
 `https://github.com/Pixel-CLI/pixel/security/advisories/GHSA-…` instead of a
