@@ -336,8 +336,7 @@ fn task_route_should_give_inference_its_full_budget_after_the_reservation() {
     );
     assert!(
         !result["classifier"].is_null(),
-        "a 280ms answer must fit the 300ms inference budget: {}",
-        result
+        "a 280ms answer must fit the 300ms inference budget: {result}"
     );
     assert_eq!(result["recommended"], "prepare");
     assert_eq!(server.count.load(Ordering::SeqCst), 1);
