@@ -820,7 +820,9 @@ fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
         // `view` is Copilot CLI's file-read tool (its camelCase payload is
         // normalized to `tool_name="view"` upstream). Like the other reads,
         // an unbounded in-repo read is a policy denial.
-        "read" | "view" | "view_file" | "notebook_read" if path.is_some() && !bounded_read(input) => {
+        "read" | "view" | "view_file" | "notebook_read"
+            if path.is_some() && !bounded_read(input) =>
+        {
             Some(REPO_READ_REASON.into())
         }
         _ => None,
