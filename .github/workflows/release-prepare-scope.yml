@@ -6,9 +6,9 @@ name: Release-prepare scope
 # deleted fragments). The branch name alone would let any code change
 # skip the gates. Any other event, or a failed check, keeps every job.
 #
-# Called by ci.yml, mutants.yml and cross-build.yml as their `scope` job:
-# one definition, so the three workflows cannot disagree on what a
-# release-prepare pull request is.
+# Called by ci.yml, mutants.yml, cross-build.yml and homebrew-core.yml as
+# their `scope` job: one definition, so the workflows cannot disagree on what
+# a release-prepare pull request is.
 on:
   workflow_call:
     outputs:
