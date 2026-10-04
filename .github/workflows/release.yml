@@ -72,13 +72,26 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+  # Dynamic analysis before anything is built: every cargo-fuzz target for
+  # 120 s on the tagged commit (fuzz.yml, the same job as the weekly run).
+  # A crash fails it and `assets` never starts; the reproducer is the run's
+  # `fuzz-artifacts-*` artifact.
+  fuzz:
+    name: Fuzz
+    needs: verify
+    permissions:
+      contents: read
+    uses: ./.github/workflows/fuzz.yml
+    with:
+      seconds: "120"
+
   # Build, package and attest in a reusable workflow: the attestation names
   # release-build.yml as its signer, which is what SLSA Build Level 3 asks of
   # the build (see that file). This job only grants it the signing
   # permissions; no secret crosses over.
   assets:
     name: Build and attest
-    needs: verify
+    needs: [verify, fuzz]
     permissions:
       contents: read
       id-token: write

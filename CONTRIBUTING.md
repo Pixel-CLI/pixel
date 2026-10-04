@@ -221,7 +221,8 @@ cross build --release --no-default-features --features model2vec \
 The `Fuzz` workflow (`.github/workflows/fuzz.yml`) runs every cargo-fuzz
 target under `fuzz/` for 60 seconds on a pull request that touches `fuzz/`,
 `pixel-graph`, `pixel-index`, `pixel-git`, the root `Cargo.toml` or
-`deny.toml`, and for 600 seconds weekly. A crash fails it and uploads the
+`deny.toml`, for 600 seconds weekly, and for 120 seconds on every release tag,
+before `release.yml` builds anything. A crash fails it and uploads the
 reproducer as the `fuzz-artifacts-*` artifact. `fuzz/` is its own
 workspace, so the gates above never build it; the workflow runs `cargo deny`
 on it with the root `deny.toml` (the `libfuzzer-sys` NCSA licence exception
