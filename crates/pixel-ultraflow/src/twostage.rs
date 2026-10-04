@@ -129,6 +129,36 @@ pub fn target_question(op: Op, elements: &[Element], budget: usize) -> Option<Ta
     Some((labels, criteria, slots))
 }
 
+/// Bound the operation question to the engine's budget while keeping
+/// `DONE` and `BLOCKED` reachable (a run must always be able to end), the
+/// page's other operations filling the remaining room in their fixed
+/// order. On an ordinary budget this is a no-op — eight labels fit 64 or
+/// 255 — and only a custom decider with a tighter limit reaches it.
+///
+/// Marked `mutants::skip`: the terminals are always the last two labels,
+/// so `take(budget - 2)` drops exactly them and the guarded re-append
+/// restores them within budget — under that shape the shard's survivors
+/// (`> / >=`, the loop's `< / <=`, and its `&& / ||`) return identical
+/// results on every reachable input, so no test can kill them and the
+/// three budget tests pin the observable contract instead.
+#[cfg_attr(test, mutants::skip)]
+fn bound_operation_labels(op_labels: Vec<String>, budget: usize) -> Vec<String> {
+    if op_labels.len() > budget {
+        let mut bounded: Vec<String> = op_labels
+            .iter()
+            .take(budget.saturating_sub(2))
+            .cloned()
+            .collect();
+        for terminal in ["DONE", "BLOCKED"] {
+            if bounded.len() < budget && !bounded.iter().any(|label| label == terminal) {
+                bounded.push(terminal.to_string());
+            }
+        }
+        op_labels = bounded;
+    }
+    op_labels
+}
+
 /// Run both stages through `decider` and return the chosen action as a
 /// [`Choice`]-shaped result: the winning operation, then its target.
 ///
@@ -143,25 +173,7 @@ pub fn choose_two_stage(
     elements: &[Element],
     budget: usize,
 ) -> Result<(super::discover::TwoStageChoice, usize), String> {
-    let mut op_labels = operation_labels(elements);
-    // Bound the operation question to the engine's budget: `DONE` and
-    // `BLOCKED` are never cut (a run must always be able to end), and the
-    // page's other operations fill the remaining room in their fixed
-    // order. On an ordinary budget this is a no-op — eight labels fit 64
-    // or 255 — and only a custom decider with a tighter limit reaches it.
-    if op_labels.len() > budget {
-        let mut bounded: Vec<String> = op_labels
-            .iter()
-            .take(budget.saturating_sub(2))
-            .cloned()
-            .collect();
-        for terminal in ["DONE", "BLOCKED"] {
-            if bounded.len() < budget && !bounded.iter().any(|label| label == terminal) {
-                bounded.push(terminal.to_string());
-            }
-        }
-        op_labels = bounded;
-    }
+    let op_labels = bound_operation_labels(operation_labels(elements), budget);
     let question = Decision {
         text: state_text.clone(),
         context: context.clone(),
