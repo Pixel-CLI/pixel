@@ -2221,6 +2221,26 @@ mod tests {
         restore_home(saved);
     }
 
+    /// A section that somehow holds a scalar (a hand-edited config) must be
+    /// repaired by the setters: the create-if-missing guard builds a fresh
+    /// object instead of indexing into the non-object, which would panic.
+    #[test]
+    fn web_search_setters_recreate_a_section_that_is_not_an_object() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        write(
+            &home.0.join(".pixel/config.yaml"),
+            "web_search: 7\nremote_keys: false\n",
+        );
+        set_web_search_searxng_url("https://sx.test").unwrap();
+        set_web_search_perplexity_key("pplx-secret").unwrap();
+        assert_eq!(web_search_searxng_url().as_deref(), Some("https://sx.test"));
+        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+        restore_home(saved);
+    }
+
     struct HomeGuard(PathBuf);
 
     impl HomeGuard {
