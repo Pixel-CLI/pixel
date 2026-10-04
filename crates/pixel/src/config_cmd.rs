@@ -290,6 +290,20 @@ fn validate(path: &Path) -> Result<(), String> {
             ));
         }
     }
+    if let Some(web_search) = doc.get("web_search") {
+        if !web_search.is_object() {
+            return Err(format!("{}: web_search must be a mapping", path.display()));
+        }
+        if web_search
+            .get("searxng_url")
+            .is_some_and(|v| !v.as_str().is_some_and(|s| !s.is_empty()))
+        {
+            return Err(format!(
+                "{}: web_search.searxng_url must be a non-empty string",
+                path.display()
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -331,6 +345,10 @@ pub fn overview(path: &Path) -> Result<(), String> {
     if let Some(preset) = classify_remote_preset() {
         println!("classify.remote_preset: {}", preset.display());
     }
+    println!(
+        "web-search provider: {}",
+        crate::web_search::configured_provider()
+    );
     let doc = crate::config_file::load(&global)?;
     if let Some(keys) = doc.get("remote_keys").and_then(Value::as_object) {
         for (name, value) in keys {
@@ -528,6 +546,7 @@ pub fn setup() -> Result<(), String> {
         color,
         &keys,
         |input, output| crate::classify_setup::install_step(true, input, output),
+        |input, output| crate::web_search_setup::install_step(true, input, output),
     )?;
     let root = std::env::current_dir()
         .ok()
@@ -536,7 +555,10 @@ pub fn setup() -> Result<(), String> {
 }
 
 /// Keep a failed first-time engine installation from enabling classification.
-/// Returns whether the settings were saved.
+/// Returns whether the settings were saved. The web-search step runs
+/// whenever the settings save, independent of the classify answer — the two
+/// configure unrelated features; the classify installer is gated on the
+/// classify answer and a failure reverts only a first-time opt-in.
 fn setup_with_install(
     path: &Path,
     input: &mut dyn BufRead,
@@ -544,12 +566,19 @@ fn setup_with_install(
     color: bool,
     keys: &KeyReader,
     install: impl FnOnce(&mut dyn BufRead, &mut dyn Write) -> Result<(), String>,
+    install_web_search: impl FnOnce(&mut dyn BufRead, &mut dyn Write) -> Result<(), String>,
 ) -> Result<bool, String> {
     let was_enabled = classify_enabled_in(&crate::config_file::load(path)?)?;
     if !setup_with_keys(path, input, output, color, keys)? {
         return Ok(false);
     }
+    // The web-search and classify steps configure unrelated features, so a
+    // web-search failure must not keep the classify installer from running.
+    // Run the web-search step, hold any error, and report it only after the
+    // classify step has had its turn.
+    let web_search_result = install_web_search(input, output);
     if !classify_enabled_in(&crate::config_file::load(path)?)? {
+        web_search_result?;
         return Ok(true);
     }
     if let Err(error) = install(input, output) {
@@ -560,6 +589,7 @@ fn setup_with_install(
         }
         return Err(error);
     }
+    web_search_result?;
     Ok(true)
 }
 
@@ -999,6 +1029,70 @@ pub fn remote_key(preset: crate::decide_remote::Preset) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The SearXNG base URL the web-search setup recorded, if any: the
+/// `PIXEL_WEB_SEARCH_URL` env var wins over it in `pixel web-search`.
+pub fn web_search_searxng_url() -> Option<String> {
+    let path = global_config_path()?;
+    read_config_doc(&path)?
+        .get("web_search")?
+        .get("searxng_url")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Persist the SearXNG base URL chosen by the web-search setup.
+pub fn set_web_search_searxng_url(url: &str) -> Result<(), String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    write_doc(&path, |doc| {
+        if !doc.get("web_search").is_some_and(Value::is_object) {
+            doc["web_search"] = json!({});
+        }
+        doc["web_search"]["searxng_url"] = json!(url);
+    })
+}
+
+/// Remove a stored SearXNG URL when the web-search setup switches to
+/// another provider. Unlike writing an empty value, this leaves a
+/// configuration that `validate` accepts: an empty `searxng_url` is
+/// rejected as a non-empty-string violation.
+pub fn remove_web_search_searxng_url() -> Result<(), String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    write_doc(&path, |doc| {
+        if let Some(web_search) = doc.get_mut("web_search").and_then(Value::as_object_mut) {
+            web_search.remove("searxng_url");
+            if web_search.is_empty() {
+                doc.as_object_mut().map(|root| root.remove("web_search"));
+            }
+        }
+    })
+}
+
+/// The Perplexity API key the web-search setup stored, under
+/// `remote_keys.perplexity` — the same secret store, in the same 0600
+/// global file, that `pixel config remote-key` writes. Never echoed back.
+pub fn web_search_perplexity_key() -> Option<String> {
+    let path = global_config_path()?;
+    let doc = read_config_doc(&path)?;
+    doc.get("remote_keys")?
+        .get("perplexity")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Persist the Perplexity API key, mirroring `pixel config remote-key`
+/// storage, under `remote_keys.perplexity`.
+pub fn set_web_search_perplexity_key(key: &str) -> Result<(), String> {
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    write_doc(&path, |doc| {
+        if !doc.get("remote_keys").is_some_and(Value::is_object) {
+            doc["remote_keys"] = json!({});
+        }
+        doc["remote_keys"]["perplexity"] = json!(key);
+    })
+}
+
 /// `pixel config remote-key <preset> [key]`: with a value, persist it to
 /// the global configuration (created 0600 on unix — it holds secrets);
 /// without one, report whether a key is stored. `--clear` removes it.
@@ -1242,6 +1336,7 @@ mod tests {
                         Err("model download failed".into())
                     }
                 },
+                |_, _| Ok(()),
             );
             assert_eq!(calls, 1);
             assert_eq!(
@@ -1265,6 +1360,32 @@ mod tests {
     }
 
     #[test]
+    fn web_search_failure_should_not_block_the_classify_installer() {
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        write(&path, "metrics: 'on'\nclassify: {enabled: true}\n");
+        let mut classify_runs = 0;
+        let error = setup_with_install(
+            &path,
+            &mut std::io::Cursor::new("n\n\n\n\n\ny\ny\n"),
+            &mut Vec::new(),
+            false,
+            &KeyReader::inert(),
+            |_, _| {
+                classify_runs += 1;
+                Ok(())
+            },
+            |_, _| Err("could not ask the web search provider".into()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            classify_runs, 1,
+            "a web-search failure must not keep the classify installer from running"
+        );
+        assert_eq!(error, "could not ask the web search provider");
+    }
+
+    #[test]
     fn setup_should_not_install_after_cancellation_or_disabling_classify() {
         for (answers, enabled, metrics, saved_expected) in [
             ("q\ny\n", true, "on", false),
@@ -1279,7 +1400,10 @@ mod tests {
                 &mut Vec::new(),
                 false,
                 &KeyReader::inert(),
-                |_, _| panic!("cancelled or disabled setup must never invoke an installer"),
+                |_, _| {
+                    panic!("cancelled or disabled setup must never invoke the classify installer")
+                },
+                |_, _| Ok(()),
             )
             .unwrap();
             assert_eq!(saved, saved_expected, "answers: {answers}");
@@ -1304,6 +1428,7 @@ mod tests {
                 std::fs::create_dir(&path).unwrap();
                 Err("model download failed".into())
             },
+            |_, _| Ok(()),
         )
         .unwrap_err();
         assert!(error.starts_with("model download failed; could not disable classification: cannot read configuration "), "{error}");
@@ -1997,15 +2122,114 @@ mod tests {
             "classify: []",
             "classify: {engine: invalid}",
             "classify: {remote_preset: invalid}",
+            "web_search: []",
+            "web_search: {searxng_url: 12}",
+            "web_search: {searxng_url: ''}",
         ] {
             write(&path, invalid);
             assert!(validate(&path).is_err(), "{invalid}");
         }
         write(
             &path,
-            "metrics: 'on'\nclassify: {engine: local, remote_preset: deepseek}\ntask_context: true",
+            "metrics: 'on'\nclassify: {engine: local, remote_preset: deepseek}\ntask_context: true\n\
+             web_search: {searxng_url: https://sx.test}\nremote_keys: {perplexity: pplx}",
         );
         validate(&path).unwrap();
+    }
+
+    #[test]
+    fn removing_the_searxng_url_leaves_a_config_validated_by_validate() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let cfg = home.0.join(".pixel/config.yaml");
+
+        set_web_search_searxng_url("https://sx.test").unwrap();
+        validate(&cfg).unwrap();
+        remove_web_search_searxng_url().unwrap();
+        assert!(
+            web_search_searxng_url().is_none(),
+            "field removed, not emptied"
+        );
+        // `validate` accepts the removed state — an empty `searxng_url`
+        // would be rejected, and would stall every later `pixel config setup`.
+        validate(&cfg).unwrap();
+        write(&cfg, "web_search: {searxng_url: ''}");
+        assert!(validate(&cfg).is_err(), "empty searxng_url stays rejected");
+
+        restore_home(saved);
+    }
+
+    #[test]
+    fn web_search_settings_roundtrip_the_url_and_perplexity_key() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+
+        assert!(web_search_searxng_url().is_none(), "nothing stored → unset");
+        assert!(
+            web_search_perplexity_key().is_none(),
+            "nothing stored → unset"
+        );
+        set_web_search_searxng_url("https://sx.test").unwrap();
+        set_web_search_perplexity_key("pplx-secret").unwrap();
+        assert_eq!(web_search_searxng_url().as_deref(), Some("https://sx.test"));
+        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+
+        let cfg: Value = serde_saphyr::from_str(
+            &std::fs::read_to_string(home.0.join(".pixel/config.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg["web_search"]["searxng_url"], "https://sx.test");
+        assert_eq!(cfg["remote_keys"]["perplexity"], "pplx-secret");
+
+        restore_home(saved);
+    }
+
+    #[test]
+    fn setting_the_perplexity_key_preserves_existing_remote_keys() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+
+        write(
+            &home.0.join(".pixel/config.yaml"),
+            "remote_keys: {openrouter: sk-existing}\n",
+        );
+        set_web_search_perplexity_key("pplx-secret").unwrap();
+
+        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+        let cfg: Value = serde_saphyr::from_str(
+            &std::fs::read_to_string(home.0.join(".pixel/config.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg["remote_keys"]["openrouter"], "sk-existing");
+        assert_eq!(cfg["remote_keys"]["perplexity"], "pplx-secret");
+
+        restore_home(saved);
+    }
+
+    /// A section that somehow holds a scalar (a hand-edited config) must be
+    /// repaired by the setters: the create-if-missing guard builds a fresh
+    /// object instead of indexing into the non-object, which would panic.
+    #[test]
+    fn web_search_setters_recreate_a_section_that_is_not_an_object() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        write(
+            &home.0.join(".pixel/config.yaml"),
+            "web_search: 7\nremote_keys: false\n",
+        );
+        set_web_search_searxng_url("https://sx.test").unwrap();
+        set_web_search_perplexity_key("pplx-secret").unwrap();
+        assert_eq!(web_search_searxng_url().as_deref(), Some("https://sx.test"));
+        assert_eq!(web_search_perplexity_key().as_deref(), Some("pplx-secret"));
+        restore_home(saved);
     }
 
     struct HomeGuard(PathBuf);

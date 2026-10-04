@@ -8,6 +8,8 @@
 <p align="center">
   <a href="https://github.com/Pixel-CLI/pixel/releases/latest"><img src="https://img.shields.io/github/v/release/Pixel-CLI/pixel?color=2ea043&label=release" alt="Latest release" /></a>
   <a href="https://github.com/Pixel-CLI/pixel/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Pixel-CLI/pixel/ci.yml?branch=main&label=CI" alt="CI" /></a>
+  <a href="SECURITY.md#verifying-a-release"><img src="https://img.shields.io/badge/provenance-SLSA%20Build%20L2-2ea043" alt="Release archives and install.sh carry SLSA Build L2 provenance attestations" /></a>
+  <a href="https://github.com/Pixel-CLI/pixel/releases/latest"><img src="https://img.shields.io/badge/platforms-macOS%20arm64%20%7C%20Linux%20x86__64%20%C2%B7%20arm64-blue" alt="Prebuilt for macOS arm64 and Linux x86_64 and arm64" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license" /></a>
 </p>
 
@@ -166,3 +168,8 @@ flowchart TD
 - [CONTRIBUTING.md](CONTRIBUTING.md): build from source, gates, pull requests
 
 MIT licensed. See [`NOTICE`](NOTICE) for attribution.
+
+### GitHub Actions
+
+Prepare Pixel for CI agents with the reusable [setup action](docs/github-actions.md):
+verified release installation and daemon-free indexing on Linux and macOS ARM64.
