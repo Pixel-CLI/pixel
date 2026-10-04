@@ -60,7 +60,7 @@ on:
       - ".agents/skills/rust-guidelines/**"
       # scripts/test-prepare.py and pixel-release's tests read prepare.sh:
       - ".agents/skills/release/**"
-      # test_lead_time.py:
+      # test_lead_time.py, test_adherence.py:
       - ".agents/skills/pixel-retro/**"
       - "scripts/README.md"
       # gen-plugin-assets.sh --check:
@@ -486,6 +486,10 @@ jobs:
       - name: Retro lead-time contract (synthetic transcripts, no network)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 .agents/skills/pixel-retro/test_lead_time.py
+
+      - name: Retro adherence contract (synthetic transcripts, no network)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 .agents/skills/pixel-retro/test_adherence.py
 
       - name: Action pin check contract (tags, short SHAs, unparsed forms refused)
         if: ${{ needs.changes.outputs.scripts == 'true' }}

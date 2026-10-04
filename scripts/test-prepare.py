@@ -37,6 +37,7 @@ if args[:2] == ["pr", "list"]:
     base = args[args.index("--base") + 1] if "--base" in args else None
     repo = args[args.index("--repo") + 1] if "--repo" in args else "old/fixture"
     prs = json.loads(open(os.environ["FIXTURE_PRS"]).read()) if base == "main" and repo == "example/fixture" else []
+    prs = [pr for pr in prs if str(pr["number"]) != os.environ.get("FIXTURE_OMIT_SEARCH")]
     if os.environ.get("FIXTURE_EMPTY_SEARCH"):
         prs = []
     expr = args[args.index("--jq") + 1]
@@ -195,6 +196,24 @@ class PrepareContract(unittest.TestCase):
         result = self.prepare()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.listed(result.stdout), ["#12 fix: thing"])
+
+    def test_a_partially_missing_search_cannot_hide_an_associated_pr(self):
+        self.git("tag", "v0.1.0")
+        prs = []
+        for number in (12, 13):
+            self.write(f"changelog.d/{number}-fix.fixed.md", "**thing:** fixed.\n")
+            self.git("add", ".")
+            self.git("commit", "-qm", f"fix: thing (#{number})")
+            prs.append({"number": number, "title": "fix: thing",
+                        "mergeCommit": {"oid": self.git("rev-parse", "HEAD")}})
+        self.prs.write_text(json.dumps(prs))
+        before = self.changelog()
+        self.env["FIXTURE_OMIT_SEARCH"] = "13"
+        result = self.prepare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing from the candidate inventory", result.stderr)
+        self.assertEqual(self.changelog(), before)
+        self.assertEqual(len(self.fragments()), 2)
 
     def test_incomplete_inventory_refuses_before_cutting(self):
         """An API failure, truncated search or false empty result must not
