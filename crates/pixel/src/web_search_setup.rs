@@ -139,6 +139,9 @@ fn ask_searxng_url(
 /// typed blind, then echo is restored" contract is observable without a tty.
 trait EchoFlag {
     /// Whether echo is currently enabled.
+    // Only the tests observe the echo state back (the key-typed-blind
+    // contract); production calls just mute/restore.
+    #[allow(dead_code)]
     fn echoed(&self) -> bool;
     /// Clear echo, returning the previous state, or `None` when the
     /// terminal cannot be muted (a pipe, a CI run, a failed termios call).
@@ -167,6 +170,9 @@ impl EchoFlag for TermiosEcho {
     fn echoed(&self) -> bool {
         // SAFETY: zeroed memory is a valid (if meaningless) termios buffer
         // that the tcgetattr call immediately overwrites.
+        // SAFETY: `zeroed` is only valid here because every field is
+        // overwritten before the value escapes (c_lflag below, then the
+        // assert reads only c_lflag).
         let mut termios: libc::termios = unsafe { std::mem::zeroed() };
         // SAFETY: a single tcgetattr on stdin with a valid, zeroed buffer.
         if unsafe { libc::tcgetattr(0, &mut termios) } != 0 {
@@ -196,6 +202,9 @@ impl EchoFlag for TermiosEcho {
     fn restore(&mut self, prior: bool) {
         // SAFETY: zeroed memory is a valid (if meaningless) termios buffer
         // that the tcgetattr call immediately overwrites.
+        // SAFETY: `zeroed` is only valid here because every field is
+        // overwritten before the value escapes (c_lflag below, then the
+        // assert reads only c_lflag).
         let mut termios: libc::termios = unsafe { std::mem::zeroed() };
         // SAFETY: a single tcgetattr on stdin with a valid, zeroed buffer.
         if unsafe { libc::tcgetattr(0, &mut termios) } != 0 {
@@ -500,6 +509,9 @@ mod tests {
 
     #[test]
     fn clipping_is_what_hides_echo() {
+        // SAFETY: `zeroed` is only valid here because every field is
+        // overwritten before the value escapes (c_lflag below, then the
+        // assert reads only c_lflag).
         let mut termios: libc::termios = unsafe { std::mem::zeroed() };
         termios.c_lflag |= libc::ECHO;
         let muted = with_echo_clipped(termios);
