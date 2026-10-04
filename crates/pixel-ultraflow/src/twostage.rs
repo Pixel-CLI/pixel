@@ -8,11 +8,14 @@
 //! and a truncated space is how a run misses the control it needs (the
 //! Google Drive run of 2026-10-04 offered 59 of ~200 options and blocked).
 //!
-//! The two-stage shape never truncates the *question*:
+//! The two-stage shape keeps its *operation* question tiny:
 //!
 //! 1. **Operation.** A fixed question — one option per operation the page
 //!    can legally perform (`CLICK`, `TYPE`, `SELECT`, plus the five
-//!    targetless ones). Nine labels at most; any budget fits.
+//!    targetless ones). Eight labels at most, so ordinary budgets fit in
+//!    one question; a tighter budget is still honoured — the two terminal
+//!    operations (`DONE`, `BLOCKED`) are never cut, and the page's other
+//!    operations fill the remaining room in a fixed order.
 //! 2. **Target.** When the chosen operation needs an element, a second
 //!    question over that operation's slots only, labels the slot numbers.
 //!    Still bounded: a page with more candidates for one operation than
@@ -140,7 +143,25 @@ pub fn choose_two_stage(
     elements: &[Element],
     budget: usize,
 ) -> Result<(super::discover::TwoStageChoice, usize), String> {
-    let op_labels = operation_labels(elements);
+    let mut op_labels = operation_labels(elements);
+    // Bound the operation question to the engine's budget: `DONE` and
+    // `BLOCKED` are never cut (a run must always be able to end), and the
+    // page's other operations fill the remaining room in their fixed
+    // order. On an ordinary budget this is a no-op — eight labels fit 64
+    // or 255 — and only a custom decider with a tighter limit reaches it.
+    if op_labels.len() > budget {
+        let mut bounded: Vec<String> = op_labels
+            .iter()
+            .take(budget.saturating_sub(2))
+            .cloned()
+            .collect();
+        for terminal in ["DONE", "BLOCKED"] {
+            if bounded.len() < budget && !bounded.iter().any(|label| label == terminal) {
+                bounded.push(terminal.to_string());
+            }
+        }
+        op_labels = bounded;
+    }
     let question = Decision {
         text: state_text.clone(),
         context: context.clone(),
@@ -201,7 +222,7 @@ pub fn choose_two_stage(
     };
     let target_distribution = decider.decide(&target_question)?;
     decisions += 1;
-    let (offered, truncated) = target_totals(op, elements, budget);
+    let (_offered, truncated) = target_totals(op, elements, budget);
     let winner = argmax_index(&target_distribution.probabilities, &labels)
         .ok_or_else(|| format!("the engine gave no probability to any {op_word} target offered"))?;
     let label = labels[winner].clone();
@@ -215,7 +236,7 @@ pub fn choose_two_stage(
             target_probability: Some(target_distribution.probabilities[&labels[winner].clone()]),
             model: distribution.model,
             offered_operations: op_labels.len(),
-            truncated_targets: truncated.saturating_sub(offered),
+            truncated_targets: truncated,
         },
         decisions,
     ))
@@ -315,6 +336,62 @@ mod tests {
         // two, and the disabled one was never a candidate at all.
         let (offered, truncated) = target_totals(Op::Click, &elements, 3);
         assert_eq!((offered, truncated), (3, 2));
+    }
+
+    /// A page that offers all three targeted operations has an eight-label
+    /// operation question, which a tight custom budget would refuse. The
+    /// question is bounded to the budget, and the terminal operations are
+    /// never cut, so the run can still end.
+    #[test]
+    fn a_tiny_budget_bounds_the_operation_question_and_keeps_the_terminal_ops() {
+        let body = "- button \"A\" [ref=e1]\n\
+                    - textbox \"B\" [ref=e2]\n\
+                    - combobox \"C\" [ref=e3]";
+        let elements = parse_snapshot(body).0;
+        let mut decider = ScriptedDecider::new(vec![Ok(distribution(&[("DONE", 1.0)]))]);
+        let (answer, decisions) = choose_two_stage(
+            &mut decider,
+            "URL: x".into(),
+            "GOAL: g".into(),
+            &elements,
+            6,
+        )
+        .unwrap();
+        assert_eq!(decisions, 1);
+        let labels = decider.asked(0).labels.clone();
+        assert_eq!(labels.len(), 6, "the operation question fits the budget");
+        assert!(labels.contains(&"DONE".to_string()));
+        assert!(labels.contains(&"BLOCKED".to_string()));
+        assert!(labels.contains(&"CLICK".to_string()));
+        assert_eq!(answer.op, Op::Done);
+        assert_eq!(answer.slot, None);
+    }
+
+    /// `truncated_targets` is the full count the budget cut from the
+    /// chosen operation's target list — not that count minus how many were
+    /// offered.
+    #[test]
+    fn truncated_targets_reports_the_full_omitted_count() {
+        let body: String = (1..=5)
+            .map(|i| format!("- button \"b{i}\" [ref=e{i}]\n"))
+            .collect();
+        let elements = parse_snapshot(&body).0;
+        let mut decider = ScriptedDecider::new(vec![
+            Ok(distribution(&[("CLICK", 1.0)])),
+            Ok(distribution(&[("1", 1.0)])),
+        ]);
+        let (answer, decisions) = choose_two_stage(
+            &mut decider,
+            "URL: x".into(),
+            "GOAL: g".into(),
+            &elements,
+            3,
+        )
+        .unwrap();
+        assert_eq!(decisions, 2);
+        // Five clickable candidates against a budget of three: two were cut
+        // from the target list, and the record reports both.
+        assert_eq!(answer.truncated_targets, 2);
     }
 
     /// Both stages run through the decider in order, and the answer
