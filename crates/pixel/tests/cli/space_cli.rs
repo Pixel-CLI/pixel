@@ -89,12 +89,7 @@ fn delete_without_yes_proceeds_on_a_stdin_yes() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"y\n")
-        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"y\n").unwrap();
     let out = child.wait_with_output().unwrap();
     assert!(
         out.status.success(),
@@ -102,7 +97,10 @@ fn delete_without_yes_proceeds_on_a_stdin_yes() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(!proj.join(".pixel").exists(), "shard removed after a stdin yes");
+    assert!(
+        !proj.join(".pixel").exists(),
+        "shard removed after a stdin yes"
+    );
     assert!(proj.exists(), "project untouched");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("removed "), "{stdout}");
@@ -115,5 +113,32 @@ fn empty_tree_reports_no_shards() {
     let (ok, stdout, _err) = pixel(&["space", base.to_str().unwrap()]);
     assert!(ok, "{stdout}");
     assert!(stdout.contains("no `.pixel` index shards"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A non-yes confirmation aborts the delete: nothing is removed and the run
+/// reports the abort. Guards the destructive branch — an unconditional
+/// confirm would delete the shard here and the existence assert fails.
+#[test]
+fn delete_without_yes_aborts_on_a_stdin_no() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let base = scratch("decline");
+    let proj = base.join("one");
+    shard_of(&proj, 100);
+    assert!(proj.join(".pixel").exists());
+    let mut child = pixel_command()
+        .args(["space", "--delete", base.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"n\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("aborted"), "{stderr}");
+    assert!(proj.join(".pixel").exists(), "shard kept after a decline");
     let _ = std::fs::remove_dir_all(&base);
 }
