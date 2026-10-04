@@ -1851,8 +1851,7 @@ fn web_search_provider_from(searxng_env: bool, perplexity_env: bool, doc: &Value
 /// does not make `pixel doctor` report a provider `pixel web-search` would
 /// not select.
 fn env_non_empty(name: &str) -> bool {
-    std::env::var_os(name)
-        .is_some_and(|v| v.into_string().ok().is_some_and(|s| !s.is_empty()))
+    std::env::var_os(name).is_some_and(|v| v.into_string().ok().is_some_and(|s| !s.is_empty()))
 }
 
 /// The global pixel config as a JSON value: `~/.pixel/config.yaml` parsed
