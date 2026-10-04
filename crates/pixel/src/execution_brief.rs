@@ -339,7 +339,9 @@ const PASTE_CLOSE: &str = "</pasted_content";
 
 /// The part of a prompt the user typed: pasted blocks (`<pasted_content …>`
 /// to its closing tag) are someone else's text and never the task itself.
-fn typed_text(prompt: &str) -> String {
+/// A removed block leaves a space, so the words on either side stay apart
+/// (`where is<block>the parser` keeps its `where is ` opening).
+pub(crate) fn typed_text(prompt: &str) -> String {
     let mut typed = String::new();
     let mut rest = prompt;
     while let Some(start) = rest.find(PASTE_OPEN) {
@@ -350,6 +352,9 @@ fn typed_text(prompt: &str) -> String {
         };
         let tail = &after[close + PASTE_CLOSE.len()..];
         rest = tail.find('>').map_or("", |end| &tail[end + 1..]);
+        if !rest.is_empty() {
+            typed.push(' ');
+        }
     }
     typed.push_str(rest);
     typed
@@ -357,9 +362,10 @@ fn typed_text(prompt: &str) -> String {
 
 /// A token that can only be a name in code: `a::b`, `snake_case`, `camelCase`
 /// or `PascalCase` with an inner capital, a path, or a file with a source
-/// extension.
+/// extension (in any case, so `README.MD` counts). Surrounding punctuation,
+/// a sentence's closing period and backticks are not part of the token.
 fn names_code(token: &str) -> bool {
-    let token = token.trim_matches(|ch: char| "()[]{}<>,;:!?\"'".contains(ch));
+    let token = token.trim_matches(|ch: char| "()[]{}<>,.;:!?\"'`".contains(ch));
     let inner = |separator: char| {
         token.split(separator).count() > 1
             && token
@@ -370,15 +376,17 @@ fn names_code(token: &str) -> bool {
         .chars()
         .zip(token.chars().skip(1))
         .any(|(before, after)| before.is_lowercase() && after.is_uppercase());
-    let extension = token
-        .rsplit_once('.')
-        .is_some_and(|(stem, ext)| !stem.is_empty() && SOURCE_EXTENSIONS.contains(&ext));
+    let extension = token.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && SOURCE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+    });
     token.contains("::") || inner('_') || inner('/') || camel || extension
 }
 
 /// The text to route when `prompt` asks about code, `None` when it asks for
 /// something else. Only the typed text counts: a backticked identifier, a
-/// token that names code, a code word or a code question. Everything else
+/// token that names code, a code word or a code question opening the prompt
+/// or any clause after a break (`.`, `?`, `!`, `:`, `;`, `,`, a newline,
+/// so "Hey, where is…" and "Context:\nwhy does…" count). Everything else
 /// (git and release requests, pasted chat threads, discussion) gets no route.
 pub fn retrieval_request(prompt: &str) -> Option<String> {
     let typed = typed_text(prompt);
@@ -389,9 +397,14 @@ pub fn retrieval_request(prompt: &str) -> Option<String> {
         || lower
             .split(|ch: char| !ch.is_alphanumeric())
             .any(|word| CODE_WORDS.contains(&word))
-        || CODE_QUESTIONS
-            .iter()
-            .any(|opening| lower.starts_with(opening) || lower.contains(&format!(". {opening}")));
+        || lower
+            .split(['.', '?', '!', ':', ';', ',', '\n'])
+            .map(str::trim_start)
+            .any(|clause| {
+                CODE_QUESTIONS
+                    .iter()
+                    .any(|opening| clause.starts_with(opening))
+            });
     asks.then(|| typed.to_string())
 }
 
@@ -1002,6 +1015,21 @@ mod tests {
                 "<pasted_content id=\"1\">\nchat\n</pasted_content id=\"1\">\nWhy does the parser panic?",
                 "Why does the parser panic?",
             ),
+            // A code question after any clause break, not only ". ".
+            (
+                "Hey, where is the config loaded?",
+                "Hey, where is the config loaded?",
+            ),
+            (
+                "Context:\nwhy does the daemon stall",
+                "Context:\nwhy does the daemon stall",
+            ),
+            ("Done! where is the config", "Done! where is the config"),
+            // A block glued to the words around it does not fuse them.
+            (
+                "where is<pasted_content>x</pasted_content>the config",
+                "where is the config",
+            ),
         ] {
             assert_eq!(
                 retrieval_request(prompt).as_deref(),
@@ -1017,8 +1045,10 @@ mod tests {
             typed_text(
                 "a<pasted_content id=\"1\">x</pasted_content id=\"1\">b<pasted_content>y</pasted_content>c"
             ),
-            "abc"
+            "a b c"
         );
+        // A block that ends the prompt leaves no trailing separator.
+        assert_eq!(typed_text("x<pasted_content>y</pasted_content>"), "x");
         assert_eq!(
             typed_text("keep<pasted_content id=\"2\">never closed"),
             "keep"
@@ -1039,6 +1069,9 @@ mod tests {
             "a.rs",
             "Cargo.toml",
             "x.tsx,",
+            "guard.rs.",
+            "`guard.rs`",
+            "README.MD",
         ] {
             assert!(names_code(token), "{token}");
         }
