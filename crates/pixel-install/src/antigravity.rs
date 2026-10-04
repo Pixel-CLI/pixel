@@ -831,7 +831,7 @@ mod tests {
         let fake_agy = tmp.path().join("agy");
         fs::write(
             &fake_agy,
-            "#!/bin/sh\nif [ \"$*\" = \"plugin list\" ]; then printf '{\\\"imports\\\":[{\\\"name\\\":\\\"pixel\\\"}]}'; exit 0; fi\nexit 9\n",
+            "#!/bin/sh\nif [ \"$*\" = \"plugin list\" ]; then printf '%s' '{\"imports\":[{\"name\":\"pixel\"}]}'; exit 0; fi\nexit 9\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&fake_agy).unwrap().permissions();
