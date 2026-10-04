@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # harness-grid-live.sh — launch the real 2x2 grid of the four harnesses as a
 # live CUI, no recording, for testing Pixel locally by hand.
 #

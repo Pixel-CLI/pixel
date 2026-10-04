@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Explicit controlled trials backed by the existing `eval/` scorer and gate.
 //!
 //! The bundled Bun backend uses Docker private storage and a filtering inference

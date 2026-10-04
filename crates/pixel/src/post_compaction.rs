@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Restore bounded, advisory task hints after compaction.
 //!
 //! Claude/Codex use SessionStart(source=compact), which supports context output;

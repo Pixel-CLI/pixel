@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # d2-5 — abstention rate of a whole-change negative, per motif.
 # Usage: run.sh <name> <tree> <n>   (then: aggregate.py <name>=<clone> ...)
 #   <tree> is a checkout this script may move (a dedicated worktree or clone);

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Sniper-target candidate generators — the graph-side signals behind
 //! `gitpixel targets`. Each generator returns path-keyed rows in a total
 //! deterministic order (strength desc, path asc) so fusion upstream is

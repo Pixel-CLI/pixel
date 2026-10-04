@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Advisory call history for read-only pixel CLI invocations.
 //!
 //! Prevents infinite loops and unbounded memory growth from agents that

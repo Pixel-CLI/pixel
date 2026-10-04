@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The TTY option picker: arrow keys move a `❯` marker over a rendered
 //! option list, Enter chooses, a digit picks immediately. Only the redraw
 //! region is rewritten (`CSI n A` + `CSI J`), so the transcript keeps one

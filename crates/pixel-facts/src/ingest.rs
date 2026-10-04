@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `ingest.rs` — the low-priority, checkpointed ingest engine.
 //!
 //! Three phases, resumable via the `ingest_jobs` cursor:

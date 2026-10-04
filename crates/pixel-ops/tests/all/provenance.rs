@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration tests for the `provenance` op: real git repos built with
 //! real git commands (same convention as the other pixel-ops tests).
 

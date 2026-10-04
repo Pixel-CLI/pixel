@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! pixel-ops — safe git mutation infrastructure + read ops.
 //!
 //! Ports usable-git's crash-safety model (snapshot store, repository lock,

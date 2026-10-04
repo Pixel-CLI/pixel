@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Budget contract: `{byteCap, used, truncated, cursor}` from `PLAN.md`'s
 //! Envelope v2. Note the field is `byteCap` (camelCase) on the wire even
 //! though sibling envelope sections (e.g. `epistemics`) are snake_case —

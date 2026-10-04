@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Confinement of repository-relative paths to the repository root.
 //!
 //! Paths read back from pixel's stores (an index shard's file table, the

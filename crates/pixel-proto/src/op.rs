@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `Op`: a type-level mirror of `pixel_daemon::api::Request`
 //! (`crates/pixel-daemon/src/api.rs`), reproduced here so the shared
 //! contract crate carries the wire-format definition rather than the daemon

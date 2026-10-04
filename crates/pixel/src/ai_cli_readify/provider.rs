@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The provider, the honest probe, and the failure classification.
 //!
 //! The probe is honest because it is representative: it sends the same shape

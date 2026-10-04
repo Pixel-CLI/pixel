@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Engine 1 — `resolve "<phrase>"` cascade.
 //!
 //! Each tier short-circuits with explicit confidence:

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Real CLI routing against a bounded fake classifier; no global environment mutation.
 
 use std::io::{BufRead, BufReader, Read, Write};

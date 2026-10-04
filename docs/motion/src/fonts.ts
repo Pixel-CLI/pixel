@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 import {cancelRender, continueRender, delayRender, staticFile} from 'remotion';
 
 // The site's three faces, served from public/fonts (latin subsets from

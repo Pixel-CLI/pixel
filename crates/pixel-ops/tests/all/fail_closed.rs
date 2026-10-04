@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! HO-05 / HO-06: a durable record that cannot be read is not "no record".
 //!
 //! A truncated recovery record used to read back as `None`, which

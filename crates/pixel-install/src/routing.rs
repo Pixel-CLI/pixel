@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Provider-specific hook configuration. Installation is not proof that a
 //! harness has fired the hooks; doctor reports that boundary separately.
 

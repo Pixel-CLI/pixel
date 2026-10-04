@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Warning contract, mirroring usable-git's `warningSchema`
 //! (`{code, message}`, both non-empty in usable-git's zod schema; this crate
 //! does not re-enforce non-emptiness — that is a validation concern for

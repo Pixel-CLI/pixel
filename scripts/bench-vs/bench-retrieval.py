@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Natural-language retrieval: semble, pixel's two search engines and WarpGrep.
 
 Each arm gets the identical query (a doc comment, see gen-queries.py) and is

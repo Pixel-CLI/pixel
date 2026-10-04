@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel commit --message-file`: a multi-paragraph commit message from a
 //! file (or stdin) lands in the commit verbatim, and `-m` and `-F` together
 //! are a usage error before any git state is touched.

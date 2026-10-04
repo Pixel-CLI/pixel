@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Fuzz: runs every cargo-fuzz target under fuzz/ (`cargo fuzz list`) for a
 # bounded time and fails on any crash, uploading the reproducers.
 #

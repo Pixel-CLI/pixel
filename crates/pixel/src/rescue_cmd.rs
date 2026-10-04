@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `gitpixel rescue` — surgical revert planner + gated apply.
 //!
 //! "Something was working before" is a retrieval problem, not a coding

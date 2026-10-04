@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of .cargo/mutants.toml: an exclusion only ever covers a bench or
 a crate-root build script.
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! User configuration contracts through the real CLI, with isolated home directories.
 use crate::support::{Scratch, pixel_command};
 use std::fs;

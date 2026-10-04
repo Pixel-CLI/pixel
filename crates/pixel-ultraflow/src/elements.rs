@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The observation: `agent-browser snapshot -i` parsed into numbered slots.
 //!
 //! One node receives one slot, even when it supports both clicking and

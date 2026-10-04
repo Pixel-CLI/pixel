@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Flow document types — the on-disk schema for a saved browser flow.
 
 use serde::{Deserialize, Serialize};

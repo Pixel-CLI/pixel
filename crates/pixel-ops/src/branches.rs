@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `branches` — one-call read-only branch inventory.
 //!
 //! The deterministic answer to "did you push everything?" and "clean my

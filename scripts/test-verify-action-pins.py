@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/verify-action-pins.py.
 
 The check exists for one failure: a `uses:` that runs whatever a movable

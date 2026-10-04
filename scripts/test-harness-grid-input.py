@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of harness-grid.yml's dispatch input guard.
 
 `pr` names the pull request the shoot script comments on and pushes media

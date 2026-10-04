@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Aggregate the repo-map rows into the size-vs-coverage table.
 
 Both axes are printed side by side and never combined into a single score: a

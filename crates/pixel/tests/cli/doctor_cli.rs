@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel doctor`'s exit contract: 0 when no check reaches `--fail-on`, 1
 //! when one does, 2 when the checks could not run. Agents and CI gate on the
 //! code alone, so a red report that exits 0 reads as healthy.

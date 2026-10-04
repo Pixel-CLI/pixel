@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Exercise the consumer installer, including refusal before publishing PATH."""
 import hashlib
 import io

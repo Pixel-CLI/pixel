@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Never-worse quality/turn gate with matched controlled-trial evidence.
 
 Every host is compared with its own baseline. Missing metrics are unknown.

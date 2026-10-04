@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Versioned task contracts, factual observations and runner-owned receipts.
 
 use std::collections::{BTreeMap, BTreeSet};

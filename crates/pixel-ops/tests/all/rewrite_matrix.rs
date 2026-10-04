@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration matrix for `rewrite` (squash-to-one-commit with optional
 //! leased push). Real git fixtures: a working clone plus a bare "remote"
 //! that a second clone independently pushes into, so lease races are

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Configuration storage with legacy JSON support and comment-preserving YAML writes.
 
 use std::path::{Path, PathBuf};

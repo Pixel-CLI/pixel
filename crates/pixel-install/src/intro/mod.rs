@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The intro an interactive `pixel install` plays before its banner, in
 //! four acts on one clock ([`END`] seconds):
 //!

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 import {ComparisonSpec} from './ComparisonScene';
 import {C} from './theme';
 

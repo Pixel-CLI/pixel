@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Operation journal — durable, idempotent request journal for mutations.
 //!
 //! Port of usable-git's `operation-journal.ts`. Every mutation begins by

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! CLI subcommands renamed by the clean-break rename (commit 08268b0).
 //!
 //! The rename gave every command a verb-first name and kept no alias, so

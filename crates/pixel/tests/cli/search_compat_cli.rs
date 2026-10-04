@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Differential checks against the actual native executables, not snapshots
 //! of Pixel's own formatting. Hook payload tests never execute their input.
 use std::io::Write;

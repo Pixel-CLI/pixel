@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Bounded reachability evaluation with witnesses for `pixel evaluate`.
 //!
 //! One proposition in ("some source reaches some target along the selected

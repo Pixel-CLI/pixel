@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Window weighting for sparse n-gram selection.
 //!
 //! A `Weigher` assigns a deterministic weight to a fixed-size byte window

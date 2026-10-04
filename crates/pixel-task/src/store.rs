@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Locked task transactions with an authoritative append-only journal.
 
 use std::fs::{self, File, OpenOptions};

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Rank arena arms: quality (rubric score), tokens, wall time, saving vs raw."""
 import argparse, json, sys
 from pathlib import Path

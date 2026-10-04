@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `gitpixel recall` — machine-wide transcript retrieval commands.
 
 use clap::Subcommand;

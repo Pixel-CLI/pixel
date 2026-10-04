@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Composition: traces in, a saved flow out.
 //!
 //! A single run composes to one plain step per action. Two runs of the same

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 // Portions derived from marjoballabani/hypergrep (MIT) — see NOTICE.
 //! Posting-list intersection/union and boolean gram-query resolution.
 //!

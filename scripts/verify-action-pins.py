@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Every `uses:` in the workflows names an immutable reference.
 
 A tag or a branch is a pointer its owner can move: `actions/checkout@v7`

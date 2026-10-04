@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Flow-variable resolution shared by `replay` (text output), `execute`
 //! (live browser runs) and `pixel ultraflow`'s condition evaluator, so a
 //! declared default resolves the same way in all of them.

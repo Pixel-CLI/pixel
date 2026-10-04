@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel doctor` — checks install state, binary path, daemon health, and
 //! index/graph/facts freshness, reporting green/yellow/red per check.
 //!

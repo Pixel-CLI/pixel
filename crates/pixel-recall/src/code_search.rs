@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Semantic code search over a code tree via static embeddings.
 //!
 //! `ask(root, query, k, max_files)` answers open-ended questions like "how is

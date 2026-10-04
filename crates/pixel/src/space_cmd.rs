@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel space` — audit how much disk the pixel index (`.pixel/`) takes
 //! across every project under a tree, and delete shards to reclaim space.
 //!

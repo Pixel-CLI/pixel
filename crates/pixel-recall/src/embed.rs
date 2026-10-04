@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Embedding seam: the pluggable model behind semantic search.
 //!
 //! The corpus side only ever sees this trait; the concrete model (fastembed

@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # decide-local-setup.sh — set up the local 4B decision backend for
 # `pixel classify --remote-preset local`.
 #

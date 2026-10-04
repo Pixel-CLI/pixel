@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The "a newer pixel is released" line, once a day, on a terminal only.
 //!
 //! The "a newer pixel is released" line, once a day, on a terminal only —

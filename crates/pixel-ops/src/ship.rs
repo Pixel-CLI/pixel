@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `ship` — publish + push in one op (convenience wrapper).
 
 use std::path::Path;

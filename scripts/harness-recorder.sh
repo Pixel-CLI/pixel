@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # harness-recorder.sh — record a harness run (Claude Code, Codex) with
 # asciinema so a pull request can show the run as a terminal video.
 #

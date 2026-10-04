@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Impact analysis — BFS over `calls` edges, depth-bucketed blast radius with
 //! an epistemic envelope so "0 callers" is distinguishable from "resolver gave up".
 

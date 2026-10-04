@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of the reproducible release build (scripts/release-build-env.sh).
 
 A release binary is reproducible only if every input that varies between two

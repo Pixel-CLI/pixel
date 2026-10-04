@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Upgrade control never touches unrelated daemons and never waits indefinitely.
 
 use std::io::{BufRead, BufReader, Write};

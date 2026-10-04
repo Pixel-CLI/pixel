@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: CI
 
 on:
@@ -351,6 +354,11 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/verify-action-pins.py
 
+      # Every tracked source file carries its SPDX copyright and license
+      # lines (OpenSSF gold); a tenth of a second, so it runs on every diff.
+      - name: SPDX headers (copyright and license in every source file)
+        run: python3 scripts/check-spdx.py
+
       - name: Install Rust toolchain
         if: ${{ needs.changes.outputs.cargo == 'true' }}
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -495,6 +503,10 @@ jobs:
       - name: Advisory ignore check contract (deny.toml and osv-scanner.toml agree)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-check-advisory-ignores.py
+
+      - name: SPDX header check contract (missing lines fail, --fix keeps a shebang first)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-check-spdx.py
 
       # The sweep cancels moot validation runs; the board sync and its own
       # run must survive it, or merged tasks stay In Progress.

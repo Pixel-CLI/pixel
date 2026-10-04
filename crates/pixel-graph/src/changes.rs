@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Change detection — `git diff --unified=0` hunk ranges mapped onto indexed
 //! symbols, each judged against its file's base symbols, with affected
 //! processes, the call sites that may be affected, and depth-1 upstream

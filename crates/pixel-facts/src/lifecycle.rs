@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `lifecycle.rs` — lifecycle of a path or token: first-seen, last-changed,
 //! removed-in, present-at-HEAD.
 //!

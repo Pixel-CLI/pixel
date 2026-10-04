@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Deterministic recognition of questions about the Pixel tool itself.
 //!
 //! A prompt that asks about Pixel, Pi or a Pixel operation by name is not a

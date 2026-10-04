@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Documentation drift: the docs and the agent prompts name commands, and
 //! the binary is the only source of truth for which commands exist.
 //!

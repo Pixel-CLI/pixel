@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Durable file write utilities — the crash-safety foundation.
 //!
 //! Every journal/snapshot/recovery write goes through `write_durably`:

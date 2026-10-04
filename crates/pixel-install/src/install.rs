@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Idempotent provider integration: safe shell routing and lifecycle context.
 //! Unknown overlapping hooks are preserved rather than double-rewritten.
 //! Configuration alone is not proof that an agent has executed the hooks.

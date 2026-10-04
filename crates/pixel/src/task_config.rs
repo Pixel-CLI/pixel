@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Repository check definitions and task contracts, preserving mandatory requirements.
 
 use std::path::Path;

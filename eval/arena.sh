@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # eval/arena.sh — head-to-head: raw codex vs retrieval-tool arms, ranked.
 #
 # Arms: raw | semble | graft | stacklit | gitnexus | gortex | pixel

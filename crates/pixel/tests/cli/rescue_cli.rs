@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `gitpixel plan-rollback` — plan correctness and apply safety invariants.
 
 use std::path::Path;

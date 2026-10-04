@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Fast pre-push mutation exposure gate. --check/--ack only list CI's
 # prospective mutants; CI remains responsible for the verdict. --run executes
 # them locally in a throwaway worktree (optionally bounded by a -F-style

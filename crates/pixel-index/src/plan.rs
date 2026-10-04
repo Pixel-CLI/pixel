@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Query planning: regex pattern → boolean gram query.
 //!
 //! A simplified form of Russ Cox's trigram-query algebra (regexp4), with

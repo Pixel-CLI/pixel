@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! GitHub Copilot CLI hook installation.
 //!
 //! Copilot loads hook definitions from `~/.copilot/hooks/*.json` (user level)

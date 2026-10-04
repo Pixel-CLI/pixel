@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Writes website/data/scope.toml, the home's Scoping board, from the
 recording the Problem chapter shows (docs/bench/problem-trace/).
 

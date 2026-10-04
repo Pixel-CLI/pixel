@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `sniper run -- <cmd>`: spawn a command, tee its output through live, and
 //! on failure turn the captured output into structured error records — tsc
 //! diagnostics parsed per TS code, Minitest/RSpec failures one record per

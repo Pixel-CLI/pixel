@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Single integration-test binary for the CLI crate. Each former
 //! `tests/<name>.rs` is a module here, so cargo links one executable
 //! instead of one per file (linking dominated `cargo test -p pixel-cli`).

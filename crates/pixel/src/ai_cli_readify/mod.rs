@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel ai-cli-readify` — honest provider readiness for the four agent
 //! CLIs, and the config rewrite that points them at the provider that
 //! answered.

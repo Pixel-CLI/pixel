@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # pr-swarm — one rmux pane per open-PR worktree.
 #
 #   pr-swarm.sh reconcile [--wait N] [--no-wait] [--dry-run]

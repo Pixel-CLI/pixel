@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Error code + error payload contracts.
 //!
 //! `ErrorCode` reproduces usable-git's 18-value `errorCodeSchema`

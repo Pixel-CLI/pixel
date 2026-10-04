@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration: an existing `graph.db` follows the working tree file by
 //! file instead of being rebuilt from scratch on the first graph op after
 //! an edit.

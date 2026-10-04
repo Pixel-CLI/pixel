@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Real CLI boundaries with a disposable home and a fake browser only.
 
 use std::os::unix::fs::PermissionsExt;

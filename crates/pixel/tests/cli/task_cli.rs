@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! End-to-end contract, private verification and native lifecycle behavior.
 
 use std::io::Write;

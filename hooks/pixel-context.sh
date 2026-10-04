@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # pixel-context.sh — plugin lifecycle hook. Emits the pixel retrieval
 # protocol as hookSpecificOutput.additionalContext so plugin installs get
 # always-on instructions without `pixel install` or shell wrappers.

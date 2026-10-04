@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! File-based flow store — one JSON file per flow in a global directory.
 
 use std::fs;

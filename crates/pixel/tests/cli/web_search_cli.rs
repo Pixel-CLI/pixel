@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel web-search`: the parse and dispatch contract — query argument,
 //! `--limit`, `--json`, and the `marker`/`epistemics`/`snapshot` envelope —
 //! exercised end to end against a loopback SearXNG stub. A configured SearXNG

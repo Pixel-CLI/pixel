@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `inspect` — repo state snapshot (HEAD, branch, dirty files, fingerprints).
 //!
 //! Port of usable-git's `inspect` op. Returns a structured snapshot of the

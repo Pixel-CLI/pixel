@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of check-advisory-ignores.py.
 
 An advisory accepted by cargo-deny but absent from osv-scanner.toml stays a

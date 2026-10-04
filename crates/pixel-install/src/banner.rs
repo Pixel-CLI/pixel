@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The human-facing exit of an interactive `pixel install`: the summary a
 //! person at a terminal reads, with the tour of what to visit next.
 //! `--json` and a piped stdout keep the machine-readable report — this

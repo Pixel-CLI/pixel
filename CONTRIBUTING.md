@@ -27,6 +27,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` exits 0.
 - [ ] `cargo deny check` exits 0 (skip when neither `Cargo.lock` nor `deny.toml` changed); a new advisory exception in `deny.toml` carries its reason and is repeated in `osv-scanner.toml` (`python3 scripts/check-advisory-ignores.py`).
 - [ ] New behaviour has a test that fails if the behaviour is removed.
+- [ ] Every new source file (`.rs`, `.py`, `.sh`, `.ts`, `.js`, `.mjs`, `Cargo.toml`, a workflow, a hook under `.githooks/`) opens with `SPDX-FileCopyrightText: The Pixel contributors` and `SPDX-License-Identifier: MIT` in its line comment, after any shebang; `python3 scripts/check-spdx.py --fix` adds them, and CI runs the check on every diff. The script lists the exclusions and their reasons.
 - [ ] The `Mutants` CI job reports no `MISSED` mutant on the pull request (see "Mutation testing"); a local run is optional.
 - [ ] A `changelog.d/<slug>.<section>.md` fragment carries the entry, opening on its scope (`**graph:** …`), under 500 bytes (skip for pure refactors, CI/deps chores, and changes to the website alone, `website/` and its data, which ship nothing in the tool). Write it once, in the same push as the change: the pull request's link is left out, and the release cut appends it from the merge commit's `(#<n>)`. `prepare.sh --check`, which CI runs on every pull request, refuses a missing scope or an entry over 900.
 - [ ] The commit message follows the Conventional Commits format below.

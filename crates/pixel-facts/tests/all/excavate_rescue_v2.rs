@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Rescue-v2 (`excavate`) integration tests against a real git fixture that
 //! reproduces PLAN.md's canonical Scenario 1 ("dropped-svelte"): a feature
 //! file is added, modified, then deleted in favor of an unrelated

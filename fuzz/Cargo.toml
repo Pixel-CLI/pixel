@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # cargo-fuzz targets (`cargo fuzz list`), run by .github/workflows/fuzz.yml.
 #
 # The empty `[workspace]` table makes this crate its own workspace root, so

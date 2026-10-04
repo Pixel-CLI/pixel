@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/pr-swarm.sh: what one reconcile does, and what it must not.
 
 Every case runs the real script with three stub binaries on PATH -- `rmux`

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Append retro items to ~/.local/state/pixel-retro/seen.tsv from a JSON file.
 
 Usage: python3 ledger.py <items.json>

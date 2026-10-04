@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Deterministic detection of "what does this repo do" prompts.
 //!
 //! An overview question names no code. Fed to the keyword retrievers it

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! SQLite store for the recall corpus (sessions + turns + ingest state).
 //!
 //! Same rusqlite/WAL/additive-migration discipline as pixel-graph's

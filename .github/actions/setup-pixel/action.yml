@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: Setup Pixel
 description: Install a verified Pixel release and prepare repository indexes for CI agents.
 inputs:

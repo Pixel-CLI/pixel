@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration tests for the `branches` inventory op. Real git fixtures:
 //! a bare "remote" plus working clones (same pattern as
 //! `reconcile_matrix.rs`), so ahead/behind, merged, no-upstream, stale,

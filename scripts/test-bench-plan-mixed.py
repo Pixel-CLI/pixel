@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Observable mixed-job contracts, separate from the locked quality corpus."""
 import importlib.util
 from pathlib import Path

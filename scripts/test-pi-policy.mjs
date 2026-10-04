@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 // Executable extension contract: bun scripts/test-pi-policy.mjs
 // The real extension handles events; only its host and Pixel process are fixtures.
 import assert from "node:assert/strict";

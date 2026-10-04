@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Build provenance for `pixel --version`.
 //!
 //! Emits `PIXEL_GIT_SHA`, `PIXEL_GIT_DIRTY`, `PIXEL_BUILD_COMMIT`, `PIXEL_BUILD_TARGET`,

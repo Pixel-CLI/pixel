@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! AR-03: one canonical identity for the repository lock and the journal.
 //!
 //! `publish`, `push` and `rewrite` keyed the lock on a raw `<root>/.git`

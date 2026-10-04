@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Epistemics contract: how honest is this answer about its own completeness.
 //!
 //! Mirrors gitpixel's "epistemic envelope" concept (closed-world vs

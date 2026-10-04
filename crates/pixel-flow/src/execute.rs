@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Flow executor — actually runs agent-browser commands from a flow.
 //!
 //! Unlike `replay` (which only emits text), this module shells out to

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Engine 1 audit: drives the REAL `build_graph` entry point (not just
 //! `extract_concepts` + `replace_concepts` in isolation) over a realistic
 //! fixture repo on disk, inspects the resulting `concepts`/`concept_words`

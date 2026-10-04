@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Pure workflow gates shared by live adapters and deterministic replay.
 
 use crate::model::{CheckOutcome, Decision, Gate, ObservationKind, Phase, Route, Task};
