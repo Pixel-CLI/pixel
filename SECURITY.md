@@ -33,6 +33,17 @@ gh attestation verify pixel-vX.Y.Z-aarch64-apple-darwin.tar.gz --repo Pixel-CLI/
 The same command verifies `install.sh` before you pipe it into `sh`.
 Releases before the first attested one have no attestation.
 
+v0.6.0 and v0.6.1 were signed before the repository moved from
+`LivioGama/pixel` to `Pixel-CLI/pixel`, and their attestations stayed with
+the former owner: `--repo Pixel-CLI/pixel` answers `HTTP 404` for them.
+Verify those two under the name they were built as:
+
+```bash
+gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --owner LivioGama \
+  --signer-workflow LivioGama/pixel/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.6.1 --deny-self-hosted-runners
+```
+
 ## Security model
 
 Pixel runs locally and processes repository data. Key security boundaries:
