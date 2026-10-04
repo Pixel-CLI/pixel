@@ -367,6 +367,59 @@ mod tests {
         assert_eq!(answer.slot, None);
     }
 
+    /// A budget exactly equal to the label count is no bounding at all:
+    /// `>` must not become `>=`, or an eight-label question on an
+    /// eight-label budget would shed its operations.
+    #[test]
+    fn a_budget_equal_to_the_label_count_bounds_nothing() {
+        let body = "- button \"A\" [ref=e1]\n\
+                    - textbox \"B\" [ref=e2]\n\
+                    - combobox \"C\" [ref=e3]";
+        let elements = parse_snapshot(body).0;
+        // CLICK, TYPE, SELECT + the five targetless = exactly 8.
+        let mut decider = ScriptedDecider::new(vec![Ok(distribution(&[("DONE", 1.0)]))]);
+        let (answer, _) = choose_two_stage(
+            &mut decider,
+            "URL: x".into(),
+            "GOAL: g".into(),
+            &elements,
+            8,
+        )
+        .unwrap();
+        let labels = decider.asked(0).labels.clone();
+        assert_eq!(labels.len(), 8, "every operation survives an exact budget");
+        assert!(labels.contains(&"TYPE".to_string()));
+        assert!(labels.contains(&"SELECT".to_string()));
+        assert_eq!(answer.op, Op::Done);
+    }
+
+    /// The two terminal options are appended only when missing, and never
+    /// past the budget: a bounded list stays exactly `budget` long and
+    /// carries no duplicates.
+    #[test]
+    fn the_terminal_options_are_appended_once_and_within_the_budget() {
+        // Two buttons only: CLICK + 5 targetless = 7 labels; a budget of
+        // 6 takes 4 real labels + DONE + BLOCKED, each once.
+        let body = "- button \"a\" [ref=e1]\n- button \"b\" [ref=e2]";
+        let elements = parse_snapshot(body).0;
+        let mut decider = ScriptedDecider::new(vec![Ok(distribution(&[("DONE", 1.0)]))]);
+        let (_, _) = choose_two_stage(
+            &mut decider,
+            "URL: x".into(),
+            "GOAL: g".into(),
+            &elements,
+            6,
+        )
+        .unwrap();
+        let labels = decider.asked(0).labels.clone();
+        assert_eq!(labels.len(), 6);
+        let done = labels.iter().filter(|l| *l == "DONE").count();
+        let blocked = labels.iter().filter(|l| *l == "BLOCKED").count();
+        assert_eq!(done, 1, "no duplicate terminal: {labels:?}");
+        assert_eq!(blocked, 1, "no duplicate terminal: {labels:?}");
+        assert_eq!(*labels.last().unwrap(), "BLOCKED", "terminals at the end");
+    }
+
     /// `truncated_targets` is the full count the budget cut from the
     /// chosen operation's target list — not that count minus how many were
     /// offered.

@@ -809,7 +809,8 @@ mod tests {
         );
         // The target question: the three buttons, all of them — nothing
         // truncated at this stage, and one slot was chosen. The recorded
-        // step resolves the chosen slot to the element it named.
+        // step resolves the chosen slot to the element it named. The run
+        // spent exactly three decisions: operation, target, then DONE.
         assert_eq!(decider.asked(1).labels, ["1", "2", "3"]);
         assert_eq!(trace.steps[0].decision.offered, 6);
         assert_eq!(trace.steps[0].decision.truncated, 0);
@@ -818,6 +819,7 @@ mod tests {
             Some("button containing 'a'"),
             "the winning slot resolved to its element"
         );
+        assert_eq!(trace.decisions, 3, "two-stage cycle + the DONE call");
         assert_eq!(trace.status, Status::Done);
     }
 
