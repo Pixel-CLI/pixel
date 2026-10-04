@@ -1345,6 +1345,13 @@ mod tests {
             "s@a@b@e touch marker",
             "s/a/b/e",
             "w",
+            "1 e touch marker",
+            "1~2w out",
+            "1,+3e touch x",
+            "1!w out",
+            "$!w out",
+            "/a/Iw out",
+            "1 w out",
             "\\#foo#w out",
             "\\#\\b#w out",
             "west",
@@ -1573,6 +1580,9 @@ mod tests {
             );
         }
         for command in [
+            "sed -n '1,40p' eval/README.md",
+            "sed -n '1,20p' website/content/docs.md",
+            "sed -n '1p' /tmp/w.txt",
             "git diff --name-only HEAD",
             "git status --porcelain=v1",
             "git diff -- --output=notes",
