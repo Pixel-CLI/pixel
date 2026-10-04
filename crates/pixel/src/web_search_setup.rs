@@ -217,13 +217,11 @@ impl EchoFlag for TermiosEcho {
         }
         // SAFETY: TCSANOW applies the descriptor's own modified settings.
         let result = unsafe { libc::tcsetattr(0, libc::TCSANOW, &termios) };
-        if result != 0 {
-            if prior {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "warning: terminal echo may remain disabled; run `stty echo` if input remains hidden"
-                );
-            }
+        if result != 0 && prior {
+            let _ = writeln!(
+                std::io::stderr(),
+                "warning: terminal echo may remain disabled; run `stty echo` if input remains hidden"
+            );
         }
     }
 }
