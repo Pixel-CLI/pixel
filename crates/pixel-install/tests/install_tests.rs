@@ -635,10 +635,7 @@ fn dry_run_install_has_no_copilot_step_without_copilot_config() {
     // exists. A machine that has never run Copilot CLI gets no copilot-hooks
     // step and no directory fabricated for it.
     assert!(
-        !report
-            .steps
-            .iter()
-            .any(|s| s.id == "copilot-hooks"),
+        !report.steps.iter().any(|s| s.id == "copilot-hooks"),
         "no copilot step without ~/.copilot: {report:?}"
     );
     assert!(!home.join(".copilot").exists());
@@ -667,13 +664,17 @@ fn install_deploys_copilot_hooks_when_copilot_config_is_present() {
         serde_json::from_str(&fs::read_to_string(&hooks).unwrap()).unwrap();
     assert_eq!(doc["_pixel_managed"], "pixel-managed-copilot-hooks-v1");
     assert!(
-        doc["hooks"]["preToolUse"].as_array().unwrap().iter().any(|e| {
-            e["args"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|a| a.as_str() == Some("guard"))
-        }),
+        doc["hooks"]["preToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| {
+                e["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|a| a.as_str() == Some("guard"))
+            }),
         "guard entry must be deployed: {doc}"
     );
 }

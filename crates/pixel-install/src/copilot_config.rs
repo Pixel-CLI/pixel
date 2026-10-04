@@ -36,6 +36,7 @@ pub(crate) fn copilot_hooks_dir(home: &Path) -> Option<PathBuf> {
 fn is_pixel_owned(content: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(content)
         .ok()
+        .as_ref()
         .and_then(|doc| doc.get(MANAGED_KEY))
         .and_then(serde_json::Value::as_str)
         == Some(MANAGED_MARKER)
@@ -252,7 +253,11 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{\"version\":1,\"hooks\":{}}").unwrap();
         let step = install_copilot_hooks(home.path(), Path::new("/tmp/pixel"), false).unwrap();
-        assert!(step.summary.contains("is not pixel-managed"), "{}", step.summary);
+        assert!(
+            step.summary.contains("is not pixel-managed"),
+            "{}",
+            step.summary
+        );
         assert_eq!(step.status, CheckStatus::Red);
         let still = fs::read_to_string(&path).unwrap();
         assert_eq!(still, "{\"version\":1,\"hooks\":{}}");
@@ -280,7 +285,11 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{}").unwrap();
         let step = remove_copilot_hooks(home.path(), false).unwrap();
-        assert!(step.summary.contains("is not pixel-managed"), "{}", step.summary);
+        assert!(
+            step.summary.contains("is not pixel-managed"),
+            "{}",
+            step.summary
+        );
         assert_eq!(step.status, CheckStatus::Red);
         assert!(path.exists());
     }
