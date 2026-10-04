@@ -16,7 +16,7 @@
 //! `pixel classify` always wins.
 
 use serde_json::{Value, json};
-use std::io::BufRead;
+use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 
 /// Install-time proposal text, with each option's measured accuracy in
@@ -180,9 +180,12 @@ pub fn install_step(
         stored_engine(),
         setup_local,
         propose_remote_key,
+        &mut crate::select::TermiosRaw::default(),
+        std::io::stdin().is_terminal(),
     )
 }
 
+#[allow(clippy::too_many_arguments)] // the seams are the point: tests inject each collaborator
 fn install_step_with<FLocal, FRemote>(
     tty: bool,
     stdin: &mut dyn BufRead,
@@ -190,6 +193,8 @@ fn install_step_with<FLocal, FRemote>(
     stored: Option<String>,
     setup_local: FLocal,
     propose_remote_key: FRemote,
+    raw: &mut dyn crate::select::RawMode,
+    stdin_is_terminal: bool,
 ) -> Result<(), String>
 where
     FLocal: FnOnce(&mut dyn std::io::Write) -> Result<(), String>,
@@ -201,20 +206,39 @@ where
         return Ok(());
     }
     writeln!(stdout, "Classify engine:").map_err(|e| e.to_string())?;
-    writeln!(stdout, "  [1] {LOCAL_LABEL}").map_err(|e| e.to_string())?;
-    writeln!(stdout, "  [2] {REMOTE_LABEL}").map_err(|e| e.to_string())?;
     if !tty {
+        writeln!(stdout, "  [1] {LOCAL_LABEL}").map_err(|e| e.to_string())?;
+        writeln!(stdout, "  [2] {REMOTE_LABEL}").map_err(|e| e.to_string())?;
         writeln!(stdout, "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote>` or re-run `pixel install` in a terminal")
             .map_err(|e| e.to_string())?;
         return Ok(());
     }
-    write!(stdout, "Choice> ").map_err(|e| e.to_string())?;
-    stdout.flush().map_err(|e| e.to_string())?;
-    let mut line = String::new();
-    stdin
-        .read_line(&mut line)
-        .map_err(|e| format!("read choice: {e}"))?;
-    match parse_choice(&line) {
+    // TTY: the arrow picker paints the option rows itself; EOF falls back
+    // to the numbered prompt so a piped answer still lands.
+    let picked = crate::select::pick(
+        &[LOCAL_LABEL, REMOTE_LABEL],
+        stdin,
+        stdout,
+        raw,
+        stdin_is_terminal,
+    )?;
+    let choice = match picked {
+        Some(0) => Some("local"),
+        Some(1) => Some("remote"),
+        Some(_) => None,
+        None => {
+            writeln!(stdout, "  [1] {LOCAL_LABEL}").map_err(|e| e.to_string())?;
+            writeln!(stdout, "  [2] {REMOTE_LABEL}").map_err(|e| e.to_string())?;
+            write!(stdout, "Choice> ").map_err(|e| e.to_string())?;
+            stdout.flush().map_err(|e| e.to_string())?;
+            let mut line = String::new();
+            stdin
+                .read_line(&mut line)
+                .map_err(|e| format!("read choice: {e}"))?;
+            parse_choice(&line)
+        }
+    };
+    match choice {
         Some("local") => setup_local(stdout),
         Some("remote") => propose_remote_key(stdin, stdout),
         _ => {
@@ -701,6 +725,16 @@ use std::time::Duration;
 mod tests {
     use super::*;
 
+    /// No-op raw-mode seam: test stdin is a cursor, never a terminal.
+    struct FakeRaw;
+
+    impl crate::select::RawMode for FakeRaw {
+        fn enter(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn leave(&mut self) {}
+    }
+
     type RunInvocation = (String, Vec<String>, Vec<(String, String)>);
 
     struct FakeLocalSetup {
@@ -1019,6 +1053,8 @@ mod tests {
             Some("remote".to_string()),
             |_| panic!("stored setting must not start local setup"),
             |_, _| panic!("stored setting must not prompt for a key"),
+            &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(
@@ -1035,6 +1071,8 @@ mod tests {
             None,
             |_| panic!("non-interactive install must not start local setup"),
             |_, _| panic!("non-interactive install must not prompt for a key"),
+            &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(
@@ -1051,6 +1089,8 @@ mod tests {
             None,
             |stdout| writeln!(stdout, "local setup ran").map_err(|e| e.to_string()),
             |_, _| panic!("local choice must not prompt for a remote key"),
+            &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(
@@ -1071,6 +1111,8 @@ mod tests {
                 stdin.read_line(&mut provider).map_err(|e| e.to_string())?;
                 writeln!(stdout, "remote key for {}", provider.trim()).map_err(|e| e.to_string())
             },
+            &mut FakeRaw,
+            false,
         )
         .unwrap();
         assert!(

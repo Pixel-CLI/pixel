@@ -905,6 +905,10 @@ fn ask_bool_keys(
 ) -> Result<Option<bool>, String> {
     let mut picked = current;
     let hint = paint(color, "2", "  ←/→ pick · Enter confirm · q cancel");
+    // A line longer than the terminal wraps; the \r rewrite can then not
+    // reach the start of the question and the previous render survives as
+    // a duplicate. Drop the hint when the full line would not fit.
+    let hint = picker_hint(label, &hint, crate::select::terminal_width());
     render_choice(output, label, picked, &hint, color)?;
     loop {
         match crate::prompt_key::step(raw.read_key(), picked) {
@@ -925,6 +929,18 @@ fn ask_bool_keys(
     render_choice(output, label, picked, &hint, color)?;
     writeln!(output).map_err(|e| e.to_string())?;
     Ok(Some(picked))
+}
+
+/// Decide whether the key hint fits on one line: a rendered line at least as
+/// wide as the terminal wraps, which the `\r` rewrite cannot recover from, so
+/// the hint is dropped. `xxx / xxx` is a fixed-width stand-in for the choice
+/// tokens, whose real width is identical whatever the picked state.
+fn picker_hint(label: &str, hint: &str, cols: usize) -> String {
+    if crate::select::visible_len(&format!("{label} [ xxx / xxx ]{hint} ")) >= cols {
+        String::new()
+    } else {
+        hint.to_owned()
+    }
 }
 
 /// One picker line: `[ (Y) / n ]` with the active choice in parentheses and
@@ -2708,6 +2724,15 @@ mod picker_tests {
         render_choice(&mut output, "Choice?", false, "  hint", false).unwrap();
         let line = String::from_utf8(output).unwrap();
         assert!(line.contains("Choice? [  Y  / (n) ]  hint"), "{line}");
+    }
+
+    #[test]
+    fn picker_hint_drops_when_the_line_fills_the_terminal() {
+        // At exactly the terminal width the hint is dropped; a single spare
+        // column keeps it.
+        let cols = crate::select::visible_len("Choice? [ (Y) /  n  ]  hint ");
+        assert_eq!(picker_hint("Choice?", "  hint", cols), "");
+        assert_eq!(picker_hint("Choice?", "  hint", cols + 1), "  hint");
     }
 
     #[test]

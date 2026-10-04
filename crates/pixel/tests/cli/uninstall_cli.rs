@@ -69,22 +69,22 @@ fn wrappers_only_removes_one_block_and_keeps_the_rest_installed() {
     assert!(!prompt.exists(), "a full uninstall removes the prompt");
 }
 
-/// Run `spawn` again while it fails with ETXTBSY: a binary this test just
-/// copied is "busy" as long as a child another test thread forked in the
-/// meantime still holds a copy of the write descriptor, until that child
-/// execs. Bounded, so a real error still surfaces within a second.
-fn output_unless_busy(
-    mut spawn: impl FnMut() -> std::io::Result<std::process::Output>,
+/// Executing a binary this test just copied can fail with ETXTBSY while a
+/// sibling test's forked child still holds the write descriptor, or while
+/// writeback finishes on overlay filesystems; a short bounded retry clears
+/// it (the same race antigravity's registration probe retries under).
+fn exec_while_text_busy(
+    mut probe: impl FnMut() -> std::io::Result<std::process::Output>,
 ) -> std::io::Result<std::process::Output> {
     for _ in 0..50 {
-        match spawn() {
+        match probe() {
             Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             outcome => return outcome,
         }
     }
-    spawn()
+    probe()
 }
 
 /// `install.sh` with `PIXEL_INSTALL_DIR` puts the binary outside
@@ -97,7 +97,7 @@ fn uninstall_removes_the_binary_that_runs_it() {
     std::fs::create_dir_all(&dir).unwrap();
     let copy = dir.join("pixel");
     std::fs::copy(env!("CARGO_BIN_EXE_pixel"), &copy).unwrap();
-    let out = output_unless_busy(|| {
+    let out = exec_while_text_busy(|| {
         std::process::Command::new(&copy)
             .args(["uninstall", "--shell", "zsh", "--json"])
             .env("PIXEL_DAEMON_AUTO_START", "0")
