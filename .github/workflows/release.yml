@@ -277,3 +277,70 @@ jobs:
           brew install LivioGama/tap/pixel
           brew test LivioGama/tap/pixel
           "$RUNNER_TEMP/check-version.sh" "$(brew --prefix)/bin/pixel" "brew install LivioGama/tap/pixel"
+
+  # VirusTotal: submits each release archive and appends a link to its report
+  # to the release notes, so a user can check the scan of the exact file they
+  # download (a static "0/N" badge would go stale with the next release).
+  # Reports are linked by sha256, so a link stays valid as engines re-scan.
+  # Runs only when the VT_API_KEY secret is set; the free API allows 4
+  # requests a minute, hence the pause between calls. A failure here comes
+  # after publication and unpublishes nothing.
+  virustotal:
+    name: VirusTotal scan
+    needs: release
+    runs-on: ubuntu-26.04
+    permissions:
+      # Append the report links to the release notes.
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VT_API_KEY: ${{ secrets.VT_API_KEY }}
+    steps:
+      - name: No VirusTotal key
+        if: env.VT_API_KEY == ''
+        run: echo "::notice::VT_API_KEY is not set; the release archives were not submitted to VirusTotal."
+
+      - name: Submit the archives and link their reports
+        if: env.VT_API_KEY != ''
+        run: |
+          set -eu
+          DIR="$RUNNER_TEMP/virustotal"
+          mkdir -p "$DIR" && cd "$DIR"
+          # pixel-v*: the three archives; the bottles (pixel-<version>.*)
+          # carry the same binaries as the Linux archives.
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern 'pixel-v*.tar.gz'
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json body --jq .body > notes.md
+          if grep -Fqx '### VirusTotal' notes.md; then
+            echo "::notice::the release notes already link VirusTotal reports; nothing appended"
+            exit 0
+          fi
+          printf '\n\n### VirusTotal\n\n' > links.md
+          # The key goes to curl through a mode-0600 header file, never as an
+          # argument another process could read from the process list
+          # (printf is a shell builtin, so writing it spawns nothing).
+          hdr="$(umask 077 && mktemp)"
+          trap 'rm -f "$hdr"' EXIT
+          printf 'x-apikey: %s\n' "$VT_API_KEY" > "$hdr"
+          for f in pixel-v*.tar.gz; do
+            # 32 MB is the direct upload limit; larger files take an upload URL.
+            url="https://www.virustotal.com/api/v3/files"
+            if [ "$(wc -c < "$f")" -gt 32000000 ]; then
+              url="$(curl -fsS --retry 3 -H "@$hdr" \
+                https://www.virustotal.com/api/v3/files/upload_url | jq -r .data)"
+              sleep 16
+            fi
+            # The key and the archive only ever travel over HTTPS.
+            case "$url" in
+              https://*) ;;
+              *) echo "::error::VirusTotal returned a non-HTTPS upload URL; $f not submitted"; exit 1 ;;
+            esac
+            curl -fsS --retry 3 -H "@$hdr" -F "file=@$f" "$url" > /dev/null
+            sha="$(shasum -a 256 "$f" | cut -d' ' -f1)"
+            # shellcheck disable=SC2016 # the backticks are Markdown, not a command
+            printf -- '- [`%s`](https://www.virustotal.com/gui/file/%s)\n' "$f" "$sha" >> links.md
+            echo "submitted $f ($sha)"
+            sleep 16
+          done
+          cat notes.md links.md > notes-with-scan.md
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file notes-with-scan.md
+          cat links.md

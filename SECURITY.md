@@ -52,6 +52,14 @@ gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --owner LivioGama
   --source-ref refs/tags/v0.6.1 --deny-self-hosted-runners
 ```
 
+### VirusTotal reports
+
+Each release's notes end with a `VirusTotal` section linking the report of
+every archive, by its sha256, once the release workflow has submitted them
+(from the first release after v0.6.1, when the repository's `VT_API_KEY`
+secret is set). A scan says what antivirus engines think of the file; the
+attestation above is what proves where it came from.
+
 ## Security model
 
 Pixel runs locally and processes repository data. Key security boundaries:
