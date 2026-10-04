@@ -223,8 +223,13 @@ Machine-wide:
 Envelope<Value>`. The Unix-socket daemon reads one JSON `Op` per line and
 writes one JSON `Envelope` line back. Request handling is single-threaded; an
 accept thread and a `notify` watcher feed one channel. The watcher debounces
-filesystem events and refreshes the index and graph for changed files. The
-daemon exits after thirty minutes idle.
+filesystem events and refreshes the index and graph for changed files. It is
+registered on its own thread so the daemon answers from its first request: a
+recursive watch walks every directory under the root, ignored ones included,
+and took 11 to 28 s over a repository's 11 515 `node_modules` directories.
+Once it is live, `Corpus::watch_ready` re-reads every path `git status`
+lists, since edits made meanwhile raised no event. The daemon exits after
+thirty minutes idle.
 
 Two version numbers exist and must not be conflated:
 

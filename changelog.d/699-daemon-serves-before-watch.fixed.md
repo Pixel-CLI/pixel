@@ -1,0 +1,1 @@
+**daemon:** a starting daemon answers its first request before its recursive file watch is registered, then re-reads what `git status` lists: in a repository with 11 515 `node_modules` directories the first `pixel search-content` after the 30-minute idle exit took 11–28 s, and now takes 0.2–0.4 s.
