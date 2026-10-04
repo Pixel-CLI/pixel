@@ -137,6 +137,12 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
             .join(pixel_index::index::SHARD_FILE)
             .is_file()
     });
+    // Retrieval guidance and the route ride only a prompt that asks about code
+    // or about Pixel itself; on a git request or a pasted thread they are
+    // noise the model learns to skip, together with every later route.
+    let pixel_note = crate::pixel_question::pixel_question_note(&payload.prompt);
+    let asks = pixel_note.is_some()
+        || crate::execution_brief::retrieval_request(&payload.prompt).is_some();
     // The opt-outs silence the task notes, not the Pixel-first guidance:
     // with both features disabled the guidance still rides an indexed
     // repository's prompt on Codex and on a real Claude host.
@@ -150,7 +156,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         } else {
             ""
         };
-        if !guidance.is_empty() {
+        if asks && !guidance.is_empty() {
             let context = append_execution_route(guidance, &payload.prompt);
             emit_context(&context, event_name);
         }
@@ -214,8 +220,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // A prompt that asks about the Pixel tool itself carries the operation it
     // names as the first guidance line, so the agent consults the CLI instead
     // of answering about Pixel from memory.
-    let pixel_note = crate::pixel_question::pixel_question_note(&payload.prompt);
-    if matches!(provider, Some(crate::guard::Provider::Devin)) {
+    if asks && matches!(provider, Some(crate::guard::Provider::Devin)) {
         context = render_devin_context(&context, pixel_note.as_deref());
     }
     // Codex reads no SessionStart prompt of its own for this contract, so
@@ -223,7 +228,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // guidance. A discovered root without a shard is not indexed: the same
     // commands there would build a full index instead of answering (the
     // sub-agent prompt carries the same rule), so the guidance stays quiet.
-    if matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
+    if asks && matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
         context = render_codex_context(&context, pixel_note.as_deref());
     }
     // Claude Code reads no per-turn mandate of its own for this contract, so a
@@ -231,7 +236,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // guidance like Devin and Codex do. The hosting gate keeps an imported
     // Claude config (Devin reading `~/.claude/settings.json` verbatim) from
     // prepending a second guidance over Devin's own.
-    if claude_host && indexed {
+    if asks && claude_host && indexed {
         context = render_claude_context(&context, pixel_note.as_deref());
     }
     if indexed {
@@ -399,9 +404,14 @@ fn render_claude_context(context: &str, pixel_note: Option<&str>) -> String {
     }
 }
 
-fn append_execution_route(context: &str, task: &str) -> String {
+/// Append the route for a prompt that asks about code, built from the typed
+/// text only; any other prompt leaves `context` unchanged.
+fn append_execution_route(context: &str, prompt: &str) -> String {
+    let Some(task) = crate::execution_brief::retrieval_request(prompt) else {
+        return context.to_string();
+    };
     let route = crate::execution_brief::pretty_retrieval_route(
-        &crate::execution_brief::retrieval_route(task),
+        &crate::execution_brief::retrieval_route(&task),
     );
     if context.is_empty() {
         route
@@ -1054,6 +1064,31 @@ mod tests {
         assert!(context.contains("maximum 40-line window"));
         assert!(context.contains("rtk rg -m 5 -n -F -- 'Foo::bar' ."));
         assert!(context.contains("[/PIXEL:EXECUTION_ROUTE]"));
+    }
+
+    #[test]
+    fn route_should_skip_prompts_that_do_not_ask_about_code() {
+        for prompt in [
+            "go to branch main and pull",
+            "<pasted_content id=\"4f44\">\nBon allez `grep` src/main.rs\n</pasted_content id=\"4f44\">\nWe have one task left: coherence.",
+        ] {
+            assert_eq!(
+                append_execution_route("context", prompt),
+                "context",
+                "{prompt}"
+            );
+            assert_eq!(append_execution_route("", prompt), "", "{prompt}");
+        }
+        // The route is built from the typed text, never from the pasted block.
+        let context = append_execution_route(
+            "",
+            "<pasted_content id=\"1\">\nthread\n</pasted_content id=\"1\">\nWhy does the parser panic?",
+        );
+        assert!(
+            context.contains("rtk pixel find-code 'Why does the parser panic?'"),
+            "{context}"
+        );
+        assert!(!context.contains("thread"), "{context}");
     }
 
     #[test]
