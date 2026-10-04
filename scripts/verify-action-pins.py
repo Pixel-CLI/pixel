@@ -3,8 +3,8 @@
 
 A tag or a branch is a pointer its owner can move: `actions/checkout@v7`
 runs whatever `v7` names on the day of the run, not what was reviewed.
-`release.yml` holds `HOMEBREW_TAP_TOKEN` and, since provenance attestation,
-an OIDC token that Sigstore turns into a signing certificate for this
+`release.yml` holds `HOMEBREW_TAP_TOKEN` and `release-build.yml`, which it
+calls, an OIDC token that Sigstore turns into a signing certificate for this
 repository, so a moved upstream tag there runs someone else's code with
 those credentials. The workflows already pin every action to a full commit
 SHA with a trailing `# vN` comment (Dependabot moves both together); this

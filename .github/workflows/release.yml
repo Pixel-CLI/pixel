@@ -59,93 +59,26 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
-  build:
-    name: Build ${{ matrix.target }}
+  # Build, package and attest in a reusable workflow: the attestation names
+  # release-build.yml as its signer, which is what SLSA Build Level 3 asks of
+  # the build (see that file). This job only grants it the signing
+  # permissions; no secret crosses over.
+  assets:
+    name: Build and attest
     needs: verify
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-26.04
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-26.04
-          - target: aarch64-apple-darwin
-            os: macos-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          # The job never pushes: do not leave the token in .git/config.
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          # The SHA pin no longer names the toolchain through the ref, so
-          # it is passed explicitly (same channel as before).
-          toolchain: stable
-          targets: ${{ matrix.target }}
-
-      # Restores what cross-build.yml saved on main for this target (shared
-      # key release-<target>): the dependencies arrive compiled, and only the
-      # workspace crates and the thin-LTO link are left. Never saves, for the
-      # same reason as the verify job.
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: release-${{ matrix.target }}
-          save-if: false
-
-      # Prebuilt binary instead of `cargo install cross`. cross compiles inside
-      # its own Docker image (musl toolchain included), so no host packages.
-      - name: Install cross (Linux musl)
-        if: runner.os == 'Linux'
-        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
-        with:
-          tool: cross
-
-      # fastembed (ONNX) has no musl build; model2vec is pure Rust and does,
-      # so the Linux binaries keep a working semantic channel.
-      - name: Build (Linux musl via cross, model2vec only)
-        if: runner.os == 'Linux'
-        run: cross build --release --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
-
-      - name: Build (macOS native)
-        if: runner.os == 'macOS'
-        run: cargo build --release --locked --target ${{ matrix.target }} -p pixel-cli
-
-      - name: Package
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          TARGET="${{ matrix.target }}"
-          ARCHIVE="pixel-${VERSION}-${TARGET}.tar.gz"
-          STAGING="pixel-${VERSION}-${TARGET}"
-          mkdir -p "$STAGING/bin"
-          cp "target/${TARGET}/release/pixel" "$STAGING/bin/"
-          cp README.md LICENSE "$STAGING/"
-          tar czf "$ARCHIVE" "$STAGING"
-          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: pixel-${{ matrix.target }}
-          path: |
-            pixel-*.tar.gz
-            pixel-*.tar.gz.sha256
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release-build.yml
 
   release:
     name: Publish release + formula
-    needs: build
+    needs: assets
     runs-on: ubuntu-26.04
+    # Publication only: the signing permissions stay with release-build.yml.
     permissions:
       contents: write
-      # Provenance attestation: the OIDC token Sigstore exchanges for a
-      # short-lived signing certificate naming this workflow run, and the
-      # write that stores the signed attestation on the repository.
-      id-token: write
-      attestations: write
     env:
       # Fine-grained PAT with Contents: read/write on LivioGama/homebrew-tap.
       # When unset, the formula is still attached to the release but the tap
@@ -157,47 +90,13 @@ jobs:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
 
-      - name: Download all artifacts
+      # The files release-build.yml built and attested: archives and their
+      # .sha256, the Linux bottles, pixel.rb, pixel-core.rb and install.sh.
+      - name: Download the release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          path: artifacts
-          merge-multiple: true
-
-      # pixel.rb and the two Linux bottles: the musl binary laid out as a keg,
-      # which Homebrew pours where a formula without a bottle would need a C
-      # compiler. The script checks each archive against its .sha256 and is
-      # held by scripts/test-homebrew-formula.py, which CI runs on every pull
-      # request that touches it, so this step changes without a tag.
-      - name: Generate the Homebrew formula and the Linux bottles
-        run: python3 scripts/homebrew-formula.py "${GITHUB_REF#refs/tags/}" artifacts .
-
-      # pixel-core.rb: the formula a homebrew-core pull request carries,
-      # built from the source archive GitHub serves for this tag (its sha256
-      # is only known once the tag exists). homebrew-core.yml builds and
-      # audits the same formula from source on every change to it.
-      - name: Generate the homebrew-core formula (build from source)
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          curl -fsSL --retry 3 -o source.tar.gz \
-            "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
-          python3 scripts/homebrew-core-formula.py "$TAG" source.tar.gz pixel-core.rb
-
-      # SLSA build provenance for what a user downloads and runs: each
-      # archive, each Linux bottle Homebrew pours, and install.sh, which the
-      # README pipes into sh. The
-      # .sha256 files ship beside the archives in the same release, so they
-      # prove the download was not corrupted, never who built it; an
-      # attestation is signed by this workflow on this tag and checked with
-      # `gh attestation verify` (SECURITY.md). Before the upload on purpose:
-      # a signing failure stops the release instead of publishing it
-      # unattested. The smoke job verifies both subjects after publication.
-      - name: Attest build provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: |
-            artifacts/pixel-*.tar.gz
-            pixel-*.bottle.tar.gz
-            scripts/install.sh
+          name: release-assets
+          path: assets
 
       # The release body is the tag's section of CHANGELOG.md (Keep a
       # Changelog: from "## [X.Y.Z]" to the next "## " heading).
@@ -223,13 +122,14 @@ jobs:
           # ahead of the latest release, and the documented one-liner reads
           # releases/latest/download/install.sh, so it always runs the
           # script of the release it installs.
+          # assets/pixel-*.tar.gz matches the archives and the Linux
+          # bottles (pixel-*.bottle.tar.gz) alike.
           files: |
-            artifacts/pixel-*.tar.gz
-            artifacts/pixel-*.tar.gz.sha256
-            pixel-*.bottle.tar.gz
-            pixel.rb
-            pixel-core.rb
-            scripts/install.sh
+            assets/pixel-*.tar.gz
+            assets/pixel-*.tar.gz.sha256
+            assets/pixel.rb
+            assets/pixel-core.rb
+            assets/install.sh
 
       - name: Check out the Homebrew tap
         if: env.HOMEBREW_TAP_TOKEN != ''
@@ -243,7 +143,7 @@ jobs:
         if: env.HOMEBREW_TAP_TOKEN != ''
         run: |
           VERSION="${GITHUB_REF#refs/tags/}"
-          cp pixel.rb homebrew-tap/Formula/pixel.rb
+          cp assets/pixel.rb homebrew-tap/Formula/pixel.rb
           cd homebrew-tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -313,13 +213,13 @@ jobs:
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --pattern "$ARCHIVE" --pattern "$ARCHIVE.sha256"
           shasum -a 256 -c "$ARCHIVE.sha256"
-          # Signed by release.yml on this tag, on a GitHub-hosted runner:
-          # the command SECURITY.md gives users, so a release whose
+          # Signed by release-build.yml on this tag, on a GitHub-hosted
+          # runner: the command SECURITY.md gives users, so a release whose
           # attestation is missing or foreign fails here.
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern install.sh
           for subject in "$ARCHIVE" install.sh; do
             gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-build.yml" \
               --source-ref "$GITHUB_REF" --deny-self-hosted-runners
           done
           tar xzf "$ARCHIVE"

@@ -11,7 +11,7 @@ GitHub serves for the tag.
 
 | homebrew-core expects | Where it is met |
 | --- | --- |
-| a stable, tagged, checksummed source archive, never a branch | `url` is `archive/refs/tags/vX.Y.Z.tar.gz` with its sha256, written by `release.yml` once the tag exists |
+| a stable, tagged, checksummed source archive, never a branch | `url` is `archive/refs/tags/vX.Y.Z.tar.gz` with its sha256, written by `release-build.yml` once the tag exists |
 | a build from source, nothing prebuilt downloaded | `cargo install --no-default-features --features model2vec`: the default `fastembed` feature downloads a prebuilt ONNX Runtime while building and vendors OpenSSL; `model2vec` is pure Rust, with no OpenSSL, ONNX or native TLS in its dependency tree |
 | no self-updating software | the formula builds with `PIXEL_UPDATE_CHECK=off`: that binary never checks for a release, never prints the notice and never offers to upgrade itself (`update_notice.rs`); `pixel self-update` already refuses a binary Homebrew owns |
 | a DFSG-compatible licence | MIT (`LICENSE`, `license "MIT"`) |

@@ -1,6 +1,6 @@
 name: Cross-build
 
-# The release lanes, built exactly as release.yml builds them: musl through
+# The release lanes, built exactly as release-build.yml builds them: musl through
 # cross (--locked, model2vec only) and aarch64-apple-darwin natively. The Test job's `cargo check` of that feature
 # set runs on glibc and cannot see a dependency that fails to link against
 # musl or a Cargo.lock that --locked rejects, so this is the only job that
@@ -59,14 +59,14 @@ jobs:
     # through LTO. On PR runs every dependency already came from the cache
     # and those crates were the whole build: 2 min 21 s to 3 min 53 s in
     # `release` (runs 36576912510, 36579443968). The push to main keeps
-    # building `release` exactly as release.yml does, and the release skill
+    # building `release` exactly as release-build.yml does, and the release skill
     # tags only once that run is green, so an LTO-only failure still stops a
     # release before its tag. A maintenance pull request into `release/x.y`
     # keeps `release`: no push run covers that branch.
     #
     # The push to main runs both profiles, each as its own job with its own
     # cache key, so each saves the entry its readers restore: `release-<t>`
-    # for the tag's build in release.yml, `dev-release-<t>` for the pull
+    # for the tag's build in release-build.yml, `dev-release-<t>` for the pull
     # requests. One key cannot hold both: an entry is immutable, and a push
     # whose key already exists saves nothing ("Cache up-to-date"), so a
     # dev-release build added to the release job would never reach the
@@ -77,7 +77,7 @@ jobs:
       matrix:
         profile: ${{ fromJSON(github.event_name == 'push' && '["release", "dev-release"]' || (github.event_name == 'pull_request' && github.base_ref == 'main') && '["dev-release"]' || '["release"]') }}
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, aarch64-apple-darwin]
-        # The three release targets, on the runners release.yml builds them
+        # The three release targets, on the runners release-build.yml builds them
         # on. aarch64-apple-darwin is here so a push to main proves the macOS
         # lane before a tag does, and saves the cache the tag's build restores.
         include:
@@ -140,7 +140,7 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
-      # One entry per target, shared with release.yml's build job: a shared
+      # One entry per target, shared with release-build.yml's build job: a shared
       # key replaces the job id in the cache key, so the tag's build (job
       # `build`) restores what this job (`cross-build`) saved on main. A tag
       # run can read the default branch's caches, never another tag's.
@@ -153,7 +153,7 @@ jobs:
           # or poison them. A failed build still saves what it compiled.
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-          # `release-<target>` for the release profile, the name release.yml
+          # `release-<target>` for the release profile, the name release-build.yml
           # restores; `dev-release-<target>` for the pull requests' profile.
           shared-key: ${{ matrix.profile }}-${{ matrix.target }}
 
@@ -166,7 +166,7 @@ jobs:
         with:
           tool: cross
 
-      # Must match release.yml exactly, but for the profile (see the
+      # Must match release-build.yml exactly, but for the profile (see the
       # job comment): fastembed (ONNX) has no musl build, but model2vec is pure
       # Rust and ships in the Linux release. Building without it here would
       # leave the released feature set untested.
@@ -174,7 +174,7 @@ jobs:
         if: runner.os == 'Linux' && steps.dup.outputs.duplicate != 'true'
         run: cross build --profile ${{ matrix.profile }} --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
 
-      # Must match release.yml's macOS step exactly, but for the profile:
+      # Must match release-build.yml's macOS step exactly, but for the profile:
       # default features, native.
       - name: Build (macOS native)
         if: runner.os == 'macOS' && steps.dup.outputs.duplicate != 'true'
