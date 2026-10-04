@@ -79,7 +79,9 @@ the list above whenever one of them changes role.
 ## Contributors
 
 Anyone can contribute, from a fork: open a pull request from your fork's
-branch into `main`; CONTRIBUTING.md is the guide. Only the two maintainers
+branch into `main`; CONTRIBUTING.md is the guide, and
+CODE_OF_CONDUCT.md applies to every space the project runs (the
+maintainers above enforce it). Only the two maintainers
 have write access to this repository, so only they push branches here and
 open pull requests from them; a regular contributor may be given the Triage
 role to label and manage issues and pull requests, never write access. A

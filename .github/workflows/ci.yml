@@ -60,7 +60,7 @@ on:
       - ".agents/skills/rust-guidelines/**"
       # scripts/test-prepare.py and pixel-release's tests read prepare.sh:
       - ".agents/skills/release/**"
-      # test_lead_time.py:
+      # test_lead_time.py, test_adherence.py:
       - ".agents/skills/pixel-retro/**"
       - "scripts/README.md"
       # gen-plugin-assets.sh --check:
@@ -254,6 +254,7 @@ jobs:
           ^\.agents/skills/pixel-retro/
           ^\.cargo/mutants\.toml$
           (^|/)Cargo\.toml$
+          ^Cross\.toml$
           ^crates/pixel-install/assets/pi-pixel\.ts$
           EOF
 
@@ -483,6 +484,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 .agents/skills/pixel-retro/test_lead_time.py
 
+      - name: Retro adherence contract (synthetic transcripts, no network)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 .agents/skills/pixel-retro/test_adherence.py
+
       - name: Action pin check contract (tags, short SHAs, unparsed forms refused)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-verify-action-pins.py
@@ -502,6 +507,14 @@ jobs:
       - name: Harness-grid dispatch input contract
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-harness-grid-input.py
+
+      # What reproducible-build.yml's proof depends on: the commit's time,
+      # both path remaps, Cross.toml forwarding SOURCE_DATE_EPOCH, the
+      # environment set before the cache and the build in the three
+      # workflows, one pinned cross, the release command.
+      - name: Reproducible release build contract (disposable repo)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-release-build-env.py
 
       # clean.sh removes whole directories. The cases that matter are the ones
       # asserting what it leaves alone: a file git tracks, a tree behind a

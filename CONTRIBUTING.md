@@ -8,6 +8,9 @@ checklist as the contract for your pull request.
 
 - Architecture, crate map, wire contract: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Security model and vulnerability reporting: [SECURITY.md](SECURITY.md)
+- How we treat each other, and how to report a problem: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Where the project is heading, and what it will not do:
+  [ROADMAP.md](ROADMAP.md)
 - Agent rules for this repo, whatever the tool: [AGENTS.md](AGENTS.md) (the
   loops) and [`.agents/rules/`](.agents/rules/) (scoped rules: mutation-gate-proof
   code, test hygiene, long campaigns, the lint idioms) and [`.agents/skills/`](.agents/skills/)
@@ -31,6 +34,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
 - [ ] If a command or op was added or renamed: `ARCHITECTURE.md` (its `## Command surface` table, in `pixel --help` order), `pixel --help` output, and the agent prompt in `crates/pixel-install/assets/pixel-agent-prompt.md` agree with each other. `cargo test -p pixel-cli --test cli docs_drift::` enforces both directions.
 - [ ] If the change moves anything `ARCHITECTURE.md` describes (a crate or an internal dependency, a file on disk, the wire contract, what `pixel install` writes, a hook, a CI job), the matching section is updated in the same pull request ([`.agents/rules/architecture-doc.md`](.agents/rules/architecture-doc.md) maps change to section; `docs_drift::` checks the command and crate tables).
+- [ ] If the change crosses a trust boundary of [`docs/threat-model.md`](docs/threat-model.md) (a new entry point, a file under `.pixel/` or the machine-wide state, a network destination, a secret, a hook or install target, an op on the daemon socket, a listed mitigation, or a workflow's triggers, permissions or secrets), the matching threat and attack-surface entries are updated in the same pull request. A suspected vulnerability goes to the private advisory (SECURITY.md), not into that file.
 - [ ] If binary behavior or installed rules changed: the finished implementation unit completed the rebuild, reinstall, index and doctor checklist in AGENTS.md (see "Local install loop").
 - [ ] Every CodeRabbit finding on the pull request has an answer in its own thread — a fix naming its commit, or the reason it does not apply — and the thread is resolved (see "CodeRabbit reviews").
 - [ ] The work was tracked on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1): the PR body opens with `Task <number>`, or with `no task: <reason>` for the declared exceptions (see [`.agents/rules/project-task.md`](.agents/rules/project-task.md)).

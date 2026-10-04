@@ -157,7 +157,7 @@ developer_instructions = '''
 Your own instructions, if any.
 
 <!-- pixel:managed:begin -->
-# Pixel Retrieval Layer — Mandatory Agent Protocol
+# Pixel — deterministic repository facts
 ... the content of ~/.local/share/pixel/agent-prompt.md ...
 <!-- pixel:managed:end -->
 '''
