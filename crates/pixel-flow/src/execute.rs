@@ -1110,6 +1110,18 @@ mod tests {
         assert!(!field_holds_value(snapshot, "e59", "Zurich"));
     }
 
+    /// A value is only read as the field's contents from a *closed* bracket
+    /// block: a truncated line whose `[ref=e59` block is missing its closing
+    /// `]` never proves the field is satisfied, so the needed fill is not
+    /// skipped. (`held_on_line` guards on the closing bracket's index being
+    /// strictly inside the line; an unterminated block falls through to the
+    /// empty `: value` suffix and reads as not held.)
+    #[test]
+    fn an_unterminated_bracket_block_does_not_count_as_the_field_contents() {
+        let snapshot = "- textbox \"City\" [value=\"Zurich\", ref=e59,";
+        assert!(!field_holds_value(snapshot, "e59", "Zurich"));
+    }
+
     #[test]
     fn evaluate_condition_or() {
         let snapshot = "- heading \"hCaptcha\" [ref=e1]";
