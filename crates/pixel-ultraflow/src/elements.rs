@@ -412,9 +412,7 @@ mod tests {
 
     #[test]
     fn echoed_value_is_read_when_name_contains_reference_text() {
-        let (elements, _) = parse_snapshot(
-            "- textbox \"Search ref=e59]\" [ref=e59]: filled text",
-        );
+        let (elements, _) = parse_snapshot("- textbox \"Search ref=e59]\" [ref=e59]: filled text");
         assert_eq!(elements[0].value.as_deref(), Some("filled text"));
     }
 
