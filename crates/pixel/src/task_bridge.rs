@@ -821,7 +821,10 @@ mod tests {
         std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
         // A read-only markers directory fails the durable write while the
         // lookup still proves the marker absent — the state whose fallback
-        // releases the session.
+        // releases the session. Root ignores directory mode bits, and so can
+        // any environment where the chmod fails to bite: when the write
+        // succeeded anyway the fixture never established that state, and the
+        // case is skipped rather than asserting a world it did not build.
         let markers = root.0.join(ENFORCED_SESSIONS);
         std::fs::create_dir_all(&markers).unwrap();
         let original = std::fs::metadata(&markers).unwrap().permissions();
@@ -831,6 +834,8 @@ mod tests {
             locked.set_mode(locked.mode() & !0o222);
             std::fs::set_permissions(&markers, locked).unwrap();
         }
+        let marker_name =
+            |session: &str| pixel_task::digest(&("claude", session_key(session).unwrap())).unwrap();
 
         // The task starts enforced: host_policy is recorded before the marker
         // write, so the obligation survives the failure; a prompt-submit gates
@@ -839,6 +844,14 @@ mod tests {
             json!({"session_id":"s1","prompt":"fix the parser bug in src/a.rs","mutation":false});
         let started = handle_hook(&root.0, "claude", "prompt-submit", &prompt).unwrap();
         assert_eq!(started["decision"], "observe", "{started}");
+        if markers.join(marker_name("s1")).exists() {
+            // The chmod did not bite (a privileged run can bypass directory
+            // mode bits): the write succeeded, the fixture never established
+            // an unwritable marker, and the deny-below would assert a state
+            // this run cannot build.
+            std::fs::set_permissions(&markers, original).unwrap();
+            return;
+        }
 
         std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
         // The settings no longer enforce, the task's host_policy record does,
