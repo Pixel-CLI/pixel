@@ -553,8 +553,9 @@ mod tests {
         let mut browser = ScriptedBrowser::default();
         browser.start();
         browser.observe(URL, DUCK);
-        browser.ok("- button \"Search\" [ref=e186]");
-        browser.ok("");
+        // The click's executor shape: pre-click snapshot, probe, click,
+        // two empty polls to the two-empty stop.
+        browser.click("- button \"Search\" [ref=e186]");
         browser.observe(URL, "- link \"Elsewhere\" [ref=e300]");
         let mut decider = ScriptedDecider::then("CLICK 3", "DONE", "DONE");
         let trace = discover(&mut browser, &mut decider, &request(&[], Limits::default())).unwrap();
@@ -589,19 +590,35 @@ mod tests {
         assert!(asked.text.contains("[3] button \"Search\""));
         assert_eq!(asked.criteria["CLICK 3"], "button \"Search\"");
         // The run opened the page it was asked about, then clicked through
-        // the same executor a replay uses.
-        assert_eq!(browser.calls()[0], ["open", URL]);
-        assert_eq!(browser.paused[0].as_secs(), 3, "the page gets time to load");
-        assert_eq!(browser.calls()[1], ["get", "url"], "the observation");
-        assert_eq!(browser.calls()[2], ["snapshot", "-i"]);
+        // the same executor a replay uses. The executor's shape: a URL
+        // probe before the open, poll intervals (200ms) instead of fixed
+        // waits, a URL probe before the click, and two poll reads after
+        // it — the two-empty stop, since the scripted browser answers
+        // nothing more.
+        assert_eq!(browser.calls()[0], ["get", "url"], "the open's probe");
+        assert_eq!(browser.calls()[1], ["open", URL]);
+        assert_eq!(browser.paused[0], Duration::from_millis(200));
+        assert_eq!(browser.calls()[2], ["get", "url"], "poll 1");
         assert_eq!(
             browser.calls()[3],
+            ["get", "url"],
+            "poll 2, the two-empty stop"
+        );
+        assert_eq!(browser.calls()[4], ["get", "url"], "the observation");
+        assert_eq!(browser.calls()[5], ["snapshot", "-i"]);
+        assert_eq!(
+            browser.calls()[6],
             ["snapshot", "-i"],
-            "{:?}",
+            "the click's own pre-snapshot: {:?}",
             browser.calls()
         );
-        assert_eq!(browser.calls()[4], ["click", "@e186"]);
-        assert_eq!(browser.paused[1].as_secs(), 2);
+        assert_eq!(browser.calls()[7], ["get", "url"], "the click's probe");
+        assert_eq!(browser.calls()[8], ["click", "@e186"]);
+        assert_eq!(
+            browser.paused[1..],
+            [Duration::from_millis(200); 3],
+            "the open's second poll interval, then the click's two"
+        );
         assert_eq!(trace.steps.len(), 1);
         let step = &trace.steps[0];
         assert_eq!(step.step.action, "click");
@@ -626,7 +643,9 @@ mod tests {
         let mut browser = ScriptedBrowser::default();
         browser.start();
         browser.observe(URL, DUCK);
+        // The fill's executor shape: pre-fill snapshot, URL probe, fill.
         browser.ok("- combobox \"Search with DuckDuckGo\" [ref=e185]");
+        browser.ok("");
         browser.ok("");
         browser.observe("https://duckduckgo.com/?q=Zurich", DUCK);
         let vars = [Var::new("query", "Zurich")];
@@ -646,8 +665,12 @@ mod tests {
         assert_eq!(step.step.action, "fill");
         assert_eq!(step.step.value.as_deref(), Some("Zurich"));
         assert_eq!(step.step.value_var.as_deref(), Some("query"));
-        assert_eq!(browser.calls()[3], ["snapshot", "-i"]);
-        assert_eq!(browser.calls()[4], ["fill", "@e185", "Zurich"]);
+        assert_eq!(
+            browser.calls()[6],
+            ["snapshot", "-i"],
+            "the fill's pre-snapshot"
+        );
+        assert_eq!(browser.calls()[7], ["fill", "@e185", "Zurich"]);
         assert_eq!(
             trace.decisions, 3,
             "two page decisions and one value decision"
@@ -733,8 +756,8 @@ mod tests {
         assert_eq!(trace.decisions, 2);
         assert_eq!(
             browser.calls().len(),
-            3,
-            "only the open, the look, nothing else"
+            6,
+            "the open's probe and two polls, then the look — nothing else"
         );
     }
 
@@ -778,8 +801,7 @@ mod tests {
         browser.start();
         browser.observe(URL, DUCK);
         for _ in 0..DEFAULT_MAX_STALLED {
-            browser.ok("- button \"Search\" [ref=e186]");
-            browser.ok("");
+            browser.click("- button \"Search\" [ref=e186]");
             browser.observe(URL, DUCK);
         }
         let mut decider = ScriptedDecider::always("CLICK 3");
@@ -803,8 +825,10 @@ mod tests {
         browser.start();
         browser.observe(URL, DUCK);
         for _ in 0..DEFAULT_MAX_STALLED {
-            // The click resolves its ref, then the browser refuses it.
+            // The click resolves its ref, the probe reads the URL, then
+            // the browser refuses the click itself.
             browser.ok("- button \"Search\" [ref=e1]");
+            browser.ok("");
             browser.fail("agent-browser click @e1 exited with 1: unknown ref e1");
             browser.observe(URL, DUCK);
         }
@@ -828,10 +852,10 @@ mod tests {
         browser.start();
         browser.observe(URL, DUCK);
         browser.ok("- button \"Search\" [ref=e1]");
+        browser.ok("");
         browser.fail("unknown ref e1");
         browser.observe(URL, DUCK);
-        browser.ok("- button \"Search\" [ref=e186]");
-        browser.ok("");
+        browser.click("- button \"Search\" [ref=e186]");
         browser.observe(URL, "- link \"Elsewhere\" [ref=e300]");
         let mut decider = ScriptedDecider::then("CLICK 3", "CLICK 3", "DONE");
         let trace = discover(&mut browser, &mut decider, &request(&[], Limits::default())).unwrap();
@@ -865,11 +889,11 @@ mod tests {
         assert_eq!(trace.steps.len(), 4);
         assert!(trace.steps.iter().all(|step| step.step.action == "wait"));
         assert_eq!(trace.steps[0].step.wait.as_deref(), Some(WAIT_STEP));
-        // The open's navigation wait, then one pause per WAIT.
-        assert_eq!(browser.paused.len(), 5, "a WAIT pauses");
-        assert_eq!(browser.paused[0], Duration::from_secs(3));
+        // The open's two poll intervals, then one pause per WAIT.
+        assert_eq!(browser.paused.len(), 6, "a WAIT pauses");
+        assert_eq!(browser.paused[0..2], [Duration::from_millis(200); 2]);
         assert!(
-            browser.paused[1..]
+            browser.paused[2..]
                 .iter()
                 .all(|pause| *pause == Duration::from_millis(500)),
             "{:?}",
@@ -883,7 +907,6 @@ mod tests {
         let mut browser = ScriptedBrowser::default();
         browser.start();
         browser.observe(URL, DUCK);
-        browser.ok("");
         browser.observe(URL, "- link \"Elsewhere\" [ref=e300]");
         let mut decider = ScriptedDecider::then("SCROLL_DOWN", "DONE", "DONE");
         let trace = discover(&mut browser, &mut decider, &request(&[], Limits::default())).unwrap();
@@ -891,7 +914,7 @@ mod tests {
         assert_eq!(trace.status, Status::Done);
         assert_eq!(trace.steps[0].step.action, "scroll");
         assert_eq!(trace.steps[0].step.value.as_deref(), Some("down 800"));
-        assert_eq!(browser.calls()[3], ["scroll", "down", "800"]);
+        assert_eq!(browser.calls()[6], ["scroll", "down", "800"]);
         assert!(trace.steps[0].changed);
         assert_eq!(trace.steps[0].step.ref_hint, None, "a scroll needs no ref");
     }
@@ -920,9 +943,11 @@ mod tests {
             "the decision engine gave no probability to any of the 9 options offered on https://duckduckgo.com/"
         );
 
-        // A browser that fails on the very first call fails the open; one
-        // that opens and then fails fails the look that follows.
+        // A browser that fails the open fails the run; the probe before it
+        // is tolerated (the poll later compares against wherever the page
+        // was). One that opens and then fails fails the look that follows.
         let mut browser = ScriptedBrowser::default();
+        browser.ok("");
         browser.fail("no browser");
         let mut decider = ScriptedDecider::always("DONE");
         let err =
