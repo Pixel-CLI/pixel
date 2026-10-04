@@ -132,6 +132,8 @@ status blocks. Keep exactly one current next action.
 ## 1. Preconditions
 
 ```bash
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
 git fetch origin --tags
 pixel repo-state                                   # clean tree
 LAST=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
@@ -194,22 +196,25 @@ only, 2000 bytes; `prepare.sh` refuses more).
 
 ## 3. Prepare the release commit
 
-From an up-to-date `main`, on a `release-x.y.z` branch. Record the full
-`BASE=$(git rev-parse origin/main)` before preparation and
+Set `TARGET=main` for a regular release or `TARGET=release/x.y` for a
+maintenance release, and prepare from `origin/$TARGET` on `release-x.y.z`.
+Record the full `BASE=$(git rev-parse "origin/$TARGET")` before preparation and
 `PREPARE_HEAD=$(git rev-parse HEAD)` after its final validated commit.
 A rebase invalidates that record and its changelog coverage, even if Git
 reports no conflict: review every newly included PR and direct commit,
 fold new fragments into the released section, then validate and record anew.
 
 ```bash
-git fetch origin
-BASE=$(git rev-parse origin/main)
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+git fetch origin "refs/heads/$TARGET:refs/remotes/origin/$TARGET"
+BASE=$(git rev-parse "origin/$TARGET")
 ```
 
 Prepare:
 
 ```bash
-pixel new-branch release-x.y.z --from origin/main --request-id "release-x.y.z-branch"
+pixel new-branch release-x.y.z --from "origin/$TARGET" --request-id "release-x.y.z-branch"
 .agents/skills/release/prepare.sh x.y.z        # --date YYYY-MM-DD to override today
 ```
 
@@ -286,7 +291,7 @@ status in the record; it must not swallow a failing gate behind `tail`.
 ```bash
 pixel commit -m "release: prepare x.y.z" --request-id "release-x.y.z-prepare"
 git push -u origin release-x.y.z
-gh pr create --base main --title "release: prepare x.y.z" --body-file <body>
+gh pr create --base "$TARGET" --title "release: prepare x.y.z" --body-file <body>
 ```
 
 Body: the version, the reason for patch/minor, the gate output, "tag `vx.y.z`
@@ -314,13 +319,15 @@ bypass a 404 by pretending the future tag was audited. Weekly or later PR
 checks still audit released source formulas.
 
 Immediately before merging, fetch the target and run the candidate guard
-with the recorded SHAs (for maintenance, use `origin/release/x.y` and
-`--maintenance` on both guard calls; that mode permits the tested backport
-code but keeps the ancestry, fragment and tree checks):
+with the recorded SHAs and the selected target. For maintenance, append
+`--maintenance` to both guard calls; that mode permits the tested backport
+code but keeps the ancestry, fragment and tree checks:
 
 ```bash
-git fetch origin
-python3 .agents/skills/release/check-candidate.py "$BASE" "$PREPARE_HEAD" --tip origin/main
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+git fetch origin "refs/heads/$TARGET:refs/remotes/origin/$TARGET"
+python3 .agents/skills/release/check-candidate.py "$BASE" "$PREPARE_HEAD" --tip "origin/$TARGET"
 ```
 
 If the base moved or GitHub reports `BEHIND`, refresh coverage and validation;
@@ -334,15 +341,20 @@ like every PR on `main`
 
 Tag the prepare PR's merge commit, not whatever `main`'s head is by then:
 another PR merged in between would ship unreviewed in the release. Wait for
-that commit's push CI (CI, Cross-build) to be green:
+that commit's push CI (CI, Cross-build) to be green on `main`. The current
+push workflows select `main` only: for maintenance, require the complete
+prepare PR CI/Cross-build verdict for `PREPARE_HEAD` and the exact-tree guard
+below instead of waiting for nonexistent maintenance push runs.
 
 ```bash
-git fetch origin
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+git fetch origin "refs/heads/$TARGET:refs/remotes/origin/$TARGET"
 SHA=$(gh pr view <n> --json mergeCommit --jq .mergeCommit.oid)
-python3 .agents/skills/release/check-candidate.py "$BASE" "$PREPARE_HEAD" --tip origin/main --merge "$SHA"
+python3 .agents/skills/release/check-candidate.py "$BASE" "$PREPARE_HEAD" --tip "origin/$TARGET" --merge "$SHA"
 git show --stat "$SHA" | head -5                      # the merge of release: prepare x.y.z
 git show "${SHA}:crates/pixel/Cargo.toml" | sed -n 3p # version = "x.y.z"; braces: zsh reads "$SHA:c" as a modifier
-gh run list --branch main --commit "$SHA"             # CI and Cross-build: success
+gh run list --branch "$TARGET" --commit "$SHA"             # CI and Cross-build: success
 git tag -a vx.y.z -m "pixel x.y.z" "$SHA"             # annotated, as v0.2.4
 git push origin vx.y.z                                # the release ask covers it (Authority)
 ```
