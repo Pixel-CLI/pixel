@@ -603,6 +603,37 @@ fn an_exact_hit_should_not_run_fallback_when_call_count_warning_is_present() {
     );
 }
 
+/// The task-aware fallback is a first-page recovery: on a later page
+/// (`--offset > 0`) the skip guard must hold even when that page holds zero
+/// matches, so paging an empty exact search cannot silently re-run the
+/// fallback query.
+#[test]
+fn the_task_aware_fallback_skips_nonzero_pages() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["build-index"]));
+
+    let output = fixture
+        .command()
+        .args([
+            "search-content",
+            "-F",
+            "missing_exact_pixel_literal",
+            "--offset",
+            "1",
+            "--fallback-query",
+            "mzzqxwv xorffle gazonk 4f9",
+            "--no-daemon",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("ran one task-aware find-code fallback"),
+        "paging an empty exact search must not run the task-aware fallback: {stderr}"
+    );
+}
+
 /// `find-code --json` on an overview prompt answers with an empty match list
 /// and the README pointer as the note.
 #[test]
