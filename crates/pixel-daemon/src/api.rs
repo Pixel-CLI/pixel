@@ -9051,3 +9051,6 @@ mod context_crux_coordinate_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

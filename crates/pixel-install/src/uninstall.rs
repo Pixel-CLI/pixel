@@ -1764,3 +1764,6 @@ mod backup_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod contract_tests;
