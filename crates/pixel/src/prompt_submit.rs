@@ -138,7 +138,9 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // with both features disabled the guidance still rides an indexed
     // repository's prompt on Codex and on a real Claude host.
     if prompt_features_disabled(task_context, task_boundary) {
-        let guidance = if matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
+        let guidance = if matches!(provider, Some(crate::guard::Provider::Devin)) && indexed {
+            DEVIN_PIXEL_GUIDANCE
+        } else if matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
             CODEX_PIXEL_GUIDANCE
         } else if claude_host && indexed {
             CLAUDE_PIXEL_GUIDANCE
@@ -146,7 +148,8 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
             ""
         };
         if !guidance.is_empty() {
-            emit_context(guidance, event_name);
+            let context = append_execution_route(guidance, &payload.prompt);
+            emit_context(&context, event_name);
         }
         std::process::exit(0);
     }
@@ -227,6 +230,9 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // prepending a second guidance over Devin's own.
     if claude_host && indexed {
         context = render_claude_context(&context, pixel_note.as_deref());
+    }
+    if indexed {
+        context = append_execution_route(&context, &payload.prompt);
     }
     if !context.is_empty() {
         emit_context(&context, event_name);
@@ -387,6 +393,17 @@ fn render_claude_context(context: &str, pixel_note: Option<&str>) -> String {
         guidance
     } else {
         format!("{guidance}\n\n{context}")
+    }
+}
+
+fn append_execution_route(context: &str, task: &str) -> String {
+    let route = crate::execution_brief::pretty_retrieval_route(
+        &crate::execution_brief::retrieval_route(task),
+    );
+    if context.is_empty() {
+        route
+    } else {
+        format!("{context}\n\n{route}")
     }
 }
 
@@ -1014,6 +1031,38 @@ mod tests {
         let context = render_codex_context("task targets", None);
         assert!(context.starts_with("Pixel-first retrieval"), "{context}");
         assert!(!context.contains("[PIXEL:TASK_CONTEXT]"), "{context}");
+    }
+
+    #[test]
+    fn task_specific_route_is_separate_from_non_authoritative_task_context() {
+        let task_context =
+            "[PIXEL:TASK_CONTEXT] Suggested entry points, not an action recommendation.";
+        let context = append_execution_route(task_context, "Trace callers of `Foo::bar`");
+        assert!(context.starts_with(task_context));
+        assert!(context.contains("[PIXEL:EXECUTION_ROUTE]"));
+        // A backticked identifier starts with exact search and runs one
+        // task-aware find-code fallback on empty (identifier-route wording).
+        assert!(context.contains(
+            "rtk pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
+        ));
+        assert!(
+            context.contains("runs the task-aware find-code fallback once in the same command")
+        );
+        assert!(context.contains("maximum 40-line window"));
+        assert!(context.contains("rtk rg -m 5 -n -F -- 'Foo::bar' ."));
+        assert!(context.contains("[/PIXEL:EXECUTION_ROUTE]"));
+    }
+
+    #[test]
+    fn behavior_route_wording_uses_find_code_first_then_an_alternate_query() {
+        let context = append_execution_route("", "Trace protected search metrics");
+        assert!(context.starts_with("[PIXEL:EXECUTION_ROUTE]"));
+        assert!(context.contains("rtk pixel find-code 'Trace protected search metrics'"));
+        assert!(context.contains("If it returns no usable or relevant result, run exactly once"));
+        assert!(context.contains(
+            "rtk pixel find-code 'Trace protected search metrics implementation and callers'"
+        ));
+        assert!(context.contains("maximum 40-line window"));
     }
     use std::process::Command;
 

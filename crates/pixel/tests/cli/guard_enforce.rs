@@ -2037,12 +2037,14 @@ fn antigravity_pre_invocation_should_inject_pixel_matches_without_denial() {
 
     let transcript = Scratch::for_test("pixel-guard-policy", "agy-transcript");
     let transcript_path = transcript.join("transcript.jsonl");
+    // A backticked identifier guarantees an exact search-content -F match
+    // against the fixture, independent of find-code's semantic ranking.
     std::fs::write(
         &transcript_path,
         serde_json::json!({
             "source": "USER_EXPLICIT",
             "type": "USER_INPUT",
-            "content": "<USER_REQUEST>Find the private test parcel identifier in project notes and describe it.</USER_REQUEST>"
+            "content": "<USER_REQUEST>Find `AGY-PIXEL-7319` in project notes and describe it.</USER_REQUEST>"
         })
         .to_string(),
     )
@@ -2061,16 +2063,26 @@ fn antigravity_pre_invocation_should_inject_pixel_matches_without_denial() {
         response,
         json!({"injectSteps": [{"ephemeralMessage": message}]})
     );
-    assert!(
-        message.contains(
-            "search-content --metrics off --no-daemon --scope code --limit 20 --context 0"
-        )
-    );
+    // A backticked identifier starts with exact search-content -F.
+    assert!(message.contains("search-content"), "{message}");
+    assert!(message.contains("AGY-PIXEL-7319"), "{message}");
     assert!(message.contains(dir.to_str().unwrap()), "{message}");
     assert!(
         message.contains("PROJECT_NOTES.md:1:Fixture notes. Identifier: AGY-PIXEL-7319. It labels a private test parcel."),
         "{message}"
     );
+    // The ordered task route is appended from the recovered request.
+    assert!(message.contains("[PIXEL:EXECUTION_ROUTE]"), "{message}");
+    assert!(
+        message.contains("rtk pixel search-content -F 'AGY-PIXEL-7319'"),
+        "{message}"
+    );
+    let metric_lines = message
+        .lines()
+        .filter(|line| line.starts_with("🟩 pixel search-content "))
+        .count();
+    assert_eq!(metric_lines, 1, "{message}");
+    assert!(message.contains("maximum 40-line window"), "{message}");
     let searches = antigravity_search_events(&dir);
     assert_eq!(searches.len(), 1, "{searches:?}");
     assert_eq!(searches[0]["outcome"], "ok");
@@ -2078,7 +2090,13 @@ fn antigravity_pre_invocation_should_inject_pixel_matches_without_denial() {
         searches[0]["cwd"],
         dir.canonicalize().unwrap().to_str().unwrap()
     );
-    assert!(searches[0]["args"].as_str().unwrap().contains("parcel"));
+    assert!(
+        searches[0]["args"]
+            .as_str()
+            .unwrap()
+            .contains("AGY-PIXEL-7319"),
+        "{searches:?}"
+    );
 
     let mut later = payload.clone();
     later["invocationNum"] = json!(1);
@@ -2091,7 +2109,7 @@ fn antigravity_search_events(root: &Path) -> Vec<Value> {
         .unwrap_or_default()
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .filter(|event| event["command"] == "search-content")
+        .filter(|event| event["command"] == "search-content" || event["command"] == "find-code")
         .collect()
 }
 
@@ -2114,11 +2132,12 @@ fn antigravity_pre_invocation_should_skip_unusable_requests_without_retrieval() 
         "workspacePaths": [dir.to_str().unwrap()],
     });
     assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
+    // Unusable transcripts (no recoverable USER_EXPLICIT string request) fail
+    // open to the native retrieval path without running a Pixel search.
     for transcript in [
         "not valid JSON".to_owned(),
         json!({"source":"USER_EXPLICIT","content":false}).to_string(),
         json!({"source":"MODEL","content":"parcel identifier"}).to_string(),
-        json!({"source":"USER_EXPLICIT","content":"Can you do this?"}).to_string(),
     ] {
         std::fs::write(&path, &transcript).unwrap();
         assert_eq!(
@@ -2128,6 +2147,16 @@ fn antigravity_pre_invocation_should_skip_unusable_requests_without_retrieval() 
         );
         assert_eq!(antigravity_search_events(&dir), Vec::<Value>::new());
     }
+    // A trivial but recoverable USER_EXPLICIT request still gets the route
+    // (fail-open to native tools); the pre-invocation search runs once.
+    std::fs::write(
+        &path,
+        json!({"source":"USER_EXPLICIT","content":"Can you do this?"}).to_string(),
+    )
+    .unwrap();
+    let response = guard("antigravity", &payload, &[]);
+    assert!(response["injectSteps"][0]["ephemeralMessage"].is_string());
+    assert_eq!(antigravity_search_events(&dir).len(), 1);
     std::fs::write(
         &path,
         json!({"source":"USER_EXPLICIT","content":"parcel identifier"}).to_string(),
@@ -2137,7 +2166,6 @@ fn antigravity_pre_invocation_should_skip_unusable_requests_without_retrieval() 
         let mut missing = payload.clone();
         missing.as_object_mut().unwrap().remove(field);
         assert_eq!(guard("antigravity", &missing, &[]), Value::Null, "{field}");
-        assert_eq!(antigravity_search_events(&dir), Vec::<Value>::new());
     }
 }
 
@@ -2158,10 +2186,17 @@ fn antigravity_pre_invocation_should_fail_open_when_retrieval_cannot_return_matc
         "transcriptPath": path,
         "workspacePaths": [dir.to_str().unwrap()],
     });
+    // No .pixel dir → no workspace → fail open (Null, no search).
     assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
     assert_eq!(antigravity_search_events(&dir), Vec::<Value>::new());
+    // .pixel dir but no index: find-code exits 0 with "No matches" and the
+    // route is injected so the agent can take the bounded recovery step.
     std::fs::create_dir_all(dir.join(".pixel")).unwrap();
-    assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
+    let no_index_response = guard("antigravity", &payload, &[]);
+    assert!(
+        no_index_response["injectSteps"][0]["ephemeralMessage"].is_string(),
+        "{no_index_response}"
+    );
 
     let indexed = pixel_command()
         .args(["build-index", "."])
@@ -2169,12 +2204,129 @@ fn antigravity_pre_invocation_should_fail_open_when_retrieval_cannot_return_matc
         .output()
         .unwrap();
     assert!(indexed.status.success(), "{indexed:?}");
+    // Indexed but no match: the search succeeds (empty) and the route is
+    // still injected so the agent can take the bounded recovery step.
     let before = antigravity_search_events(&dir).len();
-    assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
+    let response = guard("antigravity", &payload, &[]);
+    let message = response["injectSteps"][0]["ephemeralMessage"]
+        .as_str()
+        .expect("route injected on empty search");
+    assert!(message.contains("[PIXEL:EXECUTION_ROUTE]"), "{message}");
     let searches = antigravity_search_events(&dir);
     assert_eq!(searches.len(), before + 1);
     assert_eq!(searches.last().unwrap()["outcome"], "ok");
 
+    // Corrupt index: find-code degrades gracefully (exit 0, no matches) and
+    // the route is still injected so the agent can use the native fallback.
     std::fs::write(dir.join(".pixel/base.shard"), "invalid index bytes").unwrap();
-    assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
+    let corrupt_response = guard("antigravity", &payload, &[]);
+    assert!(
+        corrupt_response["injectSteps"][0]["ephemeralMessage"].is_string(),
+        "{corrupt_response}"
+    );
+}
+
+#[test]
+fn antigravity_pre_invocation_should_inject_the_task_route_built_from_the_recovered_request() {
+    let dir = Scratch::for_test("pixel-guard-policy", "agy-route");
+    crate::support::git(&dir, &["init", "-q"]);
+    std::fs::write(
+        dir.join("PROJECT_NOTES.md"),
+        "Fixture notes. Identifier: AGY-PIXEL-ROUTE-44. A private test parcel.\n",
+    )
+    .unwrap();
+    let indexed = pixel_command()
+        .args(["build-index", "."])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(indexed.status.success(), "{indexed:?}");
+
+    let transcript = Scratch::for_test("pixel-guard-policy", "agy-route-transcript");
+    let transcript_path = transcript.join("transcript.jsonl");
+    std::fs::write(
+        &transcript_path,
+        serde_json::json!({
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "content": "<USER_REQUEST>Trace callers of `AGY-PIXEL-ROUTE-44` in project notes.</USER_REQUEST>"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let payload = json!({
+        "invocationNum": 0,
+        "transcriptPath": transcript_path,
+        "workspacePaths": [dir.to_str().unwrap()],
+    });
+
+    let response = guard("antigravity", &payload, &[]);
+    let message = response["injectSteps"][0]["ephemeralMessage"]
+        .as_str()
+        .expect("retrieval message reaches the model");
+    // The ordered task route is appended from the recovered request, not
+    // only from static installer text. A backticked identifier starts with
+    // exact search and runs one task-aware find-code fallback on empty.
+    assert!(message.contains("[PIXEL:EXECUTION_ROUTE]"), "{message}");
+    assert!(
+        message.contains("rtk pixel search-content -F 'AGY-PIXEL-ROUTE-44'"),
+        "{message}"
+    );
+    let metric_lines = message
+        .lines()
+        .filter(|line| line.starts_with("🟩 pixel search-content "))
+        .count();
+    assert_eq!(metric_lines, 1, "{message}");
+    assert!(
+        message.contains("runs the task-aware find-code fallback once in the same command"),
+        "{message}"
+    );
+    assert!(message.contains("maximum 40-line window"), "{message}");
+    assert!(
+        message.contains("rtk rg -m 5 -n -F -- 'AGY-PIXEL-ROUTE-44' ."),
+        "{message}"
+    );
+    assert!(message.contains("[/PIXEL:EXECUTION_ROUTE]"), "{message}");
+    // The retrieval block still precedes the route.
+    assert!(
+        message.contains("[/PIXEL:PRE_INVOCATION_RETRIEVAL]\n\n[PIXEL:EXECUTION_ROUTE]"),
+        "{message}"
+    );
+}
+
+#[test]
+fn antigravity_pre_invocation_should_fail_open_when_the_route_is_unavailable() {
+    let dir = Scratch::for_test("pixel-guard-policy", "agy-no-route");
+    crate::support::git(&dir, &["init", "-q"]);
+    std::fs::write(dir.join("notes.md"), "parcel identifier AGY-PIXEL-7319\n").unwrap();
+    let indexed = pixel_command()
+        .args(["build-index", "."])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(indexed.status.success(), "{indexed:?}");
+    let transcript = Scratch::for_test("pixel-guard-policy", "agy-no-route-transcript");
+    let path = transcript.join("transcript.jsonl");
+    let payload = json!({
+        "invocationNum": 0,
+        "transcriptPath": path,
+        "workspacePaths": [dir.to_str().unwrap()],
+    });
+    // No recoverable user request → no route can be built. The guard fails
+    // open: no denial, no injection, and the session keeps its native
+    // retrieval path. A model-only or non-USER_EXPLICIT transcript, or one
+    // whose content is empty after trimming, must not strand the agent.
+    for transcript in [
+        json!({"source":"MODEL","content":"parcel identifier"}).to_string(),
+        json!({"source":"USER_EXPLICIT","content":"   "}).to_string(),
+        json!({"source":"USER_EXPLICIT","content":"<USER_REQUEST></USER_REQUEST>"}).to_string(),
+    ] {
+        std::fs::write(&path, &transcript).unwrap();
+        assert_eq!(
+            guard("antigravity", &payload, &[]),
+            Value::Null,
+            "{transcript}"
+        );
+        assert_eq!(antigravity_search_events(&dir), Vec::<Value>::new());
+    }
 }

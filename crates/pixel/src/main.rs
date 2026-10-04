@@ -248,6 +248,9 @@ enum Command {
         /// Match the pattern as a literal string, not a regex (ripgrep `-F`).
         #[arg(short = 'F', long = "fixed-strings")]
         fixed_strings: bool,
+        /// Run one task-aware find-code query when an exact lookup has no hits.
+        #[arg(long, hide = true)]
+        fallback_query: Option<String>,
         /// Accepted for ripgrep compatibility; matches always carry their
         /// line number.
         #[arg(short = 'n', long = "line-number")]
@@ -336,7 +339,6 @@ enum Command {
         precision: bool,
     },
     /// Build a deterministic, bounded execution brief from scope-task evidence.
-    #[command(hide = true)]
     ExecutionBrief {
         /// Task/feature description.
         task: String,
@@ -3357,6 +3359,7 @@ fn run_search(
     globs: &[String],
     types: &[String],
     files_only: bool,
+    fallback_query: Option<String>,
     logger: &pixel_actionlog::ActionLog,
 ) -> Result<(), String> {
     let effective_pattern = if ignore_case && !pattern.starts_with("(?i)") {
@@ -3365,6 +3368,9 @@ fn run_search(
         pattern
     };
     let groups = group_by_root(&paths)?;
+    if fallback_query.is_some() && groups.len() != 1 {
+        return Err("--fallback-query requires exactly one repository root".to_string());
+    }
     let multi_root = groups.len() > 1;
     let mut seen_files = HashSet::new();
     for (root, rels) in groups {
@@ -3385,11 +3391,55 @@ fn run_search(
             globs,
             types,
             files_only,
+            fallback_query.as_deref(),
             &mut seen_files,
             logger,
         )?;
     }
     Ok(())
+}
+
+/// Run the task-aware resolver once when an opted-in exact search finds no hits.
+fn run_task_aware_search_fallback(
+    root: &Path,
+    phrase: &str,
+    limit: Option<usize>,
+    no_daemon: bool,
+    json: bool,
+) -> Result<bool, String> {
+    call_guard_check("find-code", &format!("{phrase} {}", root.display()));
+    if overview_intent::is_overview_prompt(phrase) {
+        let repo_root = discover_root(root).unwrap_or_else(|_| root.to_path_buf());
+        let answer = overview_intent::overview_answer(&repo_root);
+        if json {
+            print_data(&json!({ "matches": [], "note": answer }), true)?;
+        } else {
+            println!("{answer}");
+        }
+        return Ok(true);
+    }
+    let mut data = execute(
+        root,
+        Request::Resolve {
+            phrase: phrase.to_string(),
+            limit,
+        },
+        no_daemon,
+    )?;
+    if let Ok(repo_root) = discover_root(root) {
+        enrich_resolve_matches_with_context(&mut data, &repo_root);
+    }
+    let found = data
+        .get("matches")
+        .and_then(Value::as_array)
+        .is_some_and(|matches| !matches.is_empty());
+    if json {
+        print_data(&data, true)?;
+    } else {
+        eprintln!("exact lookup returned no matches; ran one task-aware find-code fallback");
+        print_resolve_human(&data)?;
+    }
+    Ok(found)
 }
 
 /// Print `paths` one per line within the stdout byte cap, stopping before a
@@ -3425,6 +3475,7 @@ fn run_search_one(
     globs: &[String],
     types: &[String],
     files_only: bool,
+    fallback_query: Option<&str>,
     seen_files: &mut HashSet<String>,
     _logger: &pixel_actionlog::ActionLog,
 ) -> Result<(), String> {
@@ -3450,6 +3501,31 @@ fn run_search_one(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    if let Some(phrase) = fallback_query.filter(|_| {
+        offset == 0
+            && matches.is_empty()
+            && data.get("match_count").and_then(Value::as_u64) == Some(0)
+            && !data
+                .get("truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+    }) {
+        operation_metrics::observe(&data);
+        match run_task_aware_search_fallback(root, phrase, limit, no_daemon, json) {
+            Ok(found) => {
+                if !found && !json {
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| root.to_path_buf());
+                    eprintln!("{}", no_match_note(&cwd, root));
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!(
+                    "task-aware find-code fallback unavailable; preserving the exact-search result: {error}"
+                );
+            }
+        }
+    }
     let positions: Vec<u64> = (offset as u64..).take(matches.len()).collect();
     // Enrich matches with surrounding context lines if requested.
     let mut cache: HashMap<PathBuf, Option<String>> = HashMap::new();
@@ -4780,10 +4856,17 @@ fn run_command(
             types,
             files_with_matches,
             fixed_strings,
+            fallback_query,
             line_number: _,
         } => {
             if call_guard_check("search-content", &format!("{pattern} {paths:?}")) {
                 return Err("circuit breaker: repeated search calls".to_string());
+            }
+            if fallback_query.as_deref().is_some_and(str::is_empty) {
+                return Err("--fallback-query must not be empty".to_string());
+            }
+            if fallback_query.is_some() && !fixed_strings {
+                return Err("--fallback-query requires -F/--fixed-strings".to_string());
             }
             // Fail on a bad `-g`/`-t` before any daemon round trip; the
             // daemon builds the same filter from the same rules.
@@ -4807,6 +4890,7 @@ fn run_command(
                 &globs,
                 &types,
                 files_with_matches,
+                fallback_query,
                 logger,
             )
         }

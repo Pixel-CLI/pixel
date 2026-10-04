@@ -35,7 +35,7 @@ const args = process.argv.slice(2);
 const settings = JSON.parse(readFileSync(${JSON.stringify(settingsPath)}, "utf8"));
 appendFileSync(${JSON.stringify(trace)}, JSON.stringify(args) + "\\n");
 if (settings.fail?.includes(args[0])) { console.error("fixture Pixel unavailable: " + args[0]); process.exit(1); }
-const operations = ["status", "scope-task", "repo-state", "review-changes", "commit-history", "find-code", "fetch", "commit", "commit-and-push", "list-areas", "search-content", "impact", "pack-context", "what-changed", "classify"];
+const operations = ["status", "scope-task", "execution-brief", "repo-state", "review-changes", "commit-history", "find-code", "fetch", "commit", "commit-and-push", "list-areas", "search-content", "impact", "pack-context", "what-changed", "classify"];
 const box = "warning: diagnostic line\\n\u{1F7E9} pixel " + args[0] + " \u2740 1.0ms\\n  \u2502\\n  \u2514\u2500\u2500\u2500\\n";
 if (!args.includes("off") && !["--version", "--help"].includes(args[0])) process.stderr.write(box);
 switch (args[0]) {
@@ -52,6 +52,19 @@ switch (args[0]) {
   case "status": console.log(JSON.stringify({index:{base_files:1},graph:{present:true},facts:{fresh:true}})); break;
   case "config": console.log(JSON.stringify({policy: settings.policy ?? "advisory", source: "repo"})); break;
   case "scope-task": console.log(JSON.stringify({padding: "x".repeat(settings.scopePadding ?? 0), targets:[{path:"src/main.rs"}]})); break;
+  case "execution-brief": console.log(JSON.stringify({
+    task: args[1], padding: "x".repeat(settings.scopePadding ?? 0), workstreams: [{ path: "src/main.rs", tier: "P0" }], route: {
+      first_command: "rtk pixel find-code " + JSON.stringify(args[1]),
+      steps: [
+        { order: 1, action: "retrieve", command: "rtk pixel find-code " + JSON.stringify(args[1]) },
+        { order: 2, action: "read_result", max_lines: 40, command: "read the first returned path:line only" },
+        { order: 3, action: "validate", command: "verify the answer against the bounded evidence" },
+      ],
+      retry: { after: "first result is unresolved, capped, or irrelevant", command: "rtk pixel find-code 'narrower behavior'" },
+      fallback: { after_pixel_calls: 2, command: "rtk rg -n -F -- 'task' ." },
+      on_unavailable: "Pixel is advisory; continue with native tools and report that retrieval was unavailable.",
+    },
+  })); break;
   case "repo-state": console.log(JSON.stringify({branch:"fixture"})); break;
   case "find-code": console.log(JSON.stringify(settings.findAmbiguous ? {confidence:"ranked",matches:[{path:"src/a.rs",raw:"main",symbol_kind:"function"},{path:"src/b.rs",raw:"main",symbol_kind:"function"}]} : {padding: "x".repeat(settings.findPadding ?? 0), confidence:"resolved",matches:[{path:"src/found.rs",raw:"main",symbol_kind:"function"}]})); break;
   case "classify": {
@@ -116,7 +129,7 @@ switch (args[0]) {
     };
     await emit("session_start", { reason: "startup" });
     assert.ok(active.includes("pixel") && active.includes("pixel_project"), "session start activates both pixel tools");
-    return { emit, tool, activateAgain: () => activate(api), boot: () => emit("before_agent_start", { prompt: "inspect the implementation" }) };
+    return { emit, tool, activateAgain: () => activate(api), boot: (prompt = "inspect the implementation") => emit("before_agent_start", { prompt }) };
   };
   const check = async (name, test) => {
     configure();
@@ -141,6 +154,30 @@ switch (args[0]) {
         assert.deepEqual(event, before);
       }
     }
+  });
+
+  await check("prompt bootstrap injects an ordered populated route and the agent uses its bounded result", async () => {
+    const h = await host("enforce");
+    const prompt = "Find the behavior that decides native repository reads and explain its guard";
+    const boot = await h.boot(prompt);
+    const route = boot.message.content;
+    assert.match(route, /DETERMINISTIC PIXEL ROUTE/);
+    assert.ok(route.indexOf("1. retrieve:") < route.indexOf("2. read_result (maximum 40 lines):"));
+    assert.ok(route.indexOf("2. read_result (maximum 40 lines):") < route.indexOf("3. validate:"));
+    assert.ok(route.includes(`rtk pixel find-code ${JSON.stringify(prompt)}`));
+    assert.match(route, /Retry only if the first result is unresolved, capped, or irrelevant/);
+    assert.match(route, /After two nonconverging Pixel calls, use: rtk rg/);
+    assert.match(route, /If Pixel is unavailable: Pixel is advisory/);
+    const briefCall = calls().findLast(([name]) => name === "execution-brief");
+    assert.equal(briefCall[1], prompt, "the exact current prompt reaches execution-brief");
+    assert.deepEqual(briefCall.slice(-2), ["--metrics", "off"], "bootstrap probes suppress metrics by design");
+
+    const result = await h.tool.execute("find", { action: "find_code", goal: prompt }, null, null, user(prompt));
+    assert.equal(result.content.length, 2);
+    assert.match(result.content[0].text, /matches/);
+    assert.equal(result.content[1].text, "🟩 pixel find-code ❀ 1.0ms\n  │\n  └───");
+    await h.emit("tool_result", { toolName: "pixel", toolCallId: "pixel", input: {}, ...result });
+    assert.equal(await h.emit("tool_call", read("src/found.rs", 40)), undefined, "the result path accepts a read bounded to the route's 40-line limit");
   });
 
   await check("configuration decides enforcement when the environment is silent", async () => {
@@ -202,6 +239,9 @@ switch (args[0]) {
     // pattern must not be read as a path that does not exist.
     assert.equal(await why("rg error"), "repository search: use pixel search-content");
     assert.equal(await why("grep -rn error"), "repository search: use pixel search-content");
+    await h.emit("tool_result", pixelResult());
+    assert.equal(await why("rg -m 5 -n -F -- error src"), undefined, "native search fallback proceeds after Pixel was used");
+    assert.equal(await why("grep -m 5 error src"), undefined, "grep fallback proceeds after Pixel was used");
     assert.equal(await why("ls src"), "repository discovery: use pixel list-areas or find-code");
     assert.equal(await why("find src"), "repository discovery: use pixel find-code or list-areas");
     assert.equal(await why("git status"), "repository inspection: use pixel repo-state");
@@ -324,7 +364,7 @@ switch (args[0]) {
   });
 
   await check("bootstrap and structured-tool failures fail open and recover", async () => {
-    for (const op of ["status", "scope-task", "repo-state"]) {
+    for (const op of ["status", "execution-brief", "repo-state"]) {
       const h = await host("enforce");
       configure({ fail: [op] });
       const boot = await h.boot();

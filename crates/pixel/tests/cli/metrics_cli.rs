@@ -11,6 +11,15 @@ use serde_json::{Value, json};
 const PIXEL: &str = env!("CARGO_BIN_EXE_pixel");
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn execution_brief_is_visible_in_cli_help() {
+    let fixture = Fixture::new();
+    let help = fixture.run(&["--help"]);
+    assert!(help.status.success(), "{help:?}");
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(stdout.contains("execution-brief"), "{stdout}");
+}
+
 struct Fixture(PathBuf);
 
 impl Fixture {
@@ -482,6 +491,78 @@ fn an_empty_search_from_a_subdirectory_names_the_root_and_claims_no_saving() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!stderr.contains("matches under"), "{extra:?}: {stderr}");
     }
+}
+
+#[test]
+fn an_empty_exact_search_should_run_one_task_aware_find_code_fallback() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["build-index"]));
+
+    let output = fixture
+        .command()
+        .args([
+            "search-content",
+            "-F",
+            "missing_exact_pixel_literal",
+            "--fallback-query",
+            "Trace callers of login_user",
+            "--no-daemon",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("login_user"), "{stdout}");
+    assert!(stdout.contains("Confidence:"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .matches("ran one task-aware find-code fallback")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("0 matches under"), "{stderr}");
+    assert_eq!(metric_lines(&output).len(), 1, "{stderr}");
+    assert_eq!(fixture.events("search-content").len(), 1);
+}
+
+#[test]
+fn an_exact_hit_should_not_run_fallback_when_call_count_warning_is_present() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.run(&["build-index"]));
+    let session = format!("metrics-cli-fallback-{}", std::process::id());
+
+    let mut final_output = None;
+    for pattern in ["l", "lo", "log", "login", "login_", "login_user"] {
+        let output = fixture
+            .command()
+            .env("PIXEL_SESSION_ID", &session)
+            .args([
+                "search-content",
+                "-F",
+                pattern,
+                "--fallback-query",
+                "Trace callers of login_user",
+                "--no-daemon",
+            ])
+            .output()
+            .unwrap();
+        assert_success(&output);
+        final_output = Some(output);
+    }
+
+    let output = final_output.unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("login_user"), "{stdout}");
+    assert!(!stdout.contains("Confidence:"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("prior calls in 10 minutes"), "{stderr}");
+    assert!(
+        !stderr.contains("ran one task-aware find-code fallback"),
+        "{stderr}"
+    );
 }
 
 /// `find-code --json` on an overview prompt answers with an empty match list

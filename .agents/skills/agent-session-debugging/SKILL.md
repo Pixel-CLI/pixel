@@ -90,6 +90,13 @@ the workspace. Use returned pane and agent IDs rather than guessing IDs.
 ## Pixel retrieval and metrics evidence
 
 - Record the exact Pixel command, complete result, and any `path:line` served.
+- Treat `0 matches` as a normal retrieval result with a recovery step, not as
+  task completion: retry once with `pixel find-code` using the task's behavior
+  or concept. If that does not converge, follow the task route's bounded native
+  fallback. Do not repeatedly vary Pixel queries without a new information need.
+- A high prior-call note (for example, “42 prior calls in 10 minutes”) is
+  informational by itself. Check whether the current query has a relevant hit;
+  call volume alone is not evidence of a loop and must not block retrieval.
 - Record each subsequent bounded read and its visible range. Do not infer ranges
   from an abbreviated pane label.
 - Copy the metrics line verbatim from that invocation's result, correlated to
@@ -99,6 +106,14 @@ the workspace. Use returned pane and agent IDs rather than guessing IDs.
 - Track emission, host relay, display, and model use as separate events; name
   where the line was observed. A relayed line does not prove the model noticed
   or acted on it.
+
+For a cross-harness retrieval challenge, use one identical read-only task that
+has no exact identifier, then inspect each transcript for the first
+`find-code` action, one bounded read from a returned location, the exact
+invocation's metrics line, and any hook denial. Record unavailable Pixel and
+empty-result recovery as successful fail-open paths when the agent continues
+with the prescribed fallback. Never count an informational prior-call warning
+as a failure on its own.
 
 ## Implement, retest, and redeploy
 

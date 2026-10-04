@@ -11,6 +11,7 @@ const MAX_TARGETS: usize = 100;
 const MAX_TEXT_CHARS: usize = 320;
 const MAX_TASK_CHARS: usize = 4096;
 const MAX_WORKSTREAMS: usize = 64;
+const MAX_ROUTE_TASK_CHARS: usize = 240;
 
 #[derive(Default)]
 struct Workstream {
@@ -159,6 +160,7 @@ pub fn from_scope_task(task: &str, data: &Value) -> Value {
     json!({
         "version": 1,
         "task": bounded_task,
+        "retrieval_route": retrieval_route(task),
         "workstreams": workstreams,
         "uncertainty": {
             "closed_world": false,
@@ -170,6 +172,149 @@ pub fn from_scope_task(task: &str, data: &Value) -> Value {
         },
         "validation": validation,
     })
+}
+
+/// Produce one deterministic retrieval route from a task description. An
+/// explicitly backticked identifier starts with exact search; other tasks
+/// start with behavior search. A non-converging first call gets one alternate
+/// Pixel query, then a bounded native fallback. Search warnings and call-count
+/// notices are informational; only the result itself advances the route.
+pub fn retrieval_route(task: &str) -> Value {
+    let task = truncate_chars(task.trim(), MAX_ROUTE_TASK_CHARS);
+    let identifier = explicit_identifier(&task);
+    let (subcommand, args) = match identifier.as_deref() {
+        Some(identifier) => (
+            "search-content",
+            vec![
+                "-F".to_string(),
+                identifier.to_string(),
+                "--fallback-query".to_string(),
+                task.clone(),
+                "--no-daemon".to_string(),
+            ],
+        ),
+        None => ("find-code", vec![task.clone()]),
+    };
+    let first = route_command(subcommand, &args);
+    let fallback_query = identifier.as_deref().unwrap_or(&task);
+    let native_fallback = format!(
+        "rtk rg -m 5 -n -F -- {} . | rtk sed -n '1,20p'",
+        shell_quote(fallback_query)
+    );
+    let alternate = if identifier.is_some() {
+        native_fallback.clone()
+    } else {
+        format!(
+            "rtk pixel find-code {}",
+            shell_quote(&format!("{task} implementation and callers"))
+        )
+    };
+    json!({
+        "first_command": first,
+        "first_operation": {"subcommand": subcommand, "args": args},
+        "first_on_empty_or_irrelevant": alternate,
+        "after_two_nonconverging_calls": native_fallback,
+        "automatic_empty_fallback": identifier.is_some(),
+        "read": "Read only a path returned by Pixel, in a maximum 40-line window around its line.",
+        "validation": "After an edit, run the smallest relevant test for the changed behavior; read-only tasks need no test.",
+        "progression": if identifier.is_some() {
+            "An empty exact result automatically runs one task-aware find-code fallback in the same command; warnings or prior-call counts alone never trigger it. If that combined lookup is unusable, use the bounded native fallback."
+        } else {
+            "A warning or prior-call count is informational, not a no-hit. Advance only when this invocation returns no usable match, an unresolved result, or an irrelevant result."
+        }
+    })
+}
+
+fn route_command(subcommand: &str, args: &[String]) -> String {
+    format!(
+        "rtk pixel {subcommand} {}",
+        args.iter()
+            .map(|argument| match argument.as_str() {
+                "-F" | "--fallback-query" | "--no-daemon" => argument.clone(),
+                _ => shell_quote(argument),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RetrievalOutcome {
+    Usable,
+    NoUsableResult,
+    WarningOnly,
+}
+
+/// Resolve the next route step from an invocation's outcome. A warning by
+/// itself never advances the route, regardless of the displayed call count.
+#[cfg(test)]
+pub(crate) fn next_retrieval_command(
+    route: &Value,
+    completed_pixel_calls: usize,
+    outcome: RetrievalOutcome,
+) -> Option<&str> {
+    if outcome != RetrievalOutcome::NoUsableResult {
+        return None;
+    }
+    match completed_pixel_calls {
+        0 => route["first_command"].as_str(),
+        1 => route["first_on_empty_or_irrelevant"].as_str(),
+        _ => route["after_two_nonconverging_calls"].as_str(),
+    }
+}
+
+/// Render an executable route without presenting task-context candidates as
+/// recommendations or boundaries.
+pub fn pretty_retrieval_route(route: &Value) -> String {
+    if route["automatic_empty_fallback"].as_bool() == Some(true) {
+        return format!(
+            "[PIXEL:EXECUTION_ROUTE]\n1. Run: {}\n   An empty exact result automatically runs the task-aware find-code fallback once in the same command.\n2. Read: {}\n3. If the combined Pixel lookup is unusable, use: {}\n4. Validate: {}\n{}\n[/PIXEL:EXECUTION_ROUTE]",
+            route["first_command"].as_str().unwrap_or(""),
+            route["read"].as_str().unwrap_or(""),
+            route["after_two_nonconverging_calls"]
+                .as_str()
+                .unwrap_or(""),
+            route["validation"].as_str().unwrap_or(""),
+            route["progression"].as_str().unwrap_or(""),
+        );
+    }
+    format!(
+        "[PIXEL:EXECUTION_ROUTE]\n1. Run: {}\n   If it returns no usable or relevant result, run exactly once: {}\n2. Read: {}\n3. If both Pixel calls do not converge, use: {}\n4. Validate: {}\n{}\n[/PIXEL:EXECUTION_ROUTE]",
+        route["first_command"].as_str().unwrap_or(""),
+        route["first_on_empty_or_irrelevant"].as_str().unwrap_or(""),
+        route["read"].as_str().unwrap_or(""),
+        route["after_two_nonconverging_calls"]
+            .as_str()
+            .unwrap_or(""),
+        route["validation"].as_str().unwrap_or(""),
+        route["progression"].as_str().unwrap_or(""),
+    )
+}
+
+fn explicit_identifier(task: &str) -> Option<String> {
+    let (_, tail) = task.split_once('`')?;
+    let (identifier, _) = tail.split_once('`')?;
+    let identifier = identifier.trim();
+    (!identifier.is_empty()
+        && identifier
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "_:-./".contains(ch)))
+    .then(|| identifier.to_string())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    let mut chars = value.chars();
+    let prefix: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
 }
 
 /// Human-readable rendering that preserves the same bounded target details as
@@ -518,6 +663,108 @@ mod tests {
         assert!(
             text.contains("  src/login.rs\n    reason: defines login_user\n"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn explicit_identifier_starts_exact_and_empty_result_routes_to_find_code() {
+        let route = retrieval_route("Trace callers of `Foo::bar`");
+        assert_eq!(
+            route["first_command"],
+            "rtk pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
+        );
+        assert_eq!(
+            route["first_operation"],
+            json!({
+                "subcommand": "search-content",
+                "args": ["-F", "Foo::bar", "--fallback-query", "Trace callers of `Foo::bar`", "--no-daemon"]
+            })
+        );
+        assert_eq!(route["automatic_empty_fallback"], true);
+        assert_eq!(
+            route["first_on_empty_or_irrelevant"],
+            "rtk rg -m 5 -n -F -- 'Foo::bar' . | rtk sed -n '1,20p'"
+        );
+        let rendered = pretty_retrieval_route(&route);
+        assert!(
+            rendered.contains("runs the task-aware find-code fallback once in the same command")
+        );
+        assert!(rendered.contains("maximum 40-line window"));
+        assert!(rendered.contains("warnings or prior-call counts alone never trigger it"));
+        assert!(!rendered.contains("run exactly once: rtk pixel find-code"));
+        assert_eq!(
+            next_retrieval_command(&route, 1, RetrievalOutcome::NoUsableResult),
+            route["first_on_empty_or_irrelevant"].as_str()
+        );
+        assert_eq!(
+            next_retrieval_command(&route, 1, RetrievalOutcome::Usable),
+            None
+        );
+        assert_eq!(
+            next_retrieval_command(&route, 2, RetrievalOutcome::NoUsableResult),
+            route["after_two_nonconverging_calls"].as_str()
+        );
+        assert_eq!(
+            next_retrieval_command(&route, 1, RetrievalOutcome::WarningOnly),
+            None
+        );
+    }
+
+    #[test]
+    fn behavior_route_has_a_distinct_second_query_then_bounded_fallback() {
+        let route = retrieval_route("How does task preparation refresh stale source evidence?");
+        assert_eq!(route["automatic_empty_fallback"], false);
+        assert_eq!(
+            route["first_command"],
+            "rtk pixel find-code 'How does task preparation refresh stale source evidence?'"
+        );
+        assert_eq!(
+            route["first_operation"],
+            json!({
+                "subcommand": "find-code",
+                "args": ["How does task preparation refresh stale source evidence?"]
+            })
+        );
+        assert_eq!(
+            route["first_on_empty_or_irrelevant"],
+            "rtk pixel find-code 'How does task preparation refresh stale source evidence? implementation and callers'"
+        );
+        assert!(
+            route["after_two_nonconverging_calls"]
+                .as_str()
+                .unwrap()
+                .starts_with("rtk rg -m 5 -n -F -- '")
+        );
+        assert!(
+            route["after_two_nonconverging_calls"]
+                .as_str()
+                .unwrap()
+                .ends_with("| rtk sed -n '1,20p'")
+        );
+        assert_eq!(
+            route["progression"],
+            "A warning or prior-call count is informational, not a no-hit. Advance only when this invocation returns no usable match, an unresolved result, or an irrelevant result."
+        );
+    }
+
+    #[test]
+    fn identifier_shell_quoting_is_safe_and_invalid_backticks_do_not_select_exact_search() {
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        let route = retrieval_route("Find `two words` in code");
+        assert!(
+            route["first_command"]
+                .as_str()
+                .unwrap()
+                .starts_with("rtk pixel find-code ")
+        );
+    }
+
+    #[test]
+    fn route_command_should_leave_known_flags_bare_and_quote_query_values() {
+        let route = retrieval_route("Trace callers of `Foo::bar` in Livio's code");
+        assert_eq!(
+            route["first_command"],
+            "rtk pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar` in Livio'\\''s code' --no-daemon"
         );
     }
 }
