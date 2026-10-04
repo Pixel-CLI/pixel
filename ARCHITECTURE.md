@@ -656,7 +656,8 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     pre-push and remote host, release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
     nightly mutants, mutants
-    config, action pins, advisory ignores, clean, cancel-stale sweep, harness-grid dispatch input), the
+    config, action pins, advisory ignores, clean, cancel-stale sweep, harness-grid dispatch input,
+    reproducible release build environment), the
     pixel-retro lead-time and adherence contracts
     (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`)
     and the Bun Pi-policy contract (`scripts/test-pi-policy.mjs`);
@@ -674,7 +675,13 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   `ubuntu-26.04` when the variable is unset or empty, so capacity moves
   with a variable edit and no shard queues behind one busy self-hosted
   host), `mutants-nightly.yml` (a whole-tree
-  rotation), `cross-build.yml` (the three release lanes), `release.yml`
+  rotation), `cross-build.yml` (the three release lanes),
+  `reproducible-build.yml` (the `x86_64-unknown-linux-musl` release binary
+  built twice from two checkouts at different paths, no cache, failing
+  unless the two sha256 match; on pull requests touching the build
+  environment, `Cargo.lock`, a `Cargo.toml`, `crates/pixel/build.rs` or
+  `release-build.yml`, on pushes to `main` touching any of them or
+  `crates/**`, weekly and on demand), `release.yml`
   (on a tag: `verify`, then publication, the tap and the post-publish smoke
   test) and `release-build.yml`, the reusable workflow it calls to build the
   archives, write the formula and the Linux bottles with
@@ -740,6 +747,16 @@ back to `unknown` rather than failing the build. The script re-runs when
 `.git/HEAD`, the ref it points to (looked up in the worktree's git dir and
 the common dir), the index, or `SOURCE_DATE_EPOCH` changes, so the flag
 follows commits without a `cargo clean`.
+
+Release builds are reproducible. `scripts/release-build-env.sh` sets
+`SOURCE_DATE_EPOCH` to the commit's time and `RUSTFLAGS` to
+`--remap-path-prefix` the checkout (`/pixel`) and `CARGO_HOME` (`/cargo`);
+`release-build.yml` and `cross-build.yml` run it before their cache step
+(rust-cache hashes `RUSTFLAGS` into the key they share), `Cross.toml`
+forwards `SOURCE_DATE_EPOCH` into cross's container, and the three
+workflows pin the same `cross`. `reproducible-build.yml` checks it
+(`## Testing and gates`); SECURITY.md, "Reproducing a release build", is the
+user's procedure.
 
 ## Build features
 
