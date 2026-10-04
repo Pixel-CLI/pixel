@@ -293,6 +293,9 @@ fn exec_step(
             if let Some(ref url) = step.url {
                 let url = substitute(url, vars);
                 log.push_str(&format!("{indent}agent-browser open \"{url}\"\n"));
+                // The page the URL is opened from, so the poll below can
+                // tell the navigation it is waiting for from a no-op.
+                let before = browser.run(&["get", "url"]).ok();
                 // Try open first; if the bound tab is gone, use `tab new`.
                 match browser.run(&["open", &url]) {
                     Ok(_) => {}
@@ -304,8 +307,9 @@ fn exec_step(
                     }
                     Err(e) => return Err(format!("open failed: {e}")),
                 }
-                // Give the page time to load (websites open in <5s).
-                browser.pause(Duration::from_secs(3));
+                // Give the page time to load: poll the URL until it moves,
+                // bounded by the old fixed wait. (websites open in <5s)
+                wait_for_navigation(browser, before.as_deref(), OPEN_NAV_CAP, log);
             }
             Ok(true)
         }
@@ -324,12 +328,16 @@ fn exec_step(
                 .map_err(|e| format!("snapshot before click failed: {e}"))?;
             let ref_id = find_ref_in_snapshot(&snapshot, &target)
                 .ok_or_else(|| format!("no element matching '{target}' found in snapshot"))?;
+            // The page the click is issued from, so the poll below can
+            // tell the navigation it is waiting for from a no-op.
+            let before = browser.run(&["get", "url"]).ok();
             log.push_str(&format!("{indent}agent-browser click @{ref_id}\n"));
             browser
                 .run(&["click", &format!("@{ref_id}")])
                 .map_err(|e| format!("click @{ref_id} failed: {e}"))?;
-            // Wait for potential navigation.
-            browser.pause(Duration::from_secs(2));
+            // Wait for potential navigation: poll the URL, bounded by the
+            // old fixed wait.
+            wait_for_navigation(browser, before.as_deref(), CLICK_NAV_CAP, log);
 
             // Check if the click actually navigated (snapshot changed).
             // If on_failure mentions JS click/eval, try that as a fallback.
@@ -352,7 +360,7 @@ fn exec_step(
                         browser
                             .run(&["eval", &js])
                             .map_err(|e| format!("JS click fallback failed: {e}"))?;
-                        browser.pause(Duration::from_secs(2));
+                        wait_for_navigation(browser, before.as_deref(), CLICK_NAV_CAP, log);
                     }
                 }
             }
@@ -791,10 +799,49 @@ fn close_stale_tabs(
 
 /// How far a `scroll` step moves when its `value` names no pixel amount.
 const DEFAULT_SCROLL_PX: u32 = 800;
+/// Interval between `get url` polls after an `open` or a `click`.
+const NAV_POLL: Duration = Duration::from_millis(200);
+/// Longest a navigation poll waits before declaring the page settled. The
+/// fixed sleeps it replaces (3s after open, 2s after click) are its caps,
+/// so a page that never navigates costs what it did before — and one that
+/// navigates in 400ms costs 400ms.
+const OPEN_NAV_CAP: Duration = Duration::from_secs(3);
+const CLICK_NAV_CAP: Duration = Duration::from_secs(2);
 /// Time a `scroll` step gives the page to re-render before the next
 /// observation. Shorter than the navigation waits: a scroll never
 /// navigates.
 const SCROLL_SETTLE: Duration = Duration::from_millis(300);
+
+/// Wait for a navigation an `open` or `click` may have started: poll
+/// `get url` every [`NAV_POLL`] and stop as soon as it moves from
+/// `before`, or after `cap / NAV_POLL` polls with the page where it was.
+///
+/// A same-page re-render (a menu opening, a panel sliding in) is not a
+/// navigation, so the poll runs its bound for it — the caller's next
+/// observation is what sees that change, as it always did. An empty or
+/// failed answer is also no move: a navigating document answers
+/// inconsistently, and treating "" as a move would return on the very
+/// failure the poll exists to ride out.
+fn wait_for_navigation(
+    browser: &mut dyn Browser,
+    before: Option<&str>,
+    cap: Duration,
+    log: &mut String,
+) {
+    let polls = (cap.as_millis() / NAV_POLL.as_millis()).max(1);
+    for _ in 0..polls {
+        browser.pause(NAV_POLL);
+        match browser.run(&["get", "url"]) {
+            Ok(url) if !url.trim().is_empty() && Some(url.trim()) != before => return,
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    log.push_str(&format!(
+        "  # page did not navigate within {}s\n",
+        cap.as_secs_f64()
+    ));
+}
 
 /// Parse a `scroll` step's `value`: `"<up|down|left|right> [pixels]"`.
 /// The direction defaults to `down` (and so does an unrecognized one); the
@@ -1053,8 +1100,72 @@ mod tests {
     }
 
     #[test]
-    fn open_runs_the_url_then_waits_for_the_page() {
-        let mut b = Scripted::new(vec![]);
+    fn wait_for_navigation_boundaries() {
+        // A cap below one interval is still one poll, never zero: a
+        // zero-poll poll would wait for nothing and log a lie. One poll
+        // is all the cap buys, so the move answer is never even read and
+        // the bound is logged.
+        let mut b = Scripted::new(vec![Ok("about:blank"), Ok("https://e.com/x")]);
+        let mut log = String::new();
+        wait_for_navigation(
+            &mut b,
+            Some("about:blank"),
+            Duration::from_millis(199),
+            &mut log,
+        );
+        assert_eq!(b.paused, vec![NAV_POLL]);
+        assert!(log.contains("did not navigate within 0.199s"), "{log}");
+
+        // An empty URL is no move, however many times it repeats: old,
+        // empty, then the move — three polls.
+        let mut b = Scripted::new(vec![Ok("about:blank"), Ok(""), Ok("https://e.com/y")]);
+        let mut log = String::new();
+        wait_for_navigation(
+            &mut b,
+            Some("about:blank"),
+            Duration::from_millis(600),
+            &mut log,
+        );
+        assert_eq!(b.paused, vec![NAV_POLL; 3]);
+        assert!(!log.contains("did not navigate"), "{log}");
+
+        // A failed `get url` is no move either; the poll rides it out.
+        let mut b = Scripted::new(vec![
+            Ok("about:blank"),
+            Err("navigation interrupted"),
+            Ok("https://e.com/z"),
+        ]);
+        let mut log = String::new();
+        wait_for_navigation(
+            &mut b,
+            Some("about:blank"),
+            Duration::from_millis(600),
+            &mut log,
+        );
+        assert_eq!(b.paused, vec![NAV_POLL; 3]);
+        assert!(!log.contains("did not navigate"), "{log}");
+
+        // No `before` at all (the probe failed): the first non-empty URL
+        // is a move from unknown — the page is somewhere, waiting longer
+        // adds nothing.
+        let mut b = Scripted::new(vec![Ok("https://e.com/anything")]);
+        let mut log = String::new();
+        wait_for_navigation(&mut b, None, Duration::from_millis(200), &mut log);
+        assert_eq!(b.paused, vec![NAV_POLL]);
+        assert!(!log.contains("did not navigate"), "{log}");
+    }
+
+    #[test]
+    fn open_runs_the_url_then_polls_for_the_navigation() {
+        // The scripted browser answers the pre-open probe with the page
+        // `open` was issued from, `open` itself, then the first poll with
+        // the moved one: one poll interval is enough, the poll returns at
+        // once.
+        let mut b = Scripted::new(vec![
+            Ok("about:blank"),
+            Ok(""),
+            Ok("https://example.com/login"),
+        ]);
         let s = FlowStep {
             url: Some("https://example.com/{{p}}".into()),
             ..step("open")
@@ -1063,8 +1174,16 @@ mod tests {
         let vars = HashMap::from([("p".to_string(), "login".to_string())]);
         let r = exec_step(&s, 1, &vars, &flow_with(vec![]), &mut log, 0, &mut b);
         assert_eq!(r, Ok(true));
-        assert_eq!(b.calls(), vec![vec!["open", "https://example.com/login"]]);
-        assert_eq!(b.paused, vec![Duration::from_secs(3)]);
+        assert_eq!(
+            b.calls(),
+            vec![
+                vec!["get", "url"],
+                vec!["open", "https://example.com/login"],
+                vec!["get", "url"],
+            ]
+        );
+        assert_eq!(b.paused, vec![NAV_POLL]);
+        assert!(!log.contains("did not navigate"), "{log}");
     }
 
     #[test]
@@ -1074,12 +1193,20 @@ mod tests {
             ..step("open")
         };
         for gone in ["tab_gone: t3", "no tab bound"] {
-            let mut b = Scripted::new(vec![Err(gone), Ok("")]);
+            // The probe, the refused `open`, the `tab new` itself, then a
+            // poll answer that shows the page the new tab opened.
+            let mut b = Scripted::new(vec![
+                Ok("about:blank"),
+                Err(gone),
+                Ok(""),
+                Ok("https://e.com"),
+            ]);
             let (r, log) = run_step(&s, &mut b);
             assert_eq!(r, Ok(true), "{gone}");
             assert_eq!(
-                b.calls(),
+                b.calls()[..3],
                 vec![
+                    vec!["get", "url"],
                     vec!["open", "https://e.com"],
                     vec!["tab", "new", "https://e.com"]
                 ]
@@ -1087,12 +1214,12 @@ mod tests {
             assert!(log.contains("bound tab gone"), "{log}");
         }
         // Any other failure is the step's failure: no retry.
-        let mut b = Scripted::new(vec![Err("connection refused")]);
+        let mut b = Scripted::new(vec![Ok("about:blank"), Err("connection refused")]);
         let (r, _) = run_step(&s, &mut b);
         assert_eq!(r, Err("open failed: connection refused".to_string()));
-        assert_eq!(b.calls().len(), 1);
+        assert_eq!(b.calls().len(), 2);
         // And a failed `tab new` is reported as such.
-        let mut b = Scripted::new(vec![Err("tab_gone"), Err("nope")]);
+        let mut b = Scripted::new(vec![Ok("about:blank"), Err("tab_gone"), Err("nope")]);
         let (r, _) = run_step(&s, &mut b);
         assert_eq!(r, Err("open/tab new failed: nope".to_string()));
     }
@@ -1110,8 +1237,16 @@ mod tests {
     }
 
     #[test]
-    fn click_resolves_the_ref_from_a_fresh_snapshot_then_waits() {
-        let mut b = Scripted::new(vec![Ok("- button \"Continue with Google\" [ref=e5]\n")]);
+    fn click_resolves_the_ref_from_a_fresh_snapshot_then_polls() {
+        // Call order: the snapshot resolves the ref, the probe reads the
+        // URL the click is issued from, the click itself, then one poll
+        // whose answer shows the moved page — the poll returns at once.
+        let mut b = Scripted::new(vec![
+            Ok("- button \"Continue with Google\" [ref=e5]\n"),
+            Ok("https://e.com/before"),
+            Ok(""),
+            Ok("https://e.com/moved"),
+        ]);
         let s = FlowStep {
             ref_hint: Some("button containing 'Continue with Google'".into()),
             ..step("click")
@@ -1120,10 +1255,39 @@ mod tests {
         assert_eq!(r, Ok(true));
         assert_eq!(
             b.calls(),
-            vec![vec!["snapshot", "-i"], vec!["click", "@e5"]]
+            vec![
+                vec!["snapshot", "-i"],
+                vec!["get", "url"],
+                vec!["click", "@e5"],
+                vec!["get", "url"],
+            ]
         );
-        assert_eq!(b.paused, vec![Duration::from_secs(2)]);
+        assert_eq!(b.paused, vec![NAV_POLL]);
         assert!(log.contains("agent-browser click @e5"), "{log}");
+        // A page that never moves costs the full cap and says so: the
+        // cap is 2s of 200ms polls, ten in all, never a sleep. (The click
+        // consumes the third answer; the polls run on the default "".)
+        let mut b = Scripted::new(vec![
+            Ok("- button \"Continue with Google\" [ref=e5]\n"),
+            Ok("https://e.com/before"),
+            Ok(""),
+        ]);
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert!(log.contains("page did not navigate within 2s"), "{log}");
+        // The first `get url` is the probe; every poll after the click is
+        // one per interval to the cap.
+        let polls = b
+            .calls()
+            .iter()
+            .filter(|c| c.as_slice() == ["get", "url"])
+            .count();
+        assert_eq!(polls, 11, "one probe plus one poll per interval to the cap");
+        assert_eq!(
+            b.paused,
+            vec![NAV_POLL; 10],
+            "the cap is the poll count times the interval, never a sleep"
+        );
         // No matching element: the step fails before any click.
         let mut b = Scripted::new(vec![Ok("- heading \"Welcome\" [ref=e1]\n")]);
         let (r, _) = run_step(&s, &mut b);
@@ -1147,23 +1311,61 @@ mod tests {
             on_failure: Some("use a JS click via eval".into()),
             ..step("click")
         };
-        // Same snapshot after the click: the target is still there.
-        let mut b = Scripted::new(vec![Ok(snap), Ok(""), Ok(snap)]);
+        // Same URL on the probe and on every poll to the cap: the target
+        // is still there, so the fallback fires. Every call consumes one
+        // answer: snapshot, probe, click, ten polls, then the post-click
+        // snapshot the fallback consults — still showing the button.
+        let mut b = Scripted::new(vec![
+            Ok(snap),
+            Ok("https://e.com/"),
+            Ok(""),
+            Ok("https://e.com/"),
+            Ok("https://e.com/"),
+            Ok("https://e.com/"),
+            Ok("https://e.com/"),
+            Ok("https://e.com/"),
+            Ok("https://e.com/"),
+            Ok("https://e.com/"),
+            Ok("https://e.com/"),
+            Ok("https://e.com/"),
+            Ok("https://e.com/"),
+            Ok(snap),
+        ]);
         let (r, log) = run_step(&s, &mut b);
         assert_eq!(r, Ok(true));
+        // One probe, ten polls to the cap, the post-click snapshot the
+        // fallback consults, the eval — then the second bounded poll
+        // after the JS click.
+        let calls = b.calls();
+        let len = calls.len();
         assert_eq!(
-            b.calls()[2..],
+            calls[len - 12..len - 10],
             vec![
                 vec!["snapshot", "-i"],
                 vec!["eval", "document.querySelector('button')?.click()"]
             ]
         );
+        assert_eq!(len, 25, "probe + click + 2x10 polls + snapshot + eval");
         assert!(log.contains("JS click fallback"), "{log}");
-        // Page moved: no fallback.
-        let mut b = Scripted::new(vec![Ok(snap), Ok(""), Ok("- heading \"Home\" [ref=e1]\n")]);
+        // Page moved on the first poll: no fallback. The consult snapshot
+        // still runs (on_failure is set) but shows the page moved on, so
+        // no eval follows: snapshot, probe, click, poll, consult.
+        let mut b = Scripted::new(vec![
+            Ok(snap),
+            Ok("https://e.com/"),
+            Ok(""),
+            Ok("https://e.com/home"),
+        ]);
         let (r, _) = run_step(&s, &mut b);
         assert_eq!(r, Ok(true));
-        assert_eq!(b.calls().len(), 3);
+        assert_eq!(b.calls().len(), 5);
+        let calls = b.calls();
+        assert_eq!(calls[3], vec!["get", "url"], "the poll saw the move");
+        assert_eq!(
+            calls[4],
+            vec!["snapshot", "-i"],
+            "the consult, not the eval"
+        );
     }
 
     #[test]
