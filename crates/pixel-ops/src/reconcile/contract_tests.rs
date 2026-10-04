@@ -92,9 +92,10 @@ fn reconcile_should_refuse_while_another_git_operation_is_in_progress() {
             err.starts_with(&format!("{op} is already in progress")),
             "{marker}: {err}"
         );
-        assert!(
-            state.exists(),
-            "{marker}: the refusal must come before any state is cleared"
+        assert_eq!(
+            std::fs::read_to_string(&state).ok().as_deref(),
+            Some("{\"conflict_count\":1}"),
+            "{marker}: the refusal must come before any state is cleared or rewritten"
         );
     }
 }

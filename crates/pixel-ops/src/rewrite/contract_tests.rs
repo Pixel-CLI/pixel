@@ -259,7 +259,14 @@ fn rewrite_should_refuse_reusing_a_request_id_with_different_options() {
     fx.run(&o, None).unwrap();
     let mut changed = o.clone();
     changed.message = Some("another message".to_string());
-    assert!(fx.run(&changed, None).is_err());
+    let err = fx.run(&changed, None).unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "idempotency conflict: requestId {} already used with different operation/input",
+            o.request_id
+        )
+    );
 }
 
 #[test]
