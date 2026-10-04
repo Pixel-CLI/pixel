@@ -95,6 +95,10 @@ fn ramp_glyphs_run_dense_to_sparse() {
     assert_eq!(ramp_pick(0.0), '@');
     assert_eq!(ramp_pick(0.5), '+');
     assert_eq!(ramp_pick(0.999), '·');
+    // the clamp keeps a boundary hash inside the ramp: `h * len` floors to
+    // `len` at exactly 1.0, and `.min(len - 1)` must pull it back to the last
+    // glyph instead of indexing past the end
+    assert_eq!(ramp_pick(1.0), '·', "a boundary hash is clamped");
 }
 
 // ── canvas and layout ───────────────────────────────────────────────────────

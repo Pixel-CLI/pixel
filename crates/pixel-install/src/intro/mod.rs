@@ -87,6 +87,7 @@ fn smooth(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+#[cfg_attr(test, mutants::skip)] // the two branches coincide at exactly 0.5 (both give 0.5), so `<` vs `<=` is unobservable
 fn ease_in_out(t: f32) -> f32 {
     let t = clamp01(t);
     if t < 0.5 {
