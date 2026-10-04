@@ -4,9 +4,15 @@
 # test_statement_coverage80 asks for at least 80% statement coverage measured
 # by a FLOSS tool; this job is the measurement (task #732).
 #
-# The job fails when line coverage drops under 80%, the criterion's bar (the
-# first run, 37219909593, measured 91.97% of lines and 91.01% of regions),
+# The job fails when line coverage drops under 90%, the gold criterion
+# test_statement_coverage90 (the first run, 37219909593, measured 91.97% of
+# lines and 91.01% of regions; main at fa804690, run 37225278581, the same),
 # and when a test is red. The summary is written first either way.
+#
+# The `branches` job measures branch coverage for the gold criterion
+# test_branch_coverage80. rustc instruments branches only on nightly
+# (`-Zcoverage-options=branch`, which `cargo llvm-cov --branch` passes), so
+# it runs the same suite on a dated nightly, apart from the stable job.
 #
 # The suite is the one CI's Test job runs (nextest `ci` profile, the
 # `readify` feature), so the number covers what CI tests. The CLI tests spawn
@@ -137,7 +143,105 @@ jobs:
           TEST_STATUS: ${{ steps.test.outputs.status }}
         run: test "$TEST_STATUS" = 0
 
-      # test_statement_coverage80: llvm-cov's lines are the closest measure
-      # of statements it reports.
-      - name: Line coverage at least 80%
-        run: cargo llvm-cov report --summary-only --fail-under-lines 80 > /dev/null
+      # test_statement_coverage90 (gold; silver asks 80): llvm-cov's lines
+      # are the closest measure of statements it reports.
+      - name: Line coverage at least 90%
+        run: cargo llvm-cov report --summary-only --fail-under-lines 90 > /dev/null
+
+  branches:
+    name: Branch coverage (cargo-llvm-cov, nightly)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 75
+    env:
+      # A dated nightly, so a toolchain release cannot move the number on
+      # its own; bump it on purpose.
+      NIGHTLY: nightly-2026-10-01
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # The pin is the action's commit used everywhere else; the ref
+          # does not name the toolchain, so it is passed explicitly.
+          toolchain: ${{ env.NIGHTLY }}
+          components: llvm-tools-preview
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: linux-coverage-branch
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - name: Install system dependencies
+        run: |
+          if command -v perl >/dev/null && command -v make >/dev/null; then
+            echo "perl and make already installed"
+          else
+            sudo apt-get update
+            sudo apt-get install -y perl make
+          fi
+
+      - name: Install cargo-llvm-cov and cargo-nextest
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      - name: Test under branch coverage
+        id: test
+        run: |
+          status=0
+          cargo +"$NIGHTLY" llvm-cov nextest --branch --workspace --locked --profile ci \
+            --features pixel-cli/readify --no-report || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Branch coverage report
+        if: ${{ !cancelled() }}
+        run: |
+          cargo +"$NIGHTLY" llvm-cov report --branch --json --summary-only \
+            --output-path target/coverage-branch.json
+          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from collections import defaultdict
+
+          data = json.load(open("target/coverage-branch.json"))["data"][0]
+          kinds = ("branches", "lines")
+
+          def pct(c, n):
+              return f"{100 * c / n:.2f}%" if n else "n/a"
+
+          total = data["totals"]
+          print("## Branch coverage (cargo-llvm-cov --branch, nightly)\n")
+          print("| | covered | total | % |\n| --- | ---: | ---: | ---: |")
+          for k in kinds:
+              print(f"| {k} | {total[k]['covered']} | {total[k]['count']} | {pct(total[k]['covered'], total[k]['count'])} |")
+
+          crates = defaultdict(lambda: {k: [0, 0] for k in kinds})
+          for f in data["files"]:
+              parts = f["filename"].split("/crates/", 1)
+              name = parts[1].split("/", 1)[0] if len(parts) == 2 else "(other)"
+              for k in kinds:
+                  crates[name][k][0] += f["summary"][k]["covered"]
+                  crates[name][k][1] += f["summary"][k]["count"]
+          print("\n### Per crate, lowest branch coverage first\n")
+          print("| crate | branches | lines |\n| --- | ---: | ---: |")
+          for name, s in sorted(crates.items(), key=lambda kv: kv[1]["branches"][0] / max(kv[1]["branches"][1], 1)):
+              cells = " | ".join(f"{pct(*s[k])} ({s[k][1]})" for k in kinds)
+              print(f"| {name} | {cells} |")
+          EOF
+
+      - name: Upload the report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-branch-summary
+          path: target/coverage-branch.json
+          if-no-files-found: ignore
+
+      - name: Tests passed
+        env:
+          TEST_STATUS: ${{ steps.test.outputs.status }}
+        run: test "$TEST_STATUS" = 0
