@@ -145,7 +145,7 @@ impl Runner<'_> {
                 continue;
             }
             match execute_step(step, self.vars, self.flow, self.browser) {
-                Ok((executed, log)) => {
+                Ok((executed, _, log)) => {
                     self.report.log.push_str(&indented(&log, depth));
                     if executed {
                         self.report.steps_executed += 1;
@@ -237,7 +237,7 @@ impl Runner<'_> {
             (None, Some(detail), _) => Some(detail),
             (None, None, None) => Some("the re-decision produced no step".to_string()),
             (None, None, Some(repaired)) => {
-                let (executed, log) =
+                let (executed, _, log) =
                     match execute_step(&repaired, self.vars, self.flow, self.browser) {
                         Ok(result) => result,
                         // The re-decision is evidence even when its step

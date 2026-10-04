@@ -11,3 +11,4 @@ workspace = true
 [dependencies]
 pixel-flow = { path = "../pixel-flow" }
 serde = { workspace = true }
+mutants = { workspace = true }

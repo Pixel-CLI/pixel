@@ -509,6 +509,7 @@ mod tests {
             url_before: URL.to_string(),
             url_after: URL.to_string(),
             changed: true,
+            fill_skipped: false,
             log: String::new(),
         }
     }
