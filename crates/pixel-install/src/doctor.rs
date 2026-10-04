@@ -2657,6 +2657,7 @@ pub use pixel_daemon::daemon::socket_path as daemon_socket_path;
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use super::env_non_empty;
     use super::{
         CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary,
         PLACEHOLDER_DUMMY, Remedy, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL,
@@ -2664,10 +2665,9 @@ mod tests {
         fix_for, judge_repair, load_pixel_config, names_check, normalize_rule_command, one_line,
         probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
         rtk_backup_check, run_repair, scenario_mismatches, selected, shell_path_check, shell_word,
-        spec, split_home_repairs, validate_selection, web_search_provider_check,
-        web_search_provider_check_with, web_search_provider_from,
+        spec, split_home_repairs, validate_selection, web_search_provider_check_with,
+        web_search_provider_from,
     };
-    use super::env_non_empty;
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
 
@@ -3437,23 +3437,31 @@ mod tests {
     /// really reads untouched.
     #[test]
     fn env_non_empty_counts_only_a_present_non_empty_utf8_value() {
+        use std::os::unix::ffi::OsStringExt;
         const VAR: &str = "PIXEL_QR_DOCTOR_WEB_SEARCH_PROBE";
 
+        // SAFETY: nextest runs one process per test (this repo's nextest
+        // config leans on exactly that), so the process env below races
+        // with no other test.
         unsafe { std::env::remove_var(VAR) };
         assert!(!env_non_empty(VAR), "absent counts as not configured");
 
+        // SAFETY: see the comment above; same isolation guarantees.
         unsafe { std::env::set_var(VAR, "") };
         assert!(!env_non_empty(VAR), "empty counts as not configured");
 
+        // SAFETY: see the comment above; same isolation guarantees.
         unsafe { std::env::set_var(VAR, "https://sx.test") };
         assert!(env_non_empty(VAR), "non-empty counts as configured");
 
         // A value the CLI cannot read as UTF-8 is unusable, so it too counts
         // as not configured rather than selecting a provider.
         let non_utf8 = std::ffi::OsString::from_vec(vec![0xf0, 0x28, 0x8c, 0x28]);
+        // SAFETY: see the comment above; same isolation guarantees.
         unsafe { std::env::set_var(VAR, non_utf8) };
         assert!(!env_non_empty(VAR), "non-UTF-8 counts as not configured");
 
+        // SAFETY: see the comment above; same isolation guarantees.
         unsafe { std::env::remove_var(VAR) };
     }
 
