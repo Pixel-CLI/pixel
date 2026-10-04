@@ -631,18 +631,16 @@ switch (args[0]) {
     assert.equal(gate.continue, false);
     assert.match(gate.entries[0].content, /task state is unavailable/);
   });
-  await check("bounded sed prints and read sequences stay available when task state is unavailable", async () => {
+  await check("read sequences stay available when task state is unavailable", async () => {
     const h = await host("off");
     configure({ fail: ["run-hook"] });
     for (const command of [
-      "sed -n '1,20p' src/main.rs", "sed -n 12p src/main.rs", "sed -n '5,$p' src/main.rs", "sed -n '10,+40p' src/main.rs",
-      "cd src && sed -n '1,20p' main.rs", "ls src 2>/dev/null; cat src/main.rs", "rg needle || cat src/main.rs",
-      "nl -ba src/main.rs | sed -n 1,40p", "echo start; cat src/main.rs",
+      "cd src && cat main.rs", "ls src 2>/dev/null; cat src/main.rs", "rg needle || cat src/main.rs",
+      "nl -ba src/main.rs | head -n 40", "echo start; cat src/main.rs",
     ]) assert.equal(await h.emit("tool_call", native(command)), undefined, command);
     for (const command of [
-      "sed -i 's/a/b/' src/main.rs", "sed 1,5p src/main.rs", "sed -n 1,5p -i src/main.rs", "sed -n '1,5w out' src/main.rs", "sed -n 1,5d src/main.rs",
-      "sed -n p src/main.rs", "sed -n ,5p src/main.rs", "sed -n 1,2,3p src/main.rs", "sed -n -f script.sed src/main.rs",
       "cat src/main.rs 2>/tmp/err", "rg needle; rm src/main.rs", "cd src && rm main.rs", "rg needle; pixel task prepare task-1",
+      "cd src && sed -i 's/a/b/' main.rs",
     ]) assert.equal((await h.emit("tool_call", native(command))).block, true, command);
   });
   await check("known discovery aliases remain available when task state is unavailable", async () => {

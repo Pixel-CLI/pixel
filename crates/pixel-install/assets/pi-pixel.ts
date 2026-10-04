@@ -185,24 +185,6 @@ const mayMutate = (tool: string, input: any): boolean => {
   if (!segments) return true;
   return segments.some((segment) => taskLeafMutates(segment.text, segments.length === 1));
 };
-// `sed -n` printing one line or range, the bounded read Pixel advises (task_hook.rs `sed_read`).
-const printRange = (script: string): boolean => {
-  const line = (text: string) => text === "$" || /^[0-9]+$/.test(text);
-  if (!script.endsWith("p")) return false;
-  const [start, end, ...rest] = script.slice(0, -1).split(",");
-  return rest.length === 0 && line(start) && (end === undefined || line(end.startsWith("+") ? end.slice(1) : end));
-};
-const sedRead = (args: string[]): boolean => {
-  let quiet = false;
-  let script: string | undefined;
-  for (const arg of args) {
-    if (["-n", "--quiet", "--silent"].includes(arg)) quiet = true;
-    else if (["-E", "-r", "--regexp-extended"].includes(arg)) continue;
-    else if (arg.startsWith("-")) return false;
-    else if (script === undefined) script = arg;
-  }
-  return quiet && script !== undefined && printRange(script);
-};
 const taskLeafMutates = (command: string, recovery: boolean): boolean => {
   // Discarding diagnostics writes nothing; any other redirection stays gated.
   let words = tokenizeShell(command.endsWith(" 2>/dev/null") ? command.slice(0, -" 2>/dev/null".length) : command, true);
@@ -214,7 +196,6 @@ const taskLeafMutates = (command: string, recovery: boolean): boolean => {
   if (["rg", "grep"].includes(base(words[0] ?? "") ?? "")) return !searchRead(words.slice(1));
   if (base(words[0] ?? "") === "sort") return !sortRead(words.slice(1));
   if (base(words[0] ?? "") === "uniq") return !uniqRead(words.slice(1));
-  if (base(words[0] ?? "") === "sed") return !sedRead(words.slice(1));
   return !["pwd", "true", "false", "cat", "head", "tail", "wc", "ls", "read", "cd", "nl", "echo"].includes(base(words[0] ?? "") ?? "");
 };
 
