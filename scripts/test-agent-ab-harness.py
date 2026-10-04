@@ -37,6 +37,7 @@ import arm_order  # noqa: E402
 import filter_hooks  # noqa: E402
 import scenario  # noqa: E402
 import score  # noqa: E402
+import host_reached  # noqa: E402
 
 ARMS = ["baseline", "quiet", "full"]
 
@@ -45,10 +46,22 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "absent"
 
 
+# A pre-push hook runs this script with GIT_DIR and friends exported: left in
+# place they would point the fixture's git calls at the caller's repository.
+GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX")
+
+
+def clean_env(**extra):
+    env = {key: value for key, value in os.environ.items() if key not in GIT_LOCATION_VARS}
+    env.update(extra)
+    return env
+
+
 def git(*args, cwd):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
-                   env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+                   env=clean_env(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                                 GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"))
 
 
 def pixel_hook(verb, matcher=None):
@@ -59,6 +72,36 @@ def pixel_hook(verb, matcher=None):
 
 
 class UnitContracts(unittest.TestCase):
+    def test_host_reached_reads_status_events_not_the_answer(self):
+        logged_out = "\n".join(json.dumps(e) for e in [
+            {"type": "assistant", "message": {"model": "<synthetic>", "content": [
+                {"type": "text", "text": "Not logged in · Please run /login"}]}},
+            {"type": "result", "subtype": "success", "is_error": True, "terminal_reason": "api_error",
+             "result": "Not logged in · Please run /login"}])
+        self.assertTrue(host_reached.unreached(logged_out))
+        self.assertTrue(host_reached.unreached(json.dumps(
+            {"type": "result", "is_error": True, "result": "Not logged in · Please run /login"})))
+        # A reached model whose answer quotes the failure strings is recorded.
+        quoting = "\n".join(json.dumps(e) for e in [
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "run.sh greps for Not logged in and 401 Unauthorized"}]}},
+            {"type": "result", "subtype": "success", "is_error": False, "terminal_reason": "completed",
+             "result": "It stops on Not logged in or 401 Unauthorized."}])
+        self.assertFalse(host_reached.unreached(quoting))
+        codex_answer = "\n".join(json.dumps(e) for e in [
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "401 Unauthorized"}},
+            {"type": "turn.completed"}])
+        self.assertFalse(host_reached.unreached(codex_answer))
+        # Codex failing before any item, and either host failing on stderr only.
+        self.assertTrue(host_reached.unreached("\n".join(json.dumps(e) for e in [
+            {"type": "thread.started"}, {"type": "turn.started"},
+            {"type": "turn.failed", "error": {"message": "unexpected status 401"}}])))
+        self.assertTrue(host_reached.unreached(codex_answer.replace("401 Unauthorized", "ok"),
+                                               "Error: 401 Unauthorized"))
+        self.assertTrue(host_reached.unreached("", "Not logged in · Please run /login"))
+        self.assertFalse(host_reached.unreached("", "warning: slow disk"))
+
     def test_arm_order_matches_the_controlled_runner(self):
         # bun: armOrder(seed, rep, case) from eval/controlled.ts, arms
         # ["retrieval","gates","gates_classifier"] -> same indices here.
@@ -208,7 +251,8 @@ class OfflinePipeline(unittest.TestCase):
         git("init", "-q", "-b", "main", cwd=repo)
         git("add", ".", cwd=repo)
         git("commit", "-qm", "pinned tree", cwd=repo)
-        pinned = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+        pinned = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True,
+                                env=clean_env()).stdout.strip()
         shutil.copytree(EVAL, repo / "eval", ignore=shutil.ignore_patterns("results", "arena-results", "scenarios", "heldout", "__pycache__"))
         scenarios = repo / "eval/scenarios"
         scenarios.mkdir()
@@ -240,7 +284,7 @@ class OfflinePipeline(unittest.TestCase):
         cls.fake_log = root / "fake.jsonl"
         cls.pixel_log = root / "pixel.jsonl"
         cls.env = {
-            **os.environ,
+            **clean_env(),
             "HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "CLIS": "claude codex", "ARMS": " ".join(ARMS), "SUITE": "fixture", "REPS": "3",
             "RESULTS": str(cls.results), "SCRATCH": str(root / "scratch"),
@@ -249,7 +293,7 @@ class OfflinePipeline(unittest.TestCase):
             "CODEX_MODEL": "codex-test-model", "CODEX_REASONING": "low", "RUN_TIMEOUT": "120",
             "FAKE_LOG": str(cls.fake_log), "FAKE_PIXEL_LOG": str(cls.pixel_log),
         }
-        for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "SCENARIOS", "ORDER_SEED", "MAX_TURNS"):
+        for key in ("SCENARIOS", "ORDER_SEED", "MAX_TURNS"):
             cls.env.pop(key, None)
         cls.campaign = subprocess.run(["bash", str(repo / "eval/run.sh")], cwd=repo, env=cls.env,
                                  capture_output=True, text=True, timeout=900)
@@ -278,7 +322,7 @@ class OfflinePipeline(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        subprocess.run(["git", "worktree", "prune"], cwd=cls.repo, capture_output=True)
+        subprocess.run(["git", "worktree", "prune"], cwd=cls.repo, capture_output=True, env=clean_env())
         cls.tmp.cleanup()
 
     def test_the_campaign_completes_and_a_rerun_skips_every_cell(self):

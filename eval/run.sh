@@ -498,7 +498,9 @@ run_one() {  # rep scenario cli arm position
   # A host that never reached the model (no login, an API error before the
   # first turn) would be scored as a failed answer and read as a tie or a
   # loss. Stop the campaign before recording the cell, so a rerun repeats it.
-  if grep -qE 'Not logged in|"terminal_reason": ?"api_error"|401 Unauthorized' "$out" 2>/dev/null; then
+  # lib/host_reached.py reads the host's status events and stderr, never the
+  # answer text, so an answer quoting a login error is still recorded.
+  if ! python3 "$EVAL_DIR/lib/host_reached.py" "$out" "${out%.jsonl}.err"; then
     echo "eval/run.sh: $cli never reached the model in $scenario/$arm rep $rep (see $out); stopping the campaign" >&2
     rm -f "$meta"
     exit 3
