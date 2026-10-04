@@ -202,3 +202,6 @@ mod tests {
         assert!(units[0].mtime_ms > 0);
     }
 }
+
+#[cfg(test)]
+mod contract_tests;
