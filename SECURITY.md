@@ -80,7 +80,7 @@ attestation above is what proves where it came from.
 
 ## Security model
 
-Pixel runs locally and processes repository data. Key security boundaries:
+Pixel runs locally and processes repository data. [docs/threat-model.md](docs/threat-model.md) is the full threat model and attack surface analysis: actors, trust boundaries, each threat with its mitigation in the code and its residual risk. Key security boundaries:
 
 - **Daemon socket**: per-user directory (0700) on Linux, per-user TMPDIR on macOS. Socket file is 0600. No cross-user access.
 - **History database**: a `_pixel_marker` table proves the db was created by pixel. A db planted by a hostile repo (e.g. `git add -f .pixel/history.db`) is detected and wiped before any data is trusted.

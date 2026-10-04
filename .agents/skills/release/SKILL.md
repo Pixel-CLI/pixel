@@ -215,6 +215,12 @@ It must end with `release-check: all checks passed`. Then:
   with `git cat-file -e v<last>:<path>` before calling it new.
 - **Release body.** Read the new `## [x.y.z]` section as a stranger: it is
   published verbatim. Fix wording or section order now, not after the tag.
+- **Threat model.** Read the same section against
+  [`docs/threat-model.md`](../../../docs/threat-model.md) section 4: an entry
+  that adds an entry point, a sidecar file, a network destination, a secret,
+  a hook or an install target that the threat model does not name gets a
+  `docs` pull request into `main` before the tag, not an edit here (the
+  `scope` rule below refuses it).
 - **Diff.** `prepare.sh` ends with `scripts/release-prepare-only.py HEAD`,
   the rule CI's `scope` job applies: only version lines (17 `Cargo.toml`,
   `Cargo.lock`, the 7 plugin manifests), `CHANGELOG.md` and deleted
