@@ -1062,6 +1062,61 @@ mod tests {
         assert_eq!(unanchored[0].file.as_deref(), Some("src/del.rs"));
     }
 
+    /// A consumer that names a DIFFERENT deleted symbol must not raise an
+    /// unrelated deletion: `has_live_references` keys on the consumer's
+    /// `of`, not on the mere presence of any consumer. Hoisting that
+    /// predicate to a constant `true` would loop every unanchored symbol
+    /// into HIGH the moment ANY consumer survives — this test pins the
+    /// per-symbol cost of that mutant.
+    #[test]
+    fn review_only_clears_the_concern_for_a_symbol_whose_own_references_survived() {
+        let dir = tmpdir("unanchored");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub mod a;\npub mod b;\npub fn keeper() -> i32 { crate::b::beta() }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn alpha() -> i32 { 1 }\n").unwrap();
+        std::fs::write(root.join("src/b.rs"), "pub fn beta() -> i32 { 2 }\n").unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let store = store_for(root);
+
+        // Delete both files: `beta` keeps a live call site in the untouched
+        // `lib.rs` (a surviving consumer), `alpha` has none anywhere.
+        std::fs::remove_file(root.join("src/a.rs")).unwrap();
+        std::fs::remove_file(root.join("src/b.rs")).unwrap();
+        let report = review(&store, root, None).expect("review runs");
+        let unanchored: Vec<&ReviewFinding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule == "unanchored-symbol")
+            .collect();
+        assert_eq!(unanchored.len(), 2, "{report:?}");
+        // `report.consumers` is non-empty (the surviving beta call site), so
+        // a predicate coerced to `true` would wrongly make EVERY deletion
+        // HIGH. `alpha` has no surviving reference and must stay MEDIUM.
+        assert_eq!(
+            unanchored
+                .iter()
+                .find(|f| f.file.as_deref() == Some("src/a.rs"))
+                .map(|f| f.severity.as_str()),
+            Some("MEDIUM"),
+            "{report:?}"
+        );
+        assert_eq!(
+            unanchored
+                .iter()
+                .find(|f| f.file.as_deref() == Some("src/b.rs"))
+                .map(|f| f.severity.as_str()),
+            Some("HIGH"),
+            "{report:?}"
+        );
+    }
+
     #[test]
     fn review_on_a_clean_tree_emits_no_findings() {
         let dir = tmpdir("clean");
