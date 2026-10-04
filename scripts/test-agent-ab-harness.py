@@ -172,6 +172,7 @@ class OfflinePipeline(unittest.TestCase):
         (home / ".claude/skills/pixel-retrieval").mkdir(parents=True)
         (home / ".claude/skills/other-skill").mkdir(parents=True)
         (home / ".claude/CLAUDE.md").write_text("operator notes\n")
+        (home / ".claude/.credentials.json").write_text('{"fixture": "login"}')
         (home / ".claude/settings.json").write_text(json.dumps({"hooks": {
             "SessionStart": [pixel_hook("session-start"), pixel_hook("post-compaction", "compact")],
             "UserPromptSubmit": [pixel_hook("prompt-submit")],
@@ -288,6 +289,24 @@ class OfflinePipeline(unittest.TestCase):
         self.assertNotIn("run failed", self.relative.stdout)
         rows = json.loads((self.relative_root / "results-rel/scores.json").read_text())
         self.assertEqual([(r["scenario"], r["arm"]) for r in rows], [("fx-answer", "baseline")])
+
+    def test_a_host_that_never_reaches_the_model_stops_the_campaign_unrecorded(self):
+        logged_out = self.relative_root / "home-logged-out"
+        if not logged_out.exists():
+            shutil.copytree(self.home, logged_out, symlinks=True)
+            (logged_out / ".claude/.credentials.json").unlink()
+        results = self.relative_root / "results-logged-out"
+        run = subprocess.run(["bash", str(self.repo / "eval/run.sh")], cwd=self.repo, capture_output=True,
+                             text=True, timeout=600,
+                             env={**self.env, "HOME": str(logged_out), "CLIS": "claude", "ARMS": "baseline full",
+                                  "REPS": "1", "SCENARIOS": "fx-answer", "RESULTS": str(results),
+                                  "SCRATCH": str(self.relative_root / "scratch-logged-out"),
+                                  "FAKE_LOG": str(self.relative_root / "fake-logged-out.jsonl")})
+        self.assertEqual(run.returncode, 3, run.stdout[-2000:] + run.stderr[-2000:])
+        self.assertIn("never reached the model", run.stderr)
+        self.assertEqual(run.stdout.count("=== run"), 1, "the campaign stops at the first such cell")
+        self.assertEqual(list(results.glob("rep-1/*.run.json")), [], "the cell is not recorded")
+        self.assertFalse((results / "scores.json").exists())
 
     def test_a_missing_host_binary_refuses_the_campaign_before_any_cell(self):
         missing = subprocess.run(["bash", str(self.repo / "eval/run.sh")], cwd=self.repo, capture_output=True,

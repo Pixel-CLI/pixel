@@ -57,6 +57,14 @@ def main():
     prompt = arg("-p") or ""
     cwd = Path.cwd()
     cfg = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    # Like the real CLI: an isolated config dir without the operator's login
+    # answers "Not logged in" with an api_error result and never runs a tool.
+    if not (Path(cfg) / ".credentials.json").is_file():
+        print(json.dumps({"type": "assistant", "message": {"model": "<synthetic>", "content": [
+            {"type": "text", "text": "Not logged in · Please run /login"}]}}))
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "total_cost_usd": 0,
+                          "terminal_reason": "api_error", "result": "Not logged in · Please run /login"}))
+        sys.exit(1)
     pixel = shutil.which("pixel")
     pixel_ok = bool(pixel) and subprocess.run([pixel, "--version"], capture_output=True).returncode == 0
     with open(os.environ["FAKE_LOG"], "a") as log:

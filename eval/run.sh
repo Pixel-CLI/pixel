@@ -307,6 +307,12 @@ build_arm() {  # arm commit
   # claude config: real settings with the arm's pixel hook set — baseline
   # none, quiet/full filtered from the installed set, legacy arms one clean set
   rm -rf "$cfg"; mkdir -p "$cfg"
+  # The isolated config still needs the operator's login: without it every
+  # `claude -p` answers "Not logged in" and spends nothing.
+  if [ -f "$HOME/.claude/.credentials.json" ]; then
+    cp "$HOME/.claude/.credentials.json" "$cfg/.credentials.json"
+    chmod 600 "$cfg/.credentials.json"
+  fi
   local mode; mode="$(hook_mode "$arm")"
   if [ "$mode" = legacy ]; then
     strip_pixel_hooks_py < "$HOME/.claude/settings.json" > "$cfg/settings.json"
@@ -489,6 +495,14 @@ run_one() {  # rep scenario cli arm position
   run_cli "$cli" "$arm" "$scenario" "$out" "$turns" || rc=$?
   t1=$(now_ms)
   [ "$rc" = 0 ] || echo "run failed rc=$rc ($scenario/$arm/$cli rep $rep)"
+  # A host that never reached the model (no login, an API error before the
+  # first turn) would be scored as a failed answer and read as a tie or a
+  # loss. Stop the campaign before recording the cell, so a rerun repeats it.
+  if grep -qE 'Not logged in|"terminal_reason": ?"api_error"|401 Unauthorized' "$out" 2>/dev/null; then
+    echo "eval/run.sh: $cli never reached the model in $scenario/$arm rep $rep (see $out); stopping the campaign" >&2
+    rm -f "$meta"
+    exit 3
+  fi
   # Pixel's own action log is a second witness of what the agent ran.
   [ -f "$wt/.pixel/actions.jsonl" ] && cp "$wt/.pixel/actions.jsonl" "${out%.jsonl}.actions.jsonl" || true
   if [ "$mode" = edit ]; then
