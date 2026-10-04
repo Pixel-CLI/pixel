@@ -665,3 +665,6 @@ mod tests {
         assert!(tail(&link, 10).is_err());
     }
 }
+
+#[cfg(test)]
+mod contract_tests;
