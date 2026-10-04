@@ -20,7 +20,9 @@ jobs:
       - uses: Pixel-CLI/pixel/.github/actions/setup-pixel@main
         with:
           version: v0.6.1
-      - run: pixel what-changed --json
+      - run: pixel what-changed --base "$PIXEL_BASE" --json
+        env:
+          PIXEL_BASE: ${{ github.event.pull_request.base.sha }}
 ```
 
 The action first becomes available when its implementation merges; older
@@ -52,12 +54,14 @@ Keep your existing agent action and credentials, and insert setup after
 checkout and before the agent. Give the reviewer this instruction through
 its normal prompt input:
 
-> Pixel is available in the checked-out repository. Use `pixel what-changed`,
+> Pixel is available in the checked-out repository. Use `pixel what-changed --base <base-sha>`,
 > `pixel impact <symbol>` and `pixel who-calls <symbol>` to investigate the
 > affected code, then verify findings against source and relevant tests.
 > Empty caller results do not prove that a symbol is unused.
 
-Fetch full history for diff and history analysis. Review the checkout you
+Pass the PR base SHA to `what-changed`: its default only examines working-tree
+changes, so a clean CI checkout needs an explicit base. Fetch full history
+for diff and history analysis. Review the checkout you
 intend: `pull_request` normally checks out GitHub's merge result; set the
 checkout `ref` to the PR head SHA when your reviewer expects the exact head.
 Use `pull_request` with read-only permissions for untrusted PRs; do not run
