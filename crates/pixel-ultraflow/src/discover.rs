@@ -470,6 +470,12 @@ pub fn discover(
                 cycle.decision.label
             ));
         };
+        // A real step breaks the run of consecutive satisfied fills: the
+        // bound below counts only re-chooses, not every fill a run happens
+        // to find already done along the way, and the note no longer bleeds
+        // into the decisions that follow it.
+        satisfied_note = None;
+        satisfied = 0;
 
         let snapshot_before = page.snapshot.clone();
         let (executed, fill_skipped, log) = match execute_step(&step, &vars, &shell, browser) {

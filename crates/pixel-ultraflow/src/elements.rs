@@ -243,8 +243,13 @@ fn parse_line(body: &str) -> Option<Element> {
     // table prints it; parse it too, so a decision can see the field is
     // already satisfied (issue #638).
     let echoed = rest
-        .split_once(&format!("ref={reference}]"))
-        .and_then(|(_, after)| after.strip_prefix(": "))
+        .split('[')
+        .skip(1)
+        .find_map(|after_open| {
+            let (span, after) = after_open.split_once(']')?;
+            (attr(span, "ref").as_deref() == Some(reference.as_str())).then_some(after)
+        })
+        .and_then(|after| after.strip_prefix(": "))
         .map(str::trim)
         .filter(|held| !held.is_empty())
         .map(str::to_string);
@@ -403,6 +408,14 @@ mod tests {
         assert_eq!(obs.elements[0].operations(), vec![Op::Click]);
         assert_eq!(obs.elements[3].operations(), vec![Op::Type, Op::Select]);
         assert_eq!(obs.elements[5].operations(), vec![Op::Click]);
+    }
+
+    #[test]
+    fn echoed_value_is_read_when_name_contains_reference_text() {
+        let (elements, _) = parse_snapshot(
+            "- textbox \"Search ref=e59]\" [ref=e59]: filled text",
+        );
+        assert_eq!(elements[0].value.as_deref(), Some("filled text"));
     }
 
     #[test]
