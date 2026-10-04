@@ -396,7 +396,11 @@ mod tests {
         let mut out = Vec::new();
         let result = pick(&["a", "b"], &mut keys, &mut out, &mut NoopRaw, true).unwrap();
         assert_eq!(result, Some(1));
-        assert_eq!(keys.position(), 1, "a digit on a terminal returns immediately");
+        assert_eq!(
+            keys.position(),
+            1,
+            "a digit on a terminal returns immediately"
+        );
     }
 
     #[test]
@@ -434,7 +438,13 @@ mod tests {
         {
             let mut keys = std::io::Cursor::new(b"\r".to_vec());
             let mut out = Vec::new();
-            let result = pick(&["a"], &mut keys, &mut out, &mut Tracking(left.clone()), false);
+            let result = pick(
+                &["a"],
+                &mut keys,
+                &mut out,
+                &mut Tracking(left.clone()),
+                false,
+            );
             assert_eq!(result.unwrap(), Some(0));
             // `_restore` drops inside `pick`, so leave already ran.
             assert!(left.get(), "raw mode restored on success");
