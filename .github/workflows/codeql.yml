@@ -1,0 +1,60 @@
+# CodeQL: static analysis (SAST) of the code and the workflows, on every pull
+# request into `main`, every push to `main` and weekly, so a new query pack
+# also reaches code nobody touched. Results land in the Security tab as
+# code-scanning alerts, and on a pull request as the `CodeQL` check.
+#
+# OpenSSF Scorecard's SAST check reads both halves: a workflow that uses
+# `github/codeql-action/analyze`, and the code-scanning check run on each
+# recently merged pull request. A `paths` filter would leave the pull
+# requests it skips unchecked, so there is none.
+#
+# Every language runs with `build-mode: none`. It is the only mode CodeQL
+# supports for Rust: rust-analyzer runs the build scripts and expands the
+# macros without a full `cargo build`, with the runner image's toolchain
+# (Rust 1.98 on ubuntu-26.04, above the workspace's 1.91 MSRV). Python and
+# JavaScript/TypeScript (the plugins `pixel-install` ships, `docs/motion`)
+# and the workflows themselves (`actions`) need no build either.
+name: CodeQL
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    permissions:
+      # Upload the results to code scanning.
+      security-events: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions, python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:${{ matrix.language }}
