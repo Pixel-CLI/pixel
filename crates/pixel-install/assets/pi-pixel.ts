@@ -309,27 +309,19 @@ function latestUserText(ctx: any) {
     : "";
 }
 
-function renderExecutionRoute(stdout: string): string | null {
+// The brief carries the route every host renders (`execution_brief::
+// pretty_retrieval_route`) and whether the prompt asks about code at all.
+// A binary older than `retrieval_route_text` gives no route, never a guessed one.
+function readBrief(stdout: string): { route: string | null; asksAboutCode: boolean } {
   try {
-    const route = JSON.parse(stdout)?.route;
-    if (!route || typeof route.first_command !== "string" || !route.first_command.trim()
-      || !Array.isArray(route.steps) || route.steps.length < 3) return null;
-    const steps = route.steps.map((step: any) => {
-      const order = Number(step.order);
-      const action = typeof step.action === "string" ? step.action : "step";
-      const command = typeof step.command === "string" ? step.command : "";
-      const limit = Number(step.max_lines);
-      return `${order}. ${action}${Number.isFinite(limit) && limit > 0 ? ` (maximum ${limit} lines)` : ""}: ${command}`;
-    });
-    const retry = route.retry?.command
-      ? `\nRetry only if the first result is unresolved, capped, or irrelevant: ${route.retry.command}` : "";
-    const fallback = route.fallback?.command
-      ? `\nAfter two nonconverging Pixel calls, use: ${route.fallback.command}` : "";
-    const unavailable = typeof route.on_unavailable === "string"
-      ? `\nIf Pixel is unavailable: ${route.on_unavailable}` : "";
-    return `DETERMINISTIC PIXEL ROUTE (index is a lower bound):\n${steps.join("\n")}${retry}${fallback}${unavailable}`;
+    const brief = JSON.parse(stdout);
+    const text = brief?.retrieval_route_text;
+    return {
+      route: typeof text === "string" && text.includes("[PIXEL:EXECUTION_ROUTE]") ? text : null,
+      asksAboutCode: brief?.asks_about_code !== false,
+    };
   } catch {
-    return null;
+    return { route: null, asksAboutCode: true };
   }
 }
 
@@ -1000,8 +992,20 @@ export default function activate(pi: ExtensionAPI) {
       ])).map((text) => text.trim());
       const intentText = await intent;
       for (const text of [scope, repo]) rememberPaths(parseEvidence(text), resolvedPaths, root);
-      const routeText = routeAvailable ? renderExecutionRoute(scope) : null;
+      const brief = routeAvailable ? readBrief(scope) : { route: null, asksAboutCode: true };
+      const routeText = brief.route;
       state.pixelHealthy = true;
+      // A prompt that asks nothing about code (git, a release, a pasted thread)
+      // gets the repository state only: no route, no targets, as on Claude/Codex.
+      if (!brief.asksAboutCode) {
+        audit(root, "bootstrap", "repo-state injected; prompt asks nothing about code", { graph_present: index.graph?.present, route_available: false });
+        return {
+          message: {
+            customType: "pixel-bootstrap", display: false,
+            content: `PIXEL REPO STATE (deterministic, from pixel repo-state):\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}`,
+          },
+        };
+      }
       audit(root, "bootstrap", `${contextOperation} and repo-state injected`, { graph_present: index.graph?.present, route_available: Boolean(routeText) });
       const guidance = policyFor(root) === "enforce"
         ? "Enforcement is enabled for supported native retrieval. Call the pixel tool before editing; compositions and unsupported syntax retain native behavior."
