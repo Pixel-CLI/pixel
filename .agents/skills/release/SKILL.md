@@ -319,11 +319,10 @@ diff holds no code, and step 3's local gates plus the push run on its merge
 commit, which step 4 waits for, cover it. If Test + Format or Mutants runs,
 `scope` refused the diff: stop and read its log, do not wait for green. A
 maintenance release into `release/x.y` keeps every job, and there green is
-the bar. The companion Homebrew fix (#715) adds a fourth scope caller and
-skips the source audit for a normal prepare PR, whose tag URL cannot exist
-before merge. Verify that change is present on the release base; do not
-bypass a 404 by pretending the future tag was audited. Weekly or later PR
-checks still audit released source formulas.
+the bar. Homebrew skips the source audit for a normal prepare PR, whose
+tag URL cannot exist before merge. Weekly or later PR checks still audit
+released source formulas; the skip is not a claim that the future tag URL
+was audited.
 
 Immediately before merging, fetch the target and run the candidate guard
 with the recorded SHAs and the selected target. For maintenance, append
