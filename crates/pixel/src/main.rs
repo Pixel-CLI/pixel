@@ -70,6 +70,7 @@ mod task_runtime;
 use task_commands::TaskCmd;
 mod ultraflow_cmd;
 
+mod select;
 mod update_notice;
 mod web_search;
 mod web_search_setup;

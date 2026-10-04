@@ -905,6 +905,15 @@ fn ask_bool_keys(
 ) -> Result<Option<bool>, String> {
     let mut picked = current;
     let hint = paint(color, "2", "  ←/→ pick · Enter confirm · q cancel");
+    // A line longer than the terminal wraps; the \r rewrite can then not
+    // reach the start of the question and the previous render survives as
+    // a duplicate. Drop the hint when the full line would not fit.
+    let cols = crate::select::terminal_width();
+    let hint = if crate::select::visible_len(&format!("{label} [ xxx / xxx ]{hint} ")) >= cols {
+        String::new()
+    } else {
+        hint
+    };
     render_choice(output, label, picked, &hint, color)?;
     loop {
         match crate::prompt_key::step(raw.read_key(), picked) {
