@@ -414,6 +414,10 @@ fn http_chat_within(
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .user_agent("pixel-cli classify-remote")
+        // Non-2xx handled below so the provider's error body (which usually
+        // names the real cause — blocked model, bad key, no route) reaches
+        // the error string instead of a bare status code.
+        .http_status_as_error(false)
         .build();
     let agent = ureq::Agent::new_with_config(agent);
     let mut request = agent.post(&url);
@@ -432,6 +436,13 @@ fn http_chat_within(
         .limit(cap as u64)
         .read_to_string()
         .map_err(|e| format!("remote chat read {url}: {e}"))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        let snippet: String = text.chars().take(400).collect();
+        return Err(format!(
+            "remote chat {url}: http status {status}: {snippet}"
+        ));
+    }
     serde_json::from_str(&text).map_err(|e| format!("remote chat JSON {url}: {e}"))
 }
 

@@ -17,13 +17,14 @@
 //!
 //! Everything interactive is gated on a TTY: a scripted install (CI, pipes)
 //! prints the choice it would have asked as a suggestion and moves on —
-//! `pixel config classify-engine <local|remote|auto>` records the answer
+//! `pixel config classify-engine <local|remote|jev|auto>` records the answer
 //! later. The stored preference is advisory: an explicit `--engine` flag on
 //! `pixel classify` always wins.
 
 use serde_json::{Value, json};
+use std::fs;
 use std::io::{BufRead, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Install-time proposal text, with each option's measured accuracy in
 /// parentheses (Ollaya's published typed-decisions benchmark for
@@ -32,10 +33,38 @@ use std::path::PathBuf;
 pub const LOCAL_LABEL: &str = "Local — Ollaya winnow:e4b on this Mac (offline, $0 per call; 0.722 typed-decisions accuracy vs Jev's 0.738)";
 pub const REMOTE_LABEL: &str = "Remote — hosted LLM behind your key (DeepSeek-v4.1-flash: 100% on the 14-item public coding exam; ~$0.0001/call, needs network)";
 pub const JEV_LABEL: &str = "Jev — TypeSafe's hosted decision model behind your TYPESAFE_API_KEY (0.738 typed-decisions accuracy, needs network)";
+/// What one menu row launches: the local auto-setup, the remote-provider
+/// key flow (any chat preset), or the Jev flow (a TypeSafe or OpenCode Go
+/// key, then the model the source carries).
+#[derive(Clone, Copy, PartialEq)]
+enum SetupKind {
+    Local,
+    Remote,
+    Jev,
+}
+
+/// The install menu, in display order.
+const MENU: &[(&str, SetupKind)] = &[
+    (LOCAL_LABEL, SetupKind::Local),
+    (REMOTE_LABEL, SetupKind::Remote),
+    (JEV_LABEL, SetupKind::Jev),
+];
 
 /// Everything Ollaya owns lives under one pixel-managed prefix (binary,
 /// model store, installer, server log), never in the global PATH.
 const OLLAYA_ROOT: &str = ".local/share/pixel/ollaya";
+
+/// The bundled `pixel-classify` skill — how to shape bounded classify calls
+/// and wire them into a harness's routing, guards, and grading — deployed
+/// into each configured harness's skills dir as `pixel-classify/SKILL.md`.
+const CLASSIFY_SKILL: &str = include_str!("../../pixel-install/assets/pixel-classify-skill.md");
+/// The bundled pi extension: `ask_pixel_file_bool/choice/score`,
+/// `ask_pixel_files`, `pick_pixel_file` — file-level classify calls whose
+/// file text never enters the agent's context. pi auto-discovers it from
+/// `~/.pi/agent/extensions/` once installed.
+const PI_CLASSIFY_EXTENSION: &str = include_str!("../../pixel-install/assets/pi-classify-files.ts");
+/// The skills-dir name every harness copy of [`CLASSIFY_SKILL`] deploys to.
+const CLASSIFY_SKILL_NAME: &str = "pixel-classify";
 
 /// The stored engine preference, if any: `local`, `remote`, or `auto`.
 #[cfg_attr(test, mutants::skip)] // Thin config adapter; policy is tested through injected settings.
@@ -162,14 +191,9 @@ pub fn server_reachable_within(base: &str, cap: Duration) -> bool {
         .is_some_and(|addr| TcpStream::connect_timeout(&addr, cap).is_ok())
 }
 
-/// Parse the interactive answer ("1"/"2"/"3") into an engine choice.
-fn parse_choice(answer: &str) -> Option<&'static str> {
-    match answer.trim() {
-        "1" => Some("local"),
-        "2" => Some("remote"),
-        "3" => Some("jev"),
-        _ => None,
-    }
+/// Parse the interactive numbered answer into a menu index.
+fn parse_choice(answer: &str) -> Option<usize> {
+    answer.trim().parse::<usize>().ok()?.checked_sub(1)
 }
 
 /// The install-time step: propose, then dispatch to the chosen setup. When
@@ -189,13 +213,14 @@ pub fn install_step(
         setup_local,
         propose_remote_key,
         propose_jev_key,
+        propose_classify_helpers,
         &mut crate::select::TermiosRaw::default(),
         std::io::stdin().is_terminal(),
     )
 }
 
 #[allow(clippy::too_many_arguments)] // the seams are the point: tests inject each collaborator
-fn install_step_with<FLocal, FRemote, FJev>(
+fn install_step_with<FLocal, FRemote, FJev, FHelpers>(
     tty: bool,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
@@ -203,6 +228,7 @@ fn install_step_with<FLocal, FRemote, FJev>(
     setup_local: FLocal,
     propose_remote_key: FRemote,
     propose_jev_key: FJev,
+    propose_helpers: FHelpers,
     raw: &mut dyn crate::select::RawMode,
     stdin_is_terminal: bool,
 ) -> Result<(), String>
@@ -210,58 +236,154 @@ where
     FLocal: FnOnce(&mut dyn std::io::Write) -> Result<(), String>,
     FRemote: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
     FJev: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
+    FHelpers: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
 {
     if let Some(engine) = stored {
-        writeln!(stdout, "classify engine: already configured as {engine:?} (change with `pixel config classify-engine <local|remote|auto>`)")
+        writeln!(stdout, "classify engine: already configured as {engine:?} (change with `pixel config classify-engine <local|remote|jev|auto>`)")
             .map_err(|e| e.to_string())?;
-        return Ok(());
+        // An engine chosen on an earlier install still gets the helpers
+        // offer — the proposal itself is a no-op once every file it
+        // manages is current.
+        return propose_helpers(stdin, stdout);
     }
+    let print_menu = |stdout: &mut dyn std::io::Write| -> Result<(), String> {
+        for (index, (label, _)) in MENU.iter().enumerate() {
+            writeln!(stdout, "  [{}] {label}", index + 1).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    };
     writeln!(stdout, "Classify engine:").map_err(|e| e.to_string())?;
     if !tty {
-        writeln!(stdout, "  [1] {LOCAL_LABEL}").map_err(|e| e.to_string())?;
-        writeln!(stdout, "  [2] {REMOTE_LABEL}").map_err(|e| e.to_string())?;
-        writeln!(stdout, "  [3] {JEV_LABEL}").map_err(|e| e.to_string())?;
-        writeln!(stdout, "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote>` or re-run `pixel install` in a terminal")
+        print_menu(stdout)?;
+        writeln!(stdout, "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote|jev>` or re-run `pixel install` in a terminal")
             .map_err(|e| e.to_string())?;
         return Ok(());
     }
     // TTY: the arrow picker paints the option rows itself; EOF falls back
     // to the numbered prompt so a piped answer still lands.
-    let picked = crate::select::pick(
-        &[LOCAL_LABEL, REMOTE_LABEL, JEV_LABEL],
-        stdin,
-        stdout,
-        raw,
-        stdin_is_terminal,
-    )?;
+    let labels: Vec<&str> = MENU.iter().map(|(label, _)| *label).collect();
+    let picked = crate::select::pick(&labels, stdin, stdout, raw, stdin_is_terminal)?;
     let choice = match picked {
-        Some(0) => Some("local"),
-        Some(1) => Some("remote"),
-        Some(2) => Some("jev"),
+        Some(index) if index < MENU.len() => Some(index),
         Some(_) => None,
         None => {
-            writeln!(stdout, "  [1] {LOCAL_LABEL}").map_err(|e| e.to_string())?;
-            writeln!(stdout, "  [2] {REMOTE_LABEL}").map_err(|e| e.to_string())?;
-            writeln!(stdout, "  [3] {JEV_LABEL}").map_err(|e| e.to_string())?;
+            print_menu(stdout)?;
             write!(stdout, "Choice> ").map_err(|e| e.to_string())?;
             stdout.flush().map_err(|e| e.to_string())?;
             let mut line = String::new();
             stdin
                 .read_line(&mut line)
                 .map_err(|e| format!("read choice: {e}"))?;
-            parse_choice(&line)
+            parse_choice(&line).filter(|index| *index < MENU.len())
         }
     };
-    match choice {
-        Some("local") => setup_local(stdout),
-        Some("remote") => propose_remote_key(stdin, stdout),
-        Some("jev") => propose_jev_key(stdin, stdout),
-        _ => {
-            writeln!(stdout, "classify engine: skipped — run `pixel config classify-engine <local|remote>` to choose later")
+    match choice.and_then(|index| MENU.get(index).map(|(_, kind)| *kind)) {
+        Some(SetupKind::Local) => setup_local(stdout),
+        Some(SetupKind::Remote) => propose_remote_key(stdin, stdout),
+        Some(SetupKind::Jev) => propose_jev_key(stdin, stdout),
+        None => {
+            writeln!(stdout, "classify engine: skipped — run `pixel config classify-engine <local|remote|jev>` to choose later")
                 .map_err(|e| e.to_string())?;
-            Ok(())
+            return Ok(());
+        }
+    }?;
+    // The person accepted a classifier; offer the harness helpers on top.
+    propose_helpers(stdin, stdout)
+}
+
+/// The files a "yes" to the helpers proposal writes: the `pixel-classify`
+/// skill into every configured harness's skills dir — the skill is
+/// harness-agnostic, not pi-only; [`pixel_install::config::SKILL_ROOTS`] is
+/// the single list of roots — and, when pi is set up, the
+/// `pixel-classify-files` extension into pi's global extensions dir.
+/// `.claude` is a target unconditionally (`pixel install` writes its hooks
+/// there before this step runs); the rest join only when configured.
+fn classify_helper_targets(home: &Path) -> Vec<(PathBuf, &'static str)> {
+    let skill_file = |root: &Path| {
+        (
+            root.join("skills")
+                .join(CLASSIFY_SKILL_NAME)
+                .join("SKILL.md"),
+            CLASSIFY_SKILL,
+        )
+    };
+    let mut targets = vec![skill_file(&home.join(".claude"))];
+    for root in pixel_install::config::SKILL_ROOTS {
+        let dir = home.join(root);
+        if dir.is_dir() {
+            targets.push(skill_file(&dir));
         }
     }
+    let pi_agent = home.join(".pi/agent");
+    if pi_agent.is_dir() {
+        targets.push((
+            pi_agent.join("extensions").join("pixel-classify-files.ts"),
+            PI_CLASSIFY_EXTENSION,
+        ));
+    }
+    targets
+}
+
+/// Offer the classify helpers after a successful engine setup. The helpers
+/// are optional extras, so a write failure or a missing HOME downgrades to
+/// a printed note — it must never fail (and roll back) the engine install.
+#[cfg_attr(test, mutants::skip)] // HOME adapter; policy is tested by `propose_classify_helpers_at`.
+fn propose_classify_helpers(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        writeln!(stdout, "classify helpers: skipped — no HOME").map_err(|e| e.to_string())?;
+        return Ok(());
+    };
+    if let Err(error) = propose_classify_helpers_at(&home, stdin, stdout) {
+        writeln!(stdout, "classify helpers: skipped — {error}").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The helpers proposal against an explicit home: list what would land,
+/// ask, and on a yes write each target with the usual pixel backup of a
+/// differing existing file. A fully current set short-circuits to
+/// "already installed" without prompting, which keeps re-installs quiet.
+fn propose_classify_helpers_at(
+    home: &Path,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    let targets = classify_helper_targets(home);
+    if targets
+        .iter()
+        .all(|(path, content)| fs::read_to_string(path).is_ok_and(|existing| existing == *content))
+    {
+        return writeln!(stdout, "classify helpers: already installed").map_err(|e| e.to_string());
+    }
+    writeln!(stdout, "Classify helpers:").map_err(|e| e.to_string())?;
+    for (path, _) in &targets {
+        writeln!(stdout, "  {}", path.display()).map_err(|e| e.to_string())?;
+    }
+    write!(stdout, "Install them? [Y/n]> ").map_err(|e| e.to_string())?;
+    stdout.flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    stdin
+        .read_line(&mut line)
+        .map_err(|e| format!("read helpers answer: {e}"))?;
+    if !matches!(line.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes") {
+        return writeln!(stdout, "classify helpers: skipped").map_err(|e| e.to_string());
+    }
+    for (path, content) in &targets {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        }
+        let _ = pixel_install::config::backup_if_changing(path, content.as_bytes());
+        fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    writeln!(
+        stdout,
+        "classify helpers: installed {} file(s)",
+        targets.len()
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(test, mutants::skip)] // Config adapter; prompt and persistence dispatch are tested with injected storage.
@@ -269,22 +391,29 @@ fn propose_remote_key(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
 ) -> Result<(), String> {
-    propose_remote_key_with(stdin, stdout, |preset, key, model| {
+    propose_remote_key_with(stdin, stdout, |preset, key, model, base| {
         if let Some(key) = key {
             crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
         }
-        crate::config_cmd::set_classify_remote_model(preset, model)
+        crate::config_cmd::set_classify_remote_model(preset, model, base)
     })
 }
 
+/// The remote path's provider list: every chat preset except Jev — Jev has
+/// its own top-level option because its key source and model need asking.
 fn propose_remote_key_with(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
-    store: impl FnOnce(crate::decide_remote::Preset, Option<&str>, Option<String>) -> Result<(), String>,
+    store: impl FnOnce(
+        crate::decide_remote::Preset,
+        Option<&str>,
+        Option<String>,
+        Option<&str>,
+    ) -> Result<(), String>,
 ) -> Result<(), String> {
     writeln!(
         stdout,
-        "Remote providers: openrouter / ollama / deepseek / opencode-go / jev"
+        "Remote providers: openrouter / ollama / deepseek / opencode-go"
     )
     .map_err(|e| e.to_string())?;
     write!(stdout, "Provider [openrouter]> ").map_err(|e| e.to_string())?;
@@ -300,71 +429,117 @@ fn propose_remote_key_with(
     };
     let Some(preset) = crate::decide_remote::Preset::parse_name(provider) else {
         return Err(format!(
-            "unknown provider {provider:?} (openrouter, ollama, deepseek, opencode-go, jev, local)"
+            "unknown provider {provider:?} (openrouter, ollama, deepseek, opencode-go, local)"
         ));
     };
-    // OpenCode Go's subscription carries the remote LLM and both Jev
-    // variants; every other preset has a single model line.
-    let model = if preset == crate::decide_remote::Preset::OpencodeGo {
-        opencode_go_model(stdin, stdout)?
-    } else {
-        None
-    };
-    propose_key_for(preset, model, stdin, stdout, store)
+    if matches!(
+        preset,
+        crate::decide_remote::Preset::Jev | crate::decide_remote::Preset::Local
+    ) {
+        return Err(format!(
+            "{provider} is not a remote chat provider — pick Jev or Local at the top menu"
+        ));
+    }
+    propose_key_for(preset, None, None, None, stdin, stdout, store)
 }
 
-/// The OpenCode Go model choice: the subscription's remote LLM or one of
-/// the two Jev models it carries. `None` (an empty answer or `1`) keeps the
-/// preset default; an unrecognized answer is taken as a custom model id.
-fn opencode_go_model(
+/// The Jev path: the key can be a TypeSafe key (api.typesafe.ai) or an
+/// OpenCode Go key — the subscription serves Jev through `opencode.ai/zen`.
+/// Both carry the two Jev models, so the model menu follows.
+#[cfg_attr(test, mutants::skip)] // Config adapter; prompt and persistence dispatch are tested with injected storage.
+fn propose_jev_key(stdin: &mut dyn BufRead, stdout: &mut dyn std::io::Write) -> Result<(), String> {
+    propose_jev_key_with(stdin, stdout, |preset, key, model, base| {
+        if let Some(key) = key {
+            crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+        }
+        crate::config_cmd::set_classify_remote_model(preset, model, base)
+    })
+}
+
+fn propose_jev_key_with(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
-) -> Result<Option<String>, String> {
-    writeln!(stdout, "OpenCode Go model:").map_err(|e| e.to_string())?;
-    writeln!(stdout, "  [1] deepseek-v4.1-flash — remote LLM").map_err(|e| e.to_string())?;
-    writeln!(stdout, "  [2] jev — the subscription's Jev decision model")
-        .map_err(|e| e.to_string())?;
-    writeln!(stdout, "  [3] jev-3 — Jev 3").map_err(|e| e.to_string())?;
+    store: impl FnOnce(
+        crate::decide_remote::Preset,
+        Option<&str>,
+        Option<String>,
+        Option<&str>,
+    ) -> Result<(), String>,
+) -> Result<(), String> {
+    writeln!(stdout, "Jev API key source:").map_err(|e| e.to_string())?;
+    writeln!(
+        stdout,
+        "  [1] OpenCode Go — the subscription's OPENCODE_API_KEY"
+    )
+    .map_err(|e| e.to_string())?;
+    writeln!(stdout, "  [2] TypeSafe — a direct TYPESAFE_API_KEY").map_err(|e| e.to_string())?;
+    write!(stdout, "Source [1]> ").map_err(|e| e.to_string())?;
+    stdout.flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    stdin
+        .read_line(&mut line)
+        .map_err(|e| format!("read key source: {e}"))?;
+    // The two sources publish different catalogs — verified against both
+    // APIs: opencode.ai/zen lists jev-1.13 + jev-1.13-free, api.typesafe.ai
+    // lists jev-latest + jev-preview.
+    let (base, key_var, models) = match line.trim() {
+        "" | "1" => (
+            Some(OPENCODE_ZEN_BASE),
+            "OPENCODE_API_KEY",
+            ["jev-1.13-free", "jev-1.13"],
+        ),
+        "2" => (None, "TYPESAFE_API_KEY", ["jev-latest", "jev-preview"]),
+        other => return Err(format!("unknown key source {other:?} (1 or 2)")),
+    };
+    writeln!(stdout, "Jev model:").map_err(|e| e.to_string())?;
+    for (index, model) in models.iter().enumerate() {
+        writeln!(stdout, "  [{}] {model}", index + 1).map_err(|e| e.to_string())?;
+    }
     write!(stdout, "Model [1]> ").map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;
     let mut line = String::new();
     stdin
         .read_line(&mut line)
         .map_err(|e| format!("read model: {e}"))?;
-    Ok(match line.trim() {
-        "" | "1" => None,
-        "2" => Some("jev".to_string()),
-        "3" => Some("jev-3".to_string()),
+    let model = match line.trim() {
+        "" | "1" => Some(models[0].to_string()),
+        "2" => Some(models[1].to_string()),
         custom => Some(custom.to_string()),
-    })
-}
-
-/// The Jev onboarding option: no provider question — Jev is the preset, the
-/// only input is its `TYPESAFE_API_KEY`.
-#[cfg_attr(test, mutants::skip)] // Config adapter; prompt and persistence dispatch are tested with injected storage.
-fn propose_jev_key(stdin: &mut dyn BufRead, stdout: &mut dyn std::io::Write) -> Result<(), String> {
+    };
     propose_key_for(
         crate::decide_remote::Preset::Jev,
-        None,
+        model,
+        base,
+        Some(key_var),
         stdin,
         stdout,
-        |preset, key, model| {
-            if let Some(key) = key {
-                crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
-            }
-            crate::config_cmd::set_classify_remote_model(preset, model)
-        },
+        store,
     )
 }
+
+/// Where the OpenCode subscription serves Jev: the zen host, which proxies
+/// TypeSafe's `/v1/systemone` — verified against the live API (`jev-1.13-free`
+/// answers there; `zen/go/v1` chat rejects every jev model).
+const OPENCODE_ZEN_BASE: &str = "https://opencode.ai/zen";
 
 fn propose_key_for(
     preset: crate::decide_remote::Preset,
     model: Option<String>,
+    base: Option<&str>,
+    key_var: Option<&str>,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
-    store: impl FnOnce(crate::decide_remote::Preset, Option<&str>, Option<String>) -> Result<(), String>,
+    store: impl FnOnce(
+        crate::decide_remote::Preset,
+        Option<&str>,
+        Option<String>,
+        Option<&str>,
+    ) -> Result<(), String>,
 ) -> Result<(), String> {
-    let Some(var) = crate::decide_remote::key_env_name(preset, None) else {
+    let Some(var) = key_var
+        .map(str::to_string)
+        .or_else(|| crate::decide_remote::key_env_name(preset, None))
+    else {
         return Err(
             "the local preset needs no API key — choose it as the engine instead".to_string(),
         );
@@ -380,7 +555,12 @@ fn propose_key_for(
         .read_line(&mut key)
         .map_err(|e| format!("read key: {e}"))?;
     let key = key.trim();
-    store(preset, if key.is_empty() { None } else { Some(key) }, model)?;
+    store(
+        preset,
+        if key.is_empty() { None } else { Some(key) },
+        model,
+        base,
+    )?;
     if key.is_empty() {
         writeln!(stdout, "classify engine: remote selected, no key stored — set {var} or run `pixel config remote-key {} -` before classifying", preset.display())
             .map_err(|e| e.to_string())?;
@@ -871,9 +1051,10 @@ mod tests {
     }
 
     #[test]
-    fn the_choice_parser_accepts_exactly_one_and_two() {
-        assert_eq!(parse_choice("1"), Some("local"));
-        assert_eq!(parse_choice(" 2\n"), Some("remote"));
+    fn the_choice_parser_maps_numbers_to_menu_indices() {
+        assert_eq!(parse_choice("1"), Some(0));
+        assert_eq!(parse_choice(" 2\n"), Some(1));
+        assert_eq!(parse_choice("3"), Some(2));
         assert_eq!(parse_choice(""), None);
         assert_eq!(parse_choice("yes"), None);
         assert_eq!(parse_choice("0"), None);
@@ -938,7 +1119,7 @@ mod tests {
     fn remote_key_prompt_reads_the_provider_from_the_supplied_reader() {
         let mut input = std::io::Cursor::new(b"unknown-provider\n".to_vec());
         let mut output = Vec::new();
-        let error = propose_remote_key_with(&mut input, &mut output, |_, _, _| {
+        let error = propose_remote_key_with(&mut input, &mut output, |_, _, _, _| {
             panic!("invalid provider must not be stored")
         })
         .unwrap_err();
@@ -952,55 +1133,108 @@ mod tests {
 
     #[test]
     fn remote_setup_should_persist_the_selected_provider_even_without_a_key() {
-        for (input, expected, key, model) in [
+        for (input, expected, key, model, base) in [
             (
                 "deepseek\n test-secret \n",
                 crate::decide_remote::Preset::Deepseek,
                 Some("test-secret"),
                 None,
-            ),
-            (
-                "opencode-go\n\n",
-                crate::decide_remote::Preset::OpencodeGo,
-                None,
                 None,
             ),
             (
-                "opencode-go\n2\ngo-secret\n",
+                "opencode-go\ngo-secret\n",
                 crate::decide_remote::Preset::OpencodeGo,
                 Some("go-secret"),
-                Some("jev"),
-            ),
-            (
-                "opencode-go\n3\n\n",
-                crate::decide_remote::Preset::OpencodeGo,
                 None,
-                Some("jev-3"),
-            ),
-            (
-                "  jev  \n typesafe-secret \n",
-                crate::decide_remote::Preset::Jev,
-                Some("typesafe-secret"),
                 None,
             ),
-            ("\n\n", crate::decide_remote::Preset::Openrouter, None, None),
+            (
+                "\n\n",
+                crate::decide_remote::Preset::Openrouter,
+                None,
+                None,
+                None,
+            ),
         ] {
             let mut stored = None;
             let mut output = Vec::new();
             propose_remote_key_with(
                 &mut std::io::Cursor::new(input),
                 &mut output,
-                |preset, value, model| {
-                    stored = Some((preset, value.map(str::to_string), model));
+                |preset, value, model, base| {
+                    stored = Some((
+                        preset,
+                        value.map(str::to_string),
+                        model,
+                        base.map(str::to_string),
+                    ));
                     Ok(())
                 },
             )
             .unwrap();
             assert_eq!(
                 stored,
-                Some((expected, key.map(str::to_string), model.map(str::to_string)))
+                Some((
+                    expected,
+                    key.map(str::to_string),
+                    model.map(str::to_string),
+                    base.map(str::to_string)
+                ))
             );
             assert!(!String::from_utf8(output).unwrap().contains("test-secret"));
+        }
+    }
+
+    #[test]
+    fn remote_setup_rejects_jev_and_local_as_chat_providers() {
+        for provider in ["jev", "local"] {
+            let mut input = std::io::Cursor::new(format!("{provider}\n").into_bytes());
+            let mut output = Vec::new();
+            let error = propose_remote_key_with(&mut input, &mut output, |_, _, _, _| {
+                panic!("{provider} must not be stored as a chat preset")
+            })
+            .unwrap_err();
+            assert!(error.contains("not a remote chat provider"), "{error}");
+        }
+    }
+
+    #[test]
+    fn jev_setup_routes_the_key_source_and_model_choice() {
+        for (input, key, model, base) in [
+            (
+                "1\n1\noc-key\n",
+                Some("oc-key"),
+                Some("jev-1.13-free"),
+                Some(OPENCODE_ZEN_BASE),
+            ),
+            ("2\n2\nts-key\n", Some("ts-key"), Some("jev-preview"), None),
+        ] {
+            let mut stored = None;
+            let mut output = Vec::new();
+            propose_jev_key_with(
+                &mut std::io::Cursor::new(input),
+                &mut output,
+                |preset, value, model, base| {
+                    stored = Some((
+                        preset,
+                        value.map(str::to_string),
+                        model,
+                        base.map(str::to_string),
+                    ));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                stored,
+                Some((
+                    crate::decide_remote::Preset::Jev,
+                    key.map(str::to_string),
+                    model.map(str::to_string),
+                    base.map(str::to_string)
+                ))
+            );
+            assert!(!String::from_utf8(output).unwrap().contains("oc-key"));
         }
     }
 
@@ -1153,15 +1387,15 @@ mod tests {
             |_| panic!("stored setting must not start local setup"),
             |_, _| panic!("stored setting must not prompt for a key"),
             |_, _| panic!("stored setting must not prompt for a jev key"),
+            |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
         )
         .unwrap();
-        assert!(
-            String::from_utf8(output)
-                .unwrap()
-                .contains("already configured")
-        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("already configured"));
+        // A stored engine still gets the helpers offer.
+        assert!(output.contains("helpers proposed"));
 
         let mut output = Vec::new();
         install_step_with(
@@ -1172,6 +1406,7 @@ mod tests {
             |_| panic!("non-interactive install must not start local setup"),
             |_, _| panic!("non-interactive install must not prompt for a key"),
             |_, _| panic!("non-interactive install must not prompt for a jev key"),
+            |_, _| panic!("non-interactive install must not offer helpers"),
             &mut FakeRaw,
             false,
         )
@@ -1191,15 +1426,15 @@ mod tests {
             |stdout| writeln!(stdout, "local setup ran").map_err(|e| e.to_string()),
             |_, _| panic!("local choice must not prompt for a remote key"),
             |_, _| panic!("local choice must not prompt for a jev key"),
+            |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
         )
         .unwrap();
-        assert!(
-            String::from_utf8(output)
-                .unwrap()
-                .contains("local setup ran")
-        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("local setup ran"));
+        // An accepted engine leads into the helpers proposal.
+        assert!(output.contains("helpers proposed"));
 
         let mut output = Vec::new();
         install_step_with(
@@ -1214,15 +1449,14 @@ mod tests {
                 writeln!(stdout, "remote key for {}", provider.trim()).map_err(|e| e.to_string())
             },
             |_, _| panic!("remote choice must not prompt for a jev key"),
+            |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
         )
         .unwrap();
-        assert!(
-            String::from_utf8(output)
-                .unwrap()
-                .contains("remote key for provider input")
-        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("remote key for provider input"));
+        assert!(output.contains("helpers proposed"));
 
         let mut output = Vec::new();
         install_step_with(
@@ -1233,15 +1467,152 @@ mod tests {
             |_| panic!("jev choice must not start local setup"),
             |_, _| panic!("jev choice must not ask for a provider"),
             |_, stdout| writeln!(stdout, "jev key prompt ran").map_err(|e| e.to_string()),
+            |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
         )
         .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("jev key prompt ran"));
+        assert!(output.contains("helpers proposed"));
+
+        // Skipping the engine (EOF at both pickers) must not offer helpers.
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(Vec::new()),
+            &mut output,
+            None,
+            |_| panic!("a skipped engine must not start local setup"),
+            |_, _| panic!("a skipped engine must not prompt for a key"),
+            |_, _| panic!("a skipped engine must not prompt for a jev key"),
+            |_, _| panic!("a skipped engine must not offer helpers"),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+        assert!(String::from_utf8(output).unwrap().contains("skipped"));
+    }
+
+    #[test]
+    fn classify_helpers_should_write_the_bundled_skill_and_extension_when_accepted() {
+        let home =
+            std::env::temp_dir().join(format!("pixel-classify-helpers-{}", std::process::id()));
+        fs::create_dir_all(home.join(".pi/agent")).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(home.join(".cursor")).unwrap();
+
+        let mut output = Vec::new();
+        propose_classify_helpers_at(
+            &home,
+            &mut std::io::Cursor::new(b"y\n".to_vec()),
+            &mut output,
+        )
+        .unwrap();
+
+        let skill = home.join(".claude/skills/pixel-classify/SKILL.md");
+        let pi_ext = home.join(".pi/agent/extensions/pixel-classify-files.ts");
+        assert!(
+            fs::read_to_string(&skill)
+                .unwrap()
+                .contains("name: pixel-classify")
+        );
+        assert!(home.join(".codex/skills/pixel-classify/SKILL.md").is_file());
+        assert!(
+            home.join(".cursor/skills/pixel-classify/SKILL.md")
+                .is_file()
+        );
+        assert!(
+            home.join(".pi/agent/skills/pixel-classify/SKILL.md")
+                .is_file()
+        );
+        // A harness root that does not exist is skipped, not created.
+        assert!(!home.join(".devin").exists());
+        assert!(
+            fs::read_to_string(&pi_ext)
+                .unwrap()
+                .contains("ask_pixel_file_bool")
+        );
         assert!(
             String::from_utf8(output)
                 .unwrap()
-                .contains("jev key prompt ran")
+                .contains("installed 5 file(s)")
         );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn classify_helpers_should_write_nothing_when_declined() {
+        let home = std::env::temp_dir().join(format!(
+            "pixel-classify-helpers-declined-{}",
+            std::process::id()
+        ));
+
+        let mut output = Vec::new();
+        propose_classify_helpers_at(
+            &home,
+            &mut std::io::Cursor::new(b"n\n".to_vec()),
+            &mut output,
+        )
+        .unwrap();
+
+        assert!(!home.join(".claude").exists());
+        assert!(String::from_utf8(output).unwrap().contains("skipped"));
+    }
+
+    #[test]
+    fn classify_helpers_should_short_circuit_when_every_target_is_current() {
+        let home = std::env::temp_dir().join(format!(
+            "pixel-classify-helpers-idem-{}",
+            std::process::id()
+        ));
+        let skill = home.join(".claude/skills/pixel-classify/SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(&skill, CLASSIFY_SKILL).unwrap();
+
+        let mut output = Vec::new();
+        // No stdin answer: reaching the prompt would read EOF as a yes and
+        // rewrite — the short-circuit must come first.
+        propose_classify_helpers_at(&home, &mut std::io::Cursor::new(Vec::new()), &mut output)
+            .unwrap();
+
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("already installed")
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn classify_helpers_should_back_up_a_differing_existing_target() {
+        let home = std::env::temp_dir().join(format!(
+            "pixel-classify-helpers-backup-{}",
+            std::process::id()
+        ));
+        let skill = home.join(".claude/skills/pixel-classify/SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(&skill, "my edited copy").unwrap();
+
+        propose_classify_helpers_at(
+            &home,
+            &mut std::io::Cursor::new(b"\n".to_vec()),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let backups: Vec<_> = fs::read_dir(skill.parent().unwrap())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".pixel-bak."))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            fs::read_to_string(backups[0].path()).unwrap(),
+            "my edited copy"
+        );
+        assert_eq!(fs::read_to_string(&skill).unwrap(), CLASSIFY_SKILL);
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

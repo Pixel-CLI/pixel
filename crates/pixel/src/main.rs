@@ -1874,13 +1874,31 @@ enum ConfigCmd {
         #[arg(long)]
         clear: bool,
     },
+    /// Remote provider `pixel classify` uses when the engine is `remote`:
+    /// `pixel config remote-preset jev --model jev-latest`. Switching the
+    /// stored engine to `remote` too; a `--model`/`--base` left out clears
+    /// the previous provider's stale choice.
+    RemotePreset {
+        /// Remote provider preset (openrouter, ollama, deepseek,
+        /// opencode-go, jev, local).
+        #[arg(value_enum)]
+        preset: decide_remote::Preset,
+        /// Model id the preset runs (default: the preset's own).
+        #[arg(long)]
+        model: Option<String>,
+        /// Endpoint base override (default: the preset's own).
+        #[arg(long)]
+        base: Option<String>,
+    },
     /// Which engine answers `pixel classify` when no `--engine` flag is
     /// given: `local` (an installed Ollaya server), `remote` (a hosted LLM
-    /// behind a stored key), or `auto` (probe local, fall back to remote —
-    /// the default). `pixel install` sets this when you choose an engine.
+    /// behind a stored key), `jev` (TypeSafe's hosted decision model —
+    /// remote engine on the `jev` preset), or `auto` (probe local, fall
+    /// back to remote — the default). `pixel install` sets this when you
+    /// choose an engine.
     ClassifyEngine {
         /// The engine preference to store.
-        #[arg(value_parser = ["local", "remote", "auto"])]
+        #[arg(value_parser = ["local", "remote", "jev", "auto"])]
         value: String,
     },
 }
@@ -6689,9 +6707,23 @@ fn run_command(
                 clear,
             }) => config_cmd::key_from_arg(value, &mut std::io::stdin().lock())
                 .and_then(|key| config_cmd::run_remote_key(preset, key, clear)),
+            Some(ConfigCmd::RemotePreset {
+                preset,
+                model,
+                base,
+            }) => {
+                config_cmd::set_classify_remote_model(preset, model, base.as_deref())?;
+                println!("classify remote preset: {} stored", preset.display());
+                Ok(())
+            }
             Some(ConfigCmd::ClassifyEngine { value }) => {
-                config_cmd::set_classify_engine(&value)?;
-                println!("classify engine: {value} stored");
+                if value == "jev" {
+                    config_cmd::set_classify_remote_model(decide_remote::Preset::Jev, None, None)?;
+                    println!("classify engine: remote (jev) stored");
+                } else {
+                    config_cmd::set_classify_engine(&value)?;
+                    println!("classify engine: {value} stored");
+                }
                 Ok(())
             }
         },

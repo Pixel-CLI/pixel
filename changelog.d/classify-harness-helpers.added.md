@@ -1,0 +1,1 @@
+**classify:** an accepted classify engine (`pixel install` or `pixel config setup`) now offers the `pixel-classify` skill — deployed to each configured harness's skills dir — and the `pixel-classify-files` pi extension (`~/.pi/agent/extensions/`), which judges a file's contents through `pixel classify` without loading them into the agent's context.

@@ -311,8 +311,31 @@ fn open_engine(
     preset: crate::decide_remote::Preset,
     model: Option<String>,
 ) -> Result<crate::decide_remote::Remote, String> {
-    crate::decide_remote::resolve_config(preset, model, remote_key_value(preset)?)
-        .map(crate::decide_remote::Remote::open)
+    let mut config =
+        crate::decide_remote::resolve_config(preset, model, remote_key_value(preset)?)?;
+    config.base = stored_base_when_unset(&config)?;
+    Ok(crate::decide_remote::Remote::open(config))
+}
+
+/// The base the install step stored, when `PIXEL_REMOTE_BASE` does not
+/// override — re-checked for clear text since `resolve_config` validated
+/// the preset base, not this one.
+fn stored_base_when_unset(config: &crate::decide_remote::Config) -> Result<String, String> {
+    let env_set = std::env::var("PIXEL_REMOTE_BASE")
+        .ok()
+        .is_some_and(|s| !s.is_empty());
+    let Some(stored) = (!env_set)
+        .then(crate::config_cmd::classify_remote_base)
+        .flatten()
+    else {
+        return Ok(config.base.clone());
+    };
+    if config.key_value().is_some() && crate::decide_remote::sends_in_clear_text(&stored) {
+        return Err(format!(
+            "refusing to send the API key to {stored} over cleartext http; use https or a loopback base"
+        ));
+    }
+    Ok(stored)
 }
 
 /// Open the hosted Jev engine from the same preset config the chat
@@ -321,20 +344,19 @@ fn open_engine(
 /// source all behave identically whichever preset is chosen.
 #[cfg_attr(test, mutants::skip)] // thin adapter over the real env; the policy is decide_jev's
 fn open_jev_engine(model: Option<String>) -> Result<crate::decide_jev::Jev, String> {
-    crate::decide_remote::resolve_config(
+    let mut config = crate::decide_remote::resolve_config(
         crate::decide_remote::Preset::Jev,
         model,
         remote_key_value(crate::decide_remote::Preset::Jev)?,
-    )
-    .map(|config| {
-        let key = config.key_value();
-        crate::decide_jev::Jev::open(crate::decide_jev::JevConfig {
-            base: config.base,
-            model_name: config.model,
-            key,
-            ..Default::default()
-        })
-    })
+    )?;
+    config.base = stored_base_when_unset(&config)?;
+    let key = config.key_value();
+    Ok(crate::decide_jev::Jev::open(crate::decide_jev::JevConfig {
+        base: config.base,
+        model_name: config.model,
+        key,
+        ..Default::default()
+    }))
 }
 
 /// Read the remote API-key value for a preset, in disclosure order: the
@@ -509,6 +531,12 @@ pub struct ClassifyOptions {
     /// and name the pixel ops that fit the verdict.
     #[arg(long, conflicts_with_all = ["labels", "context", "jsonl"])]
     pub task_intent: bool,
+    /// Debug comparison: ask every configured engine — local Ollaya, the
+    /// remote chat preset and Jev — the same question in parallel and print
+    /// each one's answer. An engine that is not set up or fails reports as
+    /// its own error row; the stored engine choice is ignored.
+    #[arg(long, conflicts_with_all = ["jsonl", "if_warm", "task_intent", "engine"], requires = "labels")]
+    pub debug: bool,
     #[arg(long)]
     pub json: bool,
 }
@@ -729,6 +757,140 @@ fn run_with(
     }
 }
 
+/// One `--debug` lane: an engine that answers the shared spec inside its
+/// own thread — nothing engine-shaped crosses a thread boundary, so the
+/// adapters' non-`Send` internals stay lane-local. The lane's outcome is
+/// captured: a missing key or an engine that fails to come up becomes that
+/// lane's error row, never the command's.
+type DebugLane = (
+    &'static str,
+    Box<dyn FnOnce(&Spec) -> Result<(String, BTreeMap<String, f64>), String> + Send>,
+);
+
+/// The engines `--debug` runs side by side: the local Ollaya daemon
+/// (auto-started through the same path `pixel classify` uses), the
+/// configured remote chat preset — omitted when it is Jev, since the Jev
+/// lane already covers that wire — and Jev itself. All three reuse the
+/// normal openers, so `--remote-model`, `PIXEL_REMOTE_*` and stored
+/// onboarding state apply to each lane exactly as they would solo.
+#[cfg_attr(test, mutants::skip)] // env/process adapters; the fan-out policy is run_debug_with's
+fn debug_lanes(
+    opts: &ClassifyOptions,
+    remote_preset: crate::decide_remote::Preset,
+    remote_model: Option<String>,
+) -> Vec<DebugLane> {
+    let mut lanes: Vec<DebugLane> = Vec::new();
+
+    // `opts.engine`/`--ollaya-url` are clap-conflicted under `--debug`; the
+    // local lane always uses the recorded daemon base.
+    let base = crate::classify_setup::local_base();
+    lanes.push((
+        "local",
+        Box::new(move |spec: &Spec| {
+            crate::classify_setup::ensure_local(&base)?;
+            let mut engine: Box<dyn DecisionEngine> = Box::new(crate::decide_ollaya::Ollaya::open(
+                ollaya_config(base, false),
+            ));
+            let model = engine.model_id();
+            engine.decide(spec).map(|probs| (model, probs))
+        }),
+    ));
+
+    if !matches!(remote_preset, crate::decide_remote::Preset::Jev) {
+        let model = remote_model.clone();
+        lanes.push((
+            "remote",
+            Box::new(move |spec: &Spec| {
+                let mut engine: Box<dyn DecisionEngine> =
+                    Box::new(open_engine(remote_preset, model)?);
+                let id = engine.model_id();
+                engine.decide(spec).map(|probs| (id, probs))
+            }),
+        ));
+    }
+
+    // The stored `classify.remote_model` belongs to whichever preset it was
+    // saved against — it reaches the Jev lane only when that preset is Jev
+    // (an explicit `--remote-model` flag still applies to both lanes).
+    let jev_model = opts.remote_model.clone().or_else(|| {
+        matches!(remote_preset, crate::decide_remote::Preset::Jev)
+            .then(stored_remote_model_when_unset)
+            .flatten()
+    });
+    lanes.push((
+        "jev",
+        Box::new(move |spec: &Spec| {
+            let mut engine: Box<dyn DecisionEngine> = Box::new(open_jev_engine(jev_model)?);
+            let id = engine.model_id();
+            engine.decide(spec).map(|probs| (id, probs))
+        }),
+    ));
+
+    lanes
+}
+
+/// Ask every lane the same spec in parallel and print one result section
+/// per engine — the `--debug` comparison view. Lanes answer independently:
+/// one engine's failure or panic does not abort the others.
+fn run_debug_with(
+    opts: &ClassifyOptions,
+    lanes: Vec<DebugLane>,
+    output: &mut dyn ClassifyOutput,
+) -> Result<(), String> {
+    let spec = one_shot_spec(opts)?;
+    let spec_ref = &spec;
+    let rows = std::thread::scope(|scope| {
+        let (names, handles): (Vec<_>, Vec<_>) = lanes
+            .into_iter()
+            .map(|(name, run)| (name, scope.spawn(move || run(spec_ref))))
+            .unzip();
+        names
+            .into_iter()
+            .zip(handles)
+            .map(|(name, handle)| {
+                (
+                    name,
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err("engine panicked".into())),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+
+    if opts.json {
+        let engines: Vec<Value> = rows
+            .iter()
+            .map(|(name, result)| match result {
+                Ok((model, probs)) => {
+                    json!({"engine": name, "model": model, "probs": probs})
+                }
+                Err(error) => json!({"engine": name, "error": error}),
+            })
+            .collect();
+        return output.print_document(&json!({
+            "text": spec.text,
+            "labels": spec.labels,
+            "engines": engines,
+        }));
+    }
+
+    let mut text = String::new();
+    for (name, result) in &rows {
+        match result {
+            Ok((model, probs)) => {
+                text.push_str(&format!(
+                    "== {name} ({model}) ==\n{}",
+                    render_probs(probs, &spec)
+                ));
+            }
+            Err(error) => text.push_str(&format!("== {name} ==\nerror: {error}\n")),
+        }
+        text.push('\n');
+    }
+    output.write_text(&text)
+}
+
 /// The engine for this invocation: the explicit flag wins, then the stored
 /// preference, then a reachability probe of the local daemon. A resolved
 /// local engine that is not yet answering gets one auto-start chance.
@@ -861,6 +1023,13 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
     let if_warm = opts.if_warm;
     let stdin = std::io::stdin();
     let mut output = ProductionOutput;
+    if opts.debug {
+        return run_debug_with(
+            &opts,
+            debug_lanes(&opts, remote_preset, remote_model),
+            &mut output,
+        );
+    }
     run_with(
         opts,
         resolve_engine_for,
@@ -925,6 +1094,7 @@ pub(crate) fn open_session(
         // prompt-intent battery (which `task_intent` selects) is never what
         // it wants.
         task_intent: false,
+        debug: false,
     };
     let resolved = resolve_engine_for(&opts)?;
     open_resolved(
@@ -1502,6 +1672,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: false,
         };
         let e = one_shot_spec(&opts(None, &["a", "b"], &[])).unwrap_err();
@@ -1516,6 +1687,121 @@ mod tests {
         assert_eq!(s.text, "t");
         assert_eq!(s.context, "the rubric");
         assert_eq!(s.criteria["a"], "desc");
+    }
+
+    /// Buffer `write_text`/`print_document` capture for output assertions.
+    struct BufferOutput {
+        text: String,
+        docs: Vec<Value>,
+    }
+
+    impl ClassifyOutput for BufferOutput {
+        fn write_text(&mut self, text: &str) -> Result<(), String> {
+            self.text.push_str(text);
+            Ok(())
+        }
+
+        fn print_document(&mut self, document: &Value) -> Result<(), String> {
+            self.docs.push(document.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn run_debug_with_runs_every_lane_and_reports_each_outcome() {
+        let opts = ClassifyOptions {
+            text: Some("t".to_string()),
+            context: None,
+            labels: vec!["yes".to_string(), "no".to_string()],
+            criteria: Vec::new(),
+            remote_preset: None,
+            remote_model: None,
+            engine: None,
+            ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
+            jsonl: false,
+            if_warm: false,
+            task_intent: false,
+            debug: true,
+            json: false,
+        };
+        let lanes: Vec<DebugLane> = vec![
+            (
+                "local",
+                Box::new(|_spec: &Spec| {
+                    Ok((
+                        "winnow:e4b".to_string(),
+                        BTreeMap::from([("yes".to_string(), 0.9), ("no".to_string(), 0.1)]),
+                    ))
+                }),
+            ),
+            (
+                "jev",
+                Box::new(|_spec: &Spec| Err("no TYPESAFE_API_KEY".to_string())),
+            ),
+        ];
+
+        let mut out = BufferOutput {
+            text: String::new(),
+            docs: Vec::new(),
+        };
+        run_debug_with(&opts, lanes, &mut out).unwrap();
+
+        assert!(
+            out.text.contains("== local (winnow:e4b) =="),
+            "{}",
+            out.text
+        );
+        assert!(out.text.contains("yes: 0.900"), "{}", out.text);
+        assert!(out.text.contains("predicted: yes"), "{}", out.text);
+        assert!(
+            out.text.contains("== jev ==\nerror: no TYPESAFE_API_KEY"),
+            "{}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn run_debug_with_json_lists_one_entry_per_engine() {
+        let opts = ClassifyOptions {
+            text: Some("t".to_string()),
+            context: None,
+            labels: vec!["yes".to_string(), "no".to_string()],
+            criteria: Vec::new(),
+            remote_preset: None,
+            remote_model: None,
+            engine: None,
+            ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
+            jsonl: false,
+            if_warm: false,
+            task_intent: false,
+            debug: true,
+            json: true,
+        };
+        let lanes: Vec<DebugLane> = vec![
+            (
+                "remote",
+                Box::new(|_spec: &Spec| {
+                    Ok((
+                        "deepseek-v4.1-flash".to_string(),
+                        BTreeMap::from([("yes".to_string(), 0.7), ("no".to_string(), 0.3)]),
+                    ))
+                }),
+            ),
+            ("jev", Box::new(|_spec: &Spec| Err("no key".to_string()))),
+        ];
+
+        let mut out = BufferOutput {
+            text: String::new(),
+            docs: Vec::new(),
+        };
+        run_debug_with(&opts, lanes, &mut out).unwrap();
+
+        let engines = out.docs[0]["engines"].as_array().unwrap();
+        assert_eq!(engines.len(), 2);
+        assert_eq!(engines[0]["engine"], "remote");
+        assert_eq!(engines[0]["probs"]["yes"], 0.7);
+        assert_eq!(engines[1]["engine"], "jev");
+        assert_eq!(engines[1]["error"], "no key");
     }
 
     #[test]
@@ -1725,6 +2011,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: false,
         };
         let mut output = RecordingOutput::default();
@@ -1756,6 +2043,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: true,
         };
         run_with(
@@ -1954,6 +2242,7 @@ mod tests {
             jsonl: true,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: false,
         };
         let mut output = RecordingOutput::default();
@@ -2020,6 +2309,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+                debug: false,
                 json: false,
             },
             test_resolve,
@@ -2070,6 +2360,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+                debug: false,
                 json: false,
             },
             |_| {
@@ -2109,6 +2400,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+                debug: false,
                 json: false,
             },
             test_resolve,
@@ -2171,6 +2463,7 @@ mod tests {
             jsonl: true,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: false,
         };
         let mut output = RecordingOutput::default();
@@ -2224,6 +2517,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+                debug: false,
                 json: true,
             },
             test_resolve,
@@ -2288,6 +2582,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: false,
         };
         // A dead server address fails the decision with a transport error —

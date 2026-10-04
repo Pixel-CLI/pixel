@@ -3430,6 +3430,35 @@ fn uninstall_removes_the_pi_prompt_file_when_it_held_nothing_else() {
 }
 
 #[test]
+fn uninstall_removes_the_classify_helpers_and_keeps_a_backup_of_them() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    // What the classify-helpers proposal writes.
+    let files = [
+        home.join(".pi/agent/extensions/pixel-classify-files.ts"),
+        home.join(".pi/agent/skills/pixel-classify/SKILL.md"),
+        home.join(".claude/skills/pixel-classify/SKILL.md"),
+        home.join(".codex/skills/pixel-classify/SKILL.md"),
+    ];
+    for file in &files {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "shipped content\n").unwrap();
+    }
+
+    uninstall_home(home);
+
+    for file in &files {
+        assert!(!file.exists(), "{file:?} must be removed");
+    }
+    let backups = fs::read_dir(home.join(".claude/skills"))
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".pixel-bak."))
+        .count();
+    assert_eq!(backups, 1, "a renamed .pixel-bak dir keeps the user copy");
+}
+
+#[test]
 fn uninstall_survives_a_missing_pi_prompt_file() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();

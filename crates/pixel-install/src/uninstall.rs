@@ -21,6 +21,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::InstallError;
 use crate::config;
@@ -144,6 +145,7 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         remove_cursor_hooks(&home, &exe, dry_run)?,
         crate::copilot_config::remove_copilot_hooks(&home, dry_run)?,
         remove_pi_extension(&home, dry_run)?,
+        remove_classify_skill(&home, dry_run)?,
         // 5. Remove pixel hooks from project-level .codex/hooks.json files.
         remove_project_codex_hooks(&home, &exe, dry_run)?,
         // 6. Remove the pixel rule source file.
@@ -775,21 +777,22 @@ fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallSt
             detail: None,
         });
     }
-    let ext_file = config_dir.join("extensions").join("pixel-guard.ts");
-    let mut ext_removed = false;
-    if ext_file.is_file() {
-        if !dry_run {
-            let current = fs::read(&ext_file).unwrap_or_default();
-            let _ = config::backup_if_changing(&ext_file, &{
-                let mut s = current.clone();
-                s.push(0);
-                s
-            });
-            let _ = fs::remove_file(&ext_file);
+    let mut removed = Vec::new();
+    for name in ["pixel-guard.ts", "pixel-classify-files.ts"] {
+        let ext_file = config_dir.join("extensions").join(name);
+        if ext_file.is_file() {
+            if !dry_run {
+                let current = fs::read(&ext_file).unwrap_or_default();
+                let _ = config::backup_if_changing(&ext_file, &{
+                    let mut s = current.clone();
+                    s.push(0);
+                    s
+                });
+                let _ = fs::remove_file(&ext_file);
+            }
+            removed.push(format!("extensions/{name}"));
         }
-        ext_removed = true;
     }
-
     // Strip managed block from <config_dir>/AGENTS.md.
     let agents_md = config_dir.join("AGENTS.md");
     let mut agents_stripped = false;
@@ -807,10 +810,10 @@ fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallSt
 
     let summary = format!(
         "{}{}",
-        if ext_removed {
-            "removed pi guard extension"
+        if removed.is_empty() {
+            "no pi extension found".to_string()
         } else {
-            "no pi extension found"
+            format!("removed {}", removed.join(" "))
         },
         if agents_stripped {
             " + stripped AGENTS.md managed block"
@@ -822,7 +825,59 @@ fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallSt
         id: "hooks.pi".into(),
         status: CheckStatus::Green,
         summary: install::dry_run_summary(dry_run, &summary),
-        detail: Some(format!("ext={}", ext_file.display())),
+        detail: (!removed.is_empty()).then(|| removed.join(" ")),
+    })
+}
+
+/// Rename `dir` to `<name>.pixel-bak.<nanos>-<seq>` beside itself — the
+/// directory counterpart of [`config::backup_if_changing`], so a user-edited
+/// copy survives an uninstall instead of being deleted outright.
+fn rename_as_backup(dir: &Path) -> Result<()> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let name = dir
+        .file_name()
+        .map_or_else(|| "dir".into(), |n| n.to_string_lossy().into_owned());
+    let backup = dir.with_file_name(format!("{name}.pixel-bak.{nanos}-0"));
+    fs::rename(dir, backup)?;
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Step 4b: remove the classify helpers' skill dirs from every harness
+// -------------------------------------------------------------------------
+
+/// Remove the `pixel-classify` skill the install-time helpers proposal can
+/// write into every configured harness's skills dir — the same roots
+/// [`config::SKILL_ROOTS`] installs into, plus Claude's always-present one.
+fn remove_classify_skill(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let dirs: Vec<PathBuf> = [PathBuf::from(".claude")]
+        .into_iter()
+        .chain(config::SKILL_ROOTS.iter().map(PathBuf::from))
+        .map(|root| home.join(root).join("skills/pixel-classify"))
+        .collect();
+    let mut removed = Vec::new();
+    for dir in &dirs {
+        if dir.is_dir() {
+            if !dry_run {
+                rename_as_backup(dir)?;
+            }
+            removed.push(dir.display().to_string());
+        }
+    }
+    Ok(InstallStep {
+        id: "classify.skill".into(),
+        status: CheckStatus::Green,
+        summary: install::dry_run_summary(
+            dry_run,
+            &if removed.is_empty() {
+                "no classify skill found".to_string()
+            } else {
+                format!("removed {} classify skill dir(s)", removed.len())
+            },
+        ),
+        detail: (!removed.is_empty()).then(|| removed.join(" ")),
     })
 }
 
@@ -1263,6 +1318,9 @@ fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Ve
         parent_of(home, config::CURSOR_HOOKS_FILE),
         home.join(config::PI_CONFIG_DIR),
         home.join(config::PI_CONFIG_DIR).join("extensions"),
+        // The classify helpers proposal writes under each harness's skills
+        // dir; a user-edited copy leaves a renamed `.pixel-bak` dir behind.
+        home.join(".claude/skills"),
         parent_of(home, config::PIXEL_RULES_REL),
         home.join(".local/share/pixel"),
         crate::antigravity::antigravity_config_dir(home),
@@ -1270,6 +1328,9 @@ fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Ve
         crate::antigravity::cli_plugin_dir(home),
         opencode_dir.to_path_buf(),
     ];
+    for root in config::SKILL_ROOTS {
+        dirs.push(home.join(root).join("skills"));
+    }
     for root in project_hook_search_roots(home) {
         dirs.push(root.join(".codex"));
     }
