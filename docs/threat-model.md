@@ -130,7 +130,11 @@ bounds-checked against `MAX_FILE_COUNT`, `MAX_GRAM_COUNT`, `MAX_PATH_LEN`
 before use), SQLite databases, JSON manifests. `.pixel/` is listed in the
 clone's `info/exclude` (`pixel_index::lock::ensure_pixel_gitignored`), which
 keeps Pixel's own files out of commits but does not stop a repository from
-shipping a tracked `.pixel/`.
+shipping a tracked `.pixel/`. Since 0.7.0 (GHSA-c9f5-vxc4-wjph), the stores
+refuse such a directory before reading it (`pixel_git::sidecar::check`), files
+under it are written without following links (`pixel_git::nofollow`,
+`SQLITE_OPEN_NOFOLLOW`), and a path read from a shard or the graph is used only
+inside the repository (`pixel_git::repo_path::confine`); see T6.
 
 ### 3.6 Git operations (B1, B2)
 
@@ -282,19 +286,27 @@ boundary it crosses.
 - **Scenario**: the repository tracks files under `.pixel/` (a `git add -f`),
   so the first `pixel` command in the clone finds an index, a graph, a
   history database, task manifests or a configuration it did not build.
-- **Mitigation**: `history.db` must carry the `_pixel_marker` table with
-  `created_by = 'pixel-facts'` and a known `PRAGMA user_version`, or
-  `FactsStore::needs_rebuild` wipes it; the shards must name a commit present
-  in the clone (`delta_anchor_held`) and Pixel's extractor id; the graph must
-  carry the current extractor version and freshness signature.
+- **Mitigation** (0.7.0, GHSA-c9f5-vxc4-wjph): before the index, graph and
+  history stores read anything, and before `pixel index-unpack` installs,
+  `pixel_git::sidecar::check` refuses a `.pixel` that is a symbolic link or
+  holds files git tracks, and names the command that removes it. Files under
+  `.pixel/` are opened with `O_NOFOLLOW` or created fresh and renamed into
+  place, permissions are set on the open descriptor, and the SQLite databases
+  open with `SQLITE_OPEN_NOFOLLOW` (`pixel_git::nofollow`), so nothing is
+  written, truncated or chmodded through a link. A path read from a shard or
+  the graph is used only when it is a plain relative path whose directory
+  resolves inside the repository (`pixel_git::repo_path::confine`), and the
+  credential filter covers `credentials`, `.netrc` and `.git-credentials`.
+  The integrity checks inside the files (the `_pixel_marker` table, extractor
+  ids, the graph freshness signature) still only tell current files from stale
+  or foreign ones.
 - **Status**: Partial.
-- **Residual**: these checks detect a stale or foreign file, not a crafted
-  one: the marker, the extractor ids and the freshness signature
-  (`pixel_graph::build::signature_of`, an unsalted xxh3) are all computable
-  from public code. Nothing authenticates a sidecar that came with the
-  checkout. Until something does, treat a repository whose `git ls-files
-  .pixel` is not empty as hostile, and delete its `.pixel/` before running
-  Pixel in it.
+- **Residual**: the tracked-file check runs when a store opens; the small
+  state files other commands and hooks read on each call (the task map,
+  repository settings) are not checked against git on every read, so a
+  repository can still influence their content, though not write through
+  them (SECURITY.md, "Known limitations"). Before running Pixel in a clone
+  you do not trust, `git ls-files .pixel` should print nothing.
 
 ### T7. Repository git configuration runs code (E, B1)
 
@@ -470,7 +482,9 @@ boundary it crosses.
 - **Scenario**: `pixel index-unpack https://…` installs a bundle built by
   someone else.
 - **Mitigation**: each member's xxh3 is checked against the bundle's own
-  manifest; member names must be single path components; a live index is
+  manifest; only the files `pixel index pack` writes are accepted as members
+  (since 0.7.0); the target `.pixel/` passes `pixel_git::sidecar::check` and
+  the staging directory is created without following links; a live index is
   not overwritten without `--force`.
 - **Status**: Partial.
 - **Residual**: the check proves integrity against corruption, not
