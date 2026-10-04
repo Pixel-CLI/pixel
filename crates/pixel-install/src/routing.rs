@@ -157,6 +157,7 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
                 "guard --provider codex",
                 "guard --provider devin",
                 "guard --provider zcode",
+                "guard --provider cursor",
                 "guard --provider claude --delegate-rtk",
                 "composed-guard --provider codex",
                 "session-start",

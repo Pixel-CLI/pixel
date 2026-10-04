@@ -1445,6 +1445,37 @@ mod routing_tests {
     }
 
     #[test]
+    fn remove_cursor_hooks_counts_and_preserves_foreign_entries() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = Path::new("/tmp/pixel");
+        let path = home.path().join(config::CURSOR_HOOKS_FILE);
+        let pixel_guard =
+            json!({"command":format!("'{}' run-hook guard --provider cursor", exe.display())});
+        let pixel_metrics =
+            json!({"command":format!("'{}' run-hook metrics --provider cursor", exe.display())});
+        let foreign = json!({"command":"notify-send done"});
+        install::write_settings(
+            &path,
+            &json!({"hooks":{
+                "preToolUse":[pixel_guard, foreign.clone()],
+                "postToolUse":[pixel_metrics],
+            }}),
+            false,
+        )
+        .unwrap();
+        let step = remove_cursor_hooks(home.path(), exe, false).unwrap();
+        assert!(step.summary.contains("removed 1"), "{}", step.summary);
+        let restored = install::read_settings(&path).unwrap();
+        assert_eq!(restored["hooks"]["preToolUse"], json!([foreign]));
+        assert!(restored["hooks"].get("postToolUse").is_none());
+        // Nothing pixel-owned left: a second pass reports zero and does not
+        // rewrite the file.
+        let step = remove_cursor_hooks(home.path(), exe, false).unwrap();
+        assert!(step.summary.contains("removed 0"), "{}", step.summary);
+        assert_eq!(install::read_settings(&path).unwrap(), restored);
+    }
+
+    #[test]
     fn routing_uninstall_removes_direct_codex_and_devin_commands() {
         for provider in [routing::Provider::Codex, routing::Provider::Devin] {
             let home = tempfile::tempdir().unwrap();
