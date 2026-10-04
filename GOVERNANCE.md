@@ -67,8 +67,10 @@ for them:
 
 ## Granting access
 
-Write or admin access to this repository, a seat in the Pixel-CLI
-organization, or access to a secret is granted only after both maintainers
+Write or admin access to this repository or to `LivioGama/homebrew-tap`
+(which the release workflow writes the Homebrew formula to), a seat in the
+Pixel-CLI organization, or access to a secret is granted only after both
+maintainers
 have reviewed the person's contributions (their merged pull requests and how
 they handle review) and agreed, in a pull request that updates this file.
 Access no longer needed is removed the same way, and the maintainers review
