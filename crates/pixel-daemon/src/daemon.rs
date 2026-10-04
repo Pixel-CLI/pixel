@@ -182,7 +182,20 @@ enum Msg {
     /// the corpus) so a watch that stopped reporting is counted and logged
     /// instead of dropped on the callback thread.
     WatcherError(String),
+    /// The background watch registration finished: the guard that keeps the
+    /// watch alive, or why it could not be set up.
+    WatchReady(Result<WatchGuard, String>),
 }
+
+/// Keeps a registered watch alive for as long as the loop holds it.
+type WatchGuard = Box<dyn Send>;
+
+/// Registers the watch on `paths`, forwarding its events into the loop's
+/// channel. Runs off the serving thread: a recursive watch walks every
+/// directory under the root, ignored ones included (11 515 `node_modules`
+/// directories made a repository wait 11 to 28 s for its first answer).
+type Registrar =
+    Box<dyn FnOnce(Vec<PathBuf>, mpsc::Sender<Msg>) -> Result<WatchGuard, String> + Send>;
 
 /// A corpus a daemon can serve: the repo `Service`, or the machine-wide
 /// transcript recall service. The transport (socket, watcher, debounce,
@@ -213,6 +226,10 @@ pub trait Corpus {
     /// Periodic maintenance, called every `sweep_interval` from the loop
     /// thread (default: nothing).
     fn sweep(&mut self) {}
+    /// The watch is registered and reporting. Changes made while it was
+    /// being set up were not observed, so a corpus that can list its changed
+    /// files re-reads them here (default: nothing).
+    fn watch_ready(&mut self) {}
     /// The watcher backend reported an error: changes may have been missed,
     /// so answers can be stale until the next event. The default logs it; a
     /// corpus that reports health counts it too.
@@ -249,6 +266,17 @@ impl Corpus for Service {
 
     fn watcher_error(&mut self, error: &str) {
         self.note_watcher_error(error);
+    }
+
+    /// Re-read every path `git status` reports: an edit made while the watch
+    /// was still being registered reached no event.
+    fn watch_ready(&mut self) {
+        let root = Service::root(self).to_path_buf();
+        let changes: Vec<(PathBuf, bool)> = pixel_index::gitsync::status_porcelain(&root)
+            .into_iter()
+            .map(|(xy, path)| (root.join(path), xy.contains('D')))
+            .collect();
+        self.apply_changes(&changes);
     }
 
     fn apply_changes(&mut self, changes: &[(PathBuf, bool)]) {
@@ -323,7 +351,37 @@ pub(crate) fn spawn_facts_ingest(root: &Path) {
 }
 
 /// Run any corpus daemon in the foreground.
-pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
+pub fn run_corpus(service: impl Corpus) -> Result<(), ServeError> {
+    run_corpus_with(service, Box::new(register_recursive_watch))
+}
+
+/// Watch every path recursively, forwarding events and backend errors into
+/// the loop's channel.
+#[cfg_attr(test, mutants::skip)] // adapter over the notify backend; the loop's handling is tested
+fn register_recursive_watch(
+    paths: Vec<PathBuf>,
+    tx: mpsc::Sender<Msg>,
+) -> Result<WatchGuard, String> {
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let msg = match res {
+            Ok(ev) => Msg::Fs(ev),
+            Err(error) => Msg::WatcherError(error.to_string()),
+        };
+        // The only send failure is a dropped receiver: the loop is exiting.
+        let _ = tx.send(msg);
+    })
+    .map_err(|e| format!("watcher init: {e}"))?;
+    for path in &paths {
+        watcher
+            .watch(path, RecursiveMode::Recursive)
+            .map_err(|e| format!("watch {}: {e}", path.display()))?;
+    }
+    Ok(Box::new(watcher))
+}
+
+/// [`run_corpus`] with the watch registration as a parameter, so a test can
+/// stand in a slow one.
+fn run_corpus_with(mut service: impl Corpus, register: Registrar) -> Result<(), ServeError> {
     let root = service.root().to_path_buf();
     let sock = socket_path(&root);
 
@@ -360,31 +418,20 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let stop = Arc::new(AtomicBool::new(false));
     let acceptor = spawn_acceptor(listener, tx.clone(), Arc::clone(&stop));
 
-    // Watcher: raw notify events into the channel; debounced below. A
-    // backend error goes through the same channel: a watch that stopped
-    // reporting is exactly the failure that leaves the index stale, so it
-    // must not be dropped here.
+    // Watcher: raw notify events into the channel; debounced below. It is
+    // registered on its own thread so the loop answers from the first
+    // request; `WatchReady` hands the loop its guard. A backend error goes
+    // through the same channel: a watch that stopped reporting is exactly
+    // the failure that leaves the index stale, so it must not be dropped.
     let watch_paths = service.watch_paths();
-    let _watcher = if watch_paths.is_empty() {
-        None
-    } else {
-        let tx_fs = tx.clone();
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let msg = match res {
-                Ok(ev) => Msg::Fs(ev),
-                Err(error) => Msg::WatcherError(error.to_string()),
-            };
-            // The only send failure is a dropped receiver: the loop is exiting.
-            let _ = tx_fs.send(msg);
-        })
-        .map_err(|e| ServeError::Msg(format!("watcher init: {e}")))?;
-        for wp in &watch_paths {
-            watcher
-                .watch(wp, RecursiveMode::Recursive)
-                .map_err(|e| ServeError::Msg(format!("watch {}: {e}", wp.display())))?;
-        }
-        Some(watcher)
-    };
+    let mut _watcher: Option<WatchGuard> = None;
+    if !watch_paths.is_empty() {
+        let tx_watch = tx.clone();
+        std::thread::spawn(move || {
+            let ready = register(watch_paths, tx_watch.clone());
+            let _ = tx_watch.send(Msg::WatchReady(ready));
+        });
+    }
 
     eprintln!(
         "pixel daemon: root={} socket={}",
@@ -430,6 +477,9 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
                         Msg::AcceptFailed => failed = true,
                         Msg::Fs(ev) => note_event(&root, &ev, &mut pending, &mut flush_at),
                         Msg::WatcherError(error) => service.watcher_error(&error),
+                        Msg::WatchReady(ready) => {
+                            _watcher = watch_ready(&mut service, ready);
+                        }
                     }
                 }
                 // Apply the debounced batch before serving the connections:
@@ -449,6 +499,7 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
             Ok(Msg::AcceptFailed) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(Msg::Fs(ev)) => note_event(&root, &ev, &mut pending, &mut flush_at),
             Ok(Msg::WatcherError(error)) => service.watcher_error(&error),
+            Ok(Msg::WatchReady(ready)) => _watcher = watch_ready(&mut service, ready),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
 
@@ -483,6 +534,21 @@ pub fn run_corpus(mut service: impl Corpus) -> Result<(), ServeError> {
     let _ = std::fs::remove_file(pid_path(&root));
     let _ = std::fs::remove_file(&lock_path);
     Ok(())
+}
+
+/// Take the registered watch: keep its guard and let the corpus catch up on
+/// what changed meanwhile, or report why there is no watch.
+fn watch_ready(service: &mut impl Corpus, ready: Result<WatchGuard, String>) -> Option<WatchGuard> {
+    match ready {
+        Ok(guard) => {
+            service.watch_ready();
+            Some(guard)
+        }
+        Err(error) => {
+            service.watcher_error(&error);
+            None
+        }
+    }
 }
 
 /// Accept connections on a blocking listener and hand them to the loop, so
@@ -1403,5 +1469,178 @@ mod tests {
             read_capped_line(&mut reader, &mut line, 4, Instant::now()),
             ReadResult::TimedOut
         ));
+    }
+
+    /// Counts the loop's watch callbacks; watches its root like `Service`.
+    struct WatchedCorpus {
+        root: PathBuf,
+        ready: Arc<AtomicUsize>,
+        errors: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Corpus for WatchedCorpus {
+        fn root(&self) -> &Path {
+            &self.root
+        }
+        fn handle(&mut self, _req: Request) -> Response {
+            failure_response("stub", "stub corpus")
+        }
+        fn apply_change(&mut self, _abs: &Path, _removed: bool) {}
+        fn watch_ready(&mut self) {
+            self.ready.fetch_add(1, Ordering::SeqCst);
+        }
+        fn watcher_error(&mut self, error: &str) {
+            self.errors.lock().unwrap().push(error.to_string());
+        }
+    }
+
+    /// A repository whose recursive watch takes seconds to register (11 515
+    /// ignored `node_modules` directories: 11 to 28 s) still answers its
+    /// first request at once, and the corpus catches up once the watch lands.
+    #[test]
+    fn a_slow_watch_registration_should_not_delay_the_first_answer() {
+        let root = scratch_root("slow-watch");
+        let sock = socket_path(&root);
+        let ready = Arc::new(AtomicUsize::new(0));
+        let corpus = WatchedCorpus {
+            root: root.clone(),
+            ready: Arc::clone(&ready),
+            errors: Arc::default(),
+        };
+        let (release, gate) = mpsc::channel::<()>();
+        let registered = Arc::new(AtomicBool::new(false));
+        let registered_flag = Arc::clone(&registered);
+        let register: Registrar = Box::new(move |paths, _tx| {
+            assert_eq!(paths.len(), 1, "the corpus root is watched");
+            // Held until the test has been answered; never longer than 5 s.
+            let _ = gate.recv_timeout(Duration::from_secs(5));
+            registered_flag.store(true, Ordering::SeqCst);
+            Ok(Box::new(()))
+        });
+        let started = Instant::now();
+        let daemon = std::thread::spawn(move || run_corpus_with(corpus, register));
+        wait_until("socket to answer", Duration::from_secs(4), || ping(&sock));
+        assert!(
+            !registered.load(Ordering::SeqCst),
+            "the answer waited for the watch registration ({:?})",
+            started.elapsed()
+        );
+        assert_eq!(
+            ready.load(Ordering::SeqCst),
+            0,
+            "ready before the watch landed"
+        );
+
+        release.send(()).unwrap();
+        wait_until("the watch to land", Duration::from_secs(10), || {
+            ping(&sock) && ready.load(Ordering::SeqCst) == 1
+        });
+        assert!(ping(&sock));
+        assert_eq!(ready.load(Ordering::SeqCst), 1, "watch_ready runs once");
+
+        let _response = shutdown(&sock).expect("shutdown request must receive a response");
+        wait_until("daemon to exit", Duration::from_secs(10), || {
+            daemon.is_finished()
+        });
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A watch that cannot be registered is reported as a watcher error (the
+    /// index may go stale) instead of failing the daemon, which keeps serving.
+    #[test]
+    fn a_failed_watch_registration_should_be_reported_and_keep_serving() {
+        let root = scratch_root("failed-watch");
+        let sock = socket_path(&root);
+        let ready = Arc::new(AtomicUsize::new(0));
+        let errors: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let corpus = WatchedCorpus {
+            root: root.clone(),
+            ready: Arc::clone(&ready),
+            errors: Arc::clone(&errors),
+        };
+        let register: Registrar = Box::new(|_paths, _tx| Err("watch limit reached".into()));
+        let daemon = std::thread::spawn(move || run_corpus_with(corpus, register));
+        wait_until("the error to be reported", Duration::from_secs(10), || {
+            ping(&sock) && !errors.lock().unwrap().is_empty()
+        });
+        assert_eq!(
+            *errors.lock().unwrap(),
+            vec!["watch limit reached".to_string()]
+        );
+        assert_eq!(ready.load(Ordering::SeqCst), 0);
+        assert!(ping(&sock), "the daemon keeps serving without a watch");
+
+        let _response = shutdown(&sock).expect("shutdown request must receive a response");
+        wait_until("daemon to exit", Duration::from_secs(10), || {
+            daemon.is_finished()
+        });
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn search_hits(svc: &mut Service, pattern: &str) -> usize {
+        let resp = svc.handle(Request::Search {
+            paths: None,
+            pattern: pattern.into(),
+            json: true,
+            limit: None,
+            offset: None,
+            scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
+        });
+        assert!(resp.ok, "search {pattern}: {resp:?}");
+        resp.data()
+            .get("matches")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len)
+    }
+
+    /// Edits made before the watch was live reach no event: `watch_ready`
+    /// re-reads what `git status` lists, so a modified, a new and a deleted
+    /// file are all current afterwards.
+    #[test]
+    fn service_watch_ready_should_catch_up_on_unwatched_edits() {
+        let root = scratch_root("service-watch-ready");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("a.rs"), "fn alphaNeedle() {}\n").unwrap();
+        std::fs::write(root.join("b.rs"), "fn deltaNeedle() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "initial"]);
+        let mut svc = Service::open(&root).unwrap();
+        assert_eq!(search_hits(&mut svc, "alphaNeedle"), 1);
+
+        // Changed with no watcher running.
+        std::fs::write(root.join("a.rs"), "fn betaNeedle() {}\n").unwrap();
+        std::fs::write(root.join("c.rs"), "fn gammaNeedle() {}\n").unwrap();
+        std::fs::remove_file(root.join("b.rs")).unwrap();
+        assert_eq!(
+            search_hits(&mut svc, "betaNeedle"),
+            0,
+            "no event, no refresh"
+        );
+
+        Corpus::watch_ready(&mut svc);
+        assert_eq!(search_hits(&mut svc, "betaNeedle"), 1);
+        assert_eq!(search_hits(&mut svc, "alphaNeedle"), 0);
+        assert_eq!(search_hits(&mut svc, "gammaNeedle"), 1);
+        assert_eq!(search_hits(&mut svc, "deltaNeedle"), 0);
+        drop(svc);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
