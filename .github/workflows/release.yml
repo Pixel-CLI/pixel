@@ -415,15 +415,26 @@ jobs:
             exit 0
           fi
           printf '\n\n### VirusTotal\n\n' > links.md
+          # The key goes to curl through a mode-0600 header file, never as an
+          # argument another process could read from the process list
+          # (printf is a shell builtin, so writing it spawns nothing).
+          hdr="$(umask 077 && mktemp)"
+          trap 'rm -f "$hdr"' EXIT
+          printf 'x-apikey: %s\n' "$VT_API_KEY" > "$hdr"
           for f in pixel-v*.tar.gz; do
             # 32 MB is the direct upload limit; larger files take an upload URL.
             url="https://www.virustotal.com/api/v3/files"
             if [ "$(wc -c < "$f")" -gt 32000000 ]; then
-              url="$(curl -fsS --retry 3 -H "x-apikey: $VT_API_KEY" \
+              url="$(curl -fsS --retry 3 -H "@$hdr" \
                 https://www.virustotal.com/api/v3/files/upload_url | jq -r .data)"
               sleep 16
             fi
-            curl -fsS --retry 3 -H "x-apikey: $VT_API_KEY" -F "file=@$f" "$url" > /dev/null
+            # The key and the archive only ever travel over HTTPS.
+            case "$url" in
+              https://*) ;;
+              *) echo "::error::VirusTotal returned a non-HTTPS upload URL; $f not submitted"; exit 1 ;;
+            esac
+            curl -fsS --retry 3 -H "@$hdr" -F "file=@$f" "$url" > /dev/null
             sha="$(shasum -a 256 "$f" | cut -d' ' -f1)"
             # shellcheck disable=SC2016 # the backticks are Markdown, not a command
             printf -- '- [`%s`](https://www.virustotal.com/gui/file/%s)\n' "$f" "$sha" >> links.md
