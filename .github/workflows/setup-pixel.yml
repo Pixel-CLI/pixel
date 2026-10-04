@@ -1,0 +1,55 @@
+name: Setup Pixel action
+on:
+  pull_request:
+    paths: ['.github/actions/setup-pixel/**', '.github/workflows/setup-pixel.yml', 'scripts/test-setup-pixel.py']
+  push:
+    branches: [main]
+    paths: ['.github/actions/setup-pixel/**', '.github/workflows/setup-pixel.yml', 'scripts/test-setup-pixel.py']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Installer failure contracts
+        run: python3 scripts/test-setup-pixel.py
+      - name: Create a small consumer repository
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/consumer"
+          git init "$RUNNER_TEMP/consumer"
+          printf 'def greet():\n    return "hello"\n' > "$RUNNER_TEMP/consumer/hello.py"
+      - uses: ./.github/actions/setup-pixel
+        id: pixel
+        with:
+          version: v0.6.1
+          path: ${{ runner.temp }}/consumer
+      - name: Verify installed binary and prepared graph
+        shell: bash
+        env:
+          REPORT: ${{ steps.pixel.outputs.report }}
+        run: |
+          test "$(pixel -V)" = 'pixel 0.6.1'
+          test "$PIXEL_DAEMON_AUTO_START" = 0
+          python3 -c 'import json,os; r=json.load(open(os.environ["REPORT"])); assert r["daemon"] == "skipped"; assert r["graph"]["symbols"] == 1'
+          test ! -e "$RUNNER_TEMP/consumer/.gitignore"
+      - name: Change the consumer after the initial preparation
+        shell: bash
+        run: printf 'def second():\n    return 2\n' > "$RUNNER_TEMP/consumer/second.py"
+      - uses: ./.github/actions/setup-pixel
+        id: refreshed
+        with:
+          version: v0.6.1
+          path: ${{ runner.temp }}/consumer
+      - name: Verify an existing index follows the checkout
+        shell: bash
+        env:
+          REPORT: ${{ steps.refreshed.outputs.report }}
+        run: python3 -c 'import json,os; assert json.load(open(os.environ["REPORT"]))["graph"]["symbols"] == 2'
