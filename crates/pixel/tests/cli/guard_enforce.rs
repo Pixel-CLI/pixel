@@ -2267,11 +2267,21 @@ fn antigravity_pre_invocation_should_skip_unusable_requests_without_retrieval() 
         );
         assert_eq!(antigravity_search_events(&dir), Vec::<Value>::new());
     }
-    // A trivial but recoverable USER_EXPLICIT request still gets the route
-    // (fail-open to native tools); the pre-invocation search runs once.
+    // A recoverable request that asks nothing about code gets no route and
+    // runs no search: a route there is noise the model learns to skip.
     std::fs::write(
         &path,
         json!({"source":"USER_EXPLICIT","content":"Can you do this?"}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
+    assert_eq!(antigravity_search_events(&dir), Vec::<Value>::new());
+    // A code request gets the route (fail-open to native tools); the
+    // pre-invocation search runs once.
+    std::fs::write(
+        &path,
+        json!({"source":"USER_EXPLICIT","content":"where is the parcel identifier defined?"})
+            .to_string(),
     )
     .unwrap();
     let response = guard("antigravity", &payload, &[]);
@@ -2298,7 +2308,8 @@ fn antigravity_pre_invocation_should_fail_open_when_retrieval_cannot_return_matc
     let path = transcripts.join("transcript.jsonl");
     std::fs::write(
         &path,
-        json!({"source":"USER_EXPLICIT","content":"parcel identifier"}).to_string(),
+        json!({"source":"USER_EXPLICIT","content":"where is the parcel identifier defined?"})
+            .to_string(),
     )
     .unwrap();
     let payload = json!({

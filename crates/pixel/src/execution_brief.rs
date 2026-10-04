@@ -160,10 +160,17 @@ pub fn from_scope_task(task: &str, data: &Value) -> Value {
         validation.push("Review uncertainty.caps before relying on this brief.".to_string());
     }
 
+    // The same typed text the hooks route (a pasted block never steers the
+    // search); a task that asks nothing about code still gets a route from
+    // its whole text, since `execution-brief` was asked for one.
+    let request = retrieval_request(task);
+    let route = retrieval_route(request.as_deref().unwrap_or(task));
     json!({
         "version": 1,
         "task": bounded_task,
-        "retrieval_route": retrieval_route(task),
+        "asks_about_code": request.is_some(),
+        "retrieval_route_text": pretty_retrieval_route(&route),
+        "retrieval_route": route,
         "workstreams": workstreams,
         "uncertainty": {
             "closed_world": false,
@@ -228,6 +235,192 @@ pub fn retrieval_route(task: &str) -> Value {
             "A warning or prior-call count is informational, not a no-hit. Advance only when this invocation returns no usable match, an unresolved result, or an irrelevant result."
         }
     })
+}
+
+/// Words that name code or ask a question about it. A prompt with none of
+/// them and no identifier asks for something else (git, a release, a
+/// discussion), and a retrieval route for it is noise a model learns to skip.
+const CODE_WORDS: &[&str] = &[
+    "api",
+    "bug",
+    "bugs",
+    "call",
+    "called",
+    "callee",
+    "callees",
+    "caller",
+    "callers",
+    "calls",
+    "class",
+    "classes",
+    "codebase",
+    "constant",
+    "crash",
+    "crashes",
+    "crate",
+    "crates",
+    "declaration",
+    "declared",
+    "defined",
+    "definition",
+    "endpoint",
+    "enum",
+    "error",
+    "errors",
+    "exception",
+    "failing",
+    "field",
+    "fields",
+    "function",
+    "functions",
+    "handler",
+    "handlers",
+    "hook",
+    "hooks",
+    "implement",
+    "implementation",
+    "implemented",
+    "implements",
+    "import",
+    "imports",
+    "interface",
+    "method",
+    "methods",
+    "module",
+    "modules",
+    "panic",
+    "panics",
+    "parameter",
+    "parser",
+    "refactor",
+    "regression",
+    "rename",
+    "schema",
+    "signature",
+    "struct",
+    "structs",
+    "symbol",
+    "symbols",
+    "test",
+    "tests",
+    "trait",
+    "variable",
+];
+
+/// Openings of a question about how the code works or where something is.
+const CODE_QUESTIONS: &[&str] = &[
+    "explain ",
+    "find the ",
+    "fix ",
+    "how does ",
+    "how is ",
+    "trace ",
+    "what calls ",
+    "what does ",
+    "where are ",
+    "where do ",
+    "where does ",
+    "where is ",
+    "which file ",
+    "which function ",
+    "who calls ",
+    "why does ",
+];
+
+/// Source extensions that make a token a file name.
+const SOURCE_EXTENSIONS: &[&str] = &[
+    "c", "cpp", "cs", "css", "ex", "exs", "go", "h", "hpp", "html", "java", "js", "json", "jsx",
+    "kt", "lua", "md", "php", "py", "rb", "rs", "sh", "sql", "swift", "toml", "ts", "tsx", "vue",
+    "yaml", "yml",
+];
+
+const PASTE_OPEN: &str = "<pasted_content";
+const PASTE_CLOSE: &str = "</pasted_content";
+
+/// The part of a prompt the user typed: pasted blocks (`<pasted_content …>`
+/// to its closing tag) are someone else's text and never the task itself.
+/// A removed block leaves a space, so the words on either side stay apart
+/// (`where is<block>the parser` keeps its `where is ` opening).
+pub(crate) fn typed_text(prompt: &str) -> String {
+    let mut typed = String::new();
+    let mut rest = prompt;
+    while let Some(start) = find_tag(rest, PASTE_OPEN) {
+        typed.push_str(&rest[..start]);
+        let after = &rest[start + PASTE_OPEN.len()..];
+        let Some(close) = find_tag(after, PASTE_CLOSE) else {
+            return typed;
+        };
+        let tail = &after[close + PASTE_CLOSE.len()..];
+        rest = tail.find('>').map_or("", |end| &tail[end + 1..]);
+        if !rest.is_empty() {
+            typed.push(' ');
+        }
+    }
+    typed.push_str(rest);
+    typed
+}
+
+/// The first `tag` that ends at a tag boundary (`>` or whitespace), so a
+/// longer name such as `</pasted_contentious>` is not taken for it.
+fn find_tag(haystack: &str, tag: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(found) = haystack[from..].find(tag) {
+        let at = from + found;
+        let next = haystack[at + tag.len()..].chars().next();
+        if next.is_none_or(|ch| ch == '>' || ch.is_whitespace()) {
+            return Some(at);
+        }
+        from = at + tag.len();
+    }
+    None
+}
+
+/// A token that can only be a name in code: `a::b`, `snake_case`, `camelCase`
+/// or `PascalCase` with an inner capital, a path, or a file with a source
+/// extension (in any case, so `README.MD` counts). Surrounding punctuation,
+/// a sentence's closing period and backticks are not part of the token.
+fn names_code(token: &str) -> bool {
+    let token = token.trim_matches(|ch: char| "()[]{}<>,.;:!?\"'`".contains(ch));
+    let inner = |separator: char| {
+        token.split(separator).count() > 1
+            && token
+                .split(separator)
+                .all(|part| part.chars().next().is_some_and(char::is_alphanumeric))
+    };
+    let camel = token
+        .chars()
+        .zip(token.chars().skip(1))
+        .any(|(before, after)| before.is_lowercase() && after.is_uppercase());
+    let extension = token.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && SOURCE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+    });
+    token.contains("::") || inner('_') || inner('/') || camel || extension
+}
+
+/// The text to route when `prompt` asks about code, `None` when it asks for
+/// something else. Only the typed text counts: a backticked identifier, a
+/// token that names code, a code word or a code question opening the prompt
+/// or any clause after a break (`.`, `?`, `!`, `:`, `;`, `,`, a newline,
+/// so "Hey, where is…" and "Context:\nwhy does…" count). Everything else
+/// (git and release requests, pasted chat threads, discussion) gets no route.
+pub fn retrieval_request(prompt: &str) -> Option<String> {
+    let typed = typed_text(prompt);
+    let typed = typed.trim();
+    let lower = typed.to_lowercase();
+    let asks = explicit_identifier(typed).is_some()
+        || typed.split_whitespace().any(names_code)
+        || lower
+            .split(|ch: char| !ch.is_alphanumeric())
+            .any(|word| CODE_WORDS.contains(&word))
+        || lower
+            .split(['.', '?', '!', ':', ';', ',', '\n'])
+            .map(str::trim_start)
+            .any(|clause| {
+                CODE_QUESTIONS
+                    .iter()
+                    .any(|opening| clause.starts_with(opening))
+            });
+    asks.then(|| typed.to_string())
 }
 
 fn route_command(subcommand: &str, args: &[String]) -> String {
@@ -777,6 +970,178 @@ mod tests {
         assert_eq!(
             route["first_command"],
             "rtk pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar` in Livio'\\''s code' --no-daemon"
+        );
+    }
+
+    #[test]
+    fn retrieval_request_should_route_only_prompts_that_ask_about_code() {
+        // Prompts from real sessions on 2026-10-04 that received a route.
+        for prompt in [
+            "go to branch main and pull",
+            "commit and push",
+            "release 0.6.2",
+            "This is a good question, and I'm not sure about the answer because I would say yes, it should rewrite.",
+            "So basically we should also do it with codex, of course, because codex does not necessarily give the same result.",
+            "<pasted_content id=\"4f44\">\nLe model il s'en fout de pixel. `grep` src/main.rs\n</pasted_content id=\"4f44\">\n\nWe have only one remaining task: coherence.",
+            "",
+        ] {
+            assert_eq!(retrieval_request(prompt), None, "{prompt}");
+        }
+        for (prompt, typed) in [
+            ("Trace callers of `Foo::bar`", "Trace callers of `Foo::bar`"),
+            (
+                "where is retrieval_route called",
+                "where is retrieval_route called",
+            ),
+            (
+                "How does task preparation refresh stale source evidence?",
+                "How does task preparation refresh stale source evidence?",
+            ),
+            ("make TaskHookEvent cheaper", "make TaskHookEvent cheaper"),
+            ("look at pixel_task::digest", "look at pixel_task::digest"),
+            ("open crates/pixel/src/guard", "open crates/pixel/src/guard"),
+            ("check guard.rs", "check guard.rs"),
+            ("fix the failing test", "fix the failing test"),
+            (
+                "explain the guard's precedence rules",
+                "explain the guard's precedence rules",
+            ),
+            (
+                "fix the hook so a prompt keeps the task",
+                "fix the hook so a prompt keeps the task",
+            ),
+            (
+                "What does the watchdog guarantee?",
+                "What does the watchdog guarantee?",
+            ),
+            ("Ok. Who calls the daemon?", "Ok. Who calls the daemon?"),
+            // Each signal on its own: a backticked plain word, a code word,
+            // a code question after a sentence break.
+            ("ask about `config`", "ask about `config`"),
+            (
+                "the parser panics on empty input",
+                "the parser panics on empty input",
+            ),
+            (
+                "Thanks. Where is the config loaded?",
+                "Thanks. Where is the config loaded?",
+            ),
+            (
+                "<pasted_content id=\"1\">\nchat\n</pasted_content id=\"1\">\nWhy does the parser panic?",
+                "Why does the parser panic?",
+            ),
+            // A code question after any clause break, not only ". ".
+            (
+                "Hey, where is the config loaded?",
+                "Hey, where is the config loaded?",
+            ),
+            (
+                "Context:\nwhy does the daemon stall",
+                "Context:\nwhy does the daemon stall",
+            ),
+            ("Done! where is the config", "Done! where is the config"),
+            // A block glued to the words around it does not fuse them.
+            (
+                "where is<pasted_content>x</pasted_content>the config",
+                "where is the config",
+            ),
+        ] {
+            assert_eq!(
+                retrieval_request(prompt).as_deref(),
+                Some(typed),
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_text_should_drop_every_pasted_block_and_an_unclosed_one() {
+        assert_eq!(
+            typed_text(
+                "a<pasted_content id=\"1\">x</pasted_content id=\"1\">b<pasted_content>y</pasted_content>c"
+            ),
+            "a b c"
+        );
+        // A longer tag name neither opens nor closes a block.
+        assert_eq!(
+            typed_text("<pasted_content>q </pasted_contentious>check guard.rs</pasted_content>x"),
+            " x"
+        );
+        assert_eq!(
+            typed_text("see <pasted_contents> here"),
+            "see <pasted_contents> here"
+        );
+        // A tag cut off by the end of the prompt still opens a block.
+        assert_eq!(typed_text("a <pasted_content"), "a ");
+        // A block that ends the prompt leaves no trailing separator.
+        assert_eq!(typed_text("x<pasted_content>y</pasted_content>"), "x");
+        assert_eq!(
+            typed_text("keep<pasted_content id=\"2\">never closed"),
+            "keep"
+        );
+        assert_eq!(typed_text("x<pasted_content>y</pasted_content"), "x");
+        assert_eq!(typed_text("plain"), "plain");
+    }
+
+    #[test]
+    fn names_code_should_accept_code_shapes_and_reject_prose() {
+        for token in [
+            "a::b",
+            "snake_case",
+            "(snake_case)",
+            "camelCase",
+            "PascalCase",
+            "src/main",
+            "a.rs",
+            "Cargo.toml",
+            "x.tsx,",
+            "guard.rs.",
+            "`guard.rs`",
+            "README.MD",
+        ] {
+            assert!(names_code(token), "{token}");
+        }
+        for token in [
+            "Hello",
+            "word",
+            "_private",
+            "trailing_",
+            "a//b",
+            "https://",
+            "e.g.",
+            ".rs",
+            "v0.6",
+            "ALLCAPS",
+            "x.unknown",
+            "/",
+        ] {
+            assert!(!names_code(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn brief_should_carry_relevance_and_the_rendered_route() {
+        let brief = from_scope_task("where is retrieval_route called", &json!({"targets": []}));
+        assert_eq!(brief["asks_about_code"], true);
+        assert_eq!(
+            brief["retrieval_route_text"],
+            pretty_retrieval_route(&retrieval_route("where is retrieval_route called"))
+        );
+        let ops = from_scope_task("go to branch main and pull", &json!({"targets": []}));
+        assert_eq!(ops["asks_about_code"], false);
+        assert_eq!(
+            ops["retrieval_route"],
+            retrieval_route("go to branch main and pull")
+        );
+        // A pasted block never reaches the brief's route: it matches the hooks'.
+        let pasted = from_scope_task(
+            "<pasted_content id=\"1\">\nthread about grep\n</pasted_content id=\"1\">\nWhy does the parser panic?",
+            &json!({"targets": []}),
+        );
+        assert_eq!(pasted["asks_about_code"], true);
+        assert_eq!(
+            pasted["retrieval_route"],
+            retrieval_route("Why does the parser panic?")
         );
     }
 }

@@ -2118,6 +2118,8 @@ fn antigravity_pre_invocation(payload: &Value) -> Option<Value> {
     let transcript_path = payload.get("transcriptPath")?.as_str()?;
     let transcript = std::fs::read_to_string(transcript_path).ok()?;
     let request = antigravity_user_request(&transcript)?;
+    // Same gate as the prompt-submit route: no search for a non-code request.
+    let request = crate::execution_brief::retrieval_request(&request)?;
     let route = crate::execution_brief::retrieval_route(&request);
     let workspace = payload
         .get("workspacePaths")?

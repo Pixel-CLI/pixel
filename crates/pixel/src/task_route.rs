@@ -118,7 +118,12 @@ pub(crate) fn route(
         )?;
         let mut engine = crate::decide_ollaya::Ollaya::open(crate::decide_ollaya::OllayaConfig {
             base,
-            timeout: Duration::from_millis(300).saturating_sub(start.elapsed()),
+            // The budget covers inference alone: the reservation above fsyncs
+            // the journal, its directory and task.json, and on a loaded disk
+            // those writes consumed the whole budget before the request went
+            // out (shard 3 of #704, shard 0 of #703). `start` still spans the
+            // attempt end-to-end for the recorded classifier duration.
+            timeout: Duration::from_millis(300),
             ..Default::default()
         });
         engine.decide(&spec).ok().and_then(|scores| {
