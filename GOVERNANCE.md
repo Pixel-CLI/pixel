@@ -48,8 +48,10 @@ branch into `main`; CONTRIBUTING.md is the guide. Only the two maintainers
 have write access to this repository, so only they push branches here and
 open pull requests from them; a regular contributor may be given the Triage
 role to label and manage issues and pull requests, never write access. A
-fork's pull request runs CI only after a maintainer approves it, and its
-workflows get no secrets.
+fork's pull request runs CI only after a maintainer approves it. Its
+workflows receive no secrets, except the metadata-only `pull_request_target`
+board sync, which receives `PROJECTS_TOKEN` to update the project board and
+never checks out the fork's code.
 
 ## Changes to this file
 
