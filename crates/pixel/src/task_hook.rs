@@ -1201,6 +1201,8 @@ mod tests {
             "west",
             "\\#foo",
             "\\#foo#p",
+            "# w out\n1,20p",
+            "\\",
         ] {
             assert!(!sed_script_writes(script), "{script}");
         }
