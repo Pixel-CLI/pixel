@@ -63,6 +63,8 @@ The index, the code graph and the optional history data live in `.pixel/` at the
 
 Each agent's page under [For your agent](../for/) names the files, the check and the removal, including the agents `pixel install` leaves alone.
 
+At a terminal, `pixel install` opens with a short animation before its summary: an agent grepping its way through a repository, then the same task in three Pixel calls. Any key skips it; `PIXEL_NO_INTRO=1` (or `NO_COLOR`, `CI`, `--json`, a pipe) turns it off.
+
 `pixel uninstall` removes everything `pixel install` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it (`mise uninstall pixel`, or the Homebrew equivalent).
 
 ### Per-repository guards

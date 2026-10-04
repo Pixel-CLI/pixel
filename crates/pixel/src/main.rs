@@ -43,6 +43,7 @@ mod evaluate_cmd;
 mod execution_brief;
 mod guard;
 mod index_cmd;
+mod install_intro;
 mod operation_metrics;
 mod overview_intent;
 mod pixel_question;
@@ -6221,6 +6222,12 @@ fn run_command(
             let interactive_banner = should_render_install_banner(json, stdout_tty);
             let color = banner_color(std::env::var_os("NO_COLOR").as_deref());
             if interactive_banner {
+                let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+                if install_intro::should_play(json, stdout_tty, stdin_tty, |key| {
+                    std::env::var_os(key)
+                }) {
+                    install_intro::play();
+                }
                 write_stdout(&pixel_install::banner::render_start(color))?;
             }
             let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
