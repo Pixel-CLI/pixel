@@ -26,7 +26,11 @@ concurrency:
 
 jobs:
   build:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # A hosted runner: blacksmith self-hosted labels are not registered for
+    # this repo (only a2 is), so they queue the deploy forever and the live
+    # site goes stale (2026-10-04: #608's website merge sat un-published
+    # >13h, still serving Gemini/Windsurf/LivioGama URLs).
+    runs-on: ubuntu-latest
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
         with:
@@ -52,7 +56,11 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # A hosted runner: blacksmith self-hosted labels are not registered for
+    # this repo (only a2 is), so they queue the deploy forever and the live
+    # site goes stale (2026-10-04: #608's website merge sat un-published
+    # >13h, still serving Gemini/Windsurf/LivioGama URLs).
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
