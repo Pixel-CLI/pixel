@@ -552,6 +552,8 @@ enum Command {
         #[arg(long)]
         workspace: bool,
         #[arg(long)]
+        no_daemon: bool,
+        #[arg(long)]
         json: bool,
     },
     /// Direct callers or callees of a symbol.
@@ -568,6 +570,8 @@ enum Command {
         /// Answer from every repo in .pixel/workspace.json, merged per repo.
         #[arg(long)]
         workspace: bool,
+        #[arg(long)]
+        no_daemon: bool,
         #[arg(long)]
         json: bool,
     },
@@ -5376,6 +5380,7 @@ fn run_command(
             direction,
             depth,
             workspace,
+            no_daemon,
             json,
         } => {
             if call_guard_check("impact", &format!("{uid_or_name} {}", path.display())) {
@@ -5400,7 +5405,7 @@ fn run_command(
                     direction: dir.to_string(),
                     depth,
                 },
-                false,
+                no_daemon,
             )?;
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
@@ -5411,6 +5416,7 @@ fn run_command(
             role,
             offset,
             workspace,
+            no_daemon,
             json,
         } => {
             let role_s = match role {
@@ -5432,7 +5438,7 @@ fn run_command(
                     role: role_s.to_string(),
                     offset: Some(offset),
                 },
-                false,
+                no_daemon,
             )?;
             finish_graph_cmd(data, json, |d| {
                 let edges = d.get("edges")?.as_array()?;

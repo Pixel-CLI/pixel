@@ -30,6 +30,11 @@ pub(crate) fn hooks_path(home: &Path) -> PathBuf {
     antigravity_config_dir(home).join("hooks.json")
 }
 
+/// Tool names the PreToolUse guard fires on: every retrieval or read tool
+/// Antigravity may call, matching the set `run-hook guard` judges. A tool
+/// outside this matcher reaches the model unguarded.
+const PRE_TOOL_MATCHER: &str = "run_command|grep_search|find_by_name|find_file_by_name|list_dir|file_search|view_file|read|read_file|notebook_read";
+
 pub(crate) fn config_path(home: &Path) -> PathBuf {
     antigravity_config_dir(home).join("config.json")
 }
@@ -83,10 +88,16 @@ fn agy_pixel_registered_with(executable: &OsStr, home: &Path) -> Result<Option<b
         ))
         .into());
     }
-    if String::from_utf8_lossy(&output.stdout).trim() == "No imported plugins." {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.trim();
+    if stdout.is_empty() || stdout == "No imported plugins." {
         return Ok(Some(false));
     }
-    let listing: Value = serde_json::from_slice(&output.stdout)?;
+    // A list output we cannot parse is unknown, not an error: registration
+    // stays a best-effort probe and the caller falls back to `plugin install`.
+    let Ok(listing) = serde_json::from_str::<Value>(stdout) else {
+        return Ok(None);
+    };
     Ok(Some(
         listing
             .get("imports")
@@ -188,7 +199,7 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
             "enabled": true,
             "PreToolUse": [
                 {
-                    "matcher": "run_command|grep_search|find_by_name|view_file",
+                    "matcher": PRE_TOOL_MATCHER,
                     "hooks": [
                         {
                             "type": "command",
@@ -332,7 +343,7 @@ pub fn install_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         "enabled": true,
         "PreToolUse": [
             {
-                "matcher": "run_command|grep_search|find_by_name|view_file",
+                "matcher": PRE_TOOL_MATCHER,
                 "hooks": [
                     {
                         "type": "command",
