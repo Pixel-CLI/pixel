@@ -146,8 +146,7 @@ struct TerminateGuard {
 impl TerminateGuard {
     #[cfg_attr(test, mutants::skip)] // libc adapter; the flag logic is tested pure
     fn install() -> Option<Self> {
-        let mut prev: [libc::sigaction; 2] =
-            std::array::from_fn(|_| unsafe { std::mem::zeroed() });
+        let mut prev: [libc::sigaction; 2] = std::array::from_fn(|_| unsafe { std::mem::zeroed() });
         let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
         act.sa_sigaction = on_terminate as usize;
         act.sa_flags = libc::SA_RESETHAND;
@@ -430,8 +429,7 @@ mod tests {
     #[test]
     fn it_plays_to_the_end_and_gives_the_screen_back() {
         let mut fake = Fake::new(&[BIG], &[]);
-        let outcome =
-            run(&mut fake, &mut clock(&[0.0, 1.0, intro::END]), true, &AtomicI32::new(0));
+        let outcome = run(&mut fake, &mut clock(&[0.0, 1.0, intro::END]), true, &AtomicI32::new(0));
         assert_eq!(outcome, Outcome::Finished);
         assert_eq!(fake.written.first().map(String::as_str), Some(intro::ENTER));
         assert_eq!(fake.written.last().map(String::as_str), Some(intro::LEAVE));
