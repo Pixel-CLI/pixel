@@ -457,14 +457,7 @@ pub fn discover(
         // recorded the same satisfied fill — not only the immediately
         // preceding one — so a rerun alternating between two already-filled
         // fields still counts each repetition toward the stall bound.
-        let repeated = satisfied
-            && steps.iter().any(|prev| {
-                prev.fill_skipped
-                    && prev.step.action == step.action
-                    && prev.step.ref_hint == step.ref_hint
-                    && prev.step.value == step.value
-                    && prev.step.value_var == step.value_var
-            });
+        let repeated = satisfied && steps.iter().any(|prev| is_same_satisfied_fill(prev, &step));
         // Only the first sighting's page movement (or a wait step) clears
         // the bound: a repeated satisfied fill keeps counting as a stall
         // even when an unrelated page change sets `changed`.
@@ -503,6 +496,22 @@ pub fn discover(
         steps,
         refused,
     })
+}
+
+/// Whether `step` is the same satisfied fill an earlier recorded step made:
+/// same action, same field (`ref_hint`), same value, and the same way the
+/// value came to it (`value_var`). A proposal that agrees in every field
+/// but one is a *different* fill — a rerun proposing it has not stalled on
+/// a repetition, however close it reads — while a fill that matches in
+/// every field is the stall the rerun bound exists to stop. Each conjunct
+/// pins one half of the contract: a test drives the non-repeat side of all
+/// four, the positive side drives the stall tests.
+fn is_same_satisfied_fill(prev: &TracedStep, step: &FlowStep) -> bool {
+    prev.fill_skipped
+        && prev.step.action == step.action
+        && prev.step.ref_hint == step.ref_hint
+        && prev.step.value == step.value
+        && prev.step.value_var == step.value_var
 }
 
 /// The step a decided cycle records, or `None` for an option whose
@@ -1073,6 +1082,165 @@ mod tests {
             browser.calls()
         );
         assert_eq!(trace.steps.len(), DEFAULT_MAX_STALLED + 1);
+        assert!(
+            trace
+                .steps
+                .iter()
+                .all(|s| s.fill_skipped && s.log.contains("already holds")),
+            "{}",
+            trace.steps[0].log
+        );
+    }
+
+    /// A recorded fill for the repeat-check matrix. Only `step` and
+    /// `fill_skipped` are read by the check; the rest is empty bookkeeping.
+    fn traced_fill(
+        action: &str,
+        ref_hint: &str,
+        value: Option<&str>,
+        value_var: Option<&str>,
+        fill_skipped: bool,
+    ) -> TracedStep {
+        TracedStep {
+            decision: DecisionRecord {
+                label: "TYPE 2".to_string(),
+                probability: 1.0,
+                model: "scripted".to_string(),
+                offered: 0,
+                truncated: 0,
+            },
+            step: fill_step(action, ref_hint, value, value_var),
+            value: value.map(ToString::to_string),
+            value_label: None,
+            value_source: None,
+            snapshot_before: String::new(),
+            snapshot_after: String::new(),
+            url_before: String::new(),
+            url_after: String::new(),
+            changed: false,
+            fill_skipped,
+            log: String::new(),
+        }
+    }
+
+    /// The step shape the matrix compares: a fill of one field with one
+    /// value, from one source. Other fields stay at their defaults.
+    fn fill_step(
+        action: &str,
+        ref_hint: &str,
+        value: Option<&str>,
+        value_var: Option<&str>,
+    ) -> FlowStep {
+        FlowStep {
+            action: action.to_string(),
+            ref_hint: Some(ref_hint.to_string()),
+            value: value.map(ToString::to_string),
+            value_var: value_var.map(ToString::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// A satisfied fill that agrees with an earlier recorded step in every
+    /// field but one is a *different* fill, not a repetition — one row per
+    /// conjunct of the satisfied-fill match. If any conjunct were lost (an
+    /// `&&` read as an OR) the row it guards would read "repeated" here and
+    /// fail, so a rerun whose fills differ in one field can never be
+    /// mistaken for a stall. The all-fields-identical pair is the opposite
+    /// contract: it *is* the repetition the stall tests drive.
+    #[test]
+    fn a_satisfied_fill_differing_in_one_field_is_not_a_repeat() {
+        let rows: Vec<(TracedStep, FlowStep, &str)> = vec![
+            (
+                traced_fill("fill", "From", Some("Zurich"), Some("query"), false),
+                fill_step("fill", "From", Some("Zurich"), Some("query")),
+                "fill_skipped — one fill was sent, not skipped",
+            ),
+            (
+                traced_fill("type", "From", Some("Zurich"), Some("query"), true),
+                fill_step("fill", "From", Some("Zurich"), Some("query")),
+                "action — a type is not a fill",
+            ),
+            (
+                traced_fill("fill", "To", Some("Zurich"), Some("query"), true),
+                fill_step("fill", "From", Some("Zurich"), Some("query")),
+                "ref_hint — a different field",
+            ),
+            (
+                traced_fill("fill", "From", Some("Madrid"), Some("query"), true),
+                fill_step("fill", "From", Some("Zurich"), Some("query")),
+                "value — a different value",
+            ),
+        ];
+        for (prior, current, row) in rows {
+            assert!(
+                !is_same_satisfied_fill(&prior, &current),
+                "{row}: agreeing in every field but one is not a repeat"
+            );
+        }
+        let prior = traced_fill("fill", "From", Some("Zurich"), Some("query"), true);
+        let current = fill_step("fill", "From", Some("Zurich"), Some("query"));
+        assert!(
+            is_same_satisfied_fill(&prior, &current),
+            "agreeing in every field is the repetition the stall tests drive"
+        );
+    }
+
+    /// A rerun whose satisfied fills all hold the same value but live in
+    /// different fields: each proposal agrees with every earlier one in
+    /// every field but `ref_hint`, so none is a repeat and the run reaches
+    /// DONE with the stall bound unspent. If the `ref_hint` conjunct (or a
+    /// later one) were read as an OR, the third fill would read as a
+    /// repetition and the bound would stop the run Blocked before DONE.
+    #[test]
+    fn satisfied_fills_in_different_fields_reach_done_not_the_bound() {
+        let mut browser = ScriptedBrowser::default();
+        browser.start();
+        const FOUR_SAME_VALUE: &str = "- link \"Learn about DuckDuckGo\" [ref=e80]\n\
+                                       - combobox \"From\" [value=\"Zurich\", ref=e185]\n\
+                                       - combobox \"To\" [value=\"Zurich\", ref=e190]\n\
+                                       - combobox \"Best\" [value=\"Zurich\", ref=e195]\n\
+                                       - combobox \"Last\" [value=\"Zurich\", ref=e200]\n\
+                                       - button \"Search\" [ref=e186]";
+        browser.observe(URL, FOUR_SAME_VALUE);
+        // Each proposal skips in one browser call (the pre-fill snapshot
+        // whose line shows the field holding the value); the page never
+        // changes between them.
+        for _ in 0..DEFAULT_MAX_STALLED + 1 {
+            browser.ok("- combobox \"From\" [value=\"Zurich\", ref=e185]\n");
+            browser.observe(URL, FOUR_SAME_VALUE);
+            browser.ok("- combobox \"To\" [value=\"Zurich\", ref=e190]\n");
+            browser.observe(URL, FOUR_SAME_VALUE);
+            browser.ok("- combobox \"Best\" [value=\"Zurich\", ref=e195]\n");
+            browser.observe(URL, FOUR_SAME_VALUE);
+            browser.ok("- combobox \"Last\" [value=\"Zurich\", ref=e200]\n");
+            browser.observe(URL, FOUR_SAME_VALUE);
+        }
+        let vars = [Var::new("query", "Zurich")];
+        let mut decider = ScriptedDecider::new(vec![
+            Ok(distribution(&[("TYPE 2", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 3", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 4", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("TYPE 5", 0.9)])),
+            Ok(distribution(&[("VAR query", 0.8)])),
+            Ok(distribution(&[("DONE", 1.0)])),
+        ]);
+        let trace = discover(
+            &mut browser,
+            &mut decider,
+            &request(&vars, Limits::default()),
+        )
+        .unwrap();
+
+        assert_eq!(trace.status, Status::Done, "{}", trace.detail);
+        assert_eq!(trace.steps.len(), DEFAULT_MAX_STALLED + 1);
+        assert!(
+            browser.calls().iter().all(|call| call[0] != "fill"),
+            "not one of the fills is sent: {:?}",
+            browser.calls()
+        );
         assert!(
             trace
                 .steps
