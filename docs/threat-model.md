@@ -10,7 +10,9 @@ workflow that implements it, as the code spells it, so a reader can check it.
 [SECURITY.md](../SECURITY.md) is the short policy: supported versions, how to
 report a vulnerability, how to verify a release. [ARCHITECTURE.md](../ARCHITECTURE.md)
 is the map of crates, on-disk state and the daemon wire contract this document
-builds on. A suspected vulnerability goes to the private advisory link in
+builds on. [assurance-case.md](assurance-case.md) builds on this document in
+turn: the security claims, the design principles and the common weaknesses
+it counters. A suspected vulnerability goes to the private advisory link in
 SECURITY.md, never to an issue or a pull request against this file.
 
 Statuses used below:
