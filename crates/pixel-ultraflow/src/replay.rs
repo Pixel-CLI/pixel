@@ -221,7 +221,14 @@ impl Runner<'_> {
         self.repairs_left -= 1;
         let page = Observation::see(self.browser)?;
         let vars = self.declared_vars();
-        let cycle = one_cycle(self.decider, &self.flow.description, &vars, &[], &page)?;
+        let cycle = one_cycle(
+            self.decider,
+            &self.flow.description,
+            &vars,
+            &[],
+            &page,
+            None,
+        )?;
         let mut deviation = Deviation {
             step: id.to_string(),
             failure: failure.to_string(),
