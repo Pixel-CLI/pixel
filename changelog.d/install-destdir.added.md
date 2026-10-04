@@ -1,0 +1,1 @@
+**install:** `install.sh` honours `DESTDIR`: with it set, the binary is staged under `$DESTDIR$PIXEL_INSTALL_DIR` and the final directory is left untouched, the POSIX convention package builds and image layers rely on. `GITHUB_PATH` and the messages still name the final directory.
