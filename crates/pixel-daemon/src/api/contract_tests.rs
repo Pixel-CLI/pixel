@@ -22,19 +22,22 @@ fn tmpdir(tag: &str) -> PathBuf {
     d.canonicalize().unwrap()
 }
 
+/// Through `GitRunner`, the one sanctioned git spawner: this file is a
+/// separate module file, which `pixel-git`'s boundary walk reads as source.
 fn git(dir: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
+    let out = pixel_git::GitRunner::new(dir)
+        .run_output(
+            args,
+            &[
+                ("GIT_AUTHOR_NAME", "t"),
+                ("GIT_AUTHOR_EMAIL", "t@t"),
+                ("GIT_COMMITTER_NAME", "t"),
+                ("GIT_COMMITTER_EMAIL", "t@t"),
+                ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ],
+        )
         .unwrap();
-    assert!(out.status.success(), "git {args:?}: {out:?}");
+    assert!(out.success(), "git {args:?}: {out:?}");
 }
 
 /// `login` is called once by `go`; `helper` is defined twice, so a bare
