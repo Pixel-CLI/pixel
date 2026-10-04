@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Post-edit hook runs against an existing graph snapshot, never a refreshed source scan.
 use pixel_daemon::api::GRAPH_DB_FILE;
 use serde_json::{Value, json};

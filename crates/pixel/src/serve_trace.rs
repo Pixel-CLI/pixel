@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The serve steps of this invocation, collected where each request is
 //! routed and written into its action-log event by `main`.
 

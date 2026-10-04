@@ -10,7 +10,9 @@ workflow that implements it, as the code spells it, so a reader can check it.
 [SECURITY.md](../SECURITY.md) is the short policy: supported versions, how to
 report a vulnerability, how to verify a release. [ARCHITECTURE.md](../ARCHITECTURE.md)
 is the map of crates, on-disk state and the daemon wire contract this document
-builds on. A suspected vulnerability goes to the private advisory link in
+builds on. [assurance-case.md](assurance-case.md) builds on this document in
+turn: the security claims, the design principles and the common weaknesses
+it counters. A suspected vulnerability goes to the private advisory link in
 SECURITY.md, never to an issue or a pull request against this file.
 
 Statuses used below:
@@ -601,7 +603,8 @@ Across all of them:
   "Mutation testing").
 - **Fuzzing**: `fuzz.yml` runs every cargo-fuzz target for 60 s on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
-  root `Cargo.toml` or `deny.toml`, and for 600 s weekly.
+  root `Cargo.toml` or `deny.toml`, for 600 s weekly, and for 120 s on every
+  `v*` tag before `release.yml` builds anything.
 - **Static analysis**: `codeql.yml` scans Rust, the workflows, Python and
   JavaScript/TypeScript on every pull request into `main`, every push to it,
   and weekly; `cargo clippy` with warnings denied runs in CI.

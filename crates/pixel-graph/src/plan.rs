@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Deterministic plan query engine for `pixel plan`.
 //!
 //! No LLM is used for the code analysis: queries run against the graph.db

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # pixel-bench-isolated.sh — isolate PIXEL'S OWN cost from the rest of the
 # user's global CLAUDE.md.
 #

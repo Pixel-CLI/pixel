@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Human-vs-orchestrator classification for user turns.
 //!
 //! Harness machinery injects text as the "user": system reminders, task

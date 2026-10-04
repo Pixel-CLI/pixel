@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # eval/run.sh — repeatable harness trial: scenarios × arms × CLIs.
 #
 # Arms:

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Claude Code adapter: `~/.claude/projects/<slug>/<session>.jsonl` plus the
 //! subagent transcripts at `<slug>/<session>/subagents/agent-*.jsonl` (the
 //! majority of files — never skip them).

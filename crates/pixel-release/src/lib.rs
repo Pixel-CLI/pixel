@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel release-check`: the consistency a release tag must have before
 //! anything is built or published.
 //!

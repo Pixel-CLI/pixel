@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! pixel CLI — index/search plus the graph command surface, speaking to a
 //! per-root daemon over its Unix socket when one is up, else in-process.
 

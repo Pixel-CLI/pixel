@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Freeze the two decide-bakeoff eval sets (protocol: docs/bench/decide-bakeoff-protocol.md).
 
 Outputs, both under scripts/fixtures/:

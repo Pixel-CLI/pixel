@@ -648,6 +648,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 - CI (`.github/workflows/ci.yml`) classifies the diff first, so a job whose
   paths did not change skips its steps, then runs in parallel:
   - **Test + Format**: action-pin verification (`scripts/verify-action-pins.py`),
+    the SPDX header check (`scripts/check-spdx.py`, on every diff),
     `cargo fmt --check`, `cargo nextest run --profile ci`
     (`.config/nextest.toml`: one process per test, retry once but fail on
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
@@ -656,7 +657,8 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     pre-push and remote host, release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
     nightly mutants, mutants
-    config, action pins, advisory ignores, clean, cancel-stale sweep, harness-grid dispatch input), the
+    config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
+    reproducible release build environment), the
     pixel-retro lead-time and adherence contracts
     (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`)
     and the Bun Pi-policy contract (`scripts/test-pi-policy.mjs`);
@@ -674,7 +676,13 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   `ubuntu-26.04` when the variable is unset or empty, so capacity moves
   with a variable edit and no shard queues behind one busy self-hosted
   host), `mutants-nightly.yml` (a whole-tree
-  rotation), `cross-build.yml` (the three release lanes), `release.yml`
+  rotation), `cross-build.yml` (the three release lanes),
+  `reproducible-build.yml` (the `x86_64-unknown-linux-musl` release binary
+  built twice from two checkouts at different paths, no cache, failing
+  unless the two sha256 match; on pull requests touching the build
+  environment, `Cargo.lock`, a `Cargo.toml`, `crates/pixel/build.rs` or
+  `release-build.yml`, on pushes to `main` touching any of them or
+  `crates/**`, weekly and on demand), `release.yml`
   (on a tag: `verify`, then publication, the tap and the post-publish smoke
   test) and `release-build.yml`, the reusable workflow it calls to build the
   archives, write the formula and the Linux bottles with
@@ -700,8 +708,17 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   `fuzz.yml` (`cargo deny` on the `fuzz/` workspace with the root
   `deny.toml`, then every cargo-fuzz target on nightly: 60 s each on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
-  root `Cargo.toml` or `deny.toml`, 600 s weekly and on demand, crash
-  reproducers uploaded).
+  root `Cargo.toml` or `deny.toml`, 600 s weekly and on demand, 120 s when
+  `release.yml` calls it on a `v*` tag, crash reproducers uploaded) and `coverage.yml` (the Test job's nextest suite
+  under `cargo llvm-cov`, doctests aside, on every push to `main`, on a pull
+  request touching `crates/`, the manifests or the nextest profile, and on
+  demand: line, region and function totals and one row per crate in the job
+  summary, the report as the `coverage-summary` artifact; it fails on a red
+  test or on line coverage under 90%, the OpenSSF gold bar; its `branches`
+  job runs the same suite on a dated nightly under `cargo llvm-cov
+  --branch` and writes branch and line totals, one row per crate, to its
+  summary; it uploads the raw JSON report as the `coverage-branch-summary`
+  artifact).
 - `fuzz/` is a cargo-fuzz crate with its own `[workspace]`, outside the
   root workspace (no root `cargo` command builds it). `graph_extract` feeds
   arbitrary source to `pixel_graph::extract::extract_file` (no panic, lines
@@ -730,6 +747,10 @@ reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
 `changelog`), exit 1 on any failure. Pure functions over file contents;
 no git, no network.
 
+After `verify`, the `fuzz` job calls `fuzz.yml` (every cargo-fuzz target,
+120 s each) on the tagged commit. The `assets` build needs both `verify`
+and `fuzz`, so no release is built from code that was not fuzzed.
+
 The release skill also runs `.agents/skills/release/check-candidate.py` on
 recorded base and prepare SHAs. Before merge it requires the fetched target
 to equal that base and a prepare-only diff without remaining fragments.
@@ -752,6 +773,16 @@ back to `unknown` rather than failing the build. The script re-runs when
 `.git/HEAD`, the ref it points to (looked up in the worktree's git dir and
 the common dir), the index, or `SOURCE_DATE_EPOCH` changes, so the flag
 follows commits without a `cargo clean`.
+
+Release builds are reproducible. `scripts/release-build-env.sh` sets
+`SOURCE_DATE_EPOCH` to the commit's time and `RUSTFLAGS` to
+`--remap-path-prefix` the checkout (`/pixel`) and `CARGO_HOME` (`/cargo`);
+`release-build.yml` and `cross-build.yml` run it before their cache step
+(rust-cache hashes `RUSTFLAGS` into the key they share), `Cross.toml`
+forwards `SOURCE_DATE_EPOCH` into cross's container, and the three
+workflows pin the same `cross`. `reproducible-build.yml` checks it
+(`## Testing and gates`); SECURITY.md, "Reproducing a release build", is the
+user's procedure.
 
 ## Build features
 

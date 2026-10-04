@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Write the Homebrew formula of a release and its Linux bottles.
 
     python3 scripts/homebrew-formula.py <tag> <artifacts-dir> <out-dir>

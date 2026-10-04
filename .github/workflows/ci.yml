@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: CI
 
 on:
@@ -254,6 +257,7 @@ jobs:
           ^\.agents/skills/pixel-retro/
           ^\.cargo/mutants\.toml$
           (^|/)Cargo\.toml$
+          ^Cross\.toml$
           ^crates/pixel-install/assets/pi-pixel\.ts$
           EOF
 
@@ -349,6 +353,11 @@ jobs:
       - name: Action pins (every uses on a full commit SHA)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/verify-action-pins.py
+
+      # Every tracked source file carries its SPDX copyright and license
+      # lines (OpenSSF gold); a tenth of a second, so it runs on every diff.
+      - name: SPDX headers (copyright and license in every source file)
+        run: python3 scripts/check-spdx.py
 
       - name: Install Rust toolchain
         if: ${{ needs.changes.outputs.cargo == 'true' }}
@@ -499,6 +508,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-check-advisory-ignores.py
 
+      - name: SPDX header check contract (missing lines fail, --fix keeps a shebang first)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-check-spdx.py
+
       # The sweep cancels moot validation runs; the board sync and its own
       # run must survive it, or merged tasks stay In Progress.
       - name: Cancel-stale sweep contract (stubbed gh)
@@ -510,6 +523,14 @@ jobs:
       - name: Harness-grid dispatch input contract
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-harness-grid-input.py
+
+      # What reproducible-build.yml's proof depends on: the commit's time,
+      # both path remaps, Cross.toml forwarding SOURCE_DATE_EPOCH, the
+      # environment set before the cache and the build in the three
+      # workflows, one pinned cross, the release command.
+      - name: Reproducible release build contract (disposable repo)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-release-build-env.py
 
       # clean.sh removes whole directories. The cases that matter are the ones
       # asserting what it leaves alone: a file git tracks, a tree behind a

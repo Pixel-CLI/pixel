@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Tiered call-graph resolution.
 //!
 //! Tiers (a name NEVER fans out to multiple definition sites as edges):

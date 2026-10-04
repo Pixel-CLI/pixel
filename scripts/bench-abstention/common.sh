@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # shellcheck shell=bash
 # Shared by run.sh and rerun.sh. Sourced, not executed.
 

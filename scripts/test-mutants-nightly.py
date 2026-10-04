@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/mutants-nightly.py: the rotation and the tracking issue.
 
 What must hold: the seven nights together cover every shard of the

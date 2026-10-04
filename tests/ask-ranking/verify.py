@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Frozen ask evaluation. Run after building: python3 tests/ask-ranking/verify.py.
 
 Inputs frozen before semantic measurements. This directory is excluded by ask's

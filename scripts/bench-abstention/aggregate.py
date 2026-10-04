@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """d2-5 — aggregate what-changed outputs into abstention rates per motif.
 
 A commit "abstains" when a whole-change negative from `diff-reaches` would be

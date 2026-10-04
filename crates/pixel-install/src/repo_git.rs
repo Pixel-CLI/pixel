@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Keeps the machine-local files of `pixel install --repo` out of commits.
 //!
 //! Every repo artifact names this machine's `pixel` binary by absolute path.

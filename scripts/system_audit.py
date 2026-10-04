@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Real CLI audit in disposable repositories/homes. Never uses a live remote/browser.
 
 Build the candidate first; pass its absolute path. The report identifies that

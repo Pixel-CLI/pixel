@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Typed outcomes for deterministic repository fact requests.
 
 use serde::{Deserialize, Serialize};

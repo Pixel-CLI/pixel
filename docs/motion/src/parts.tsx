@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 import {Easing, useCurrentFrame} from 'remotion';
 import type React from 'react';
 import {C, F, PX} from './theme';

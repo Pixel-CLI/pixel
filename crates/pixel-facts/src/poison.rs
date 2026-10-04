@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `poison.rs` — structural fix for usable-git's ingest failure class.
 //!
 //! Decisions are made BEFORE git is spawned to produce diff text: (1) paths

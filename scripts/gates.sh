@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Local gate runner: the CI gates (fmt, clippy, test) with laptop-safe defaults.
 #
 #   scripts/gates.sh            # skip when nothing Rust-affecting changed

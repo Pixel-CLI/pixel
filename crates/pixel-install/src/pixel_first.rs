@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The Pixel-first retrieval rule in a repository's root `AGENTS.md`.
 //!
 //! `pixel install --repo` writes one managed block telling every agent that

@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Contract for the pre-push order: a Rust baseline must compile before the
 # remote mutation campaign starts, while non-Rust pushes avoid Cargo entirely.
 set -eu

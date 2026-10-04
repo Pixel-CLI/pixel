@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! SQLite persistence for the sniper error sink — THE schema contract.
 //!
 //! One database per project under

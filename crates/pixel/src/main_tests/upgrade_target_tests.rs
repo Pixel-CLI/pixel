@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use super::cargo_profile_dir;
 
 /// The install step must read the binary the build step wrote: a

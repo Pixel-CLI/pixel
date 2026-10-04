@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel classify` — OpenAI-compatible chat completion.
 //!
 //! The remote engine maps the wire contract — `text` + `context` +

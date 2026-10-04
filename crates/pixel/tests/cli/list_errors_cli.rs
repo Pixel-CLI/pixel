@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel list-errors`: the error sink is only useful if what one command
 //! records, another reads back. The query layer has its own tests in
 //! `pixel-session`; these pin the CLI dispatch in front of it.

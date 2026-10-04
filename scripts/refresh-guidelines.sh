@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Refresh the vendored Microsoft Pragmatic Rust Guidelines and show what moved.
 #
 #   scripts/refresh-guidelines.sh

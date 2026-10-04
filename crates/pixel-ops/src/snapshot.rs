@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Snapshot store — durable worktree snapshots keyed by worktree root.
 //!
 //! Port of usable-git's `snapshot-store.ts`. A snapshot captures the repo's

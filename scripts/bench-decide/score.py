@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Score decide-bakeoff raw runs (protocol: docs/bench/decide-bakeoff-protocol.md).
 
 Usage: score.py --run <dir> [--baseline pixel-static]

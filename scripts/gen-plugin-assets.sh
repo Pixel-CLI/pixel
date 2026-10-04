@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # gen-plugin-assets.sh — regenerate every plugin-manifest surface from the
 # canonical agent prompts so each agent CLI can install pixel through its own
 # native plugin mechanism (ponytail-style).

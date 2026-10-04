@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: Cross-build
 
 # The release lanes, built exactly as release-build.yml builds them: musl through
@@ -23,6 +26,8 @@ on:
       - ".cargo/**"
       - ".github/workflows/cross-build.yml"
       - "Cargo.*"
+      - "Cross.toml"
+      - "scripts/release-build-env.sh"
       - "crates/**"
       - "deny.toml"
       - "rust-toolchain*"
@@ -140,6 +145,14 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # The same reproducible-build environment as release-build.yml, before
+      # the cache step: rust-cache hashes RUSTFLAGS into its key, so the
+      # entry this job saves is the one the tag's build restores only when
+      # both set the same value.
+      - name: Reproducible build environment
+        if: steps.dup.outputs.duplicate != 'true'
+        run: scripts/release-build-env.sh --github-env
+
       # One entry per target, shared with release-build.yml's build job: a shared
       # key replaces the job id in the cache key, so the tag's build (job
       # `build`) restores what this job (`cross-build`) saved on main. A tag
@@ -164,7 +177,8 @@ jobs:
         if: runner.os == 'Linux' && steps.dup.outputs.duplicate != 'true'
         uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
-          tool: cross
+          # The version release-build.yml pins.
+          tool: cross@0.2.5
 
       # Must match release-build.yml exactly, but for the profile (see the
       # job comment): fastembed (ONNX) has no musl build, but model2vec is pure

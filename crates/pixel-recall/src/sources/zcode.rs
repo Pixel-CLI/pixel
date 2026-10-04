@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! zcode adapter — SQLite store at `~/.zcode/cli/db/db.sqlite`.
 //!
 //! The schema is the opencode shape (session / message / part with JSON

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Replay the release race using real commits, including a content-neutral merge."""
 import os
 from pathlib import Path

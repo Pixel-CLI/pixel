@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Shared fixture plumbing for the CLI contract tests.
 //!
 //! Two rules every module follows through these helpers:

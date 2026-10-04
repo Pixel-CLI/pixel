@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Writes website/data/problem_trace.toml, the home's Problem chapter trace,
 from a recording archived in docs/bench/problem-trace/.
 

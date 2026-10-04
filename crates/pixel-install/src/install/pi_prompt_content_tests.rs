@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use super::{AGENT_PROMPT_ASSET, PI_PROMPT_ASSET, managed_pi_content, write_pi_prompt};
 use crate::config::{MANAGED_BEGIN, MANAGED_END};
 

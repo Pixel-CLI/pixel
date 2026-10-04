@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration test for Ruby calls written without receiver or parentheses:
 //! `target` and `target.to_set` call the method `target` exactly as
 //! `target()` does, so `impact target` must list their callers, while a local

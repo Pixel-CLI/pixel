@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Generic fallback for wrapped commands: last-N-lines tail for the record,
 //! full output preserved via raw_fallbacks by the caller.
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! What act 1 scrolls through: real grep output and real file lines of this
 //! repository, captured once, so the agent the intro shows searches the
 //! way the recorded vanilla-6 run did (`docs/motion/src/demo/runs.json`).

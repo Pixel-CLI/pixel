@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The transcript-corpus daemon service: watches every CLI's transcript
 //! store, ingests changes incrementally, keeps the embedding model warm,
 //! and serves `search` / `ask` over the standard daemon transport.

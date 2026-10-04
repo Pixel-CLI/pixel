@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Fail when deny.toml and osv-scanner.toml accept different advisories.
 
 cargo-deny reads `[advisories] ignore` in deny.toml; OpenSSF Scorecard's

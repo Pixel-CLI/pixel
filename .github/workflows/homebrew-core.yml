@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # The homebrew-core formula, checked the way homebrew-core's CI would check a
 # pull request that adds it: built from source (a `git archive` of the tree
 # under test, so no tag is needed), `brew test`, `brew audit --strict --new`

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel uninstall` — the inverse of `pixel install`.
 //!
 //! Removes every trace pixel install wrote:

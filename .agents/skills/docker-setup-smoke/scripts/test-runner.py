@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Verify mode selection, failed-run evidence and the fake model script without Docker."""
 import importlib.util
 import json

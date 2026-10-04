@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! File opens that never follow a symbolic link at the file they name.
 //!
 //! Pixel writes its derived state under `<root>/.pixel/` and restores

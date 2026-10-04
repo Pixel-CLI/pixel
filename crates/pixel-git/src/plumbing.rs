@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Typed convenience methods consolidating every git subcommand used across
 //! the three original wrappers (`pixel-index::gitsync`, `pixel-cli::rescue_cmd`,
 //! `pixel-graph::changes`). Same flags, same semantics as the originals —

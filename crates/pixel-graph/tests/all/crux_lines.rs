@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The crux lines a graph build stores for each symbol: the guard and
 //! early-exit lines of that symbol's own body, cut from the file it was
 //! extracted from.

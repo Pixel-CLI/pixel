@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Isolated, frozen sparse PlanQuery pilot. Never changes Pixel routing."""
 import argparse
 import csv

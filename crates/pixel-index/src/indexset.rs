@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Git-anchored 3-layer index: base shard + delta shard + dirty overlay.
 //!
 //! Layering (freshest wins, by path):

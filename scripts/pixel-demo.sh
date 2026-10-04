@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # pixel-demo.sh — side-by-side demo: agent task with vs without Pixel.
 #
 # Runs ONE scenario through `claude -p` twice:

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/cancel-stale-runs.sh, the sweep cancel-stale.yml runs
 when a pull request closes and every ten minutes.
 

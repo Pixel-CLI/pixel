@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Per-root exclusive build lock via `flock(2)`.
 //!
 //! When multiple CLI invocations (or CLI + daemon) race to build the same

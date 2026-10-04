@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of lead_time.py: which time each pull request owns, and what it was spent on.
 
 The numbers it prints decide which workflow rule gets changed, so each case

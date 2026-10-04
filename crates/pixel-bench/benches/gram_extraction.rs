@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use pixel_bench::source_corpus;
 use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtractor};

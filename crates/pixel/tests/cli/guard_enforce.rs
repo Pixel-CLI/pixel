@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Provider policy contracts: advisory by default, explicit enforcement, native fallbacks.
 use crate::support::{Scratch, pixel_command};
 use serde_json::{Value, json};

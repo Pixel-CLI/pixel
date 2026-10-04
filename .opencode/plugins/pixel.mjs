@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 // pixel OpenCode plugin — injects the pixel retrieval protocol into the
 // system prompt every turn. Reads the generated PIXEL.md shipped at the
 // plugin root; no network access, no hooks that block tool calls.

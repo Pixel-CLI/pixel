@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `rewrite` — squash every commit on the current branch since a base into
 //! ONE commit, with an optional leased force-push.
 //!

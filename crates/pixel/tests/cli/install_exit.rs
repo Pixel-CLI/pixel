@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The `pixel install` exit: `--json` and a piped stdout keep the
 //! machine-readable report; the human banner (`pixel_install::banner`) is
 //! a stdout-is-a-TTY path unit-tested in the pixel-install crate. These

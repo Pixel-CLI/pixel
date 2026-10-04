@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 [package]
 name = "pixel-ultraflow"
 version = "0.7.0"

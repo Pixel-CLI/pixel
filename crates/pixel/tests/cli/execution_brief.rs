@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Focused CLI coverage for the bounded `execution-brief` projection.
 
 use std::collections::BTreeSet;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The response envelope: "Envelope v2" from `PLAN.md`'s Part A design,
 //! extending usable-git's v1 envelope (`ok`/`result`/`error`) with
 //! `op`/`protocol`/`requestId`/`snapshot`/`epistemics`/`budget`/`warnings`.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel-git` — the single, unified git-subprocess wrapper for the pixel
 //! workspace.
 //!

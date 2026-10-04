@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Build a per-arm Codex config from the real one.
 
 Usage: build_codex_cfg.py <input-config.toml> <output-config.toml> <mode> [payload-file]

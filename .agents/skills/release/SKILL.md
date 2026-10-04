@@ -13,12 +13,13 @@ from the line's last tag (see "Patch release while `main` is not releasable").
 
 The tag is the release. Pushing `vX.Y.Z` runs `.github/workflows/release.yml`,
 and its `verify` job gates publication; ordinary CI does not run on tags.
-The dependency graph is `verify` → `assets` → `release`, then `smoke` and
-`virustotal` independently:
+The dependency graph is `verify` → `fuzz` → `assets` → `release`, then
+`smoke` and `virustotal` independently:
 
 | Job | Does | A failure means |
 | --- | --- | --- |
 | `verify` | `check-release $GITHUB_REF` (CLI version, every workspace member in Cargo.lock, released heading and empty Unreleased), `cargo deny check`, then locked workspace tests | nothing built or published |
+| `fuzz` | `fuzz.yml` called with 120 s per target: every cargo-fuzz target on nightly, `cargo deny` on `fuzz/` first | a crash or a target that ran nothing: nothing built; the reproducer is the run's `fuzz-artifacts-*` artifact |
 | `assets` | calls `release-build.yml`: three target builds (musl x86_64/aarch64 with model2vec only, native Apple arm64), checksums and feature-specific CycloneDX SBOMs; `attest` makes formulas and Linux bottles, signs archives/bottles/install.sh/SBOMs, stages the provenance bundle | nothing published |
 | `release` | publishes the staged assets with the tag's changelog section, then updates `LivioGama/homebrew-tap` using `HOMEBREW_TAP_TOKEN` | publication may already be immutable; classify in Recovery |
 | `smoke` (×3, `fail-fast: false`) | verifies provenance, runs the downloaded asset and one-liner in an empty HOME; checks macOS tap install/test and Linux bottle pouring when available; version and commit must match the tag | already published; distinguish code failure from infrastructure |
@@ -382,7 +383,9 @@ failures that never happened.
 
 About 12 minutes to the end of `smoke` (0.3.0: verify 5 min, builds 6 min,
 publish and smoke under a minute; 0.5.0, uncached: builds 5.3 to 5.5 min
-on musl).
+on musl). The `fuzz` job, added after 0.7.0, sits between `verify` and
+the builds: about 5 more minutes (nightly build of the targets, then 120 s
+per target).
 
 ## 5. Verify the publication
 

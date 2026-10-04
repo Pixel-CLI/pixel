@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Bounded JSONL evidence bridge for interactive harnesses.
 //!
 //! The normal daemon protocol remains request/response. This bridge is a

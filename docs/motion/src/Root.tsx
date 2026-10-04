@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 import {Composition} from 'remotion';
 import {AgentDemo, DemoProps, demoFrames, FPS, Trace} from './AgentDemo';
 import {ComparisonScene, ComparisonSpec} from './ComparisonScene';

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Records the agent runs the AgentDemo composition replays.
 #
 # Both arms run the same model, at the same effort, on the same task, in a

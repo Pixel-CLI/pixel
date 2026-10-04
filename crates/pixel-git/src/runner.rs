@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Core git-subprocess execution primitive: bounded by a wall-clock timeout
 //! and a stdout byte cap, both enforced *during* the read (not after
 //! buffering unbounded output first) — the exact defect class PLAN.md calls

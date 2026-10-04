@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Auto-approval: clearing the gate an agent puts in front of its own first
 //! turn.
 //!

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The review-gate human render is the feature's face: a findings list of
 //! severity, anchor, rule, witness and fix. These tests pin that shape.
 

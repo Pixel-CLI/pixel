@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Integration matrix for `reconcile` (Engine 4: one-call deterministic
 //! branch sync). Each of the four classification states gets a real git
 //! fixture — a working clone plus a bare "remote" this test independently

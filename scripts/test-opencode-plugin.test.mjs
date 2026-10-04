@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 // The V2 OpenCode route-tool adapter and V1 guard fallback, exercised without
 // a model or editor UI. Run with: bun test scripts/test-opencode-plugin.test.mjs
 import { spawnSync } from "node:child_process";

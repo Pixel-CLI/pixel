@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 use pixel_graph::imports::resolve_import;
 
 fn paths(files: &[&str]) -> Vec<String> {

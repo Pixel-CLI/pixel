@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # pixel-vs-manual.sh — direct comparison: pixel commands vs manual grep/git.
 #
 # Runs the SAME tasks two ways and shows timing + output quality side by side.

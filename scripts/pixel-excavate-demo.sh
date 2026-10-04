@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # pixel-excavate-demo.sh — excavation demo on ShipFast: find the Kimi model feature.
 #
 # Shows the same task done two ways:

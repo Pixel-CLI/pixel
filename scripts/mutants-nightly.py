@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Plan and report the nightly slice of the whole-tree mutation run.
 
 The pull-request gate (`mutants.yml`) mutates the lines a diff changes, and

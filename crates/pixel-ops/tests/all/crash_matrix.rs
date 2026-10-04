@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Crash matrix tests for `publish` and `push`.
 //!
 //! Faithful port of usable-git's `mutation-crash-matrix.test.ts`: inject a

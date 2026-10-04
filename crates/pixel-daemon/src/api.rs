@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Transport-agnostic service: one `Request` in, one `Response` out.
 //!
 //! All cross-crate contract calls (graph analyses, context rendering) are

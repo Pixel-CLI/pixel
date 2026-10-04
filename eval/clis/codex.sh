@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Codex runner for the eval loop. Reads $WT $CFG $PROMPT $OUT; writes codex
 # exec --json (JSONL events) to $OUT. Arm isolation: $CFG/codex-home holds a
 # per-arm config.toml (baseline strips the pixel block, variants swap it) plus

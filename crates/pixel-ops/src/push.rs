@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `push` — leased push with crash-safe journaling.
 //!
 //! Phases: started → push_started → terminal

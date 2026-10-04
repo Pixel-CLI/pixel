@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Exit 0 when a diff is only what `prepare.sh` writes, 1 otherwise.
 
 `ci.yml`, `mutants.yml` and `cross-build.yml` skip their jobs on a

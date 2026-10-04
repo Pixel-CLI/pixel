@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Generate call-path cases: (caller, callee) pairs with a located call site.
 
 A pair is kept only when both names have exactly one **function** definition in

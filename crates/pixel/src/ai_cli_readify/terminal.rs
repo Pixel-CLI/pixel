@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Startup-prompt detection and dismissal.
 //!
 //! The TypeScript stack this port mirrors detects these prompts and *fails

@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 set -eu
 # A hook or wrapper may export these; they would make `git -C` report
 # another repository's checkout in the saved provenance.

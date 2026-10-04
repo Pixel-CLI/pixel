@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel classify` — Ollaya local decision daemon (TypeSafe-compatible).
 //!
 //! Ollaya is "Ollama for decision models": one binary pulls and serves typed

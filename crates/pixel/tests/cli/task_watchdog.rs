@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Native hook deadlines and interrupted telemetry delivery through the real CLI.
 
 use std::fs::{self, OpenOptions};

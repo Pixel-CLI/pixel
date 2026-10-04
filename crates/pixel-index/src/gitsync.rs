@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Thin shell-out helpers over the `git` CLI.
 //!
 //! Every function degrades gracefully outside a git repository (returns

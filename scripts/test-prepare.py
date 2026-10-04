@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of .agents/skills/release/prepare.sh: the pull requests it lists.
 
 Runs the real script inside a disposable workspace repository with stub
@@ -48,8 +51,10 @@ elif args[:2] == ["repo", "view"]:
     print("example/fixture")
 elif args[:1] == ["api"]:
     sha = args[1].split("/")[-2]
+    # GitHub associates a pull request with its merge commit and with every
+    # commit of its branch.
     for pr in json.loads(open(os.environ["FIXTURE_PRS"]).read()):
-        if pr["mergeCommit"]["oid"] == sha:
+        if sha == pr["mergeCommit"]["oid"] or sha in pr.get("commits", []):
             print(pr["number"])
 else:
     sys.exit(1)
@@ -130,7 +135,14 @@ class PrepareContract(unittest.TestCase):
         return sorted(p.name for p in (self.repo / "changelog.d").glob("*.md"))
 
     def listed(self, stdout):
-        head = "pull requests merged into main since v0.1.0"
+        return self.block(stdout, "pull requests merged into main since v0.1.0")
+
+    def direct(self, stdout):
+        """Subjects of the commits reported as in no merged pull request."""
+        block = self.block(stdout, "commits since v0.1.0 in no merged pull request")
+        return [line.split(": ", 1)[1] for line in block]
+
+    def block(self, stdout, head):
         lines = stdout.splitlines()
         start = next(i for i, line in enumerate(lines) if line.startswith(head)) + 1
         block = []
@@ -148,7 +160,8 @@ class PrepareContract(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "fragment")
         self.prs.write_text(json.dumps([
-            {"number": 12, "title": "fix: thing", "mergeCommit": {"oid": fixed}},
+            {"number": 12, "title": "fix: thing", "mergeCommit": {"oid": fixed},
+             "commits": [self.git("rev-parse", "fix-thing")]},
             {"number": 11, "title": "release: prepare 0.1.0", "mergeCommit": {"oid": released}},
             # Merged on GitHub, merge commit not fetched into this clone.
             {"number": 13, "title": "fix: elsewhere", "mergeCommit": {"oid": "1" * 40}},
@@ -158,6 +171,10 @@ class PrepareContract(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.listed(result.stdout), ["#12 fix: thing"])
+        # The branch commit of #12 is covered by #12's entry: reporting it as
+        # direct would send the release reviewer after a missing entry that
+        # is not missing. Only the commits pushed outside a PR remain.
+        self.assertEqual(self.direct(result.stdout), ["script", "fragment"])
 
     def test_nothing_unreleased_says_none(self):
         released = self.merge_pr("release-0.1.0", "released.txt")

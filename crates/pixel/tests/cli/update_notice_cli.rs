@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! The release notice reaches a person at a terminal and nobody else. An
 //! agent's command tool and a hook read pixel's stderr through a pipe, and
 //! a line there costs context on every call, so the pipe case must print

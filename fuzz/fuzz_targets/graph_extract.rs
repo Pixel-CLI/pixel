@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel_graph::extract::extract_file` on arbitrary bytes.
 //!
 //! The graph is built from whatever a repository holds: half-written files,

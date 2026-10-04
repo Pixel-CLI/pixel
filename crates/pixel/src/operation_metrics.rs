@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! CLI measurement adapter for pixel-actionlog. No descriptor redirection,
 //! comparison subprocesses, source reads, or changes to terminal detection;
 //! the one file a whole-file reader stands in for is measured by `stat`.

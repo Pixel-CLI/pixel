@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Repo-map comparison: `stacklit derive` vs `pixel repo-map --markdown`.
 
 These two optimise opposite ends of the same trade-off, so the benchmark

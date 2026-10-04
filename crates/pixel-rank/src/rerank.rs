@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Engine 3 shared reranker — reorders candidates *within* their tier using
 //! activity + session signals. Never promotes across tiers (protects the
 //! closed-world claim).

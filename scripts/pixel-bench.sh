@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # pixel-bench.sh — measure agent workflow time with and without pixel.
 #
 # Runs 4 scenarios via `claude -p` (default model, --dangerously-skip-permissions):

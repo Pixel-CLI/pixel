@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Parser for Minitest (and `rails test`) output:
 //!
 //! ```text

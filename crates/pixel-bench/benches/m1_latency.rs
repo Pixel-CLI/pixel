@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! M1 latency gates per PLAN.md:
 //! - Daemon retrieve operations: <1ms service time
 //! - CLI end-to-end: <5ms

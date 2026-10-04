@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Renders every composition into docs/examples/, in two forms:
 #   <name>.mp4   1600x1000 H.264 for the website, with a <name>.jpg poster
 #   <name>.webp  800x500 animated WebP at 15 fps for the README; set

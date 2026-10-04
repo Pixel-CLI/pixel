@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Print the repository roots with a .pixel/actions.jsonl among the sessions of a window.
 
 Usage: python3 roots.py <window>   (12h, 7d, 3w, or an ISO date)

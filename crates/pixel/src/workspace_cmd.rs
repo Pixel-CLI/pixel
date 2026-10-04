@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel workspace` — a named set of repositories that graph ops can fan
 //! out across, and the `--workspace` flag that uses it.
 //!

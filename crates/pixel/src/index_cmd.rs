@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel index pack` / `pixel index unpack` — portable index bundles.
 //!
 //! The team's sharing story: CI (or one developer) runs `pixel build-index`

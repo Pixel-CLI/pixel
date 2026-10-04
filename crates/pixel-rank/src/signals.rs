@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Engine 3 ranking signals — activity (churn) + session (recent working
 //! set) + live error-sink join.
 //!

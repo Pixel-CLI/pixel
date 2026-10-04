@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Durable task contracts, workflow decisions and snapshot-bound verification.
 
 pub mod evaluation;

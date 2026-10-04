@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `update` — fast-forward merge with expectedHead + targetOid.
 //!
 //! Returns NON_FAST_FORWARD + merge base on divergence.

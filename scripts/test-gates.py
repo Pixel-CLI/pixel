@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/gates.sh: skip-if-untouched, fail-open, laptop-safe env.
 
 Runs the real script inside a disposable git repository with a stub `cargo`

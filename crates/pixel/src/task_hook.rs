@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Host hook normalization and response envelopes for durable task gates.
 
 use std::io::{Read, Write};

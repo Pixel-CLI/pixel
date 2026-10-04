@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Snapshot token contract.
 //!
 //! Reproduces usable-git's 12-hex-char snapshot token scheme

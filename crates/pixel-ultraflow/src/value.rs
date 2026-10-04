@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Field values: what to type, and where the answer came from.
 //!
 //! `pixel classify` is a decision engine, not a text generator, so a value

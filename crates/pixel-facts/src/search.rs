@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `search.rs` — history search: `search {query, facet: message|path|diff|all}`.
 //!
 //! Diff/path scopes take trigram candidates from `diff_fts` / `path_fts`

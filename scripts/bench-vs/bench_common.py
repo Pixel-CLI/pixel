@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Shared configuration for the comparison harnesses.
 
 Kept in one place because the three benchmarks are meant to be re-run by readers

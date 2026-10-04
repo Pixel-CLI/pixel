@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel classify` — bounded label decision through a remote LLM.
 //!
 //! The decision half of the refinement contract: one OpenAI-compatible chat

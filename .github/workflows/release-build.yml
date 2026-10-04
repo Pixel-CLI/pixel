@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 name: Release build
 
 # Builds, packages and signs everything a release publishes, called by
@@ -57,6 +60,15 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # The reproducible-build environment (SECURITY.md, "Reproducing a
+      # release build"): SOURCE_DATE_EPOCH from the tagged commit, the
+      # checkout and CARGO_HOME remapped out of the binary through RUSTFLAGS.
+      # Before the cache step: rust-cache hashes RUSTFLAGS into its key, and
+      # cross-build.yml sets the same value for the entry restored below.
+      # reproducible-build.yml builds the x86_64 lane twice with it.
+      - name: Reproducible build environment
+        run: scripts/release-build-env.sh --github-env
+
       # Restores what cross-build.yml saved on main for this target (shared
       # key release-<target>): the dependencies arrive compiled, and only the
       # workspace crates and the thin-LTO link are left. Never saves: a tag's
@@ -69,11 +81,13 @@ jobs:
 
       # Prebuilt binary instead of `cargo install cross`. cross compiles inside
       # its own Docker image (musl toolchain included), so no host packages.
+      # Pinned: the image is part of what a reproduced build must match, and
+      # cross-build.yml and reproducible-build.yml pin the same version.
       - name: Install cross (Linux musl)
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
-          tool: cross
+          tool: cross@0.2.5
 
       - name: Build (Linux musl via cross, model2vec only)
         if: runner.os == 'Linux'

@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Host side of pixel's pre-push mutants gate (scripts/mutants-remote-gate.sh).
 # stdin: tar payload holding push.bundle and an optional mutants.out seed.
 # usage: pixel-mutants-gate <base-oid> <head-oid>

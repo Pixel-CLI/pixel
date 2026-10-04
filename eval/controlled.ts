@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 /** Isolated backend for the existing eval/ scorer and candidate gate. */
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile, cp, chmod, lstat, readdir } from "node:fs/promises";

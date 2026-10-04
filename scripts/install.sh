@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # pixel install script — downloads the latest release binary from GitHub.
 # Usage: curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 # (published as an asset of every release; main may be ahead of the latest release)
@@ -6,6 +9,11 @@ set -eu
 
 REPO="Pixel-CLI/pixel"
 INSTALL_DIR="${PIXEL_INSTALL_DIR:-${HOME}/.local/bin}"
+# DESTDIR stages the install under a root that is not the final one (a package
+# build, an image layer), the POSIX convention `make install` follows: files
+# are written to ${DESTDIR}${INSTALL_DIR}, while PATH and the messages keep
+# naming INSTALL_DIR, where the binary ends up once the stage is copied.
+STAGE_DIR="${DESTDIR:-}${INSTALL_DIR}"
 
 # A SHA-256 digest exactly as the release workflow writes it: 64 lower-case
 # hex digits. The digits are spelled out one by one because a `[0-9a-f]` range
@@ -121,7 +129,7 @@ tar xzf "${TMPDIR}/${ARCHIVE}" -C "$TMPDIR"
 # Install — atomic rename to avoid corrupting a running binary's code
 # signature on macOS (in-place cp overwrites a mapped Mach-O, invalidating
 # the ad-hoc signature and causing SIGKILL on next invocation).
-mkdir -p "$INSTALL_DIR"
+mkdir -p "$STAGE_DIR"
 BINARY="${TMPDIR}/pixel-${VERSION}-${TARGET}/bin/pixel"
 if [ ! -f "$BINARY" ]; then
     # Fallback: some archives may not have the version-prefixed dir
@@ -131,8 +139,8 @@ if [ ! -f "$BINARY" ]; then
     echo "Archive ${ARCHIVE} has no bin/pixel." >&2
     exit 1
 fi
-DEST="${INSTALL_DIR}/pixel"
-TMP_DEST="${INSTALL_DIR}/.pixel.tmp.$$"
+DEST="${STAGE_DIR}/pixel"
+TMP_DEST="${STAGE_DIR}/.pixel.tmp.$$"
 cp "$BINARY" "$TMP_DEST"
 chmod +x "$TMP_DEST"
 
@@ -155,6 +163,10 @@ if [ -n "${GITHUB_PATH:-}" ]; then
     echo "$INSTALL_DIR" >> "$GITHUB_PATH"
 fi
 
-echo "Installed pixel to ${INSTALL_DIR}/pixel"
+if [ -n "${DESTDIR:-}" ]; then
+    echo "Staged pixel in ${DEST} (DESTDIR) for ${INSTALL_DIR}/pixel"
+else
+    echo "Installed pixel to ${INSTALL_DIR}/pixel"
+fi
 echo "Add ${INSTALL_DIR} to your PATH if it's not already there."
 echo "Run: pixel doctor"

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Unix-socket NDJSON daemon: one JSON `Request` per line, one JSON
 //! `Response` line back. Single-threaded request handling: an accept thread
 //! blocked on the listener and a notify watcher feed one mpsc channel, and

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Opt-in private receipt for one native Pixel plan call; installs no hooks."""
 import argparse
 import hashlib

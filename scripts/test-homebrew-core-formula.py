@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/homebrew-core-formula.py: the formula a homebrew-core
 pull request carries, which must build pixel from source.
 

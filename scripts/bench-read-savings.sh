@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # bench-read-savings.sh — what reaches an agent that needs to know what a
 # large file contains: the whole file, or `pixel list-signatures` on it.
 #

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Real CLI contracts in disposable homes/repos; no host daemons or network models."""
 import argparse
 import hashlib

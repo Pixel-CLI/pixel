@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! THE shared query layer — `pixel list-errors` is a thin wrapper over these
 //! functions. Every result type is `Serialize`, and the CLI `--json` output
 //! is that serialization.

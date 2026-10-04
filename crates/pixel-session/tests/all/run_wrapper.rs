@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `sniper run` end to end: a shell command replays a fixture and exits
 //! like the real tool; the store must hold the structured records.
 

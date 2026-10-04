@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Measured task trajectories and offline policy replay, without counterfactual outcome claims.
 
 use std::collections::{BTreeMap, BTreeSet};

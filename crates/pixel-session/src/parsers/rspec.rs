@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Parser for RSpec's documentation/progress formatter output:
 //!
 //! ```text

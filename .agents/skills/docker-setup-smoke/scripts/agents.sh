@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 set -eu
 # Agent sessions against fake-llm.py, after checks.sh left the personal
 # settings restored: Claude Code, Codex and pi each run one session in a

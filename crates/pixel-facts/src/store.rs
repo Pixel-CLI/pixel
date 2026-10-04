@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `store.rs` — the `.pixel/history.db` SQLite store plus the shared fact
 //! types every module in this crate returns.
 //!

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Contract of scripts/clean.sh: what it reclaims, and what it must not touch.
 
 Every case runs the real script against a disposable git repository that has a

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Corpus selection and annotation integrity tests; no quality predictions."""
 import hashlib
 import importlib.util

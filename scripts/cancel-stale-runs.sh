@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # Empty the workflow-run queue of work that no longer matters. A merged (or
 # closed) pull request leaves its validation runs pointing at a head that
 # does not exist on any branch; the cancel-stale workflow calls this on

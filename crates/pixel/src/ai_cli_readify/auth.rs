@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Handing an auth wall to the installed `claude-code-auth-flow`.
 //!
 //! A browser login is the one repair the readiness probe cannot perform

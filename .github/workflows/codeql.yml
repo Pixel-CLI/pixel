@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 # CodeQL: static analysis (SAST) of the code and the workflows, on every pull
 # request into `main`, every push to `main` and weekly, so a new query pack
 # also reaches code nobody touched. Results land in the Security tab as

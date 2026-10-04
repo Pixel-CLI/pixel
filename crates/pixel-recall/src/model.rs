@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Unified transcript model every source adapter normalizes into.
 
 /// Where a timestamp came from — outputs always disclose this because some

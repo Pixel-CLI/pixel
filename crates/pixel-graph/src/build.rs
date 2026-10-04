@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Whole-repo build / single-file update orchestration.
 //!
 //! `build_graph`: walk → parallel extract (rayon) → single-writer store
