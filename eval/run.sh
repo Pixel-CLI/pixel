@@ -40,8 +40,10 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE   # caller exports would poison the s
 EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(git -C "$EVAL_DIR" rev-parse --show-toplevel)"
 PIXEL_BIN="${PIXEL_BIN:-$HOME/.local/bin/pixel}"
-CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
-export CODEX_BIN="${CODEX_BIN:-$HOME/.local/bin/codex}"
+# The host CLIs as PATH resolves them (an interactive alias never reaches this
+# script), else the per-user install location.
+CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude || echo "$HOME/.local/bin/claude")}"
+export CODEX_BIN="${CODEX_BIN:-$(command -v codex || echo "$HOME/.local/bin/codex")}"
 DEPLOY_PROMPT="$HOME/.local/share/pixel/agent-prompt.md"
 RESULTS="${RESULTS:-$EVAL_DIR/results}"
 SCEN_DIR="$EVAL_DIR/scenarios"
@@ -107,6 +109,19 @@ cli_model() {
     *)      echo default ;;
   esac
 }
+# A missing host binary fails every cell with rc 127 after its setup cost:
+# refuse the campaign before the first one instead.
+for cli in $CLIS; do
+  case "$cli" in
+    claude) bin="$CLAUDE_BIN" var=CLAUDE_BIN ;;
+    codex)  bin="$CODEX_BIN" var=CODEX_BIN ;;
+    *)      continue ;;
+  esac
+  if [ ! -x "$bin" ]; then
+    echo "eval/run.sh: no $cli executable at $bin (set $var)" >&2
+    exit 2
+  fi
+done
 # Read once per campaign (bash 3.2 has no associative arrays: one variable
 # per host, read back through version_of).
 for cli in $CLIS; do

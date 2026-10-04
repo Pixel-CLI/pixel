@@ -289,6 +289,16 @@ class OfflinePipeline(unittest.TestCase):
         rows = json.loads((self.relative_root / "results-rel/scores.json").read_text())
         self.assertEqual([(r["scenario"], r["arm"]) for r in rows], [("fx-answer", "baseline")])
 
+    def test_a_missing_host_binary_refuses_the_campaign_before_any_cell(self):
+        missing = subprocess.run(["bash", str(self.repo / "eval/run.sh")], cwd=self.repo, capture_output=True,
+                                 text=True, timeout=120,
+                                 env={**self.env, "CLIS": "claude", "CLAUDE_BIN": "/nonexistent/claude",
+                                      "RESULTS": str(self.relative_root / "results-missing"),
+                                      "SCRATCH": str(self.relative_root / "scratch-missing")})
+        self.assertEqual(missing.returncode, 2, missing.stdout[-2000:] + missing.stderr[-2000:])
+        self.assertIn("no claude executable at /nonexistent/claude", missing.stderr)
+        self.assertNotIn("=== run", missing.stdout)
+
     def test_a_variant_payload_never_leaks_into_the_quiet_arm(self):
         self.assertEqual(self.swap.returncode, 0, self.swap.stdout[-3000:] + self.swap.stderr[-3000:])
         seen = [json.loads(line) for line in self.swap_log.read_text().splitlines()]
