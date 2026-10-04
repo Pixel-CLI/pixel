@@ -116,6 +116,10 @@ check` needs the network for the advisory database and is not part of
 its reason, in `osv-scanner.toml`: OpenSSF Scorecard scans `Cargo.lock` with
 osv-scanner, which never reads `deny.toml`, and the same CI job runs
 `scripts/check-advisory-ignores.py` to fail when the two lists differ.
+The CI job only runs when `Cargo.lock` or `deny.toml` changes, so the release
+workflow runs `cargo deny check` again on the tag, before anything is built:
+an advisory published since the last dependency change blocks the release
+until it is fixed or accepted as above.
 
 `scripts/gates.sh` runs the same commands (nextest when installed, `cargo
 test` otherwise) (plus `--mutants` for the

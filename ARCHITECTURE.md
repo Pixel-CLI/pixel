@@ -643,7 +643,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     pre-push and remote host, release prepare, Homebrew formula and Linux
     bottles, homebrew-core formula,
     nightly mutants, mutants
-    config, action pins, advisory ignores, clean, cancel-stale sweep), the
+    config, action pins, advisory ignores, clean, cancel-stale sweep, harness-grid dispatch input), the
     pixel-retro lead-time contract (`.agents/skills/pixel-retro/test_lead_time.py`)
     and the Bun Pi-policy contract (`scripts/test-pi-policy.mjs`);
   - **Lint**: `cargo clippy --all-targets` with warnings denied, then
@@ -698,7 +698,8 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 
 `pixel check-release <version|tag> [--repo <path>] [--json]`
 (the `pixel-release` crate) runs in the first job of
-`.github/workflows/release.yml` (`verify`, before its `cargo test`) and is a
+`.github/workflows/release.yml` (`verify`, before `cargo deny check` and its
+`cargo test`) and is a
 maintainer's last local step: it
 reads `Cargo.toml`, every member's manifest, `Cargo.lock` and
 `CHANGELOG.md` and reports three checks (`cli-version`, `cargo-lock`,

@@ -56,6 +56,19 @@ jobs:
       - name: Release consistency (pixel check-release)
         run: cargo run -q -p pixel-cli -- check-release "$GITHUB_REF" --repo .
 
+      # The dependency policy again, on the tag: CI only runs cargo-deny when
+      # Cargo.lock or deny.toml changes, while RustSec keeps publishing
+      # advisories. One published since the last dependency change stops the
+      # release here, before anything is built, until it is fixed or accepted
+      # with its reason in deny.toml and osv-scanner.toml.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        with:
+          tool: cargo-deny
+
+      - name: Dependency policy (cargo deny check)
+        run: cargo deny check
+
       - name: Test
         run: cargo test --workspace --locked
 
