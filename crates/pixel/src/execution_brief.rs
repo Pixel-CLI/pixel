@@ -160,11 +160,15 @@ pub fn from_scope_task(task: &str, data: &Value) -> Value {
         validation.push("Review uncertainty.caps before relying on this brief.".to_string());
     }
 
-    let route = retrieval_route(task);
+    // The same typed text the hooks route (a pasted block never steers the
+    // search); a task that asks nothing about code still gets a route from
+    // its whole text, since `execution-brief` was asked for one.
+    let request = retrieval_request(task);
+    let route = retrieval_route(request.as_deref().unwrap_or(task));
     json!({
         "version": 1,
         "task": bounded_task,
-        "asks_about_code": retrieval_request(task).is_some(),
+        "asks_about_code": request.is_some(),
         "retrieval_route_text": pretty_retrieval_route(&route),
         "retrieval_route": route,
         "workstreams": workstreams,
@@ -1066,5 +1070,19 @@ mod tests {
         );
         let ops = from_scope_task("go to branch main and pull", &json!({"targets": []}));
         assert_eq!(ops["asks_about_code"], false);
+        assert_eq!(
+            ops["retrieval_route"],
+            retrieval_route("go to branch main and pull")
+        );
+        // A pasted block never reaches the brief's route: it matches the hooks'.
+        let pasted = from_scope_task(
+            "<pasted_content id=\"1\">\nthread about grep\n</pasted_content id=\"1\">\nWhy does the parser panic?",
+            &json!({"targets": []}),
+        );
+        assert_eq!(pasted["asks_about_code"], true);
+        assert_eq!(
+            pasted["retrieval_route"],
+            retrieval_route("Why does the parser panic?")
+        );
     }
 }
