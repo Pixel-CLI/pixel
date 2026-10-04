@@ -39,7 +39,7 @@ the former owner: `--repo Pixel-CLI/pixel` answers `HTTP 404` for them.
 Verify those two under the name they were built as:
 
 ```bash
-gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --owner LivioGama \
+gh attestation verify pixel-v0.6.1-aarch64-apple-darwin.tar.gz --repo LivioGama/pixel \
   --signer-workflow LivioGama/pixel/.github/workflows/release.yml \
   --source-ref refs/tags/v0.6.1 --deny-self-hosted-runners
 ```

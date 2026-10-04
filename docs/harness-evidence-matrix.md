@@ -42,10 +42,10 @@ Index: `pixel doctor . --only facts.freshness`
 
 | Check | Pass when |
 |-------|-----------|
-| First command | Agent's first tool call is `pixel search-content -F '<id>'` (identifier) or `pixel find-code '<concept>'` (behavior) — not `ls`, `grep`, `read`, or `cat` |
+| First command | Agent's first Pixel operation is `pixel search-content -F '<id>'` (identifier) or `pixel find-code '<concept>'` (behavior) — not `ls`, `grep`, `read`, or `cat`. For Antigravity, the retrieval command captured by the pre-invocation hook counts as the first Pixel operation even when the model makes no Pixel tool call |
 | Empty fallback | `search-content -F` returning empty runs exactly one `find-code` fallback in the same command (automatic) or agent runs `find-code` once (route-guided) |
 | Bounded read | After Pixel serves `path:line`, agent reads `sed -n '<line>,+40p'` or `read(path, offset=<line>, limit≈40)` — never the whole file |
-| Metrics line | `🟩 pixel <subcommand> ❀ <ms> ❀ #<hash>` visible exactly once per Pixel invocation |
+| Metrics line | When metrics are enabled, `🟩 pixel <subcommand> ❀ <ms> ❀ #<hash>` is visible exactly once per Pixel invocation; when opted out, no line is expected |
 | Non-blocking | Hook returns without error; session continues normally |
 | Fail-open | Pixel unavailable → agent continues with native retrieval; no error |
 

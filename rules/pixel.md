@@ -100,3 +100,12 @@ Estimates, not measurements: `sequential-v1` computes time savings from a
 per-step round trip (default `round_trip_ms` is 2000,
 `PIXEL_METRICS_ROUND_TRIP_MS` overrides); zero or negative values are valid —
 relay as emitted.
+
+## Harness verification
+
+Six-harness live verification uses the evidence matrix template at
+`docs/harness-evidence-matrix.md`. Challenge Claude, Codex, Pi,
+agy/Antigravity, OpenCode, and Devin with the same read-only task in a
+Herdr-managed pane; record pane identity, first Pixel command, empty-fallback
+behavior, read range (≤40 lines), metrics line visibility, evidence class
+(direct/self-report/inference/unknown), and any gap.
