@@ -8,6 +8,22 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 REPO_DIR="${ARENA_REPO_DIR:-/repo}"
 cd "$REPO_DIR" || exit 1
+REVIEWED_PIXEL_HOOKS="${ARENA_REVIEWED_PIXEL_HOOKS:-0}"
+CODEX_CALLER_FACTS="${ARENA_CODEX_CALLER_FACTS:-0}"
+case "$REVIEWED_PIXEL_HOOKS:$CODEX_CALLER_FACTS" in
+  0:0|1:0|1:1) ;;
+  *) echo "arena hook flags must be 0 or caller-facts requires reviewed hooks" >&2; exit 2 ;;
+esac
+HOOK_AUDIT_KEY="${ARENA_RUN_ID:-standalone}-${REP:-1}"
+HOOK_AUDIT_READY="/out/hook-audit-${ARM_TOOL:-raw}-${HOOK_AUDIT_KEY}.ready"
+mark_hook_audit_failure() {
+  local rc=$?
+  if [ "$REVIEWED_PIXEL_HOOKS" = "1" ] && [ ! -e "$HOOK_AUDIT_READY" ]; then
+    touch "/out/hook-audit-${ARM_TOOL:-raw}-${HOOK_AUDIT_KEY}.failed"
+  fi
+  return "$rc"
+}
+trap mark_hook_audit_failure EXIT
 
 prep_semble()  { :; }                     # indexes lazily on first query
 prep_graft()   { graft init --yes; }
@@ -65,6 +81,46 @@ if [ "$prep_rc" -ne 0 ]; then
   exit "$prep_rc"
 fi
 
+if [ "$CODEX_CALLER_FACTS" = "1" ]; then
+  if [ "${ARM_TOOL:-raw}" != "pixel" ] || [ "${PIXEL_ARENA_PREP_GRAPH:-0}" != "1" ] || \
+     [ ! -s "$REPO_DIR/.pixel/graph.v2.db" ]; then
+    echo "caller-facts opt-in requires the pixel arm with a prepared graph" >&2
+    exit 2
+  fi
+fi
+if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
+  if ! python3 /usr/local/lib/arena-hook-audit.py audit \
+    --arm "${ARM_TOOL:-raw}" --codex-home "${CODEX_HOME:-$HOME/.codex}" \
+    --repo "$REPO_DIR" --rep "${REP:-1}" \
+    --receipt "/out/hook-audit-${ARM_TOOL:-raw}-${REP:-1}.json"; then
+    exit 1
+  fi
+  touch "$HOOK_AUDIT_READY"
+  for _ in $(seq 1 90); do
+    if [ -e "/out/hook-audit-raw-${HOOK_AUDIT_KEY}.failed" ] || \
+       [ -e "/out/hook-audit-pixel-${HOOK_AUDIT_KEY}.failed" ]; then
+      touch "/out/hook-audit-${ARM_TOOL:-raw}-${HOOK_AUDIT_KEY}.failed"
+      echo "paired hook audit failed; refusing to start Codex" >&2
+      exit 1
+    fi
+    if [ -e "/out/hook-audit-raw-${HOOK_AUDIT_KEY}.ready" ] && \
+       [ -e "/out/hook-audit-pixel-${HOOK_AUDIT_KEY}.ready" ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [ ! -e "/out/hook-audit-raw-${HOOK_AUDIT_KEY}.ready" ] || \
+     [ ! -e "/out/hook-audit-pixel-${HOOK_AUDIT_KEY}.ready" ]; then
+    touch "/out/hook-audit-${ARM_TOOL:-raw}-${HOOK_AUDIT_KEY}.failed"
+    echo "timed out waiting for both paired hook audits; refusing to start Codex" >&2
+    exit 1
+  fi
+fi
+if [ "$CODEX_CALLER_FACTS" = "1" ]; then
+  # This explicit arena-only opt-in is separate from hook trust review.
+  export PIXEL_CODEX_CALLER_FACTS=1
+fi
+
 # This receipt is captured after arm setup, immediately before Codex runs, so
 # the arena can verify the static instructions visible to each arm.
 python3 /usr/local/lib/arena-context-manifest.py \
@@ -85,6 +141,11 @@ IFS=' ' read -r -a TASK_LIST <<< "${TASKS:-s1-hook-install s2-vector-recall s3-r
 MODEL_ARGS=()
 [ -n "${CODEX_MODEL:-}" ] && MODEL_ARGS+=(-m "$CODEX_MODEL")
 [ -n "${CODEX_EFFORT:-}" ] && MODEL_ARGS+=(-c model_reasoning_effort="$CODEX_EFFORT")
+HOOK_TRUST_ARGS=()
+if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
+  # Both paired arms use the same bypass; the allowlist was audited above.
+  HOOK_TRUST_ARGS+=(--dangerously-bypass-hook-trust)
+fi
 
 overall_rc=0
 for task in "${TASK_LIST[@]}"; do
@@ -94,7 +155,8 @@ for task in "${TASK_LIST[@]}"; do
   # The container is the sandbox: docker's default seccomp blocks codex's
   # bubblewrap namespaces, so read-only mode would fail every command.
   codex exec --json --sandbox danger-full-access --skip-git-repo-check \
-    "${MODEL_ARGS[@]}" "$prompt" > "/out/$tag.jsonl" 2> /tmp/err
+    "${HOOK_TRUST_ARGS[@]}" "${MODEL_ARGS[@]}" "$prompt" \
+    > "/out/$tag.jsonl" 2> "/out/$tag.stderr"
   rc=$?
   t1=$(date +%s)
   echo $((t1 - t0)) > "/out/$tag.seconds"
@@ -104,4 +166,26 @@ for task in "${TASK_LIST[@]}"; do
     overall_rc=1
   fi
 done
+if [ "$REVIEWED_PIXEL_HOOKS" = "1" ] && [ "${ARM_TOOL:-raw}" = "pixel" ]; then
+  hook_receipt="/out/pixel-hook-${REP:-1}.jsonl"
+  if ! python3 - "$hook_receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+except (OSError, ValueError):
+    rows = []
+if not rows or any(row.get("response_valid") is not True for row in rows):
+    sys.exit(1)
+PY
+  then
+    task="${TASK_LIST[0]:-unknown}"
+    echo "Pixel prompt-hook receipt is missing or invalid; excluding this run" >&2
+    touch "/out/pixel-${task}-${REP:-1}.failed"
+    overall_rc=1
+  fi
+fi
 exit "$overall_rc"

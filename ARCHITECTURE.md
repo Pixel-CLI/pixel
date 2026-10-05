@@ -501,7 +501,16 @@ so no machine path is committed:
 --repo` also remove the MCP server entry releases up to 0.6.1 wrote into
 `.warp/.mcp.json`, and `repo.warp-mcp` reports one still there.
 
-Codex receives Pixel retrieval guidance only through the selective prompt hook.
+Codex receives no Pixel retrieval context by default. The experimental
+`PIXEL_CODEX_CALLER_FACTS=1` prompt hook accepts explicit caller/impact questions
+about one bare symbol. It reads an existing graph without building or starting
+the daemon, returns at most three caller examples, and verifies the target and
+caller files against indexed hashes (at most 64 KiB per file). A 150 ms worker
+deadline and 1,024-byte output cap bound the intervention; missing, ambiguous,
+stale or unsafe inputs emit nothing. Results remain incomplete because new
+callers elsewhere may not be indexed; the model must verify source and search
+for other callers. History questions abstain. This opt-in is experimental:
+small paired arena runs showed mixed token and wall-time results.
 Global and project installation remove the retired `<!-- pixel:managed:begin
 -->`/`end` block from `developer_instructions` with `toml_edit`, preserving foreign
 text, unrelated configuration and layout. A key with no remaining instructions
@@ -543,7 +552,7 @@ The hook entry points, all under `pixel run-hook` (alias `hook`), and where
 | Hook event | Command | Effect |
 | --- | --- | --- |
 | `SessionStart` | `pixel run-hook session-start` | Injects the agent prompt and the capability block from the op registry. For Claude Code the prompt is fitted to the 10 000-character inline limit of a hook's context (`CLAUDE_INLINE_CONTEXT_LIMIT` in `guard.rs`): `DEFERRABLE_SECTIONS` come out first and a closing line names them and the deployed prompt's path. Global for Claude Code and for Devin's own protocol; in a session that only imports Claude's configuration (Devin's `read_config_from.claude`), the entry carries the short Pixel-first guidance and the capability block instead of the Claude prompt. |
-| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Never rejects a prompt. Codex uses `codex_retrieval_intent` for a local, conservative graph/history decision: ordinary prompts emit nothing, selected prompts receive optional targeted guidance only when an index exists, and neither route starts task-context/boundary work. Claude and Devin retain task-context/boundary detection. The Claude task packet is written only for a real Claude host, never for a host importing its configuration. Their code-request guidance and `[PIXEL:EXECUTION_ROUTE]` use `execution_brief::retrieval_request`, which ignores pasted content; routes require an existing index. Global for Claude Code, Codex, and Devin's own protocol. |
+| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Never rejects a prompt. Codex emits nothing by default; the explicit caller-facts experiment uses `codex_retrieval_intent` and a bounded, read-only graph lookup. Neither Codex route starts task-context/boundary work. Claude and Devin retain task-context/boundary detection. The Claude task packet is written only for a real Claude host, never for a host importing its configuration. Their code-request guidance and `[PIXEL:EXECUTION_ROUTE]` use `execution_brief::retrieval_request`, which ignores pasted content; routes require an existing index. Global for Claude Code, Codex, and Devin's own protocol. |
 | `SessionStart` matcher `compact` (`PostCompaction` on Devin) | `pixel run-hook post-compaction` | Re-injects active task evidence for supported hosts. Codex emits nothing, so compaction cannot restore a target packet bypassed by native-default prompt routing. A `--provider claude` entry re-run by an importing host also exits without emitting: its session id belongs to the other harness. |
 | `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. Repo-local (`--repo`) for Claude Code and Devin; global for Antigravity and zcode; OpenCode reaches it through its auto-loaded plugin (`--provider opencode`), the one host whose plugin hook can throw a call away. |
 | `PostToolUse` (Claude `Edit`) | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |

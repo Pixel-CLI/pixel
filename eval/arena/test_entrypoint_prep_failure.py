@@ -12,6 +12,38 @@ import unittest
 
 
 class PrepFailureStopsCodexTest(unittest.TestCase):
+    def test_caller_facts_without_reviewed_hooks_stops_before_pixel_prep(self):
+        with tempfile.TemporaryDirectory(prefix="arena-facts-opt-in-") as temporary:
+            root = pathlib.Path(temporary)
+            bin_dir = root / "bin"
+            home = root / "home"
+            repo = root / "repo"
+            bin_dir.mkdir()
+            home.mkdir()
+            repo.mkdir()
+            calls = root / "pixel-calls"
+            pixel = bin_dir / "pixel"
+            pixel.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PIXEL_CALLS\"\n")
+            pixel.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                "ARM_TOOL": "pixel",
+                "ARENA_CODEX_CALLER_FACTS": "1",
+                "ARENA_REVIEWED_PIXEL_HOOKS": "0",
+                "ARENA_REPO_DIR": str(repo),
+                "HOME": str(home),
+                "PATH": f"{bin_dir}{os.pathsep}{environment['PATH']}",
+                "PIXEL_CALLS": str(calls),
+            })
+            entrypoint = pathlib.Path(__file__).with_name("entrypoint.sh")
+            result = subprocess.run(
+                ["bash", str(entrypoint)], check=False, capture_output=True,
+                cwd=repo, env=environment, text=True,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("caller-facts requires reviewed hooks", result.stderr)
+            self.assertFalse(calls.exists())
+
     def test_failed_pixel_install_stops_before_codex(self):
         self.assert_prep_failure_stops_codex(fail_command="install", expected_rc=41)
 

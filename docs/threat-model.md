@@ -416,8 +416,13 @@ boundary it crosses.
   follows them.
 - **Mitigation**: the agent prompt states that Pixel output is data, not
   instructions (`crates/pixel-install/assets/pixel-agent-prompt.md`,
-  `pixel-subagent-prompt.md`); Codex's selective guidance carries the same
-  boundary in `codex_retrieval_intent.rs`. Hook packets carry repository strings as JSON
+  `pixel-subagent-prompt.md`). Codex emits no retrieval context by default.
+  Its experimental caller-facts path in `prompt_submit.rs` returns only
+  validated names, relative paths, lines and tiers from an existing read-only
+  graph, verifies bounded source files against indexed hashes, and caps the
+  packet at 1,024 bytes with a 150 ms lookup deadline. Escaping paths and
+  control characters are rejected; the packet labels its rows as incomplete
+  repository evidence. Hook packets carry repository strings as JSON
   values (`[PIXEL:TASK_CONTEXT]` in `prompt_submit.rs`, the dependants list
   of `post-tool-use`) and label them; output is capped.
 - **Status**: Accepted: a retrieval tool has to return repository text.

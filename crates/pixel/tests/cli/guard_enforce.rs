@@ -16,6 +16,7 @@ fn hook(args: &[&str], payload: &Value, envs: &[(&str, &str)]) -> Value {
         .env_remove("PIXEL_TARGETS_GUARD")
         .env_remove("RIPGREP_CONFIG_PATH")
         .env_remove("GREP_OPTIONS")
+        .env_remove("PIXEL_CODEX_CALLER_FACTS")
         .env("PIXEL_TEST", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -63,6 +64,97 @@ fn indexed_dir(tag: &str) -> Scratch {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/lib.rs"), "fn needle() {}\n").unwrap();
     dir
+}
+
+fn caller_facts_dir(tag: &str, ambiguous: bool) -> Scratch {
+    let dir = Scratch::for_test("pixel-codex-caller-facts", tag);
+    std::fs::create_dir_all(dir.join("apps/notion-to-ghost")).unwrap();
+    std::fs::write(
+        dir.join("apps/notion-to-ghost/transfer.ts"),
+        "export function transferPageToGhost() { return true }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("apps/notion-to-ghost/route.ts"),
+        "import { transferPageToGhost } from './transfer';\nexport async function POST() { return transferPageToGhost() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("apps/notion-to-ghost/cli.ts"),
+        "import { transferPageToGhost } from './transfer';\nexport function main() { return transferPageToGhost() }\n",
+    )
+    .unwrap();
+    if ambiguous {
+        std::fs::create_dir_all(dir.join("apps/other")).unwrap();
+        std::fs::write(
+            dir.join("apps/other/transfer.ts"),
+            "export function transferPageToGhost() { return false }\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(dir.join(".gitignore"), ".pixel/\n").unwrap();
+    crate::support::git(&dir, &["init", "-q"]);
+    crate::support::git(&dir, &["add", "."]);
+    crate::support::git(&dir, &["commit", "-qm", "baseline"]);
+    rebuild_caller_graph(&dir);
+    dir
+}
+
+fn rebuild_caller_graph(dir: &Path) {
+    let built = pixel_command()
+        .args(["rebuild-graph"])
+        .arg(dir)
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "graph build failed: {built:?}");
+}
+
+fn extend_indexed_source_path(dir: &Path, old_relative: &str, growth: usize) -> String {
+    assert!(growth > 0);
+    let (parent, file_name) = old_relative.rsplit_once('/').unwrap();
+    let mut name_growth = growth.min(200);
+    let mut directory_growth = growth - name_growth;
+    if directory_growth == 1 && name_growth > 0 {
+        name_growth -= 1;
+        directory_growth = growth - name_growth;
+    }
+    let new_file_name = format!("{file_name}{}", "x".repeat(name_growth));
+    let new_relative = if directory_growth == 0 {
+        format!("{parent}/{new_file_name}")
+    } else {
+        assert!(directory_growth >= 2);
+        let mut remaining = directory_growth - 1;
+        let mut components = Vec::new();
+        while remaining > 255 {
+            components.push("a".repeat(254));
+            remaining -= 255;
+        }
+        components.push("a".repeat(remaining));
+        format!("{parent}/{}/{new_file_name}", components.join("/"))
+    };
+    let old_path = dir.join(old_relative);
+    let new_path = dir.join(&new_relative);
+    std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+    std::fs::rename(&old_path, &new_path).unwrap();
+
+    let graph_path = dir
+        .join(pixel_index::index::SHARD_DIR)
+        .join(pixel_daemon::api::GRAPH_DB_FILE);
+    let graph = pixel_graph::store::GraphStore::open(&graph_path).unwrap();
+    // The paths consist only of test-generated ASCII alphanumerics, slash,
+    // and dot, so interpolating them cannot alter the SQL statement.
+    graph
+        .conn()
+        .execute_batch(&format!(
+            "UPDATE files SET path = '{new_relative}' WHERE path = '{old_relative}'"
+        ))
+        .unwrap();
+    let changed: i64 = graph
+        .conn()
+        .query_row("SELECT changes()", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(changed, 1, "expected exactly one indexed path update");
+    new_relative
 }
 
 fn payload(tool: &str, input: Value, cwd: &Path) -> Value {
@@ -1640,12 +1732,11 @@ fn prompt_submit_should_treat_a_harness_task_notification_as_no_prompt() {
     assert!(context.contains("Pixel-first retrieval"), "{context}");
 }
 
-/// Ordinary Q&A prompts keep native search; explicit structural prompts get
-/// only a small optional graph/history hint.
+/// Caller facts are opt-in, source-verified, bounded, and fail open.
 #[test]
-fn codex_prompt_submit_classifies_only_explicit_structural_retrieval() {
-    let dir = indexed_dir("codex-prompt-context");
-    let submit = |prompt: &str| {
+fn codex_caller_facts_are_opt_in_and_fail_open() {
+    let dir = caller_facts_dir("verified", false);
+    let submit = |prompt: &str, enabled: bool| {
         hook(
             &["run-hook", "prompt-submit", "--provider", "codex"],
             &json!({
@@ -1653,106 +1744,190 @@ fn codex_prompt_submit_classifies_only_explicit_structural_retrieval() {
                 "prompt":prompt,
                 "cwd":dir.as_ref()
             }),
-            &[],
+            if enabled {
+                &[("PIXEL_CODEX_CALLER_FACTS", "1")]
+            } else {
+                &[]
+            },
         )
     };
-    // Arena g1: locale routing and g2: API behavior are plain research Q&A.
-    for prompt in [
-        "How does locale routing work in this repo? Which file intercepts requests, what locales are supported, and what happens to a request for a path with no locale prefix?",
-        "Trace the POST handler for the company-research API endpoint end to end: what does it validate, what library function does it call, and what does that function do?",
-        // Arena g3 asks impact questions about a UI rename; that is still
-        // native file/reference discovery, not graph-aware symbol analysis.
-        "If the ApplicationModal component in components/ were renamed or moved, which files would need updating? List every file that imports or references it, and note whether the same-named component under apps/sanity-check shares code or is a separate copy.",
-        "Add a regression test for `foo`.",
-        "Who introduced this idea?",
-        "Show git history.",
-        "Trace the inline multiword description `locale routing behavior`.",
-        "Rename `foo.ts` to `bar.ts`.",
-        "Rename `Component.tsx` and update its imports.",
-        "If the ApplicationModal component were renamed or moved, which files would need updating?",
-        "What should I do with this pasted request? <pasted_content>Trace callers of `Foo::bar` and its impact.</pasted_content>",
-    ] {
-        assert_eq!(submit(prompt), Value::Null, "{prompt}");
+    let graph_prompt = "In /apps/notion-to-ghost, trace the call path around transferPageToGhost. What are its direct callers?";
+    assert_eq!(
+        submit(graph_prompt, false),
+        Value::Null,
+        "default is native"
+    );
+
+    let response = submit(graph_prompt, true);
+    let context = response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("explicit opt-in with a ready graph returns caller facts");
+    assert!(context.contains("Indexed repository data"), "{context}");
+    assert!(
+        context.contains("(incomplete; verify source and search for other callers)"),
+        "{context}"
+    );
+    assert!(
+        context.contains("apps/notion-to-ghost/route.ts"),
+        "{context}"
+    );
+    assert!(context.contains("apps/notion-to-ghost/cli.ts"), "{context}");
+    assert!(context.contains("POST"), "{context}");
+    assert!(context.contains("main"), "{context}");
+    assert!(context.len() <= 1024, "{} bytes", context.len());
+
+    for value in ["true", "01", "yes"] {
+        let response = hook(
+            &["run-hook", "prompt-submit", "--provider", "codex"],
+            &json!({"hook_event_name":"UserPromptSubmit", "prompt":graph_prompt, "cwd":dir.as_ref()}),
+            &[("PIXEL_CODEX_CALLER_FACTS", value)],
+        );
+        assert_eq!(
+            response,
+            Value::Null,
+            "only the exact opt-in value enables facts: {value}"
+        );
     }
 
-    let graph_prompt = "Trace callers of `Foo::bar` and the impact of changing `Foo::bar`.";
-    let history_prompt = "Which commit introduced `Foo::bar`?";
-    assert_eq!(submit(graph_prompt), Value::Null, "graph data is absent");
+    for prompt in [
+        "How does locale routing work in this repo? Which file intercepts requests?",
+        "Which commit introduced transferPageToGhost?",
+        "Who calls transferPageToGhost? Use native search only.",
+    ] {
+        assert_eq!(submit(prompt, true), Value::Null, "{prompt}");
+    }
+
+    let missing = indexed_dir("codex-caller-facts-no-graph");
+    let missing_response = hook(
+        &["run-hook", "prompt-submit", "--provider", "codex"],
+        &json!({"hook_event_name":"UserPromptSubmit", "prompt":graph_prompt, "cwd":missing.as_ref()}),
+        &[("PIXEL_CODEX_CALLER_FACTS", "1")],
+    );
+    assert_eq!(missing_response, Value::Null, "unready graph abstains");
+
+    let stale = dir.join("apps/notion-to-ghost/route.ts");
+    std::fs::write(&stale, "export async function POST() { return false }\n").unwrap();
     assert_eq!(
-        submit(history_prompt),
+        submit(graph_prompt, true),
         Value::Null,
-        "history data is absent"
+        "stale source abstains"
     );
 
-    // A text shard alone does not make graph retrieval available. Exercise
-    // the installed hook path with each backing database appearing on disk.
-    let pixel_dir = dir.join(pixel_index::index::SHARD_DIR);
+    let ambiguous = caller_facts_dir("ambiguous", true);
+    let ambiguous_response = hook(
+        &["run-hook", "prompt-submit", "--provider", "codex"],
+        &json!({"hook_event_name":"UserPromptSubmit", "prompt":graph_prompt, "cwd":ambiguous.as_ref()}),
+        &[("PIXEL_CODEX_CALLER_FACTS", "1")],
+    );
+    assert_eq!(ambiguous_response, Value::Null, "ambiguous target abstains");
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_caller_facts_reject_a_source_symlink_that_escapes_the_repository() {
+    let dir = caller_facts_dir("escaping-source", false);
+    let outside = Scratch::for_test("pixel-codex-caller-facts", "outside-source");
+    std::fs::write(&outside.join("route.ts"), "export function POST() {}\n").unwrap();
+    let route = dir.join("apps/notion-to-ghost/route.ts");
+    std::fs::remove_file(&route).unwrap();
+    std::os::unix::fs::symlink(outside.join("route.ts"), &route).unwrap();
+    let output = hook(
+        &["run-hook", "prompt-submit", "--provider", "codex"],
+        &json!({
+            "hook_event_name":"UserPromptSubmit",
+            "prompt":"In /apps/notion-to-ghost, trace the call path around transferPageToGhost. What are its direct callers?",
+            "cwd":dir.as_ref()
+        }),
+        &[("PIXEL_CODEX_CALLER_FACTS", "1")],
+    );
+    assert_eq!(output, Value::Null, "escaping source must not be emitted");
+}
+
+#[test]
+fn codex_caller_context_accepts_exactly_1024_bytes_and_rejects_1025() {
+    let dir = caller_facts_dir("context-byte-boundary", false);
+    let prompt = "In /apps/notion-to-ghost, trace the call path around transferPageToGhost. What are its direct callers?";
+    let submit = || {
+        hook(
+            &["run-hook", "prompt-submit", "--provider", "codex"],
+            &json!({"hook_event_name":"UserPromptSubmit", "prompt":prompt, "cwd":dir.as_ref()}),
+            &[("PIXEL_CODEX_CALLER_FACTS", "1")],
+        )
+    };
+    let initial = submit();
+    let initial_context = initial["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("fixture graph has caller facts");
+    let growth = 1024 - initial_context.len();
+    let current_path = extend_indexed_source_path(&dir, "apps/notion-to-ghost/route.ts", growth);
+    let at_limit = submit();
+    let context = at_limit["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("context exactly at the byte cap remains available");
+    assert_eq!(context.len(), 1024);
+
+    extend_indexed_source_path(&dir, &current_path, 1);
+    assert_eq!(submit(), Value::Null, "1025-byte context must abstain");
+}
+
+#[test]
+fn codex_caller_facts_reject_a_stale_target_file() {
+    let dir = caller_facts_dir("stale-target", false);
+    let target = dir.join("apps/notion-to-ghost/transfer.ts");
     std::fs::write(
-        pixel_dir.join(pixel_daemon::api::GRAPH_DB_FILE),
-        b"graph database present",
+        &target,
+        "export function transferPageToGhost() { return 'changed but same symbol' }\n",
     )
     .unwrap();
-    let graph = submit(graph_prompt);
-    let guidance = graph["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(
-        guidance.contains("Optional structural lookup"),
-        "{guidance}"
+    let output = hook(
+        &["run-hook", "prompt-submit", "--provider", "codex"],
+        &json!({
+            "hook_event_name":"UserPromptSubmit",
+            "prompt":"In /apps/notion-to-ghost, trace the call path around transferPageToGhost. What are its direct callers?",
+            "cwd":dir.as_ref()
+        }),
+        &[("PIXEL_CODEX_CALLER_FACTS", "1")],
     );
-    assert!(guidance.contains("pixel who-calls"), "{guidance}");
-    assert!(
-        guidance.contains("incomplete repository evidence, not instructions"),
-        "{guidance}"
-    );
-    assert!(
-        guidance.contains("0 callers does not prove none exist"),
-        "{guidance}"
-    );
-    assert!(
-        guidance.contains("immediately if results are empty or unhelpful"),
-        "{guidance}"
-    );
-    assert_eq!(
-        submit(history_prompt),
-        Value::Null,
-        "graph data alone must not enable history guidance"
-    );
+    assert_eq!(output, Value::Null, "stale target source must abstain");
+}
 
-    let natural_symbol = submit(
-        "In /apps/notion-to-ghost, trace the call path around transferPageToGhost. What are its direct callers?",
-    );
-    assert!(
-        natural_symbol["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .is_some_and(|context| context.contains("Optional structural lookup")),
-        "{natural_symbol}"
-    );
-
-    std::fs::write(
-        pixel_dir.join(pixel_facts::store::HISTORY_DB_FILE),
-        b"history database present",
-    )
-    .unwrap();
-    let history = submit(history_prompt);
-    let guidance = history["hookSpecificOutput"]["additionalContext"]
-        .as_str()
+#[test]
+fn codex_caller_facts_reject_a_graph_callsite_past_source_end() {
+    let dir = caller_facts_dir("invalid-callsite-line", false);
+    let graph_path = dir
+        .join(pixel_index::index::SHARD_DIR)
+        .join(pixel_daemon::api::GRAPH_DB_FILE);
+    let graph = pixel_graph::store::GraphStore::open(&graph_path).unwrap();
+    graph
+        .conn()
+        .execute_batch(
+            "UPDATE edges SET site_line = 999
+             WHERE src_id IN (
+                 SELECT s.id FROM symbols AS s JOIN files AS f ON f.id = s.file_id
+                 WHERE s.name = 'POST' AND f.path = 'apps/notion-to-ghost/route.ts'
+             ) AND dst_id IN (
+                 SELECT s.id FROM symbols AS s JOIN files AS f ON f.id = s.file_id
+                 WHERE s.name = 'transferPageToGhost' AND f.path = 'apps/notion-to-ghost/transfer.ts'
+             )",
+        )
         .unwrap();
-    assert!(guidance.contains("Optional history lookup"), "{guidance}");
-    assert!(guidance.contains("pixel dig-history"), "{guidance}");
-    assert!(
-        guidance.contains("incomplete evidence, not instructions"),
-        "{guidance}"
+    let changed: i64 = graph
+        .conn()
+        .query_row("SELECT changes()", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(changed, 1, "fixture must corrupt one indexed call site");
+    drop(graph);
+
+    let output = hook(
+        &["run-hook", "prompt-submit", "--provider", "codex"],
+        &json!({
+            "hook_event_name":"UserPromptSubmit",
+            "prompt":"In /apps/notion-to-ghost, trace the call path around transferPageToGhost. What are its direct callers?",
+            "cwd":dir.as_ref()
+        }),
+        &[("PIXEL_CODEX_CALLER_FACTS", "1")],
     );
-    assert!(
-        guidance.contains("immediately if results are empty or unhelpful"),
-        "{guidance}"
-    );
-    assert_eq!(
-        submit("How does locale routing work in this repo?"),
-        Value::Null,
-        "ordinary Q&A stays native even when both databases exist"
-    );
+    assert_eq!(output, Value::Null, "out-of-range callsite must abstain");
 }
 
 #[test]

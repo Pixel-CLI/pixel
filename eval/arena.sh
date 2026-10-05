@@ -13,6 +13,7 @@
 # Usage: eval/arena.sh [--arms "raw pixel"] [--tasks "s1 s2 s3"] [--reps N]
 #                      [--results-dir DIR] [--reuse-pixel-image] [--watch]
 #                      [--assert-context-parity] [--prepare-pixel-graph]
+#                      [--review-pixel-hooks] [--codex-caller-facts]
 #   --watch opens one Herdr pane per arm container (when inside Herdr)
 #   running `docker exec -it <c> codex` — interactive codex with and
 #   without pixel side by side; falls back to a tmux session otherwise.
@@ -35,6 +36,8 @@ SCENARIOS_DIR="${ARENA_SCENARIOS_DIR:-$ARENA_DIR/scenarios}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)-$$}"
 ASSERT_CONTEXT_PARITY=0
 PREPARE_PIXEL_GRAPH="${ARENA_PREPARE_PIXEL_GRAPH:-0}"
+REVIEWED_PIXEL_HOOKS="${ARENA_REVIEWED_PIXEL_HOOKS:-0}"
+CODEX_CALLER_FACTS="${ARENA_CODEX_CALLER_FACTS:-0}"
 START=$(date +%s)
 
 # flags override env: --arms, --tasks, --reps, --results-dir, --watch
@@ -47,6 +50,8 @@ while [ $# -gt 0 ]; do
     --reuse-pixel-image) PIXEL_IMAGE_SOURCE=existing; shift ;;
     --assert-context-parity) ASSERT_CONTEXT_PARITY=1; shift ;;
     --prepare-pixel-graph) PREPARE_PIXEL_GRAPH=1; shift ;;
+    --review-pixel-hooks) REVIEWED_PIXEL_HOOKS=1; shift ;;
+    --codex-caller-facts) CODEX_CALLER_FACTS=1; shift ;;
     --watch) WATCH=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -56,8 +61,29 @@ case "$PREPARE_PIXEL_GRAPH" in
   0|1) ;;
   *) echo "ARENA_PREPARE_PIXEL_GRAPH must be 0 or 1" >&2; exit 2 ;;
 esac
+case "$REVIEWED_PIXEL_HOOKS:$CODEX_CALLER_FACTS" in
+  0:0|1:0|1:1) ;;
+  *) echo "--codex-caller-facts requires --review-pixel-hooks" >&2; exit 2 ;;
+esac
 if [ "$PREPARE_PIXEL_GRAPH" = "1" ] && [[ " $ARMS " != *" pixel "* ]]; then
   echo "--prepare-pixel-graph requires the pixel arm" >&2
+  exit 2
+fi
+if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
+  read -r -a reviewed_arms <<< "$ARMS"
+  if [ "${#reviewed_arms[@]}" -ne 2 ] || \
+     ! { [[ " ${reviewed_arms[*]} " == *" raw "* ]] && [[ " ${reviewed_arms[*]} " == *" pixel "* ]]; }; then
+    echo "--review-pixel-hooks requires exactly the raw and pixel arms" >&2
+    exit 2
+  fi
+  read -r -a reviewed_tasks <<< "$TASKS"
+  if [ "${#reviewed_tasks[@]}" -ne 1 ]; then
+    echo "--review-pixel-hooks requires exactly one task so its receipt is unambiguous" >&2
+    exit 2
+  fi
+fi
+if [ "$CODEX_CALLER_FACTS" = "1" ] && [ "$PREPARE_PIXEL_GRAPH" != "1" ]; then
+  echo "--codex-caller-facts requires --prepare-pixel-graph" >&2
   exit 2
 fi
 
@@ -89,12 +115,36 @@ for task in $TASKS; do
     exit 2
   fi
 done
+python3 - "$ARENA_DIR" "$RESULTS" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+arena_dir, results_dir = map(Path, sys.argv[1:])
+files = {
+    "arena_runner": (arena_dir / "arena.sh", None),
+    "entrypoint": (arena_dir / "arena/entrypoint.sh", "/usr/local/bin/arena-entrypoint"),
+    "context_manifest": (arena_dir / "arena/context_manifest.py", "/usr/local/lib/arena-context-manifest.py"),
+    "hook_audit": (arena_dir / "arena/hook_audit.py", "/usr/local/lib/arena-hook-audit.py"),
+}
+receipt = {
+    name: {
+        "source_path": str(path.resolve()),
+        "container_path": container_path,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+    for name, (path, container_path) in files.items()
+}
+(results_dir / "harness-source.json").write_text(json.dumps(receipt, indent=2) + "\n")
+PY
 : > "$RESULTS/.watch-panes"
 
 prompt_for() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "$SCENARIOS_DIR/$1.json"; }
 
 launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
-  local arm="$1" rep="$2" image_id="$3" actual_image container
+  local arm="$1" rep="$2" image_id="$3" actual_image container arm_caller_facts=0
+  if [ "$arm" = "pixel" ]; then arm_caller_facts="$CODEX_CALLER_FACTS"; fi
   container="arena-$arm-$RUN_ID-$rep"
   local snap="$RESULTS/snapshot-$arm-$rep"
   if [ ! -d "$snap" ]; then
@@ -137,10 +187,13 @@ launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
   -v "$AUTH":/root/.codex/auth.json:ro \
   -v "$ARENA_DIR/arena/entrypoint.sh":/usr/local/bin/arena-entrypoint:ro \
   -v "$ARENA_DIR/arena/context_manifest.py":/usr/local/lib/arena-context-manifest.py:ro \
+  -v "$ARENA_DIR/arena/hook_audit.py":/usr/local/lib/arena-hook-audit.py:ro \
     -v "$SCENARIOS_DIR":/prompts:ro \
     -v "$RESULTS":/out \
-    -e ARM_TOOL="$arm" -e REP="$rep" -e TASKS="$TASKS" \
+    -e ARM_TOOL="$arm" -e REP="$rep" -e TASKS="$TASKS" -e ARENA_RUN_ID="$RUN_ID" \
     -e PIXEL_ARENA_PREP_GRAPH="$PREPARE_PIXEL_GRAPH" \
+    -e ARENA_REVIEWED_PIXEL_HOOKS="$REVIEWED_PIXEL_HOOKS" \
+    -e ARENA_CODEX_CALLER_FACTS="$arm_caller_facts" \
     -e CODEX_MODEL="${CODEX_MODEL:-}" -e CODEX_EFFORT="${CODEX_EFFORT:-}" \
     "$image_id" >/dev/null
   actual_image=$("$DOCKER_BIN" inspect --format '{{.Image}}' "$container")

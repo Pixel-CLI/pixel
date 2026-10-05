@@ -40,13 +40,59 @@ receipt beside the results. It also refuses comparisons across different Codex
 versions. Local builds cache Cargo's registry, Git dependencies, and build
 artifacts; the first build still needs to populate those caches. Git builds use
 the resolved commit as Cargo's actual `--rev`.
+The runner bind-mounts its current entrypoint, context manifest and hook auditor
+into each container, including when reusing a pinned image; harness-only edits
+do not require an image rebuild. `harness-source.json` records SHA-256 values
+and container paths for the runner files used in that run.
 
 Graph experiments use `--prepare-pixel-graph`; the saved setup receipt separates
-index preparation from model time. A fresh Codex home may leave installed hooks
-untrusted: static context parity alone cannot establish hook delivery. Preserve
-an actual prompt-hook response receipt before drawing conclusions about dynamic
-routing. `--assert-context-parity` additionally expects no Pixel calls and is
-intended for generic-question abstention controls.
+index preparation from model time. Retrieval routing stays native by default,
+including when a graph is prepared. A fresh Codex home may leave installed
+hooks untrusted: static context parity alone cannot establish hook delivery.
+`--assert-context-parity` additionally expects no Pixel calls and is intended
+for generic-question abstention controls.
+
+### Explicit reviewed-hook experiment
+
+The default run keeps Pixel retrieval routing native and does not bypass Codex
+hook trust. For a disposable raw/Pixel pair that intentionally exercises
+Pixel's Codex prompt hook, add `--review-pixel-hooks`. This flag only audits and
+records delivery; it does not enable experimental caller facts. Both containers
+must finish the audit before either model starts: raw must have no hooks; Pixel
+must have exactly the 11 known Pixel Codex commands under
+`/root/.codex/hooks.json`; project/global foreign hooks and plugin hook
+declarations stop the pair. Only after both audits pass does the runner apply
+the same Codex hook-trust bypass to both arms. It does not change host hook
+trust. The Pixel prompt-hook wrapper records its validated `UserPromptSubmit`
+response, emitted context status and hook stderr in
+`pixel-hook-<rep>.jsonl`; task stderr is retained as
+`<arm>-<task>-<rep>.stderr`. Neither receipt stores prompt input or auth. A
+receipt proves only that context text was returned and forwarded by the hook;
+it does not prove the model used it. Reviewed-hook mode is limited to one task
+per run so the receipt corresponds to the selected scenario; the harness marks
+the Pixel result failed if that task produces no valid hook response.
+
+Experimental indexed-caller facts require a separate explicit flag. This also
+requires graph preparation and reviewed hooks, and sets the installed Pixel
+hook's `PIXEL_CODEX_CALLER_FACTS=1` switch only in the Pixel container:
+
+```bash
+REPO_SNAPSHOT=/path/to/foreign/repository \
+PIXEL_IMAGE_SOURCE=existing PIXEL_ARENA_IMAGE=sha256:<pinned-image-id> \
+CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium \
+rtk bash eval/arena.sh --arms "raw pixel" --tasks "g4-transfer-callers" \
+  --reps 1 --prepare-pixel-graph --review-pixel-hooks --codex-caller-facts \
+  --results-dir eval/arena-results/g4-reviewed-hooks-01
+```
+
+Use a new results directory and the same pinned image/repository/model for each
+paired comparison. The flags are opt-in; caller facts are not enabled by
+`--review-pixel-hooks` alone. Compare the transcript and answer quality as
+well.
+
+The hook allowlist intentionally matches the current Pixel Codex installer.
+If its command set or event names change, update the allowlist and tests before
+using this reviewed-hook mode.
 
 Inspect the transcripts as well as the rank table. A required-pattern score
 measures answer coverage, not semantic correctness. Token totals include

@@ -136,10 +136,18 @@ affected by the sub-agent flag.
 
 ### Codex
 
-Codex uses native retrieval for ordinary questions. Pixel's `UserPromptSubmit`
-hook adds a short optional hint only for selected structural or historical
-questions about named code; it adds nothing for ordinary questions and never
-starts a model call to classify the prompt.
+Codex uses native retrieval by default. Pixel's `UserPromptSubmit` hook adds no
+retrieval instructions or facts unless the experimental
+`PIXEL_CODEX_CALLER_FACTS=1` environment variable is set when launching Codex.
+That experiment can supply up to three indexed caller locations for an explicit
+caller or impact question about one named symbol. It verifies the cited files,
+uses an existing graph only, and adds nothing when the graph is absent, stale,
+ambiguous or too slow. It never starts a model call to classify the prompt.
+The experiment remains opt-in because the small paired trials showed mixed
+cost and latency results; it is not a guaranteed improvement.
+This describes the `pixel install` integration. Separately installed plugins
+and skills can still contribute their own instructions; they are not removed
+by this migration.
 
 For manual hook registration, use `pixel run-hook prompt-submit --provider
 codex` for `UserPromptSubmit` and `pixel run-hook metrics --provider codex` for

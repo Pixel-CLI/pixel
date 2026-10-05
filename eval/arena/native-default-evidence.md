@@ -1,9 +1,10 @@
 # Codex native-default experiment (Task 700)
 
 The target is a routing contract: ordinary repository questions should receive
-no Pixel retrieval instructions or forced Pixel command. Explicit structural
-questions may receive one small, optional graph hint. Classification is local;
-it makes no model request and does not build an index. This removes a systematic
+no Pixel retrieval instructions or forced Pixel command. Bounded caller facts
+remain an opt-in experiment because their measured benefit is inconsistent.
+Classification is local; it makes no model request and does not build an index.
+This removes a systematic
 source of extra model work, but cannot guarantee identical answers, tokens or
 latency across stochastic model runs. Hook process startup still has a cost.
 
@@ -170,9 +171,94 @@ the helper name `findPostsByTitle` while correctly explaining exact-title
 matching, both callers, the status gate, and the create/update Ghost methods.
 Both answers were substantively correct on the requested behavior. This one
 pair shows the optional hint was delivered and ignored, not a demonstrated
-retrieval benefit. The next bounded experiment changes only the hint wording.
+retrieval benefit.
 
-## Installed validation
+## Candidate 3: require a graph call (rejected)
+
+The next override asked the model to run `who-calls` once. The first trial
+exposed a scenario defect: `/apps/notion-to-ghost` was interpreted as an absolute
+working directory. The scenario now says `apps/notion-to-ghost under the
+repository root`. Its remaining question and rubric are unchanged. Results
+before and after that correction are not pooled.
+
+The two corrected trials used the same pinned candidate 2 image, empty static
+context, and an audited hook override. Receipts confirm that the 376-byte
+instruction reached the model and each Pixel run successfully called
+`who-calls`. These are prompt-override experiments, not a new production image.
+
+| Run directory in `eval/arena-results/` | Raw tokens / seconds / coverage | Pixel tokens / seconds / coverage |
+| --- | --- | --- |
+| `candidate3-g4-path-corrected` | 62,534 / 30 / 14 of 18 | 65,563 / 27 / 18 of 18 |
+| `candidate3-g4-confirmation` | 63,095 / 25 / 18 of 18 | 85,047 / 29 / 18 of 18 |
+
+Median total tokens increased from 62,814.5 to 75,305 (19.9%). Both arms
+described the requested behavior correctly; raw's first answer omitted the
+full repository-relative paths required by four rubric patterns. A forced
+tool call did not demonstrate a substantive quality benefit and was rejected.
+
+## Candidate 4: supply bounded caller facts
+
+Instead of requiring another model tool turn, the hook supplied two caller
+locations from a real graph query. The exact 217-byte context is recorded with
+hash `a93d7416` (prefix) in the runtime receipts. It labels the callers as
+incomplete indexed candidates and asks the model to verify source. Static
+context stayed empty. The image, model and corrected scenario were held fixed;
+only the dynamic context changed.
+
+| Run directory in `eval/arena-results/` | Raw tokens / seconds / coverage | Pixel tokens / seconds / coverage |
+| --- | --- | --- |
+| `candidate4-g4-facts-r1` | 62,062 / 24 / 14 of 18 | 47,501 / 23 / 14 of 18 |
+| `candidate4-g4-confirmation` | 67,092 / 31 / 18 of 18 | 48,511 / 29 / 14 of 18 |
+
+The precompute query took 179 ms, separately from install (52 ms) and graph
+preparation (682 ms). All source snapshots used commit `5c478747` (prefix).
+The precompute and source-verification receipt is
+`target/arena-g4-hook-audit/candidate4-query/output/candidate4-precompute.json`.
+Each Pixel run made zero model-time Pixel calls; transcripts show native search
+and source reads. Median total tokens fell from 64,577 to 48,006 (25.7%);
+median model wall time fell from 27.5 to 26 seconds, before the separately
+measured lookup. Gross tokens are not billed dollars: cached input is included
+and prices were not measured.
+
+All four answers were substantively correct on callers, publication status,
+title matching and Ghost create/update methods. Both Pixel answers and the
+first raw answer abbreviated file paths, losing four required-pattern points.
+This does not establish equal rubric quality. A separate citation-format
+experiment must retain its own result and context hash.
+
+Reproduce any row's coverage with:
+
+```bash
+rtk python3 eval/arena/rank.py \
+  --results eval/arena-results/<run-directory> \
+  --scenarios-dir eval/scenarios --arms raw pixel \
+  --tasks g4-transfer-callers --reps 1
+```
+
+The direct-facts experiments used a precomputed hook override. They do not
+establish production-hook timing or correctness; the bounded read-only
+implementation requires separate installed validation.
+
+## Candidate 5: preserve citation paths (mixed result)
+
+`candidate5-g4-citations` changed only the dynamic prefix to ask for full
+repository-relative citations and a search for additional callers. Its exact
+297-byte context has hash prefix `d2305bf9`. Both answers covered 18/18
+patterns and correctly explained the source. Raw used 47,745 total tokens
+(47,026 input, 38,144 cached input, 719 generated) in 44 seconds. Pixel used
+67,696 (66,942 input, 56,320 cached input, 754 generated) in 29 seconds,
+with zero model-time Pixel calls. Setup took 882 ms; the original 179 ms
+precompute was reused, not remeasured. Runtime receipts confirm delivery,
+empty static context, the pinned image and matching source snapshots.
+
+Equal rubric coverage came with more gross tokens and less wall time in this
+pair. Together with candidate 4, the evidence is mixed; it does not justify
+enabling caller facts automatically. The default therefore remains native,
+and the bounded implementation is retained only behind explicit experimental
+opt-in. No candidate demonstrates universal non-regression, and no result is
+being reported as a dollar-cost saving.
+
+## Earlier candidate validation
 
 The final rebuild and self-update exited 0. Global installation reported 13
 green steps; absolute-path repository installation reported 8. Configuration
@@ -193,4 +279,49 @@ original thresholds and no retries. On frozen commit
 exited 0: 3,863 tests passed, six skipped, and formatting, Clippy, doctests and
 the script contracts passed. The same commit's review gate exited 0 with no
 BLOCKER or CONCERN; its lower-severity findings were capped at 200, so it is
-not an exhaustive review. CI and the remote mutation verdict remain separate.
+not an exhaustive review. The remote campaign on that commit tested 94 mutants:
+65 caught, 13 unviable, 16 missed, zero timeouts (exit 2). Nine classifier and
+seven installation coverage gaps were addressed in `a4984278`; focused tests
+passed. That is not a passing mutation verdict. New implementation changes and
+CI require fresh validation.
+
+## Installed native default and experimental caller facts
+
+After the final routing decision, `pixel self-update --repo . --build
+"rtk cargo build --profile dev-release -p pixel-cli" --metrics off` rebuilt
+and installed the binary in 97.52 seconds (exit 0). Its SHA-256 is
+`7fdea364119ea4656b43beb5879242dcb1f8fe1e14a5c12b8d8ec717eef65c25`.
+The source identity and build output are in
+`target/native-default-evidence/facts-build.json` and `facts-build.log`.
+This is the production implementation, distinct from the arena overrides.
+
+The history-index track indexed 1,045 base files, 18 overlay files and
+2,238 commits, exiting 0. In parallel, `build-agent-config` exited 0;
+global installation returned 13 green steps and absolute-path repository
+installation returned eight. The subsequent
+`pixel doctor . --fix --fail-on yellow --json --metrics off` exited 0 with
+32 green checks, zero yellow/red/skipped checks, and no repairs needed.
+
+The probe read the exact command registered in `~/.codex/hooks.json` and
+invoked that installed command with valid Codex events against the foreign
+repository. All ten probes passed: g1–g4 emitted zero context by default;
+with `PIXEL_CODEX_CALLER_FACTS=1`, only g4 emitted the two verified caller
+locations; explicit native-only and unknown-symbol questions emitted nothing.
+Single-call local timings ranged from 10.49 to 14.78 ms, including process
+startup. This is hook-level verification, not a model benchmark or guarantee.
+The exact commands, payload hashes, outputs and binary hash are retained in
+`target/native-default-evidence/installed-facts-proof.json`.
+
+The production packet quotes names and paths and explicitly labels them as
+repository data; its ordering and text differ from the precomputed benchmark
+overrides. The earlier token results must not be attributed to this exact
+production packet. Its default is disabled; regression tests and final gates
+are tracked separately below.
+
+Scope: these runs exercise `pixel install`, not native plugin installation.
+The generated general Pixel skill still has a broad `.pixel/`-presence trigger.
+Adding narrower skills alongside it would not establish native-default
+behavior for plugin users. Skills can improve discovery and defer their bodies,
+but semantic activation is not reliable command interception; any separate
+skill-routing experiment must account for its always-visible metadata and
+on-demand loading cost.
