@@ -716,7 +716,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   to `api.scorecard.dev` and the findings to code scanning) and `codeql.yml`
   (CodeQL on every pull request into `main`, every push to `main` and
   weekly: Rust, the workflows, Python and JavaScript/TypeScript, all with
-  `build-mode: none`, results to code scanning and the `CodeQL` check) and
+  `build-mode: none` and `security-extended` queries, results to code scanning
+  and the `CodeQL` check; a dedicated Rust extraction cache is keyed by
+  runner, compiler, manifests/lockfiles and workflow, restored on PRs and
+  saved only after successful main analyses) and
   `fuzz.yml` (`cargo deny` on the `fuzz/` workspace with the root
   `deny.toml`, then every cargo-fuzz target on nightly: 60 s each on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the

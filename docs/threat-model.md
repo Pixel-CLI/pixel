@@ -550,7 +550,11 @@ boundary it crosses.
   an environment variable; no workflow interpolates `github.event.*` or
   `inputs.*` directly in a `run:` script; workflows default to `contents:
   read`; runs of outside contributors wait for a maintainer's approval;
-  CodeQL scans the workflows (`actions` language).
+  CodeQL scans the workflows (`actions` language) with `security-extended`
+  queries. Its Rust extraction cache is separate from build/test caches;
+  only successful main analyses save executable build-script/proc-macro
+  outputs, while PR analyses can restore them. All four language analyses
+  still run even when the cache hits.
 - **Status**: Partial.
 - **Residual**: any pull request body can name `Task <n>` and move that
   issue's board status; workflows that compile pull-request code on the
