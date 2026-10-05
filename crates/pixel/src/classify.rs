@@ -324,7 +324,11 @@ fn stored_base_when_unset(config: &crate::decide_remote::Config) -> Result<Strin
     let env_set = std::env::var("PIXEL_REMOTE_BASE")
         .ok()
         .is_some_and(|s| !s.is_empty());
-    let Some(stored) = (!env_set)
+    // The stored base/model belong to the preset the install step saved them
+    // for — applied to a different `--remote-preset` they would send that
+    // preset's key to a host it was never meant for.
+    let same_preset = crate::config_cmd::classify_remote_preset() == Some(config.preset);
+    let Some(stored) = (!env_set && same_preset)
         .then(crate::config_cmd::classify_remote_base)
         .flatten()
     else {
@@ -814,7 +818,7 @@ fn debug_lanes(
     // (an explicit `--remote-model` flag still applies to both lanes).
     let jev_model = opts.remote_model.clone().or_else(|| {
         matches!(remote_preset, crate::decide_remote::Preset::Jev)
-            .then(stored_remote_model_when_unset)
+            .then(|| stored_remote_model_when_unset(remote_preset))
             .flatten()
     });
     lanes.push((
@@ -980,12 +984,13 @@ fn resolve_remote_preset(
 
 /// The model the install step stored, when neither `--remote-model` nor
 /// `PIXEL_REMOTE_MODEL` names one — kept below both so an explicit override
-/// always wins over the onboarding choice.
-fn stored_remote_model_when_unset() -> Option<String> {
+/// always wins over the onboarding choice, and only for the preset it was
+/// stored against (a stored OpenCode Go model must never name a Jev call).
+fn stored_remote_model_when_unset(preset: crate::decide_remote::Preset) -> Option<String> {
     let env_set = std::env::var("PIXEL_REMOTE_MODEL")
         .ok()
         .is_some_and(|s| !s.is_empty());
-    if env_set {
+    if env_set || crate::config_cmd::classify_remote_preset() != Some(preset) {
         return None;
     }
     crate::config_cmd::classify_remote_model()
@@ -1018,7 +1023,7 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
     let remote_model = opts
         .remote_model
         .clone()
-        .or_else(stored_remote_model_when_unset);
+        .or_else(|| stored_remote_model_when_unset(remote_preset));
     // `opts` moves into `run_with`; the engine opener still needs the flag.
     let if_warm = opts.if_warm;
     let stdin = std::io::stdin();
@@ -1097,10 +1102,12 @@ pub(crate) fn open_session(
         debug: false,
     };
     let resolved = resolve_engine_for(&opts)?;
+    let resolved_preset =
+        resolve_remote_preset(preset, crate::config_cmd::classify_remote_preset());
     open_resolved(
         resolved,
-        resolve_remote_preset(preset, crate::config_cmd::classify_remote_preset()),
-        model.or_else(stored_remote_model_when_unset),
+        resolved_preset,
+        model.or_else(|| stored_remote_model_when_unset(resolved_preset)),
         false,
     )
 }
@@ -2725,7 +2732,9 @@ mod tests {
             ("PIXEL_REMOTE_MODEL", None),
             ("PIXEL_REMOTE_KEY_ENV", None),
         ]);
-        env.write_config("classify: {remote_base: 'https://stored.example'}\n");
+        env.write_config(
+            "classify: {remote_preset: openrouter, remote_base: 'https://stored.example'}\n",
+        );
         let config = crate::decide_remote::resolve_config(
             crate::decide_remote::Preset::Openrouter,
             None,
@@ -2745,7 +2754,9 @@ mod tests {
             ("PIXEL_REMOTE_MODEL", None),
             ("PIXEL_REMOTE_KEY_ENV", None),
         ]);
-        env.write_config("classify: {remote_base: 'https://stored.example'}\n");
+        env.write_config(
+            "classify: {remote_preset: openrouter, remote_base: 'https://stored.example'}\n",
+        );
         let config = crate::decide_remote::resolve_config(
             crate::decide_remote::Preset::Openrouter,
             None,
@@ -2762,7 +2773,9 @@ mod tests {
             ("PIXEL_REMOTE_MODEL", None),
             ("PIXEL_REMOTE_KEY_ENV", None),
         ]);
-        env.write_config("classify: {remote_base: 'https://stored.example'}\n");
+        env.write_config(
+            "classify: {remote_preset: openrouter, remote_base: 'https://stored.example'}\n",
+        );
         let config = crate::decide_remote::resolve_config(
             crate::decide_remote::Preset::Openrouter,
             None,
@@ -2782,7 +2795,9 @@ mod tests {
             ("PIXEL_REMOTE_MODEL", None),
             ("PIXEL_REMOTE_KEY_ENV", None),
         ]);
-        env.write_config("classify: {remote_base: 'http://plain.example'}\n");
+        env.write_config(
+            "classify: {remote_preset: openrouter, remote_base: 'http://plain.example'}\n",
+        );
         let keyed = crate::decide_remote::resolve_config(
             crate::decide_remote::Preset::Openrouter,
             None,
@@ -2790,6 +2805,7 @@ mod tests {
         )
         .unwrap();
         assert!(stored_base_when_unset(&keyed).is_err());
+        env.write_config("classify: {remote_preset: local, remote_base: 'http://plain.example'}\n");
         let keyless =
             crate::decide_remote::resolve_config(crate::decide_remote::Preset::Local, None, None)
                 .unwrap();
@@ -2800,11 +2816,30 @@ mod tests {
     }
 
     #[test]
+    fn stored_base_when_unset_should_ignore_a_base_stored_for_another_preset() {
+        let env = ScopedEnv::new(&[
+            ("PIXEL_REMOTE_BASE", None),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        env.write_config(
+            "classify: {remote_preset: jev, remote_base: 'https://api.typesafe.ai'}\n",
+        );
+        let config = crate::decide_remote::resolve_config(
+            crate::decide_remote::Preset::Openrouter,
+            None,
+            Some("sk-test".into()),
+        )
+        .unwrap();
+        assert_eq!(stored_base_when_unset(&config).unwrap(), config.base);
+    }
+
+    #[test]
     fn stored_remote_model_when_unset_should_yield_the_stored_model() {
         let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", None)]);
-        env.write_config("classify: {remote_model: stored-m}\n");
+        env.write_config("classify: {remote_preset: openrouter, remote_model: stored-m}\n");
         assert_eq!(
-            stored_remote_model_when_unset().as_deref(),
+            stored_remote_model_when_unset(crate::decide_remote::Preset::Openrouter).as_deref(),
             Some("stored-m")
         );
     }
@@ -2813,16 +2848,29 @@ mod tests {
     fn stored_remote_model_when_unset_should_defer_to_a_set_env_model() {
         {
             let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", Some("env-m"))]);
-            env.write_config("classify: {remote_model: stored-m}\n");
-            assert_eq!(stored_remote_model_when_unset(), None);
+            env.write_config("classify: {remote_preset: openrouter, remote_model: stored-m}\n");
+            assert_eq!(
+                stored_remote_model_when_unset(crate::decide_remote::Preset::Openrouter),
+                None
+            );
         }
         {
             let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", Some(""))]);
-            env.write_config("classify: {remote_model: stored-m}\n");
+            env.write_config("classify: {remote_preset: openrouter, remote_model: stored-m}\n");
             assert_eq!(
-                stored_remote_model_when_unset().as_deref(),
+                stored_remote_model_when_unset(crate::decide_remote::Preset::Openrouter).as_deref(),
                 Some("stored-m")
             );
         }
+    }
+
+    #[test]
+    fn stored_remote_model_when_unset_should_ignore_a_model_stored_for_another_preset() {
+        let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", None)]);
+        env.write_config("classify: {remote_preset: jev, remote_model: jev-latest}\n");
+        assert_eq!(
+            stored_remote_model_when_unset(crate::decide_remote::Preset::Openrouter),
+            None
+        );
     }
 }
