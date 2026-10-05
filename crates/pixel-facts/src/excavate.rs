@@ -708,3 +708,6 @@ fn snippet(text: &str, needle: &str) -> String {
         None => text.chars().take(120).collect(),
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

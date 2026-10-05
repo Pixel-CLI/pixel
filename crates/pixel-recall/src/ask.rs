@@ -674,3 +674,6 @@ mod lexical_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

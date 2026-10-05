@@ -317,3 +317,6 @@ mod tests {
         assert!(rendered.ends_with("cursor: 412\n"));
     }
 }
+
+#[cfg(test)]
+mod contract_tests;
