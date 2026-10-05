@@ -1174,3 +1174,6 @@ mod tests {
         assert!(extract_svelte_vue("src/Empty.svelte", b"").is_empty());
     }
 }
+
+#[cfg(test)]
+mod contract_tests;
