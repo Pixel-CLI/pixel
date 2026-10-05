@@ -1405,10 +1405,10 @@ fn capped(mut s: String, cap: usize) -> (String, bool) {
     if s.len() <= cap {
         return (s, false);
     }
-    s.truncate(cap);
-    while !s.is_char_boundary(s.len()) {
-        s.pop();
-    }
+    // `truncate` panics on a non-boundary index, so find the boundary first
+    // (#768: a conflict hunk whose byte at the cap is inside a character).
+    let cut = s.floor_char_boundary(cap);
+    s.truncate(cut);
     (s, true)
 }
 
@@ -1560,6 +1560,24 @@ fn non_conflicting_paths(root: &Path, merge_base: &str, ours: &str, theirs: &str
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn capped_should_back_off_to_a_char_boundary_when_the_cap_splits_a_multibyte_char() {
+        // `é` is two bytes (3..5): a cap of 4 lands inside it (#768). The
+        // hunk keeps the whole characters before the cap, never panics.
+        assert_eq!(capped("abcéz".to_string(), 4), ("abc".to_string(), true));
+        // `日` is three bytes (1..4): caps of 2 and 3 both back off to 1.
+        assert_eq!(capped("a日b".to_string(), 2), ("a".to_string(), true));
+        assert_eq!(capped("a日b".to_string(), 3), ("a".to_string(), true));
+    }
+
+    #[test]
+    fn capped_should_keep_the_text_when_it_fits_the_cap_and_cut_exactly_at_a_boundary() {
+        assert_eq!(capped("abcd".to_string(), 4), ("abcd".to_string(), false));
+        assert_eq!(capped("ab".to_string(), 4), ("ab".to_string(), false));
+        assert_eq!(capped("abcé".to_string(), 3), ("abc".to_string(), true));
+        assert_eq!(capped("日本".to_string(), 3), ("日".to_string(), true));
+    }
 
     fn init_repo_with_remote(root: &Path, remote: &Path) {
         std::process::Command::new("git")
