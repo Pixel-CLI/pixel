@@ -1028,7 +1028,7 @@ pub fn set_classify_remote_model(
         if let Some(classify) = doc["classify"].as_object_mut() {
             match model.filter(|m| !m.is_empty()) {
                 Some(model) => {
-                    classify["remote_model"] = json!(model);
+                    classify.insert("remote_model".to_string(), json!(model));
                 }
                 None => {
                     classify.remove("remote_model");
@@ -1036,7 +1036,7 @@ pub fn set_classify_remote_model(
             };
             match base.filter(|b| !b.is_empty()) {
                 Some(base) => {
-                    classify["remote_base"] = json!(base);
+                    classify.insert("remote_base".to_string(), json!(base));
                 }
                 None => {
                     classify.remove("remote_base");
@@ -2725,6 +2725,41 @@ mod tests {
         assert_eq!(stored["metrics"], "off");
         assert_eq!(stored["classify"]["engine"], "local");
         assert_eq!(stored["classify"]["ollaya"]["model"], "winnow:e4b");
+
+        restore_home(saved);
+    }
+
+    #[test]
+    fn remote_preset_should_store_the_model_and_base_and_clear_them_on_switch() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+
+        set_classify_remote_model(
+            crate::decide_remote::Preset::Jev,
+            Some("jev-latest".to_string()),
+            Some("https://jev.example.test"),
+        )
+        .unwrap();
+        assert_eq!(classify_engine().as_deref(), Some("remote"));
+        assert_eq!(
+            classify_remote_preset(),
+            Some(crate::decide_remote::Preset::Jev)
+        );
+        assert_eq!(classify_remote_model().as_deref(), Some("jev-latest"));
+        assert_eq!(
+            classify_remote_base().as_deref(),
+            Some("https://jev.example.test")
+        );
+
+        set_classify_remote_model(crate::decide_remote::Preset::Deepseek, None, None).unwrap();
+        assert_eq!(
+            classify_remote_preset(),
+            Some(crate::decide_remote::Preset::Deepseek)
+        );
+        assert_eq!(classify_remote_model(), None);
+        assert_eq!(classify_remote_base(), None);
 
         restore_home(saved);
     }
