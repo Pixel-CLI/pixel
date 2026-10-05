@@ -883,6 +883,60 @@ mod tests {
     }
 
     #[test]
+    fn task_hook_check_rejects_retired_pixel_hook_after_non_retired_hooks() {
+        let home = scratch_codex_home("check-retired-order");
+        let exe = Path::new("/opt/pixel");
+        install_task_hooks(&home, exe, false).unwrap();
+
+        let path = home.join(HOOKS_FILE);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["hooks"]["SessionStart"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "hooks": [{"type": "command", "command": "foreign-session-hook"}]
+            }));
+        value["hooks"]["SessionStart"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "hooks": [{
+                    "type": "command",
+                    "command": "/opt/pixel run-hook metrics --provider codex"
+                }]
+            }));
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = check_task_hooks(&home, exe).unwrap_err();
+        assert!(
+            error.contains("retired automatic Pixel Codex hook remains"),
+            "the later retired hook must be reported even after a non-retired hook: {error}"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn carries_pixel_block_detects_either_orphaned_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(CODEX_CONFIG_FILE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        for marker in [MANAGED_BEGIN, MANAGED_END] {
+            fs::write(
+                &path,
+                format!("{DEVELOPER_INSTRUCTIONS_KEY} = {}\n", string_value(marker)),
+            )
+            .unwrap();
+
+            assert!(
+                carries_pixel_block(home.path()).unwrap(),
+                "an orphaned marker must remain detectable: {marker}"
+            );
+        }
+    }
+
+    #[test]
     fn task_hook_reinstall_refreshes_the_binary_path_without_duplicating_events() {
         let home = scratch_codex_home("refresh");
         install_task_hooks(&home, Path::new("/old/pixel"), false).unwrap();

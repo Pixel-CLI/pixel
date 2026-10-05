@@ -4236,6 +4236,36 @@ Prose naming `pixel status` is not a table row.
     }
 
     #[test]
+    fn pi_impact_doctor_should_report_an_unmanaged_extension_as_foreign_and_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let extension = home.path().join(".pi/agent/extensions/pixel-impact.ts");
+        std::fs::create_dir_all(extension.parent().unwrap()).unwrap();
+        std::fs::write(&extension, "// user-owned extension\n").unwrap();
+
+        let report = super::doctor(&super::DoctorOptions {
+            home: Some(home.path().to_path_buf()),
+            only: vec!["install.pi-impact".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let check = &report.checks[0];
+        assert_eq!(check.id, "install.pi-impact");
+        assert_eq!(check.status, CheckStatus::Yellow, "{check:?}");
+        assert_eq!(
+            check.summary,
+            format!(
+                "foreign Pi extension left untouched at {}",
+                extension.display()
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(&extension).unwrap(),
+            "// user-owned extension\n",
+            "doctor must leave the foreign extension untouched"
+        );
+    }
+
+    #[test]
     fn global_claude_doctor_should_reject_provider_qualified_automatic_hooks_only() {
         let exe = Path::new("/opt/pixel/pixel");
         let task_hooks = serde_json::json!({

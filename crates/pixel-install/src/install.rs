@@ -1351,6 +1351,44 @@ pub fn migrate(repo_root: &Path) -> Result<MigrateReport> {
 }
 
 #[cfg(test)]
+mod pi_prompt_io_tests {
+    use super::{InstallOptions, PI_PROMPT_REL, install};
+    use crate::InstallError;
+    use std::fs;
+    use std::io::ErrorKind;
+
+    #[cfg(unix)]
+    #[test]
+    fn install_should_propagate_pi_prompt_read_errors_without_touching_prompt_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let prompt_path = home.path().join(PI_PROMPT_REL);
+        fs::create_dir_all(&prompt_path).unwrap();
+        let sentinel = prompt_path.join("keep.txt");
+        fs::write(&sentinel, "user-owned Pi data").unwrap();
+
+        let error = install(&InstallOptions {
+            home: Some(home.path().to_path_buf()),
+            ..Default::default()
+        })
+        .expect_err("a directory at the prompt path is an I/O error, not an absent file");
+
+        assert!(
+            matches!(&error, InstallError::Io(error) if error.kind() == ErrorKind::IsADirectory),
+            "the prompt read error must propagate: {error:?}"
+        );
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "user-owned Pi data");
+        assert!(prompt_path.is_dir());
+        assert!(
+            !home
+                .path()
+                .join(crate::routing::CLAUDE_SHARED_SETTINGS)
+                .exists(),
+            "install must stop before writing later provider hooks"
+        );
+    }
+}
+
+#[cfg(test)]
 mod stale_prompt_tests {
     use super::*;
 

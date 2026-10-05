@@ -1454,6 +1454,52 @@ mod routing_tests {
     use serde_json::json;
 
     #[test]
+    fn pi_uninstall_preserves_foreign_extension_bytes() {
+        let home = tempfile::tempdir().unwrap();
+        let config_dir = home.path().join(config::PI_CONFIG_DIR);
+        let extension = config_dir.join("extensions/pixel-guard.ts");
+        fs::create_dir_all(extension.parent().unwrap()).unwrap();
+        let original = b"export default function foreignExtension() {}\n";
+        fs::write(&extension, original).unwrap();
+
+        let step = remove_pi_extension(home.path(), false).unwrap();
+
+        assert_eq!(step.status, CheckStatus::Yellow);
+        assert_eq!(step.summary, "foreign pi extension left untouched");
+        assert_eq!(fs::read(&extension).unwrap(), original);
+        assert_eq!(
+            fs::read_dir(extension.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pi_uninstall_preserves_symlink_even_when_target_has_managed_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let config_dir = home.path().join(config::PI_CONFIG_DIR);
+        let extension = config_dir.join("extensions/pixel-guard.ts");
+        let target = home.path().join("shared-extension.ts");
+        fs::create_dir_all(extension.parent().unwrap()).unwrap();
+        let original = format!(
+            "// {}\nexport default function shared() {{}}\n",
+            config::MANAGED_BEGIN
+        );
+        fs::write(&target, &original).unwrap();
+        std::os::unix::fs::symlink(&target, &extension).unwrap();
+
+        let step = remove_pi_extension(home.path(), false).unwrap();
+
+        assert_eq!(step.status, CheckStatus::Yellow);
+        assert_eq!(fs::read_link(&extension).unwrap(), target);
+        assert_eq!(fs::read_to_string(&target).unwrap(), original);
+        assert_eq!(
+            fs::read_dir(extension.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
     fn routing_uninstall_restores_rtk_fragment_and_preserves_later_user_changes() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
@@ -1728,6 +1774,59 @@ mod routing_tests {
             changed
         );
         assert!(codex.join(routing::CODEX_COMPOSED_BACKUP).is_file());
+    }
+
+    #[test]
+    fn legacy_composed_backup_does_not_overwrite_foreign_hooks() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join("Documents/project/.codex");
+        let path = codex.join("hooks.json");
+        let sidecar = codex.join(routing::CODEX_COMPOSED_BACKUP);
+        let current = json!({"hooks":{"PreToolUse":[{
+            "matcher":"Bash", "hooks":[{"type":"command","command":"user-security-check"}]
+        }]}});
+        let backup = json!({"version":1,"provider":"codex","pre_tool_use":[]});
+        install::write_settings(&path, &current, false).unwrap();
+        install::write_settings(&sidecar, &backup, false).unwrap();
+        make_private(&sidecar);
+        let current_bytes = fs::read(&path).unwrap();
+        let backup_bytes = fs::read(&sidecar).unwrap();
+
+        let step = remove_project_codex_hooks(home.path(), Path::new("/tmp/pixel"), false).unwrap();
+
+        assert_eq!(step.status, CheckStatus::Yellow);
+        assert_eq!(fs::read(&path).unwrap(), current_bytes);
+        assert_eq!(fs::read(&sidecar).unwrap(), backup_bytes);
+    }
+
+    #[test]
+    fn composed_backup_snapshot_takes_precedence_over_legacy_signature() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join("Documents/project/.codex");
+        let path = codex.join("hooks.json");
+        let sidecar = codex.join(routing::CODEX_COMPOSED_BACKUP);
+        let command = format!(
+            "'/tmp/pixel' run-hook composed-guard --provider codex --backup {}",
+            routing::quoted_executable(&sidecar)
+        );
+        let current = json!({"hooks":{"PreToolUse":[{"hooks":[{
+            "type":"command","command":command
+        }]}]}});
+        let backup = json!({
+            "version":1,"provider":"codex","pre_tool_use":[],
+            "managed_pre_tool_use":[{"hooks":[{"type":"command","command":"different-managed-command"}]}]
+        });
+        install::write_settings(&path, &current, false).unwrap();
+        install::write_settings(&sidecar, &backup, false).unwrap();
+        make_private(&sidecar);
+        let current_bytes = fs::read(&path).unwrap();
+        let backup_bytes = fs::read(&sidecar).unwrap();
+
+        let step = remove_project_codex_hooks(home.path(), Path::new("/tmp/pixel"), false).unwrap();
+
+        assert_eq!(step.status, CheckStatus::Yellow);
+        assert_eq!(fs::read(&path).unwrap(), current_bytes);
+        assert_eq!(fs::read(&sidecar).unwrap(), backup_bytes);
     }
 
     fn missing_composed_config(home: &Path) -> (PathBuf, serde_json::Value) {
