@@ -1,0 +1,1 @@
+**pre-push:** the hook no longer refuses a branch whose merge-base is behind origin's default: the baseline check, the mutation gate and the review all judge that merge-base, or the merge-base with `PIXEL_MUTANTS_BASE` for a stacked branch. Rebase only on a conflict or when the change needs something newer on `main`.
