@@ -147,6 +147,28 @@ fn parse_should_skip_blank_and_display_less_lines() {
     );
 }
 
+/// A complete line that is not JSON is consumed and counted in
+/// `skipped_records`, the only trace `ParseOutput` keeps of it; a valid
+/// line without `display` is not a skipped record (#787).
+#[test]
+fn parse_should_count_complete_lines_that_are_not_json() {
+    let body = format!(
+        "{}{}{}{}",
+        "{\"display\":\"cut\n",
+        line("kept", Some("k"), None, 1),
+        "not json\n",
+        "{\"conversationId\":\"nodisplay\",\"timestamp\":2}\n",
+    );
+    let h = history(&body);
+    let out = h.parse(Change::New);
+    assert_eq!(out.skipped_records, 2);
+    assert_eq!(
+        summary(&out),
+        vec![("k".to_string(), vec!["kept".to_string()])]
+    );
+    assert_eq!(out.consumed_bytes, body.len() as u64);
+}
+
 /// A last line without its newline is still being written: it is neither
 /// parsed nor consumed, so the next pass reads it whole.
 #[test]
