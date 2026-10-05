@@ -1,0 +1,152 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
+//! Literal Ruby method symbols accepted by Rails callback declarations and self dispatch.
+
+use tree_sitter::Node;
+
+use super::{Walker, each_child, field_text};
+
+/// How the symbol's receiving DSL chooses the target method's owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReferenceKind {
+    Callback,
+    Send,
+}
+
+/// Closed Rails callback list: positional symbols name instance methods, including
+/// skip declarations (a reference does not assert that the callback runs).
+/// <https://api.rubyonrails.org/classes/AbstractController/Callbacks/ClassMethods.html>
+/// <https://api.rubyonrails.org/classes/ActiveRecord/Callbacks.html>
+/// <https://api.rubyonrails.org/classes/ActiveRecord/Transactions/ClassMethods.html>
+/// <https://api.rubyonrails.org/classes/ActiveJob/Callbacks.html>
+const CALLBACK_METHODS: &[&str] = &[
+    "before_action",
+    "after_action",
+    "around_action",
+    "prepend_before_action",
+    "prepend_after_action",
+    "prepend_around_action",
+    "append_before_action",
+    "append_after_action",
+    "append_around_action",
+    "skip_before_action",
+    "skip_after_action",
+    "skip_around_action",
+    "validate",
+    "before_validation",
+    "after_validation",
+    "before_save",
+    "around_save",
+    "after_save",
+    "before_create",
+    "around_create",
+    "after_create",
+    "before_update",
+    "around_update",
+    "after_update",
+    "before_destroy",
+    "around_destroy",
+    "after_destroy",
+    "after_initialize",
+    "after_find",
+    "after_touch",
+    "before_commit",
+    "after_commit",
+    "after_rollback",
+    "after_create_commit",
+    "after_update_commit",
+    "after_destroy_commit",
+    "after_save_commit",
+    "helper_method",
+    "before_enqueue",
+    "around_enqueue",
+    "after_enqueue",
+    "before_perform",
+    "around_perform",
+    "after_perform",
+];
+
+/// Shared by extraction and replay: `arg_of` persists the DSL's method name.
+pub(crate) fn reference_kind(method: &str) -> Option<ReferenceKind> {
+    if CALLBACK_METHODS.contains(&method) {
+        Some(ReferenceKind::Callback)
+    } else if matches!(method, "send" | "public_send") {
+        Some(ReferenceKind::Send)
+    } else {
+        None
+    }
+}
+
+/// The nearest owner boundary; blocks inherit it, singleton-class bodies do not.
+fn enclosing_scope(call: Node<'_>) -> Option<Node<'_>> {
+    std::iter::successors(call.parent(), Node::parent).find(|node| {
+        matches!(
+            node.kind(),
+            "class" | "module" | "method" | "singleton_method" | "singleton_class"
+        )
+    })
+}
+
+/// Extract literal method symbols, retaining the callee for owner-aware resolution.
+pub(super) fn walk_symbol_arguments(w: &mut Walker, call: Node, method: &str) {
+    let Some(kind) = reference_kind(method) else {
+        return;
+    };
+    let receiver = field_text(w, call, "receiver");
+    let scope = enclosing_scope(call).map(|node| node.kind());
+    match kind {
+        ReferenceKind::Callback
+            if receiver.is_some() || !matches!(scope, Some("class" | "module")) =>
+        {
+            return;
+        }
+        ReferenceKind::Send
+            if receiver.as_deref().is_some_and(|r| r != "self")
+                || !matches!(
+                    scope,
+                    Some("class" | "module" | "method" | "singleton_method")
+                ) =>
+        {
+            return;
+        }
+        _ => {}
+    }
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    match kind {
+        // Object#send / #public_send take the method name first; later symbols are data.
+        // <https://docs.ruby-lang.org/en/master/Object.html#method-i-send>
+        ReferenceKind::Send => {
+            if let Some(first) = args.named_child(0) {
+                push_symbol(w, first, method, call);
+            }
+        }
+        ReferenceKind::Callback => {
+            for arg in each_child(args) {
+                if arg.kind() == "pair" {
+                    if let Some(key) = field_text(w, arg, "key")
+                        && matches!(key.trim_start_matches(':'), "if" | "unless")
+                        && let Some(value) = arg.child_by_field_name("value")
+                    {
+                        push_symbol(w, value, method, call);
+                    }
+                } else {
+                    push_symbol(w, arg, method, call);
+                }
+            }
+        }
+    }
+}
+
+/// Dynamic and quoted symbols are left unguessed; a simple symbol starts with `:`.
+fn push_symbol(w: &mut Walker, symbol: Node, method: &str, call: Node) {
+    if symbol.kind() == "simple_symbol" {
+        w.push_reference(
+            w.text(symbol)[1..].to_string(),
+            call,
+            Some(method.to_string()),
+        );
+    }
+}

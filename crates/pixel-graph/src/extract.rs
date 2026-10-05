@@ -9,9 +9,14 @@
 
 use std::panic::AssertUnwindSafe;
 
-use tree_sitter::{Language, Node, Parser};
+use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
+
+use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Tree};
 
 use crate::store::SymbolKind;
+
+pub(crate) mod ruby_callbacks;
 
 #[derive(Debug, Clone)]
 pub struct RawSymbol {
@@ -201,6 +206,41 @@ fn bytecount(haystack: &[u8], needle: u8) -> usize {
     haystack.iter().filter(|b| **b == needle).count()
 }
 
+/// Wall-clock cap on one tree-sitter parse. Error recovery on a few hundred
+/// malformed bytes can run for minutes (#800); a parse past the cap yields no
+/// tree, as a grammar failure does. A source file parses in milliseconds.
+pub(crate) const PARSE_BUDGET: Duration = Duration::from_secs(3);
+
+/// True once a parse has run longer than its budget; a parse that took
+/// exactly the budget is still within it.
+fn over_budget(elapsed: Duration, budget: Duration) -> bool {
+    elapsed > budget
+}
+
+/// `parser.parse(content, None)`, cancelled once it has run past `budget`:
+/// `None` on a cancelled parse as on any other failure. Every tree-sitter
+/// parse in this crate goes through [`parse_bounded`], which sets the budget.
+fn parse_within(parser: &mut Parser, content: &[u8], budget: Duration) -> Option<Tree> {
+    let start = Instant::now();
+    let mut stop_late = |_: &ParseState| {
+        if over_budget(start.elapsed(), budget) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    parser.parse_with_options(
+        &mut |offset, _| content.get(offset..).unwrap_or_default(),
+        None,
+        Some(ParseOptions::new().progress_callback(&mut stop_late)),
+    )
+}
+
+/// [`parse_within`] at [`PARSE_BUDGET`]: the parse every extractor uses.
+pub(crate) fn parse_bounded(parser: &mut Parser, content: &[u8]) -> Option<Tree> {
+    parse_within(parser, content, PARSE_BUDGET)
+}
+
 /// Parse one file into a tree-sitter tree for the language its extension
 /// maps to. `None` on unsupported language, a generated/minified blob, or
 /// any parse/grammar failure.
@@ -215,7 +255,7 @@ pub fn parse_file(path_rel: &str, content: &[u8]) -> Option<tree_sitter::Tree> {
     std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut parser = Parser::new();
         parser.set_language(&language).ok()?;
-        parser.parse(content, None)
+        parse_bounded(&mut parser, content)
     }))
     .ok()
     .flatten()
@@ -281,7 +321,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
     let language = language_for(lang)?;
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
-    let tree = parser.parse(content, None)?;
+    let tree = parse_bounded(&mut parser, content)?;
     let mut w = Walker {
         src: content,
         symbols: Vec::new(),
@@ -546,6 +586,16 @@ fn walk_call_arguments(w: &mut Walker, call: Node, arg_of: Option<String>) {
     };
     let mut cursor = args.walk();
     for arg in args.children(&mut cursor) {
+        // C# (and PHP) wrap each argument in an `argument` node whose last
+        // named child is the value: `OnDone` in `Handle(OnDone)`.
+        let arg = if arg.kind() == "argument" {
+            match each_child(arg).into_iter().rev().find(Node::is_named) {
+                Some(value) => value,
+                None => continue,
+            }
+        } else {
+            arg
+        };
         let name = match arg.kind() {
             "identifier" | "simple_identifier" | "variable" => Some(w.text(arg)),
             "scoped_identifier" => field_text(w, arg, "name"),
@@ -1797,18 +1847,19 @@ fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
                         w.push_call(name, None, node);
                     }
                     "member_access_expression" => {
-                        if let Some(name) = field_text(w, f, "name") {
+                        if let Some(name) = f
+                            .child_by_field_name("name")
+                            .map(|n| csharp_simple_name(w, n))
+                        {
                             let recv = field_text(w, f, "expression");
                             callee_name = Some(name.clone());
                             w.push_call(name, recv, node);
                         }
                     }
                     "generic_name" => {
-                        if let Some(inner) = f.child_by_field_name("name") {
-                            let name = w.text(inner);
-                            callee_name = Some(name.clone());
-                            w.push_call(name, None, node);
-                        }
+                        let name = csharp_simple_name(w, f);
+                        callee_name = Some(name.clone());
+                        w.push_call(name, None, node);
                     }
                     _ => {}
                 }
@@ -1829,8 +1880,13 @@ fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
         "using_directive" => {
             // `name` field only exists for alias usings (`using Foo = X;`)
             // and holds the alias — not the imported namespace. The qualified
-            // namespace is a plain child (`qualified_name` / `identifier`).
+            // namespace is a plain child (`qualified_name` / `identifier`);
+            // the alias is an `identifier` too, so it is skipped by position.
+            let alias = node.child_by_field_name("name");
             for child in each_child(node) {
+                if Some(child) == alias {
+                    continue;
+                }
                 match child.kind() {
                     "qualified_name" | "identifier" => {
                         let spec = w.text(child);
@@ -1929,12 +1985,63 @@ fn ruby_scope_of(kind: &str) -> Option<RubyScope> {
 /// otherwise the bare name is a method call.
 #[derive(Debug, Default)]
 struct RubyLocals {
-    frames: Vec<(RubyScope, Vec<String>)>,
+    frames: Vec<RubyFrame>,
+}
+
+/// One open Ruby scope: the locals it binds and how a `def` in its body is
+/// qualified.
+#[derive(Debug)]
+struct RubyFrame {
+    scope: RubyScope,
+    names: Vec<String>,
+    defs: RubyDefs,
+    /// The frame is a `module` body, where a bare `module_function` applies.
+    module: bool,
+    /// `self` is an instance here (a `def` body, or a block inside one), not
+    /// the class or module being defined.
+    instance_self: bool,
+}
+
+/// What a `def name` written in a frame's body defines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RubyDefs {
+    /// An instance method, `Klass#name`.
+    Instance,
+    /// A method of the class or module object itself, `Klass.name`: the body
+    /// of `class << self`, or a module after a bare `module_function`, which
+    /// Ruby applies to every following `def` until a `public`, `private` or
+    /// `protected`. The private instance copy `module_function` also makes is
+    /// not recorded: only an `include` of the module reaches it.
+    /// <https://docs.ruby-lang.org/en/master/Module.html#method-i-module_function>
+    Singleton,
 }
 
 impl RubyLocals {
-    fn open(&mut self, scope: RubyScope) {
-        self.frames.push((scope, Vec::new()));
+    /// Open the frame of a node of `kind`. A block keeps the enclosing
+    /// frame's `def` qualification and `self`, as a `def` in a block defines
+    /// a method of the enclosing class.
+    fn open(&mut self, scope: RubyScope, kind: &str, value_is_self: bool) {
+        let enclosing = self.frames.last();
+        let enclosing_defs = enclosing.map_or(RubyDefs::Instance, |f| f.defs);
+        let enclosing_instance = enclosing.is_some_and(|f| f.instance_self);
+        let (defs, instance_self) = match kind {
+            "block" | "do_block" | "lambda" => (enclosing_defs, enclosing_instance),
+            "method" => (RubyDefs::Instance, true),
+            // `class << self` names the class or module only where `self` is
+            // one: in a `def` body it is an instance, whose own singleton the
+            // graph cannot name, so its methods keep instance qualification.
+            "singleton_class" if value_is_self && !enclosing_instance => {
+                (RubyDefs::Singleton, false)
+            }
+            _ => (RubyDefs::Instance, false),
+        };
+        self.frames.push(RubyFrame {
+            scope,
+            names: Vec::new(),
+            defs,
+            module: kind == "module",
+            instance_self,
+        });
     }
 
     fn close(&mut self) {
@@ -1942,21 +2049,44 @@ impl RubyLocals {
     }
 
     fn bind(&mut self, name: String) {
-        if let Some((_, names)) = self.frames.last_mut() {
-            names.push(name);
+        if let Some(frame) = self.frames.last_mut() {
+            frame.names.push(name);
         }
     }
 
     fn is_local(&self, name: &str) -> bool {
-        for (scope, names) in self.frames.iter().rev() {
-            if names.iter().any(|known| known == name) {
+        for frame in self.frames.iter().rev() {
+            if frame.names.iter().any(|known| known == name) {
                 return true;
             }
-            if *scope == RubyScope::Gate {
+            if frame.scope == RubyScope::Gate {
                 return false;
             }
         }
         false
+    }
+
+    /// The qualification of a `def` whose own frame is the innermost one:
+    /// the frame around it decides.
+    fn enclosing_defs(&self) -> RubyDefs {
+        self.frames
+            .len()
+            .checked_sub(2)
+            .map_or(RubyDefs::Instance, |i| self.frames[i].defs)
+    }
+
+    /// A bare visibility word written directly in a `module` body:
+    /// `module_function` makes the following `def`s module functions, and
+    /// `public`/`private`/`protected` end that mode.
+    fn visibility(&mut self, word: &str) {
+        let Some(frame) = self.frames.last_mut().filter(|f| f.module) else {
+            return;
+        };
+        match word {
+            "module_function" => frame.defs = RubyDefs::Singleton,
+            "public" | "private" | "protected" => frame.defs = RubyDefs::Instance,
+            _ => {}
+        }
     }
 }
 
@@ -1967,7 +2097,10 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
     let mut pushed = false;
     let scope = ruby_scope_of(node.kind());
     if let Some(scope) = scope {
-        locals.open(scope);
+        let value_is_self = node
+            .child_by_field_name("value")
+            .is_some_and(|value| value.kind() == "self");
+        locals.open(scope, node.kind(), value_is_self);
     }
     match node.kind() {
         "module" => {
@@ -1993,10 +2126,15 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
                 let (kind, q) = if w.stack.is_empty() {
                     (SymbolKind::Function, name.clone())
                 } else {
-                    // Ruby convention: `Klass#instance_method`.
+                    // Ruby convention: `Klass#instance_method`, and
+                    // `Klass.class_method` for a singleton frame.
+                    let separator = match locals.enclosing_defs() {
+                        RubyDefs::Instance => '#',
+                        RubyDefs::Singleton => '.',
+                    };
                     (
                         SymbolKind::Method,
-                        format!("{}#{}", w.stack.join("::"), name),
+                        format!("{}{separator}{name}", w.stack.join("::")),
                     )
                 };
                 w.push_symbol(name, q, kind, node);
@@ -2019,6 +2157,16 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             if let Some(name) = field_text(w, node, "method") {
                 let recv = field_text(w, node, "receiver");
                 callee_name = Some(name.clone());
+                // `module_function()` and `public()` set the mode as the
+                // bare words do; with arguments they only touch the methods
+                // they name.
+                if recv.is_none()
+                    && node
+                        .child_by_field_name("arguments")
+                        .is_none_or(|args| args.named_child_count() == 0)
+                {
+                    locals.visibility(&name);
+                }
                 if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
                     if let Some(spec) = ruby_first_string_argument(w, node) {
                         w.push_import(spec, Vec::new());
@@ -2033,6 +2181,9 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             // references (callbacks / handlers passed as args). Skip require
             // methods — their string args are imports, not references.
             if !matches!(callee_name.as_deref(), Some(n) if RUBY_REQUIRE_METHODS.contains(&n)) {
+                if let Some(method) = callee_name.as_deref() {
+                    ruby_callbacks::walk_symbol_arguments(w, node, method);
+                }
                 walk_call_arguments(w, node, callee_name);
             }
         }
@@ -2044,6 +2195,7 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             RubyIdent::Expr => {
                 let name = w.text(node);
                 if !locals.is_local(&name) {
+                    locals.visibility(&name);
                     w.push_call(name, None, node);
                 }
             }
@@ -2099,6 +2251,20 @@ fn ruby_first_string_argument(w: &Walker, call: Node) -> Option<String> {
         }
     }
     if spec.is_empty() { None } else { Some(spec) }
+}
+
+/// The plain name of a C# `generic_name` (`Create` for `Create<int>`), or any
+/// other node's own text. The grammar gives `generic_name` no `name` field:
+/// its identifier is a child beside the `type_argument_list`.
+fn csharp_simple_name(w: &Walker, node: Node) -> String {
+    if node.kind() == "generic_name"
+        && let Some(id) = each_child(node)
+            .into_iter()
+            .find(|c| c.kind() == "identifier")
+    {
+        return w.text(id);
+    }
+    w.text(node)
 }
 
 // --- Generic heuristic walker -------------------------------------------------
@@ -2216,12 +2382,13 @@ fn generic_name(w: &Walker, node: Node) -> Option<String> {
             return Some(t);
         }
     }
-    if let Some(decl) = node.child_by_field_name("declarator") {
-        for child in each_child(decl) {
-            if let Some(n) = generic_name(w, child) {
-                return Some(n);
-            }
-        }
+    // C: `function_definition` → `function_declarator` (or a pointer
+    // declarator around it) → `identifier`. The identifier is a child of the
+    // declarator, so recurse into the declarator itself, not its children.
+    if let Some(decl) = node.child_by_field_name("declarator")
+        && let Some(n) = generic_name(w, decl)
+    {
+        return Some(n);
     }
     for child in each_child(node) {
         match child.kind() {
@@ -2242,24 +2409,34 @@ fn generic_name(w: &Walker, node: Node) -> Option<String> {
 /// fieldsh and member accesses (php `member_call_expression`, C `field_expression`
 /// member of a join, etc.).
 fn generic_call(w: &mut Walker, node: Node) {
-    // Elixir `call` nodes whose body is a `do_block` are function definitions,
-    // not invocation sites —— skip them.
-    if node.kind() == "call" && node.child_by_field_name("do_block").is_some() {
+    // Elixir `def`/`defmodule …` and the head a definer defines (`total(x)`
+    // in `def total(x) do`) are definitions, not invocation sites.
+    if elixir_definer(w, node) || elixir_definition_head(w, node) {
         return;
     }
     let mut callee: Option<String> = None;
     let mut receiver: Option<String> = None;
+    // Swift's `call_expression` names no field: the callee is its first
+    // named child, before the `call_suffix`.
     let expr = ["function", "callee", "name", "method", "target"]
         .iter()
-        .find_map(|f| node.child_by_field_name(f));
+        .find_map(|f| node.child_by_field_name(f))
+        .or_else(|| {
+            (node.kind() == "call_expression")
+                .then(|| node.named_child(0))
+                .flatten()
+        });
     if let Some(e) = expr {
         match e.kind() {
             "identifier" | "simple_identifier" | "name" | "type_identifier" | "dotted_name"
             | "qualified_name" | "namespace_name" | "escaped_identifier" | "variable" => {
                 callee = Some(w.text(e));
+                // The callee itself is no receiver: Elixir's `round(x)` names
+                // its callee in `target`, a field this list also reads.
                 receiver = ["receiver", "object", "scope", "target"]
                     .iter()
                     .find_map(|f| node.child_by_field_name(f))
+                    .filter(|r| *r != e)
                     .map(|r| w.text(r));
             }
             k if k.ends_with("_expression")
@@ -2269,9 +2446,16 @@ fn generic_call(w: &mut Walker, node: Node) {
                 || k.contains("index")
                 || k.contains("access") =>
             {
+                // Swift: `navigation_expression` → `suffix` field
+                // (`navigation_suffix`) → its own `suffix` identifier.
                 let pos_name = ["property", "field", "name", "attribute", "member"]
                     .iter()
-                    .find_map(|f| e.child_by_field_name(f));
+                    .find_map(|f| e.child_by_field_name(f))
+                    .or_else(|| {
+                        e.child_by_field_name("suffix")
+                            .and_then(|s| s.child_by_field_name("suffix"))
+                    });
+                // C's `field_expression` holds its operand in `argument`.
                 let pos_recv = [
                     "object",
                     "operand",
@@ -2279,6 +2463,7 @@ fn generic_call(w: &mut Walker, node: Node) {
                     "expression",
                     "value",
                     "target",
+                    "argument",
                 ]
                 .iter()
                 .find_map(|f| e.child_by_field_name(f));
@@ -2303,6 +2488,44 @@ fn generic_call(w: &mut Walker, node: Node) {
     }
 }
 
+/// Elixir macros that define rather than call: a `call` whose `target` is one
+/// of them is a definition site.
+const ELIXIR_DEFINERS: &[&str] = &[
+    "def",
+    "defp",
+    "defmacro",
+    "defmacrop",
+    "defguard",
+    "defguardp",
+    "defdelegate",
+    "defmodule",
+    "defprotocol",
+    "defimpl",
+];
+
+/// True for an Elixir `call` whose target is a definer (`def`, `defmodule`…).
+fn elixir_definer(w: &Walker, node: Node) -> bool {
+    node.kind() == "call"
+        && node
+            .child_by_field_name("target")
+            .is_some_and(|t| ELIXIR_DEFINERS.contains(&w.text(t).as_str()))
+}
+
+/// True for the head a definer defines: `total(x)` in `def total(x) do`,
+/// also behind a guard (`def total(x) when is_integer(x)`, where the head is
+/// the left operand of `when`). The guard's own calls stay call sites.
+fn elixir_definition_head(w: &Walker, node: Node) -> bool {
+    let mut up = node.parent();
+    if let Some(guard) = up.filter(|p| p.kind() == "binary_operator")
+        && guard.child_by_field_name("left") == Some(node)
+    {
+        up = guard.parent();
+    }
+    up.filter(|args| args.kind() == "arguments")
+        .and_then(|args| args.parent())
+        .is_some_and(|def| elixir_definer(w, def))
+}
+
 /// Best-effort import spec from import/use/require node kinds. Prefers source-like
 /// fields, then string/identifier children (php `require_expression`, kotlin
 /// `import_header`, swift `import_declaration`).
@@ -2318,7 +2541,15 @@ fn generic_import(w: &mut Walker, node: Node) {
     }
     for child in each_child(node) {
         match child.kind() {
-            "string" => {
+            // PHP parses a double-quoted path as `encapsed_string`.
+            // An interpolated one (`"lib/$name.php"`) is chosen at run time:
+            // only a double-quoted path made of plain text is an import.
+            "string" | "encapsed_string"
+                if each_child(child)
+                    .into_iter()
+                    .filter(Node::is_named)
+                    .all(|c| c.kind() == "string_content") =>
+            {
                 let spec = strip_quotes(&w.text(child));
                 if !spec.is_empty() {
                     w.push_import(spec, Vec::new());
@@ -2711,6 +2942,103 @@ namespace MyApp.Services {
             .find(|s| s.qualified == "MyApp.Services.IGreeter.Greet")
             .expect("interface method Greet should exist with full qualification");
         assert_eq!(greet_in_interface.name, "Greet");
+    }
+
+    /// `class << self` and a bare `module_function` define methods of the
+    /// class or module object (`Klass.name`); the mode ends where Ruby ends
+    /// it, and never leaks out of a `def` body or into `class << other`.
+    #[test]
+    fn ruby_singleton_defs_should_be_qualified_as_class_methods() {
+        let source = br"
+class User
+  def self.direct; end
+  class << self
+    def importable; end
+    private
+    def hidden; end
+    [1].each do
+      def in_block; end
+    end
+  end
+  def after; end
+  class << other
+    def elsewhere; end
+  end
+end
+
+module Util
+  def before; end
+  module_function
+  def slug(s); end
+  def with_private_inside
+    private
+  end
+  def still_function; end
+  public
+  def back_to_instance; end
+end
+
+module Plain
+  def helper
+    module_function
+  end
+  def instance_too; end
+end
+
+class Widget
+  def build
+    class << self
+      def per_instance; end
+    end
+  end
+  def self.setup
+    class << self
+      def meta; end
+    end
+  end
+end
+
+module Parens
+  module_function()
+  def a; end
+  private :a
+  def b; end
+  public()
+  def c; end
+end
+";
+        let extraction = extract_file("lib/user.rb", source).unwrap();
+        let methods: Vec<&str> = extraction
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .map(|s| s.qualified.as_str())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "User.direct",
+                "User.importable",
+                "User.hidden",
+                "User.in_block",
+                "User#after",
+                "User#elsewhere",
+                "Util#before",
+                "Util.slug",
+                "Util.with_private_inside",
+                "Util.still_function",
+                "Util#back_to_instance",
+                "Plain#helper",
+                "Plain#instance_too",
+                "Widget#build",
+                "Widget#per_instance",
+                "Widget.setup",
+                "Widget.meta",
+                "Parens.a",
+                "Parens.b",
+                "Parens#c",
+            ]
+        );
     }
 
     #[test]
@@ -3334,6 +3662,101 @@ export function wire(emitter: any) {
     fn reference_names(path: &str, source: &[u8]) -> Vec<String> {
         let extraction = extract_file(path, source).unwrap();
         extraction.references.into_iter().map(|r| r.name).collect()
+    }
+
+    #[test]
+    fn ruby_callbacks_should_reference_methods_but_not_option_values_or_foreign_receivers() {
+        let source = b"class Record\n  before_action :load, :authorize, only: :show\n  validate :check, if: :ready?, unless: :blocked?\n  after_commit :sync, on: :create\n  foo.before_action :foreign\n  self.before_action :explicit\n  before_action()\n  scope :active, -> { true }\nend\n";
+        let fx = extract_file("record.rb", source).unwrap();
+        assert_eq!(
+            fx.references
+                .iter()
+                .map(|r| (
+                    r.name.as_str(),
+                    r.arg_of.as_deref(),
+                    r.site_line,
+                    r.enclosing_index
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("load", Some("before_action"), 2, Some(0)),
+                ("authorize", Some("before_action"), 2, Some(0)),
+                ("check", Some("validate"), 3, Some(0)),
+                ("ready?", Some("validate"), 3, Some(0)),
+                ("blocked?", Some("validate"), 3, Some(0)),
+                ("sync", Some("after_commit"), 4, Some(0)),
+            ],
+            "only method symbols in supported callback declarations are references"
+        );
+    }
+
+    #[test]
+    fn ruby_callbacks_should_cover_the_documented_dsl_and_only_class_or_module_bodies() {
+        let methods = [
+            "before_action",
+            "after_action",
+            "around_action",
+            "prepend_before_action",
+            "prepend_after_action",
+            "prepend_around_action",
+            "append_before_action",
+            "append_after_action",
+            "append_around_action",
+            "skip_before_action",
+            "skip_after_action",
+            "skip_around_action",
+            "validate",
+            "before_validation",
+            "after_validation",
+            "before_save",
+            "around_save",
+            "after_save",
+            "before_create",
+            "around_create",
+            "after_create",
+            "before_update",
+            "around_update",
+            "after_update",
+            "before_destroy",
+            "around_destroy",
+            "after_destroy",
+            "after_initialize",
+            "after_find",
+            "after_touch",
+            "before_commit",
+            "after_commit",
+            "after_rollback",
+            "after_create_commit",
+            "after_update_commit",
+            "after_destroy_commit",
+            "after_save_commit",
+            "helper_method",
+            "before_enqueue",
+            "around_enqueue",
+            "after_enqueue",
+            "before_perform",
+            "around_perform",
+            "after_perform",
+        ];
+        for method in methods {
+            let source = format!(
+                "{method} :top\nmodule Rules\n  {method} :check\nend\nclass Record\n  def run\n    {method} :inside\n  end\n  def self.configure\n    {method} :singleton_method\n  end\n  class << self\n    {method} :singleton\n  end\nend\n"
+            );
+            assert_eq!(
+                reference_names("record.rb", source.as_bytes()),
+                ["check"],
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn ruby_send_should_reference_only_the_first_literal_symbol_on_self() {
+        let source = b"class Record\n  def run\n    send(:check, :data)\n    self.public_send(:ready?, :other)\n    object.send(:foreign)\n    Record.send(:constant)\n    send(name, :dynamic)\n    send()\n    send(\"string\")\n  end\n  class << self\n    send(:unknown_owner)\n    def singleton_run\n      send(:class_target)\n    end\n  end\nend\nsend(:top_level)\n";
+        assert_eq!(
+            reference_names("record.rb", source),
+            ["check", "ready?", "name", "class_target"]
+        );
     }
 
     /// A member argument names a function only on a self receiver:

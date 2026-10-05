@@ -23,9 +23,8 @@ exclude_re = ["impl Debug"]
 # in a library crate is judged by that crate's unit and `tests/all` suite.
 test_workspace = false
 
-# The cargo arguments every lane shares: CI's shards, scripts/mutants-preflight.sh
-# --run, scripts/gates.sh --mutants and a hand-typed `cargo mutants -F ...`
-# all read this file, so none of them may pass these on its command line.
+# The scheduled CI shards read the cargo arguments from this file.
+# No local or manual campaign is part of the development workflow.
 # A lane that adds one alone runs a different program: --all-targets decides
 # which targets are built (a mutant that breaks only an example or a bench
 # is unviable with it and invisible without it) and drops the doctests from
@@ -38,11 +37,8 @@ additional_cargo_args = ["--locked"]
 # already decided, and this cuts that; the timeout budget alone still
 # bounds a hanging mutant. The flag is nightly-only (stable libtest:
 # "only accepted on the nightly compiler with -Z unstable-options"), so
-# every lane that runs mutants also installs and exports the pinned
-# nightly in PIXEL_MUTANTS_TOOLCHAIN — the workflow install steps and
-# scripts/mutants-preflight.sh --run, which is also what the remote gate
-# host executes. `cargo mutants --list` never runs tests, so the listing
-# lanes stay on whatever toolchain they have. None of this changes which
+# CI installs and exports the pinned nightly toolchain. Listing mutants
+# never runs tests and stays on stable. None of this changes which
 # mutants are generated. Nightlies after 2025-09-18 carry the flag
 # (rust-lang/rust#142859); the pin moves with the workflow's
 # cargo-mutants pin, and a rust-toolchain file is deliberately not added

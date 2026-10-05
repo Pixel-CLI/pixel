@@ -735,9 +735,11 @@ fn map_should_list_files_in_path_order_and_render_the_markdown_projection() {
         )),
         "{text}"
     );
-    assert!(text.contains("\n### `caller.rs`\n"), "{text}");
-    assert!(text.contains("\n## sub\n"), "{text}");
-    assert!(text.contains("\n### `sub/deep.rs`\n"), "{text}");
+    // Root files sort before `sub/`: they still open under a `## .`
+    // heading, exactly once, ahead of their first file (#779).
+    assert!(text.contains("\n## .\n\n### `caller.rs`\n"), "{text}");
+    assert_eq!(text.matches("\n## ").count(), 2, "{text}");
+    assert!(text.contains("\n## sub\n\n### `sub/deep.rs`\n"), "{text}");
     assert!(
         text.contains("**deep** (L1–1)"),
         "each symbol names its line span: {text}"

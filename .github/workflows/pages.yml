@@ -30,7 +30,7 @@ concurrency:
 jobs:
   build:
     # A hosted runner: blacksmith self-hosted labels are not registered for
-    # this repo (only a2 is), so they queue the deploy forever and the live
+    # this repo, so they queue the deploy forever and the live
     # site goes stale (2026-10-04: #608's website merge sat un-published
     # >13h, still serving Gemini/Windsurf/LivioGama URLs).
     runs-on: ubuntu-26.04
@@ -60,7 +60,7 @@ jobs:
   deploy:
     needs: build
     # A hosted runner: blacksmith self-hosted labels are not registered for
-    # this repo (only a2 is), so they queue the deploy forever and the live
+    # this repo, so they queue the deploy forever and the live
     # site goes stale (2026-10-04: #608's website merge sat un-published
     # >13h, still serving Gemini/Windsurf/LivioGama URLs).
     runs-on: ubuntu-26.04

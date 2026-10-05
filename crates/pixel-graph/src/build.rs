@@ -111,7 +111,23 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 13: a Go package import or a Java wildcard import resolves to the
 ///    package's smallest path, not to the first one the walk or the store
 ///    happened to list (`imports.resolved_file_id`).
-pub const EXTRACTOR_VERSION: &str = "13";
+/// 14: markup concepts carry 1-based lines (HTML started at 0, Svelte/Vue
+///    markup before a `<script>` was offset), strings under `__tests__/` are
+///    no longer concepts, and `app.get("/users")` keeps its path.
+/// 15: C function definitions are symbols and `o->start()` keeps its
+///    receiver; Swift calls are recorded; Elixir `def`/`defmodule` and the
+///    heads they define are not calls; a double-quoted PHP `require_once` is
+///    an import; C# generic calls are named without type arguments, an alias
+///    `using` no longer imports its alias, and callback arguments are
+///    references.
+/// 16: a Ruby call without receiver to a name defined in its file and in
+///    another one resolves to the caller's own method, as `self.name` did,
+///    instead of staying unresolved.
+/// 17: a Ruby `def` inside `class << self` or after a bare `module_function`
+///    is a class method (`Klass.name`), not an instance method.
+/// 18: Ruby callback and literal self-send symbols reference the owning method,
+///    preserving that owner during incremental resolution.
+pub const EXTRACTOR_VERSION: &str = "18";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
