@@ -5,7 +5,7 @@
 # Empty the workflow-run queue of work that no longer matters. A merged (or
 # closed) pull request leaves its validation runs pointing at a head that
 # does not exist on any branch; the cancel-stale workflow calls this on
-# `pull_request: closed`, and a human can call it to purge a backlog (a2
+# `pull_request: closed`, and a human can call it to purge a backlog (a self-hosted runner
 # drains one job at a time, so a stale queue delays every live PR).
 #
 # By default this only prints what it would cancel. Pass --apply to cancel.

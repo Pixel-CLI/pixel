@@ -10,9 +10,9 @@ Always loaded: how to run the long gates without losing an afternoon.
   command, complete log and exit status. A previous pass never covers a
   subsequent behavior change. Keep Cargo builds sequential per build
   directory and do not clean output used by a running gate.
-- **Mutants run remotely, not on the laptop.** Before a Rust push, the tracked
-  hook sends the committed candidate to the gate host and blocks on its
-  verdict; CI repeats that verdict as the merge gate. A 231-mutant campaign
+- **Mutants run off the laptop.** CI's `Mutants in diff` is the merge gate;
+  a cloud agent session sets `PIXEL_MUTANTS_GATE=local` so the pre-push hook
+  runs the same campaign on its own VM before the push. A 231-mutant campaign
   held a laptop's tree for two hours (`--in-place` forbids edits meanwhile)
   for 24 survivors that sat in six functions, all readable from the report.
   Only when explicitly asked, run `cargo mutants --in-diff <diff> -F '<fn>'`

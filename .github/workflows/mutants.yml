@@ -248,10 +248,9 @@ jobs:
     # self-hosted runner pays off most. The PIXEL_MUTANTS_SHARD_RUNNERS
     # repository variable names the pool the plan job dealt the shards over
     # (round-robin, GitHub's image when unset): same-repository pull
-    # requests included, whose diff the maintainers' pre-push gate
-    # (scripts/mutants-remote-gate.sh) already ran on a gate host. A fork's
-    # pull request stays on GitHub's image: its code reaches a persistent
-    # host through no pre-push gate, and `contents: read` and
+    # requests included, whose authors already hold push access to this
+    # repository. A fork's pull request stays on GitHub's image: its code
+    # comes from someone without that access, and `contents: read` and
     # `persist-credentials: false` do not isolate a host that outlives the
     # job.
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && matrix.runner || 'ubuntu-26.04' }}
@@ -356,8 +355,7 @@ jobs:
       # their baseline on `non_git_plain_build` and six siblings). The same
       # job gets its own XDG_RUNTIME_DIR, which the runner service lacks: the
       # test process and the `pixel` binaries it spawns must resolve daemon
-      # sockets into one place (scripts/mutants-gate-host.sh, which the gate
-      # host runs with the same two settings).
+      # sockets into one place.
       - name: Use disk-backed mutation temporary storage
         env:
           SHARD: ${{ matrix.shard }}

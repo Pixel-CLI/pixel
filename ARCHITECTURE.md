@@ -669,7 +669,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
     contract scripts (installer, gate runner, pre-push baseline, mutation
-    pre-push and remote host, release prepare, Homebrew formula and Linux
+    pre-push and push gate, release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
     nightly mutants, mutants
     config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
