@@ -61,6 +61,13 @@ Other languages get the same treatment for their import forms (TS `import {
 a as b }`, re-exports, default imports; Ruby calls without receiver or
 parentheses, #236).
 
+Line-only symbol spans do not prove Ruby lexical scope at their boundaries:
+`class C < B.run` evaluates `B` outside `C`, and `end; B.run` can be outside
+the class whose span includes that line (verified 2026-10, RB-04 fixture).
+Until a stored AST scope or columns distinguish these sites, relative constant
+receivers on class/module boundary lines stay unresolved; an absolute `::B`
+does not need lexical scope.
+
 ## Tier honesty
 
 An Exact edge asserts the callee. When the evidence does not single out one
