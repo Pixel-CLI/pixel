@@ -120,8 +120,9 @@ fields are agent-controlled. Entry points:
 and opens files through `pixel_index::index::open_regular_bounded`, which
 refuses a final-component symlink and anything over `MAX_FILE_BYTES`
 (4 MiB). `pixel-graph` parses each file with tree-sitter
-(`pixel_graph::extract::extract_file`) under the same 4 MiB cap, skips files
-with a NUL in their first `BINARY_SNIFF_BYTES`, and stops at
+(`pixel_graph::extract::extract_file`) under the same 4 MiB cap, cancels any
+parse still running after `PARSE_BUDGET` (3 s; the file then contributes no
+rows), skips files with a NUL in their first `BINARY_SNIFF_BYTES`, and stops at
 `DEFAULT_GRAPH_MAX_FILES` (50 000). Git-anchored shards read committed blobs
 through `git cat-file` rather than the filesystem.
 
@@ -275,10 +276,12 @@ boundary it crosses.
 - **Scenario**: a repository ships a huge, binary, deeply nested or malformed
   file to crash `pixel build-index` or the graph build, or to make a search
   pattern miss.
-- **Mitigation**: the caps in 3.4; symlinks are not followed by the walk;
+- **Mitigation**: the caps in 3.4, including the per-parse `PARSE_BUDGET`
+  that cuts off tree-sitter error recovery a few hundred malformed bytes can
+  stretch to minutes (#800); symlinks are not followed by the walk;
   `Shard::open` checks every section length with checked arithmetic before
   indexing into the map; the `graph_extract` fuzz target feeds arbitrary
-  source to `extract_file`, and `search_plan` checks that the query planner
+  source to `extract_file` and `extract_concepts`, and `search_plan` checks that the query planner
   never drops a document the verifier matches (`fuzz/`).
 - **Status**: Partial.
 - **Residual**: the tree-sitter grammars are C code outside Rust's memory
