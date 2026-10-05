@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 FLAG = re.compile(r"(?m)^disable-model-invocation:\s*(true|false)\s*$")
@@ -166,12 +167,13 @@ def _read_credential_file(path: Path) -> dict:
     return _oauth_payload(value)
 
 
-def credential_source(config_dir: Path, explicit_file: Path | None = None) -> str:
+def credential_source(config_dir: Path | None, explicit_file: Path | None = None) -> str:
     """Identify the configured credential location without reading its contents."""
     candidates = []
     if explicit_file is not None:
         candidates.append(("explicit-file", explicit_file.expanduser()))
-    candidates.append(("config-file", config_dir.expanduser() / ".credentials.json"))
+    config_path = config_dir.expanduser() if config_dir is not None else Path.home() / ".claude"
+    candidates.append(("config-file", config_path / ".credentials.json"))
     seen = set()
     for source, path in candidates:
         identity = str(path.absolute())
@@ -191,7 +193,7 @@ def credential_source(config_dir: Path, explicit_file: Path | None = None) -> st
 
 
 def load_oauth_credentials(
-    config_dir: Path,
+    config_dir: Path | None,
     explicit_file: Path | None = None,
     *,
     source: str | None = None,
@@ -200,33 +202,38 @@ def load_oauth_credentials(
     if source == "explicit-file":
         return _read_credential_file(explicit_file.expanduser())
     if source == "config-file":
-        return _read_credential_file(config_dir.expanduser() / ".credentials.json")
+        config_path = config_dir.expanduser() if config_dir is not None else Path.home() / ".claude"
+        return _read_credential_file(config_path / ".credentials.json")
 
     if sys.platform != "darwin":
         raise RuntimeError("Claude OAuth credentials are unavailable in the isolated config")
 
-    config_path = config_dir.expanduser().resolve()
-    suffix = digest(str(config_path).encode())[:8]
-    service = f"Claude Code-credentials-{suffix}"
+    import pwd
+
+    service = "Claude Code-credentials"
+    if config_dir is not None:
+        config_path = unicodedata.normalize("NFC", str(config_dir.expanduser()))
+        service += "-" + digest(config_path.encode())[:8]
+    try:
+        account = os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, OSError):
+        account = "claude-code-user"
+    if re.fullmatch(r"[a-zA-Z0-9._-]+", account) is None:
+        account = "claude-code-user"
     safe_env = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"}
     try:
         result = subprocess.run(
-            ["/usr/bin/security", "find-generic-password", "-s", service, "-g"],
-            capture_output=True, text=True, env=safe_env, timeout=10, check=False,
+            ["/usr/bin/security", "find-generic-password", "-a", account, "-s", service, "-w"],
+            capture_output=True, env=safe_env, timeout=10, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RuntimeError("macOS Keychain credential lookup failed") from error
     if result.returncode:
         raise RuntimeError("macOS Keychain has no Claude OAuth credential for this config")
-    match = re.search(r'password:\s*(?:0x[0-9a-fA-F]+\s*)?("(?:\\.|[^"\\])*")',
-                      result.stderr + "\n" + result.stdout, re.DOTALL)
-    if not match:
-        raise RuntimeError("macOS Keychain entry has no readable Claude OAuth payload")
     try:
-        raw = json.loads(match.group(1))
-        value = json.loads(raw) if isinstance(raw, str) else raw
-    except json.JSONDecodeError as error:
-        raise RuntimeError("macOS Keychain Claude OAuth payload is invalid") from error
+        value = json.loads(result.stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise RuntimeError("macOS Keychain Claude OAuth payload is invalid") from None
     return _oauth_payload(value)
 
 
@@ -281,7 +288,7 @@ def preflight(args: argparse.Namespace) -> dict:
     candidate_skill = invocation_variant(source_skill, True)
     if invocation_variant(candidate_skill, False) != baseline_skill:
         raise RuntimeError("candidate changes skill content beyond invocation metadata")
-    auth_config_dir = Path(args.auth_config_dir).expanduser()
+    auth_config_dir = Path(args.auth_config_dir).expanduser() if args.auth_config_dir else None
     credentials_file = Path(args.credentials_file).expanduser() if args.credentials_file else None
     credential_source_name = credential_source(auth_config_dir, credentials_file)
     oauth_credentials = load_oauth_credentials(
@@ -420,7 +427,7 @@ def execute(args: argparse.Namespace) -> list[dict]:
         raise RuntimeError("Claude version changed since preflight")
     project = Path(manifest["workspace"])
     skill_file = project / ".claude/skills/pixel-impact/SKILL.md"
-    auth_config_dir = Path(args.auth_config_dir).expanduser()
+    auth_config_dir = Path(args.auth_config_dir).expanduser() if args.auth_config_dir else None
     credentials_file = Path(args.credentials_file).expanduser() if args.credentials_file else None
     current_credential_source = credential_source(auth_config_dir, credentials_file)
     oauth_credentials = load_oauth_credentials(
@@ -528,7 +535,9 @@ def main() -> int:
     parser.add_argument("--skill", required=True)
     parser.add_argument("--pixel", default=shutil.which("pixel"))
     parser.add_argument("--claude", default=shutil.which("claude"))
-    parser.add_argument("--auth-config-dir", default=str(Path.home() / ".claude"))
+    parser.add_argument("--auth-config-dir", default=os.environ.get(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR", os.environ.get("CLAUDE_CONFIG_DIR")),
+        help="Claude credential scope; defaults to its configured scope or the unscoped login")
     parser.add_argument("--credentials-file")
     parser.add_argument("--results-dir", required=True)
     parser.add_argument("--symbol", default="transferPageToGhost")

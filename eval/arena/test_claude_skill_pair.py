@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import tempfile
+import traceback
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -92,6 +93,11 @@ class ClaudeStreamMeasurementTests(unittest.TestCase):
 
 
 class ClaudeCredentialIsolationTests(unittest.TestCase):
+    def setUp(self):
+        platform = mock.patch.object(claude_skill_pair.sys, "platform", "darwin")
+        platform.start()
+        self.addCleanup(platform.stop)
+
     def credential(self) -> dict:
         return {"claudeAiOauth": {
             "accessToken": "test-access-token",
@@ -217,25 +223,74 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
             self.assertEqual(actual["refreshToken"], "test-refresh-token")
             run.assert_not_called()
 
+    def test_default_login_uses_its_private_file_before_keychain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self.write_credential(home / ".claude/.credentials.json", self.credential())
+            with mock.patch.object(claude_skill_pair.Path, "home", return_value=home):
+                with mock.patch.object(claude_skill_pair.subprocess, "run") as run:
+                    actual = claude_skill_pair.load_oauth_credentials(None)
+            self.assertEqual(actual["accessToken"], "test-access-token")
+            run.assert_not_called()
+
+    def test_default_login_uses_unscoped_keychain_for_current_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=json.dumps(self.credential()).encode(), stderr=b"",
+            )
+            with mock.patch.object(claude_skill_pair.Path, "home", return_value=Path(directory)):
+                with mock.patch.dict(claude_skill_pair.os.environ, {"USER": "arena-user"}):
+                    with mock.patch.object(claude_skill_pair.subprocess, "run", return_value=result) as run:
+                        actual = claude_skill_pair.load_oauth_credentials(None)
+            self.assertEqual(actual["refreshToken"], "test-refresh-token")
+            self.assertEqual(run.call_args.args[0], [
+                "/usr/bin/security", "find-generic-password", "-a", "arena-user",
+                "-s", "Claude Code-credentials", "-w",
+            ])
+
+    def test_explicit_default_directory_stays_scoped_and_does_not_fall_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / ".claude"
+            result = subprocess.CompletedProcess(args=[], returncode=44, stdout=b"", stderr=b"")
+            with mock.patch.object(claude_skill_pair.Path, "home", return_value=home):
+                with mock.patch.object(claude_skill_pair.subprocess, "run", return_value=result) as run:
+                    with self.assertRaisesRegex(RuntimeError, "Keychain has no Claude OAuth"):
+                        claude_skill_pair.load_oauth_credentials(config)
+            run.assert_called_once()
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[argv.index("-s") + 1],
+                             "Claude Code-credentials-" + claude_skill_pair.digest(str(config).encode())[:8])
+
+    def test_scoped_keychain_uses_claude_nfc_path_spelling(self):
+        result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(self.credential()).encode(), stderr=b"",
+        )
+        with mock.patch.object(claude_skill_pair.subprocess, "run", return_value=result) as run:
+            claude_skill_pair.load_oauth_credentials(Path("/tmp/pixel-cafe\u0301"), source="macos-keychain")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("-s") + 1], "Claude Code-credentials-98f38245")
+
     def test_missing_file_uses_scoped_keychain_entry_without_exposing_secret(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config"
             config.mkdir()
             secret_json = json.dumps(self.credential())
             result = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="",
-                stderr="password: " + json.dumps(secret_json),
+                args=[], returncode=0, stdout=secret_json.encode(),
+                stderr=b'password: "{"',
             )
             with mock.patch.object(claude_skill_pair.subprocess, "run", return_value=result) as run:
                 actual = claude_skill_pair.load_oauth_credentials(config)
 
             service = "Claude Code-credentials-" + claude_skill_pair.digest(
-                str(config.resolve()).encode())[:8]
+                str(config).encode())[:8]
             self.assertEqual(claude_skill_pair.credential_source(config), "macos-keychain")
             self.assertEqual(actual["accessToken"], "test-access-token")
             argv = run.call_args.args[0]
             env = run.call_args.kwargs["env"]
             self.assertIn(service, argv)
+            self.assertEqual(argv[-1], "-w")
             self.assertNotIn("ANTHROPIC_API_KEY", env)
 
             isolated = Path(directory) / "isolated-config"
@@ -244,6 +299,22 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
             saved = isolated / ".credentials.json"
             self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
             self.assertEqual(json.loads(saved.read_text()), {"claudeAiOauth": actual})
+
+    def test_invalid_keychain_bytes_fail_without_exposing_secret(self):
+        for payload in (b'{"sentinel-secret":', b'\xffsentinel-secret'):
+            with self.subTest(payload_type="utf8" if payload.startswith(b"{") else "invalid-utf8"):
+                result = subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=payload, stderr=b"",
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    with mock.patch.object(claude_skill_pair.subprocess, "run", return_value=result):
+                        try:
+                            claude_skill_pair.load_oauth_credentials(Path(directory))
+                        except RuntimeError as error:
+                            self.assertEqual(str(error), "macOS Keychain Claude OAuth payload is invalid")
+                            self.assertNotIn("sentinel-secret", "".join(traceback.format_exception(error)))
+                        else:
+                            self.fail("invalid Keychain payload was accepted")
 
     def test_missing_file_and_keychain_entry_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -110,10 +110,13 @@ required-pattern score. Use a fresh output directory for each candidate.
 no-model preflight. It uses the same foreign-repository snapshot and g5
 scenario, with `sonnet` / `medium` by default. It resolves `claude` and `pixel`
 from `PATH` unless explicit binary paths are supplied; a missing executable
-fails with a clear message. On macOS it reads only the
-`claudeAiOauth` object from the Keychain entry for `--auth-config-dir` (default
-`~/.claude`); it never imports user settings, skills, hooks, plugins, or MCP
-configuration. An optional `--credentials-file` takes precedence over the
+fails with a clear message. On macOS it reads raw Keychain JSON for the current
+account and uses only its `claudeAiOauth` object. Without a configured scope it
+selects Claude's unscoped login; `--auth-config-dir`, or the existing
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` / `CLAUDE_CONFIG_DIR` scope, selects that
+profile's entry without falling back to another profile. It never imports user
+settings, skills, hooks, plugins, or MCP configuration. An optional
+`--credentials-file` takes precedence over the
 config directory's `.credentials.json` and must have mode `0600`. Only that
 OAuth object is copied into each private, temporary arm config; credentials are
 never written to results. The preflight refuses an expired refresh token.
@@ -129,6 +132,10 @@ Run the second command only after reviewing a successful preflight. The pair
 uses the existing OAuth login; a missing or expired login requires a fresh
 login before any model call. A failed or missing arm remains a failed pair,
 with unavailable token fields recorded as unknown.
+
+`claude auth status` alone is insufficient: host settings can supply a different
+endpoint, token, or model while this isolated comparison has no usable Claude
+OAuth object. Such settings remain excluded from both arms.
 
 The old `--codex-caller-facts` route is retired and rejected. Historical runs
 remain in their original result directories and must be interpreted with

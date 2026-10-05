@@ -345,11 +345,11 @@ its installed binary SHA-256 is
 predates the corrected approval check and final validation below. These are
 installation checks, not model benchmark results.
 
-The separate Claude g5 pair was not run: zero paid calls. A private isolated
-auth check found an expired access token and expired refresh token. Claude's
-local `auth status` reported stored login state but did not validate or renew
-that credential, so it is not treated as usable authentication. The pair stays
-blocked until a fresh OAuth login is available. Anthropic documents macOS
+The separate Claude g5 pair was not run: zero paid calls. An earlier private
+isolated auth check found an expired access token and expired refresh token.
+Claude's local `auth status` reported stored login state but did not validate
+or renew that credential, so it was not treated as usable authentication.
+The latest credential-source check is recorded below. Anthropic documents macOS
 Keychain storage, per-config-directory credentials, and the `/login` renewal
 path in its [authentication guide](https://code.claude.com/docs/en/authentication).
 
@@ -521,3 +521,36 @@ repository install all exited 0. The final doctor invocation exited 1 with
 32 green checks, one yellow and no red checks: the two modified Codex task hooks
 still require the user's `/hooks` review. This is an outstanding local approval
 step, not a passing installation checklist; no trust state was written.
+
+All seven CI workflows and CodeRabbit subsequently passed on
+`fba8d29efb9686f752a0b8f95ad5d0da9281957f`, including all 15 mutation shards and
+the aggregate mutation verdict. The final CodeRabbit review found no actionable
+comments and left no unresolved threads.
+
+## Claude credential-loader follow-up
+
+A later no-model probe exposed a harness bug: macOS `security -g` displays
+unescaped quotes inside JSON, so the old display parser truncated a valid
+Keychain item. The loader now requests raw bytes with `-w` and parses the JSON
+directly. Malformed JSON and invalid UTF-8 produce a generic error without
+including credential contents in a traceback. It selects the current account,
+distinguishes the unscoped default login from a configured profile, and uses
+Claude 2.1.289's NFC-normalized path spelling for scoped service names without
+falling back to another profile.
+
+The corrected default-login probe reports that a `claudeAiOauth` credential
+object is unavailable. The inspected Keychain items contain plugin OAuth data;
+the local CLI's logged-in status comes from global settings supplying a token,
+a different endpoint, and model overrides. Those settings are preserved and
+remain excluded from the isolated comparison. This is a missing compatible
+credential for the benchmark, not evidence that the configured host login is
+broken. The Claude pair still has zero paid calls and requires a compatible
+OAuth credential before execution. Sanitized receipts are in
+`target/native-default-evidence/fba8d29e-gates/auth-corrected-loader.json` and
+`auth-source-final.json`; no credential values or hashes were saved.
+
+`python3 -m unittest discover -s eval/arena -v` passed all 57 tests after this
+correction. The log and tested harness SHA-256 are recorded in
+`target/native-default-evidence/fba8d29e-gates/arena-keychain-fix.log` and
+`keychain-contract.json`. These harness-only changes do not alter the installed
+Pixel binary or the earlier Codex model measurements.
