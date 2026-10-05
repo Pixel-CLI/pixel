@@ -999,6 +999,92 @@ mod tests {
     }
 
     #[test]
+    fn task_hook_approval_requires_the_same_synchronous_reviewed_handler() {
+        let home = tempfile::tempdir().unwrap();
+        let codex_home = home.path().join(".codex");
+        fs::create_dir_all(&codex_home).unwrap();
+        let hooks_path = codex_home.join(HOOKS_FILE);
+        let config_path = codex_home.join(CODEX_CONFIG_FILE);
+        let exe = Path::new("/usr/local/bin/pixel");
+        let mut hooks = serde_json::json!({"hooks": {}});
+        let mut trust = String::new();
+
+        for (event, name) in crate::routing::TASK_HOOK_EVENTS
+            .iter()
+            .copied()
+            .chain(std::iter::once(("Interrupt", "interrupt")))
+        {
+            let mut handler = serde_json::json!({
+                "type": "command",
+                "command": format!(
+                    "/usr/local/bin/pixel run-hook task-event --provider codex --event {name}"
+                ),
+                "timeout": if matches!(event, "SessionEnd" | "Interrupt") {
+                    3
+                } else {
+                    10
+                },
+            });
+            if event == "SessionStart" {
+                handler["async"] = serde_json::json!(false);
+            }
+            let group = serde_json::json!({"hooks": [handler]});
+            hooks["hooks"][event] = serde_json::json!([group]);
+            let hash = codex_hook_hash(event, &group, &group["hooks"][0]).unwrap();
+            let state_key = format!(
+                "{}:{}:0:0",
+                hooks_path.display(),
+                hook_event_label(event).unwrap()
+            );
+            trust.push_str(&format!(
+                "[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n\n"
+            ));
+        }
+        fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+        fs::write(&config_path, &trust).unwrap();
+
+        assert!(
+            task_hook_suite_is_enabled_and_trusted(&codex_home, &hooks_path, &hooks, exe,),
+            "an explicitly synchronous, exactly reviewed handler must be eligible"
+        );
+
+        // A trusted asynchronous callback cannot authorize a separate
+        // synchronous callback whose current hash was never reviewed.
+        let mut trusted_async = hooks["hooks"]["SessionStart"][0].clone();
+        trusted_async["hooks"][0]["async"] = serde_json::json!(true);
+        let mut mixed_trust = String::new();
+        for (event, _) in crate::routing::TASK_HOOK_EVENTS
+            .iter()
+            .copied()
+            .chain(std::iter::once(("Interrupt", "interrupt")))
+        {
+            let group = if event == "SessionStart" {
+                &trusted_async
+            } else {
+                &hooks["hooks"][event][0]
+            };
+            let hash = codex_hook_hash(event, group, &group["hooks"][0]).unwrap();
+            let state_key = format!(
+                "{}:{}:0:0",
+                hooks_path.display(),
+                hook_event_label(event).unwrap()
+            );
+            mixed_trust.push_str(&format!(
+                "[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n\n"
+            ));
+        }
+        let untrusted_sync = hooks["hooks"]["SessionStart"][0].clone();
+        hooks["hooks"]["SessionStart"] = serde_json::json!([trusted_async, untrusted_sync]);
+        fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+        fs::write(&config_path, mixed_trust).unwrap();
+
+        assert!(
+            !task_hook_suite_is_enabled_and_trusted(&codex_home, &hooks_path, &hooks, exe,),
+            "approval for an asynchronous group must not combine with an unreviewed synchronous group"
+        );
+    }
+
+    #[test]
     fn hook_approval_requires_exact_source_enabled_state_and_current_hash() {
         let home = tempfile::tempdir().unwrap();
         let hooks_path = home.path().join("hooks.json");

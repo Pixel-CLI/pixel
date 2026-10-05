@@ -2756,6 +2756,10 @@ mod tests {
 
         // Malformed or ineligible global entries are not evidence that the
         // global suite will run, so keep all project-local callbacks.
+        // Restore the complete reviewed suite first so each malformed field
+        // is the only reason the corresponding global entry is ineligible.
+        install::write_settings(&global_hooks, &global, false).unwrap();
+        std::fs::write(home.path().join(".codex/config.toml"), &trust).unwrap();
         for (field, invalid_value) in [("type", json!("mcp_tool")), ("async", json!("false"))] {
             let mut ineligible = global.clone();
             ineligible["hooks"]["Stop"][0]["hooks"][0][field] = invalid_value;
@@ -2783,6 +2787,10 @@ mod tests {
         // A registered suite does not cover project callbacks while Codex's
         // feature switch disables hooks globally. Respect the deprecated
         // alias as well as the current feature name.
+        // These checks must start from the pristine, fully approved global
+        // suite; otherwise a prior malformed matcher masks the feature gate.
+        install::write_settings(&global_hooks, &global, false).unwrap();
+        std::fs::write(home.path().join(".codex/config.toml"), &trust).unwrap();
         for feature in ["hooks", "codex_hooks"] {
             install::write_settings(&project_hooks, &original, false).unwrap();
             std::fs::write(
