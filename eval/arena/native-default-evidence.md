@@ -124,6 +124,36 @@ pair must prepare the graph before model execution and record that setup cost.
 Static manifest parity does not by itself prove equal dynamic host context;
 installed hook responses and transcripts are separate evidence.
 
+The graph-prepared `g4-transfer-callers-graph-prepped-candidate2` pair created
+a 1,880,064-byte graph in 1,045 ms before model execution. Both answers covered
+18/18 patterns; raw used 81,215 tokens / 31 seconds and Pixel used 98,012 /
+38 seconds. Both made zero Pixel calls. Investigation found that the disposable
+Codex home had not trusted its installed hooks. A separate direct invocation
+returned the expected hint, but that does not show delivery to the model.
+This pair cannot establish whether the routing intervention helps or hurts.
+
+Codex 0.160.0 requires trust for new or changed non-managed hooks. Subsequent
+hook-routing experiments must verify the hook actually executes and retain its
+returned context separately from the static instruction manifest. Any isolated
+trust bypass must be restricted to enumerated, reviewed hook commands and used
+equally in both arms; it must not change the user's real hook trust.
+
+The first trust-bypass diagnostic, `g4-trusted-hook-pair`, completed with
+18/18 coverage in both arms. Raw used 80,765 tokens / 39 seconds and Pixel
+66,053 / 29 seconds, including one `who-calls 'transferPageToGhost'` call.
+However, its Pixel context manifest contained 1,446 characters of permanent
+developer instructions while raw contained none, and no instrumented prompt-hook
+response was captured. It therefore does not validate the native-default
+candidate or isolate the classifier's contribution. The recorded image/source
+identity needs reconciliation with this observed installation behavior.
+
+Independent source review found both answers correct: the API POST route and
+CLI main are the two direct callers, the status gate is “Ready to Publish,”
+and title matching selects `updatePost` versus `createDraft`, which lead to
+`posts.edit` versus `posts.add`. The four relevant source files had identical
+hashes between snapshots. Pixel's graph listed the two callers as probable;
+native search and source reads verified the answer.
+
 ## Installed validation
 
 The final rebuild and self-update exited 0. Global installation reported 13

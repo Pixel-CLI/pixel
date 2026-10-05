@@ -5715,6 +5715,7 @@ fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
     let repo = dir.path().join("repo");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(repo.join(".claude")).unwrap();
+    fs::create_dir_all(repo.join(".codex")).unwrap();
     git(&repo, &["init", "-q"]);
     // An exact RTK group in the personal settings is adopted by the guard,
     // which makes the install write its backup, the one conditional artifact.
@@ -5726,7 +5727,40 @@ fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
         .unwrap(),
     )
     .unwrap();
+    fs::write(
+        repo.join(".codex/config.toml"),
+        format!(
+            "developer_instructions = '''\nKeep the user's first instruction.\n\n{MANAGED_BEGIN}\nretired Pixel instructions\n{MANAGED_END}\n\nKeep the user's last instruction.\n'''\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("AGENTS.md"),
+        "Keep the user's first project instruction.\n\n<!-- pixel:warp-retrieval:begin -->\nretired Pixel-first instructions\n<!-- pixel:warp-retrieval:end -->\n\nKeep the user's last project instruction.\n",
+    )
+    .unwrap();
     install(&repo_install_options(&repo, &home)).unwrap();
+
+    let codex = fs::read_to_string(repo.join(".codex/config.toml")).unwrap();
+    assert!(!codex.contains(MANAGED_BEGIN), "{codex}");
+    assert!(
+        codex.contains("Keep the user's first instruction."),
+        "{codex}"
+    );
+    assert!(
+        codex.contains("Keep the user's last instruction."),
+        "{codex}"
+    );
+    let agents = fs::read_to_string(repo.join("AGENTS.md")).unwrap();
+    assert!(!agents.contains("pixel:warp-retrieval:"), "{agents}");
+    assert!(
+        agents.contains("Keep the user's first project instruction."),
+        "{agents}"
+    );
+    assert!(
+        agents.contains("Keep the user's last project instruction."),
+        "{agents}"
+    );
 
     let mut written = Vec::new();
     let mut stack = vec![repo.clone()];

@@ -384,9 +384,10 @@ pub struct RepoArtifact {
     pub machine_local: bool,
 }
 
-/// Every file `pixel install --repo` may write. The per-project list in
-/// `website/content/docs.md` and the `--repo` help name exactly these paths,
-/// which `docs_drift::` checks.
+/// Every file `pixel install --repo` may write. This includes the two
+/// portable migration targets, which are rewritten only when they contain a
+/// retired Pixel block. The per-project list in `website/content/docs.md` and
+/// the `--repo` help name exactly these paths, which `docs_drift::` checks.
 pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
     RepoArtifact {
         path: crate::routing::CLAUDE_LOCAL_SETTINGS,
@@ -395,6 +396,10 @@ pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
     RepoArtifact {
         path: crate::routing::RTK_BACKUP,
         machine_local: true,
+    },
+    RepoArtifact {
+        path: ".codex/config.toml",
+        machine_local: false,
     },
     RepoArtifact {
         path: CODEX_PROJECT_HOOKS,
@@ -411,6 +416,10 @@ pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
     RepoArtifact {
         path: crate::pi_project::EXTENSION,
         machine_local: true,
+    },
+    RepoArtifact {
+        path: "AGENTS.md",
+        machine_local: false,
     },
 ];
 
