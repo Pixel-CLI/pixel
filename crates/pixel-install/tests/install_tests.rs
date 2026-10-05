@@ -3508,10 +3508,12 @@ fn plugin_skill_is_focused_explicit_and_replaces_the_broad_skill() {
     let codex_policy = read("skills/pixel-impact/agents/openai.yaml");
     assert!(codex_policy.contains("allow_implicit_invocation: false"));
 
+    let openclaw = read(".openclaw/skills/pixel/SKILL.md");
+    assert!(openclaw.contains("name: pixel\n"));
+    assert!(openclaw.ends_with(include_str!("../assets/pixel-agent-prompt.md")));
     for retired in [
         "skills/pixel/SKILL.md",
         ".agents/skills/pixel/SKILL.md",
-        ".openclaw/skills/pixel/SKILL.md",
         ".agents/skills/pixel-impact/SKILL.md",
     ] {
         assert!(

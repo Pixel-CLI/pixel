@@ -37,10 +37,11 @@ VERSION=$(grep -m1 '^version' "$ROOT/crates/pixel/Cargo.toml" | sed -E 's/.*"([^
 FILES="skills/pixel-impact/SKILL.md skills/pixel-impact/agents/openai.yaml
 claude-skills/pixel-impact/SKILL.md
 pi/extensions/pixel-impact.ts
+.openclaw/skills/pixel/SKILL.md
 .cursor/rules/pixel.mdc
 .windsurf/rules/pixel.md .kiro/steering/pixel.md .qoder/rules/pixel.md .clinerules/pixel.md
 rules/pixel.md PIXEL.md PIXEL-SUBAGENT.md"
-RETIRED_FILES="skills/pixel/SKILL.md .agents/skills/pixel/SKILL.md .openclaw/skills/pixel/SKILL.md
+RETIRED_FILES="skills/pixel/SKILL.md .agents/skills/pixel/SKILL.md
 .agents/skills/pixel-impact/SKILL.md .agents/skills/pixel-impact/agents/openai.yaml"
 
 # --check mode: render into a scratch dir and compare, without rewriting.
@@ -68,7 +69,7 @@ fi
 # OUT_ROOT lets --check render into a scratch dir; default is the repo root.
 OUT_ROOT=${OUT_ROOT:-$ROOT}
 
-# Remove only the three generated broad skills being replaced. `rmdir` keeps
+# Remove only the pilot's retired generated skills. `rmdir` keeps
 # any neighboring user files and non-empty directories intact.
 for f in $RETIRED_FILES; do
   retired="$OUT_ROOT/$f"
@@ -136,6 +137,19 @@ write_pi_extension() {
   echo "wrote pi/extensions/pixel-impact.ts"
 }
 
+# OpenClaw is outside this pilot and retains its existing profile.
+OPENCLAW_SKILL_FRONT='---
+name: pixel
+description: >
+  Deterministic code retrieval: indexed search, concept resolve, impact
+  analysis, caller/callee tracing, task scoping, plan generation, and git
+  history archaeology via the `pixel` CLI. Use when the repo has a `.pixel`
+  directory, when the user mentions pixel, or before editing a symbol when
+  blast radius matters. Requires the `pixel` binary on PATH.
+license: MIT
+---
+'
+
 CURSOR_FRONT='---
 description: Pixel retrieval layer — optional retrieval helpers for the pixel CLI (search-content, find-code, impact, recall). Requires the pixel binary.
 alwaysApply: true
@@ -151,6 +165,7 @@ write_file "skills/pixel-impact/SKILL.md" "" "$SKILL_SRC" no
 write_file "skills/pixel-impact/agents/openai.yaml" "" "$SKILL_CODEX_META" no
 write_claude_skill "claude-skills/pixel-impact/SKILL.md"
 write_pi_extension
+write_file ".openclaw/skills/pixel/SKILL.md" "$OPENCLAW_SKILL_FRONT" "$SRC" yes
 write_file ".cursor/rules/pixel.mdc"          "$CURSOR_FRONT" "$SRC" yes
 write_file ".windsurf/rules/pixel.md"         ""              "$SRC" yes
 write_file ".kiro/steering/pixel.md"          ""              "$SRC" yes
