@@ -584,6 +584,16 @@ fn walk_call_arguments(w: &mut Walker, call: Node, arg_of: Option<String>) {
     };
     let mut cursor = args.walk();
     for arg in args.children(&mut cursor) {
+        // C# (and PHP) wrap each argument in an `argument` node whose last
+        // named child is the value: `OnDone` in `Handle(OnDone)`.
+        let arg = if arg.kind() == "argument" {
+            match each_child(arg).into_iter().rev().find(Node::is_named) {
+                Some(value) => value,
+                None => continue,
+            }
+        } else {
+            arg
+        };
         let name = match arg.kind() {
             "identifier" | "simple_identifier" | "variable" => Some(w.text(arg)),
             "scoped_identifier" => field_text(w, arg, "name"),
@@ -1835,18 +1845,19 @@ fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
                         w.push_call(name, None, node);
                     }
                     "member_access_expression" => {
-                        if let Some(name) = field_text(w, f, "name") {
+                        if let Some(name) = f
+                            .child_by_field_name("name")
+                            .map(|n| csharp_simple_name(w, n))
+                        {
                             let recv = field_text(w, f, "expression");
                             callee_name = Some(name.clone());
                             w.push_call(name, recv, node);
                         }
                     }
                     "generic_name" => {
-                        if let Some(inner) = f.child_by_field_name("name") {
-                            let name = w.text(inner);
-                            callee_name = Some(name.clone());
-                            w.push_call(name, None, node);
-                        }
+                        let name = csharp_simple_name(w, f);
+                        callee_name = Some(name.clone());
+                        w.push_call(name, None, node);
                     }
                     _ => {}
                 }
@@ -1867,8 +1878,13 @@ fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
         "using_directive" => {
             // `name` field only exists for alias usings (`using Foo = X;`)
             // and holds the alias — not the imported namespace. The qualified
-            // namespace is a plain child (`qualified_name` / `identifier`).
+            // namespace is a plain child (`qualified_name` / `identifier`);
+            // the alias is an `identifier` too, so it is skipped by position.
+            let alias = node.child_by_field_name("name");
             for child in each_child(node) {
+                if Some(child) == alias {
+                    continue;
+                }
                 match child.kind() {
                     "qualified_name" | "identifier" => {
                         let spec = w.text(child);
@@ -2139,6 +2155,20 @@ fn ruby_first_string_argument(w: &Walker, call: Node) -> Option<String> {
     if spec.is_empty() { None } else { Some(spec) }
 }
 
+/// The plain name of a C# `generic_name` (`Create` for `Create<int>`), or any
+/// other node's own text. The grammar gives `generic_name` no `name` field:
+/// its identifier is a child beside the `type_argument_list`.
+fn csharp_simple_name(w: &Walker, node: Node) -> String {
+    if node.kind() == "generic_name"
+        && let Some(id) = each_child(node)
+            .into_iter()
+            .find(|c| c.kind() == "identifier")
+    {
+        return w.text(id);
+    }
+    w.text(node)
+}
+
 // --- Generic heuristic walker -------------------------------------------------
 //
 // Languages without a hand-written walker (php, c, swift, elixir, lua,
@@ -2254,12 +2284,13 @@ fn generic_name(w: &Walker, node: Node) -> Option<String> {
             return Some(t);
         }
     }
-    if let Some(decl) = node.child_by_field_name("declarator") {
-        for child in each_child(decl) {
-            if let Some(n) = generic_name(w, child) {
-                return Some(n);
-            }
-        }
+    // C: `function_definition` → `function_declarator` (or a pointer
+    // declarator around it) → `identifier`. The identifier is a child of the
+    // declarator, so recurse into the declarator itself, not its children.
+    if let Some(decl) = node.child_by_field_name("declarator")
+        && let Some(n) = generic_name(w, decl)
+    {
+        return Some(n);
     }
     for child in each_child(node) {
         match child.kind() {
@@ -2280,24 +2311,34 @@ fn generic_name(w: &Walker, node: Node) -> Option<String> {
 /// fieldsh and member accesses (php `member_call_expression`, C `field_expression`
 /// member of a join, etc.).
 fn generic_call(w: &mut Walker, node: Node) {
-    // Elixir `call` nodes whose body is a `do_block` are function definitions,
-    // not invocation sites —— skip them.
-    if node.kind() == "call" && node.child_by_field_name("do_block").is_some() {
+    // Elixir `def`/`defmodule …` and the head a definer defines (`total(x)`
+    // in `def total(x) do`) are definitions, not invocation sites.
+    if elixir_definer(w, node) || elixir_definition_head(w, node) {
         return;
     }
     let mut callee: Option<String> = None;
     let mut receiver: Option<String> = None;
+    // Swift's `call_expression` names no field: the callee is its first
+    // named child, before the `call_suffix`.
     let expr = ["function", "callee", "name", "method", "target"]
         .iter()
-        .find_map(|f| node.child_by_field_name(f));
+        .find_map(|f| node.child_by_field_name(f))
+        .or_else(|| {
+            (node.kind() == "call_expression")
+                .then(|| node.named_child(0))
+                .flatten()
+        });
     if let Some(e) = expr {
         match e.kind() {
             "identifier" | "simple_identifier" | "name" | "type_identifier" | "dotted_name"
             | "qualified_name" | "namespace_name" | "escaped_identifier" | "variable" => {
                 callee = Some(w.text(e));
+                // The callee itself is no receiver: Elixir's `round(x)` names
+                // its callee in `target`, a field this list also reads.
                 receiver = ["receiver", "object", "scope", "target"]
                     .iter()
                     .find_map(|f| node.child_by_field_name(f))
+                    .filter(|r| *r != e)
                     .map(|r| w.text(r));
             }
             k if k.ends_with("_expression")
@@ -2307,9 +2348,16 @@ fn generic_call(w: &mut Walker, node: Node) {
                 || k.contains("index")
                 || k.contains("access") =>
             {
+                // Swift: `navigation_expression` → `suffix` field
+                // (`navigation_suffix`) → its own `suffix` identifier.
                 let pos_name = ["property", "field", "name", "attribute", "member"]
                     .iter()
-                    .find_map(|f| e.child_by_field_name(f));
+                    .find_map(|f| e.child_by_field_name(f))
+                    .or_else(|| {
+                        e.child_by_field_name("suffix")
+                            .and_then(|s| s.child_by_field_name("suffix"))
+                    });
+                // C's `field_expression` holds its operand in `argument`.
                 let pos_recv = [
                     "object",
                     "operand",
@@ -2317,6 +2365,7 @@ fn generic_call(w: &mut Walker, node: Node) {
                     "expression",
                     "value",
                     "target",
+                    "argument",
                 ]
                 .iter()
                 .find_map(|f| e.child_by_field_name(f));
@@ -2341,6 +2390,44 @@ fn generic_call(w: &mut Walker, node: Node) {
     }
 }
 
+/// Elixir macros that define rather than call: a `call` whose `target` is one
+/// of them is a definition site.
+const ELIXIR_DEFINERS: &[&str] = &[
+    "def",
+    "defp",
+    "defmacro",
+    "defmacrop",
+    "defguard",
+    "defguardp",
+    "defdelegate",
+    "defmodule",
+    "defprotocol",
+    "defimpl",
+];
+
+/// True for an Elixir `call` whose target is a definer (`def`, `defmodule`…).
+fn elixir_definer(w: &Walker, node: Node) -> bool {
+    node.kind() == "call"
+        && node
+            .child_by_field_name("target")
+            .is_some_and(|t| ELIXIR_DEFINERS.contains(&w.text(t).as_str()))
+}
+
+/// True for the head a definer defines: `total(x)` in `def total(x) do`,
+/// also behind a guard (`def total(x) when is_integer(x)`, where the head is
+/// the left operand of `when`). The guard's own calls stay call sites.
+fn elixir_definition_head(w: &Walker, node: Node) -> bool {
+    let mut up = node.parent();
+    if let Some(guard) = up.filter(|p| p.kind() == "binary_operator")
+        && guard.child_by_field_name("left") == Some(node)
+    {
+        up = guard.parent();
+    }
+    up.filter(|args| args.kind() == "arguments")
+        .and_then(|args| args.parent())
+        .is_some_and(|def| elixir_definer(w, def))
+}
+
 /// Best-effort import spec from import/use/require node kinds. Prefers source-like
 /// fields, then string/identifier children (php `require_expression`, kotlin
 /// `import_header`, swift `import_declaration`).
@@ -2356,7 +2443,15 @@ fn generic_import(w: &mut Walker, node: Node) {
     }
     for child in each_child(node) {
         match child.kind() {
-            "string" => {
+            // PHP parses a double-quoted path as `encapsed_string`.
+            // An interpolated one (`"lib/$name.php"`) is chosen at run time:
+            // only a double-quoted path made of plain text is an import.
+            "string" | "encapsed_string"
+                if each_child(child)
+                    .into_iter()
+                    .filter(Node::is_named)
+                    .all(|c| c.kind() == "string_content") =>
+            {
                 let spec = strip_quotes(&w.text(child));
                 if !spec.is_empty() {
                     w.push_import(spec, Vec::new());

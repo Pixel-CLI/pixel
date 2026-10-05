@@ -114,7 +114,13 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 14: markup concepts carry 1-based lines (HTML started at 0, Svelte/Vue
 ///    markup before a `<script>` was offset), strings under `__tests__/` are
 ///    no longer concepts, and `app.get("/users")` keeps its path.
-pub const EXTRACTOR_VERSION: &str = "14";
+/// 15: C function definitions are symbols and `o->start()` keeps its
+///    receiver; Swift calls are recorded; Elixir `def`/`defmodule` and the
+///    heads they define are not calls; a double-quoted PHP `require_once` is
+///    an import; C# generic calls are named without type arguments, an alias
+///    `using` no longer imports its alias, and callback arguments are
+///    references.
+pub const EXTRACTOR_VERSION: &str = "15";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {

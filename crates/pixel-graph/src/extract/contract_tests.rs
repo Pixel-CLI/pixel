@@ -1151,3 +1151,99 @@ fn extraction_should_return_on_a_file_that_stalls_the_parser() {
     assert!(concepts.is_empty(), "{concepts:?}");
     assert!(!extraction);
 }
+
+// --- generic-walker and C# regressions (#773–#778) ------------------------------
+
+/// A C function definition names its function: the identifier sits inside
+/// the `function_declarator`, through a pointer declarator too (#773).
+#[test]
+fn c_function_definitions_should_be_symbols() {
+    let fx = extract(
+        "src/add.c",
+        "int add(int a) { return a; }\nchar *name(void) { return 0; }\n",
+    );
+    assert_eq!(
+        symbols(&fx),
+        vec![
+            ("add".to_string(), SymbolKind::Function),
+            ("name".to_string(), SymbolKind::Function)
+        ]
+    );
+}
+
+/// `o->start()` keeps `o` as its receiver: C's `field_expression` holds
+/// its operand in the `argument` field (#774).
+#[test]
+fn c_member_call_should_keep_its_receiver() {
+    let fx = extract("src/add.c", "void f(void) { o->start(); helper(); }\n");
+    assert_eq!(call_receiver(&fx, "start").as_deref(), Some("o"));
+    assert_eq!(call_receiver(&fx, "helper"), None);
+}
+
+/// `def`, `defmodule … do` and the head a `def` defines are definitions:
+/// only the calls in the body are call sites (#775).
+#[test]
+fn elixir_definitions_should_not_be_calls() {
+    let src = "defmodule Cart do\n  def total(x) do\n    Enum.sum(x)\n  end\n  defp tax(x), do: round(x)\n  def pay(x) when is_integer(x) do\n    charge(x)\n  end\nend\n";
+    let fx = extract("lib/cart.ex", src);
+    // A guarded head (`pay(x) when …`) is a definition too; the guard's
+    // own call (`is_integer`) is a call site.
+    assert_eq!(
+        calls(&fx),
+        vec![
+            ("Enum.sum".to_string(), None),
+            ("round".to_string(), None),
+            ("is_integer".to_string(), None),
+            ("charge".to_string(), None)
+        ]
+    );
+}
+
+/// Swift's `call_expression` has no `function` field: the callee is its
+/// first named child, a plain name or a navigation (#776).
+#[test]
+fn swift_calls_should_be_recorded_with_their_receiver() {
+    let fx = extract("View.swift", "func f() { layout(); v.draw(x) }\n");
+    assert_eq!(
+        calls(&fx),
+        vec![
+            ("layout".to_string(), None),
+            ("draw".to_string(), Some("v".to_string()))
+        ]
+    );
+}
+
+/// A double-quoted path parses as `encapsed_string`; it is an import like
+/// the single-quoted one (#777).
+#[test]
+fn php_require_once_with_double_quotes_should_be_an_import() {
+    let fx = extract(
+        "src/a.php",
+        "<?php\nrequire_once \"lib/double.php\";\nrequire_once 'lib/single.php';\nrequire_once \"lib/$name.php\";\n",
+    );
+    // The interpolated path is decided at run time: no import for it.
+    assert_eq!(import_paths(&fx), vec!["lib/double.php", "lib/single.php"]);
+}
+
+/// C# generic calls are named without their type arguments, an alias
+/// `using` imports the namespace and not the alias, and an identifier
+/// passed as an argument is a callback reference (#778).
+#[test]
+fn csharp_generic_calls_alias_usings_and_callback_arguments() {
+    let fx = extract("Service.cs", CS_SRC);
+    assert!(has_call(&fx, "Parse"), "{:?}", calls(&fx));
+    assert_eq!(call_receiver(&fx, "Create").as_deref(), Some("Factory"));
+    assert!(
+        !fx.calls.iter().any(|c| c.callee_name.contains('<')),
+        "{:?}",
+        calls(&fx)
+    );
+    assert_eq!(import_paths(&fx), vec!["System", "Newtonsoft.Json"]);
+    let refs = references(&fx);
+    assert!(
+        refs.contains(&("OnDone".to_string(), Some("Handle".to_string()))),
+        "{refs:?}"
+    );
+    assert!(refs.contains(&("OnClick".to_string(), None)), "{refs:?}");
+    assert!(!refs.iter().any(|(n, _)| n == "null"), "{refs:?}");
+}
