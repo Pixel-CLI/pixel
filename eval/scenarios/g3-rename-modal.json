@@ -1,0 +1,15 @@
+{
+  "id": "g3-rename-modal",
+  "suite": "generic",
+  "task_class": "rename-impact",
+  "mode": "answer",
+  "max_turns": 30,
+  "prompt": "If the ApplicationModal component in components/ were renamed or moved, which files would need updating? List every file that imports or references it, and note whether the same-named component under apps/sanity-check shares code or is a separate copy.",
+  "must": [
+    {"pattern": "client-page\\.tsx", "points": 3, "why": "the consumer"},
+    {"pattern": "ApplicationModal", "points": 3, "why": "the symbol itself"},
+    {"pattern": "sanity-check", "points": 3, "why": "the sibling app copy"},
+    {"pattern": "components/ApplicationModal", "points": 2, "why": "the definition path"}
+  ],
+  "never": []
+}

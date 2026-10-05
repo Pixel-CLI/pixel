@@ -1,0 +1,1 @@
+**Codex retrieval:** Ordinary questions and native searches no longer require a Pixel first call or permanent Pixel instructions. A local prompt classifier offers targeted structural and historical guidance with immediate native fallback. Installation removes retired managed prompt blocks while preserving foreign instructions. Task #700.

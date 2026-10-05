@@ -152,13 +152,9 @@ fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams()
         );
     }
 
-    // Codex reads the prompt from config.toml itself: the value the file
-    // carries is what its developer message gets.
-    let codex_value = codex_developer_instructions(home).expect("developer_instructions written");
-    assert!(
-        codex_value.contains("## LIVE OPERATION METRICS"),
-        "the relay contract must reach codex through config.toml"
-    );
+    // Codex keeps its normal native retrieval flow; global install writes no
+    // permanent Pixel developer-instructions block.
+    assert_eq!(codex_developer_instructions(home), None);
     // Claude gets the doctrine through the SessionStart hook, which injects
     // the deployed prompt itself — every `claude` process, not only shells
     // launched through the retired wrapper.
@@ -877,9 +873,10 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
         !shell_profile_path(home).exists(),
         "no shell wrapper is written — the SessionStart hook injects the prompt"
     );
-    assert!(
-        codex_developer_instructions(home).is_some_and(|v| v.contains("## Retrieval route")),
-        "a fresh install must write the agent prompt into ~/.codex/config.toml"
+    assert_eq!(
+        codex_developer_instructions(home),
+        None,
+        "a fresh install leaves Codex's native instructions untouched"
     );
 }
 
@@ -1708,8 +1705,8 @@ fn repo_uninstall_reports_the_backups_left_in_the_repository() {
 
     let on_disk = backups_on_disk(&repo);
     assert!(
-        on_disk.iter().any(|p| p.parent() == Some(repo.as_path())),
-        "the AGENTS.md rewrite keeps a backup at the root: {on_disk:?}"
+        on_disk.iter().all(|p| p.parent() != Some(repo.as_path())),
+        "removing retired guidance does not rewrite or back up user AGENTS.md: {on_disk:?}"
     );
     let command = backups_step(&report).detail.as_deref().expect("command");
     assert_eq!(rm_command_paths(command), on_disk, "{command}");
@@ -2612,47 +2609,19 @@ js_repl = false
 token_budget.enabled = true
 "#;
 
-/// Codex has no file-backed `developer_instructions`, so the prompt is
-/// embedded in the file. Two things must hold: Codex reads back exactly the
-/// bundled prompt (a TOML round trip, no escaping accident), and nothing else
-/// in a file the desktop app also owns moves.
+/// Global installation removes the retired block but preserves user-owned
+/// Codex settings without creating a replacement prompt.
 #[test]
-fn install_writes_the_agent_prompt_into_codex_config_and_leaves_the_rest_of_the_file_alone() {
+fn install_does_not_add_codex_developer_instructions_or_rewrite_other_settings() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     fs::create_dir_all(home.join(".codex")).unwrap();
     fs::write(codex_config_path(home), USER_CODEX_CONFIG).unwrap();
     install_for_shell(home, TEST_SHELL);
 
-    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
-    let value = codex_developer_instructions(home).expect("developer_instructions written");
-    assert_eq!(
-        value,
-        format!("{PIXEL_BLOCK_BEGIN}\n{asset}{PIXEL_BLOCK_END}\n"),
-        "codex must read back the bundled prompt between the pixel markers"
-    );
+    assert_eq!(codex_developer_instructions(home), None);
     let written = fs::read_to_string(codex_config_path(home)).unwrap();
-    for line in USER_CODEX_CONFIG.lines() {
-        assert!(
-            written.contains(line),
-            "user line {line:?} must survive the install verbatim:\n{written}"
-        );
-    }
-    assert!(
-        written.contains("developer_instructions = '''\n"),
-        "the prompt must be a literal multi-line string, so the file shows it unescaped:\n{written}"
-    );
-    let doc: toml_edit::DocumentMut = written.parse().unwrap();
-    assert!(
-        doc.get("developer_instructions")
-            .is_some_and(toml_edit::Item::is_value),
-        "the key must sit in the root table, not inside [features] at the end of the file"
-    );
-    assert_eq!(
-        doc["features"]["token_budget"]["enabled"].as_bool(),
-        Some(true),
-        "sub-tables must be untouched"
-    );
+    assert_eq!(written, USER_CODEX_CONFIG);
 
     install_for_shell(home, TEST_SHELL);
     assert_eq!(
@@ -2660,49 +2629,28 @@ fn install_writes_the_agent_prompt_into_codex_config_and_leaves_the_rest_of_the_
         written,
         "a re-install must be byte-for-byte idempotent"
     );
-    assert!(
-        !shell_profile_path(home).exists(),
-        "no shell wrapper is written — codex carries the prompt in config.toml"
-    );
 }
 
 #[test]
-fn install_keeps_a_users_own_developer_instructions_and_refreshes_a_stale_pixel_block() {
+fn install_removes_a_retired_codex_block_and_preserves_surrounding_user_text() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     fs::create_dir_all(home.join(".codex")).unwrap();
     fs::write(
         codex_config_path(home),
-        "developer_instructions = \"Always answer in French.\"\n",
-    )
-    .unwrap();
-    install_for_shell(home, TEST_SHELL);
-    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
-    let expected =
-        format!("Always answer in French.\n\n{PIXEL_BLOCK_BEGIN}\n{asset}{PIXEL_BLOCK_END}\n");
-    assert_eq!(
-        codex_developer_instructions(home).as_deref(),
-        Some(expected.as_str()),
-        "the user's own instructions come first, the pixel block is appended"
-    );
-
-    // A block left by an older pixel (different prompt) plus text the user
-    // added after it: only the block changes.
-    fs::write(
-        codex_config_path(home),
         format!(
-            "developer_instructions = '''\nMine first.\n\n{PIXEL_BLOCK_BEGIN}\nold prompt\n{PIXEL_BLOCK_END}\nMine last.\n'''\n"
+            "developer_instructions = {}\n",
+            toml_edit::Value::from(format!(
+                "Mine first.\n\n{PIXEL_BLOCK_BEGIN}\nold prompt\n{PIXEL_BLOCK_END}\nMine last.\n"
+            ))
         ),
     )
     .unwrap();
     install_for_shell(home, TEST_SHELL);
     assert_eq!(
         codex_developer_instructions(home).as_deref(),
-        Some(
-            format!("Mine first.\n\n{PIXEL_BLOCK_BEGIN}\n{asset}{PIXEL_BLOCK_END}\nMine last.\n")
-                .as_str()
-        ),
-        "a stale block is replaced in place, text on both sides survives"
+        Some("Mine first.\n\nMine last.\n"),
+        "only the retired block is removed"
     );
 }
 
@@ -2853,7 +2801,7 @@ fn dry_run_leaves_codex_config_absent_and_untouched() {
 }
 
 #[test]
-fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
+fn doctor_codex_config_check_is_green_without_pixel_and_red_for_a_retired_block() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     let status = || {
@@ -2870,7 +2818,7 @@ fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
         .find(|c| c.id == "install.codex-config")
         .expect("codex-config check")
     };
-    assert_eq!(status().status, CheckStatus::Red, "nothing installed");
+    assert_eq!(status().status, CheckStatus::Green, "nothing installed");
 
     fs::create_dir_all(home.join(".codex")).unwrap();
     fs::write(
@@ -2878,30 +2826,30 @@ fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
         "developer_instructions = \"Always answer in French.\"\n",
     )
     .unwrap();
-    assert_eq!(
-        status().status,
-        CheckStatus::Red,
-        "a value without the pixel block does not carry the prompt"
-    );
-
-    install_for_shell(home, TEST_SHELL);
     let check = status();
-    assert_eq!(check.status, CheckStatus::Green, "{check:?}");
+    assert_eq!(check.status, CheckStatus::Green, "user text remains valid");
 
-    let written = fs::read_to_string(codex_config_path(home)).unwrap();
+    let retired =
+        format!("Mine first.\n\n{PIXEL_BLOCK_BEGIN}\nold prompt\n{PIXEL_BLOCK_END}\nMine last.\n");
     fs::write(
         codex_config_path(home),
-        written.replace("## Retrieval route", "## Retrieval output"),
+        format!(
+            "developer_instructions = {}\n",
+            toml_edit::Value::from(retired)
+        ),
     )
     .unwrap();
     let check = status();
     assert_eq!(
         check.status,
         CheckStatus::Red,
-        "a block that differs from the bundled prompt is stale: {check:?}"
+        "any retired Pixel block must be removed: {check:?}"
     );
     assert!(
-        check.reason.as_deref().is_some_and(|r| r.contains("stale")),
+        check
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("retired Pixel block remains")),
         "{check:?}"
     );
 }
@@ -2910,13 +2858,21 @@ fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
 fn uninstall_takes_only_the_pixel_block_out_of_codex_config() {
     use pixel_install::uninstall::{UninstallOptions, uninstall};
 
-    // Only pixel in the key: the key goes, the rest of the file stays.
+    // A retired block is removed with its key; unrelated settings in the
+    // same config.toml survive byte-for-byte.
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     fs::create_dir_all(home.join(".codex")).unwrap();
-    fs::write(codex_config_path(home), USER_CODEX_CONFIG).unwrap();
-    install_for_shell(home, TEST_SHELL);
-    assert!(codex_developer_instructions(home).is_some());
+    fs::write(
+        codex_config_path(home),
+        format!(
+            "developer_instructions = {}\n{USER_CODEX_CONFIG}",
+            toml_edit::Value::from(format!(
+                "{PIXEL_BLOCK_BEGIN}\nold prompt\n{PIXEL_BLOCK_END}\n"
+            ))
+        ),
+    )
+    .unwrap();
     uninstall(&UninstallOptions {
         repo: None,
         home: Some(home.to_path_buf()),
@@ -2937,16 +2893,20 @@ fn uninstall_takes_only_the_pixel_block_out_of_codex_config() {
         );
     }
 
-    // The user's own text around the block: the block goes, the text stays.
+    // User text surrounding a retired block remains after removal.
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     fs::create_dir_all(home.join(".codex")).unwrap();
     fs::write(
         codex_config_path(home),
-        "developer_instructions = \"Always answer in French.\"\n",
+        format!(
+            "developer_instructions = {}\n",
+            toml_edit::Value::from(format!(
+                "Always answer in French.\n\n{PIXEL_BLOCK_BEGIN}\nold prompt\n{PIXEL_BLOCK_END}\n"
+            ))
+        ),
     )
     .unwrap();
-    install_for_shell(home, TEST_SHELL);
     uninstall(&UninstallOptions {
         repo: None,
         home: Some(home.to_path_buf()),
@@ -3918,7 +3878,7 @@ fn repo_install_options(repo: &std::path::Path, home: &std::path::Path) -> Insta
 
 #[test]
 #[cfg(unix)]
-fn repo_install_writes_all_five_artifacts() {
+fn repo_install_writes_five_task_scoped_artifacts_without_permanent_guidance() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -3962,10 +3922,10 @@ fn repo_install_writes_all_five_artifacts() {
         );
     }
 
-    // .codex/config.toml — developer_instructions managed block.
-    let config = fs::read_to_string(repo.join(".codex/config.toml")).unwrap();
-    assert!(config.contains("developer_instructions"), "{config}");
-    assert!(config.contains(MANAGED_BEGIN), "{config}");
+    // Codex gets only task-scoped hooks; install does not create a permanent
+    // developer-instructions config or root Pixel-first AGENTS.md block.
+    assert!(!repo.join(".codex/config.toml").exists());
+    assert!(!repo.join("AGENTS.md").exists());
 
     // .codex/hooks.json — exactly the composed guard group + sidecar backup.
     let hooks: serde_json::Value =
@@ -4153,7 +4113,6 @@ fn repo_install_is_idempotent() {
     install(&repo_install_options(&repo, &home)).unwrap();
     let artifacts = [
         ".claude/settings.local.json",
-        ".codex/config.toml",
         ".codex/hooks.json",
         ".codex/pixel-composed-guard-backup.json",
         ".devin/config.local.json",
@@ -4354,9 +4313,8 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
             .exists()
     );
 
-    // config.toml: developer_instructions block gone.
-    let config = fs::read_to_string(repo.join(".codex/config.toml")).unwrap();
-    assert!(!config.contains(MANAGED_BEGIN), "{config}");
+    // Repo install/uninstall never creates a permanent Codex prompt.
+    assert!(!repo.join(".codex/config.toml").exists());
 
     // Claude: only the foreign group remains — the pixel guard is gone.
     let claude: serde_json::Value = serde_json::from_str(
@@ -4827,8 +4785,8 @@ fn repo_install_should_keep_machine_local_artifacts_out_of_git() {
         );
     }
     assert!(
-        status.contains(".codex/config.toml"),
-        "the portable Codex instructions stay visible to git:\n{status}"
+        !repo.join(".codex/config.toml").exists(),
+        "repo install does not create a permanent Codex prompt"
     );
 
     // A second install adds nothing to the exclude file.
@@ -4933,7 +4891,11 @@ fn doctor_repo_checks_should_stay_green_on_a_project_with_its_own_configs() {
     ] {
         let c = check(&report, id);
         assert_eq!(c.status, CheckStatus::Green, "{id}: {c:?}");
-        assert!(c.summary.contains("not installed"), "{id}: {c:?}");
+        if id == "repo.codex-config" {
+            assert!(c.summary.contains("no retired Pixel block"), "{id}: {c:?}");
+        } else {
+            assert!(c.summary.contains("not installed"), "{id}: {c:?}");
+        }
     }
 }
 
@@ -5795,22 +5757,22 @@ fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
     assert_eq!(written, listed);
 }
 
-/// Repo installation makes Pixel-first instructions available to project-aware
-/// agents and doctor detects drift without treating an unconfigured repo as broken.
+/// Repo installation removes the retired permanent Pixel-first block and
+/// leaves project-authored instructions unchanged.
 #[test]
 #[cfg(unix)]
-fn repo_install_should_manage_pixel_first_project_rules_fail_open() {
+fn repo_install_removes_retired_pixel_first_rules_without_rewriting_user_text() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q"]);
-    fs::write(
-        repo.join("AGENTS.md"),
-        "# Existing project rules\nPreserve this instruction.\n",
-    )
-    .unwrap();
+    let before = "# Existing project rules\nPreserve this instruction.\n\n";
+    let retired = "<!-- pixel:warp-retrieval:begin -->\nold Pixel-first prompt\n<!-- pixel:warp-retrieval:end -->";
+    let after = "\nKeep this trailing instruction.\n";
+    let original = format!("{before}{retired}{after}");
+    fs::write(repo.join("AGENTS.md"), &original).unwrap();
     let doctor_options = DoctorOptions {
         home: Some(home.clone()),
         repo_root: Some(repo.clone()),
@@ -5818,60 +5780,21 @@ fn repo_install_should_manage_pixel_first_project_rules_fail_open() {
         ..Default::default()
     };
 
-    let absent = doctor(&doctor_options).unwrap();
-    assert_eq!(
-        check(&absent, "repo.pixel-first").status,
-        CheckStatus::Green
-    );
+    let legacy = doctor(&doctor_options).unwrap();
+    assert_eq!(check(&legacy, "repo.pixel-first").status, CheckStatus::Red);
 
     let installed = install(&repo_install_options(&repo, &home)).unwrap();
     assert!(installed.ok, "{installed:?}");
     let rules_path = repo.join("AGENTS.md");
-    let managed = fs::read_to_string(&rules_path).unwrap();
-    assert!(managed.starts_with("# Existing project rules\nPreserve this instruction."));
-    assert!(managed.contains("pixel:warp-retrieval:begin"));
-    assert!(managed.contains("pixel search-content -F '<identifier>'"));
-    assert!(managed.contains("native tools stay available"));
+    assert_eq!(
+        fs::read_to_string(&rules_path).unwrap(),
+        format!("{before}{after}")
+    );
     let current = doctor(&doctor_options).unwrap();
     assert_eq!(
         check(&current, "repo.pixel-first").status,
         CheckStatus::Green
     );
-
-    // The block re-wrapped by hand, as a committed AGENTS.md carries it:
-    // doctor stays green and a reinstall writes nothing, backup included.
-    let reflowed = managed.replace(". ", ".\n  ");
-    assert_ne!(reflowed, managed, "the fixture must change the layout");
-    fs::write(&rules_path, &reflowed).unwrap();
-    let rewrapped = doctor(&doctor_options).unwrap();
-    assert_eq!(
-        check(&rewrapped, "repo.pixel-first").status,
-        CheckStatus::Green
-    );
-    let agents_backups = || {
-        let mut names: Vec<_> = fs::read_dir(&repo)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("AGENTS.md.pixel-bak."))
-            .collect();
-        names.sort();
-        names
-    };
-    let backups_before = agents_backups();
-    let reinstalled = install(&repo_install_options(&repo, &home)).unwrap();
-    assert!(reinstalled.ok, "{reinstalled:?}");
-    assert_eq!(fs::read_to_string(&rules_path).unwrap(), reflowed);
-    assert_eq!(agents_backups(), backups_before);
-
-    let stale_text = managed.replace("missed retrieval", "optional retrieval");
-    assert_ne!(
-        stale_text, managed,
-        "the test mutation must alter managed policy"
-    );
-    fs::write(&rules_path, &stale_text).unwrap();
-    let stale = doctor(&doctor_options).unwrap();
-    let stale_check = check(&stale, "repo.pixel-first");
-    assert_eq!(stale_check.status, CheckStatus::Red, "{stale_check:?}");
 
     uninstall(&UninstallOptions {
         home: Some(home),
@@ -5880,10 +5803,7 @@ fn repo_install_should_manage_pixel_first_project_rules_fail_open() {
     })
     .unwrap();
     let remaining = fs::read_to_string(&rules_path).unwrap();
-    assert_eq!(
-        remaining,
-        "# Existing project rules\nPreserve this instruction.\n"
-    );
+    assert_eq!(remaining, format!("{before}{after}"));
 }
 
 /// A global RTK backup with no delegating guard is a leftover (an
@@ -6979,6 +6899,9 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     })
     .expect("install");
     let hooks = home.join(".codex/hooks.json");
+    let config = home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, "# Codex settings owned by the test\n").unwrap();
     let options = hook_review_options(home, &exe, "install.codex-hook-review", None);
 
     let report = doctor(&options).unwrap();
@@ -6999,7 +6922,6 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
 
     // A review recorded for another file, another event, or an entry without
     // a hash, is not this hook's review.
-    let config = home.join(".codex/config.toml");
     let base = fs::read_to_string(&config).unwrap();
     let review = |key: &str, entry: &str| {
         fs::write(

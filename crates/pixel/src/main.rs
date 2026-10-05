@@ -37,6 +37,7 @@ mod audit_cmd;
 mod call_guard;
 mod classify;
 mod classify_setup;
+mod codex_retrieval_intent;
 mod config_cmd;
 mod config_file;
 mod coverage_cmd;
@@ -1141,8 +1142,8 @@ enum Command {
     // -----------------------------------------------------------------
     // M5/M6 — install / doctor / migrate / hook
     // -----------------------------------------------------------------
-    /// Idempotently deploy the agent prompt, the Claude shell wrapper and the
-    /// Codex developer_instructions config key.
+    /// Idempotently deploy agent prompts and lifecycle hooks, with selective
+    /// Codex retrieval guidance instead of a permanent Pixel prompt.
     Install {
         #[arg(long)]
         json: bool,
@@ -1157,8 +1158,8 @@ enum Command {
         /// over), `.codex/config.toml`, `.codex/hooks.json` (composed guard,
         /// skipped when git tracks it) + `.codex/pixel-composed-guard-backup.json`,
         /// `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`,
-        /// and a Pixel-first retrieval block in the root `AGENTS.md`. The block
-        /// preserves surrounding instructions and never blocks native tools.
+        /// and removal of retired Pixel retrieval blocks from `AGENTS.md` and
+        /// Codex config. Foreign instructions and native tools are preserved.
         /// Machine-specific files naming this binary go into `info/exclude`.
         #[arg(long)]
         repo: Option<PathBuf>,

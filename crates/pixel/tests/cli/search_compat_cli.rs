@@ -239,7 +239,7 @@ fn repeated_search_keeps_executing_and_reports_changed_file() {
 }
 
 #[test]
-fn provider_rewrites_preserve_metadata_and_authorize_only_codex() {
+fn provider_rewrites_preserve_metadata_without_rewriting_codex_native_search() {
     for provider in ["claude", "codex", "devin"] {
         let fixture = Fixture::new(b"needle\n");
         let out = fixture.guard(provider, "grep -n needle 'a file.rs'", false, None);
@@ -248,6 +248,13 @@ fn provider_rewrites_preserve_metadata_and_authorize_only_codex() {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+        if provider == "codex" {
+            assert!(
+                out.stdout.is_empty(),
+                "Codex native search must pass through: {out:?}"
+            );
+            continue;
+        }
         let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         let output = &response["hookSpecificOutput"];
         assert!(
@@ -258,16 +265,12 @@ fn provider_rewrites_preserve_metadata_and_authorize_only_codex() {
         );
         assert_eq!(output["updatedInput"]["timeout_ms"], 1234);
         assert_eq!(output["updatedInput"]["extra"]["keep"], true);
-        if provider == "codex" {
-            assert_eq!(output["permissionDecision"], "allow");
-        } else {
-            assert!(output.get("permissionDecision").is_none());
-        }
+        assert!(output.get("permissionDecision").is_none());
     }
 }
 
 #[test]
-fn codex_argv_shell_events_rewrite_only_the_script_token() {
+fn codex_argv_shell_events_keep_the_native_search_command() {
     let fixture = Fixture::new(b"needle\n");
     let payload = serde_json::json!({
         "hook_event_name": "PreToolUse",
@@ -288,19 +291,10 @@ fn codex_argv_shell_events_rewrite_only_the_script_token() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let output = &response["hookSpecificOutput"];
-    assert_eq!(output["permissionDecision"], "allow");
-    assert_eq!(output["updatedInput"]["command"][0], "bash");
-    assert_eq!(output["updatedInput"]["command"][1], "-lc");
     assert!(
-        output["updatedInput"]["command"][2]
-            .as_str()
-            .unwrap()
-            .starts_with("pixel search-like-rg grep --")
+        out.stdout.is_empty(),
+        "Codex native argv must pass through: {out:?}"
     );
-    assert_eq!(output["updatedInput"]["timeout_ms"], 1234);
-    assert_eq!(output["updatedInput"]["extra"]["keep"], true);
 }
 
 #[test]

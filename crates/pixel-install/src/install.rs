@@ -83,10 +83,10 @@ pub struct InstallOptions {
     pub dry_run: bool,
     /// Repository root to install project-local enforcement into
     /// (`pixel install --repo <path>`). When set, ONLY repo-local steps run:
-    /// `.codex/config.toml` + `.codex/hooks.json`, `.devin/config.local.json`,
+    /// `.codex/hooks.json`, `.devin/config.local.json`,
     /// `.claude/settings.local.json` (PreToolUse guard), and
-    /// `.pi/extensions/pixel-guard.ts`, and a portable Pixel-first block in
-    /// the repository's `AGENTS.md` ([`REPO_ARTIFACTS`]); a Pixel entry an
+    /// `.pi/extensions/pixel-guard.ts`, and removes retired Pixel blocks from
+    /// `.codex/config.toml` and `AGENTS.md`; a Pixel entry an
     /// older release left in `.warp/.mcp.json` is removed — none of the global prompt/lifecycle-hook deploys.
     pub repo: Option<PathBuf>,
 }
@@ -126,9 +126,10 @@ fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
 /// lifecycle hooks in `~/.claude/settings.json` (the SessionStart hook
 /// injects that prompt into EVERY Claude process — the retired `claude()`
 /// shell wrapper only ever fired for human login shells and is removed),
-/// and sets up the Codex `developer_instructions` config key so every
-/// invocation includes the Pixel retrieval protocol —
-/// and, when OpenCode is present, a managed block in its global
+/// and removes the retired always-on Pixel block from Codex's
+/// `developer_instructions`, preserving any user-owned text. Codex keeps its
+/// dedicated hooks, while optional Pixel guidance remains available to other
+/// hosts. When OpenCode is present, a managed block in its global
 /// `~/.config/opencode/AGENTS.md`. Codex also gets the metrics relay:
 /// its exec layer already merges the invocation's stderr into the tool
 /// result it records and shows, so the relay's dedupe drops the duplicate
@@ -172,7 +173,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         // The zsh `claude()` wrapper only ever fired for human login shells
         // and would now double-inject alongside SessionStart — strip it.
         remove_legacy_wrappers(&home, options.shell.as_deref(), dry_run)?,
-        crate::codex_config::install_developer_instructions(&codex_home, dry_run)?,
+        crate::codex_config::remove_developer_instructions(&codex_home, dry_run)?,
         crate::codex_config::install_metrics_hook(&codex_home, &exe, dry_run)?,
     ];
     let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
@@ -253,9 +254,8 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 
 /// Repo-local install (`pixel install --repo <path>`): project-scoped agent
 /// enforcement instead of the global prompt deploy. Writes:
-///   - `<repo>/.codex/config.toml` — the same `developer_instructions`
-///     managed block the global install writes (Codex merges a project-local
-///     config.toml over the global one);
+///   - `<repo>/.codex/config.toml` — any retired Pixel
+///     `developer_instructions` block is removed while user text is preserved;
 ///   - `<repo>/.codex/hooks.json` — the composed-guard PreToolUse group plus
 ///     its `pixel-composed-guard-backup.json` sidecar, which snapshots any
 ///     pre-existing project hooks so the composed runtime can replay them;
@@ -268,7 +268,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 ///     machine's binary, so the shared `settings.json` never carries it);
 ///   - `<repo>/.pi/extensions/pixel-guard.ts` — pi's guard extension
 ///     ([`crate::pi_project`]).
-///   - the Pixel-first managed block in `<repo>/AGENTS.md`
+///   - any retired Pixel-first managed block in `<repo>/AGENTS.md` is removed
 ///     ([`crate::pixel_first`]).
 ///
 /// It also removes the `pixel mcp` entry an older release wrote into
@@ -281,6 +281,12 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Result<InstallReport> {
     let codex_dir = repo.join(".codex");
     let codex_hooks = codex_dir.join(crate::codex_config::HOOKS_FILE);
+    // These two cleanup steps are independent of hook ownership. Run them
+    // before validating project hooks so a foreign hook conflict cannot leave
+    // the retired always-on Codex guidance in place.
+    let retired_codex_instructions =
+        crate::codex_config::remove_developer_instructions(&codex_dir, dry_run)?;
+    let retired_pixel_first_rules = crate::pixel_first::uninstall_rules(repo, dry_run)?;
     let codex_step = if crate::repo_git::is_tracked(repo, CODEX_PROJECT_HOOKS) {
         InstallStep {
             id: "hooks.codex".into(),
@@ -296,12 +302,12 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
     };
     let steps = vec![
         crate::routing::install_project_claude_at(repo, home, exe, dry_run)?,
-        crate::codex_config::install_developer_instructions(&codex_dir, dry_run)?,
+        retired_codex_instructions,
         codex_step,
         crate::routing::install_project_devin_at(repo, exe, dry_run)?,
         crate::pi_project::install(repo, exe, dry_run)?,
         crate::warp::retire(repo, dry_run)?,
-        crate::pixel_first::install_rules(repo, dry_run)?,
+        retired_pixel_first_rules,
         exclude_project_artifacts(repo, dry_run)?,
     ];
 
@@ -391,10 +397,6 @@ pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
         machine_local: true,
     },
     RepoArtifact {
-        path: ".codex/config.toml",
-        machine_local: false,
-    },
-    RepoArtifact {
         path: CODEX_PROJECT_HOOKS,
         machine_local: true,
     },
@@ -409,10 +411,6 @@ pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
     RepoArtifact {
         path: crate::pi_project::EXTENSION,
         machine_local: true,
-    },
-    RepoArtifact {
-        path: "AGENTS.md",
-        machine_local: false,
     },
 ];
 
@@ -490,11 +488,11 @@ pub fn stale_prompts(home: &Path) -> Vec<&'static str> {
     .collect()
 }
 
-/// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`,
+/// Copy the shared Pixel agent prompt to `~/.local/share/pixel/agent-prompt.md`,
 /// the sub-agent prompt to `~/.local/share/pixel/subagent-prompt.md`, and the
 /// short Pixel rule into Pi's system-prompt file (pi reads it automatically).
-/// The prompt instructs agents to use `pixel search-content`/`pixel find-code`/`pixel impact`
-/// instead of `grep`/`rg` for code discovery in indexed repositories.
+/// Codex uses its event hooks and does not receive this shared prompt as a
+/// permanent developer instruction.
 fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let dest_dir = home.join(".local/share/pixel");
     let dest = dest_dir.join("agent-prompt.md");

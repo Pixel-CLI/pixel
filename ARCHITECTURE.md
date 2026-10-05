@@ -54,7 +54,7 @@ MCP server. `pixel install` registers no MCP server with any agent.
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
-| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: the bundled prompts, Claude Code lifecycle hooks (removing the retired `claude()` shell wrapper), the Codex `developer_instructions` key plus `UserPromptSubmit` and metrics hooks, the Pi `APPEND_SYSTEM.md` block, and, when their config exists, the OpenCode `AGENTS.md` block and guard plugin, the Antigravity plugin and hooks, Devin's own lifecycle hooks (`~/.config/devin/config.json` — Devin imports Claude's hooks, so without them its sessions get the imported Claude text instead of its own protocol), and the zcode guard. `--repo`: project guards for Claude, Codex, Devin and Pi, and the Pixel-first `AGENTS.md` rule (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups and ends on a `backups` step listing them with the quoted `rm --` command that drops them. A run at a terminal opens with the `intro` animation (frames only; `pixel` owns the tty) and ends on the `banner` summary. | proto, daemon, index, facts, git |
+| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: the bundled prompts, Claude Code lifecycle hooks (removing the retired `claude()` shell wrapper), Codex selective `UserPromptSubmit` and metrics hooks plus cleanup of its retired permanent prompt, the Pi `APPEND_SYSTEM.md` block, and, when their config exists, the OpenCode `AGENTS.md` block and guard plugin, the Antigravity plugin and hooks, Devin's own lifecycle hooks (`~/.config/devin/config.json` — Devin imports Claude's hooks, so without them its sessions get the imported Claude text instead of its own protocol), and the zcode guard. `--repo`: project guards for Claude, Codex, Devin and Pi, and cleanup of retired `AGENTS.md` retrieval blocks (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups and ends on a `backups` step listing them with the quoted `rm --` command that drops them. A run at a terminal opens with the `intro` animation (frames only; `pixel` owns the tty) and ends on the `banner` summary. | proto, daemon, index, facts, git |
 | `pixel-ultraflow` | The classify-driven browser loop over saved flows: the observation (`agent-browser snapshot -i` parsed into numbered slots, `elements`), the indexed action space of operation-target pairs (`action`), the decision seam (`decide`), the discovery loop and its single-cycle unit (`discover`), the composition of what worked into a `pixel-flow` document whose `conditional` steps carry the conditions that tell its branches apart (`compose`), and the replay that decides those conditions with `pixel classify` and re-decides a step whose page moved on (`replay`). Drives `pixel-flow`'s browser seam; the engine is a trait, so the whole loop is tested without a model, a network or a page. | flow |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
 
@@ -128,7 +128,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel dig-history` | Engine 2: history-wide discovery (rescue v2) |
 | `pixel sync-branch` | Engine 4: one-call deterministic branch sync |
 | `pixel record-event` | M5: journal a session event (fire-and-forget) |
-| `pixel install` | Idempotently deploy the agent prompt, the Claude shell wrapper, the Codex developer_instructions config key and — when `~/.config/opencode` exists — the managed prompt block in OpenCode's global `AGENTS.md` plus the guard plugin `plugins/pixel.js` |
+| `pixel install` | Idempotently deploy the agent prompt, the Claude shell wrapper, Codex selective prompt hooks and — when `~/.config/opencode` exists — the managed prompt block in OpenCode's global `AGENTS.md` plus the guard plugin `plugins/pixel.js` |
 | `pixel uninstall` | Remove everything `pixel install` wrote: managed blocks from agent-config files, hook entries from all settings files, hook scripts, the pi guard extension, the rule source file, and the pixel binary itself. |
 | `pixel check-release` | Check that a release tag is consistent with the tree before anything is built or published: crates/pixel/Cargo.toml carries the version, Cargo.lock is fresh for every workspace member, CHANGELOG.md has the `## [x.y.z]` heading and an empty Unreleased section. |
 | `pixel self-update` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
@@ -451,8 +451,9 @@ each agent through its own extension point:
   reports one that remains (`install.legacy-wrappers`). The hook does not
   reach sub-agents: a print-mode run passes the deployed sub-agent prompt
   with `--append-subagent-system-prompt-file` ([docs/manual-setup.md](docs/manual-setup.md)).
-- **Codex**: the `developer_instructions` key, the `UserPromptSubmit`
-  Pixel-first guidance, and the `PostToolUse` metrics hook
+- **Codex**: selective retrieval guidance through `UserPromptSubmit`, and the
+  `PostToolUse` metrics hook. Installation removes Pixel's retired permanent
+  `developer_instructions` block while preserving foreign instructions
   (`$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json`), detailed below.
 - **Pi**: a short Pixel rule in `~/.pi/agent/APPEND_SYSTEM.md`. Its
   repository extension (installed by `--repo`) registers the structured
@@ -475,6 +476,15 @@ independent of that setting and preserve original tool results. Install
 preserves foreign agent settings and rule files: it only rewrites its own
 managed blocks and hook entries.
 
+Codex has no permanent Pixel retrieval prompt. Its prompt hook classifies explicit
+structural and historical questions locally, without a model call; ordinary
+Q&A, text searches and uncertain requests receive no retrieval context or
+task-target lookup. Graph/history hints require the corresponding local database
+to already exist. A selected route is an optional, targeted hint with an
+immediate native fallback. Codex's guard leaves retrieval commands native even
+when the shared policy is `enforce`. Codex permissions and composed foreign
+hooks keep their own contracts; the other providers still use the shared policy.
+
 `pixel install --repo <path>` writes the project-scoped guards instead; each
 one that names this machine's binary is listed in the clone's `info/exclude`
 so no machine path is committed:
@@ -482,28 +492,22 @@ so no machine path is committed:
 | File | Agent | Content |
 | --- | --- | --- |
 | `.claude/settings.local.json` | Claude Code | `PreToolUse` `run-hook guard --provider claude` |
-| `.codex/config.toml`, `.codex/hooks.json` (+ backup sidecar) | Codex | `developer_instructions`, and the `composed-guard` `PreToolUse` group replaying pre-existing project hooks; skipped when the repository tracks `.codex/hooks.json` |
+| `.codex/config.toml`, `.codex/hooks.json` (+ backup sidecar) | Codex | Removes retired Pixel `developer_instructions` text; the `composed-guard` `PreToolUse` group replays pre-existing project hooks and is skipped when the repository tracks `.codex/hooks.json` |
 | `.devin/config.local.json` | Devin | `PreToolUse` rewrite, `PermissionRequest` retrieval approval, prompt-context and metrics hooks |
 | `.pi/extensions/pixel-guard.ts` | Pi | the guard extension |
-| a managed block in `AGENTS.md` | Codex, and any agent that reads `AGENTS.md` | the Pixel-first retrieval rule, which never blocks native tools; compared word by word, so a copy re-wrapped by hand is current and left as is |
+| retired managed block in `AGENTS.md` | any agent that reads `AGENTS.md` | Removed on install so ordinary tasks carry no permanent Pixel retrieval instructions; foreign project instructions are preserved |
 
 `doctor` checks them under the `repo.*` ids. `install --repo` and `uninstall
 --repo` also remove the MCP server entry releases up to 0.6.1 wrote into
 `.warp/.mcp.json`, and `repo.warp-mcp` reports one still there.
 
-Codex gets the prompt through `developer_instructions` in `~/.codex/config.toml`
-(`$CODEX_HOME` honoured), the key it appends to its developer message while
-keeping its own system prompt; `model_instructions_file` would replace that
-system prompt (it becomes the base instructions). A config key reaches every
-Codex front end (CLI, desktop app, extension, `spawn_agent` sub-agents) where
-a shell function only fronts interactive shells, so there is no `codex`
-function. Codex has no file-backed variant of the key: `install` embeds the
-prompt as a TOML literal multi-line string between `<!-- pixel:managed:begin
--->`/`end` marker lines, rewriting only that key with `toml_edit` so the rest
-of a file the desktop app also owns keeps its layout, refusing to touch a file
-that does not parse, and keeping text outside the markers. `doctor`
-(`install.codex-config`) compares the block with the bundled prompt; `uninstall`
-removes the block, or the key when nothing else was in it. Pi reads
+Codex receives Pixel retrieval guidance only through the selective prompt hook.
+Global and project installation remove the retired `<!-- pixel:managed:begin
+-->`/`end` block from `developer_instructions` with `toml_edit`, preserving foreign
+text, unrelated configuration and layout. A key with no remaining instructions
+is removed. Invalid TOML is refused rather than replaced. `doctor` checks that
+the retired block is absent. `$CODEX_HOME` remains honoured; no shell wrapper or
+replacement system prompt is installed. Pi reads
 `~/.pi/agent/APPEND_SYSTEM.md` automatically; that file is shared the same way
 (markers, text outside them kept, `install.pi-prompt` in `doctor`, block — not
 the file — removed by `uninstall`), so a user's own pi instructions survive.
@@ -539,12 +543,12 @@ The hook entry points, all under `pixel run-hook` (alias `hook`), and where
 | Hook event | Command | Effect |
 | --- | --- | --- |
 | `SessionStart` | `pixel run-hook session-start` | Injects the agent prompt and the capability block from the op registry. For Claude Code the prompt is fitted to the 10 000-character inline limit of a hook's context (`CLAUDE_INLINE_CONTEXT_LIMIT` in `guard.rs`): `DEFERRABLE_SECTIONS` come out first and a closing line names them and the deployed prompt's path. Global for Claude Code and for Devin's own protocol; in a session that only imports Claude's configuration (Devin's `read_config_from.claude`), the entry carries the short Pixel-first guidance and the capability block instead of the Claude prompt. |
-| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Task context/boundary detection and the task-intent verdict. Never rejects a prompt. The Claude task packet is written only in a Claude Code session, never in a session that only imports Claude's configuration (a `--provider claude` hook Devin re-runs from `~/.claude/settings.json` delivers target/boundary context alone). Codex and a real Claude host carry a Pixel-first guidance line ahead of any task context only in an indexed repository (a discovered root without a shard would make the same commands build a full index, so the guidance stays quiet there); Devin carries its guidance in any repository while a task feature is enabled, and only in an indexed one when both are disabled. The `[PIXEL:EXECUTION_ROUTE]` follows only in an indexed repository. The guidance rides only a prompt that asks about code or about Pixel, the route only one that asks about code: `execution_brief::retrieval_request` reads the typed text, never a `<pasted_content>` block, and requires a backticked or code-shaped identifier, a code word or a code question; the Antigravity pre-invocation search applies the same gate. Global for Claude Code, Codex, and Devin's own protocol. |
-| `SessionStart` matcher `compact` (`PostCompaction` on Devin) | `pixel run-hook post-compaction` | Re-injects the active task evidence as additional context. A `--provider claude` entry re-run by an importing host exits without emitting: the session id it would read belongs to the other harness. |
+| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Never rejects a prompt. Codex uses `codex_retrieval_intent` for a local, conservative graph/history decision: ordinary prompts emit nothing, selected prompts receive optional targeted guidance only when an index exists, and neither route starts task-context/boundary work. Claude and Devin retain task-context/boundary detection. The Claude task packet is written only for a real Claude host, never for a host importing its configuration. Their code-request guidance and `[PIXEL:EXECUTION_ROUTE]` use `execution_brief::retrieval_request`, which ignores pasted content; routes require an existing index. Global for Claude Code, Codex, and Devin's own protocol. |
+| `SessionStart` matcher `compact` (`PostCompaction` on Devin) | `pixel run-hook post-compaction` | Re-injects active task evidence for supported hosts. Codex emits nothing, so compaction cannot restore a target packet bypassed by native-default prompt routing. A `--provider claude` entry re-run by an importing host also exits without emitting: its session id belongs to the other harness. |
 | `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. Repo-local (`--repo`) for Claude Code and Devin; global for Antigravity and zcode; OpenCode reaches it through its auto-loaded plugin (`--provider opencode`), the one host whose plugin hook can throw a call away. |
 | `PostToolUse` (Claude `Edit`) | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
 | `PostToolUse` (Codex, Claude `Bash`, Devin `exec`) | `pixel run-hook metrics` | Codex tool results drop stderr, so the finalized invocation's 🟩 metrics line is re-emitted as `additionalContext` (Claude and Devin also get `systemMessage`/`additionalContext` output through the same relay, installed by `pixel install` and `pixel install --repo`; when the tool result already carries the box, Claude still receives it as `systemMessage` only while Codex and Devin stay silent) — correlated to the action record by cwd + argv, silent on any miss, and suppressed by the same `metrics` opt-out. An imported Claude entry re-run by an importing host exits without emitting, so it does not double Devin's own relay. |
-| `PreToolUse` (Codex, `<repo>/.codex/hooks.json`, `--repo`) | `pixel run-hook composed-guard` | Runs a sealed install-time snapshot of a foreign hook before Pixel's Codex rewrite. |
+| `PreToolUse` (Codex, `<repo>/.codex/hooks.json`, `--repo`) | `pixel run-hook composed-guard` | Runs a sealed install-time snapshot of foreign hooks. Pixel adds no retrieval rewrite or denial; foreign denials and input mutations remain effective. |
 | Native task lifecycle (Claude Code and Codex); Pi extension lifecycle | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks; Pi persists branch-local bindings. Once enforced, a task retains its gates if runtime settings change. |
 
 `pixel doctor` checks current installation artifacts and distinguishes configured
@@ -556,7 +560,7 @@ by id or by group (`install.*`), and each yellow or red check reports that comma
 the managed one doctoring them (a global `pixel-dev install`, a previous release's
 path); a `pixel-dev` doctor never judges the home install.
 `repo.claude-hooks` is yellow with no fix when a repository `install --repo`
-prepared (its Pixel-first rule is there) has no guard because a hook of the
+prepared has no guard because a hook of the
 user's that also rewrites shell calls held it back: only the user can narrow
 that hook's matcher or accept the missing guard, and the summary says both.
 `--fix` runs them: `repair_plan` folds the flagged checks into one run of each

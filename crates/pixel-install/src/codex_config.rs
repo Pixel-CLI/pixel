@@ -11,14 +11,10 @@
 //! bundled binary, the VS Code extension, `spawn_agent` sub-agents — where a
 //! shell function only fronts interactive shells that sourced the profile.
 //!
-//! Codex 0.154 has no file-backed variant of the key, so the prompt is
-//! embedded in the file as a TOML literal multi-line string. The value is
-//! managed the way the Markdown agent configs were: the Pixel prompt sits
-//! between [`config::MANAGED_BEGIN`] and [`config::MANAGED_END`] marker
-//! lines, and text the user keeps outside the markers survives every
-//! `pixel install`. The rest of the file is rewritten by `toml_edit` with its
-//! formatting and comments preserved, because the desktop app writes to the
-//! same file.
+//! Older versions embedded Pixel's prompt in the value between
+//! [`config::MANAGED_BEGIN`] and [`config::MANAGED_END`]. Installation now
+//! removes only that retired block, preserving user-owned instructions and
+//! the rest of the TOML file.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,7 +42,8 @@ pub const METRICS_HOOK_MARKER: &str = "run-hook metrics";
 pub const PROMPT_SUBMIT_HOOK_MARKER: &str = "run-hook prompt-submit --provider codex";
 
 /// The agent prompt as bundled in the binary.
-pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
+#[cfg(test)]
+const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
 
 /// The Codex home directory: `$CODEX_HOME` when the caller did not pin a
 /// home directory (a real `pixel install`, where Codex itself honours the
@@ -62,17 +59,23 @@ pub(crate) fn codex_home(home: &Path, home_was_explicit: bool) -> PathBuf {
     home.join(".codex")
 }
 
-/// The managed block exactly as `pixel install` embeds it: markers on their
-/// own lines around the bundled prompt.
-pub(crate) fn managed_block() -> String {
+/// A legacy block fixture for cleanup tests.
+#[cfg(test)]
+fn managed_block() -> String {
     format!("{MANAGED_BEGIN}\n{AGENT_PROMPT_ASSET}{MANAGED_END}\n")
 }
 
 /// Byte range of the managed block inside a `developer_instructions` value,
 /// from the begin marker to the end of the line holding the end marker.
 fn managed_range(value: &str) -> Option<std::ops::Range<usize>> {
+    if value.matches(MANAGED_BEGIN).count() != 1 || value.matches(MANAGED_END).count() != 1 {
+        return None;
+    }
     let start = value.find(MANAGED_BEGIN)?;
     let end_marker = start + value[start..].find(MANAGED_END)?;
+    if start >= end_marker || value[start..end_marker].contains('\r') {
+        return None;
+    }
     let mut end = end_marker + MANAGED_END.len();
     if value[end..].starts_with('\n') {
         end += 1;
@@ -83,7 +86,8 @@ fn managed_range(value: &str) -> Option<std::ops::Range<usize>> {
 /// The value `pixel install` writes for a current value of `existing`:
 /// the block replaces a previous one in place, or is appended after the
 /// user's own text, separated by a blank line.
-pub(crate) fn merged_value(existing: Option<&str>) -> String {
+#[cfg(test)]
+fn merged_value(existing: Option<&str>) -> String {
     let block = managed_block();
     match existing {
         None => block,
@@ -164,66 +168,6 @@ fn write_document(path: &Path, doc: &DocumentMut) -> Result<()> {
     fs::write(&tmp, doc.to_string())?;
     fs::rename(&tmp, path)?;
     Ok(())
-}
-
-/// `pixel install` step: put the managed block into `developer_instructions`.
-pub(crate) fn install_developer_instructions(
-    codex_home: &Path,
-    dry_run: bool,
-) -> Result<InstallStep> {
-    let path = codex_home.join(CODEX_CONFIG_FILE);
-    let detail = Some(format!(
-        "path={} key={DEVELOPER_INSTRUCTIONS_KEY}",
-        path.display()
-    ));
-    let step = |status, summary: String| InstallStep {
-        id: "codex-config".into(),
-        status,
-        summary,
-        detail: detail.clone(),
-    };
-    let mut doc = match read_document(&path) {
-        Ok(doc) => doc,
-        // A file Codex itself could not load is not ours to repair; a
-        // rewrite from a failed parse would drop whatever it holds.
-        Err(e) => return Ok(step(CheckStatus::Red, format!("{e} — not touched"))),
-    };
-    let existing = match current_value(&doc) {
-        Ok(existing) => existing,
-        Err(e) => return Ok(step(CheckStatus::Red, format!("{e} — not touched"))),
-    };
-    let wanted = merged_value(existing.as_deref());
-    if existing.as_deref() == Some(wanted.as_str()) {
-        return Ok(step(
-            CheckStatus::Green,
-            format!(
-                "verified {DEVELOPER_INSTRUCTIONS_KEY} in {}",
-                path.display()
-            ),
-        ));
-    }
-    let kept_user_text = wanted != managed_block();
-    let verb = match &existing {
-        None => "installed",
-        Some(current) if managed_range(current).is_some() => "updated",
-        Some(_) => "appended",
-    };
-    let summary = format!(
-        "{} {DEVELOPER_INSTRUCTIONS_KEY} in {}{}",
-        verb,
-        path.display(),
-        if kept_user_text {
-            ", keeping the text outside the pixel markers"
-        } else {
-            ""
-        }
-    );
-    if dry_run {
-        return Ok(step(CheckStatus::Green, dry_run_summary(true, &summary)));
-    }
-    doc[DEVELOPER_INSTRUCTIONS_KEY] = Item::Value(string_value(&wanted));
-    write_document(&path, &doc)?;
-    Ok(step(CheckStatus::Green, summary))
 }
 
 /// The PostToolUse entry `pixel install` merges into `hooks.json`: Codex
@@ -436,16 +380,26 @@ pub(crate) fn remove_developer_instructions(
         Ok(doc) => doc,
         Err(e) => return Ok(step(CheckStatus::Red, format!("{e} — not touched"))),
     };
-    let Some(current) = current_value(&doc).ok().flatten() else {
+    let current = match current_value(&doc) {
+        Ok(Some(current)) => current,
+        Ok(None) => {
+            return Ok(step(
+                CheckStatus::Green,
+                dry_run_summary(dry_run, "no pixel block in codex config.toml — skipping"),
+            ));
+        }
+        Err(error) => return Ok(step(CheckStatus::Red, format!("{error} — not touched"))),
+    };
+    if !current.contains(MANAGED_BEGIN) && !current.contains(MANAGED_END) {
         return Ok(step(
             CheckStatus::Green,
             dry_run_summary(dry_run, "no pixel block in codex config.toml — skipping"),
         ));
-    };
+    }
     if managed_range(&current).is_none() {
         return Ok(step(
-            CheckStatus::Green,
-            dry_run_summary(dry_run, "no pixel block in codex config.toml — skipping"),
+            CheckStatus::Red,
+            format!("partial Pixel markers in {} — not touched", path.display()),
         ));
     }
     let summary = match value_without_block(&current) {
@@ -474,18 +428,15 @@ pub(crate) fn remove_developer_instructions(
     Ok(step(CheckStatus::Green, dry_run_summary(dry_run, &summary)))
 }
 
-/// `pixel doctor` check: the managed block is present and current.
-/// Whether `codex_home`'s config.toml holds pixel's begin marker in
-/// `developer_instructions`: the evidence that `pixel install` wrote there.
-/// A missing file, a missing key, or a value without the marker is none, so
-/// a project that keeps its own Codex config is not a broken install.
+/// `pixel doctor` check: no always-on Pixel block remains in the setting.
 ///
 /// # Errors
 ///
 /// The file cannot be read or parsed, or the key is not a string.
 pub(crate) fn carries_pixel_block(codex_home: &Path) -> std::result::Result<bool, String> {
     let doc = read_document(&codex_home.join(CODEX_CONFIG_FILE))?;
-    Ok(current_value(&doc)?.is_some_and(|value| value.contains(MANAGED_BEGIN)))
+    Ok(current_value(&doc)?
+        .is_some_and(|value| value.contains(MANAGED_BEGIN) || value.contains(MANAGED_END)))
 }
 
 /// The table Codex keeps its per-project settings in.
@@ -715,36 +666,28 @@ pub(crate) fn check_developer_instructions(
         "key": DEVELOPER_INSTRUCTIONS_KEY,
     });
     if !path.is_file() {
-        return Err(format!(
-            "{} not found — run `pixel install`",
-            path.display()
+        return Ok((
+            "no Pixel developer-instructions block installed".into(),
+            detail,
         ));
     }
     let doc = read_document(&path)?;
     let Some(current) = current_value(&doc)? else {
-        return Err(format!(
-            "{DEVELOPER_INSTRUCTIONS_KEY} missing from {} — run `pixel install`",
-            path.display()
+        return Ok((
+            "no Pixel developer-instructions block installed".into(),
+            detail,
         ));
     };
-    match managed_range(&current) {
-        None => Err(format!(
-            "{DEVELOPER_INSTRUCTIONS_KEY} in {} carries no pixel block — run `pixel install`",
+    if current.contains(MANAGED_BEGIN) || current.contains(MANAGED_END) {
+        return Err(format!(
+            "retired Pixel block remains in {DEVELOPER_INSTRUCTIONS_KEY} in {} — run `pixel install` to remove it",
             path.display()
-        )),
-        Some(range) if current[range.clone()] != managed_block() => Err(format!(
-            "{DEVELOPER_INSTRUCTIONS_KEY} in {} is stale — run `pixel install` to update",
-            path.display()
-        )),
-        Some(_) => Ok((
-            format!(
-                "{DEVELOPER_INSTRUCTIONS_KEY} carries the agent prompt in {} ({} bytes)",
-                path.display(),
-                current.len()
-            ),
-            detail,
-        )),
+        ));
     }
+    Ok((
+        "no Pixel developer-instructions block installed".into(),
+        detail,
+    ))
 }
 
 #[cfg(test)]
@@ -819,6 +762,50 @@ mod tests {
             Some("Before.\n\nAfter.\n")
         );
         assert_eq!(value_without_block(&managed_block()), None);
+    }
+
+    #[test]
+    fn managed_marker_range_rejects_duplicate_stray_and_reordered_markers() {
+        let malformed = [
+            format!("{MANAGED_BEGIN}\ntext\n"),
+            format!("text\n{MANAGED_END}\n"),
+            format!("{MANAGED_END}\n{MANAGED_BEGIN}\n"),
+            format!("{MANAGED_BEGIN}\none\n{MANAGED_BEGIN}\ntwo\n{MANAGED_END}"),
+            format!("{MANAGED_BEGIN}\none\n{MANAGED_END}\n{MANAGED_END}"),
+        ];
+        for value in malformed {
+            assert!(
+                managed_range(&value).is_none(),
+                "malformed markers must not produce a removable range: {value:?}"
+            );
+            assert!(
+                value_without_block(&value).is_none(),
+                "malformed marker content must remain untouched: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn removal_refuses_malformed_marker_sets_without_rewriting_codex_config() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(CODEX_CONFIG_FILE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for value in [
+            format!("{MANAGED_BEGIN}\npartial"),
+            format!("{MANAGED_END}\n"),
+            format!("{MANAGED_END}\n{MANAGED_BEGIN}\n"),
+            format!("{MANAGED_BEGIN}\nfirst\n{MANAGED_BEGIN}\nsecond\n{MANAGED_END}"),
+            format!("{MANAGED_BEGIN}\n{MANAGED_END}\n{MANAGED_END}"),
+        ] {
+            let original = format!("developer_instructions = {}\n", string_value(&value));
+            fs::write(&path, &original).unwrap();
+
+            let step = remove_developer_instructions(home.path(), false).unwrap();
+
+            assert_eq!(step.status, CheckStatus::Red, "{value:?}");
+            assert!(step.summary.contains("not touched"), "{step:?}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
     }
 
     // ---- metrics PostToolUse hook ----------------------------------------

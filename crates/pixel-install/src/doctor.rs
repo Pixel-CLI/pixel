@@ -897,8 +897,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 return Ok((
                     CheckStatus::Green,
                     DoctorCheckDetail {
-                        summary: "no pixel block in .codex/config.toml — repo-local codex instructions not installed"
-                            .into(),
+                        summary: "no retired Pixel block in .codex/config.toml".into(),
                         detail: None,
                     },
                 ));
@@ -1118,18 +1117,8 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                         detail: None,
                     },
                 )),
-                Some(true) => Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: format!(
-                            "Pixel-first retrieval rule configured in {}",
-                            path.display()
-                        ),
-                        detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-                    },
-                )),
-                Some(false) => Err(format!(
-                    "Pixel-first rule in {} is stale — run `pixel install --repo {}`",
+                Some(_) => Err(format!(
+                    "retired Pixel-first block remains in {} — run `pixel install --repo {}` to remove it",
                     path.display(),
                     crate::routing::quoted_executable(root)
                 )),
@@ -1175,13 +1164,31 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             };
             let rtk_backup = root.join(crate::routing::RTK_BACKUP);
             if !crate::routing::has_pixel_hook(&value, &exe) && !rtk_backup.is_file() {
-                // A repository `pixel install --repo` prepared (its Pixel-first
-                // rule is there) whose guard a hook of the user's held back:
-                // yellow, since the session runs unguarded, and no command,
-                // since only the user can choose between their hook and it.
+                // A repo install can no longer use its retired permanent
+                // guidance block as evidence that installation was attempted.
+                // Detect task-scoped Pixel artifacts instead, so a Claude
+                // guard held back by a competing hook is still reported.
+                let codex_hooks = root.join(".codex").join(crate::codex_config::HOOKS_FILE);
+                let codex_prepared = if codex_hooks.is_file() {
+                    let value = install::read_settings(&codex_hooks).map_err(|e| e.to_string())?;
+                    crate::routing::has_pixel_hook(&value, &exe)
+                } else {
+                    false
+                };
+                let devin_hooks = root.join(".devin/config.local.json");
+                let devin_prepared = if devin_hooks.is_file() {
+                    let value = install::read_settings(&devin_hooks).map_err(|e| e.to_string())?;
+                    crate::routing::has_pixel_hook(&value, &exe)
+                } else {
+                    false
+                };
                 let prepared = crate::pixel_first::check_rules(root)
                     .map_err(|e| e.to_string())?
-                    .is_some();
+                    .is_some()
+                    || codex_prepared
+                    || devin_prepared
+                    || rtk_backup.is_file()
+                    || root.join(".pi/extensions/pixel-guard.ts").is_file();
                 if prepared && !rivals.is_empty() {
                     return Ok((
                         CheckStatus::Yellow,

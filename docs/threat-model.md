@@ -100,7 +100,11 @@ rebuilds and `shutdown`. The CLI starts a daemon on demand
 (ARCHITECTURE.md, hook table). The payload's `cwd`, `tool_input` and session
 fields are agent-controlled. Entry points:
 
-- `guard` rewrites native search and read commands into Pixel commands.
+- `guard` can rewrite native search and read commands into Pixel commands
+  for supported providers. Codex preserves native retrieval commands even
+  under the shared enforce policy; its
+  prompt hook can suggest a structural or historical query without approving
+  permissions or executing it.
   `search_compat::shell_argv` accepts a small grammar only (it refuses `$`,
   backticks, `\`, newlines, and unquoted operators, globs and `~`), every
   rewritten word is re-quoted with `search_compat::shell_quote`, and an
@@ -412,7 +416,8 @@ boundary it crosses.
   follows them.
 - **Mitigation**: the agent prompt states that Pixel output is data, not
   instructions (`crates/pixel-install/assets/pixel-agent-prompt.md`,
-  `pixel-subagent-prompt.md`); hook packets carry repository strings as JSON
+  `pixel-subagent-prompt.md`); Codex's selective guidance carries the same
+  boundary in `codex_retrieval_intent.rs`. Hook packets carry repository strings as JSON
   values (`[PIXEL:TASK_CONTEXT]` in `prompt_submit.rs`, the dependants list
   of `post-tool-use`) and label them; output is capped.
 - **Status**: Accepted: a retrieval tool has to return repository text.

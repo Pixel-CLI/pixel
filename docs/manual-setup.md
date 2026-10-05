@@ -17,8 +17,8 @@ wire (Cursor, Copilot, ...)? You don't need `pixel install`.
    binary until it is set up too ([In CI](#in-ci-claude-code-action)). No
    shell wrapper: an older install's `claude()` function in the shell
    profile is removed.
-4. **Put the prompt into Codex's `config.toml`** as `developer_instructions`,
-   so every Codex front end (CLI, desktop app, extension, sub-agents) gets it.
+4. **Register Codex's selective prompt and metrics hooks**, removing the
+   retired permanent Pixel prompt while preserving your own instructions.
 5. **Put the prompt into Pi's `~/.pi/agent/APPEND_SYSTEM.md`**, and, when
    their config directories exist, into OpenCode's global `AGENTS.md` and an
    Antigravity plugin under `~/.gemini/config/`.
@@ -136,37 +136,24 @@ affected by the sub-agent flag.
 
 ### Codex
 
-Codex takes the prompt through the `developer_instructions` key of
-`~/.codex/config.toml` (`$CODEX_HOME/config.toml` when that variable is set).
-The key is appended to Codex's developer message and leaves its own system
-prompt in place; `model_instructions_file` looks similar but *replaces* that
-system prompt (it becomes the base instructions, and the model loses its
-native protocol and personality). A config key, unlike a shell function,
-reaches the desktop app's bundled binary, the VS Code extension, scripts
-that call the binary by path, and `spawn_agent` sub-agents (which inherit it
-unless a role overrides it).
+Codex uses native retrieval for ordinary questions. Pixel's `UserPromptSubmit`
+hook adds a short optional hint only for selected structural or historical
+questions about named code; it adds nothing for ordinary questions and never
+starts a model call to classify the prompt.
 
-Codex has no file-backed variant of the key, so the prompt is embedded as a
-TOML literal multi-line string, between two marker lines. Text you keep
-outside the markers survives a re-install; `pixel install` refreshes only the
-block, and `pixel uninstall` removes only the block (or the key, when nothing
-else was in it):
+For manual hook registration, use `pixel run-hook prompt-submit --provider
+codex` for `UserPromptSubmit` and `pixel run-hook metrics --provider codex` for
+`PostToolUse`. Both consume the host's JSON event on stdin. `pixel install`
+registers these in `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set),
+preserving foreign hooks. Project installation composes existing project hooks;
+Pixel adds no native-search rewrite or denial.
 
-```toml
-developer_instructions = '''
-Your own instructions, if any.
-
-<!-- pixel:managed:begin -->
-# Pixel — deterministic repository facts
-... the content of ~/.local/share/pixel/agent-prompt.md ...
-<!-- pixel:managed:end -->
-'''
-```
-
-To do it by hand, paste `agent-prompt.md` between the markers. Codex reads the
-file at session start, so a running session keeps the prompt it started with.
-For a one-off session with different instructions, the CLI override wins:
-`codex -c developer_instructions="..."`.
+Do not copy the shared agent prompt into Codex's `developer_instructions`.
+Installation removes older `<!-- pixel:managed:begin -->`/`end` blocks from
+global and project Codex config, keeping all foreign instructions and removing
+an otherwise empty key. It also removes the retired Pixel block in project
+`AGENTS.md`. Existing sessions retain context they already received; the new
+policy applies when those instructions are loaded again.
 
 ### Pi
 

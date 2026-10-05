@@ -1,7 +1,11 @@
-# pixel arm — latest pixel built from the main branch, indexing the repo at
-# container start. The build stage compiles from git main; PIXEL_MAIN_SHA is
-# the remote refs/heads/main sha the caller resolved (arena.sh does a
-# `git ls-remote`), so the layer cache busts exactly when main moves.
+# pixel arm — pixel built from the main branch, indexing the repo at
+# container start. PIXEL_SRC selects the source:
+#   git   (default) compile from remote refs/heads/main; PIXEL_MAIN_SHA is
+#         the sha the caller resolved (arena.sh does a `git ls-remote`), so
+#         the layer cache busts exactly when main moves
+#   local compile from the build context — pass the repository root as the
+#         docker build context (arena.sh does this when PIXEL_SRC=local), so
+#         uncommitted-on-remote work like a new agent prompt is measured too
 # Built on rust:slim (trixie) — glibc/libstdc++ must match the runtime stage,
 # which is why Dockerfile.base is on node:22-trixie.
 FROM rust:slim AS pixel-build
@@ -9,12 +13,23 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git build-essential perl pkg-config libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 ARG PIXEL_MAIN_SHA=main
-RUN echo "pixel main pin: $PIXEL_MAIN_SHA" \
- && cargo install --git https://github.com/Pixel-CLI/pixel pixel-cli --force --locked --root /usr/local
+ARG PIXEL_SRC=git
+ARG CARGO_BUILD_JOBS=2
+COPY . /src
+RUN if [ "$PIXEL_SRC" = "local" ]; then \
+      echo "pixel local build from context" \
+   && CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" cargo install --path /src/crates/pixel --locked --root /usr/local; \
+    else \
+      echo "pixel main pin: $PIXEL_MAIN_SHA" \
+   && CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" cargo install --git https://github.com/Pixel-CLI/pixel pixel-cli --force --locked --root /usr/local; \
+    fi
 
 FROM pixel-arena-base:latest
 COPY --from=pixel-build /usr/local/bin/pixel /usr/local/bin/pixel
 ENV ARM_TOOL=pixel
-COPY entrypoint.sh /usr/local/bin/arena-entrypoint
+# entrypoint lives in eval/arena/ — that IS the context in git mode, but in
+# local mode the context is the repo root, so the path differs.
+ARG ENTRYPOINT_SRC=entrypoint.sh
+COPY ${ENTRYPOINT_SRC} /usr/local/bin/arena-entrypoint
 RUN chmod +x /usr/local/bin/arena-entrypoint
 ENTRYPOINT ["/usr/local/bin/arena-entrypoint"]

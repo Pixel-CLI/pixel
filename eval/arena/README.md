@@ -1,46 +1,47 @@
-# eval/arena — head-to-head: raw codex vs retrieval tools vs Pixel
+# Codex retrieval arena
 
-Seven dockerized arms on identical footing (same repo snapshot, codex version,
-auth, sandbox, prompts): `raw` (no tool), `semble`, `graft`, `stacklit`,
-`gitnexus`, `gortex`, `pixel`. Each tool is installed and wired to codex per
-its own docs (MCP registration or instruction channel). Measures answer
-quality (the shared scenario rubrics), token consumption (codex usage events),
-token saving vs raw, and wall time; `rank.py` orders arms by quality then
-tokens.
+Seven containerized arms compare retrieval tools against native Codex: `raw`,
+`semble`, `graft`, `stacklit`, `gitnexus`, `gortex`, and `pixel`. Each arm uses
+its own writable repository snapshot; each repetition gets a fresh snapshot.
+Authentication is mounted at runtime, never baked into an image.
+
+Build the shared base before the first run:
 
 ```bash
-docker build -f eval/arena/Dockerfile.base -t pixel-arena-base:latest eval/arena
-REPO_SNAPSHOT=/path/to/pixel-clone bash eval/arena.sh                 # all arms, all tasks
-REPO_SNAPSHOT=... bash eval/arena.sh --tasks "s3-rename-impact"       # one task, all arms parallel
+rtk docker build -f eval/arena/Dockerfile.base -t pixel-arena-base:latest eval/arena
 ```
 
-One container per arm runs all tasks (prep once — indexing, MCP wiring —
-then the scored runs); arms launch in parallel. Per-arm rw snapshots keep one
-tool's index artifacts out of another's repo. Model: `CODEX_MODEL`
-(default `gpt-6-luna`) at `CODEX_EFFORT` (default `high`). Auth is mounted at
-runtime, never baked.
+## Tiny paired loops
 
-## First round — task s3 (rename impact), gpt-6-luna @ high, n1 per arm
+Start with one scenario, one repetition and two arms. Use a new output directory
+for every run so an earlier failure or a different candidate cannot enter its
+comparison.
 
-| rank | arm | score | tokens | time | saving vs raw |
-| --- | --- | --- | --- | --- | --- |
-| 1 | graft | 11/12 | 104,395 | 39s | −24,132 (−30%) |
-| 1 | **pixel** | **11/12** | **114,962** | **29s** | −34,699 (−43%) |
-| 3 | gitnexus | 10/12 | 286,794 | 53s | +206,531 (+257%) |
-| 4 | stacklit | 7/12 | 80,868 | 22s | +605 (+1%) |
-| 5 | raw | 3/12 | 80,263 | 26s | — |
-| 5 | semble | 3/12 | 80,225 | 33s | +38 (+0%) |
-| — | gortex | no data | — | — | daemon never registered the repo (track-before-ready hang) |
+```bash
+REPO_SNAPSHOT=/path/to/foreign/repository \
+PIXEL_SRC=local \
+CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium \
+rtk bash eval/arena.sh --arms "raw pixel" --tasks "g1-locale-routing" \
+  --reps 1 --assert-context-parity \
+  --results-dir eval/arena-results/g1-candidate-01
+```
 
-Raw's own n1 variance is large (the same task scored 11/12 in an earlier
-probe) — rankings at n1 are indicative, not conclusive; n≥3 per arm is the
-follow-up before any verdict. Semble's flat-vs-raw result is expected: its
-lazy indexing only helps when the agent calls it, and codex needed to be told
-its MCP tools existed (fair-wiring question per tool — see below).
+`REPO_SNAPSHOT` supplies the repository being investigated. Local Pixel source
+comes from the repository containing this script, or `PIXEL_SRC_DIR` when set.
+Use the same repository revision, model, effort and scenario for both arms.
+The `g*` scenarios target the foreign example application; the `s*`
+scenarios target Pixel itself. A scenario's expected paths must exist in the
+chosen repository.
 
-Known first-round integration findings: gortex's `track` ran before its
-daemon accepted registrations (hang — now fixed with a registration poll);
-semble's lazy index only helps if the agent calls its MCP tools, which raw
-codex had no reason to discover — the fair-wiring question per tool is
-queued. Stacklit's derived map lands in `/root/.codex/AGENTS.md`, which
-codex reads, so its 7/12 already includes that channel.
+Inspect the transcripts as well as the rank table. A required-pattern score
+measures answer coverage, not semantic correctness. Token totals include
+reported input and generated tokens; cached input is part of input and must not
+be counted twice. Unknown usage is unknown, not zero. Failure counts belong
+beside completed-pair measurements; a transcript containing an answer does not
+by itself explain a nonzero container exit.
+
+Keep the first loop diagnostic. A single pair can expose a forced extra lookup
+or an incorrect answer, but cannot establish a general speedup. Confirm useful
+changes on another generic question and on the structural question meant to
+benefit. Preserve the source identity, image identity, complete logs and exit
+statuses with each result. Change one input between candidate comparisons.

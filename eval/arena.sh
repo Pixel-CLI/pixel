@@ -10,14 +10,15 @@
 # own codex docs. The repo snapshot, auth, model, sandbox, and prompts are
 # identical across arms.
 #
-# Usage: eval/arena.sh [--arms "raw pixel"] [--tasks "s1 s2 s3"] [--reps N] [--watch]
+# Usage: eval/arena.sh [--arms "raw pixel"] [--tasks "s1 s2 s3"] [--reps N]
+#                      [--results-dir DIR] [--reuse-pixel-image] [--watch]
+#                      [--assert-context-parity] [--prepare-pixel-graph]
 #   --watch opens one Herdr pane per arm container (when inside Herdr)
 #   running `docker exec -it <c> codex` — interactive codex with and
 #   without pixel side by side; falls back to a tmux session otherwise.
-# Results: eval/arena-results/<arm>-<task>-<rep>.jsonl + rank table.
+# Results: <results-dir>/<arm>-<task>-<rep>.jsonl + rank table.
 set -euo pipefail
 ARENA_DIR="$(cd "$(dirname "$0")" && pwd)"
-DOCKER="$_"   # placeholder; resolved below to bypass shell wrappers
 DOCKER_BIN="$(command -v docker)"
 REPO_SNAPSHOT="${REPO_SNAPSHOT:?set REPO_SNAPSHOT to the repo dir to mount at /repo}"
 AUTH="${AUTH:-$HOME/.codex/auth.json}"
@@ -27,38 +28,73 @@ CODEX_EFFORT="${CODEX_EFFORT:-medium}"
 TASKS="${TASKS:-s1-hook-install s2-vector-recall s3-rename-impact}"
 REPS="${REPS:-1}"
 WATCH="${WATCH:-0}"
-RESULTS="$ARENA_DIR/arena-results"
-mkdir -p "$RESULTS"
+PIXEL_IMAGE_SOURCE="${PIXEL_IMAGE_SOURCE:-build}"
+RESULTS="${ARENA_RESULTS_DIR:-$ARENA_DIR/arena-results}"
+SCENARIOS_DIR="${ARENA_SCENARIOS_DIR:-$ARENA_DIR/scenarios}"
+RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)-$$}"
+ASSERT_CONTEXT_PARITY=0
+PREPARE_PIXEL_GRAPH="${ARENA_PREPARE_PIXEL_GRAPH:-0}"
 START=$(date +%s)
 
-# flags override env: --arms, --tasks, --reps, --watch
+# flags override env: --arms, --tasks, --reps, --results-dir, --watch
 while [ $# -gt 0 ]; do
   case "$1" in
     --arms) ARMS="$2"; shift 2 ;;
     --tasks) TASKS="$2"; shift 2 ;;
     --reps) REPS="$2"; shift 2 ;;
+    --results-dir) RESULTS="$2"; shift 2 ;;
+    --reuse-pixel-image) PIXEL_IMAGE_SOURCE=existing; shift ;;
+    --assert-context-parity) ASSERT_CONTEXT_PARITY=1; shift ;;
+    --prepare-pixel-graph) PREPARE_PIXEL_GRAPH=1; shift ;;
     --watch) WATCH=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
-# Restart hygiene: a previous run's containers and --watch panes are stale —
-# close/remove them before launching new ones.
-for stale in $(docker ps -aq --filter "name=^arena-" 2>/dev/null); do
-  docker rm -f "$stale" >/dev/null 2>&1 && echo "removed stale container $stale"
-done
-if [ -f "$RESULTS/.watch-panes" ] && command -v herdr >/dev/null 2>&1; then
-  while IFS= read -r old_pane; do
-    herdr pane close "$old_pane" >/dev/null 2>&1 && echo "closed stale pane $old_pane"
-  done < "$RESULTS/.watch-panes"
+case "$PREPARE_PIXEL_GRAPH" in
+  0|1) ;;
+  *) echo "ARENA_PREPARE_PIXEL_GRAPH must be 0 or 1" >&2; exit 2 ;;
+esac
+if [ "$PREPARE_PIXEL_GRAPH" = "1" ] && [[ " $ARMS " != *" pixel "* ]]; then
+  echo "--prepare-pixel-graph requires the pixel arm" >&2
+  exit 2
 fi
+
+case "$RESULTS" in
+  /*) ;;
+  *) RESULTS="$PWD/$RESULTS" ;;
+esac
+
+if [ -e "$RESULTS" ]; then
+  if [ ! -d "$RESULTS" ]; then
+    echo "results path is not a directory: $RESULTS" >&2
+    exit 2
+  fi
+  if [ -n "$(find "$RESULTS" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    echo "refusing to reuse non-empty results directory: $RESULTS" >&2
+    echo "choose a new --results-dir (or set ARENA_RESULTS_DIR)" >&2
+    exit 2
+  fi
+else
+  mkdir -p "$RESULTS"
+fi
+if [ ! -d "$SCENARIOS_DIR" ]; then
+  echo "scenario directory does not exist: $SCENARIOS_DIR" >&2
+  exit 2
+fi
+for task in $TASKS; do
+  if [ ! -f "$SCENARIOS_DIR/$task.json" ]; then
+    echo "selected scenario does not exist: $SCENARIOS_DIR/$task.json" >&2
+    exit 2
+  fi
+done
 : > "$RESULTS/.watch-panes"
 
-prompt_for() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "$ARENA_DIR/scenarios/$1.json"; }
+prompt_for() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "$SCENARIOS_DIR/$1.json"; }
 
 launch_arm() {  # arm rep — one container runs all tasks
   local arm="$1" rep="$2"
-  local snap="$RESULTS/snapshot-$arm"
+  local snap="$RESULTS/snapshot-$arm-$rep"
   if [ ! -d "$snap" ]; then
     git clone -q "$REPO_SNAPSHOT" "$snap"
     if [ "$arm" = "raw" ]; then
@@ -73,10 +109,15 @@ launch_arm() {  # arm rep — one container runs all tasks
       # (managed warp-retrieval block + reinstall/doctor commands). Remove
       # the managed block, then every remaining line that names pixel —
       # snapshot-only edit; the eval loses project context it doesn't need.
-      sed -i '' '/<!-- pixel:warp-retrieval:begin -->/,/<!-- pixel:warp-retrieval:end -->/d' "$snap/AGENTS.md" 2>/dev/null \
-        || sed -i '/<!-- pixel:warp-retrieval:begin -->/,/<!-- pixel:warp-retrieval:end -->/d' "$snap/AGENTS.md"
-      grep -vEi 'pixel' "$snap/AGENTS.md" > "$snap/AGENTS.md.scrubbed" \
-        && mv "$snap/AGENTS.md.scrubbed" "$snap/AGENTS.md"
+      if [ -f "$snap/AGENTS.md" ]; then
+        if sed --version >/dev/null 2>&1; then
+          sed -i '/<!-- pixel:warp-retrieval:begin -->/,/<!-- pixel:warp-retrieval:end -->/d' "$snap/AGENTS.md"
+        else
+          sed -i '' '/<!-- pixel:warp-retrieval:begin -->/,/<!-- pixel:warp-retrieval:end -->/d' "$snap/AGENTS.md"
+        fi
+        grep -vEi 'pixel' "$snap/AGENTS.md" > "$snap/AGENTS.md.scrubbed" \
+          && mv "$snap/AGENTS.md.scrubbed" "$snap/AGENTS.md"
+      fi
       rm -rf "$snap/.agents/skills/pixel-retro"
       for f in "$snap"/.agents/rules/*.md "$snap"/.agents/skills/*/SKILL.md; do
         [ -f "$f" ] || continue
@@ -89,31 +130,43 @@ launch_arm() {  # arm rep — one container runs all tasks
     [ -s "$RESULTS/$arm-$task-$rep.jsonl" ] || missing=1
   done
   [ "$missing" -eq 0 ] && { echo "skip arm=$arm rep=$rep (all tasks exist)"; return 0; }
-  "$DOCKER_BIN" run -d --name "arena-$arm-$rep-$$" \
+  "$DOCKER_BIN" run -d --name "arena-$arm-$RUN_ID-$rep" \
     -v "$snap":/repo \
-    -v "$AUTH":/root/.codex/auth.json:ro \
-    -v "$ARENA_DIR/scenarios":/prompts:ro \
+  -v "$AUTH":/root/.codex/auth.json:ro \
+  -v "$ARENA_DIR/arena/entrypoint.sh":/usr/local/bin/arena-entrypoint:ro \
+  -v "$ARENA_DIR/arena/context_manifest.py":/usr/local/lib/arena-context-manifest.py:ro \
+    -v "$SCENARIOS_DIR":/prompts:ro \
     -v "$RESULTS":/out \
     -e ARM_TOOL="$arm" -e REP="$rep" -e TASKS="$TASKS" \
+    -e PIXEL_ARENA_PREP_GRAPH="$PREPARE_PIXEL_GRAPH" \
     -e CODEX_MODEL="${CODEX_MODEL:-}" -e CODEX_EFFORT="${CODEX_EFFORT:-}" \
     "pixel-arena:$arm" >/dev/null
-  echo "launched arm=$arm container=arena-$arm-$rep-$$"
+  echo "launched arm=$arm container=arena-$arm-$RUN_ID-$rep"
 }
 
 for arm in $ARMS; do
   docker_build="pixel-arena:$arm"
   if [ "$arm" = "pixel" ]; then
-    # PIXEL_SRC=git (default): pin remote refs/heads/main so the layer cache
-    # busts exactly when main moves. PIXEL_SRC=local: build the source in the
-    # build context instead — arena.sh passes REPO_SNAPSHOT as the context,
-    # so the arm measures the local tree (including unpushed work).
-    if [ "${PIXEL_SRC:-git}" = "local" ]; then
-      echo "=== building image $docker_build (local: $REPO_SNAPSHOT)"
-      "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.pixel" -t "$docker_build" \
+    if [ "$PIXEL_IMAGE_SOURCE" = "existing" ]; then
+      if ! "$DOCKER_BIN" image inspect "$docker_build" >/dev/null 2>&1; then
+        echo "requested existing Pixel image is missing: $docker_build" >&2
+        exit 2
+      fi
+      echo "=== using existing image $docker_build (source pinned by caller)"
+    elif [ "${PIXEL_SRC:-git}" = "local" ]; then
+      # PIXEL_SRC=local builds this repo's working tree (PIXEL_SRC_DIR
+      # override), including unpushed candidate behavior.
+      # pixel source context is the repo hosting this script — not
+      # REPO_SNAPSHOT, which is the repo under test (may be any project)
+      pixel_src_dir="${PIXEL_SRC_DIR:-$(cd "$ARENA_DIR/.." && pwd)}"
+      echo "=== building image $docker_build (local: $pixel_src_dir)"
+      "$DOCKER_BIN" build -f "$pixel_src_dir/eval/arena/Dockerfile.pixel" -t "$docker_build" \
         --build-arg PIXEL_SRC=local \
-        --build-arg ENTRYPOINT_SRC=eval/arena/entrypoint.sh "$REPO_SNAPSHOT" \
+        --build-arg ENTRYPOINT_SRC=eval/arena/entrypoint.sh "$pixel_src_dir" \
         || { echo "IMAGE BUILD FAILED: $arm"; exit 1; }
     else
+      # PIXEL_SRC=git: pin remote refs/heads/main so the layer cache busts
+      # exactly when main moves.
       pixel_main_sha=$(git ls-remote https://github.com/Pixel-CLI/pixel refs/heads/main | cut -f1)
       echo "=== building image $docker_build (main: ${pixel_main_sha:-unresolved})"
       "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.pixel" -t "$docker_build" \
@@ -125,17 +178,33 @@ for arm in $ARMS; do
     "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.$arm" -t "$docker_build" "$ARENA_DIR/arena" || { echo "IMAGE BUILD FAILED: $arm"; exit 1; }
   fi
 done
+PIXEL_IMAGE_ID=""
+if [[ " $ARMS " == *" pixel "* ]]; then
+  PIXEL_IMAGE_ID=$("$DOCKER_BIN" image inspect --format '{{.Id}}' pixel-arena:pixel)
+fi
+CODEX_VERSION=$("$DOCKER_BIN" run --rm --entrypoint codex pixel-arena-base:latest --version 2>&1 | tail -1)
 
 # all arms in parallel: one container each, all tasks inside
 CONTAINERS=()
+CONTAINER_ARMS=()
+CONTAINER_REPS=()
 for rep in $(seq 1 "$REPS"); do
   # fresh snapshot per rep: prior reps' index artifacts and tool edits must
-  # not leak into the next rep's starting state
-  for arm in $ARMS; do rm -rf "$RESULTS/snapshot-$arm"; done
+  # not leak into the next rep's starting state. Rep-scoped names —
+  # deleting a shared snapshot while the previous rep's containers still
+  # mount it races and kills their later tasks.
+  for arm in $ARMS; do rm -rf "$RESULTS/snapshot-$arm-$rep" || true; done
+  rep_containers=()
   for arm in $ARMS; do
     launch_arm "$arm" "$rep"
-    CONTAINERS+=("arena-$arm-$rep-$$")
+    CONTAINERS+=("arena-$arm-$RUN_ID-$rep")
+    CONTAINER_ARMS+=("$arm")
+    CONTAINER_REPS+=("$rep")
+    rep_containers+=("arena-$arm-$RUN_ID-$rep")
   done
+  # serialize reps: waiting here keeps rep N+1 from racing rep N's still
+  # running containers for CPU — wall times stay comparable across reps
+  "$DOCKER_BIN" wait "${rep_containers[@]}" >/dev/null 2>&1 || true
 done
 
 # --watch: one pane per container streaming `docker logs -f`. Inside Herdr
@@ -195,16 +264,38 @@ if [ "$WATCH" = "1" ]; then
 fi
 
 FAIL=0
-for c in "${CONTAINERS[@]}"; do
+for i in "${!CONTAINERS[@]}"; do
+  c="${CONTAINERS[$i]}"
   docker wait "$c" >/dev/null 2>&1 || FAIL=1
   rc=$(docker inspect -f '{{.State.ExitCode}}' "$c" 2>/dev/null || echo "?")
-  logs=$(docker logs "$c" 2>&1 | grep -E "rc=[1-9]|not found|Error" | tail -2)
+  logs=$(docker logs "$c" 2>&1 | grep -E "rc=[1-9]|not found|Error" | tail -2 || true)
   [ -n "$logs" ] && echo "[$c] $logs"
-  [ "$rc" != "0" ] && FAIL=1
+  if [ "$rc" != "0" ]; then
+    FAIL=1
+    for task in $TASKS; do
+      touch "$RESULTS/${CONTAINER_ARMS[$i]}-$task-${CONTAINER_REPS[$i]}.failed"
+    done
+  fi
   docker rm "$c" >/dev/null 2>&1
 done
 [ "$FAIL" -ne 0 ] && echo "WARNING: some arm containers failed (see above)"
 
 echo "=== ranking"
-python3 "$ARENA_DIR/arena/rank.py" --results "$RESULTS" --scenarios-dir "$ARENA_DIR/scenarios" --arms $ARMS
+rank_results() {
+  # ARMS and TASKS are intentionally space-delimited CLI selections.
+  # shellcheck disable=SC2086
+  python3 "$ARENA_DIR/arena/rank.py" --results "$RESULTS" \
+    --scenarios-dir "$SCENARIOS_DIR" --arms $ARMS --tasks $TASKS --reps "$REPS" \
+    "$@" \
+    --run-id "$RUN_ID" --model "$CODEX_MODEL" --effort "$CODEX_EFFORT" \
+    --repo-snapshot "$REPO_SNAPSHOT" --pixel-image-id "$PIXEL_IMAGE_ID" \
+    --pixel-source-id "${PIXEL_SOURCE_ID:-${PIXEL_SRC:-git}}" \
+    --codex-version "$CODEX_VERSION"
+}
+if [ "$ASSERT_CONTEXT_PARITY" = "1" ]; then
+  rank_results --assert-context-parity
+else
+  rank_results
+fi
 echo "total wall: $(( $(date +%s) - START ))s"
+[ "$FAIL" -eq 0 ] || exit "$FAIL"

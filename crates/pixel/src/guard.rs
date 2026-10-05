@@ -737,12 +737,12 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
     )
 }
 
-/// Recognized retrieval gets guidance, or an opt-in denial on Codex/Antigravity.
-/// Unsupported capabilities remain the host's responsibility.
+/// Recognized retrieval is governed for providers whose hooks own that policy.
+/// Codex and unsupported capabilities remain the host's responsibility.
 fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
     // Claude keeps its native permission flow (and its RTK delegate). Devin
     // has a documented PreToolUse block contract, so its retrieval calls are
-    // subject to policy like Codex and Antigravity.
+    // subject to policy alongside Antigravity.
     if provider == Provider::Claude {
         return None;
     }
@@ -1234,7 +1234,7 @@ fn enforce_leaf(
     }
 }
 
-/// Codex and Antigravity have different documented denial envelopes.
+/// Providers have different documented denial envelopes.
 fn enforce_deny(provider: Provider, reason: &str) -> Value {
     let reason = format!("pixel policy: {reason}");
     match provider {
@@ -1276,6 +1276,11 @@ fn policy_response(
     payload: &Value,
     mode: crate::config_cmd::PolicyMode,
 ) -> Option<Value> {
+    // Codex keeps native repository search/read behavior in every policy
+    // mode; the host's own permissions remain authoritative.
+    if provider == Provider::Codex {
+        return None;
+    }
     if mode == PolicyMode::Off {
         return None;
     }
@@ -2442,15 +2447,6 @@ fn has_foreign_mutation(value: &Value) -> bool {
         || value.get("permissionDecision").is_some()
 }
 
-fn foreign_allow(value: &Value) -> bool {
-    value
-        .get("hookSpecificOutput")
-        .and_then(|specific| specific.get("permissionDecision"))
-        .and_then(Value::as_str)
-        == Some("allow")
-        || value.get("permissionDecision").and_then(Value::as_str) == Some("allow")
-}
-
 fn foreign_denial(value: &Value) -> bool {
     value
         .get("hookSpecificOutput")
@@ -2558,18 +2554,9 @@ pub fn run_composed_codex(backup: &Path) -> ! {
         }
     }
     if let Some(foreign) = terminal_foreign {
-        // A foreign allow is not authority over Pixel's own policy: under
-        // PIXEL_POLICY=enforce a recognized retrieval call still denies.
-        // Foreign denials and input mutations keep their precedence.
-        if foreign_allow(&foreign)
-            && policy_mode(&payload) == PolicyMode::Enforce
-            && let Some(reason) = enforce_reason(Provider::Codex, &payload)
-        {
-            print!("{}", enforce_deny(Provider::Codex, &reason));
-            std::process::exit(0);
-        }
-        // Never place a Pixel rewrite after foreign authority. Returning this
-        // valid response preserves foreign authority.
+        // Never place a Pixel rewrite or retrieval denial after foreign
+        // authority. Returning this valid response preserves foreign
+        // denials and input mutations.
         print!("{foreign}");
         std::process::exit(0);
     }
@@ -6653,29 +6640,6 @@ mod tests {
             !composed_matches("(", "Bash"),
             "an invalid regex never matches"
         );
-    }
-
-    /// A foreign allow — nested under `hookSpecificOutput` or top-level — is
-    /// the only decision that yields to enforced Pixel policy. Denials, other
-    /// decisions and absent decisions never do.
-    #[test]
-    fn foreign_allow_recognizes_both_allow_spellings_only() {
-        use serde_json::json;
-        for value in [
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"},"permissionDecision":"allow"}),
-        ] {
-            assert!(foreign_allow(&value), "{value}");
-        }
-        for value in [
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"},"permissionDecision":"deny"}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"}}),
-            json!({}),
-        ] {
-            assert!(!foreign_allow(&value), "{value}");
-        }
     }
 
     /// A single `|` marks the NEXT segment as piped; `&&`, `||` and a lone

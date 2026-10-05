@@ -101,44 +101,40 @@ fn denied(reason: &str) -> Value {
 }
 
 #[test]
-fn policy_should_advise_without_permission_override_by_default_and_on_invalid_mode() {
+fn codex_native_git_inspection_passes_through_every_policy_mode() {
     let dir = indexed_dir("default");
     for envs in [
         vec![],
         vec![("PIXEL_POLICY", "advisory")],
         vec![("PIXEL_POLICY", "invalid")],
     ] {
-        let note = "Pixel suggestion: repository inspection: use pixel repo-state. Original call proceeds.";
-        assert_eq!(
-            guard("codex", &shell("git status", &dir), &envs),
-            json!({"systemMessage":note, "hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":note}})
-        );
+        for command in ["git status", "git diff", "git log"] {
+            assert_eq!(
+                guard("codex", &shell(command, &dir), &envs),
+                Value::Null,
+                "{command}: {envs:?}"
+            );
+        }
     }
-    for (command, alternative) in [
-        ("git status", "repo-state"),
-        ("git diff", "review-changes"),
-        ("git log", "commit-history"),
-    ] {
+    for command in ["git status", "git diff", "git log"] {
         assert_eq!(
             guard(
                 "codex",
                 &shell(command, &dir),
                 &[("PIXEL_POLICY", "enforce")]
             ),
-            denied(&format!("repository inspection: use pixel {alternative}"))
+            Value::Null,
+            "{command}"
         );
     }
 }
 
 #[test]
-fn policy_files_should_enable_enforcement_while_the_environment_still_outranks_them() {
+fn codex_native_inspection_ignores_retrieval_policy_files() {
     let home = Scratch::for_test("pixel-guard-policy", "config-home");
     let repo = indexed_dir("config-repo");
     let home = home.to_str().unwrap();
     let global = global_config_under(home);
-    let note =
-        "Pixel suggestion: repository inspection: use pixel repo-state. Original call proceeds.";
-    let advisory = json!({"systemMessage":note, "hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":note}});
     let status = shell("git status", &repo);
     let with_home = |envs: Vec<(&str, &str)>| {
         let mut all = vec![("HOME", home)];
@@ -146,31 +142,22 @@ fn policy_files_should_enable_enforcement_while_the_environment_still_outranks_t
         guard("codex", &status, &all)
     };
 
-    // A global `enforce` reaches a repository that sets nothing.
+    // A global `enforce` cannot replace Codex's native retrieval permission.
     std::fs::write(&global, "policy: enforce\n").unwrap();
-    assert_eq!(
-        with_home(vec![]),
-        denied("repository inspection: use pixel repo-state")
-    );
+    assert_eq!(with_home(vec![]), Value::Null);
 
     // The repository layer beats the global one, in both directions.
     std::fs::write(repo.join(".pixel/config.yaml"), "policy: advisory\n").unwrap();
-    assert_eq!(with_home(vec![]), advisory);
+    assert_eq!(with_home(vec![]), Value::Null);
     std::fs::write(repo.join(".pixel/config.yaml"), "policy: enforce\n").unwrap();
     std::fs::write(&global, "policy: advisory\n").unwrap();
-    assert_eq!(
-        with_home(vec![]),
-        denied("repository inspection: use pixel repo-state")
-    );
+    assert_eq!(with_home(vec![]), Value::Null);
 
     // `off` (quoted: a bare `off` is a YAML boolean) silences every decision,
     // and the environment still outranks both files.
     std::fs::write(repo.join(".pixel/config.yaml"), "policy: \"off\"\n").unwrap();
     assert_eq!(with_home(vec![]), Value::Null);
-    assert_eq!(
-        with_home(vec![("PIXEL_POLICY", "enforce")]),
-        denied("repository inspection: use pixel repo-state")
-    );
+    assert_eq!(with_home(vec![("PIXEL_POLICY", "enforce")]), Value::Null);
     std::fs::write(repo.join(".pixel/config.yaml"), "policy: enforce\n").unwrap();
     assert_eq!(with_home(vec![("PIXEL_POLICY", "off")]), Value::Null);
 }
@@ -207,7 +194,7 @@ fn off_and_legacy_switches_should_disable_pixel_rewrites_and_advice() {
             &shell("git status", &dir),
             &[("PIXEL_POLICY", "enforce"), ("PIXEL_TARGETS_GUARD", "1")]
         ),
-        denied("repository inspection: use pixel repo-state")
+        Value::Null
     );
 }
 
@@ -274,10 +261,21 @@ fn ordinary_commands_filters_and_unknown_syntax_should_stay_native_in_enforce_mo
             "{command}"
         );
     }
+    for policy in ["off", "advisory", "enforce"] {
+        assert_eq!(
+            guard(
+                "codex",
+                &shell("rg -n -F 'needle' src/lib.rs", &dir),
+                &[("PIXEL_POLICY", policy)]
+            ),
+            Value::Null,
+            "native rg must remain available in {policy}"
+        );
+    }
 }
 
 #[test]
-fn known_leaf_should_advise_or_deny_the_whole_composition_without_partial_rewrites() {
+fn codex_native_composed_commands_are_not_rewritten_or_denied() {
     let dir = indexed_dir("leaves");
     for command in [
         "printf x; find . -name '*.rs'",
@@ -301,27 +299,13 @@ fn known_leaf_should_advise_or_deny_the_whole_composition_without_partial_rewrit
         "cargo test | grep -n needle src/lib.rs",
         "echo x & cat src/lib.rs",
     ] {
-        let advisory = guard("codex", &shell(command, &dir), &[]);
-        let output = &advisory["hookSpecificOutput"];
-        assert!(
-            output["additionalContext"]
-                .as_str()
-                .unwrap()
-                .starts_with("Pixel suggestion: repository"),
-            "{command}: {advisory}"
-        );
-        assert!(output.get("permissionDecision").is_none());
-        assert!(output.get("updatedInput").is_none());
-        let enforced = guard(
-            "codex",
-            &shell(command, &dir),
-            &[("PIXEL_POLICY", "enforce")],
-        );
-        assert_eq!(
-            enforced["hookSpecificOutput"]["permissionDecision"], "deny",
-            "{command}: {enforced}"
-        );
-        assert!(enforced["hookSpecificOutput"].get("updatedInput").is_none());
+        for envs in [vec![], vec![("PIXEL_POLICY", "enforce")]] {
+            assert_eq!(
+                guard("codex", &shell(command, &dir), &envs),
+                Value::Null,
+                "{command}: {envs:?}"
+            );
+        }
     }
 }
 
@@ -372,7 +356,7 @@ fn unindexed_workdirs_outside_paths_and_symlinks_should_remain_native() {
     );
     assert_eq!(
         guard("codex", &inside, &[("PIXEL_POLICY", "enforce")]),
-        denied("repository read: use pixel search-content or pixel pack-context <uid>")
+        Value::Null
     );
     std::os::unix::fs::symlink(outside.join("file.rs"), dir.join("src/outside.rs")).unwrap();
     assert_eq!(
@@ -400,41 +384,49 @@ fn unindexed_workdirs_outside_paths_and_symlinks_should_remain_native() {
 }
 
 #[test]
-fn direct_reads_should_check_inclusive_bounds_and_missing_bounds() {
+fn direct_native_reads_pass_through_under_every_policy() {
     let dir = indexed_dir("bounds");
-    for (bound, deny) in [
-        (json!({}), true),
-        (json!({"limit":1}), false),
-        (json!({"limit":200}), false),
-        (json!({"limit":201}), true),
-        (json!({"limit":0}), true),
-        (json!({"StartLine":1,"EndLine":200}), false),
-        (json!({"StartLine":5,"EndLine":204}), false),
-        (json!({"StartLine":1,"EndLine":201}), true),
-        (json!({"StartLine":2,"EndLine":1}), true),
-        (json!({"StartLine":0,"EndLine":100}), true),
-        (json!({"start_line":5,"end_line":5}), false),
-        (json!({"start_line":5}), true),
-        (json!({"end_line":5}), true),
+    for bound in [
+        json!({}),
+        json!({"limit":1}),
+        json!({"limit":200}),
+        json!({"limit":201}),
+        json!({"limit":0}),
+        json!({"StartLine":1,"EndLine":200}),
+        json!({"StartLine":5,"EndLine":204}),
+        json!({"StartLine":1,"EndLine":201}),
+        json!({"StartLine":2,"EndLine":1}),
+        json!({"StartLine":0,"EndLine":100}),
+        json!({"start_line":5,"end_line":5}),
+        json!({"start_line":5}),
+        json!({"end_line":5}),
     ] {
         for tool in ["read", "view_file", "notebook_read"] {
             let mut input = bound.clone();
             input["path"] = json!("src/lib.rs");
-            let response = guard(
-                "codex",
-                &payload(tool, input, &dir),
-                &[("PIXEL_POLICY", "enforce")],
-            );
-            assert_eq!(
-                response,
-                if deny {
-                    denied("repository read: use pixel search-content or pixel pack-context <uid>")
-                } else {
-                    Value::Null
-                },
-                "{tool}: {bound}"
-            );
+            for policy in ["off", "advisory", "enforce"] {
+                assert_eq!(
+                    guard(
+                        "codex",
+                        &payload(tool, input.clone(), &dir),
+                        &[("PIXEL_POLICY", policy)]
+                    ),
+                    Value::Null,
+                    "{tool}: {bound}: {policy}"
+                );
+            }
         }
+    }
+    for policy in ["off", "advisory", "enforce"] {
+        assert_eq!(
+            guard(
+                "codex",
+                &shell("cat src/lib.rs", &dir),
+                &[("PIXEL_POLICY", policy)]
+            ),
+            Value::Null,
+            "native cat under {policy}"
+        );
     }
 }
 
@@ -865,20 +857,18 @@ fn devin_and_zcode_rewrite_rtk_read_head_tail_like_cat() {
             }
         }
     }
-    // Codex has no reader rewrite: the call proceeds, with the same advisory
-    // `cat` gets in the default mode.
-    let note = "Pixel suggestion: repository read: use pixel search-content or pixel pack-context <uid>. Original call proceeds.";
+    // Codex leaves native reads to the host without mandatory advisory text.
     for command in ["rtk read src/lib.rs", "head src/lib.rs", "cat src/lib.rs"] {
         assert_eq!(
             guard("codex", &shell(command, &dir), &[]),
-            json!({"systemMessage":note, "hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":note}}),
+            Value::Null,
             "{command}"
         );
     }
 }
 
-/// Under enforce every reader of a repository file is blocked like `cat`;
-/// the bounded sed read, writes and out-of-repo paths are not.
+/// Under enforce Devin's read policy remains intact while Codex leaves native
+/// shell reads to the host permission flow.
 #[test]
 fn enforce_blocks_head_tail_awk_sed_and_rtk_read_like_cat() {
     let dir = indexed_dir("reader-enforce");
@@ -924,7 +914,7 @@ fn enforce_blocks_head_tail_awk_sed_and_rtk_read_like_cat() {
             "{command}"
         );
     }
-    // Codex and Zcode-style shells: flagless forms only, like `cat`.
+    // Codex preserves its native shell reads under Pixel enforce.
     for command in [
         "head src/lib.rs",
         "rtk tail src/lib.rs",
@@ -935,7 +925,7 @@ fn enforce_blocks_head_tail_awk_sed_and_rtk_read_like_cat() {
     ] {
         assert_eq!(
             guard("codex", &shell(command, &dir), &envs),
-            denied(read),
+            Value::Null,
             "{command}"
         );
     }
@@ -1650,66 +1640,141 @@ fn prompt_submit_should_treat_a_harness_task_notification_as_no_prompt() {
     assert!(context.contains("Pixel-first retrieval"), "{context}");
 }
 
-/// Codex's UserPromptSubmit guidance is always-on, like Devin's: any
-/// repository prompt names the Pixel-first retrieval to attempt, never
-/// blocks, and stays quiet where there is no repository to retrieve from.
+/// Ordinary Q&A prompts keep native search; explicit structural prompts get
+/// only a small optional graph/history hint.
 #[test]
-fn codex_prompt_submit_injects_pixel_first_guidance_on_every_repository_prompt() {
+fn codex_prompt_submit_classifies_only_explicit_structural_retrieval() {
     let dir = indexed_dir("codex-prompt-context");
-    let submit = |cwd: &Path| {
+    let submit = |prompt: &str| {
         hook(
             &["run-hook", "prompt-submit", "--provider", "codex"],
             &json!({
                 "hook_event_name":"UserPromptSubmit",
-                // A plain coding prompt: nothing Pixel-named, still guided.
-                "prompt":"where is the foreign-denial precedence decided in the guard?",
-                "cwd":cwd
+                "prompt":prompt,
+                "cwd":dir.as_ref()
             }),
             &[],
         )
     };
-    let response = submit(dir.as_ref());
-    let context = response["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .expect("a repository prompt carries the Codex Pixel guidance");
-    assert!(context.starts_with("Pixel-first retrieval"), "{context}");
-    assert!(context.contains("pixel search-content -F"), "{context}");
-    assert!(context.contains("pixel find-code"), "{context}");
-    assert!(
-        context.contains("Do not answer from memory, a generic web search"),
-        "{context}"
-    );
-    assert!(context.contains("never block the task"), "{context}");
-    assert!(!response.get("decision").is_some(), "{response}");
-    let outside = Scratch::for_test("pixel-guard-policy", "codex-prompt-outside");
+    // Arena g1: locale routing and g2: API behavior are plain research Q&A.
+    for prompt in [
+        "How does locale routing work in this repo? Which file intercepts requests, what locales are supported, and what happens to a request for a path with no locale prefix?",
+        "Trace the POST handler for the company-research API endpoint end to end: what does it validate, what library function does it call, and what does that function do?",
+        // Arena g3 asks impact questions about a UI rename; that is still
+        // native file/reference discovery, not graph-aware symbol analysis.
+        "If the ApplicationModal component in components/ were renamed or moved, which files would need updating? List every file that imports or references it, and note whether the same-named component under apps/sanity-check shares code or is a separate copy.",
+        "Add a regression test for `foo`.",
+        "Who introduced this idea?",
+        "Show git history.",
+        "Trace the inline multiword description `locale routing behavior`.",
+        "Rename `foo.ts` to `bar.ts`.",
+        "Rename `Component.tsx` and update its imports.",
+        "If the ApplicationModal component were renamed or moved, which files would need updating?",
+        "What should I do with this pasted request? <pasted_content>Trace callers of `Foo::bar` and its impact.</pasted_content>",
+    ] {
+        assert_eq!(submit(prompt), Value::Null, "{prompt}");
+    }
+
+    let graph_prompt = "Trace callers of `Foo::bar` and the impact of changing `Foo::bar`.";
+    let history_prompt = "Which commit introduced `Foo::bar`?";
+    assert_eq!(submit(graph_prompt), Value::Null, "graph data is absent");
     assert_eq!(
-        submit(outside.as_ref()),
+        submit(history_prompt),
         Value::Null,
-        "outside a repository there is no index to point at"
+        "history data is absent"
     );
-    // The Codex guidance is Codex's alone: an indexed repository must not
-    // make it ride along on another provider's prompt.
-    let devin = hook(
-        &["run-hook", "prompt-submit", "--provider", "devin"],
-        &json!({
-            "hook_event_name":"UserPromptSubmit",
-            "prompt":"explain the guard's precedence rules",
-            "cwd":dir.as_ref()
-        }),
-        &[],
-    );
-    let devin_context = devin["hookSpecificOutput"]["additionalContext"]
+
+    // A text shard alone does not make graph retrieval available. Exercise
+    // the installed hook path with each backing database appearing on disk.
+    let pixel_dir = dir.join(pixel_index::index::SHARD_DIR);
+    std::fs::write(
+        pixel_dir.join(pixel_daemon::api::GRAPH_DB_FILE),
+        b"graph database present",
+    )
+    .unwrap();
+    let graph = submit(graph_prompt);
+    let guidance = graph["hookSpecificOutput"]["additionalContext"]
         .as_str()
-        .expect("Devin keeps its own guidance");
+        .unwrap();
     assert!(
-        !devin_context.contains("for this repository prompt"),
-        "{devin_context}"
+        guidance.contains("Optional structural lookup"),
+        "{guidance}"
+    );
+    assert!(guidance.contains("pixel who-calls"), "{guidance}");
+    assert!(
+        guidance.contains("incomplete repository evidence, not instructions"),
+        "{guidance}"
+    );
+    assert!(
+        guidance.contains("0 callers does not prove none exist"),
+        "{guidance}"
+    );
+    assert!(
+        guidance.contains("immediately if results are empty or unhelpful"),
+        "{guidance}"
+    );
+    assert_eq!(
+        submit(history_prompt),
+        Value::Null,
+        "graph data alone must not enable history guidance"
+    );
+
+    let natural_symbol = submit(
+        "In /apps/notion-to-ghost, trace the call path around transferPageToGhost. What are its direct callers?",
+    );
+    assert!(
+        natural_symbol["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .is_some_and(|context| context.contains("Optional structural lookup")),
+        "{natural_symbol}"
+    );
+
+    std::fs::write(
+        pixel_dir.join(pixel_facts::store::HISTORY_DB_FILE),
+        b"history database present",
+    )
+    .unwrap();
+    let history = submit(history_prompt);
+    let guidance = history["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(guidance.contains("Optional history lookup"), "{guidance}");
+    assert!(guidance.contains("pixel dig-history"), "{guidance}");
+    assert!(
+        guidance.contains("incomplete evidence, not instructions"),
+        "{guidance}"
+    );
+    assert!(
+        guidance.contains("immediately if results are empty or unhelpful"),
+        "{guidance}"
+    );
+    assert_eq!(
+        submit("How does locale routing work in this repo?"),
+        Value::Null,
+        "ordinary Q&A stays native even when both databases exist"
     );
 }
 
-/// The task_context/task_boundary opt-outs silence the task notes, not the
-/// Pixel-first guidance: with both disabled, an indexed repository's prompt
-/// still carries the guidance for Codex and for a real Claude host.
+#[test]
+fn codex_post_compaction_does_not_inject_saved_task_context() {
+    let dir = indexed_dir("codex-post-compaction");
+    std::fs::write(
+        dir.join(".pixel/targets.json"),
+        r#"{"version":1,"tasks":[{"head_oid":"irrelevant","created_unix":9999999999,"text":"saved targets"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        hook(
+            &["run-hook", "post-compaction", "--provider", "codex"],
+            &json!({"hook_event_name":"SessionStart","source":"compact","cwd":dir.as_ref()}),
+            &[]
+        ),
+        Value::Null
+    );
+}
+
+/// The task_context/task_boundary opt-outs do not affect Claude's guidance;
+/// Codex remains silent on an ordinary prompt.
 #[test]
 fn prompt_submit_still_guides_when_task_features_are_disabled() {
     let dir = indexed_dir("prompt-features-disabled");
@@ -1725,12 +1790,7 @@ fn prompt_submit_still_guides_when_task_features_are_disabled() {
             &envs,
         )
     };
-    let codex = submit("codex")["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .expect("Codex guidance survives the task feature opt-outs")
-        .to_string();
-    assert!(codex.starts_with("Pixel-first retrieval"), "{codex}");
-    assert!(codex.contains("pixel find-code"), "{codex}");
+    assert_eq!(submit("codex"), Value::Null);
     let claude = submit("claude")["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .expect("Claude guidance survives the task feature opt-outs")
@@ -1872,7 +1932,7 @@ fn a_host_that_imports_claude_config_never_starts_the_claude_handoff() {
 }
 
 #[test]
-fn codex_exec_command_should_preserve_cmd_key_and_metadata_on_exact_rewrite() {
+fn codex_exec_command_keeps_native_search_under_enforce() {
     let dir = indexed_dir("cmd");
     let event = payload(
         "exec_command",
@@ -1880,14 +1940,7 @@ fn codex_exec_command_should_preserve_cmd_key_and_metadata_on_exact_rewrite() {
         &dir,
     );
     let response = guard("codex", &event, &[]);
-    assert_eq!(
-        response["hookSpecificOutput"]["updatedInput"],
-        json!({"cmd":"pixel search-like-rg grep -- '-n' 'needle' 'lib.rs'","workdir":"src","yield_time_ms":500,"extra":true})
-    );
-    assert_eq!(
-        response["hookSpecificOutput"]["permissionDecision"],
-        "allow"
-    );
+    assert_eq!(response, Value::Null);
     for key in ["env", "environment"] {
         let mut event = event.clone();
         event["tool_input"][key] = json!({"RIPGREP_CONFIG_PATH":"custom"});
@@ -2060,13 +2113,13 @@ fn composed_off_should_preserve_foreign_context_and_denials() {
 }
 
 #[test]
-fn composed_policy_should_merge_guidance_and_preserve_any_foreign_denial() {
+fn codex_composed_guard_preserves_foreign_context_denials_and_mutations() {
     let dir = indexed_dir("composed-policy");
     let context = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"foreign context"}});
     let response = composed(&dir, &[reply(&context)], &shell("git status", &dir), &[]);
     assert_eq!(
         response["hookSpecificOutput"]["additionalContext"],
-        "foreign context\nPixel suggestion: repository inspection: use pixel repo-state. Original call proceeds."
+        "foreign context"
     );
     let allow =
         json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}});
@@ -2080,6 +2133,7 @@ fn composed_policy_should_merge_guidance_and_preserve_any_foreign_denial() {
         ),
         deny
     );
+    // Codex keeps its native permission flow, even under global enforcement.
     assert_eq!(
         composed(
             &dir,
@@ -2087,11 +2141,8 @@ fn composed_policy_should_merge_guidance_and_preserve_any_foreign_denial() {
             &shell("git status", &dir),
             &[("PIXEL_POLICY", "enforce")]
         ),
-        denied("repository inspection: use pixel repo-state")
+        Value::Null
     );
-    // A foreign allow is not authority over Pixel policy: enforce still
-    // denies a recognized retrieval call, while a call outside the policy
-    // returns the foreign allow untouched.
     assert_eq!(
         composed(
             &dir,
@@ -2099,7 +2150,7 @@ fn composed_policy_should_merge_guidance_and_preserve_any_foreign_denial() {
             &shell("git status", &dir),
             &[("PIXEL_POLICY", "enforce")]
         ),
-        denied("repository inspection: use pixel repo-state")
+        allow
     );
     assert_eq!(
         composed(
@@ -2115,7 +2166,7 @@ fn composed_policy_should_merge_guidance_and_preserve_any_foreign_denial() {
         composed(&dir, &[reply(&allow)], &shell("git status", &dir), &[]),
         allow
     );
-    // The top-level allow spelling is equally non-authoritative.
+    // The top-level allow spelling is preserved too.
     let top_allow =
         json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"},"permissionDecision":"allow"});
     assert_eq!(
@@ -2125,7 +2176,7 @@ fn composed_policy_should_merge_guidance_and_preserve_any_foreign_denial() {
             &shell("git status", &dir),
             &[("PIXEL_POLICY", "enforce")]
         ),
-        denied("repository inspection: use pixel repo-state")
+        top_allow
     );
     // An input mutation is not an allow: it stays authoritative under enforce.
     let updated = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"echo x"}}});

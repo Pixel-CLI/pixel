@@ -164,7 +164,7 @@ fn composed_backup(dir: &Path, command: &str) -> PathBuf {
 }
 
 #[test]
-fn composed_codex_merges_context_and_rewrites_after_exact_stdin_replay() {
+fn composed_codex_preserves_native_search_and_merges_foreign_context() {
     let repo = indexed_repo("composed-context");
     let expected = repo.join("expected.json");
     let script = repo.join("foreign-context.sh");
@@ -187,8 +187,9 @@ fn composed_codex_merges_context_and_rewrites_after_exact_stdin_replay() {
     let backup = composed_backup(&repo, "/bin/sh \"$PWD/foreign-context.sh\"");
     let (code, stdout, stderr) = run_composed_codex(raw.as_bytes(), &backup);
     assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("pixel search-like-rg"), "{stdout}");
     assert!(stdout.contains("foreign context"), "{stdout}");
+    assert!(!stdout.contains("updatedInput"), "{stdout}");
+    assert!(!stdout.contains("pixel search-like-rg"), "{stdout}");
 }
 
 #[test]
