@@ -42,18 +42,24 @@ fn check_model_should_refuse_another_model_or_dimension_once_bound() {
 }
 
 /// Appending nothing writes no segment; a row of the wrong dimension is an
-/// error and leaves no segment behind.
+/// error and leaves nothing behind: no segment, no `.tmp` file, and no
+/// chunk id raised by the valid rows before it (#786).
 #[test]
 fn append_segment_should_write_nothing_for_empty_or_mismatched_rows() {
     let (dir, mut store) = store();
     store.append_segment("m", 2, &[]).unwrap();
     assert!(store.meta.segments.is_empty());
     assert_eq!(
-        store.append_segment("m", 2, &[(1, vec![1.0, 0.0, 0.0])]),
+        store.append_segment("m", 2, &[(7, vec![1.0, 0.0]), (8, vec![1.0, 0.0, 0.0])]),
         Err("vector dim mismatch".to_string())
     );
     assert!(store.meta.segments.is_empty());
-    assert!(!dir.path().join("seg-000001.vec").exists());
+    assert_eq!(store.meta.last_chunk_id, 0);
+    let left: Vec<String> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(left.is_empty(), "no segment and no .tmp remain: {left:?}");
 }
 
 /// The store reopens with its model, segments and highest chunk id.
