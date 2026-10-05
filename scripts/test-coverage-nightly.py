@@ -23,12 +23,16 @@ class NightlyCoverage(unittest.TestCase):
         self.head = "a" * 40
         self.run = dict(head_sha=self.head, head_branch="main", event="schedule",
                         status="completed", conclusion="success",
-                        path=".github/workflows/coverage.yml")
+                        path=".github/workflows/coverage.yml@main")
 
     def test_first_run_measures_main(self):
         self.assertTrue(coverage.needs_coverage(self.head, []))
 
     def test_successful_measurement_avoids_rebuilding_unchanged_main(self):
+        self.assertFalse(coverage.needs_coverage(self.head, [self.run]))
+
+    def test_bare_workflow_paths_remain_supported(self):
+        self.run["path"] = ".github/workflows/coverage.yml"
         self.assertFalse(coverage.needs_coverage(self.head, [self.run]))
 
     def test_new_commits_need_a_new_measurement(self):
@@ -42,7 +46,8 @@ class NightlyCoverage(unittest.TestCase):
 
     def test_foreign_runs_do_not_satisfy_the_measurement(self):
         for field, value in (("event", "pull_request"), ("event", "workflow_dispatch"),
-                             ("head_branch", "feature"), ("path", ".github/workflows/ci.yml")):
+                             ("head_branch", "feature"), ("path", ".github/workflows/ci.yml"),
+                             ("path", ".github/workflows/ci.yml@main")):
             with self.subTest(field=field, value=value):
                 self.assertTrue(coverage.needs_coverage(self.head, [dict(self.run, **{field: value})]))
 
