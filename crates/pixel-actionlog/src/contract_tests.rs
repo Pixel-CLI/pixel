@@ -112,8 +112,7 @@ fn rotate_if_needed_should_keep_only_the_newest_lines_past_the_cap() {
     assert_eq!(*lines.last().unwrap(), format!("{:0width$}", total - 1));
 }
 
-/// A missing log reads as empty; blank lines are skipped; a limit of zero
-/// returns nothing.
+/// A missing log reads as empty; blank lines are skipped.
 #[test]
 fn tail_should_treat_missing_and_blank_lines_as_nothing() {
     let dir = tempdir().unwrap();
