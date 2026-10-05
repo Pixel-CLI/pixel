@@ -199,7 +199,7 @@ fn remove_pi_extension_dir_should_remove_the_guard_and_strip_the_block_keeping_a
 
     assert_eq!(
         step.summary,
-        "removed pi guard extension + stripped AGENTS.md managed block"
+        "removed extensions/pixel-guard.ts + stripped AGENTS.md managed block"
     );
     assert!(!ext.exists());
     assert_eq!(fs::read_to_string(&agents).unwrap(), "user rules\n");
@@ -209,7 +209,7 @@ fn remove_pi_extension_dir_should_remove_the_guard_and_strip_the_block_keeping_a
         "the deleted extension keeps its undo copy"
     );
     assert_eq!(backups_in(&dir).len(), 1, "so does the rewritten AGENTS.md");
-    assert_eq!(step.detail, Some(format!("ext={}", ext.display())));
+    assert_eq!(step.detail, Some("extensions/pixel-guard.ts".to_string()));
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn remove_pi_extension_dir_should_keep_every_file_when_dry_run() {
 
     assert_eq!(
         step.summary,
-        "[dry-run] would report: removed pi guard extension + stripped AGENTS.md managed block"
+        "[dry-run] would report: removed extensions/pixel-guard.ts + stripped AGENTS.md managed block"
     );
     assert!(ext.is_file());
     assert_eq!(fs::read_to_string(&agents).unwrap(), text);

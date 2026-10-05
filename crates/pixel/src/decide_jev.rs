@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! `pixel classify` — TypeSafe's hosted Jev decision model.
 //!
 //! Jev is the hosted decision model the bakeoff bar measures against

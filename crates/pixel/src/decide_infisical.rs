@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! Remote classify API keys fetched from an Infisical project.
 //!
 //! Infisical (infisical.com) is a secrets manager. When configured, it is
