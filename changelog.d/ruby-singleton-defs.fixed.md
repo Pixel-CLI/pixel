@@ -1,0 +1,1 @@
+**graph:** a Ruby method defined inside `class << self`, or after a bare `module_function`, is recorded as a class method (`Klass.name`) instead of an instance method, so `find-symbol` shows its real kind and a call from a class method links to it. Existing graphs rebuild once (extractor version 17).

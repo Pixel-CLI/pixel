@@ -123,7 +123,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 16: a Ruby call without receiver to a name defined in its file and in
 ///    another one resolves to the caller's own method, as `self.name` did,
 ///    instead of staying unresolved.
-pub const EXTRACTOR_VERSION: &str = "16";
+/// 17: a Ruby `def` inside `class << self` or after a bare `module_function`
+///    is a class method (`Klass.name`), not an instance method.
+pub const EXTRACTOR_VERSION: &str = "17";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
