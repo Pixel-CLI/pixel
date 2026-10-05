@@ -656,14 +656,11 @@ fn snippet_block(text: &str, needle: &str) -> String {
     if lines.is_empty() {
         return String::new();
     }
-    let hit_line = {
-        let lower = text.to_lowercase();
-        let n = needle.to_lowercase();
-        match lower.find(&n) {
-            Some(pos) => text[..pos].matches('\n').count().min(lines.len() - 1),
-            None => 0,
-        }
-    };
+    // `pos` is a char boundary of `text` strictly before its last byte when
+    // the needle is non-empty, so the newlines before it number at most
+    // `lines.len() - 1`; the window below is clamped to the text anyway.
+    let hit_line = crate::search::find_case_insensitive(text, needle)
+        .map_or(0, |pos| text[..pos].matches('\n').count());
     // Center the window on the hit, clamped to the text bounds.
     let start = hit_line
         .saturating_sub(SNIPPET_MAX_LINES / 2)
@@ -689,23 +686,74 @@ fn snippet_block(text: &str, needle: &str) -> String {
 }
 
 fn snippet(text: &str, needle: &str) -> String {
-    let lower = text.to_lowercase();
-    let n = needle.to_lowercase();
-    match lower.find(&n) {
-        Some(pos) => {
-            let s = pos.saturating_sub(20);
-            let e = (pos + 120).min(text.len());
-            let mut out = String::new();
-            if s > 0 {
-                out.push('…');
-            }
-            out.push_str(&text[s..e]);
-            if e < text.len() {
-                out.push('…');
-            }
-            out
-        }
-        None => text.chars().take(120).collect(),
+    crate::search::find_case_insensitive(text, needle).map_or_else(
+        || text.chars().take(120).collect(),
+        |pos| crate::search::window_around(text, pos),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snippet_should_snap_back_to_a_char_boundary_when_the_window_starts_inside_a_char() {
+        // `日` is three bytes and the hit is at byte 30, so the window would
+        // start at byte 10, inside the fourth `日` (#769): it starts at the
+        // char boundary before, and the mark says text was dropped.
+        let text = format!("{}needle", "日".repeat(10));
+        assert_eq!(
+            snippet(&text, "needle"),
+            format!("…{}needle", "日".repeat(7))
+        );
+    }
+
+    #[test]
+    fn snippet_should_snap_forward_to_a_char_boundary_when_the_window_ends_inside_a_char() {
+        // Hit at 0, window end at byte 120, inside the 38th `日` (118..121):
+        // the cut keeps that whole char and marks the tail as elided.
+        let text = format!("needle!{}", "日".repeat(60));
+        assert_eq!(
+            snippet(&text, "needle"),
+            format!("needle!{}…", "日".repeat(38))
+        );
+    }
+
+    #[test]
+    fn snippet_should_center_on_the_hit_when_lowercasing_changes_the_byte_length() {
+        // `İ` (2 bytes) lowercases to `i̇` (3 bytes): an offset found in the
+        // lowercased text is past the end of the original. The window is
+        // measured in the original text: 20 bytes, ten `İ`, before the hit.
+        let text = format!("{}NEEDLE", "İ".repeat(30));
+        assert_eq!(
+            snippet(&text, "needle"),
+            format!("…{}NEEDLE", "İ".repeat(10))
+        );
+    }
+
+    #[test]
+    fn snippet_block_should_center_on_the_hit_line_when_lowercasing_changes_the_byte_length() {
+        // Counting lines before the hit sliced `text` with an offset from
+        // the lowercased text, past `text`'s end here (#769).
+        // 200 `İ` on line 0 make the lowercased text 200 bytes longer, about
+        // 25 short lines' worth, so a miscount moves the window visibly.
+        let mut lines: Vec<String> = (0..200).map(|i| format!("line {i}")).collect();
+        lines[0] = "İ".repeat(200);
+        lines[100] = "the NEEDLE line".to_string();
+        let text = lines.join("\n");
+        let got = snippet_block(&text, "needle");
+        // Hit on line 100: the 60-line window is lines 70..130, both ends elided.
+        let expected: Vec<&str> = lines[70..130].iter().map(String::as_str).collect();
+        assert_eq!(got, format!("…\n{}\n…", expected.join("\n")));
+    }
+
+    #[test]
+    fn snippet_block_should_start_at_the_first_line_when_the_hit_is_near_the_top() {
+        let text = "İİ first\nsecond NEEDLE\nthird";
+        assert_eq!(
+            snippet_block(text, "needle"),
+            "İİ first\nsecond NEEDLE\nthird\n"
+        );
     }
 }
 

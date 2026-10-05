@@ -401,26 +401,53 @@ fn diff_search(store: &FactsStore, units: &[String], limit: usize) -> Result<Vec
 
 /// A small snippet around the first occurrence of any unit.
 fn make_snippet(text: &str, units: &[String]) -> String {
-    let lower = text.to_lowercase();
-    let mut start = 0usize;
-    let mut found = false;
-    for u in units {
-        let needle = u.to_lowercase();
-        if let Some(pos) = lower[start..].find(&needle) {
-            start += pos;
-            found = true;
-            break;
+    units
+        .iter()
+        .find_map(|u| find_case_insensitive(text, u))
+        .map_or_else(
+            || text.chars().take(120).collect(),
+            |pos| window_around(text, pos),
+        )
+}
+
+/// Byte offset in `text` of the first case-insensitive occurrence of
+/// `needle`, always on a char boundary of `text`.
+///
+/// Searching `text.to_lowercase()` alone gives an offset into the
+/// lowercased string, which is not `text`'s: `İ` (2 bytes) lowercases to
+/// `i̇` (3 bytes), so the offset drifts and can land past `text`'s end or
+/// inside one of its characters (#769). Each byte of the lowercased string
+/// is mapped back to the start of the character it came from.
+///
+/// Both sides fold character by character with [`fold_case`], never with
+/// `str::to_lowercase`, whose word-final `Σ` → `ς` depends on context and
+/// would stop a needle from matching the same word in `text`.
+pub(crate) fn find_case_insensitive(text: &str, needle: &str) -> Option<usize> {
+    let needle: String = needle.chars().flat_map(fold_case).collect();
+    let mut lower = String::with_capacity(text.len());
+    let mut origin = Vec::with_capacity(text.len());
+    for (at, ch) in text.char_indices() {
+        for lc in fold_case(ch) {
+            lower.push(lc);
+            origin.resize(lower.len(), at);
         }
     }
-    if !found {
-        return text.chars().take(120).collect();
-    }
-    let s = start.saturating_sub(20);
-    let e = (start + 120).min(text.len());
-    // Snap s and e to char boundaries — start is a byte offset from
-    // find(), and start±20/120 can land inside a multi-byte char.
-    let s = text.floor_char_boundary(s.min(text.len()));
-    let e = text.ceil_char_boundary(e.min(text.len()));
+    lower
+        .find(&needle)
+        .map(|pos| origin.get(pos).copied().unwrap_or(text.len()))
+}
+
+/// Context-free lowercase of one character, with the final sigma `ς`
+/// folded into `σ` so a word matches whether its sigma is final or not.
+fn fold_case(ch: char) -> impl Iterator<Item = char> {
+    ch.to_lowercase().map(|lc| if lc == 'ς' { 'σ' } else { lc })
+}
+
+/// Up to 20 bytes before `pos` and 120 after it, widened to whole
+/// characters, with `…` marking each elided end.
+pub(crate) fn window_around(text: &str, pos: usize) -> String {
+    let s = text.floor_char_boundary(pos.saturating_sub(20));
+    let e = text.ceil_char_boundary((pos + 120).min(text.len()));
     let mut out = String::new();
     if s > 0 {
         out.push('…');
@@ -559,5 +586,52 @@ mod tests {
         want.sort_unstable();
         assert_eq!(oids(SearchFacet::Diff, "shared_word"), want);
         assert_eq!(oids(SearchFacet::Path, "keep/"), want);
+    }
+
+    #[test]
+    fn find_case_insensitive_should_return_an_offset_into_the_original_text() {
+        // `İ` is 2 bytes and lowercases to 3: the hit is at byte 4 of `text`,
+        // byte 6 of its lowercased form (#769).
+        assert_eq!(find_case_insensitive("İİneedle", "NEEDLE"), Some(4));
+        assert_eq!(find_case_insensitive("aBc", "b"), Some(1));
+        assert_eq!(find_case_insensitive("日本needle", "Needle"), Some(6));
+        assert_eq!(find_case_insensitive("abc", "x"), None);
+        assert_eq!(find_case_insensitive("", ""), Some(0));
+        assert_eq!(find_case_insensitive("ab", ""), Some(0));
+    }
+
+    #[test]
+    fn find_case_insensitive_should_match_greek_sigma_in_any_position_and_case() {
+        // `str::to_lowercase` turns a word-final `Σ` into `ς` while
+        // `char::to_lowercase` gives `σ`: both sides fold the same way, so
+        // the final, medial and capital forms all meet.
+        assert_eq!(find_case_insensitive("ΟΔΟΣ x", "ΟΔΟΣ"), Some(0));
+        assert_eq!(find_case_insensitive("x οδος", "ΟΔΟΣ"), Some(2));
+        assert_eq!(find_case_insensitive("x ΟΔΟΣ", "οδος"), Some(2));
+        assert_eq!(find_case_insensitive("ΟΔΟΣΟ", "οδοσ"), Some(0));
+    }
+
+    #[test]
+    fn make_snippet_should_center_on_the_original_offset_when_lowercasing_changes_the_length() {
+        // The window is 20 bytes of `text` before the hit: ten `İ`, not the
+        // lowercased offset that would have shifted it towards the end.
+        let text = format!("{}NEEDLE tail", "İ".repeat(30));
+        assert_eq!(
+            make_snippet(&text, &["needle".to_string()]),
+            format!("…{}NEEDLE tail", "İ".repeat(10))
+        );
+    }
+
+    #[test]
+    fn make_snippet_should_use_the_first_unit_found_and_fall_back_to_the_head() {
+        let units = ["absent".to_string(), "two".to_string()];
+        assert_eq!(make_snippet("one two three", &units), "one two three");
+        let long = "x".repeat(200);
+        assert_eq!(make_snippet(&long, &units), "x".repeat(120));
+        let text = format!("{}two{}", "a".repeat(30), "b".repeat(200));
+        assert_eq!(
+            make_snippet(&text, &units),
+            format!("…{}two{}…", "a".repeat(20), "b".repeat(117))
+        );
     }
 }
