@@ -212,6 +212,10 @@ Pull requests run `ci.yml`, `cross-build.yml`, `codeql.yml`,
 and Actions metadata access. It accepts checkpoint metadata only from its
 own completed main runs, and validates checkpoint ancestry before selecting
 the diff. Only fully judged campaigns write checkpoint artifacts; only scheduled main runs can produce or supply them.
+`coverage.yml` runs only at 02:47 UTC on main, with read-only contents and
+Actions access. Both instrumented jobs are skipped only after a successful
+scheduled measurement of the same SHA. Coverage is post-merge feedback;
+normal tests and lint still validate the PR head before merge.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.
 
