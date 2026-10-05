@@ -67,11 +67,7 @@ pub(crate) fn uninstall(home: &Path, dry_run: bool) -> Result<InstallStep> {
     if !dry_run {
         config::backup_if_changing(&path, b"removed Pixel Pi impact extension")?;
         fs::remove_file(&path)?;
-        remove_empty_dirs(&[
-            &home.join(".pi/agent/extensions"),
-            &home.join(".pi/agent"),
-            &home.join(".pi"),
-        ]);
+        // Keep the directory containing the recoverable sibling backup.
     }
     Ok(InstallStep {
         id: "hooks.pi-impact".into(),
@@ -79,12 +75,6 @@ pub(crate) fn uninstall(home: &Path, dry_run: bool) -> Result<InstallStep> {
         summary: dry_run_summary(dry_run, "removed managed Pi impact extension"),
         detail: Some(format!("path={}", path.display())),
     })
-}
-
-fn remove_empty_dirs(dirs: &[&Path]) {
-    for dir in dirs {
-        let _ = fs::remove_dir(dir);
-    }
 }
 
 pub(crate) fn installed_state(home: &Path) -> (bool, PathBuf) {
@@ -153,9 +143,16 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(EXTENSION);
         install(home.path(), Path::new("/opt/pixel"), false).unwrap();
+        let original = fs::read(&path).unwrap();
         let step = uninstall(home.path(), false).unwrap();
         assert_eq!(step.status, CheckStatus::Green);
         assert!(!path.exists());
+        let backups: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(backups.len(), 1, "uninstall keeps one recovery copy");
+        assert_eq!(fs::read(&backups[0]).unwrap(), original);
 
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "user-owned Pi extension").unwrap();

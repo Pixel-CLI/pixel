@@ -2106,7 +2106,8 @@ fn antigravity_pre_invocation_should_inject_pixel_matches_without_denial() {
         "workspacePaths": [dir.to_str().unwrap()],
     });
 
-    let response = guard("antigravity", &payload, &[]);
+    let envs = [("PIXEL_METRICS", "1")];
+    let response = guard("antigravity", &payload, &envs);
     let message = response["injectSteps"][0]["ephemeralMessage"]
         .as_str()
         .expect("retrieval output reaches the model as an ephemeral message");
@@ -2322,7 +2323,8 @@ fn antigravity_pre_invocation_should_inject_the_task_route_built_from_the_recove
         "workspacePaths": [dir.to_str().unwrap()],
     });
 
-    let response = guard("antigravity", &payload, &[]);
+    let envs = [("PIXEL_METRICS", "1")];
+    let response = guard("antigravity", &payload, &envs);
     let message = response["injectSteps"][0]["ephemeralMessage"]
         .as_str()
         .expect("retrieval message reaches the model");

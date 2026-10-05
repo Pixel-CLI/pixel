@@ -719,24 +719,45 @@ fn the_other_tools_configuration_does_not_keep_a_search_native() {
 }
 
 #[test]
-fn claude_coordinator_delegates_rtk_exactly_once_only_on_fallback() {
+fn claude_coordinator_delegates_adopted_rtk_once_for_native_commands() {
     let fixture = Fixture::new(b"needle\n");
     let bin = fixture.0.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let script = bin.join("rtk");
-    std::fs::write(&script, "#!/bin/sh\n/bin/cat > rtk-input.json\nprintf 'rtk-response'\nprintf 'rtk-diagnostic' >&2\nexit 7\n").unwrap();
+    std::fs::write(&script, "#!/bin/sh\n/bin/cat >> rtk-input.jsonl\nprintf '\\n' >> rtk-input.jsonl\nprintf 'rtk-response'\nprintf 'rtk-diagnostic' >&2\nexit 7\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let supported = fixture.guard("claude", "grep -n needle 'a file.rs'", true, Some(&bin));
-    assert!(supported.status.success());
-    assert!(!fixture.0.join("rtk-input.json").exists());
+    assert_eq!(supported.status.code(), Some(7));
+    assert_eq!(supported.stdout, b"rtk-response");
+    assert_eq!(supported.stderr, b"rtk-diagnostic");
+    let capture = fixture.0.join("rtk-input.jsonl");
+    let first: serde_json::Value = serde_json::from_slice(
+        std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(first["tool_input"]["command"], "grep -n needle 'a file.rs'");
     let fallback = fixture.guard("claude", "printf hello", true, Some(&bin));
     assert_eq!(fallback.status.code(), Some(7));
     assert_eq!(fallback.stdout, b"rtk-response");
     assert_eq!(fallback.stderr, b"rtk-diagnostic");
-    let delegated: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(fixture.0.join("rtk-input.json")).unwrap()).unwrap();
-    assert_eq!(delegated["tool_input"]["command"], "printf hello");
-    assert_eq!(delegated["tool_input"]["timeout_ms"], 1234);
+    let records = std::fs::read_to_string(capture).unwrap();
+    let delegated: Vec<serde_json::Value> = records
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(delegated.len(), 2, "one RTK invocation per native command");
+    assert_eq!(
+        delegated[0]["tool_input"]["command"],
+        "grep -n needle 'a file.rs'"
+    );
+    assert_eq!(delegated[0]["tool_input"]["timeout_ms"], 1234);
+    assert_eq!(delegated[1]["tool_input"]["command"], "printf hello");
+    assert_eq!(delegated[1]["tool_input"]["timeout_ms"], 1234);
 }
 
 /// Runs `command` with `input` on a pipe for stdin, the way an agent's shell
