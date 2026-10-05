@@ -378,6 +378,92 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
             shutil.rmtree(manifest["workspace_parent"], ignore_errors=True)
 
 
+class ClaudeOAuthOutputPrivacyTests(unittest.TestCase):
+    def test_execute_redacts_oauth_values_before_saving_or_parsing_cli_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            skill = project / ".claude/skills/pixel-impact/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill_source = "---\ndisable-model-invocation: true\n---\nUse the impact skill.\n"
+            skill.write_text(skill_source)
+            scenario = root / "scenario.json"
+            scenario.write_text(json.dumps({"id": "privacy", "prompt": "Find callers."}))
+            results = root / "results"
+            results.mkdir()
+            claude = root / "claude"
+            claude.write_text("fixture")
+            claude.chmod(0o755)
+            pixel = root / "pixel"
+            pixel.write_text("fixture pixel binary")
+            pixel.chmod(0o755)
+
+            access = 'oauth-access-canary-"-雪'
+            refresh = "oauth-refresh-canary-\\secret"
+            credentials = root / "credentials.json"
+            credentials.write_text(json.dumps({"claudeAiOauth": {
+                "accessToken": access,
+                "refreshToken": refresh,
+            }}))
+            credentials.chmod(0o600)
+            oauth = {"accessToken": access, "refreshToken": refresh}
+            manifest = {
+                "workspace": str(project),
+                "claude_version": "2.1.289",
+                "auth_mode": "oauth",
+                "credential_source": "explicit-file",
+                "scenario_sha256": claude_skill_pair.digest(scenario.read_bytes()),
+                "skill_source_sha256": claude_skill_pair.digest(skill_source.encode()),
+                "model_alias": "sonnet",
+                "effort": "medium",
+                "repo_commit": "fixture-commit",
+                "workspace_parent": str(root / "workspace-parent"),
+            }
+            (results / "preflight.json").write_text(json.dumps(manifest))
+            stream = "".join(json.dumps(event) + "\n" for event in (
+                {"type": "system", "subtype": "init", "model": "claude-sonnet-4-5"},
+                {"type": "result", "result": f"Observed {access} and {refresh}.",
+                 "usage": {"input_tokens": 7, "output_tokens": 3,
+                           "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}},
+            ))
+            args = mock.Mock(
+                results_dir=str(results), claude=str(claude), pixel=str(pixel),
+                auth_mode="oauth", gateway_settings=None, auth_config_dir=None,
+                credentials_file=str(credentials), scenario=str(scenario), skill=str(skill),
+                model="sonnet", effort="medium", max_turns=3, max_budget_usd=1.0,
+                timeout=30,
+            )
+            cli_result = subprocess.CompletedProcess(
+                args=[str(claude)], returncode=0, stdout=stream,
+                stderr=f"diagnostic included {access} and {refresh}",
+            )
+
+            with (
+                mock.patch.object(claude_skill_pair, "version_and_help", return_value=("2.1.289", "help")),
+                mock.patch.object(claude_skill_pair, "load_oauth_credentials", return_value=oauth),
+                mock.patch.object(claude_skill_pair, "verify_preflight_snapshot", return_value=12),
+                mock.patch.object(claude_skill_pair, "command", side_effect=[
+                    cli_result, cli_result,
+                    subprocess.CompletedProcess(args=["score"], returncode=0,
+                                                stdout="score recorded\n", stderr=""),
+                ]),
+            ):
+                rows = claude_skill_pair.execute(args)
+
+            saved_text = "\n".join(
+                path.read_text(errors="replace")
+                for path in results.rglob("*") if path.is_file()
+            )
+            for secret in (access, refresh, json.dumps(access)[1:-1], json.dumps(refresh)[1:-1]):
+                self.assertNotIn(secret, saved_text)
+            self.assertIn("<redacted-oauth-credential>", saved_text)
+            self.assertEqual([row["cli_init_model"] for row in rows],
+                             ["claude-sonnet-4-5", "claude-sonnet-4-5"])
+            transcript = results / "privacy-raw.claude.jsonl"
+            parsed = claude_skill_pair.parse_stream(transcript)
+            self.assertEqual(parsed["answer"], "Observed <redacted-oauth-credential> and <redacted-oauth-credential>.")
+
+
 class ClaudeGatewayIsolationTests(unittest.TestCase):
     def setUp(self):
         platform = mock.patch.object(claude_skill_pair.sys, "platform", "darwin")

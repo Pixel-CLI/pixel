@@ -232,9 +232,14 @@ explicitly selected gateway settings file. Gateway mode forwards only its
 allowlisted connection and model environment fields to both isolated arms;
 it does not load the file as agent settings or forward an API key. OAuth
 credentials use private temporary files. Receipts omit credential values and
-hashes; gateway output is redacted for known private connection values before
-it is saved. This prevents accidental recording of those values, not access by
-the user's other processes or deliberate reads by an agent running as that user.
+hashes. Before Claude output is parsed or saved, exact OAuth access and refresh
+token values (including their JSON-escaped forms) and known private gateway
+connection values are redacted from stdout and stderr. This is exact-value
+redaction, not general secret detection: transformed or otherwise unknown
+secret forms may remain. It prevents accidental recording of the known values,
+not access by the user's other processes or deliberate reads by an agent running
+as that user; the temporary config and output files are not an OS security
+sandbox.
 The selected endpoint receives the benchmark's source context. CLI-reported
 model names do not attest the gateway's underlying implementation.
 

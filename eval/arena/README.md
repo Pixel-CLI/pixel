@@ -119,7 +119,10 @@ mode never imports user settings, skills, hooks, plugins, or MCP configuration. 
 `--credentials-file` takes precedence over the
 config directory's `.credentials.json` and must have mode `0600`. Only that
 OAuth object is copied into each private, temporary arm config; credentials are
-never written to results. The preflight refuses an expired refresh token.
+never written to results. Exact access/refresh token values and their JSON-
+escaped forms are redacted from Claude stdout/stderr before parsing or saving;
+this is exact-value filtering, not general secret detection. The preflight
+refuses an expired refresh token.
 
 ```bash
 PAIR_ARGS=(--repo /path/to/architech-t --scenario eval/scenarios/g5-transfer-status-impact.json \

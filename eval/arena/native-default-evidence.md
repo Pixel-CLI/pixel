@@ -678,3 +678,19 @@ Commands, complete logs, exit statuses and installed identity are retained in
 `target/native-default-evidence/final-candidate-validation/validation-receipt.json`.
 The earlier passing remote mutation and dependency verdicts remain historical;
 the normal push hook and GitHub checks must validate the new published head.
+
+## OAuth output privacy follow-up
+
+A subsequent review found that output filtering covered gateway secrets but not
+known OAuth access and refresh token values. The harness now redacts both tokens
+from stdout and stderr before parsing or saving, including JSON-escaped forms.
+An execute-path regression checks every generated result artifact with synthetic
+credentials. All 80 arena tests, Python compilation and the focused independent
+review passed. This is exact-value filtering, not a filesystem security sandbox
+or a guarantee against transformed or unknown secrets.
+
+No credential leak was observed. The measured Claude pair used configured-gateway
+authentication and was not rerun. The installed Rust implementation and its
+validation above are unchanged. Corrected harness SHA-256: `415faf83aa7b4748881c34ecc6fbccaf0dd6f8761a6c412fe036541208aa44e8`.
+The receipt and test log are `target/native-default-evidence/oauth-output-redaction-receipt.json`
+and `target/native-default-evidence/oauth-redaction-arena-tests-final.log`.

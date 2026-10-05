@@ -430,6 +430,23 @@ def successful_pair(results: list[dict]) -> bool:
     )
 
 
+def redact_known_values(text: str, sensitive_values: list[str], replacement: str) -> str:
+    escaped_values = {
+        escaped
+        for value in sensitive_values
+        if isinstance(value, str) and value
+        for escaped in (
+            value,
+            json.dumps(value, ensure_ascii=False)[1:-1],
+            json.dumps(value, ensure_ascii=True)[1:-1],
+        )
+    }
+    for value in sorted(escaped_values, key=len, reverse=True):
+        if value:
+            text = text.replace(value, replacement)
+    return text
+
+
 def redact_gateway_values(text: str, gateway_env: dict[str, str] | None) -> str:
     if gateway_env is None:
         return text
@@ -441,20 +458,14 @@ def redact_gateway_values(text: str, gateway_env: dict[str, str] | None) -> str:
         _, separator, value = line.partition(":")
         if separator and value.strip():
             sensitive_values.append(value.strip())
-    escaped_values = {
-        escaped
-        for value in sensitive_values
-        if value
-        for escaped in (
-            value,
-            json.dumps(value, ensure_ascii=False)[1:-1],
-            json.dumps(value, ensure_ascii=True)[1:-1],
-        )
-    }
-    for value in sorted(escaped_values, key=len, reverse=True):
-        if value:
-            text = text.replace(value, "<redacted-gateway-setting>")
-    return text
+    return redact_known_values(text, sensitive_values, "<redacted-gateway-setting>")
+
+
+def redact_oauth_values(text: str, oauth_credentials: dict | None) -> str:
+    if oauth_credentials is None:
+        return text
+    sensitive_values = [oauth_credentials.get(key, "") for key in ("accessToken", "refreshToken")]
+    return redact_known_values(text, sensitive_values, "<redacted-oauth-credential>")
 
 
 def token_totals(row: dict) -> dict:
@@ -675,6 +686,7 @@ def execute(args: argparse.Namespace) -> list[dict]:
         raise RuntimeError("Claude auth mode changed since preflight")
     gateway_env = None
     gateway_source = None
+    oauth_credentials = None
     if auth_mode == "configured-gateway":
         if not gateway_settings:
             raise RuntimeError("--gateway-settings is required for configured-gateway auth")
@@ -724,8 +736,12 @@ def execute(args: argparse.Namespace) -> list[dict]:
             started = time.monotonic()
             proc = command(argv, cwd=project, env=env, timeout=args.timeout)
             wall_ms = round((time.monotonic() - started) * 1000)
-            proc_stdout = redact_gateway_values(proc.stdout, gateway_env)
-            proc_stderr = redact_gateway_values(proc.stderr, gateway_env)
+            proc_stdout = redact_gateway_values(
+                redact_oauth_values(proc.stdout, oauth_credentials), gateway_env
+            )
+            proc_stderr = redact_gateway_values(
+                redact_oauth_values(proc.stderr, oauth_credentials), gateway_env
+            )
             transcript = out / f"{scenario['id']}-{arm}.claude.jsonl"
             transcript.write_text(proc_stdout)
             transcript.chmod(0o600)
