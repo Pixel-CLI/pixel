@@ -280,6 +280,13 @@ fn app_calls_should_be_routes_only_for_http_method_names() {
     );
 }
 
+/// A comment before the path is not the path.
+#[test]
+fn app_route_should_skip_a_comment_before_its_path() {
+    let c = extract_concepts("src/server.ts", b"app.get(/* note */ \"/users\", list);\n");
+    assert_eq!(of_kind(&c, ConceptKind::Route), vec!["get /users"]);
+}
+
 #[test]
 fn fetch_routes_should_only_index_api_paths() {
     let routes = of_kind(&ts_concepts(), ConceptKind::Route);

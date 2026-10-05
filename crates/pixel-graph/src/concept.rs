@@ -353,11 +353,12 @@ impl<'a> TsWalker<'a> {
     }
 
     fn push_app_route(&mut self, node: Node, method: &str) {
-        // The first named argument: `arguments` opens on its `(` token.
+        // The first named argument that is not a comment: `arguments` opens
+        // on its `(` token, and a comment (`/* note */`) is a named extra.
         let path = self
             .call_args(node)
             .into_iter()
-            .find(Node::is_named)
+            .find(|a| a.is_named() && !a.is_extra())
             .map(|a| strip_quotes(&self.text(a)))
             .unwrap_or_default();
         let raw = format!("{method} {path}");
