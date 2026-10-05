@@ -715,9 +715,13 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   (OpenSSF Scorecard on every push to `main` and weekly: publishes the score
   to `api.scorecard.dev` and the findings to code scanning) and `codeql.yml`
   (CodeQL on every pull request into `main`, every push to `main` and
-  weekly: Rust, the workflows, Python and JavaScript/TypeScript, all with
-  `build-mode: none` and `security-extended` queries, results to code scanning
-  and the `CodeQL` check; a dedicated Rust extraction cache is keyed by
+  weekly: workflows, Python and JavaScript/TypeScript always scan; Rust
+  skips only known non-Rust PR diffs selected by `scripts/codeql-rust-scope.py`.
+  Unknown inputs, missing merge history and CodeQL policy edits scan Rust;
+  every non-PR event scans all four languages. Scans use `build-mode: none`
+  and default security queries, preserving eligibility for incremental analysis
+  in supported languages, with results in code scanning and the `CodeQL` check.
+  A dedicated Rust extraction cache is keyed by
   runner, compiler, manifests/lockfiles and workflow, restored on PRs and
   saved only after successful main analyses) and
   `fuzz.yml` (`cargo deny` on the `fuzz/` workspace with the root

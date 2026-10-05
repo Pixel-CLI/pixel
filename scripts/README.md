@@ -16,6 +16,8 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 | Script | Run | What |
 | --- | --- | --- |
 | `gates.sh` | `scripts/gates.sh [--force]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
+| `codeql-rust-scope.py` | called by CodeQL CI | omit Rust only for known non-Rust PR merge diffs; unknown inputs and non-PR events scan fully |
+| `test-codeql-rust-scope.py` | `python3 scripts/test-codeql-rust-scope.py` | changed/deleted/renamed Rust, shallow merge diffs, policy edits and full scheduled scans |
 | `coverage-nightly.py` | called by Coverage CI | skip instrumentation only after a successful scheduled measurement of the same main SHA |
 | `test-coverage-nightly.py` | `python3 scripts/test-coverage-nightly.py` | unchanged main, failures and scheduled-only coverage |
 | `test-pre-push.sh` | `sh scripts/test-pre-push.sh` | publication starts no local validation or fetch |

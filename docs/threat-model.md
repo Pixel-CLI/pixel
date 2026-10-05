@@ -550,11 +550,13 @@ boundary it crosses.
   an environment variable; no workflow interpolates `github.event.*` or
   `inputs.*` directly in a `run:` script; workflows default to `contents:
   read`; runs of outside contributors wait for a maintainer's approval;
-  CodeQL scans the workflows (`actions` language) with `security-extended`
-  queries. Its Rust extraction cache is separate from build/test caches;
+  CodeQL always scans workflows, Python and JavaScript with default security
+  queries. Only Rust can skip a known non-Rust PR diff; unknown inputs or
+  missing merge history run the full Rust analysis, as do all non-PR events.
+  Its Rust extraction cache is separate from build/test caches;
   only successful main analyses save executable build-script/proc-macro
-  outputs, while PR analyses can restore them. All four language analyses
-  still run even when the cache hits.
+  outputs, while PR analyses can restore them. A cache hit never replaces
+  an analysis selected by the diff policy.
 - **Status**: Partial.
 - **Residual**: any pull request body can name `Task <n>` and move that
   issue's board status; workflows that compile pull-request code on the
@@ -621,9 +623,10 @@ Across all of them:
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
   root `Cargo.toml` or `deny.toml`, for 600 s weekly, and for 120 s on every
   `v*` tag before `release.yml` builds anything.
-- **Static analysis**: `codeql.yml` scans Rust, the workflows, Python and
-  JavaScript/TypeScript on every pull request into `main`, every push to it,
-  and weekly; `cargo clippy` with warnings denied runs in CI.
+- **Static analysis**: `codeql.yml` scans workflows, Python and
+  JavaScript/TypeScript on every pull request into `main`; Rust is omitted
+  only for known non-Rust PR diffs. Pushes to main, weekly and manual runs
+  scan all four languages; `cargo clippy` with warnings denied runs in CI.
 - **Dependencies**: `cargo deny check` and `scripts/check-advisory-ignores.py`
   in CI; Dependabot weekly for Cargo and GitHub Actions.
 
