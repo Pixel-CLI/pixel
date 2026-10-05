@@ -1,0 +1,1 @@
+**recall:** a vector segment whose header announces a row count large enough to overflow the size check is refused as truncated, instead of passing the check in release builds and panicking `pixel recall`'s semantic search on an out-of-range read.

@@ -252,7 +252,12 @@ impl OpenSegment {
         let dim = u32::from_le_bytes(mmap[12..16].try_into().unwrap()) as usize;
         let count = u64::from_le_bytes(mmap[16..24].try_into().unwrap()) as usize;
         let row = 16 + dim;
-        if HEADER_LEN + count * row > mmap.len() {
+        // The header is read from disk: an overflowing size wrapped past this
+        // check in release and left `scan` slicing outside the map (#785).
+        let size = count
+            .checked_mul(row)
+            .and_then(|rows| rows.checked_add(HEADER_LEN));
+        if size.is_none_or(|size| size > mmap.len()) {
             return Err("truncated vector segment".to_string());
         }
         Ok(Self { mmap, dim, count })
@@ -343,5 +348,40 @@ mod tests {
             !other.stale_revision(),
             "a model at revision 0 written at 0"
         );
+    }
+
+    /// A one-row segment of dimension 3 (row length 19) with its header's
+    /// row count replaced by `count`.
+    fn segment_with_count(dir: &Path, count: u64) -> std::path::PathBuf {
+        let mut store = VectorStore::open(dir).unwrap();
+        store
+            .append_segment("test-model", 3, &[(1i64, vec![1.0, 0.0, 0.0])])
+            .unwrap();
+        let path = dir.join(&store.meta.segments[0]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[16..24].copy_from_slice(&count.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn open_should_refuse_a_row_count_whose_size_overflows() {
+        // 19 × (u64::MAX / 19 + 1) wraps to a few bytes: the size check
+        // passed and `scan` then sliced past the mapping (#785).
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_with_count(dir.path(), u64::MAX / 19 + 1);
+        let err = OpenSegment::open(&path).err();
+        assert_eq!(err.as_deref(), Some("truncated vector segment"));
+    }
+
+    #[test]
+    fn open_should_refuse_a_row_count_past_the_file_and_accept_the_true_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_with_count(dir.path(), 2);
+        let err = OpenSegment::open(&path).err();
+        assert_eq!(err.as_deref(), Some("truncated vector segment"));
+        let path = segment_with_count(&dir.path().join("ok"), 1);
+        let segment = OpenSegment::open(&path).unwrap();
+        assert_eq!((segment.dim, segment.count), (3, 1));
     }
 }
