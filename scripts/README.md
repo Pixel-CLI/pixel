@@ -15,7 +15,7 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 
 | Script | Run | What |
 | --- | --- | --- |
-| `gates.sh` | `scripts/gates.sh [--force] [--mutants]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
+| `gates.sh` | `scripts/gates.sh [--force]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
 | `coverage-nightly.py` | called by Coverage CI | skip instrumentation only after a successful scheduled measurement of the same main SHA |
 | `test-coverage-nightly.py` | `python3 scripts/test-coverage-nightly.py` | unchanged main, failures and scheduled-only coverage |
 | `test-gates.py` | `python3 scripts/test-gates.py` | contract of `gates.sh` (stub cargo in a throwaway repo) |
