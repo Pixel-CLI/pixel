@@ -1335,6 +1335,15 @@ fn blocking_claude_groups(groups: &[Value], exe: &Path) -> Vec<Value> {
         .collect()
 }
 
+/// Every hook command of `groups`, in order.
+fn commands(groups: &[Value]) -> impl Iterator<Item = &str> {
+    groups
+        .iter()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+}
+
 /// Whether any hook command in a settings value (`{"hooks": {<event>: [...]}}`)
 /// is one of Pixel's: the evidence that Pixel was installed into that file.
 pub(crate) fn has_pixel_hook(value: &Value, exe: &Path) -> bool {
@@ -1345,10 +1354,7 @@ pub(crate) fn has_pixel_hook(value: &Value, exe: &Path) -> bool {
             events
                 .values()
                 .filter_map(Value::as_array)
-                .flatten()
-                .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-                .flatten()
-                .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+                .flat_map(|groups| commands(groups))
                 .any(|command| is_pixel_hook(command, exe))
         })
 }
@@ -1367,10 +1373,7 @@ pub(crate) fn stacked_pixel_hooks(value: &Value, exe: &Path) -> Vec<String> {
         for verb in groups
             .as_array()
             .into_iter()
-            .flatten()
-            .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-            .flatten()
-            .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+            .flat_map(|groups| commands(groups))
             .filter_map(|command| pixel_hook_verb(command, exe))
         {
             match counts.iter_mut().find(|(seen, _)| *seen == verb) {
@@ -1404,10 +1407,7 @@ pub(crate) fn pixel_hooks_running_other_binaries(value: &Value, exe: &Path) -> V
     for command in events
         .values()
         .filter_map(Value::as_array)
-        .flatten()
-        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-        .flatten()
-        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .flat_map(|groups| commands(groups))
         .filter(|command| is_pixel_hook(command, exe))
     {
         let Some(path) = command

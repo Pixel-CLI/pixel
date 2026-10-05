@@ -3143,41 +3143,35 @@ fn install_and_uninstall_preserve_a_retired_prompt_quoted_in_user_prose() {
 
 #[test]
 fn doctor_and_install_should_remove_a_managed_pi_prompt_and_preserve_orphan_markers() {
-    for closing in [MANAGED_END] {
-        let dir = TempDir::new().expect("tempdir");
-        let home = dir.path();
-        let pi_path = pi_prompt_path(home);
-        let prefix = format!("{MANAGED_END}\nBefore.\n");
-        let original = format!("{prefix}{MANAGED_BEGIN}\nstale\n{closing}");
-        fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
-        fs::write(&pi_path, &original).unwrap();
-        assert_eq!(
-            pixel_install::config::strip_managed_block(&original),
-            if closing.is_empty() {
-                original.clone()
-            } else {
-                prefix.clone()
-            }
-        );
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let pi_path = pi_prompt_path(home);
+    let prefix = format!("{MANAGED_END}\nBefore.\n");
+    let original = format!("{prefix}{MANAGED_BEGIN}\nstale\n{MANAGED_END}");
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+    fs::write(&pi_path, &original).unwrap();
+    assert_eq!(
+        pixel_install::config::strip_managed_block(&original),
+        prefix
+    );
 
-        let opts = DoctorOptions {
-            home: Some(home.to_path_buf()),
-            shell: Some(TEST_SHELL.into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            check(&doctor(&opts).unwrap(), "install.pi-prompt").status,
-            CheckStatus::Red
-        );
-        install_for_shell(home, TEST_SHELL);
-        assert_eq!(fs::read_to_string(&pi_path).unwrap(), prefix);
-        assert_eq!(
-            check(&doctor(&opts).unwrap(), "install.pi-prompt").status,
-            CheckStatus::Green
-        );
-        uninstall_home(home);
-        assert_eq!(fs::read_to_string(&pi_path).unwrap(), prefix);
-    }
+    let opts = DoctorOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        check(&doctor(&opts).unwrap(), "install.pi-prompt").status,
+        CheckStatus::Red
+    );
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(fs::read_to_string(&pi_path).unwrap(), prefix);
+    assert_eq!(
+        check(&doctor(&opts).unwrap(), "install.pi-prompt").status,
+        CheckStatus::Green
+    );
+    uninstall_home(home);
+    assert_eq!(fs::read_to_string(&pi_path).unwrap(), prefix);
 }
 
 #[test]

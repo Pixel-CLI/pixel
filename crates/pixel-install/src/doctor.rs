@@ -731,12 +731,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
             if !blocks.is_empty() {
                 return Err(format!(
-                    "stale pixel shell wrapper in {} — run `pixel install` to remove it (the SessionStart hook now injects the prompt; the wrapper double-injects)",
+                    "stale pixel shell wrapper in {} — run `pixel install` to remove its unsolicited prompt injection",
                     blocks.join(", ")
                 ));
             }
             Ok(DoctorCheckDetail {
-                summary: "no legacy shell wrappers — SessionStart hook injects the prompt".into(),
+                summary: "no legacy shell wrappers".into(),
                 detail: Some(serde_json::json!({ "profiles_checked": profiles
                     .iter()
                     .map(|p| p.display().to_string())
