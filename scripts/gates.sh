@@ -103,6 +103,7 @@ step "release prepare contract" python3 scripts/test-prepare.py
 step "release candidate contract" python3 scripts/test-release-candidate.py
 step "gate runner contract" python3 scripts/test-gates.py
 step "pre-push contract" sh scripts/test-pre-push.sh
+step "CodeQL scan policy contract" python3 scripts/test-codeql-policy.py
 step "nightly diff checkpoint contract" python3 scripts/test-mutants-nightly-range.py
 step "mutants config contract" python3 scripts/test-mutants-config.py
 step "clean contract" python3 scripts/test-clean.py

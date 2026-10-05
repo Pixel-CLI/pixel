@@ -715,8 +715,21 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   (OpenSSF Scorecard on every push to `main` and weekly: publishes the score
   to `api.scorecard.dev` and the findings to code scanning) and `codeql.yml`
   (CodeQL on every pull request into `main`, every push to `main` and
-  weekly: Rust, the workflows, Python and JavaScript/TypeScript, all with
-  `build-mode: none`, results to code scanning and the `CodeQL` check) and
+  nightly at 05:41 UTC: workflows, Python and JavaScript/TypeScript always
+  scan; Rust runs only after merge, nightly or via manual dispatch. To scan
+  a sensitive branch before merge, dispatch the workflow on that branch;
+  inspect its run and code-scanning results before merging. Rust findings
+  are post-merge feedback and must be triaged before the next release.
+  Scans use `build-mode: none` and default security queries, preserving
+  eligibility for incremental analysis in supported languages. The existing
+  CodeQL merge-protection rule remains enabled for PR analyses. The three
+  `Analyze (actions)`, `Analyze (python)` and `Analyze (javascript-typescript)`
+  jobs are required checks from GitHub Actions in the main ruleset. GitHub's
+  aggregate CodeQL check can be neutral because main has a Rust configuration
+  absent on PRs; the required jobs still enforce completion of the PR scans.
+  A dedicated Rust extraction cache is keyed by runner, compiler,
+  manifests/lockfiles and workflow. Manual branch scans may restore it;
+  only successful main analyses save it) and
   `fuzz.yml` (`cargo deny` on the `fuzz/` workspace with the root
   `deny.toml`, then every cargo-fuzz target on nightly: 60 s each on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the

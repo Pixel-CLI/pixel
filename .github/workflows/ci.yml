@@ -477,6 +477,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-prepare-only.py
 
+      - name: CodeQL scan policy contract
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-codeql-policy.py
+
       - name: Nightly coverage selection contract
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-coverage-nightly.py
