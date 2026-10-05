@@ -518,6 +518,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-check-spdx.py
 
+      - name: Uncovered-branch lister contract (synthetic lcov)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-coverage-uncovered-branches.py
+
       # The sweep cancels moot validation runs; the board sync and its own
       # run must survive it, or merged tasks stay In Progress.
       - name: Cancel-stale sweep contract (stubbed gh)
