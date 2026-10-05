@@ -261,3 +261,6 @@ mod tests {
         assert!(now > 1_577_836_800_000, "{now}"); // 2020-01-01T00:00:00Z
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

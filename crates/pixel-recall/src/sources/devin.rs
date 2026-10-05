@@ -295,3 +295,6 @@ impl SourceAdapter for Adapter {
         })
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

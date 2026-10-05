@@ -2340,3 +2340,6 @@ mod tests {
         assert!(idf_weight("unique", &content) > 1.0);
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

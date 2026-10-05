@@ -418,3 +418,6 @@ mod tests {
         let _ = fs::remove_dir_all(&work);
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

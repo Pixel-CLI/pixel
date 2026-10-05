@@ -513,3 +513,6 @@ mod tests {
         assert_eq!(env.unresolved_same_name, 0);
     }
 }
+
+#[cfg(test)]
+mod contract_tests;
