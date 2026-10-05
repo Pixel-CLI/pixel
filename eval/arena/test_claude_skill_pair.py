@@ -232,6 +232,38 @@ class ClaudeSnapshotIntegrityTests(unittest.TestCase):
 
 
 class ClaudeCliCapabilityTests(unittest.TestCase):
+    def test_pair_with_result_event_but_error_exit_is_not_successful(self):
+        results = [
+            {"result_found": True, "is_error": False, "exit_code": 0},
+            {"result_found": True, "is_error": True, "exit_code": 1},
+        ]
+
+        self.assertFalse(claude_skill_pair.successful_pair(results))
+
+    def test_pair_rejects_nonzero_exit_without_error_result(self):
+        results = [
+            {"result_found": True, "is_error": False, "exit_code": 0},
+            {"result_found": True, "is_error": False, "exit_code": 1},
+        ]
+
+        self.assertFalse(claude_skill_pair.successful_pair(results))
+
+    def test_pair_rejects_error_result_with_zero_exit(self):
+        results = [
+            {"result_found": True, "is_error": False, "exit_code": 0},
+            {"result_found": True, "is_error": True, "exit_code": 0},
+        ]
+
+        self.assertFalse(claude_skill_pair.successful_pair(results))
+
+    def test_pair_requires_both_arms_to_exit_successfully(self):
+        results = [
+            {"result_found": True, "is_error": False, "exit_code": 0},
+            {"result_found": True, "is_error": False, "exit_code": 0},
+        ]
+
+        self.assertTrue(claude_skill_pair.successful_pair(results))
+
     def test_hidden_max_turns_flag_is_verified_by_parser_diagnostic(self):
         help_text = "--setting-sources --permission-mode --permission-prompts --allowedTools --disallowedTools " \
             "--max-budget-usd --no-session-persistence --effort"

@@ -423,6 +423,13 @@ def require_matching_reported_models(results: list[dict]) -> dict[str, object] |
     }
 
 
+def successful_pair(results: list[dict]) -> bool:
+    return len(results) == 2 and all(
+        row.get("result_found") and not row.get("is_error") and row.get("exit_code") == 0
+        for row in results
+    )
+
+
 def redact_gateway_values(text: str, gateway_env: dict[str, str] | None) -> str:
     if gateway_env is None:
         return text
@@ -829,7 +836,7 @@ def main() -> int:
         results = execute(args)
         print(json.dumps([{key: value for key, value in row.items() if key != "answer"}
                           for row in results], indent=2))
-        return 0 if len(results) == 2 and all(row["result_found"] for row in results) else 1
+        return 0 if successful_pair(results) else 1
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         print("claude_skill_pair: " + str(error), file=sys.stderr)
         return 2
