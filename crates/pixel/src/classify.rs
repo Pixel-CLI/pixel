@@ -1583,7 +1583,7 @@ mod tests {
         // read the variable are spawned, and the variable is unset again
         // at the end; no other test in this binary reads TYPESAFE_API_KEY.
         unsafe { std::env::set_var("TYPESAFE_API_KEY", "tsk-routing-test") };
-        let jev = open_resolved(
+        let mut jev = open_resolved(
             crate::classify_setup::ResolvedEngine::Remote,
             crate::decide_remote::Preset::Jev,
             None,
@@ -1592,6 +1592,15 @@ mod tests {
         .unwrap();
         assert_eq!(jev.provider(), Some("jev"));
         assert_eq!(jev.basis(), crate::decide_jev::JEV_BASIS);
+        // The trait shim must really delegate: a hollowed-out decide() that
+        // fabricated an answer would pass here if this assertion only ran
+        // the inherent method — through Box<dyn DecisionEngine> a fake key
+        // or an unreachable host must surface as an Err, never an Ok.
+        let probe = spec("t", "", &["yes", "no"], &[]);
+        assert!(
+            jev.decide(&probe).is_err(),
+            "a placeholder key can never produce a real jev answer"
+        );
         // Chat presets keep the chat adapter — the local preset needs no
         // key at all, so the same resolution path must still open it.
         let chat = open_resolved(
