@@ -99,6 +99,9 @@ pub struct IndexSet {
     delta_tombstones: HashSet<String>,
     overlay: Overlay,
     open_timings: OpenTimings,
+    /// HEAD when the set was opened: the commit base ∪ delta covers. The
+    /// overlay follows the working tree from there, HEAD moves included.
+    head: Option<String>,
 }
 
 /// Whole milliseconds in `elapsed`, saturating rather than wrapping on a
@@ -666,6 +669,7 @@ impl IndexSet {
             delta: None,
             delta_tombstones: HashSet::new(),
             overlay: Overlay::new(),
+            head: head.clone(),
             open_timings: OpenTimings {
                 base: base_source,
                 base_ms,
@@ -718,6 +722,24 @@ impl IndexSet {
     /// What the open that produced this set cost, layer by layer.
     pub fn open_timings(&self) -> OpenTimings {
         self.open_timings
+    }
+
+    /// HEAD when the set was opened (`None` outside a git repository): the
+    /// commit base ∪ delta answers for, whatever HEAD has moved to since.
+    pub fn opened_head(&self) -> Option<&str> {
+        self.head.as_deref()
+    }
+
+    /// Every path the overlay answers for instead of base ∪ delta: the
+    /// working-tree edits seen at open or refreshed since. Re-reading them
+    /// is what notices an edit that was discarded with no event observed.
+    pub fn overlay_paths(&self) -> BTreeSet<String> {
+        self.overlay
+            .files
+            .keys()
+            .chain(&self.overlay.tombstones)
+            .cloned()
+            .collect()
     }
 
     /// Build or reuse the delta layer covering `base_oid..head_oid`.
@@ -1455,6 +1477,36 @@ mod tests {
         drop(set);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The daemon's catch-up reads these two accessors: the HEAD the set
+    /// answers for, and every path the overlay holds — an edit and a
+    /// deletion (tombstone only) alike — so it can re-read them.
+    #[test]
+    fn catch_up_accessors_should_report_the_opened_head_and_overlay_paths() {
+        let _cache = IsolatedCache::new("catch_up_accessors");
+        let dir = scratch("catch-up-accessors");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn alphaNeedle() {}\n").unwrap();
+        std::fs::write(dir.join("b.rs"), "fn betaNeedle() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        let mut set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let head = git_out(&dir, &["rev-parse", "HEAD"]);
+        assert_eq!(set.opened_head(), Some(head.as_str()));
+        assert_eq!(set.overlay_paths(), BTreeSet::new());
+
+        std::fs::write(dir.join("a.rs"), "fn editedNeedle() {}\n").unwrap();
+        std::fs::remove_file(dir.join("b.rs")).unwrap();
+        set.refresh_files(&[("a.rs", false), ("b.rs", true)]);
+        assert_eq!(
+            set.overlay_paths(),
+            BTreeSet::from(["a.rs".to_string(), "b.rs".to_string()])
+        );
+        // A new commit does not move the HEAD the open answered for.
+        git(&dir, &["commit", "-qam", "two"]);
+        assert_eq!(set.opened_head(), Some(head.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,0 +1,1 @@
+**task-gate:** a `sed` whose script BSD sed (the macOS default) would run is no longer read as a bounded read: `-l` only consumes a numeric value, so `sed -n -l 'w out' f` is denied, and an operand placed before the first `-e` is scanned as a script, so `sed 'w out' -e p f` is denied.

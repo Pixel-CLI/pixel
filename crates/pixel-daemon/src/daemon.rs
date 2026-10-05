@@ -187,6 +187,9 @@ enum Msg {
     WatchReady(Result<WatchGuard, String>),
 }
 
+/// Git's empty tree (SHA-1): the base a first commit is diffed from.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// Keeps a registered watch alive for as long as the loop holds it.
 type WatchGuard = Box<dyn Send>;
 
@@ -268,13 +271,39 @@ impl Corpus for Service {
         self.note_watcher_error(error);
     }
 
-    /// Re-read every path `git status` reports: an edit made while the watch
-    /// was still being registered reached no event.
+    /// Re-read every path that may have changed while the watch was still
+    /// being registered, since none of it raised an event: what `git status`
+    /// lists now, what the overlay held (an edit discarded by `git checkout
+    /// -- f` or `git stash` leaves `git status` clean), and what a HEAD move
+    /// (`git checkout <branch>`, `git pull`) rewrote. A path is removed when
+    /// it is gone from disk, as for a watcher event.
     fn watch_ready(&mut self) {
         let root = Service::root(self).to_path_buf();
-        let changes: Vec<(PathBuf, bool)> = pixel_index::gitsync::status_porcelain(&root)
+        let (opened_head, mut paths) = self.index_catch_up();
+        paths.extend(
+            pixel_index::gitsync::status_porcelain(&root)
+                .into_iter()
+                .map(|(_xy, path)| path),
+        );
+        // A repository with no commit at open has no HEAD to diff from: a
+        // first commit made meanwhile is diffed from the empty tree.
+        if let Some(head) = pixel_index::gitsync::rev_parse_head(&root)
+            && opened_head.as_deref() != Some(head.as_str())
+        {
+            let from = opened_head.unwrap_or_else(|| EMPTY_TREE.to_string());
+            paths.extend(
+                pixel_index::gitsync::diff_name_status(&root, &from, &head)
+                    .into_iter()
+                    .map(|(_status, path)| path),
+            );
+        }
+        let changes: Vec<(PathBuf, bool)> = paths
             .into_iter()
-            .map(|(xy, path)| (root.join(path), xy.contains('D')))
+            .map(|path| {
+                let abs = root.join(path);
+                let removed = !abs.exists();
+                (abs, removed)
+            })
             .collect();
         self.apply_changes(&changes);
     }
@@ -1640,6 +1669,138 @@ mod tests {
         assert_eq!(search_hits(&mut svc, "alphaNeedle"), 0);
         assert_eq!(search_hits(&mut svc, "gammaNeedle"), 1);
         assert_eq!(search_hits(&mut svc, "deltaNeedle"), 0);
+        drop(svc);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `git` in `root` with a fixed identity and no user config.
+    fn git_in(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// One committed `a.rs` defining `alphaNeedle`.
+    fn committed_repo(tag: &str) -> PathBuf {
+        let root = scratch_root(tag);
+        git_in(&root, &["init", "-q"]);
+        std::fs::write(root.join("a.rs"), "fn alphaNeedle() {}\n").unwrap();
+        git_in(&root, &["add", "."]);
+        git_in(&root, &["commit", "-qm", "initial"]);
+        root
+    }
+
+    /// An edit and a deletion the daemon opened with, both discarded before
+    /// the watch was live (`git checkout -- a.rs b.rs`), leave `git status`
+    /// clean: the overlay still answers with the discarded text and hides the
+    /// restored file unless `watch_ready` re-reads what it held.
+    #[test]
+    fn service_watch_ready_should_drop_an_edit_discarded_before_the_watch() {
+        let root = committed_repo("watch-ready-discard");
+        std::fs::write(root.join("b.rs"), "fn betaNeedle() {}\n").unwrap();
+        git_in(&root, &["add", "b.rs"]);
+        git_in(&root, &["commit", "-qm", "b"]);
+        std::fs::write(root.join("a.rs"), "fn draftNeedle() {}\n").unwrap();
+        std::fs::remove_file(root.join("b.rs")).unwrap();
+        let mut svc = Service::open(&root).unwrap();
+        assert_eq!(search_hits(&mut svc, "draftNeedle"), 1);
+        assert_eq!(search_hits(&mut svc, "betaNeedle"), 0);
+
+        git_in(&root, &["checkout", "--", "a.rs", "b.rs"]);
+        Corpus::watch_ready(&mut svc);
+        assert_eq!(search_hits(&mut svc, "draftNeedle"), 0, "discarded edit");
+        assert_eq!(search_hits(&mut svc, "alphaNeedle"), 1, "committed text");
+        assert_eq!(search_hits(&mut svc, "betaNeedle"), 1, "restored deletion");
+        drop(svc);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A branch switch before the watch was live rewrites files `git status`
+    /// never lists: `watch_ready` re-reads what HEAD's move changed.
+    /// The catch-up re-reads only what may have changed: it diffs from the
+    /// HEAD the index opened at and re-reads the overlay's paths. Without the
+    /// opened HEAD it would diff from the empty tree and re-read every
+    /// tracked file of a large repository after each daemon start.
+    #[test]
+    fn index_catch_up_should_report_the_opened_head_and_only_the_overlay_paths() {
+        let root = committed_repo("index-catch-up");
+        std::fs::write(root.join("u.rs"), "fn untrackedNeedle() {}\n").unwrap();
+        let svc = Service::open(&root).unwrap();
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let (opened, paths) = svc.index_catch_up();
+        assert_eq!(opened.as_deref(), Some(head.trim()));
+        assert_eq!(
+            paths,
+            std::collections::BTreeSet::from(["u.rs".to_string()])
+        );
+        drop(svc);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repository opened before its first commit has no HEAD to diff
+    /// from; a file added and committed during registration is clean in
+    /// `git status` and absent from the overlay, so only the empty-tree
+    /// diff brings it in.
+    #[test]
+    fn service_watch_ready_should_pick_up_a_first_commit_before_the_watch() {
+        let root = scratch_root("watch-ready-first-commit");
+        git_in(&root, &["init", "-q"]);
+        let mut svc = Service::open(&root).unwrap();
+
+        std::fs::write(root.join("a.rs"), "fn firstNeedle() {}\n").unwrap();
+        git_in(&root, &["add", "a.rs"]);
+        git_in(&root, &["commit", "-qm", "first"]);
+        assert_eq!(search_hits(&mut svc, "firstNeedle"), 0, "no event yet");
+        Corpus::watch_ready(&mut svc);
+        assert_eq!(search_hits(&mut svc, "firstNeedle"), 1);
+        drop(svc);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn service_watch_ready_should_follow_a_head_move_before_the_watch() {
+        let root = committed_repo("watch-ready-head-move");
+        git_in(&root, &["checkout", "-qb", "other"]);
+        std::fs::write(root.join("a.rs"), "fn otherNeedle() {}\n").unwrap();
+        std::fs::write(root.join("n.rs"), "fn newNeedle() {}\n").unwrap();
+        git_in(&root, &["add", "."]);
+        git_in(&root, &["commit", "-qm", "other"]);
+        git_in(&root, &["checkout", "-q", "-"]);
+        let mut svc = Service::open(&root).unwrap();
+        assert_eq!(search_hits(&mut svc, "alphaNeedle"), 1);
+
+        git_in(&root, &["checkout", "-q", "other"]);
+        Corpus::watch_ready(&mut svc);
+        assert_eq!(search_hits(&mut svc, "otherNeedle"), 1, "modified on HEAD");
+        assert_eq!(search_hits(&mut svc, "newNeedle"), 1, "added on HEAD");
+        assert_eq!(search_hits(&mut svc, "alphaNeedle"), 0, "old text");
+
+        git_in(&root, &["checkout", "-q", "-"]);
+        Corpus::watch_ready(&mut svc);
+        assert_eq!(
+            search_hits(&mut svc, "newNeedle"),
+            0,
+            "removed by the move back"
+        );
+        assert_eq!(search_hits(&mut svc, "alphaNeedle"), 1);
         drop(svc);
         let _ = std::fs::remove_dir_all(&root);
     }

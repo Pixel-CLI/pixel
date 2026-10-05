@@ -228,7 +228,9 @@ registered on its own thread so the daemon answers from its first request: a
 recursive watch walks every directory under the root, ignored ones included,
 and took 11 to 28 s over a repository's 11 515 `node_modules` directories.
 Once it is live, `Corpus::watch_ready` re-reads every path `git status`
-lists, since edits made meanwhile raised no event. The daemon exits after
+lists, every path the index overlay held (an edit discarded meanwhile leaves
+`git status` clean) and every path a HEAD move since the open changed, since
+edits made meanwhile raised no event. The daemon exits after
 thirty minutes idle.
 
 Two version numbers exist and must not be conflated:
