@@ -55,6 +55,7 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::params;
 
+use crate::extract::ruby_callbacks::{ReferenceKind, reference_kind};
 use crate::store::{
     EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, SymbolKind, Tier, decode_bindings,
     decode_scope,
@@ -164,6 +165,8 @@ fn scope_width(scope: &[(u32, u32)], site_line: Option<u32>) -> u32 {
 pub struct ResolveIndex {
     by_name: HashMap<String, Vec<Candidate>>,
     ruby_files: HashSet<i64>,
+    /// Class/module symbols supply the owner of a Ruby class-body reference.
+    containers: HashSet<i64>,
     /// symbol_id → qualified name, for the type-qualified receiver tiebreak
     /// (`pixel_git::GitRunner` + `new` ↔ `GitRunner::new`). Kept beside the
     /// `Copy` candidate rows so the tier code stays copy-based.
@@ -224,6 +227,7 @@ impl ResolveIndex {
         };
         let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::new();
         let mut qualified_of: HashMap<i64, String> = HashMap::new();
+        let mut containers = HashSet::new();
         {
             let mut stmt = conn.prepare(
                 "SELECT name, file_id, id, kind, start_line, trait_impl, qualified FROM symbols",
@@ -243,6 +247,9 @@ impl ResolveIndex {
             })?;
             for row in rows {
                 let (name, cand, qualified) = row?;
+                if matches!(cand.kind, SymbolKind::Class | SymbolKind::Module) {
+                    containers.insert(cand.symbol_id);
+                }
                 qualified_of.insert(cand.symbol_id, qualified);
                 if callable(cand.kind) {
                     by_name.entry(name).or_default().push(cand);
@@ -285,6 +292,7 @@ impl ResolveIndex {
         Ok(Self {
             by_name,
             ruby_files,
+            containers,
             qualified_of,
             import_bindings,
             rust_modules,
@@ -394,6 +402,8 @@ impl ResolveIndex {
     /// symbol either, a Ruby call on `self` (bare or written) to a name
     /// defined in its file and elsewhere cannot be matched to the caller's
     /// class and stays `Unresolved`; the resolver paths pass the caller.
+    /// Passed method symbols also need their receiving DSL: use
+    /// [`Self::decide_reference`] for reference rows, never this call API.
     pub fn decide(&self, caller_file_id: i64, name: &str, receiver: Option<&str>) -> Decision {
         self.decide_from(caller_file_id, None, name, receiver, None)
     }
@@ -408,6 +418,63 @@ impl ResolveIndex {
         site_line: u32,
     ) -> Decision {
         self.decide_from(caller_file_id, None, name, receiver, Some(site_line))
+    }
+
+    /// Resolve a passed method using its enclosing owner and receiving DSL.
+    ///
+    /// Rails symbol callbacks name instance methods of the declaring class/module.
+    /// Literal `send` on self uses the enclosing method's kind, or the class method
+    /// from a class body. An unrelated class never supplies a fallback, and reopened
+    /// definitions remain unresolved because their load order is unknown.
+    /// Both initial references and stored references replay this rule; ordinary
+    /// identifier arguments retain the name/import lookup of [`Self::decide_at`].
+    pub fn decide_reference(
+        &self,
+        file_id: i64,
+        caller_id: Option<i64>,
+        name: &str,
+        arg_of: Option<&str>,
+        site_line: u32,
+    ) -> Decision {
+        let Some(kind) = self.ruby_reference_kind(file_id, arg_of) else {
+            return self.decide_at(file_id, name, None, site_line);
+        };
+        let target = caller_id.and_then(|caller| {
+            let qualified = self.qualified_of.get(&caller)?;
+            let (owner, separator) = if self.containers.contains(&caller) {
+                (
+                    qualified.as_str(),
+                    if kind == ReferenceKind::Callback {
+                        '#'
+                    } else {
+                        '.'
+                    },
+                )
+            } else if kind == ReferenceKind::Send {
+                ruby_owner(qualified)?
+            } else {
+                return None;
+            };
+            let mut candidates = self.by_name.get(name)?.iter().filter(|candidate| {
+                self.ruby_files.contains(&candidate.file_id)
+                    && self
+                        .qualified_of
+                        .get(&candidate.symbol_id)
+                        .and_then(|q| ruby_owner(q))
+                        == Some((owner, separator))
+            });
+            let first = candidates.next()?;
+            candidates.next().is_none().then_some(first.symbol_id)
+        });
+        target.map_or(Decision::Unresolved, Decision::Probable)
+    }
+
+    fn ruby_reference_kind(&self, file_id: i64, arg_of: Option<&str>) -> Option<ReferenceKind> {
+        if self.ruby_files.contains(&file_id) {
+            arg_of.and_then(reference_kind)
+        } else {
+            None
+        }
     }
 
     fn decide_from(
@@ -914,7 +981,13 @@ pub fn resolve_references(
     let mut stats = ResolveStats::default();
     for fr in pending {
         for r#ref in &fr.references {
-            if !idx.names_a_symbol(fr.file_id, &r#ref.name, Some(r#ref.site_line)) {
+            // A known Ruby method-symbol reference must survive even before its
+            // definition is indexed; resolve_all can attach a later reopened file.
+            if idx
+                .ruby_reference_kind(fr.file_id, r#ref.arg_of.as_deref())
+                .is_none()
+                && !idx.names_a_symbol(fr.file_id, &r#ref.name, Some(r#ref.site_line))
+            {
                 continue;
             }
             let Some(src_id) = r#ref.enclosing_symbol_id else {
@@ -930,10 +1003,13 @@ pub fn resolve_references(
                 stats.unresolved += 1;
                 continue;
             };
-            // References resolve against the same T0/T1/T2 index. A real
-            // receiver is irrelevant here (the arg is an identifier, not a
-            // method call), so pass `None`.
-            match idx.decide_at(fr.file_id, &r#ref.name, None, r#ref.site_line) {
+            match idx.decide_reference(
+                fr.file_id,
+                Some(src_id),
+                &r#ref.name,
+                r#ref.arg_of.as_deref(),
+                r#ref.site_line,
+            ) {
                 Decision::Exact(dst) | Decision::Probable(dst) => {
                     store.insert_edge(&EdgeRow {
                         src_id,
@@ -1004,13 +1080,23 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
     };
     let mut stats = ResolveStats::default();
     for row in &rows {
-        let decision = idx.decide_from(
-            row.file_id,
-            Some(row.enclosing),
-            &row.name,
-            row.receiver.as_deref(),
-            Some(row.site_line),
-        );
+        let decision = if row.kind == "references" {
+            idx.decide_reference(
+                row.file_id,
+                Some(row.enclosing),
+                &row.name,
+                row.receiver.as_deref(),
+                row.site_line,
+            )
+        } else {
+            idx.decide_from(
+                row.file_id,
+                Some(row.enclosing),
+                &row.name,
+                row.receiver.as_deref(),
+                Some(row.site_line),
+            )
+        };
         let (dst, tier) = match decision {
             Decision::Exact(d) => (d, Tier::Exact),
             Decision::Probable(d) => (d, Tier::Probable),
@@ -1118,6 +1204,83 @@ mod tests {
     use super::*;
     use crate::extract::ImportBinding;
     use crate::store::GraphStore;
+
+    #[test]
+    fn ruby_callback_references_should_resolve_only_the_declaring_owners_instance_method() {
+        for (owner, target, rival, expected) in [
+            ("Record", "Record#check", "Other#check", true),
+            ("Record", "Other#check", "Third#check", false),
+            ("Record", "Record.check", "Other#check", false),
+            ("Rules", "Rules#check", "Other#check", true),
+            ("Record", "Record#check", "Record#check", false),
+        ] {
+            let mut store = GraphStore::open_in_memory().unwrap();
+            let local = store.replace_file("record.rb", "local", "ruby").unwrap();
+            let remote = store.replace_file("other.rb", "remote", "ruby").unwrap();
+            let caller = store
+                .insert_symbol(local, "owner", owner, owner, SymbolKind::Class, 1, 10, "")
+                .unwrap();
+            let target_id = store
+                .insert_symbol(
+                    local,
+                    "target",
+                    "check",
+                    target,
+                    SymbolKind::Method,
+                    5,
+                    6,
+                    "",
+                )
+                .unwrap();
+            let rival_id = store
+                .insert_symbol(
+                    remote,
+                    "rival",
+                    "check",
+                    rival,
+                    SymbolKind::Method,
+                    1,
+                    2,
+                    "",
+                )
+                .unwrap();
+            let pending = [FileReferences {
+                file_id: local,
+                references: vec![PendingReference {
+                    name: "check".into(),
+                    enclosing_symbol_id: Some(caller),
+                    site_line: 2,
+                    arg_of: Some("validate".into()),
+                }],
+            }];
+            let stats = resolve_references(&store, &pending).unwrap();
+            let idx = ResolveIndex::build(&store).unwrap();
+            assert_eq!(
+                idx.decide_reference(local, None, "check", Some("validate"), 2),
+                Decision::Unresolved
+            );
+            assert_eq!(
+                idx.decide_reference(local, Some(target_id), "check", Some("validate"), 2),
+                Decision::Unresolved,
+                "callbacks require a declaring class/module, not a method caller"
+            );
+            assert_eq!(
+                stats.probable,
+                u64::from(expected),
+                "{owner} -> {target}, rival {rival}"
+            );
+            assert_eq!(stats.unresolved, u64::from(!expected));
+            assert_eq!(store.edges_to(rival_id, None).unwrap().len(), 0);
+            let edges = store.edges_to(target_id, None).unwrap();
+            assert_eq!(edges.len(), usize::from(expected));
+            if expected {
+                assert_eq!(
+                    (edges[0].src_id, edges[0].kind, edges[0].tier),
+                    (caller, EdgeKind::References, Tier::Probable)
+                );
+            }
+        }
+    }
 
     /// Two Rust files that both define `f`: the caller's own `src/local.rs`
     /// and the `src/remote.rs` a qualified `other_crate::f()` names. `g` is

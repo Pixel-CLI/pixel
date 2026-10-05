@@ -125,7 +125,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    instead of staying unresolved.
 /// 17: a Ruby `def` inside `class << self` or after a bare `module_function`
 ///    is a class method (`Klass.name`), not an instance method.
-pub const EXTRACTOR_VERSION: &str = "17";
+/// 18: Ruby callback and literal self-send symbols reference the owning method,
+///    preserving that owner during incremental resolution.
+pub const EXTRACTOR_VERSION: &str = "18";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {

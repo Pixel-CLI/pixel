@@ -16,6 +16,8 @@ use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Tree};
 
 use crate::store::SymbolKind;
 
+pub(crate) mod ruby_callbacks;
+
 #[derive(Debug, Clone)]
 pub struct RawSymbol {
     pub name: String,
@@ -2179,6 +2181,9 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             // references (callbacks / handlers passed as args). Skip require
             // methods — their string args are imports, not references.
             if !matches!(callee_name.as_deref(), Some(n) if RUBY_REQUIRE_METHODS.contains(&n)) {
+                if let Some(method) = callee_name.as_deref() {
+                    ruby_callbacks::walk_symbol_arguments(w, node, method);
+                }
                 walk_call_arguments(w, node, callee_name);
             }
         }
@@ -3657,6 +3662,101 @@ export function wire(emitter: any) {
     fn reference_names(path: &str, source: &[u8]) -> Vec<String> {
         let extraction = extract_file(path, source).unwrap();
         extraction.references.into_iter().map(|r| r.name).collect()
+    }
+
+    #[test]
+    fn ruby_callbacks_should_reference_methods_but_not_option_values_or_foreign_receivers() {
+        let source = b"class Record\n  before_action :load, :authorize, only: :show\n  validate :check, if: :ready?, unless: :blocked?\n  after_commit :sync, on: :create\n  foo.before_action :foreign\n  self.before_action :explicit\n  before_action()\n  scope :active, -> { true }\nend\n";
+        let fx = extract_file("record.rb", source).unwrap();
+        assert_eq!(
+            fx.references
+                .iter()
+                .map(|r| (
+                    r.name.as_str(),
+                    r.arg_of.as_deref(),
+                    r.site_line,
+                    r.enclosing_index
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("load", Some("before_action"), 2, Some(0)),
+                ("authorize", Some("before_action"), 2, Some(0)),
+                ("check", Some("validate"), 3, Some(0)),
+                ("ready?", Some("validate"), 3, Some(0)),
+                ("blocked?", Some("validate"), 3, Some(0)),
+                ("sync", Some("after_commit"), 4, Some(0)),
+            ],
+            "only method symbols in supported callback declarations are references"
+        );
+    }
+
+    #[test]
+    fn ruby_callbacks_should_cover_the_documented_dsl_and_only_class_or_module_bodies() {
+        let methods = [
+            "before_action",
+            "after_action",
+            "around_action",
+            "prepend_before_action",
+            "prepend_after_action",
+            "prepend_around_action",
+            "append_before_action",
+            "append_after_action",
+            "append_around_action",
+            "skip_before_action",
+            "skip_after_action",
+            "skip_around_action",
+            "validate",
+            "before_validation",
+            "after_validation",
+            "before_save",
+            "around_save",
+            "after_save",
+            "before_create",
+            "around_create",
+            "after_create",
+            "before_update",
+            "around_update",
+            "after_update",
+            "before_destroy",
+            "around_destroy",
+            "after_destroy",
+            "after_initialize",
+            "after_find",
+            "after_touch",
+            "before_commit",
+            "after_commit",
+            "after_rollback",
+            "after_create_commit",
+            "after_update_commit",
+            "after_destroy_commit",
+            "after_save_commit",
+            "helper_method",
+            "before_enqueue",
+            "around_enqueue",
+            "after_enqueue",
+            "before_perform",
+            "around_perform",
+            "after_perform",
+        ];
+        for method in methods {
+            let source = format!(
+                "{method} :top\nmodule Rules\n  {method} :check\nend\nclass Record\n  def run\n    {method} :inside\n  end\n  def self.configure\n    {method} :singleton_method\n  end\n  class << self\n    {method} :singleton\n  end\nend\n"
+            );
+            assert_eq!(
+                reference_names("record.rb", source.as_bytes()),
+                ["check"],
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn ruby_send_should_reference_only_the_first_literal_symbol_on_self() {
+        let source = b"class Record\n  def run\n    send(:check, :data)\n    self.public_send(:ready?, :other)\n    object.send(:foreign)\n    Record.send(:constant)\n    send(name, :dynamic)\n    send()\n    send(\"string\")\n  end\n  class << self\n    send(:unknown_owner)\n    def singleton_run\n      send(:class_target)\n    end\n  end\nend\nsend(:top_level)\n";
+        assert_eq!(
+            reference_names("record.rb", source),
+            ["check", "ready?", "name", "class_target"]
+        );
     }
 
     /// A member argument names a function only on a self receiver:
