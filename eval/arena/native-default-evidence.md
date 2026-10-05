@@ -1,12 +1,12 @@
 # Codex native-default experiment (Task 700)
 
 The target is a routing contract: ordinary repository questions should receive
-no Pixel retrieval instructions or forced Pixel command. Bounded caller facts
-remain an opt-in experiment because their measured benefit is inconsistent.
-Classification is local; it makes no model request and does not build an index.
-This removes a systematic
-source of extra model work, but cannot guarantee identical answers, tokens or
-latency across stochastic model runs. Hook process startup still has a cost.
+no Pixel retrieval instructions or forced Pixel command. The current package
+removes the classifier and caller-facts hook; the experiments below explain why.
+Only an explicitly requested impact skill or Pi extension command remains.
+This removes a systematic source of extra model work, but cannot guarantee
+identical answers, tokens or latency across stochastic model runs. Independent
+task hooks and optional skill metadata still have a cost.
 
 ## Measurement corrections
 
@@ -334,16 +334,16 @@ but semantic activation is not reliable command interception; any separate
 skill-routing experiment must account for its always-visible metadata and
 on-demand loading cost.
 
-## Current installed proof and Claude pilot status
+## Preliminary installed proof and Claude pilot status
 
-The latest installed proof recorded 14 global and eight repository install
+The preliminary installed proof recorded 14 global and eight repository install
 checks, with 33 doctor checks green and no automatic Claude or Codex retrieval
 callbacks. The saved manifest is
 `target/native-default-evidence/skills-first-install/installed-native-manifest.json`;
 its installed binary SHA-256 is
-`bbe297066a628a02084e9b95d646f6b05ea0643eea4ab7d258c97b78b41297b4`. Final
-HEAD revalidation remains pending. These are installation checks, not model
-benchmark results.
+`bbe297066a628a02084e9b95d646f6b05ea0643eea4ab7d258c97b78b41297b4`. This
+predates the corrected approval check and final validation below. These are
+installation checks, not model benchmark results.
 
 The separate Claude g5 pair was not run: zero paid calls. A private isolated
 auth check found an expired access token and expired refresh token. Claude's
@@ -355,14 +355,15 @@ path in its [authentication guide](https://code.claude.com/docs/en/authenticatio
 
 ## Skill-only pilot: g3 negative control and g5 structural question
 
-These two one-repetition pairs test the packaged `pixel-impact` skill without
-installing Pixel hooks or permanent retrieval instructions. Raw and candidate
-used the same prepared foreign repository, pinned Pixel image, model and effort;
-both had the same skill body, but raw marked it `disable-model-invocation: true`
-and candidate marked it false. Other base context was equal and contained zero
-Pixel-reference lines. This differs from the Codex pilot's skill-absent raw
-control: Claude's raw arm carried disabled skill metadata. A candidate-discovered
-skill is not proof that its full body was read or followed.
+These two one-repetition Codex pairs test the packaged `pixel-impact` skill
+without installing Pixel hooks or permanent retrieval instructions. Raw and
+candidate used the same prepared foreign repository, pinned Pixel image, model
+and effort. Raw had no staged skill; the candidate staged a copy with
+`allow_implicit_invocation: true`. Other base context was equal and contained
+zero Pixel-reference lines. Both runs' `skill-stage-*.json` and `context-*.json`
+receipts confirm that distinction. The separate, unrun Claude comparison uses
+disabled skill metadata in its raw arm and is not evidence from these pairs.
+A candidate-discovered skill is not proof that its full body was read or followed.
 
 Provenance shared by both runs:
 
@@ -502,3 +503,21 @@ in an isolated fixture. No model request or trust write was made. The sanitized
 receipt is `target/native-default-evidence/codex-trust-probe/receipt.json`;
 the fixture hook configuration has SHA-256
 `814a9a674967becfa9b7cad837ec22d926e8811803c172fa64610e9eb4994290`.
+
+## Final implementation validation
+
+Frozen implementation commit: `e50538a17df65c6338cd84b825da6a7b6ed7b44e`.
+`scripts/gates.sh` exited 0: 3,904 workspace tests passed, six skipped, with
+formatting, Clippy, documentation tests and harness contracts passing.
+`scripts/mutants-remote-gate.sh` exited 0 using the passing cache; no new mutants
+were tested. Production code is unchanged from `328e835a`, whose remote retry
+caught both remaining mutants with zero misses or timeouts. `cargo deny check`
+passed against the same lockfile. Logs and exit receipts are under
+`target/native-default-evidence/e50538a1-gates/` (dependency-check evidence is in
+`target/native-default-evidence/bedeb743-gates/`).
+
+Self-update, index refresh, configuration generation, global install and
+repository install all exited 0. The final doctor invocation exited 1 with
+32 green checks, one yellow and no red checks: the two modified Codex task hooks
+still require the user's `/hooks` review. This is an outstanding local approval
+step, not a passing installation checklist; no trust state was written.
