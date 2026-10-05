@@ -9,7 +9,10 @@
 
 use std::panic::AssertUnwindSafe;
 
-use tree_sitter::{Language, Node, Parser};
+use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
+
+use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Tree};
 
 use crate::store::SymbolKind;
 
@@ -201,6 +204,41 @@ fn bytecount(haystack: &[u8], needle: u8) -> usize {
     haystack.iter().filter(|b| **b == needle).count()
 }
 
+/// Wall-clock cap on one tree-sitter parse. Error recovery on a few hundred
+/// malformed bytes can run for minutes (#800); a parse past the cap yields no
+/// tree, as a grammar failure does. A source file parses in milliseconds.
+pub(crate) const PARSE_BUDGET: Duration = Duration::from_secs(3);
+
+/// True once a parse has run longer than its budget; a parse that took
+/// exactly the budget is still within it.
+fn over_budget(elapsed: Duration, budget: Duration) -> bool {
+    elapsed > budget
+}
+
+/// `parser.parse(content, None)`, cancelled once it has run past `budget`:
+/// `None` on a cancelled parse as on any other failure. Every tree-sitter
+/// parse in this crate goes through [`parse_bounded`], which sets the budget.
+fn parse_within(parser: &mut Parser, content: &[u8], budget: Duration) -> Option<Tree> {
+    let start = Instant::now();
+    let mut stop_late = |_: &ParseState| {
+        if over_budget(start.elapsed(), budget) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    parser.parse_with_options(
+        &mut |offset, _| content.get(offset..).unwrap_or_default(),
+        None,
+        Some(ParseOptions::new().progress_callback(&mut stop_late)),
+    )
+}
+
+/// [`parse_within`] at [`PARSE_BUDGET`]: the parse every extractor uses.
+pub(crate) fn parse_bounded(parser: &mut Parser, content: &[u8]) -> Option<Tree> {
+    parse_within(parser, content, PARSE_BUDGET)
+}
+
 /// Parse one file into a tree-sitter tree for the language its extension
 /// maps to. `None` on unsupported language, a generated/minified blob, or
 /// any parse/grammar failure.
@@ -215,7 +253,7 @@ pub fn parse_file(path_rel: &str, content: &[u8]) -> Option<tree_sitter::Tree> {
     std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut parser = Parser::new();
         parser.set_language(&language).ok()?;
-        parser.parse(content, None)
+        parse_bounded(&mut parser, content)
     }))
     .ok()
     .flatten()
@@ -281,7 +319,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
     let language = language_for(lang)?;
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
-    let tree = parser.parse(content, None)?;
+    let tree = parse_bounded(&mut parser, content)?;
     let mut w = Walker {
         src: content,
         symbols: Vec::new(),

@@ -23,6 +23,8 @@
 
 use tree_sitter::{Language, Node, Parser};
 
+use crate::extract::parse_bounded;
+
 /// The closed set of concept kinds. Mirrors PLAN.md's Engine 1 table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -616,7 +618,7 @@ fn extract_ts(path: &str, content: &[u8]) -> Vec<RawConcept> {
     if parser.set_language(&language).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(content, None) else {
+    let Some(tree) = parse_bounded(&mut parser, content) else {
         return Vec::new();
     };
     let mut w = TsWalker {
@@ -635,7 +637,7 @@ fn extract_rust(path: &str, content: &[u8]) -> Vec<RawConcept> {
     if parser.set_language(&language).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(content, None) else {
+    let Some(tree) = parse_bounded(&mut parser, content) else {
         return Vec::new();
     };
     let mut w = TsWalker {
@@ -656,7 +658,7 @@ fn extract_ts_script(content: &str, line_offset: u32, test_path: bool) -> Vec<Ra
     if parser.set_language(&language).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(content.as_bytes(), None) else {
+    let Some(tree) = parse_bounded(&mut parser, content.as_bytes()) else {
         return Vec::new();
     };
     let mut w = TsWalker {

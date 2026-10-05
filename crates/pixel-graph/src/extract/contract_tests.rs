@@ -8,9 +8,13 @@
 //! so a walker that drops a qualification or invents a call misleads all of
 //! them at once.
 
+use std::time::{Duration, Instant};
+
+use tree_sitter::Parser;
+
 use super::{
-    FileExtraction, ImportBinding, RawSymbol, extract_file, generic_symbol_kind, lang_of,
-    parse_file,
+    FileExtraction, ImportBinding, PARSE_BUDGET, RawSymbol, extract_file, generic_symbol_kind,
+    lang_of, language_for, over_budget, parse_file, parse_within,
 };
 use crate::store::SymbolKind;
 
@@ -1062,4 +1066,88 @@ fn elixir_remote_call_should_be_recorded_by_its_dotted_target() {
     let fx = extract("lib/cart.ex", src);
     assert!(has_call(&fx, "Enum.sum"), "{:?}", calls(&fx));
     assert!(has_call(&fx, "Logger.info"), "{:?}", calls(&fx));
+}
+
+// --- parse budget (#800) ----------------------------------------------------------
+
+/// 262 bytes of `.tsx` (the `Fuzz` job's `timeout-287dc264…` reproducer) on
+/// which TSX error recovery ran for minutes without a budget.
+fn parse_hang_reproducer() -> Vec<u8> {
+    [
+        &b"import fu\x00\x00\x00\xfbon Button({ onClick(}# Pconst Page = (=> save()} /><span>te=t</span></di<Button onClick={() => save()} /><span>te=0</s`an></dn onClick={() => save()} /><span>t"[..],
+        &[0xa9; 72][..],
+        &b"e=t</span></div>;\n"[..],
+    ]
+    .concat()
+}
+
+/// Run `work` on its own thread and give it `cap`: a regression that hangs
+/// fails this test instead of holding the whole suite until its timeout.
+fn within<T: Send + 'static>(cap: Duration, work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    rx.recv_timeout(cap)
+        .unwrap_or_else(|_| panic!("still running after {cap:?}"))
+}
+
+fn tsx_parser() -> Parser {
+    let mut parser = Parser::new();
+    parser.set_language(&language_for("tsx").unwrap()).unwrap();
+    parser
+}
+
+/// The budget is a strict bound: a parse that took exactly the budget is
+/// still within it, one nanosecond more is over.
+#[test]
+fn over_budget_should_be_strictly_past_the_budget() {
+    let budget = Duration::from_millis(200);
+    assert!(!over_budget(Duration::from_millis(199), budget));
+    assert!(!over_budget(budget, budget));
+    assert!(over_budget(budget + Duration::from_nanos(1), budget));
+}
+
+/// A well-formed file parses whole within the budget.
+#[test]
+fn parse_within_should_return_the_tree_of_a_file_inside_its_budget() {
+    let tree = parse_within(&mut tsx_parser(), b"const a = <b>hi</b>;\n", PARSE_BUDGET).unwrap();
+    assert_eq!(tree.root_node().kind(), "program");
+    assert!(!tree.root_node().has_error());
+}
+
+/// A parse past its budget is cancelled and yields no tree, shortly after
+/// the budget rather than minutes later (#800).
+#[test]
+fn parse_within_should_give_up_once_past_its_budget() {
+    let started = Instant::now();
+    let tree = within(Duration::from_secs(15), || {
+        parse_within(
+            &mut tsx_parser(),
+            &parse_hang_reproducer(),
+            Duration::from_millis(100),
+        )
+        .is_some()
+    });
+    assert!(!tree, "a cancelled parse yields no tree");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// The production paths, concept and symbol extraction alike, return on the
+/// reproducer: the file just contributes no rows.
+#[test]
+fn extraction_should_return_on_a_file_that_stalls_the_parser() {
+    let (concepts, extraction) = within(Duration::from_secs(19), || {
+        let content = parse_hang_reproducer();
+        (
+            crate::concept::extract_concepts("src/fuzz.tsx", &content),
+            extract_file("src/fuzz.tsx", &content).is_some(),
+        )
+    });
+    assert!(concepts.is_empty(), "{concepts:?}");
+    assert!(!extraction);
 }
