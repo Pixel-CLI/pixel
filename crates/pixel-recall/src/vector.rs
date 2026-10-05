@@ -252,7 +252,12 @@ impl OpenSegment {
         let dim = u32::from_le_bytes(mmap[12..16].try_into().unwrap()) as usize;
         let count = u64::from_le_bytes(mmap[16..24].try_into().unwrap()) as usize;
         let row = 16 + dim;
-        if HEADER_LEN + count * row > mmap.len() {
+        // The header is read from disk: an overflowing size wrapped past this
+        // check in release and left `scan` slicing outside the map (#785).
+        let size = count
+            .checked_mul(row)
+            .and_then(|rows| rows.checked_add(HEADER_LEN));
+        if size.is_none_or(|size| size > mmap.len()) {
             return Err("truncated vector segment".to_string());
         }
         Ok(Self { mmap, dim, count })
@@ -343,6 +348,57 @@ mod tests {
             !other.stale_revision(),
             "a model at revision 0 written at 0"
         );
+    }
+
+    /// A segment of `rows` rows of dimension `dim` (each row is `16 + dim`
+    /// bytes after the 96-byte header) whose header announces `count` rows.
+    fn segment_with_count(dir: &Path, dim: usize, rows: i64, count: u64) -> std::path::PathBuf {
+        let mut store = VectorStore::open(dir).unwrap();
+        let data: Vec<(i64, Vec<f32>)> = (1..=rows).map(|id| (id, vec![1.0; dim])).collect();
+        store.append_segment("test-model", dim, &data).unwrap();
+        let path = dir.join(&store.meta.segments[0]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[16..24].copy_from_slice(&count.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn open_should_refuse_a_row_count_whose_size_overflows() {
+        // 19 × (u64::MAX / 19 + 1) wraps to a few bytes: the size check
+        // passed and `scan` then sliced past the mapping (#785).
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_with_count(dir.path(), 3, 1, u64::MAX / 19 + 1);
+        let err = OpenSegment::open(&path).err();
+        assert_eq!(err.as_deref(), Some("truncated vector segment"));
+    }
+
+    #[test]
+    fn open_should_refuse_a_row_count_whose_size_overflows_only_with_the_header() {
+        // 19 × (usize::MAX / 19) fits a usize (it is within 18 of the max);
+        // adding the 96-byte header is what overflows.
+        let dir = tempfile::tempdir().unwrap();
+        let count = u64::try_from(usize::MAX / 19).unwrap();
+        let path = segment_with_count(dir.path(), 3, 1, count);
+        let err = OpenSegment::open(&path).err();
+        assert_eq!(err.as_deref(), Some("truncated vector segment"));
+    }
+
+    #[test]
+    fn open_should_measure_rows_of_sixteen_bytes_plus_dim_and_accept_the_true_count() {
+        // Two rows of dimension 8 fill 96 + 2 × 24 = 144 bytes. A count of 6
+        // only fits if a row were 8 bytes, so it is refused; a count of 3 is
+        // one row past the end.
+        let dir = tempfile::tempdir().unwrap();
+        for (sub, count) in [("six", 6u64), ("three", 3)] {
+            let path = segment_with_count(&dir.path().join(sub), 8, 2, count);
+            let err = OpenSegment::open(&path).err();
+            assert_eq!(err.as_deref(), Some("truncated vector segment"), "{count}");
+        }
+        let path = segment_with_count(&dir.path().join("ok"), 8, 2, 2);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 144);
+        let segment = OpenSegment::open(&path).unwrap();
+        assert_eq!((segment.dim, segment.count), (8, 2));
     }
 }
 
