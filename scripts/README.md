@@ -15,12 +15,8 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 
 | Script | Run | What |
 | --- | --- | --- |
-| `gates.sh` | `scripts/gates.sh [--force] [--mutants]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
+| `gates.sh` | `scripts/gates.sh [--force]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
 | `test-gates.py` | `python3 scripts/test-gates.py` | contract of `gates.sh` (stub cargo in a throwaway repo) |
-| `mutants-preflight.sh` | `scripts/mutants-preflight.sh --check\|--ack\|--run [regex]` | local mutation-list review and optional throwaway-worktree campaign; `--run` is what the push gate's `local` mode executes |
-| `test-mutants-preflight.sh` | `sh scripts/test-mutants-preflight.sh` | contract of the mutation exposure pre-push gate (stub cargo, disposable repo) |
-| `mutants-push-gate.sh` | `scripts/mutants-push-gate.sh` | tracked pre-push entry point, opt-in: `PIXEL_MUTANTS_GATE=local` runs `mutants-preflight.sh --run` against the hook's base and blocks on its verdict; unset or `off` runs nothing |
-| `test-mutants-push-gate.sh` | `sh scripts/test-mutants-push-gate.sh` | contract of the push gate: off by default, `local` passes the base and returns the campaign's exit code, an unknown value refuses |
 | `mutants-gate.py` | `python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt` | the `Mutants` plan/report script; sizes the shard matrix and deals each shard a runner from the `PIXEL_MUTANTS_SHARD_RUNNERS` pool (JSON array of `runs-on` values, round-robin; GitHub-hosted when unset) |
 | `test-prepare.py` | `python3 scripts/test-prepare.py` | contract of `.agents/skills/release/prepare.sh`'s pull request listing (stub gh/cargo, disposable repo, needs `jq`) |
 | `test-install.py` | `python3 scripts/test-install.py` | contract of `install.sh` (fake curl/uname, local tarball) |
@@ -94,3 +90,5 @@ installed) through `--append-system-prompt-file`, exactly as the `claude`
 shell wrapper written by `pixel install` does. The scripts call `claude` by
 path, so a fish/zsh wrapper function never applies to them; without the
 flag the "with pixel" arm would run without pixel's instructions.
+
+`mutants-nightly-range.py` selects the cumulative main diff from completed campaign checkpoint metadata and writes a checkpoint only for fully judged outcomes. `test-mutants-nightly-range.py` tests replay, no-change skips, and checkpoint integrity.

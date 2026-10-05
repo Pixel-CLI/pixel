@@ -1,6 +1,6 @@
 ---
 name: validation-loop
-description: "Run Pixel's efficient Rust edit-to-PR validation workflow: choose scoped local feedback, freeze one candidate, use the opt-in local mutation gate, and triage failed gates precisely. Use when implementing Rust changes, preparing a pull request, or reducing compile and mutation-fix round trips."
+description: "Run Pixel's efficient Rust edit-to-PR validation workflow: choose scoped local feedback, freeze one candidate, keep mutation feedback in the nightly main campaign, and triage failed gates precisely. Use when implementing Rust changes, preparing a pull request, or reducing compile and mutation-fix round trips."
 ---
 
 # Pixel validation loop
@@ -13,8 +13,8 @@ stage.
 
 Find or create the tracked task, use a clean branch/worktree from the fetched
 actual base. Rebase later only on a conflict or a needed change on the base. Keep one behavior change in one
-pull request. A stacked branch uses its immediate base, supplied to the remote
-gate with `PIXEL_MUTANTS_BASE` when needed.
+pull request. A stacked branch uses its immediate base, supplied to the compile and review
+hook with `PIXEL_MUTANTS_BASE` when needed.
 
 ## 2. Get the first failure locally
 
@@ -38,17 +38,16 @@ work (use `--force` only when a non-Rust input can affect compiled tests). Keep
 long runs on an unchanged checkout or a committed separate worktree with its
 own `target/`; retain the SHA, command, complete log and exit status.
 
-Review the mutant surface in the committed diff. Do not start a full mutation
-campaign by hand: under `PIXEL_MUTANTS_GATE=local` (a cloud session) the
-pre-push hook runs it on the exact committed diff, otherwise `Mutants in diff`
-does. A bounded single-function local run remains an explicit request only.
-
 Fetch and run `pixel review-gate` as required by `review-gate.md`.
 Push the same candidate once. For Rust changes, the hook performs the
-all-target baseline compile before any mutation campaign; that baseline
-is a required rung, and a mutation verdict is trusted only for a candidate
-that passed it. A green push under `PIXEL_MUTANTS_GATE=local` has already
-received the mutation verdict; CI independently validates the current PR head.
+all-target baseline compile and review. Pull-request CI validates the current
+head with its normal tests, lint and feature lanes.
+
+Mutation campaigns run once a night on main's cumulative diff, only when
+commits remain since the last completed campaign. They are post-merge
+feedback, not a prerequisite for push or PR. A read-only mutant listing can
+help test design; campaigns execute only in scheduled CI, never locally or
+by manual dispatch.
 
 ## 4. Triage instead of retrying blindly
 
@@ -58,7 +57,7 @@ received the mutation verdict; CI independently validates the current PR head.
 | `MISSED` | Add an assertion on the observable contract that fails under that exact mutation, or use a documented narrow skip only when the rule permits it. |
 | `TIMEOUT` | Bound the test or loop so a broken behavior fails quickly; do not treat it as a passed mutant. |
 | CI ran an older SHA | Wait for or trigger the workflow for the current candidate; older green runs are evidence only for their own SHA. |
-| Remote host unavailable | Repair the host or use the documented explicit bypass; CI still remains required. |
+| Nightly runner unavailable | Preserve the checkpoint; the next nightly retries the unjudged diff. |
 
 Watch CI in the background while advancing independent work. Before calling a
 PR ready, verify all required workflows completed for its current head.
@@ -66,6 +65,6 @@ PR ready, verify all required workflows completed for its current head.
 ## 5. Improve the loop with evidence
 
 Measure first edit to first useful failure, first edit to a fully validated
-PR, push count, and remote baseline/mutant duration. Record a run identity,
+PR, push count, and nightly baseline/mutant duration. Record a run identity,
 command and baseline beside each number. Change one part of the workflow at a
 time, then compare against that baseline.
