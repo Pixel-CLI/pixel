@@ -1,1 +1,0 @@
-**graph:** a `.svelte` or `.vue` file whose `<script>` is never closed no longer panics `pixel build-index` and the daemon's re-extraction; the code after the tag is read as the script. One malformed file in a repository could abort the whole graph build.
