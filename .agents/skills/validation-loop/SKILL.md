@@ -1,6 +1,6 @@
 ---
 name: validation-loop
-description: "Run Pixel's efficient Rust edit-to-PR validation workflow: choose scoped local feedback, freeze one candidate, use the remote mutation gate, and triage failed gates precisely. Use when implementing Rust changes, preparing a pull request, or reducing compile and mutation-fix round trips."
+description: "Run Pixel's efficient Rust edit-to-PR validation workflow: choose scoped local feedback, freeze one candidate, use the opt-in local mutation gate, and triage failed gates precisely. Use when implementing Rust changes, preparing a pull request, or reducing compile and mutation-fix round trips."
 ---
 
 # Pixel validation loop
@@ -38,17 +38,17 @@ work (use `--force` only when a non-Rust input can affect compiled tests). Keep
 long runs on an unchanged checkout or a committed separate worktree with its
 own `target/`; retain the SHA, command, complete log and exit status.
 
-Review the mutant surface in the committed diff. Do not run a full local
-mutation campaign: the pre-push hook sends the exact committed diff to the
-remote gate host with a warm outcome cache. A bounded single-function local
-run remains an explicit request only.
+Review the mutant surface in the committed diff. Do not start a full mutation
+campaign by hand: under `PIXEL_MUTANTS_GATE=local` (a cloud session) the
+pre-push hook runs it on the exact committed diff, otherwise `Mutants in diff`
+does. A bounded single-function local run remains an explicit request only.
 
 Fetch and run `pixel review-gate` as required by `review-gate.md`.
 Push the same candidate once. For Rust changes, the hook performs the
-all-target baseline compile before the remote mutation campaign; that baseline
-is a required rung, and the remote verdict is trusted only for a candidate
-that passed it. A green push has already received the remote mutation verdict;
-CI independently validates the current PR head.
+all-target baseline compile before any mutation campaign; that baseline
+is a required rung, and a mutation verdict is trusted only for a candidate
+that passed it. A green push under `PIXEL_MUTANTS_GATE=local` has already
+received the mutation verdict; CI independently validates the current PR head.
 
 ## 4. Triage instead of retrying blindly
 

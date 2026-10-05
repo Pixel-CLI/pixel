@@ -451,9 +451,9 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: sh scripts/test-mutants-preflight.sh
 
-      - name: Remote mutation gate host contract (disposable worker home)
+      - name: Mutants push gate contract (stub campaign, disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: sh scripts/test-mutants-gate-host.sh
+        run: sh scripts/test-mutants-push-gate.sh
 
       - name: Release prepare contract (stub gh and cargo, disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}

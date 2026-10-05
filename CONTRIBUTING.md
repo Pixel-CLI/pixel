@@ -163,19 +163,18 @@ The tracked pre-push hook fetches the current base before each Rust branch
 update, judges the branch against its merge-base with it (a branch behind it
 is not refused), and runs `cargo check --all-targets` when Rust source
 changed. A failed compile is therefore fixed
-before the remote mutation campaign can report an unjudged baseline. Nothing
-mutant-related compiles or runs locally: the hook then
-bundles the committed three-dot diff and its exact base commit to the gate
-host (`PIXEL_MUTANTS_GATE_HOST`,
-default the ssh alias `a2`), which checks it out and executes the same campaign
-CI's shards run — `scripts/mutants-preflight.sh --run` — against a warm
-`target/`, seeded with the traveling outcome cache (`target/mutants-preflight/`,
-carried to the host and back so a re-push after a fix re-tests only the
-survivors). The push is blocked on the remote verdict, with CI's exit codes.
-`PIXEL_MUTANTS_GATE=off` skips the remote run when the host is down (the CI
-gate still applies); `PIXEL_MUTANTS_BASE=<ref>` selects a stacked or
-maintenance base; `git push --no-verify` remains Git's explicit local bypass;
-`Mutants in diff` remains the required merge gate.
+before any mutation campaign can report an unjudged baseline. The hook then
+calls the mutants push gate (`scripts/mutants-push-gate.sh`), which is
+opt-in. Unset or `PIXEL_MUTANTS_GATE=off`, it runs nothing. With
+`PIXEL_MUTANTS_GATE=local` it executes the same campaign CI's shards run —
+`scripts/mutants-preflight.sh --run`, on the pinned nightly and cargo-mutants —
+against the hook's merge-base on the pushing machine, and blocks the push on
+its verdict with CI's exit codes. Its outcome cache (`target/mutants-preflight/`)
+makes a re-push after a fix re-test only the survivors. Set it where the CPUs
+are free, such as a cloud agent session with its own VM; on a laptop a
+campaign holds the machine for minutes to hours. `PIXEL_MUTANTS_BASE=<ref>`
+selects a stacked or maintenance base; `git push --no-verify` remains Git's
+explicit local bypass; `Mutants in diff` remains the required merge gate.
 
 To verify a fix against the diff's mutants on the laptop — instead of waiting
 for another push round trip — the preflight script still executes them in a
@@ -541,15 +540,16 @@ gates under "Gates (run before every PR)".
 | --- | --- | --- |
 | Editing | Tests for the changed contract and affected consumers; crate-scoped compilation/Clippy as needed | The behavior is covered, including relevant failure paths |
 | Unit ready | Full local format, Clippy, workspace tests and doctests; dependency policy when its inputs change; mutant listing and review | Local gates pass on a frozen candidate, and each prospective mutant has a killing test or a justified skip |
-| Push | Fetch (rebase only on a conflict or a needed change), `pixel review-gate`, then the hook's all-target baseline compile and remote mutation campaign for Rust | The exact candidate and current base pass before the update reaches GitHub |
+| Push | Fetch (rebase only on a conflict or a needed change), `pixel review-gate`, then the hook's all-target baseline compile for Rust, and its mutation campaign under `PIXEL_MUTANTS_GATE=local` | The exact candidate and current base pass before the update reaches GitHub |
 | PR | Existing CI tests, lint, feature lanes, MSRV, cross-build and mutants as selected by their path filters; CodeRabbit review | Current-head workflows complete successfully, mutation counts have a valid verdict, and review findings are answered |
 
 Use `scripts/gates.sh` for the full local run. It skips Cargo when its path
 filter finds no Rust-affecting change; use `--force` when changed inputs
 read by tests (such as bundled prompts, rules or docs-drift inputs) require
 the compiled suite anyway. Do not add `--mutants` to an agent's normal loop:
-the pre-push hook runs the whole campaign on the gate host and blocks on its
-verdict; a local mutant run stays an explicit, bounded (`-F`) request.
+`Mutants in diff` runs the whole campaign, and so does the pre-push hook
+under `PIXEL_MUTANTS_GATE=local`; any other local mutant run stays an
+explicit, bounded (`-F`) request.
 
 For a long local run, use the harness's background-task facility and keep
 the full log and exit status. Keep that checkout unchanged until the run

@@ -107,7 +107,7 @@ step "release candidate contract" python3 scripts/test-release-candidate.py
 step "gate runner contract" python3 scripts/test-gates.py
 step "pre-push contract" sh scripts/test-pre-push.sh
 step "mutants config contract" python3 scripts/test-mutants-config.py
-step "mutants gate host contract" sh scripts/test-mutants-gate-host.sh
+step "mutants push gate contract" sh scripts/test-mutants-push-gate.sh
 step "clean contract" python3 scripts/test-clean.py
 step "harness recorder contract" python3 scripts/test-harness-recorder.py
 
