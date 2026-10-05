@@ -162,6 +162,8 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn('test "$GITHUB_REF" = refs/heads/main', workflow)
         self.assertIn("steps.checkpoint.outcome == 'success'", workflow)
         self.assertNotIn("continue-on-error:", workflow)
+        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertNotIn("ref: ${{ needs.plan.outputs.ref }}", workflow)
 
 
 if __name__ == "__main__":
