@@ -9,7 +9,7 @@ then `target/release/pixel`. Install a build that matches the tree with
 pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
 ```
 
-(never `cp` into `~/.local/bin` by hand; see CONTRIBUTING.md "Local install loop").
+(never `cp` into `~/.local/bin` by hand; see CONTRIBUTING.md "Optional local install verification").
 
 ## Gates and contracts (CI runs these)
 
@@ -18,6 +18,7 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 | `gates.sh` | `scripts/gates.sh [--force]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
 | `coverage-nightly.py` | called by Coverage CI | skip instrumentation only after a successful scheduled measurement of the same main SHA |
 | `test-coverage-nightly.py` | `python3 scripts/test-coverage-nightly.py` | unchanged main, failures and scheduled-only coverage |
+| `test-pre-push.sh` | `sh scripts/test-pre-push.sh` | publication starts no local validation or fetch |
 | `test-gates.py` | `python3 scripts/test-gates.py` | contract of `gates.sh` (stub cargo in a throwaway repo) |
 | `mutants-gate.py` | `python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt` | the `Mutants` plan/report script; sizes the shard matrix and deals each shard a runner from the `PIXEL_MUTANTS_SHARD_RUNNERS` pool (JSON array of `runs-on` values, round-robin; GitHub-hosted when unset) |
 | `test-prepare.py` | `python3 scripts/test-prepare.py` | contract of `.agents/skills/release/prepare.sh`'s pull request listing (stub gh/cargo, disposable repo, needs `jq`) |
@@ -56,7 +57,7 @@ corpus and `~/.local/state/pixel` are never touched by any of them.
 | --- | --- | --- |
 | `pr-swarm.sh` | `scripts/pr-swarm.sh reconcile [--wait N\|--no-wait] [--dry-run] \| status \| up <PR> [--worktree] \| down <PR> [--force] \| watch \| hook-session-start` | one rmux pane per open-PR worktree, each a `claude -n pr-<N>-<slug>` session sitting in that PR's tree; `reconcile` diffs the open PRs against panes titled `PR#<N>` and creates, retitles or tears down (`status` is read-only). Wired to SessionStart by `.claude/settings.json`; rails in `.agents/rules/pr-swarm.md` |
 
-## Smoke and audits (after `pixel self-update`, before a PR that touches the CLI, hooks or install)
+## Optional local smoke and audits
 
 | Script | Run | What |
 | --- | --- | --- |

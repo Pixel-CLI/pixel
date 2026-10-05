@@ -215,7 +215,8 @@ the diff. Only fully judged campaigns write checkpoint artifacts; only scheduled
 `coverage.yml` runs only at 02:47 UTC on main, with read-only contents and
 Actions access. Both instrumented jobs are skipped only after a successful
 scheduled measurement of the same SHA. Coverage is post-merge feedback;
-normal tests and lint still validate the PR head before merge.
+normal tests and lint still validate the PR head before merge. Local checks,
+including pre-push validation and reinstalling, are optional diagnostics.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.
 

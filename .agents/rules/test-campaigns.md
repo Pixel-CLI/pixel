@@ -2,14 +2,10 @@
 
 Always loaded: how to run the long gates without losing an afternoon.
 
-- **Validate one finished unit, not every reply.** Use contract and
-  consumer tests while editing; full local gates are due before the PR and
-  after changes that can invalidate their result. Follow CONTRIBUTING.md
-  "Agent validation workflow" for background execution: an unchanged
-  checkout or a committed worktree snapshot, its own `target/`, and a SHA,
-  command, complete log and exit status. A previous pass never covers a
-  subsequent behavior change. Keep Cargo builds sequential per build
-  directory and do not clean output used by a running gate.
+- **Local campaigns are optional.** Use a focused local test when it helps
+  diagnosis; full suites are CI's responsibility before merge. For a chosen
+  long local check, use an unchanged snapshot, one Cargo writer per target,
+  and record its SHA, command, log and exit status. Do not clean active builds.
 - **Mutants run only in scheduled CI on main.** No local, PR or manual
   campaigns. Diagnose survivors with ordinary tests and inspect the next
   nightly's report after merge.
