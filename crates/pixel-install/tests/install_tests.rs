@@ -838,7 +838,7 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
     let prompt = fs::read_to_string(&prompt_path)
         .expect("agent-prompt.md should be deployed on a fresh home");
     assert!(
-        prompt.contains("## Retrieval commands"),
+        prompt.contains("## Retrieval route"),
         "agent-prompt.md should carry the retrieval commands"
     );
 
@@ -878,7 +878,7 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
         "no shell wrapper is written — the SessionStart hook injects the prompt"
     );
     assert!(
-        codex_developer_instructions(home).is_some_and(|v| v.contains("## Retrieval commands")),
+        codex_developer_instructions(home).is_some_and(|v| v.contains("## Retrieval route")),
         "a fresh install must write the agent prompt into ~/.codex/config.toml"
     );
 }
@@ -975,7 +975,7 @@ fn doctor_install_artifact_checks_red_and_green() {
     let mut edited = fs::read_to_string(&prompt_path).expect("agent-prompt deployed");
     assert!(
         edited.contains("# Pixel — deterministic repository facts")
-            && edited.contains("## Retrieval commands"),
+            && edited.contains("## Retrieval route"),
         "fixture: the edited prompt must still satisfy the old heuristic"
     );
     edited.push_str("\nOne extra rule the bundled prompt does not carry.\n");
@@ -2891,7 +2891,7 @@ fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
     let written = fs::read_to_string(codex_config_path(home)).unwrap();
     fs::write(
         codex_config_path(home),
-        written.replace("## Retrieval commands", "## Retrieval output"),
+        written.replace("## Retrieval route", "## Retrieval output"),
     )
     .unwrap();
     let check = status();

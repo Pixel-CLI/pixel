@@ -7538,7 +7538,7 @@ mod tests {
             );
             for kept in [
                 "# Pixel — deterministic repository facts",
-                "## Retrieval commands",
+                "## Retrieval route — fixed order, chosen once",
                 "## Reading results",
             ] {
                 assert!(context.contains(kept), "{provider:?} lost {kept}");
