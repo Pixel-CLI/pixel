@@ -236,21 +236,47 @@ fn codex_task_hook_verb(verb: &str) -> bool {
 fn codex_hooks_are_enabled(config_path: &Path) -> bool {
     let config = match std::fs::read_to_string(config_path) {
         Ok(config) => config,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
         Err(_) => return false,
     };
     let Ok(config) = config.parse::<toml_edit::DocumentMut>() else {
         return false;
     };
-    config
-        .get("features")
-        .and_then(|features| {
-            features
-                .get("hooks")
-                .or_else(|| features.get("codex_hooks"))
-        })
-        .and_then(toml_edit::Item::as_bool)
-        .unwrap_or(true)
+    let Some(features) = config.get("features") else {
+        return true;
+    };
+    let Some(features) = features.as_table_like() else {
+        return false;
+    };
+    let Some(enabled) = features
+        .get("hooks")
+        .or_else(|| features.get("codex_hooks"))
+    else {
+        return true;
+    };
+    enabled.as_bool().unwrap_or(false)
+}
+
+fn paths_resolve_to_same_file(left: &Path, right: &Path) -> bool {
+    let resolve = |path: &Path| {
+        let mut unresolved = path.to_path_buf();
+        let mut suffix = Vec::new();
+        loop {
+            if let Ok(canonical) = unresolved.canonicalize() {
+                return suffix
+                    .into_iter()
+                    .rev()
+                    .fold(canonical, |resolved, component| resolved.join(component));
+            }
+            let Some(component) = unresolved.file_name() else {
+                return path.to_path_buf();
+            };
+            suffix.push(component.to_os_string());
+            if !unresolved.pop() {
+                return path.to_path_buf();
+            }
+        }
+    };
+    resolve(left) == resolve(right)
 }
 
 /// Replace only Pixel task registrations, preserving foreign hooks and trust.
@@ -1076,6 +1102,17 @@ pub(crate) fn install_project_codex_at(
     exe: &Path,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
+    if paths_resolve_to_same_file(global_hooks_path, path) {
+        return Ok(install::InstallStep {
+            id: "hooks.codex".into(),
+            status: install::CheckStatus::Yellow,
+            summary: install::dry_run_summary(
+                dry_run,
+                "codex project hooks not changed: project path resolves to the global hooks file",
+            ),
+            detail: Some(path.display().to_string()),
+        });
+    }
     match crate::uninstall::restore_project_codex_composed_guard(path, dry_run)? {
         crate::uninstall::ComposedGuardRestore::Conflict => {
             return Err(InstallError::InvalidSettings {
@@ -1090,7 +1127,17 @@ pub(crate) fn install_project_codex_at(
         codex_hooks_are_enabled(&codex_home.join(crate::codex_config::CODEX_CONFIG_FILE))
     }) && install::read_settings(global_hooks_path)
         .ok()
-        .is_some_and(|settings| task_hooks_registered(&settings, Provider::Codex, exe));
+        .is_some_and(|settings| {
+            task_hooks_registered(&settings, Provider::Codex, exe)
+                && global_hooks_path.parent().is_some_and(|codex_home| {
+                    crate::codex_config::task_hook_suite_is_enabled_and_trusted(
+                        codex_home,
+                        global_hooks_path,
+                        &settings,
+                        exe,
+                    )
+                })
+        });
     install_at_scoped(
         home,
         path,
@@ -2601,6 +2648,49 @@ mod tests {
         )
         .unwrap();
         install::write_settings(&global_hooks, &global, false).unwrap();
+
+        // A complete global suite without a current user review still does
+        // not cover project callbacks: Codex skips untrusted hooks.
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "unreviewed global hooks must not remove project task callbacks"
+        );
+
+        std::fs::create_dir(home.path().join(".codex/config.toml")).unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "an unreadable Codex config must preserve project task callbacks"
+        );
+        std::fs::remove_dir(home.path().join(".codex/config.toml")).unwrap();
+
+        let mut trust = String::new();
+        for (event, name) in TASK_HOOK_EVENTS
+            .iter()
+            .copied()
+            .chain(std::iter::once(("Interrupt", "interrupt")))
+        {
+            let group = &global["hooks"][event][0];
+            let hook = &group["hooks"][0];
+            let hash = crate::codex_config::codex_hook_hash(event, group, hook).unwrap();
+            let state_key = format!(
+                "{}:{}:0:0",
+                global_hooks.display(),
+                crate::codex_config::hook_event_label(event).unwrap()
+            );
+            assert_eq!(
+                hook["command"].as_str().unwrap().split("--event ").nth(1),
+                Some(name)
+            );
+            trust.push_str(&format!(
+                "[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n\n"
+            ));
+        }
+        std::fs::write(home.path().join(".codex/config.toml"), &trust).unwrap();
         install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
         let installed = install::read_settings(&project_hooks).unwrap();
         assert_eq!(
@@ -2621,6 +2711,47 @@ mod tests {
         assert_eq!(
             installed["hooks"]["PostToolUseFailure"], original["hooks"]["PostToolUseFailure"],
             "unsupported Codex tool-failure callback must be preserved"
+        );
+
+        // A profile can override the hooks configuration and its trust state.
+        // Until Pixel resolves active profiles like Codex does, a trusted base
+        // suite is not sufficient reason to remove project-local callbacks.
+        std::fs::write(
+            home.path().join(".codex/config.toml"),
+            format!("{trust}\n[profiles.test.features]\nhooks = false\n"),
+        )
+        .unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "profile overrides must keep project task callbacks until they are resolved"
+        );
+
+        // A stale identity or disabled entry in the exact source key is not
+        // permission to remove the project's copy.
+        let stale = trust.replacen(
+            "enabled = true\ntrusted_hash = \"sha256:",
+            "enabled = true\ntrusted_hash = \"sha256:stale-",
+            1,
+        );
+        std::fs::write(home.path().join(".codex/config.toml"), stale).unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "a changed global hook hash must keep project task callbacks"
+        );
+        let disabled = trust.replacen("enabled = true", "enabled = false", 1);
+        std::fs::write(home.path().join(".codex/config.toml"), disabled).unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "a disabled global hook must keep project task callbacks"
         );
 
         // Malformed or ineligible global entries are not evidence that the
@@ -2656,7 +2787,7 @@ mod tests {
             install::write_settings(&project_hooks, &original, false).unwrap();
             std::fs::write(
                 home.path().join(".codex/config.toml"),
-                format!("[features]\n{feature} = false\n"),
+                format!("[features]\n{feature} = false\n\n{trust}"),
             )
             .unwrap();
             install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false)
@@ -2667,6 +2798,18 @@ mod tests {
                 "project task hooks must survive when {feature} disables Codex hooks"
             );
         }
+        std::fs::write(
+            home.path().join(".codex/config.toml"),
+            format!("features = \"invalid\"\n\n{trust}"),
+        )
+        .unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "an invalid feature container must preserve project task callbacks"
+        );
     }
 
     #[test]
@@ -2770,6 +2913,66 @@ mod tests {
         assert_eq!(installed["hooks"]["PreToolUse"], original);
         assert!(!installed.to_string().contains("composed-guard"));
         assert!(!repo.join(".codex").join(CODEX_COMPOSED_BACKUP).exists());
+    }
+
+    #[test]
+    fn repo_equal_to_codex_home_must_not_rewrite_the_global_hook_file() {
+        let home = tempfile::tempdir().unwrap();
+        let global_hooks = Provider::Codex.path(home.path());
+        let exe = Path::new("/tmp/pixel");
+        let original = json!({
+            "hooks": {
+                "PreToolUse": [hook_group("foreign-security-check".into(), None)],
+                "Stop": [hook_group(
+                    format!("{} run-hook task-event --provider codex --event stop", quoted_executable(exe)),
+                    None,
+                )]
+            },
+            "user_setting": "keep"
+        });
+        install::write_settings(&global_hooks, &original, false).unwrap();
+        let original_bytes = std::fs::read(&global_hooks).unwrap();
+
+        let step = install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &home.path().join(".codex/./hooks.json"),
+            exe,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(step.status, install::CheckStatus::Yellow);
+        assert_eq!(std::fs::read(&global_hooks).unwrap(), original_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_codex_directory_alias_is_rejected_before_or_after_hooks_exist() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let global_hooks = Provider::Codex.path(home.path());
+        let repo = home.path().join("repo");
+        let repo_codex = repo.join(".codex");
+        let exe = Path::new("/tmp/pixel");
+        std::fs::create_dir_all(global_hooks.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        symlink(global_hooks.parent().unwrap(), &repo_codex).unwrap();
+        let alias_hooks = repo_codex.join("hooks.json");
+
+        let absent =
+            install_project_codex_at(home.path(), &global_hooks, &alias_hooks, exe, false).unwrap();
+        assert_eq!(absent.status, install::CheckStatus::Yellow);
+        assert!(!global_hooks.exists());
+
+        let original = json!({"hooks":{"Stop":[hook_group("user-hook".into(), None)]}});
+        install::write_settings(&global_hooks, &original, false).unwrap();
+        let original_bytes = std::fs::read(&global_hooks).unwrap();
+        let present =
+            install_project_codex_at(home.path(), &global_hooks, &alias_hooks, exe, false).unwrap();
+        assert_eq!(present.status, install::CheckStatus::Yellow);
+        assert_eq!(std::fs::read(&global_hooks).unwrap(), original_bytes);
     }
 
     #[test]

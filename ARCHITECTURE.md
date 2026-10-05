@@ -489,7 +489,7 @@ so no machine path is committed:
 | File | Agent | Content |
 | --- | --- | --- |
 | `.claude/settings.local.json` | Claude Code | Removes the retired retrieval guard and restores adopted RTK registrations; preserves foreign hooks and independent task controls |
-| `.codex/config.toml`, `.codex/hooks.json` (legacy backup sidecar during migration) | Codex | Removes retired Pixel `developer_instructions` text and restores foreign hooks from the owned composed-guard backup; removes task registrations already provided by matching global hooks while preserving project-only task controls; skips tracked `.codex/hooks.json` |
+| `.codex/config.toml`, `.codex/hooks.json` (legacy backup sidecar during migration) | Codex | Removes retired Pixel `developer_instructions` text and restores foreign hooks from the owned composed-guard backup; removes duplicate task registrations only when enabled global hooks cover every event and their current definitions are approved; preserves project-only task controls and skips tracked files or paths aliasing the global hook file |
 | `.devin/config.local.json` | Devin | `PreToolUse` rewrite, `PermissionRequest` retrieval approval, prompt-context and metrics hooks |
 | `.pi/extensions/pixel-guard.ts` | Pi | task lifecycle adapter; legacy retrieval behavior requires explicit opt-in |
 | retired managed block in `AGENTS.md` | any agent that reads `AGENTS.md` | Removed on install so ordinary tasks carry no permanent Pixel retrieval instructions; foreign project instructions are preserved |

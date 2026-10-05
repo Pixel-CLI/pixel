@@ -6917,10 +6917,8 @@ fn hook_review_options(home: &Path, exe: &Path, id: &str, repo: Option<&Path>) -
     }
 }
 
-/// Codex 0.159 skips a hook the user has not reviewed (`/hooks`), without a
-/// message: Pixel's task hooks installed but never reviewed are dormant, so
-/// doctor must say so, with the step only the user can take, and turn green
-/// once Codex's config records the review for that exact hook.
+/// Doctor reports missing, stale or disabled approval and turns green only
+/// when the exact normalized hook identity has a current enabled review.
 #[test]
 fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     let dir = TempDir::new().expect("tempdir");
@@ -6947,8 +6945,8 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     assert_eq!(
         unreviewed.summary,
         format!(
-            "Codex skips 9 of the 9 Pixel hook(s) in {} until you review them (Interrupt #0.0, PostToolUse #0.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0): \
-             start `codex` in this directory, run `/hooks` and trust them",
+            "approval for 9 of the 9 Pixel hook(s) in {} is missing, stale, disabled, or not verifiable (Interrupt #0.0, PostToolUse #0.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0): \
+             start `codex` in this directory and inspect `/hooks`",
             hooks.display()
         )
     );
@@ -7007,34 +7005,33 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
         "reviewing metrics alone leaves task gates unreviewed"
     );
     let mut reviews = base.clone();
-    for (event, group) in [
-        ("interrupt", 0),
-        ("post_tool_use", 0),
-        ("post_tool_use", 1),
-        ("pre_tool_use", 0),
-        ("session_end", 0),
-        ("session_start", 0),
-        ("stop", 0),
-        ("subagent_start", 0),
-        ("subagent_stop", 0),
-        ("user_prompt_submit", 0),
-        ("user_prompt_submit", 1),
+    for event in [
+        "interrupt",
+        "post_tool_use",
+        "pre_tool_use",
+        "session_end",
+        "session_start",
+        "stop",
+        "subagent_start",
+        "subagent_stop",
+        "user_prompt_submit",
     ] {
+        let key = format!("{}:{event}:0:0", hooks.display());
         reviews.push_str(&format!(
-            "\n[hooks.state.\"{}:{event}:{group}:0\"]\ntrusted_hash = \"sha256:fixture\"\n",
-            hooks.display()
+            "\n[hooks.state.{key:?}]\nenabled = true\ntrusted_hash = \"sha256:stale\"\n"
         ));
     }
     fs::write(&config, reviews).unwrap();
     let report = doctor(&options).unwrap();
-    let reviewed = check(&report, "install.codex-hook-review");
-    assert_eq!(reviewed.status, CheckStatus::Green, "{reviewed:?}");
+    let stale = check(&report, "install.codex-hook-review");
+    assert_eq!(stale.status, CheckStatus::Yellow, "{stale:?}");
     assert_eq!(
-        reviewed.summary,
-        format!(
-            "Codex has reviewed the 9 Pixel hook(s) in {}",
-            hooks.display()
-        )
+        stale.detail.as_ref().unwrap()["unreviewed"]
+            .as_array()
+            .unwrap()
+            .len(),
+        9,
+        "stale hashes must not make the global task hooks green"
     );
 }
 
@@ -7090,24 +7087,21 @@ fn doctor_reports_unreviewed_project_codex_hooks_and_ignores_foreign_ones() {
         "the foreign lint hook is not Pixel's to report"
     );
 
-    let key = |event: &str, g: usize, h: usize| format!("{}:{event}:{g}:{h}", hooks.display());
     fs::write(
         home.join(".codex/config.toml"),
         format!(
-            "[hooks.state.\"{}\"]\ntrusted_hash = \"sha256:a\"\n\n[hooks.state.\"{}\"]\ntrusted_hash = \"sha256:b\"\n",
-            key("pre_tool_use", 0, 1),
-            key("session_start", 0, 0)
+            "[hooks.state.\"{}:pre_tool_use:0:1\"]\nenabled = true\ntrusted_hash = \"sha256:stale\"\n\n[hooks.state.\"{}:session_start:0:0\"]\nenabled = true\ntrusted_hash = \"sha256:stale\"\n",
+            hooks.display(),
+            hooks.display()
         ),
     )
     .unwrap();
     let report = doctor(&options).unwrap();
-    let reviewed = check(&report, "repo.codex-hook-review");
-    assert_eq!(reviewed.status, CheckStatus::Green, "{reviewed:?}");
+    let stale = check(&report, "repo.codex-hook-review");
+    assert_eq!(stale.status, CheckStatus::Yellow, "{stale:?}");
     assert_eq!(
-        reviewed.summary,
-        format!(
-            "Codex has reviewed the 2 Pixel hook(s) in {}",
-            hooks.display()
-        )
+        stale.detail.as_ref().unwrap()["unreviewed"],
+        serde_json::json!(["PreToolUse #0.1", "SessionStart #0.0"]),
+        "stale hashes must not make a project hook green"
     );
 }

@@ -436,7 +436,11 @@ boundary it crosses.
 - **Mitigation**: current installation restores the original registrations
   only when the private backup and managed hook still match their owned
   contract, preserving changed configurations for manual resolution. It skips
-  tracked `.codex/hooks.json` (`repo_git::is_tracked`). For explicitly retained
+  tracked `.codex/hooks.json` (`repo_git::is_tracked`) and project paths that
+  alias the global hook file. Duplicate project task hooks are removed only
+  when the enabled global suite covers their events and each current definition
+  has matching Codex approval; missing or stale approval preserves them. Pixel
+  reads approval state but does not grant trust during installation. For explicitly retained
   legacy wrappers, `guard::load_composed_backup`
   refuses a symlink, a file over 1 MiB, a mode wider than 0600, an unknown
   version or provider, and any command that calls Pixel's own hooks

@@ -19,6 +19,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde_json::{Value as JsonValue, json};
+use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, Value};
 
 use crate::config::{MANAGED_BEGIN, MANAGED_END};
@@ -470,7 +472,7 @@ const TRUSTED_HASH_KEY: &str = "trusted_hash";
 
 /// The label Codex spells an event with in a `hooks.state` key
 /// (`hook_event_key_label` in codex-rs `hooks/src/lib.rs`).
-fn hook_event_label(event: &str) -> Option<&'static str> {
+pub(crate) fn hook_event_label(event: &str) -> Option<&'static str> {
     Some(match event {
         "PreToolUse" => "pre_tool_use",
         "PermissionRequest" => "permission_request",
@@ -493,19 +495,224 @@ fn hook_event_label(event: &str) -> Option<&'static str> {
 pub(crate) struct HookReview {
     /// Pixel hook handlers in the file, as `Event #group.handler`.
     pub pixel: Vec<String>,
-    /// The subset without a `trusted_hash` in Codex's config.
+    /// Handlers without an enabled state and exact trusted identity, or whose
+    /// configuration shape is not supported by the bounded verifier.
     pub unreviewed: Vec<String>,
 }
 
-/// Which of Pixel's hooks in `hooks_path` Codex will skip.
+/// Recompute the normalized identity Codex uses for its hook trust decision.
+/// Pixel's generated command shape is intentionally the supported boundary;
+/// unknown fields fail closed so an altered hook is never treated as approved.
+pub(crate) fn codex_hook_hash(
+    event: &str,
+    group: &JsonValue,
+    handler: &JsonValue,
+) -> Option<String> {
+    let label = hook_event_label(event)?;
+    let command = handler.get("command")?.as_str()?;
+    if handler.get("type")?.as_str()? != "command"
+        || handler
+            .as_object()?
+            .keys()
+            .any(|key| !matches!(key.as_str(), "type" | "command" | "timeout" | "async"))
+    {
+        return None;
+    }
+    let timeout = match handler.get("timeout") {
+        None => None,
+        Some(value) => Some(value.as_u64()?),
+    };
+    let timeout = match event {
+        "SessionEnd" | "Interrupt" => timeout.unwrap_or(1).clamp(1, 3),
+        _ => timeout.unwrap_or(600).max(1),
+    };
+    let is_async = match handler.get("async") {
+        None => false,
+        Some(value) => value.as_bool()?,
+    };
+    let matcher = match group.get("matcher") {
+        None => None,
+        Some(JsonValue::String(matcher)) => Some(matcher.clone()),
+        Some(_) => return None,
+    };
+    if group
+        .as_object()?
+        .keys()
+        .any(|key| !matches!(key.as_str(), "matcher" | "hooks"))
+    {
+        return None;
+    }
+
+    // Codex serializes `NormalizedHookIdentity { event_name, group }` where
+    // the group contains one normalized handler. `None` matcher/options are
+    // omitted by the TOML serializer before it fingerprints the JSON value.
+    let mut identity = json!({
+        "event_name": label,
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": timeout,
+            "async": is_async,
+        }],
+    });
+    if let Some(matcher) = matcher {
+        identity["matcher"] = JsonValue::String(matcher);
+    }
+    identity.sort_all_objects();
+    let serialized = serde_json::to_vec(&identity).ok()?;
+    let digest = Sha256::digest(serialized);
+    Some(format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+fn hook_state_entry<'a>(
+    doc: &'a DocumentMut,
+    hooks_path: &Path,
+    event: &str,
+    group_index: usize,
+    handler_index: usize,
+) -> Option<&'a Item> {
+    let source_path = hooks_path.to_string_lossy();
+    let label = hook_event_label(event)?;
+    doc.get("hooks")?
+        .as_table_like()?
+        .get(HOOK_STATE_TABLE)?
+        .as_table_like()?
+        .iter()
+        .find_map(|(key, entry)| {
+            let suffix = format!(":{label}:{group_index}:{handler_index}");
+            let source = key.strip_suffix(&suffix)?;
+            (source == source_path).then_some(entry)
+        })
+}
+
+fn codex_hook_is_enabled_and_trusted(
+    doc: &DocumentMut,
+    hooks_path: &Path,
+    event: &str,
+    group_index: usize,
+    handler_index: usize,
+    group: &JsonValue,
+    handler: &JsonValue,
+) -> bool {
+    let Some(current_hash) = codex_hook_hash(event, group, handler) else {
+        return false;
+    };
+    let Some(state) = hook_state_entry(doc, hooks_path, event, group_index, handler_index) else {
+        return false;
+    };
+    let Some(state) = state.as_table_like() else {
+        return false;
+    };
+    let enabled = match state.get("enabled") {
+        None => Some(true),
+        Some(value) => value.as_bool(),
+    };
+    enabled == Some(true)
+        && state
+            .get(TRUSTED_HASH_KEY)
+            .and_then(Item::as_str)
+            .is_some_and(|trusted_hash| trusted_hash == current_hash)
+}
+
+fn matching_task_hook_is_approved(
+    groups: &[JsonValue],
+    doc: &DocumentMut,
+    hooks_path: &Path,
+    event: &str,
+    task_verb: &str,
+    exe: &Path,
+) -> bool {
+    groups.iter().enumerate().any(|(group_index, group)| {
+        if group.get("matcher").is_some() {
+            return false;
+        }
+        let Some(handlers) = group.get("hooks").and_then(JsonValue::as_array) else {
+            return false;
+        };
+        if handlers.len() != 1 {
+            return false;
+        }
+        let handler = &handlers[0];
+        let is_expected = handler
+            .get("command")
+            .and_then(JsonValue::as_str)
+            .and_then(|command| crate::routing::pixel_hook_verb(command, exe))
+            .is_some_and(|verb| verb == task_verb);
+        let is_synchronous = handler
+            .get("async")
+            .is_none_or(|value| value.as_bool() == Some(false));
+        let expected_timeout = if matches!(event, "SessionEnd" | "Interrupt") {
+            3
+        } else {
+            10
+        };
+        is_expected
+            && is_synchronous
+            && handler.get("timeout").and_then(JsonValue::as_u64) == Some(expected_timeout)
+            && codex_hook_is_enabled_and_trusted(
+                doc,
+                hooks_path,
+                event,
+                group_index,
+                0,
+                group,
+                handler,
+            )
+    })
+}
+
+/// Whether every generated global Codex task hook is enabled and still has
+/// the exact identity the user reviewed. Never writes Codex trust state.
+pub(crate) fn task_hook_suite_is_enabled_and_trusted(
+    codex_home: &Path,
+    hooks_path: &Path,
+    hooks: &JsonValue,
+    exe: &Path,
+) -> bool {
+    let Ok(doc) = read_document(&codex_home.join(CODEX_CONFIG_FILE)) else {
+        return false;
+    };
+    if let Some(profiles) = doc.get("profiles") {
+        let Some(profiles) = profiles.as_table_like() else {
+            return false;
+        };
+        if profiles.iter().next().is_some() {
+            return false;
+        }
+    }
+    crate::routing::TASK_HOOK_EVENTS
+        .iter()
+        .copied()
+        .chain(std::iter::once(("Interrupt", "interrupt")))
+        .all(|(event, name)| {
+            hooks
+                .get("hooks")
+                .and_then(|events| events.get(event))
+                .and_then(JsonValue::as_array)
+                .is_some_and(|groups| {
+                    matching_task_hook_is_approved(
+                        groups,
+                        &doc,
+                        hooks_path,
+                        event,
+                        &format!("task-event --provider codex --event {name}"),
+                        exe,
+                    )
+                })
+        })
+}
+
+/// Which Pixel hooks in `hooks_path` have enabled, verifiable current approval.
 ///
-/// Codex 0.159 runs a user or project hook only after the user reviewed it
-/// (`/hooks` in the TUI), which records `[hooks.state."<file>:<event>:<group>:
-/// <handler>"] trusted_hash = "sha256:…"` in `<codex_home>/config.toml`; an
-/// unreviewed hook is skipped without a message, even in `codex exec`. The
-/// hash is not recomputed here: a present `trusted_hash` counts as reviewed,
-/// so a hook Pixel rewrote after the review (Codex's `Modified` state) is not
-/// reported. The file part of the key is compared by canonical path.
+/// Codex runs an unmanaged hook only when it is enabled and the stored hash
+/// exactly matches its normalized event/group/handler identity. The key is
+/// scoped to the exact source path and event/group/handler indexes.
 ///
 /// # Errors
 ///
@@ -517,40 +724,13 @@ pub(crate) fn pixel_hook_review(
 ) -> std::result::Result<HookReview, String> {
     let hooks = read_hooks(hooks_path)?;
     let doc = read_document(&codex_home.join(CODEX_CONFIG_FILE))?;
-    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let file = canonical(hooks_path);
-    let reviewed: Vec<String> = doc
-        .get("hooks")
-        .and_then(Item::as_table_like)
-        .and_then(|hooks| hooks.get(HOOK_STATE_TABLE))
-        .and_then(Item::as_table_like)
-        .map(|state| {
-            state
-                .iter()
-                .filter(|(_, entry)| {
-                    entry
-                        .as_table_like()
-                        .and_then(|entry| entry.get(TRUSTED_HASH_KEY))
-                        .and_then(Item::as_str)
-                        .is_some()
-                })
-                .map(|(key, _)| key.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    let is_reviewed = |suffix: &str| {
-        reviewed.iter().any(|key| {
-            key.strip_suffix(suffix)
-                .is_some_and(|source| canonical(Path::new(source)) == file)
-        })
-    };
     let mut review = HookReview {
         pixel: Vec::new(),
         unreviewed: Vec::new(),
     };
     let events = hooks.get("hooks").and_then(serde_json::Value::as_object);
     for (event, groups) in events.into_iter().flatten() {
-        let Some(label) = hook_event_label(event) else {
+        let Some(_label) = hook_event_label(event) else {
             continue;
         };
         let groups = groups.as_array().map_or(&[][..], Vec::as_slice);
@@ -574,7 +754,15 @@ pub(crate) fn pixel_hook_review(
                     continue;
                 }
                 let name = format!("{event} #{group_index}.{handler_index}");
-                if !is_reviewed(&format!(":{label}:{group_index}:{handler_index}")) {
+                if !codex_hook_is_enabled_and_trusted(
+                    &doc,
+                    hooks_path,
+                    event,
+                    group_index,
+                    handler_index,
+                    group,
+                    handler,
+                ) {
                     review.unreviewed.push(name.clone());
                 }
                 review.pixel.push(name);
@@ -610,8 +798,8 @@ pub(crate) fn hook_review_outcome(
     (
         crate::doctor::CheckStatus::Yellow,
         format!(
-            "Codex skips {} of the {} Pixel hook(s) in {file} until you review them ({}): \
-             start `codex` in this directory, run `/hooks` and trust them",
+            "approval for {} of the {} Pixel hook(s) in {file} is missing, stale, disabled, or not verifiable ({}): \
+             start `codex` in this directory and inspect `/hooks`",
             review.unreviewed.len(),
             review.pixel.len(),
             review.unreviewed.join(", ")
@@ -679,6 +867,258 @@ mod tests {
             assert_eq!(hook_event_label(event), Some(label), "{event}");
         }
         assert_eq!(hook_event_label("NotAnEvent"), None);
+    }
+
+    #[test]
+    fn codex_hook_hash_matches_the_deployed_codex_0160_identity_vectors() {
+        let vectors = [
+            (
+                "Interrupt",
+                "interrupt",
+                3,
+                "sha256:e1b9f0136319de932653a58aba7daadc81ac6ba11087b56e9642264967c6c5bd",
+            ),
+            (
+                "PostToolUse",
+                "post-tool-use",
+                10,
+                "sha256:e823b27c09032bbf495660b2b2768810f9955a2d8c8821ad0ec3b59d483315c5",
+            ),
+            (
+                "PreToolUse",
+                "pre-tool-use",
+                10,
+                "sha256:40528cc1a93d61a88f1ef8def24aeda9a35df3f769ab7ffabc1e23cb15ca68cb",
+            ),
+            (
+                "SessionEnd",
+                "session-end",
+                3,
+                "sha256:592671cbeab88cb52beb144a4a8430e1aa45930d39f97dbefda4efbeb66a3737",
+            ),
+            (
+                "SessionStart",
+                "session-start",
+                10,
+                "sha256:297139f8a7d4ad7c8c5e44305725dab6d58754e3c25fe3d9d338d44b5eef8206",
+            ),
+            (
+                "Stop",
+                "stop",
+                10,
+                "sha256:fed5e0c7cf5936eeac3f2cb180b47e9492031238ee325bab135a25f7e891a864",
+            ),
+            (
+                "SubagentStart",
+                "subagent-start",
+                10,
+                "sha256:226885cf987ba4c08cd94d411e055c9d9f23984042099f943559af79daf350b8",
+            ),
+            (
+                "SubagentStop",
+                "subagent-stop",
+                10,
+                "sha256:9bb4267598af13529d2948086891f50b76bee7728e618358a3aa08d7bdf6da2c",
+            ),
+            (
+                "UserPromptSubmit",
+                "prompt-submit",
+                10,
+                "sha256:72f75c5ee09194fa84fdab917b746b99b0941db9241d660bee579d6048676037",
+            ),
+        ];
+        for (event, verb, timeout, expected) in vectors {
+            let group = serde_json::json!({
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("/usr/local/bin/pixel run-hook task-event --provider codex --event {verb}"),
+                    "timeout": timeout,
+                }]
+            });
+            assert_eq!(
+                codex_hook_hash(event, &group, &group["hooks"][0]).as_deref(),
+                Some(expected),
+                "Codex currentHash for {event}"
+            );
+        }
+
+        let command = "/usr/local/bin/pixel run-hook task-event --provider codex --event stop";
+        let absent_timeout = serde_json::json!({"hooks":[{"type":"command","command":command}]});
+        let default_timeout =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":600}]});
+        assert_eq!(
+            codex_hook_hash("Stop", &absent_timeout, &absent_timeout["hooks"][0]),
+            codex_hook_hash("Stop", &default_timeout, &default_timeout["hooks"][0]),
+            "Codex normalizes an absent regular-event timeout to 600 seconds"
+        );
+        let short_timeout =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":1}]});
+        let zero_timeout =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":0}]});
+        assert_eq!(
+            codex_hook_hash("Stop", &short_timeout, &short_timeout["hooks"][0]),
+            codex_hook_hash("Stop", &zero_timeout, &zero_timeout["hooks"][0]),
+            "Codex clamps a zero timeout to one second"
+        );
+        let session_end_three =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":3}]});
+        let session_end_overflow =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":99}]});
+        assert_eq!(
+            codex_hook_hash(
+                "SessionEnd",
+                &session_end_three,
+                &session_end_three["hooks"][0]
+            ),
+            codex_hook_hash(
+                "SessionEnd",
+                &session_end_overflow,
+                &session_end_overflow["hooks"][0]
+            ),
+            "Codex clamps SessionEnd timeouts to three seconds"
+        );
+        let with_matcher = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":command,"timeout":10}]});
+        let without_matcher =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":10}]});
+        assert_ne!(
+            codex_hook_hash("PreToolUse", &with_matcher, &with_matcher["hooks"][0]),
+            codex_hook_hash("PreToolUse", &without_matcher, &without_matcher["hooks"][0]),
+            "Codex fingerprints the matcher"
+        );
+        let unknown_field = serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":10,"custom":true}]});
+        assert!(codex_hook_hash("Stop", &unknown_field, &unknown_field["hooks"][0]).is_none());
+        let unknown_group_field = serde_json::json!({"custom":true,"hooks":[{"type":"command","command":command,"timeout":10}]});
+        assert!(
+            codex_hook_hash(
+                "Stop",
+                &unknown_group_field,
+                &unknown_group_field["hooks"][0]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn hook_approval_requires_exact_source_enabled_state_and_current_hash() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks_path = home.path().join("hooks.json");
+        let group = serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "command": "/usr/local/bin/pixel run-hook task-event --provider codex --event session-start",
+                "timeout": 10,
+            }]
+        });
+        let handler = &group["hooks"][0];
+        let hash = codex_hook_hash("SessionStart", &group, handler).unwrap();
+        let state_key = format!("{}:session_start:0:0", hooks_path.display());
+        let config_path = home.path().join(CODEX_CONFIG_FILE);
+        fs::write(
+            &config_path,
+            format!("[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n"),
+        )
+        .unwrap();
+        let doc = read_document(&config_path).unwrap();
+        assert!(codex_hook_is_enabled_and_trusted(
+            &doc,
+            &hooks_path,
+            "SessionStart",
+            0,
+            0,
+            &group,
+            handler,
+        ));
+
+        fs::write(
+            &config_path,
+            format!("[hooks.state.{state_key:?}]\nenabled = false\ntrusted_hash = {hash:?}\n"),
+        )
+        .unwrap();
+        let doc = read_document(&config_path).unwrap();
+        assert!(!codex_hook_is_enabled_and_trusted(
+            &doc,
+            &hooks_path,
+            "SessionStart",
+            0,
+            0,
+            &group,
+            handler,
+        ));
+
+        fs::write(
+            &config_path,
+            format!(
+                "[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = \"sha256:stale\"\n"
+            ),
+        )
+        .unwrap();
+        let doc = read_document(&config_path).unwrap();
+        assert!(!codex_hook_is_enabled_and_trusted(
+            &doc,
+            &hooks_path,
+            "SessionStart",
+            0,
+            0,
+            &group,
+            handler,
+        ));
+
+        let aliased_key = format!(
+            "{}:session_start:0:0",
+            home.path().join("alias/hooks.json").display()
+        );
+        fs::write(
+            &config_path,
+            format!("[hooks.state.{aliased_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n"),
+        )
+        .unwrap();
+        let doc = read_document(&config_path).unwrap();
+        assert!(!codex_hook_is_enabled_and_trusted(
+            &doc,
+            &hooks_path,
+            "SessionStart",
+            0,
+            0,
+            &group,
+            handler,
+        ));
+    }
+
+    #[test]
+    fn pixel_hook_review_accepts_only_the_current_enabled_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks_path = home.path().join("hooks.json");
+        let exe = Path::new("/tmp/pixel");
+        let group = serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "command": "'/tmp/pixel' run-hook task-event --provider codex --event session-start",
+                "timeout": 10,
+            }]
+        });
+        let hooks = serde_json::json!({"hooks":{"SessionStart":[group.clone()]}});
+        fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+        let hash = codex_hook_hash("SessionStart", &group, &group["hooks"][0]).unwrap();
+        let state_key = format!("{}:session_start:0:0", hooks_path.display());
+        let config_path = home.path().join(CODEX_CONFIG_FILE);
+        fs::write(
+            &config_path,
+            format!("[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n"),
+        )
+        .unwrap();
+        let reviewed = pixel_hook_review(home.path(), &hooks_path, exe).unwrap();
+        assert_eq!(reviewed.pixel, ["SessionStart #0.0"]);
+        assert!(reviewed.unreviewed.is_empty());
+
+        fs::write(
+            &config_path,
+            format!(
+                "[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = \"sha256:stale\"\n"
+            ),
+        )
+        .unwrap();
+        let stale = pixel_hook_review(home.path(), &hooks_path, exe).unwrap();
+        assert_eq!(stale.unreviewed, ["SessionStart #0.0"]);
     }
 
     #[test]

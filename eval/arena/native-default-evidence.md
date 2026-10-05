@@ -459,7 +459,7 @@ Neither pair justifies automatic skill activation. Keep the packaged skill
 explicit-only by default; use more controlled, separately reviewed pairs before
 making a promotion decision.
 
-## Final installed candidate verification (2026-10-05)
+## Initial installed candidate verification (2026-10-05)
 
 Run identity: `target/native-default-evidence/frozen-install/`. This verified
 the stable working-tree candidate based on `ac35266086d1bfba54e3370007246a9e0f389dca`,
@@ -480,3 +480,25 @@ automatic prompt is absent.
 124 integration tests passed. The arena parser/runner suite passed 46 tests.
 These scoped results precede the final committed-candidate workspace gates;
 their logs and installed callback/hash manifest are retained in that run directory.
+
+An independent migration review subsequently found that the doctor's hook-review
+check accepted any saved approval hash without comparing the current definition.
+The 33-green result above therefore proves configuration presence, not current
+Codex approval. A read-only `hooks/list` request to Codex 0.160.0 on candidate
+`c8c71d697e81fa9fd4da6b939867c85f37c5c712` reported all nine global Pixel task
+hooks enabled: seven trusted and two modified (`PostToolUse` and
+`UserPromptSubmit`). The receipt is
+`target/native-default-evidence/c8c71d69-gates/codex-hook-discovery.json`.
+No user approval was written by this verification. The corrected installed
+doctor reports 32 green checks and one yellow check for those same two hooks;
+`--fail-on yellow` correctly exits 1 pending user review. Project task-hook
+deduplication requires current-definition approval and preserves registrations
+when profile overrides cannot be verified. Project paths aliasing the global
+hook file are left untouched, including an absent leaf in a symlinked directory.
+
+Nine portable hash vectors, using `/usr/local/bin/pixel`, were independently
+obtained from Codex 0.160.0 through `initialize`, `initialized`, and `hooks/list`
+in an isolated fixture. No model request or trust write was made. The sanitized
+receipt is `target/native-default-evidence/codex-trust-probe/receipt.json`;
+the fixture hook configuration has SHA-256
+`814a9a674967becfa9b7cad837ec22d926e8811803c172fa64610e9eb4994290`.
