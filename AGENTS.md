@@ -4,11 +4,11 @@
 
 ## Mutation Testing Loop
 
-- Mutation testing runs twice, both off the laptop: the pre-push gate (`scripts/mutants-remote-gate.sh`) bundles the committed diff to the gate host (default the ssh alias `a2`) and blocks the push on the campaign's verdict against a warm `target/`; the `Mutants` workflow then re-runs the same diff's shards on the same host and fails the pull request on any surviving mutant.
-- Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the gate host and the workflow's runners are for.
-- The loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push. A blocked push already lists the `MISSED`/`TIMEOUT` lines from the gate host — fix them and push again; the traveling outcome cache (`target/mutants-preflight/`) makes the retry re-test only the survivors. A PR opened after a green push has `Mutants in diff` necessarily green.
+- Mutation testing has one required verdict: the `Mutants` workflow shards the pull request's diff and fails it on any surviving mutant. The pre-push gate (`scripts/mutants-push-gate.sh`) is opt-in: with `PIXEL_MUTANTS_GATE=local` it runs the same campaign (`scripts/mutants-preflight.sh --run`, pinned nightly and cargo-mutants) on the pushing machine and blocks the push on its verdict; unset or `off`, it runs nothing.
+- Set `PIXEL_MUTANTS_GATE=local` where the CPUs are yours to spend — a cloud agent session, with its own VM and `target/`, is the intended host. On a laptop leave it unset: a campaign holds the tree's machine for minutes to hours, and parallel worktrees then fight over the same cores.
+- Do not run `cargo mutants` by hand on your own initiative; the push gate and the workflow's runners are for that.
+- The loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push. Under `local`, a blocked push already lists the `MISSED`/`TIMEOUT` lines — fix them and push again; the outcome cache (`target/mutants-preflight/`) makes the retry re-test only the survivors. Without it, read the same lines from `Mutants in diff`.
 - A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.
-- When the gate host is down: `PIXEL_MUTANTS_GATE=off git push` skips the remote run and leaves the verdict to CI. Do not make that the habit — CI then waits 5 to 10 minutes to say what the gate would have said in one.
 
 One habit keeps the CI side from being the bottleneck:
 
@@ -44,7 +44,7 @@ apply to:
 | `readme-webp.md` | `docs/examples/*.webp`, `docs/motion/**` | the verified lossless pipeline for README animated webp: render crf=10, 1600×1000 lanczos frames, `img2webp -lossless`, embed `width="800"` |
 | `project-task.md` | always | before any work: find the issue on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1) or open one and add it; the PR body opens with `Task <number>` (declared exceptions: `no task: <reason>`); the board Status follows the PR — In Progress at open, Done only at merge, back to Todo when closed unmerged |
 | `review-gate.md` | always | before pushing a feature branch: fetch the remote default (rebase only on a conflict or a needed change), then fix every `pixel review-gate` finding at CONCERN or above — the pre-push hook enforces the review |
-| `validation-loop.md` | always | publish one current validated candidate: scoped local feedback while editing, a frozen full-gate result, baseline compile and remote mutation verdict before Rust pushes, and precise CI triage |
+| `validation-loop.md` | always | publish one current validated candidate: scoped local feedback while editing, a frozen full-gate result, baseline compile before Rust pushes, the opt-in local mutation verdict, and precise CI triage |
 | `pr-swarm.md` | `scripts/pr-swarm.sh`, `.claude/settings.json` | the rmux pane-per-open-PR reconciler: the tool, the SessionStart watcher that replaces launchd (macOS TCC denies launchd any path under `~/Documents`), and the teardown rails that keep a merged PR's worktree when it is dirty, unpushed or the shared cache |
 
 `.claude/rules` is a symlink to that directory (Claude Code loads it by
@@ -69,7 +69,7 @@ and its supporting files; `.claude/skills` is a symlink to it.
 | `section-redesign/` | reworking a section of the pixel-cli.dev home, "/section-redesign #<anchor>", "même méthode que le hero" | the loop the hero went through: visitor critique, an artifact of mocked variants with votable points (`assets/review-sheet.html`), synthesis iterations, every claim checked against code and benchmarks, the Hugo implementation with desktop and mobile captures; lists the decisions that already bind every section |
 | `improve-codebase-architecture/` | manual only: "/improve-codebase-architecture [area]", an architecture review, where to deepen modules | finds deepening opportunities from churn, `pixel audit`, areas and callers, writes a local HTML report of before/after cards with their measured cost (mutants, diff, `ARCHITECTURE.md` sections, impact risk), then grills the picked candidate into a project-3 task; settled decisions live in `ARCHITECTURE.md` and `.agents/rules/`; adapted from Matt Pocock's MIT skill (`UPSTREAM` pins the commit) |
 | `agent-session-debugging/` | debugging real pi, agy, Claude, or Codex behavior in Herdr, especially Pixel retrieval, metrics, or installed hooks | keeps the main operator pane beside a 2×2 agent grid; inspect real transcripts, ask the CLI directly when its UI is ambiguous, then implement, retest, and redeploy with evidence |
-| `validation-loop/` | implementing Rust, preparing a PR, or reducing compile and mutation-fix round trips | chooses scoped local feedback, freezes one candidate, uses the remote mutation gate, and triages failed gates without blind push retries |
+| `validation-loop/` | implementing Rust, preparing a PR, or reducing compile and mutation-fix round trips | chooses scoped local feedback, freezes one candidate, uses the opt-in local mutation gate, and triages failed gates without blind push retries |
 
 Rules are always-on for the files they name; a skill is read when its
 `description` matches the task. A tool without skill support reads

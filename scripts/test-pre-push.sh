@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 # Contract for the pre-push order: a Rust baseline must compile before the
-# remote mutation campaign starts, while non-Rust pushes avoid Cargo entirely.
+# mutants gate runs, while non-Rust pushes avoid Cargo entirely.
 # A branch behind origin's default is judged against its merge-base, never
 # refused for not being rebased.
 set -eu
@@ -15,11 +15,11 @@ fixture="$tmp/repo"
 mkdir -p "$fixture/.githooks" "$fixture/scripts" "$tmp/bin"
 cp "$repo/.githooks/pre-push" "$fixture/.githooks/"
 
-cat > "$fixture/scripts/mutants-remote-gate.sh" <<'EOF'
+cat > "$fixture/scripts/mutants-push-gate.sh" <<'EOF'
 #!/bin/sh
-printf 'remote %s\n' "${PIXEL_MUTANTS_BASE:-missing}" >> "$ORDER_LOG"
+printf 'gate %s\n' "${PIXEL_MUTANTS_BASE:-missing}" >> "$ORDER_LOG"
 EOF
-chmod +x "$fixture/scripts/mutants-remote-gate.sh"
+chmod +x "$fixture/scripts/mutants-push-gate.sh"
 
 cat > "$tmp/bin/git" <<'EOF'
 #!/bin/sh
@@ -56,11 +56,11 @@ run() {
 : > "$tmp/order.log"
 run 'crates/demo/src/lib.rs\n'
 test "$(sed -n '1p' "$tmp/order.log")" = 'cargo check --all-targets'
-test "$(sed -n '2p' "$tmp/order.log")" = 'remote base'
+test "$(sed -n '2p' "$tmp/order.log")" = 'gate base'
 
 : > "$tmp/order.log"
 run 'docs/guide.md\n'
-test "$(sed -n '1p' "$tmp/order.log")" = 'remote base'
+test "$(sed -n '1p' "$tmp/order.log")" = 'gate base'
 test "$(sed -n '2p' "$tmp/order.log")" = 'review review-gate . --base base --fail-on concern'
 
 : > "$tmp/order.log"
@@ -82,17 +82,17 @@ if ! FETCHED_TIP=newer MERGE_BASE=older run 'crates/demo/src/lib.rs\n' > "$tmp/b
 fi
 ! grep -q 'not rebased' "$tmp/behind.out"
 test "$(sed -n '1p' "$tmp/order.log")" = 'cargo check --all-targets'
-test "$(sed -n '2p' "$tmp/order.log")" = 'remote older'
+test "$(sed -n '2p' "$tmp/order.log")" = 'gate older'
 
 # Stacked: an explicit immediate base wins over origin's default for the
-# baseline diff, the remote gate and the review alike.
+# baseline diff, the mutants gate and the review alike.
 : > "$tmp/order.log"
 if ! PIXEL_MUTANTS_BASE=parent-branch MERGE_BASE=parent-fork run 'crates/demo/src/lib.rs\n' > "$tmp/stacked.out" 2>&1; then
     cat "$tmp/stacked.out" >&2
     echo "expected a stacked branch to push against its parent" >&2
     exit 1
 fi
-test "$(sed -n '2p' "$tmp/order.log")" = 'remote parent-fork'
+test "$(sed -n '2p' "$tmp/order.log")" = 'gate parent-fork'
 test "$(sed -n '3p' "$tmp/order.log")" = 'review review-gate . --base parent-fork --fail-on concern'
 
 echo "pre-push contract: ok"

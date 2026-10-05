@@ -2,13 +2,11 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-# A cheap local compile proves the candidate builds before the remote mutation
-# gate spends a runner on it. Mutation coverage is then proved off this machine:
-# the gate
-# script bundles the committed diff to the gate host (PIXEL_MUTANTS_GATE_HOST,
-# default a2) where the campaign runs against a warm target/, and the push is
-# blocked on the remote verdict. Nothing mutant-related compiles or runs
-# locally; CI's Mutants in diff remains the required merge gate.
+# A cheap local compile proves the candidate builds before anything else judges
+# it. The mutants gate (scripts/mutants-push-gate.sh) is opt-in: with
+# PIXEL_MUTANTS_GATE=local it runs the diff's campaign on this machine and
+# blocks the push on its verdict; unset, it runs nothing. CI's Mutants in diff
+# remains the required merge gate either way.
 set -eu
 
 repo=$(git rev-parse --show-toplevel) || exit 0
@@ -43,7 +41,7 @@ if git diff --name-only "$tip...HEAD" | grep -Eq '^crates/.*\.rs$'; then
     fi
 fi
 
-PIXEL_MUTANTS_BASE="$tip" "$repo/scripts/mutants-remote-gate.sh"
+PIXEL_MUTANTS_BASE="$tip" "$repo/scripts/mutants-push-gate.sh"
 
 # review-gate: the deterministic review of the branch diff against the same
 # merge-base must hold no BLOCKER or CONCERN finding. Skipped when the

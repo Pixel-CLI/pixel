@@ -77,8 +77,8 @@ first `cargo mutants` run come back clean:
   --batch-check <object>` that git rejects, so every blob measured 0 bytes),
   fix the bug in its own PR with a `changelog.d/` fragment, below the PR that
   found it. Do not bend the test to the broken behaviour.
-- **Fix from the remote or CI report, verify locally only per function.** Read
-  the `MISSED`/`TIMEOUT` lines (the remote gate reports them before a blocked
+- **Fix from the push-gate or CI report, verify locally only per function.** Read
+  the `MISSED`/`TIMEOUT` lines (the `local` push gate reports them before a blocked
   push; `Mutants in diff` gathers every CI shard's), write the test, and if asked to
   check before pushing run `cargo mutants --in-diff <diff> -F <function>`
   (minutes). Never the full in-diff run: it is the job's work. Never edit
