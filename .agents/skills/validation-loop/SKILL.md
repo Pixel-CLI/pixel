@@ -11,8 +11,8 @@ stage.
 
 ## 1. Establish one candidate
 
-Find or create the tracked task, use a clean branch/worktree, fetch the actual
-base, and rebase before reviewing a candidate. Keep one behavior change in one
+Find or create the tracked task, use a clean branch/worktree from the fetched
+actual base. Rebase later only on a conflict or a needed change on the base. Keep one behavior change in one
 pull request. A stacked branch uses its immediate base, supplied to the remote
 gate with `PIXEL_MUTANTS_BASE` when needed.
 
@@ -43,7 +43,7 @@ mutation campaign: the pre-push hook sends the exact committed diff to the
 remote gate host with a warm outcome cache. A bounded single-function local
 run remains an explicit request only.
 
-Fetch, rebase and run `pixel review-gate` as required by `review-gate.md`.
+Fetch and run `pixel review-gate` as required by `review-gate.md`.
 Push the same candidate once. For Rust changes, the hook performs the
 all-target baseline compile before the remote mutation campaign; that baseline
 is a required rung, and the remote verdict is trusted only for a candidate

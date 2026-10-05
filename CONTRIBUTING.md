@@ -160,8 +160,9 @@ git diff main...HEAD > target/pr.diff && cargo mutants --in-diff target/pr.diff 
 ```
 
 The tracked pre-push hook fetches the current base before each Rust branch
-update, verifies the branch is rebased on it, and runs `cargo check
---all-targets` when Rust source changed. A failed compile is therefore fixed
+update, judges the branch against its merge-base with it (a branch behind it
+is not refused), and runs `cargo check --all-targets` when Rust source
+changed. A failed compile is therefore fixed
 before the remote mutation campaign can report an unjudged baseline. Nothing
 mutant-related compiles or runs locally: the hook then
 bundles the committed three-dot diff and its exact base commit to the gate
@@ -540,7 +541,7 @@ gates under "Gates (run before every PR)".
 | --- | --- | --- |
 | Editing | Tests for the changed contract and affected consumers; crate-scoped compilation/Clippy as needed | The behavior is covered, including relevant failure paths |
 | Unit ready | Full local format, Clippy, workspace tests and doctests; dependency policy when its inputs change; mutant listing and review | Local gates pass on a frozen candidate, and each prospective mutant has a killing test or a justified skip |
-| Push | Fetch/rebase, `pixel review-gate`, then the hook's all-target baseline compile and remote mutation campaign for Rust | The exact candidate and current base pass before the update reaches GitHub |
+| Push | Fetch (rebase only on a conflict or a needed change), `pixel review-gate`, then the hook's all-target baseline compile and remote mutation campaign for Rust | The exact candidate and current base pass before the update reaches GitHub |
 | PR | Existing CI tests, lint, feature lanes, MSRV, cross-build and mutants as selected by their path filters; CodeRabbit review | Current-head workflows complete successfully, mutation counts have a valid verdict, and review findings are answered |
 
 Use `scripts/gates.sh` for the full local run. It skips Cargo when its path
@@ -909,7 +910,7 @@ the PR title and expect a slower review.
   contract test.
 - Documentation (README, ARCHITECTURE, agent prompt, `--help`) that no
   longer matches the code.
-- A branch that was not rebased onto an up-to-date `main`.
+- A branch that conflicts with `main` and was not rebased onto it.
 - Merge commits on a feature branch. History is linear; rebase instead.
 - Personal emails, hostnames, or paths in code or fixtures. Use
   `@example.com` and temp dirs.

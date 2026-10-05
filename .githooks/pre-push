@@ -13,22 +13,24 @@ set -eu
 
 repo=$(git rev-parse --show-toplevel) || exit 0
 
-# Fetch before any expensive validation. The fetched head is the base both the
-# review gate and the mutation gate must judge against; a local `main` may be
-# stale even when its name still resolves.
+# Fetch before any expensive validation: a local `main` may be stale even when
+# its name still resolves. The branch is judged against its merge-base with the
+# fetched default — what the pull request's three-dot diff shows — so a branch
+# behind main pushes without a rebase. main does not require branches to be up
+# to date, and a rebase per push re-ran every CI workflow for nothing; rebase
+# on a conflict or when the change needs something newer on main.
 if ! git fetch --quiet origin HEAD 2>/dev/null; then
     echo "pre-push: could not fetch origin's current default; refusing to verify"
     exit 1
 fi
-tip=$(git rev-parse --verify --quiet FETCH_HEAD) || {
+git rev-parse --verify --quiet FETCH_HEAD >/dev/null || {
     echo "pre-push: could not resolve origin's fetched default; refusing to verify"
     exit 1
 }
-if [ "$(git merge-base HEAD FETCH_HEAD)" != "$tip" ]; then
-    echo "pre-push: HEAD is not rebased on the fetched origin default:"
-    echo "  git fetch origin HEAD && git rebase FETCH_HEAD"
+tip=$(git merge-base HEAD FETCH_HEAD) || {
+    echo "pre-push: HEAD shares no history with origin's default; refusing to verify"
     exit 1
-fi
+}
 
 # A Rust source change gets an immediate local baseline. This stops a compile
 # failure from being reported later as a mutation baseline failure; docs and
@@ -42,15 +44,10 @@ fi
 
 PIXEL_MUTANTS_BASE="$tip" "$repo/scripts/mutants-remote-gate.sh"
 
-# review-gate: the branch must sit on the freshest remote default and the
-# deterministic review must hold no BLOCKER or CONCERN finding. Skipped when
-# the installed pixel predates the command.
+# review-gate: the deterministic review of the branch diff against its
+# merge-base must hold no BLOCKER or CONCERN finding. Skipped when the
+# installed pixel predates the command.
 if command -v pixel >/dev/null 2>&1 && pixel review-gate --help >/dev/null 2>&1; then
-    if [ "$(git merge-base HEAD FETCH_HEAD)" != "$tip" ]; then
-        echo "pre-push: HEAD is not rebased on the fetched origin default:"
-        echo "  git fetch origin HEAD && git rebase FETCH_HEAD"
-        exit 1
-    fi
     if ! pixel review-gate . --fail-on concern; then
         echo "pre-push: review-gate findings at CONCERN or above — fix them, or push --no-verify"
         exit 1

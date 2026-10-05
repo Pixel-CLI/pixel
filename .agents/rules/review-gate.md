@@ -1,5 +1,5 @@
 ---
-description: pre-push review loop — rebase on the remote default, then fix every review-gate finding at CONCERN or above
+description: pre-push review loop — fetch the remote default, then fix every review-gate finding at CONCERN or above; rebase only on a conflict or a needed change
 ---
 
 # Review gate before pushing
@@ -11,11 +11,14 @@ merge-base with the remote default on a clean one) and lists findings as
 
 Before every `git push` of a feature branch, in this order:
 
-1. `git fetch origin && git rebase origin/<default>` — fetch the actual PR
-   base first (`origin/main` for main-targeted work; the immediate base for a
-   stack), then use that fetched ref for validation and diffing. Never review
-   or push against a stale local `main` or tracking ref. Resolve conflicts
-   hunk by hunk; the rebase finishes before the review runs.
+1. `git fetch origin` — fetch the actual PR base (`origin/main` for
+   main-targeted work; the immediate base for a stack) and diff against the
+   fetched ref, never a stale local `main` or tracking ref. Do not rebase by
+   default: `main` does not require branches to be up to date, the review and
+   the mutation gate judge the merge-base diff, and every rebase re-runs the
+   whole CI. Rebase only when the pull request conflicts with the base, or
+   when the change needs something that landed on it since; then resolve
+   conflicts hunk by hunk before the review runs.
 2. `pixel review-gate .` — read every finding.
 3. Fix each `BLOCKER` and `CONCERN` (the finding's `fix:` line names the
    move). `SUGGESTION` and `NIT` items are judgement calls — fix the cheap
@@ -28,7 +31,7 @@ twice), no edit clears them, and at CONCERN they alone refused 7 of the last 12
 merged pull requests on that alone (#555). Read them as "review this part
 as a whole", and say in the pull request that you did.
 
-The tracked pre-push hook enforces both halves: it fetches the remote
-default and refuses a push whose merge-base is behind it, then runs
+The tracked pre-push hook fetches the remote default, judges the branch
+against its merge-base with it (a branch behind it is not refused), then runs
 `pixel review-gate . --fail-on concern` and refuses the push on any BLOCKER
 or CONCERN finding. `git push --no-verify` is the explicit bypass.

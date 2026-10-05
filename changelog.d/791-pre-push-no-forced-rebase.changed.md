@@ -1,0 +1,1 @@
+**pre-push:** the hook no longer refuses a branch whose merge-base is behind origin's default; it judges the review and the mutation gate against that merge-base. `main` no longer requires branches to be up to date, and a rebase per push re-ran every CI workflow — rebase only on a conflict or when the change needs something newer on `main`.

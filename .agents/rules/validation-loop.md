@@ -12,8 +12,10 @@ request exists.
   pull request for the same change.
 - Start from the fetched actual base. For main-targeted work that is
   `origin/main`; stacked work uses its immediate base. Do not use a local
-  `main` or tracking ref until it has been fetched and rebased as
-  `review-gate.md` requires.
+  `main` or tracking ref until it has been fetched. Do not rebase a pushed
+  candidate just to catch up with its base: each rebase re-runs the whole CI.
+  Rebase on a conflict, or when the change needs something newer on the base
+  (`review-gate.md`).
 - While editing Rust, run the smallest compilation and contract/consumer tests
   that cover the changed behavior. A compile failure is a local fix, never a
   reason to wait for CI or the mutation gate.
