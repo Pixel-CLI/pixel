@@ -264,8 +264,7 @@ where
     let labels: Vec<&str> = MENU.iter().map(|(label, _)| *label).collect();
     let picked = crate::select::pick(&labels, stdin, stdout, raw, stdin_is_terminal)?;
     let choice = match picked {
-        Some(index) if index < MENU.len() => Some(index),
-        Some(_) => None,
+        Some(index) => Some(index),
         None => {
             print_menu(stdout)?;
             write!(stdout, "Choice> ").map_err(|e| e.to_string())?;
@@ -274,7 +273,7 @@ where
             stdin
                 .read_line(&mut line)
                 .map_err(|e| format!("read choice: {e}"))?;
-            parse_choice(&line).filter(|index| *index < MENU.len())
+            parse_choice(&line)
         }
     };
     match choice.and_then(|index| MENU.get(index).map(|(_, kind)| *kind)) {
