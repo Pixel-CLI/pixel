@@ -27,17 +27,33 @@ CONTEXT_FILES = {"AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", "settings.json",
 MANAGED = (Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
            Path("/Library/Managed Preferences/com.anthropic.claudecode.plist"),
            Path.home() / ".claude/managed-settings.json")
+GATEWAY_ENV_KEYS = (
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+)
+ACCOUNTING_FILES = {".pixel/actions.jsonl", ".pixel/calls.json"}
+SKILL_TREATMENT_FILE = ".claude/skills/pixel-impact/SKILL.md"
+PIXEL_IMPACT_TOOL_PERMISSION = "Bash(pixel impact * --no-refresh *)"
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def directory_digest(root: Path) -> str:
+def directory_digest(root: Path, *, ignored_regular_files: set[str] | None = None) -> str:
     result = hashlib.sha256()
+    ignored = ACCOUNTING_FILES | (ignored_regular_files or set())
     for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root).as_posix().encode()
-        result.update(relative + b"\0")
+        relative = path.relative_to(root).as_posix()
+        if relative in ignored and path.is_file() and not path.is_symlink():
+            continue
+        result.update(relative.encode() + b"\0")
         if path.is_symlink():
             result.update(b"link\0" + os.readlink(path).encode() + b"\0")
         elif path.is_file():
@@ -119,11 +135,59 @@ def version_and_help(claude: str) -> tuple[str, str]:
     if version.returncode or help_text.returncode:
         raise RuntimeError("Claude version/help preflight failed")
     for option in ("--setting-sources", "--permission-mode", "--permission-prompts",
-                   "--disallowedTools", "--max-turns", "--max-budget-usd",
+                   "--allowedTools", "--disallowedTools", "--max-budget-usd",
                    "--no-session-persistence", "--effort"):
         if option not in help_text.stdout:
             raise RuntimeError("installed Claude lacks required CLI option " + option)
+    max_turns_probe = command([claude, "--max-turns"], timeout=5)
+    probe_message = max_turns_probe.stderr + "\n" + max_turns_probe.stdout
+    if max_turns_probe.returncode == 0 or not re.search(
+        r"option ['\"]--max-turns(?: <[^>]+>)?['\"] argument missing", probe_message
+    ):
+        raise RuntimeError("installed Claude lacks required CLI option --max-turns")
     return version.stdout.strip().splitlines()[0], digest(help_text.stdout.encode())
+
+
+def verify_preflight_snapshot(project: Path, pixel: str, manifest: dict) -> int:
+    if digest(Path(pixel).read_bytes()) != manifest["pixel_binary_sha256"]:
+        raise RuntimeError("Pixel binary changed since preflight")
+    if digest((project / ".pixel/graph.v2.db").read_bytes()) != manifest["graph_sha256"]:
+        raise RuntimeError("prepared graph changed since preflight")
+    source_digest = directory_digest(
+        project, ignored_regular_files={SKILL_TREATMENT_FILE}
+    )
+    if source_digest != manifest["project_source_sha256"]:
+        raise RuntimeError("prepared source changed since preflight")
+    started = time.monotonic()
+    query = command(manifest["pre_model_graph_argv"], cwd=project, timeout=5)
+    query_ms = round((time.monotonic() - started) * 1000)
+    if query.returncode or digest(query.stdout.encode()) != manifest["pre_model_graph_query_sha256"]:
+        raise RuntimeError("no-refresh graph query changed since preflight")
+    if digest(Path(pixel).read_bytes()) != manifest["pixel_binary_sha256"]:
+        raise RuntimeError("Pixel binary changed during pre-arm graph verification")
+    if digest((project / ".pixel/graph.v2.db").read_bytes()) != manifest["graph_sha256"]:
+        raise RuntimeError("prepared graph changed during pre-arm graph verification")
+    if directory_digest(project, ignored_regular_files={SKILL_TREATMENT_FILE}) != manifest[
+        "project_source_sha256"
+    ]:
+        raise RuntimeError("prepared source changed during pre-arm graph verification")
+    return query_ms
+
+
+def claude_run_argv(claude: str, prompt: str, model: str, effort: str,
+                    max_turns: int, max_budget_usd: float) -> list[str]:
+    return [
+        claude, "-p", prompt,
+        "--model", model, "--effort", effort,
+        "--setting-sources", "project",
+        "--permission-mode", "plan", "--permission-prompts", "none",
+        "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent",
+        "--allowedTools", PIXEL_IMPACT_TOOL_PERMISSION,
+        "--no-chrome", "--no-session-persistence",
+        "--max-turns", str(max_turns),
+        "--max-budget-usd", str(max_budget_usd),
+        "--output-format", "stream-json", "--verbose",
+    ]
 
 
 def resolve_executable(value: str | None, name: str) -> Path:
@@ -256,6 +320,136 @@ def credential_receipt(source: str) -> dict[str, object]:
     }
 
 
+def _gateway_file_identity(path: Path, info: os.stat_result) -> dict[str, object]:
+    return {
+        "resolved_path": str(path),
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
+    }
+
+
+def load_gateway_settings_snapshot(path: Path) -> tuple[dict[str, str], dict[str, object]]:
+    """Load allowlisted gateway env entries and non-secret source identity."""
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+        before = resolved.stat()
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeError("gateway settings must be a regular file")
+        contents = resolved.read_text()
+        after = resolved.stat()
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        raise RuntimeError("gateway settings are unreadable or invalid") from None
+    source = _gateway_file_identity(resolved, before)
+    if source != _gateway_file_identity(resolved, after):
+        raise RuntimeError("gateway settings changed while being read")
+    try:
+        value = json.loads(contents)
+    except json.JSONDecodeError:
+        raise RuntimeError("gateway settings are unreadable or invalid") from None
+    settings_env = value.get("env") if isinstance(value, dict) else None
+    if not isinstance(settings_env, dict):
+        raise RuntimeError("gateway settings must contain an env object")
+    selected = {
+        key: settings_env[key]
+        for key in GATEWAY_ENV_KEYS
+        if key in settings_env
+    }
+    for required in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        if not isinstance(selected.get(required), str) or not selected[required].strip():
+            raise RuntimeError("gateway settings require ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL")
+    if any(not isinstance(item, str) for item in selected.values()):
+        raise RuntimeError("allowlisted gateway settings must be strings")
+    return selected, source
+
+
+def load_gateway_settings(path: Path) -> dict[str, str]:
+    return load_gateway_settings_snapshot(path)[0]
+
+
+def claude_run_environment(pixel: str, home: Path, root: Path, config: Path,
+                           gateway_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = {
+        "PATH": f"{Path(pixel).parent}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": str(home),
+        "TMPDIR": str(root),
+        "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+        "CLAUDE_CONFIG_DIR": str(config),
+    }
+    if gateway_env is not None:
+        env.update(gateway_env)
+    return env
+
+
+def reported_model_identity(row: dict) -> dict[str, object]:
+    usage = row.get("resolved_model_usage")
+    usage_ids = sorted(usage) if isinstance(usage, dict) else []
+    return {
+        "cli_init_model": row.get("cli_init_model"),
+        "cli_model_usage_ids": usage_ids,
+    }
+
+
+def model_selection_receipt(alias: str, gateway_env: dict[str, str] | None) -> dict[str, object]:
+    alias_key = {
+        "sonnet": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "opus": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "haiku": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    }.get(alias)
+    return {
+        "requested_cli_model": alias,
+        "selection_source": "explicit --model CLI argument",
+        "configured_alias_override_key": (
+            alias_key if gateway_env is not None and alias_key in gateway_env else None
+        ),
+        "configured_default_model_present": gateway_env is not None and "ANTHROPIC_MODEL" in gateway_env,
+    }
+
+
+def require_matching_reported_models(results: list[dict]) -> dict[str, object] | None:
+    if len(results) != 2 or not all(row.get("result_found") and not row.get("is_error") for row in results):
+        return None
+    identities = [reported_model_identity(row) for row in results]
+    if not any(identity["cli_init_model"] or identity["cli_model_usage_ids"] for identity in identities):
+        raise RuntimeError("Claude CLI did not report model identity for both arms")
+    if identities[0] != identities[1]:
+        raise RuntimeError("Claude CLI-reported model identity differs between arms")
+    return {
+        "status": "matched",
+        "source": "Claude CLI init/modelUsage; gateway backend identity is not attested",
+        "identity": identities[0],
+    }
+
+
+def redact_gateway_values(text: str, gateway_env: dict[str, str] | None) -> str:
+    if gateway_env is None:
+        return text
+    sensitive_values = [gateway_env.get(key, "") for key in (
+        "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
+    )]
+    custom_headers = gateway_env.get("ANTHROPIC_CUSTOM_HEADERS", "")
+    for line in custom_headers.splitlines():
+        _, separator, value = line.partition(":")
+        if separator and value.strip():
+            sensitive_values.append(value.strip())
+    escaped_values = {
+        escaped
+        for value in sensitive_values
+        if value
+        for escaped in (
+            value,
+            json.dumps(value, ensure_ascii=False)[1:-1],
+            json.dumps(value, ensure_ascii=True)[1:-1],
+        )
+    }
+    for value in sorted(escaped_values, key=len, reverse=True):
+        if value:
+            text = text.replace(value, "<redacted-gateway-setting>")
+    return text
+
+
 def token_totals(row: dict) -> dict:
     input_fields = ("input_tokens", "cache_read_tokens", "cache_creation_tokens")
     input_values = [row.get(key) for key in input_fields]
@@ -288,12 +482,35 @@ def preflight(args: argparse.Namespace) -> dict:
     candidate_skill = invocation_variant(source_skill, True)
     if invocation_variant(candidate_skill, False) != baseline_skill:
         raise RuntimeError("candidate changes skill content beyond invocation metadata")
-    auth_config_dir = Path(args.auth_config_dir).expanduser() if args.auth_config_dir else None
-    credentials_file = Path(args.credentials_file).expanduser() if args.credentials_file else None
-    credential_source_name = credential_source(auth_config_dir, credentials_file)
-    oauth_credentials = load_oauth_credentials(
-        auth_config_dir, credentials_file, source=credential_source_name
-    )
+    auth_mode = getattr(args, "auth_mode", "oauth")
+    gateway_settings = getattr(args, "gateway_settings", None)
+    gateway_env = None
+    gateway_source = None
+    if auth_mode == "configured-gateway":
+        if not gateway_settings:
+            raise RuntimeError("--gateway-settings is required for configured-gateway auth")
+        gateway_env, gateway_source = load_gateway_settings_snapshot(Path(gateway_settings))
+        credential_source_name = "configured-gateway-settings"
+        auth_receipt = {
+            "credential_source": credential_source_name,
+            "auth_mode": auth_mode,
+            "configured_environment_keys": sorted(gateway_env),
+            "gateway_settings_source": gateway_source,
+            "ANTHROPIC_API_KEY_forwarded": False,
+        }
+    else:
+        if gateway_settings:
+            raise RuntimeError("--gateway-settings requires --auth-mode configured-gateway")
+        auth_config_dir = Path(args.auth_config_dir).expanduser() if args.auth_config_dir else None
+        credentials_file = Path(args.credentials_file).expanduser() if args.credentials_file else None
+        credential_source_name = credential_source(auth_config_dir, credentials_file)
+        oauth_credentials = load_oauth_credentials(
+            auth_config_dir, credentials_file, source=credential_source_name
+        )
+        auth_receipt = {
+            "auth_mode": auth_mode,
+            **credential_receipt(credential_source_name),
+        }
     version, help_sha = version_and_help(claude)
     workspace_parent = Path(tempfile.mkdtemp(prefix="pixel-claude-pair-workspace-"))
     project = workspace_parent / "project"
@@ -312,8 +529,9 @@ def preflight(args: argparse.Namespace) -> dict:
     if pixel_version.returncode:
         raise RuntimeError("Pixel version preflight failed")
     started = time.monotonic()
-    impact = command([pixel, "impact", args.symbol, "--no-refresh", "--depth", "2",
-                      "--json", "--metrics", "off"], cwd=project, timeout=5)
+    graph_query_argv = [pixel, "impact", args.symbol, "--no-refresh", "--depth", "2",
+                        "--json", "--metrics", "off"]
+    impact = command(graph_query_argv, cwd=project, timeout=5)
     lookup_ms = round((time.monotonic() - started) * 1000)
     if impact.returncode:
         raise RuntimeError("no-refresh graph preflight failed: " + impact.stderr.strip())
@@ -342,20 +560,31 @@ def preflight(args: argparse.Namespace) -> dict:
         "pixel_binary_sha256": digest(Path(pixel).read_bytes()),
         "graph_sha256": digest((project / ".pixel/graph.v2.db").read_bytes()),
         "pre_model_graph_query": f"pixel impact {args.symbol} --no-refresh --depth 2 --json --metrics off",
+        "pre_model_graph_argv": graph_query_argv,
         "pre_model_graph_query_sha256": digest(impact.stdout.encode()),
         "pre_model_graph_query_ms": lookup_ms,
+        "project_source_sha256": directory_digest(
+            project, ignored_regular_files={SKILL_TREATMENT_FILE}
+        ),
         "pre_model_graph_result_count": len(graph_result) if isinstance(graph_result, list) else 1,
         "claude_binary": claude,
         "claude_version": version,
         "claude_help_sha256": help_sha,
         "model_alias": args.model,
+        "model_selection": model_selection_receipt(args.model, gateway_env),
+        "auth_mode": auth_mode,
+        "auth_environment_keys": sorted(gateway_env) if gateway_env is not None else [],
+        "model_identity_policy": "CLI-reported init/modelUsage only; gateway backend identity is not attested",
         "effort": args.effort,
         "max_turns": args.max_turns,
         "max_budget_usd_per_arm": args.max_budget_usd,
         "permission_mode": "plan",
         "setting_sources": "project",
-        "config_policy": "ephemeral config containing OAuth credentials only; no host settings, skills, hooks, plugins, or MCP copied",
-        **credential_receipt(credential_source_name),
+        "allowed_tools": [PIXEL_IMPACT_TOOL_PERMISSION],
+        "config_policy": ("ephemeral config with allowlisted gateway environment only; no host settings, skills, hooks, plugins, or MCP copied"
+                          if gateway_env is not None else
+                          "ephemeral config containing OAuth credentials only; no host settings, skills, hooks, plugins, or MCP copied"),
+        **auth_receipt,
         "workspace": str(project),
         "workspace_parent": str(workspace_parent),
         "setup_ms": round((time.monotonic() - setup_started) * 1000),
@@ -370,6 +599,7 @@ def parse_stream(path: Path) -> dict:
     events = []
     event_positions = {}
     final = None
+    cli_init_model = None
     for line in path.read_text(errors="replace").splitlines():
         try:
             event = json.loads(line)
@@ -388,6 +618,10 @@ def parse_stream(path: Path) -> dict:
                             events.append(block)
                     else:
                         events.append(block)
+        elif event.get("type") == "system" and event.get("subtype") == "init":
+            model = event.get("model")
+            if isinstance(model, str):
+                cli_init_model = model
         elif event.get("type") == "result":
             final = event
     skill_uses = [b.get("input") for b in events if b.get("name") == "Skill"]
@@ -411,6 +645,7 @@ def parse_stream(path: Path) -> dict:
         "cache_creation_tokens": usage.get("cache_creation_input_tokens"),
         "total_cost_usd": final.get("total_cost_usd") if final else None,
         "resolved_model_usage": final.get("modelUsage") if final else None,
+        "cli_init_model": cli_init_model,
         "skill_invocations": skill_uses,
         "pixel_impact_calls": pixel_calls,
         "tool_use_count": len(events),
@@ -427,14 +662,29 @@ def execute(args: argparse.Namespace) -> list[dict]:
         raise RuntimeError("Claude version changed since preflight")
     project = Path(manifest["workspace"])
     skill_file = project / ".claude/skills/pixel-impact/SKILL.md"
-    auth_config_dir = Path(args.auth_config_dir).expanduser() if args.auth_config_dir else None
-    credentials_file = Path(args.credentials_file).expanduser() if args.credentials_file else None
-    current_credential_source = credential_source(auth_config_dir, credentials_file)
-    oauth_credentials = load_oauth_credentials(
-        auth_config_dir, credentials_file, source=current_credential_source
-    )
-    if current_credential_source != manifest.get("credential_source"):
-        raise RuntimeError("Claude credential source changed since preflight")
+    auth_mode = getattr(args, "auth_mode", "oauth")
+    gateway_settings = getattr(args, "gateway_settings", None)
+    if auth_mode != manifest.get("auth_mode", "oauth"):
+        raise RuntimeError("Claude auth mode changed since preflight")
+    gateway_env = None
+    gateway_source = None
+    if auth_mode == "configured-gateway":
+        if not gateway_settings:
+            raise RuntimeError("--gateway-settings is required for configured-gateway auth")
+        gateway_env, gateway_source = load_gateway_settings_snapshot(Path(gateway_settings))
+        if gateway_source != manifest.get("gateway_settings_source"):
+            raise RuntimeError("configured gateway settings changed since preflight")
+        if sorted(gateway_env) != manifest.get("auth_environment_keys"):
+            raise RuntimeError("configured gateway environment keys changed since preflight")
+    else:
+        auth_config_dir = Path(args.auth_config_dir).expanduser() if args.auth_config_dir else None
+        credentials_file = Path(args.credentials_file).expanduser() if args.credentials_file else None
+        current_credential_source = credential_source(auth_config_dir, credentials_file)
+        oauth_credentials = load_oauth_credentials(
+            auth_config_dir, credentials_file, source=current_credential_source
+        )
+        if current_credential_source != manifest.get("credential_source"):
+            raise RuntimeError("Claude credential source changed since preflight")
     scenario = json.loads(Path(args.scenario).read_text())
     if digest(Path(args.scenario).read_bytes()) != manifest["scenario_sha256"]:
         raise RuntimeError("scenario changed since preflight")
@@ -455,34 +705,25 @@ def execute(args: argparse.Namespace) -> list[dict]:
             skill_file.write_text(body)
             config = root / ("config-" + arm)
             config.mkdir(mode=0o700)
-            write_isolated_credentials(config, oauth_credentials)
-            env = {
-                "PATH": f"{Path(pixel).parent}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-                "HOME": str(isolated_home),
-                "TMPDIR": str(root),
-                "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-                "CLAUDE_CONFIG_DIR": str(config),
-            }
-            argv = [
-                claude, "-p", scenario["prompt"],
-                "--model", args.model, "--effort", args.effort,
-                "--setting-sources", "project",
-                "--permission-mode", "plan", "--permission-prompts", "none",
-                "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent",
-                "--no-chrome", "--no-session-persistence",
-                "--max-turns", str(args.max_turns),
-                "--max-budget-usd", str(args.max_budget_usd),
-                "--output-format", "stream-json", "--verbose",
-            ]
+            if gateway_env is None:
+                write_isolated_credentials(config, oauth_credentials)
+            env = claude_run_environment(pixel, isolated_home, root, config, gateway_env)
+            graph_check_ms = verify_preflight_snapshot(project, pixel, manifest)
+            argv = claude_run_argv(
+                claude, scenario["prompt"], args.model, args.effort,
+                args.max_turns, args.max_budget_usd,
+            )
             before_tree = directory_digest(project)
             started = time.monotonic()
             proc = command(argv, cwd=project, env=env, timeout=args.timeout)
             wall_ms = round((time.monotonic() - started) * 1000)
+            proc_stdout = redact_gateway_values(proc.stdout, gateway_env)
+            proc_stderr = redact_gateway_values(proc.stderr, gateway_env)
             transcript = out / f"{scenario['id']}-{arm}.claude.jsonl"
-            transcript.write_text(proc.stdout)
+            transcript.write_text(proc_stdout)
             transcript.chmod(0o600)
             stderr_path = out / f"{arm}.stderr"
-            stderr_path.write_text(proc.stderr)
+            stderr_path.write_text(proc_stderr)
             stderr_path.chmod(0o600)
             command_path = out / f"{arm}.command.json"
             command_path.write_text(json.dumps({
@@ -494,7 +735,10 @@ def execute(args: argparse.Namespace) -> list[dict]:
             }, indent=2) + "\n")
             command_path.chmod(0o600)
             row = parse_stream(transcript)
+            if gateway_env is not None and isinstance(row.get("answer"), str):
+                row["answer"] = redact_gateway_values(row["answer"], gateway_env)
             row.update({"arm": arm, "exit_code": proc.returncode, "wall_ms": wall_ms,
+                        "graph_check_ms": graph_check_ms,
                         "skill_sha256": digest(body.encode()), "rep": 1,
                         "model": args.model, "cli_version": manifest["claude_version"],
                         "commit": manifest["repo_commit"]})
@@ -505,6 +749,7 @@ def execute(args: argparse.Namespace) -> list[dict]:
                 "schema_version": 1, "scenario": scenario["id"], "arm": arm, "cli": "claude",
                 "rep": 1, "model": args.model, "cli_version": manifest["claude_version"],
                 "commit": manifest["repo_commit"], "wall_ms": wall_ms,
+                "graph_check_ms": graph_check_ms,
                 "exit_code": proc.returncode, "timed_out": False,
             }, indent=2) + "\n")
             run_path.chmod(0o600)
@@ -513,10 +758,31 @@ def execute(args: argparse.Namespace) -> list[dict]:
             if proc.returncode or not row["result_found"] or row["is_error"]:
                 break
     pair_path = out / "pair.json"
+    model_identity = None
+    model_identity_error = None
+    if auth_mode == "configured-gateway":
+        try:
+            model_identity = require_matching_reported_models(results)
+        except RuntimeError as error:
+            model_identity_error = error
+    if auth_mode == "configured-gateway" and len(results) == 2 and all(
+        row.get("result_found") and not row.get("is_error") for row in results
+    ):
+        (out / "model-identity.json").write_text(json.dumps({
+            "schema_version": 1,
+            "source": "Claude CLI init/modelUsage; gateway backend identity is not attested",
+            "status": model_identity["status"] if model_identity else "mismatch-or-unavailable",
+            "identity_by_arm": {
+                row["arm"]: reported_model_identity(row) for row in results
+            },
+        }, indent=2) + "\n")
+        (out / "model-identity.json").chmod(0o600)
     pair_path.write_text(json.dumps(results, indent=2) + "\n")
     pair_path.chmod(0o600)
     # The source snapshot is reproducible from the pinned Git commit and graph hash.
     shutil.rmtree(manifest["workspace_parent"], ignore_errors=True)
+    if model_identity_error is not None:
+        raise model_identity_error
     score = command([sys.executable, str(Path(__file__).with_name("score.py")),
                      "--results", str(out), "--scenarios-dir", str(Path(args.scenario).resolve().parent),
                      "raw", "skill"], timeout=120)
@@ -539,6 +805,10 @@ def main() -> int:
         "CLAUDE_SECURESTORAGE_CONFIG_DIR", os.environ.get("CLAUDE_CONFIG_DIR")),
         help="Claude credential scope; defaults to its configured scope or the unscoped login")
     parser.add_argument("--credentials-file")
+    parser.add_argument("--auth-mode", choices=("oauth", "configured-gateway"), default="oauth",
+                        help="credential source; OAuth remains the default")
+    parser.add_argument("--gateway-settings",
+                        help="settings JSON for configured-gateway mode; only allowlisted env fields are loaded")
     parser.add_argument("--results-dir", required=True)
     parser.add_argument("--symbol", default="transferPageToGhost")
     parser.add_argument("--model", default="sonnet")

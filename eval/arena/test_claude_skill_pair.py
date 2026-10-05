@@ -45,6 +45,17 @@ class ClaudeStreamMeasurementTests(unittest.TestCase):
         self.assertEqual(row["tool_use_count"], 2)
         self.assertEqual(row["pixel_impact_calls"], ["pixel impact transferPageToGhost --no-refresh"])
         self.assertEqual(row["skill_invocations"], [{"skill": "pixel-impact"}])
+        self.assertIsNone(row["cli_init_model"])
+
+    def test_cli_init_model_is_reported_separately_from_model_usage(self):
+        row = self.parse([
+            {"type": "system", "subtype": "init", "model": "gateway-sonnet"},
+            {"type": "result", "result": "Done", "modelUsage": {"gateway-sonnet": {}}},
+        ])
+
+        self.assertEqual(row["cli_init_model"], "gateway-sonnet")
+        self.assertEqual(row["resolved_model_usage"], {"gateway-sonnet": {}})
+
 
     def test_cache_categories_are_preserved_and_included_in_gross_proxy(self):
         row = self.parse([{"type": "result", "result": "Done", "usage": {
@@ -90,6 +101,162 @@ class ClaudeStreamMeasurementTests(unittest.TestCase):
             "total_input_tokens": 0,
             "gross_tokens_proxy": 0,
         })
+
+
+class ClaudeSnapshotIntegrityTests(unittest.TestCase):
+    def snapshot_fixture(self, root: Path) -> tuple[Path, Path, dict]:
+        project = root / "project"
+        pixel_dir = project / ".pixel"
+        pixel_dir.mkdir(parents=True)
+        (pixel_dir / "graph.v2.db").write_bytes(b"pinned graph")
+        (project / "src.rs").write_text("pinned source")
+        skill = project / ".claude/skills/pixel-impact/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("treatment")
+        pixel = root / "pixel"
+        pixel.write_bytes(b"pinned pixel binary")
+        query_argv = [str(pixel), "impact", "symbol", "--no-refresh", "--depth", "2",
+                      "--json", "--metrics", "off"]
+        manifest = {
+            "pixel_binary_sha256": claude_skill_pair.digest(pixel.read_bytes()),
+            "graph_sha256": claude_skill_pair.digest((pixel_dir / "graph.v2.db").read_bytes()),
+            "project_source_sha256": claude_skill_pair.directory_digest(
+                project, ignored_regular_files={claude_skill_pair.SKILL_TREATMENT_FILE}
+            ),
+            "pre_model_graph_argv": query_argv,
+            "pre_model_graph_query_sha256": claude_skill_pair.digest(b"[{}]"),
+        }
+        return project, pixel, manifest
+
+    def test_regular_accounting_file_contents_do_not_count_as_source_edits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pixel = root / ".pixel"
+            pixel.mkdir()
+            (pixel / "graph.v2.db").write_bytes(b"graph")
+            source = root / "src.rs"
+            source.write_text("source")
+            before = claude_skill_pair.directory_digest(root)
+
+            (pixel / "actions.jsonl").write_text("after action\n")
+            (pixel / "calls.json").write_text("after calls\n")
+
+            self.assertEqual(claude_skill_pair.directory_digest(root), before)
+            (pixel / "actions.jsonl").write_text("later action\n")
+            (pixel / "calls.json").write_text("later calls\n")
+            self.assertEqual(claude_skill_pair.directory_digest(root), before)
+
+    def test_source_graph_and_unexpected_sidecar_changes_are_detected(self):
+        for relative in ("src.rs", ".pixel/graph.v2.db", ".pixel/unexpected.json"):
+            with self.subTest(path=relative), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                pixel = root / ".pixel"
+                pixel.mkdir()
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("before")
+                before = claude_skill_pair.directory_digest(root)
+
+                path.write_text("after")
+
+                self.assertNotEqual(claude_skill_pair.directory_digest(root), before)
+
+    def test_accounting_symlink_target_changes_are_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pixel = root / ".pixel"
+            pixel.mkdir()
+            (root / "first.jsonl").write_text("first")
+            (root / "second.jsonl").write_text("second")
+            accounting = pixel / "actions.jsonl"
+            accounting.write_text("regular accounting file")
+            regular_digest = claude_skill_pair.directory_digest(root)
+            accounting.unlink()
+            accounting.symlink_to(root / "first.jsonl")
+            before = claude_skill_pair.directory_digest(root)
+            self.assertNotEqual(before, regular_digest)
+
+            accounting.unlink()
+            accounting.symlink_to(root / "second.jsonl")
+
+            self.assertNotEqual(claude_skill_pair.directory_digest(root), before)
+
+    def test_pre_arm_verification_rejects_source_graph_or_binary_changes_before_query(self):
+        mutations = {
+            "source": ("src.rs", b"changed source"),
+            "graph": (".pixel/graph.v2.db", b"changed graph"),
+            "pixel": (None, b"changed binary"),
+        }
+        for name, (relative, contents) in mutations.items():
+            with self.subTest(change=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                project, pixel, manifest = self.snapshot_fixture(root)
+                changed_path = pixel if relative is None else project / relative
+                changed_path.write_bytes(contents)
+                with mock.patch.object(claude_skill_pair, "command") as run_query:
+                    with self.assertRaisesRegex(RuntimeError, "changed since preflight"):
+                        claude_skill_pair.verify_preflight_snapshot(project, str(pixel), manifest)
+                run_query.assert_not_called()
+
+    def test_pre_arm_verification_rejects_changed_query_and_allows_accounting_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project, pixel, manifest = self.snapshot_fixture(root)
+
+            def successful_query(argv, *, cwd, timeout):
+                self.assertEqual(argv, manifest["pre_model_graph_argv"])
+                self.assertEqual(cwd, project)
+                self.assertEqual(timeout, 5)
+                accounting = project / ".pixel/actions.jsonl"
+                accounting.write_text("read query accounting\n")
+                (project / ".pixel/calls.json").write_text("read query calls\n")
+                return subprocess.CompletedProcess(argv, 0, "[{}]", "")
+
+            with mock.patch.object(claude_skill_pair, "command", side_effect=successful_query):
+                query_ms = claude_skill_pair.verify_preflight_snapshot(project, str(pixel), manifest)
+            self.assertGreaterEqual(query_ms, 0)
+
+            with mock.patch.object(claude_skill_pair, "command", return_value=subprocess.CompletedProcess(
+                manifest["pre_model_graph_argv"], 0, "[{\"changed\":true}]", ""
+            )):
+                with self.assertRaisesRegex(RuntimeError, "graph query changed since preflight"):
+                    claude_skill_pair.verify_preflight_snapshot(project, str(pixel), manifest)
+
+    def test_both_arm_commands_share_the_narrow_pixel_read_allowance(self):
+        raw = claude_skill_pair.claude_run_argv("claude", "prompt", "sonnet", "medium", 10, 1.0)
+        skill = claude_skill_pair.claude_run_argv("claude", "prompt", "sonnet", "medium", 10, 1.0)
+
+        self.assertEqual(raw, skill)
+        self.assertEqual(raw[raw.index("--allowedTools") + 1],
+                         "Bash(pixel impact * --no-refresh *)")
+
+
+class ClaudeCliCapabilityTests(unittest.TestCase):
+    def test_hidden_max_turns_flag_is_verified_by_parser_diagnostic(self):
+        help_text = "--setting-sources --permission-mode --permission-prompts --allowedTools --disallowedTools " \
+            "--max-budget-usd --no-session-persistence --effort"
+        with mock.patch.object(claude_skill_pair, "command", side_effect=[
+            subprocess.CompletedProcess([], 0, "2.1.289\n", ""),
+            subprocess.CompletedProcess([], 0, help_text, ""),
+            subprocess.CompletedProcess([], 1, "", "error: option '--max-turns <turns>' argument missing"),
+        ]) as run:
+            version, help_hash = claude_skill_pair.version_and_help("claude")
+
+        self.assertEqual(version, "2.1.289")
+        self.assertEqual(help_hash, claude_skill_pair.digest(help_text.encode()))
+        self.assertEqual(run.call_args_list[-1].args[0], ["claude", "--max-turns"])
+        self.assertEqual(run.call_args_list[-1].kwargs["timeout"], 5)
+
+    def test_unknown_max_turns_option_is_rejected(self):
+        help_text = "--setting-sources --permission-mode --permission-prompts --allowedTools --disallowedTools " \
+            "--max-budget-usd --no-session-persistence --effort"
+        with mock.patch.object(claude_skill_pair, "command", side_effect=[
+            subprocess.CompletedProcess([], 0, "2.1.289\n", ""),
+            subprocess.CompletedProcess([], 0, help_text, ""),
+            subprocess.CompletedProcess([], 1, "", "error: unknown option '--max-turns'"),
+        ]):
+            with self.assertRaisesRegex(RuntimeError, "lacks required CLI option --max-turns"):
+                claude_skill_pair.version_and_help("claude")
 
 
 class ClaudeCredentialIsolationTests(unittest.TestCase):
@@ -150,6 +317,7 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
                 scenario=str(scenario), revision="HEAD", auth_config_dir=str(root / "auth"),
                 credentials_file=None, claude=str(claude), pixel=str(pixel), symbol="symbol",
                 model="sonnet", effort="medium", max_turns=1, max_budget_usd=1.0,
+                auth_mode="oauth", gateway_settings=None,
             )
             impact_result = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout="[{}]", stderr=""
@@ -176,6 +344,257 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
             self.assertNotIn("accessToken", persisted)
             self.assertNotIn("refreshToken", persisted)
             shutil.rmtree(manifest["workspace_parent"], ignore_errors=True)
+
+
+class ClaudeGatewayIsolationTests(unittest.TestCase):
+    def setUp(self):
+        platform = mock.patch.object(claude_skill_pair.sys, "platform", "darwin")
+        platform.start()
+        self.addCleanup(platform.stop)
+
+    def credential(self) -> dict:
+        return {"claudeAiOauth": {
+            "accessToken": "test-access-token",
+            "refreshToken": "test-refresh-token",
+            "expiresAt": (time.time() + 3600) * 1000,
+            "refreshTokenExpiresAt": (time.time() + 86400) * 1000,
+        }}
+
+    def write_credential(self, path: Path, value: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+
+    def settings(self, root: Path) -> Path:
+        path = root / "settings.json"
+        path.write_text(json.dumps({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "gateway-token-secret",
+                "ANTHROPIC_BASE_URL": "https://private-gateway.invalid/v1",
+                "ANTHROPIC_CUSTOM_HEADERS": "X-Private: header-secret",
+                "ANTHROPIC_MODEL": "gateway-default",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "gateway-sonnet",
+                "ANTHROPIC_API_KEY": "must-not-forward-this",
+                "CLAUDE_CODE_OAUTH_TOKEN": "must-not-forward-this-either",
+            },
+            "hooks": {"SessionStart": [{"command": "must-not-load"}]},
+            "permissions": {"allow": ["must-not-load"]},
+        }))
+        path.chmod(0o600)
+        return path
+
+    def test_gateway_allowlist_is_loaded_without_other_settings_or_receipt_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = self.settings(root)
+
+            selected = claude_skill_pair.load_gateway_settings(settings)
+            receipt = {
+                "auth_mode": "configured-gateway",
+                "configured_environment_keys": sorted(selected),
+            }
+            serialized = json.dumps(receipt)
+
+            self.assertEqual(set(selected), {
+                "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
+                "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            })
+            for secret in ("gateway-token-secret", "private-gateway.invalid", "header-secret",
+                           "must-not-forward-this", "must-not-load"):
+                self.assertNotIn(secret, serialized)
+            self.assertNotIn("ANTHROPIC_API_KEY", selected)
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", selected)
+            self.assertEqual(
+                claude_skill_pair.model_selection_receipt("sonnet", selected),
+                {
+                    "requested_cli_model": "sonnet",
+                    "selection_source": "explicit --model CLI argument",
+                    "configured_alias_override_key": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    "configured_default_model_present": True,
+                },
+            )
+
+    def test_both_run_environments_receive_the_same_gateway_snapshot_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = self.settings(root)
+            gateway = claude_skill_pair.load_gateway_settings(settings)
+            with mock.patch.dict(claude_skill_pair.os.environ, {
+                "ANTHROPIC_API_KEY": "ambient-banned",
+                "ANTHROPIC_AUTH_TOKEN": "ambient-different-token",
+                "ANTHROPIC_BASE_URL": "https://ambient.invalid",
+                "CLAUDE_CODE_OAUTH_TOKEN": "ambient-oauth",
+            }):
+                raw = claude_skill_pair.claude_run_environment(
+                    "/tools/pixel", root / "home", root, root / "config-raw", gateway
+                )
+                skill = claude_skill_pair.claude_run_environment(
+                    "/tools/pixel", root / "home", root, root / "config-skill", gateway
+                )
+
+            for env in (raw, skill):
+                self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "gateway-token-secret")
+                self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://private-gateway.invalid/v1")
+                self.assertEqual(env["ANTHROPIC_CUSTOM_HEADERS"], "X-Private: header-secret")
+                self.assertNotIn("ANTHROPIC_API_KEY", env)
+                self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
+                self.assertNotIn("hooks", env)
+                self.assertNotIn("permissions", env)
+            self.assertEqual(
+                {key: raw[key] for key in gateway},
+                {key: skill[key] for key in gateway},
+            )
+            self.assertNotEqual(raw["CLAUDE_CONFIG_DIR"], skill["CLAUDE_CONFIG_DIR"])
+
+    def test_gateway_settings_errors_do_not_echo_private_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = root / "settings.json"
+            settings.write_text(json.dumps({"env": {
+                "ANTHROPIC_AUTH_TOKEN": "unlogged-private-token",
+                "ANTHROPIC_BASE_URL": "https://unlogged.invalid",
+                "ANTHROPIC_CUSTOM_HEADERS": {"X-Canary": "unlogged-header"},
+            }}))
+            settings.chmod(0o600)
+            with self.assertRaises(RuntimeError) as caught:
+                claude_skill_pair.load_gateway_settings(settings)
+            self.assertEqual(str(caught.exception), "allowlisted gateway settings must be strings")
+            self.assertNotIn("unlogged-private-token", str(caught.exception))
+            self.assertNotIn("unlogged.invalid", "".join(traceback.format_exception(caught.exception)))
+
+    def test_gateway_source_snapshot_is_nonsecret_and_changes_with_file_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self.settings(Path(directory))
+            original_env, original_source = claude_skill_pair.load_gateway_settings_snapshot(settings)
+            serialized_source = json.dumps(original_source)
+            contents = settings.read_text().replace("gateway-token-secret", "gateway-token-changed")
+            settings.write_text(contents)
+            changed_env, changed_source = claude_skill_pair.load_gateway_settings_snapshot(settings)
+
+            self.assertEqual(original_env.keys(), changed_env.keys())
+            self.assertEqual(original_source["resolved_path"], str(settings.resolve()))
+            self.assertNotEqual(original_source, changed_source)
+            self.assertNotIn("gateway-token-secret", serialized_source)
+            self.assertNotIn("private-gateway.invalid", serialized_source)
+
+    def test_execute_rejects_gateway_source_changed_since_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = self.settings(root)
+            _, source = claude_skill_pair.load_gateway_settings_snapshot(settings)
+            contents = settings.read_text().replace("gateway-token-secret", "gateway-token-changed")
+            settings.write_text(contents)
+            results = root / "results"
+            results.mkdir()
+            workspace = root / "workspace"
+            workspace.mkdir()
+            claude = root / "claude"
+            claude.write_text("fixture")
+            claude.chmod(0o755)
+            pixel = root / "pixel"
+            pixel.write_text("fixture")
+            pixel.chmod(0o755)
+            (results / "preflight.json").write_text(json.dumps({
+                "workspace": str(workspace),
+                "claude_version": "2.1.289",
+                "auth_mode": "configured-gateway",
+                "auth_environment_keys": sorted(claude_skill_pair.load_gateway_settings(settings)),
+                "gateway_settings_source": source,
+            }))
+            args = mock.Mock(
+                results_dir=str(results), claude=str(claude), pixel=str(pixel),
+                auth_mode="configured-gateway", gateway_settings=str(settings),
+            )
+            with mock.patch.object(claude_skill_pair, "version_and_help", return_value=("2.1.289", "")):
+                with self.assertRaisesRegex(RuntimeError, "settings changed since preflight"):
+                    claude_skill_pair.execute(args)
+
+    def test_gateway_output_redacts_token_endpoint_and_headers(self):
+        sensitive = {
+            "ANTHROPIC_AUTH_TOKEN": "token-canary",
+            "ANTHROPIC_BASE_URL": "https://gateway-canary.invalid/v1",
+            "ANTHROPIC_CUSTOM_HEADERS": "X-Canary: header-canary\nX-Second: second-header-canary",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "gateway-sonnet-model",
+        }
+        output = ("error token-canary https://gateway-canary.invalid/v1 "
+                  "X-Canary: header-canary header-canary second-header-canary "
+                  "gateway-sonnet-model")
+
+        cleaned = claude_skill_pair.redact_gateway_values(output, sensitive)
+
+        for value in (
+            sensitive["ANTHROPIC_AUTH_TOKEN"],
+            sensitive["ANTHROPIC_BASE_URL"],
+            "X-Canary: header-canary\nX-Second: second-header-canary",
+            "header-canary",
+            "second-header-canary",
+        ):
+            self.assertNotIn(value, cleaned)
+        self.assertEqual(cleaned.count("<redacted-gateway-setting>"), 5)
+        self.assertIn("gateway-sonnet-model", cleaned)
+
+    def test_gateway_output_redacts_json_escaped_header_values(self):
+        header_value = 'header-café-雪-quote-"-and-slash-\\-secret'
+        gateway_env = {
+            "ANTHROPIC_AUTH_TOKEN": "token-canary",
+            "ANTHROPIC_BASE_URL": "https://gateway-canary.invalid/v1",
+            "ANTHROPIC_CUSTOM_HEADERS": "X-Private: " + header_value,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "gateway-sonnet-model",
+        }
+        serialized = json.dumps({
+            "error": "gateway rejected X-Private: " + header_value,
+            "model": "gateway-sonnet-model",
+        })
+
+        cleaned = claude_skill_pair.redact_gateway_values(serialized, gateway_env)
+
+        self.assertNotIn(header_value, cleaned)
+        self.assertNotIn(json.dumps(header_value)[1:-1], cleaned)
+        self.assertIn("gateway-sonnet-model", cleaned)
+
+    def test_reported_model_mismatch_remains_visible_after_gateway_redaction(self):
+        gateway_env = {
+            "ANTHROPIC_AUTH_TOKEN": "private-token",
+            "ANTHROPIC_BASE_URL": "https://private.invalid",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "gateway-sonnet",
+        }
+
+        def parsed_model(model: str) -> dict:
+            stream = "".join(json.dumps(event) + "\n" for event in (
+                {"type": "system", "subtype": "init", "model": model},
+                {"type": "result", "result": "Done", "modelUsage": {model: {}}},
+            ))
+            redacted = claude_skill_pair.redact_gateway_values(stream, gateway_env)
+            with tempfile.TemporaryDirectory() as directory:
+                transcript = Path(directory) / "stream.jsonl"
+                transcript.write_text(redacted)
+                return claude_skill_pair.parse_stream(transcript)
+
+        same = [
+            {"arm": "raw", "result_found": True, "is_error": False,
+             **parsed_model("gateway-sonnet")},
+            {"arm": "skill", "result_found": True, "is_error": False,
+             **parsed_model("gateway-sonnet")},
+        ]
+        result = claude_skill_pair.require_matching_reported_models(same)
+        self.assertEqual(result["status"], "matched")
+        self.assertIn("not attested", result["source"])
+        changed = [*same]
+        changed[1] = {
+            **same[1],
+            **parsed_model("different-model"),
+        }
+        with self.assertRaisesRegex(RuntimeError, "identity differs between arms"):
+            claude_skill_pair.require_matching_reported_models(changed)
+
+    def test_pair_without_any_cli_reported_model_is_unverifiable(self):
+        rows = [
+            {"arm": arm, "result_found": True, "is_error": False,
+             "cli_init_model": None, "resolved_model_usage": None}
+            for arm in ("raw", "skill")
+        ]
+        with self.assertRaisesRegex(RuntimeError, "did not report model identity"):
+            claude_skill_pair.require_matching_reported_models(rows)
 
     def test_nonregular_explicit_credential_path_fails_without_fallback(self):
         with tempfile.TemporaryDirectory() as directory:

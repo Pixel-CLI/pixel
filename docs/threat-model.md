@@ -38,6 +38,7 @@ model providers, and the website under `website/`.
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
 | Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, `~/.pi/agent/APPEND_SYSTEM.md`, OpenCode, Antigravity, zcode and Devin configs; per repository with `--repo`, `.claude/settings.local.json`, `.codex/`, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`, the managed block in `AGENTS.md` | a hook command runs with the user's privileges on every agent tool call |
 | User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `PERPLEXITY_API_KEY` or `remote_keys` in the global config), `.env` values edited by `pixel edit-env` | credential theft, billing abuse |
+| Benchmark credentials | OAuth storage or an explicitly selected Claude gateway settings file read by `eval/claude_skill_pair.py` | credentials must reach only the selected model connection and stay out of benchmark receipts |
 | Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
 | CI | `.github/workflows/*.yml`, the `PROJECTS_TOKEN` secret, the self-hosted runner named by the `PIXEL_RUNNER_LABELS` repository variable | a foothold in CI is a step towards the release chain |
 
@@ -223,6 +224,19 @@ normal tests and lint still validate the PR head before merge. Local checks,
 including pre-push validation and reinstalling, are optional diagnostics.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.
+
+### 3.11 Isolated Claude benchmark (B2, B6)
+
+`eval/claude_skill_pair.py` accepts either existing OAuth credentials or an
+explicitly selected gateway settings file. Gateway mode forwards only its
+allowlisted connection and model environment fields to both isolated arms;
+it does not load the file as agent settings or forward an API key. OAuth
+credentials use private temporary files. Receipts omit credential values and
+hashes; gateway output is redacted for known private connection values before
+it is saved. This prevents accidental recording of those values, not access by
+the user's other processes or deliberate reads by an agent running as that user.
+The selected endpoint receives the benchmark's source context. CLI-reported
+model names do not attest the gateway's underlying implementation.
 
 ## 4. Threats
 

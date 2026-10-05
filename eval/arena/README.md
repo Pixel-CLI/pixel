@@ -114,8 +114,8 @@ fails with a clear message. On macOS it reads raw Keychain JSON for the current
 account and uses only its `claudeAiOauth` object. Without a configured scope it
 selects Claude's unscoped login; `--auth-config-dir`, or the existing
 `CLAUDE_SECURESTORAGE_CONFIG_DIR` / `CLAUDE_CONFIG_DIR` scope, selects that
-profile's entry without falling back to another profile. It never imports user
-settings, skills, hooks, plugins, or MCP configuration. An optional
+profile's entry without falling back to another profile. This default OAuth
+mode never imports user settings, skills, hooks, plugins, or MCP configuration. An optional
 `--credentials-file` takes precedence over the
 config directory's `.credentials.json` and must have mode `0600`. Only that
 OAuth object is copied into each private, temporary arm config; credentials are
@@ -128,14 +128,34 @@ python3 eval/claude_skill_pair.py preflight "${PAIR_ARGS[@]}"
 python3 eval/claude_skill_pair.py run "${PAIR_ARGS[@]}"
 ```
 
-Run the second command only after reviewing a successful preflight. The pair
-uses the existing OAuth login; a missing or expired login requires a fresh
-login before any model call. A failed or missing arm remains a failed pair,
-with unavailable token fields recorded as unknown.
+Run the second command only after reviewing a successful preflight. OAuth mode
+requires a usable existing OAuth login. A failed or missing arm remains a failed
+pair, with unavailable token fields recorded as unknown.
+
+For an existing Claude gateway connection, explicitly add
+`--auth-mode configured-gateway --gateway-settings /path/to/settings.json` to
+both commands. This mode reads only the supported authentication, endpoint,
+header and model-selection environment fields; other settings, hooks, skills,
+plugins and MCP configuration remain excluded. Both arms receive the same
+in-memory connection settings in otherwise isolated environments. Preflight
+records the settings file's path and file identity; changing the file requires
+a fresh preflight. Private values and their hashes are excluded from receipts. Record this as a separate
+gateway experiment, without pooling it with another provider or model.
 
 `claude auth status` alone is insufficient: host settings can supply a different
-endpoint, token, or model while this isolated comparison has no usable Claude
-OAuth object. Such settings remain excluded from both arms.
+endpoint, token, or model while an isolated OAuth comparison has no usable
+credential. Preflight checks configuration without making a model request;
+only the actual pair establishes whether the connection works. Claude's reported
+model identity must agree between arms, but does not attest which model an
+external gateway runs internally.
+
+The snapshot check permits writes to Pixel's regular accounting files,
+`.pixel/actions.jsonl` and `.pixel/calls.json`. It still detects source edits,
+graph changes, unexpected sidecars and changes to those files' types.
+Before each arm, the prepared source snapshot, Pixel binary, graph and recorded
+query output must still match preflight. Validation time is recorded separately
+from model runtime. Both arms receive the same narrow
+`Bash(pixel impact * --no-refresh *)` permission allowance.
 
 The old `--codex-caller-facts` route is retired and rejected. Historical runs
 remain in their original result directories and must be interpreted with

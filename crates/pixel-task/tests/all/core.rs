@@ -1461,6 +1461,7 @@ fn recovering_interrupted_verification_never_resurrects_cancelled_task() {
 #[test]
 fn output_limit_accepts_exact_cap_and_rejects_each_overflowing_stream() {
     const CAP: u64 = 16_777_216;
+    let observer = tempfile::tempdir().unwrap();
     for (bytes, stderr, expected) in [
         (CAP, false, CheckOutcome::Passed),
         (CAP + 1, false, CheckOutcome::Unavailable),
@@ -1472,20 +1473,26 @@ fn output_limit_accepts_exact_cap_and_rejects_each_overflowing_stream() {
             .set_len(bytes)
             .unwrap();
         let store = Store::open(directory.path()).unwrap();
-        let task = store
-            .begin(
-                contract(if stderr {
-                    "cat payload >&2; sleep 5"
-                } else if bytes > CAP {
-                    "cat payload; sleep 5"
-                } else {
-                    "cat payload; sleep 0.05"
-                }),
-                "pi",
-                None,
-                "begin",
-            )
-            .unwrap();
+        let overflow = bytes > CAP;
+        let marker = observer.path().join(format!("continued-{stderr}"));
+        let script = if stderr {
+            "cat payload >&2; sleep 5; printf continued > \"$1\""
+        } else if overflow {
+            "cat payload; sleep 5; printf continued > \"$1\""
+        } else {
+            "cat payload; sleep 0.05"
+        };
+        let mut configured = contract(script);
+        if overflow {
+            // Give a command whose overflow monitor is broken time to reach
+            // its marker before the check deadline; a wall-clock receipt bound
+            // also measures coverage instrumentation and pre-spawn setup.
+            configured.checks[0].timeout_ms = 8_000;
+            configured.checks[0]
+                .argv
+                .extend(["pixel-check".into(), marker.display().to_string()]);
+        }
+        let task = store.begin(configured, "pi", None, "begin").unwrap();
         let task = store
             .update(
                 &task.task_id,
@@ -1501,8 +1508,11 @@ fn output_limit_accepts_exact_cap_and_rejects_each_overflowing_stream() {
         assert_eq!(receipt.outcome, expected, "bytes={bytes}, stderr={stderr}");
         assert_eq!(receipt.stdout_bytes, if stderr { 0 } else { bytes });
         assert_eq!(receipt.stderr_bytes, if stderr { bytes } else { 0 });
-        if bytes > CAP {
-            assert!(receipt.duration_ms < 1_500);
+        if overflow {
+            assert!(
+                !marker.exists(),
+                "overflow should kill the check before it reaches its marker"
+            );
             assert!(!store.decision(&task.task_id, Gate::Finish).unwrap().allowed);
         }
     }
