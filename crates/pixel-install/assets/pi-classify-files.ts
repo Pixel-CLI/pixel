@@ -371,17 +371,19 @@ export default function (pi: any) {
         const expanded = await expandPatterns(p.paths_or_globs, ctx.cwd, p.recursive ?? false);
         const { files, skipped } = await pruneFiles(expanded, ctx.cwd);
         const results: { path: string; answers: Record<string, Answer> }[] = [];
+        let calls = 0;
         await parallel(files, CONCURRENCY, async (path) => {
           try {
             const file = await readFileState(path, ctx.cwd);
             const answers = await decideFile(pi, "ask_pixel_files", file, questions);
             results.push({ path, answers });
+            calls += Object.keys(questions).length;
           } catch (err: any) {
             skipped.push({ path, reason: err instanceof FileStateError ? err.message : `call failed: ${err?.message ?? err}` });
           }
         });
         results.sort((a, b) => a.path.localeCompare(b.path));
-        return ok({ results, skipped, calls: results.length });
+        return ok({ results, skipped, calls });
       } catch (err) { return fail(err); }
     },
   });
@@ -399,10 +401,11 @@ export default function (pi: any) {
     async execute(_id: string, p: any, _signal: AbortSignal) {
       try {
         if (!p.candidates.length) return ok({ path: null, confidence: 0, probabilities: {} });
+        const shown = p.candidates.slice(0, MAX_FILES - 1);
         const criteria: Record<string, string | null> = {};
-        for (const c of p.candidates.slice(0, MAX_FILES - 1)) criteria[c.path] = c.note ?? null;
+        for (const c of shown) criteria[c.path] = c.note ?? null;
         criteria.none = "No file in the list fits";
-        const stateText = p.question + "\n\nfiles:\n" + p.candidates.map((c: any) => c.path).join("\n");
+        const stateText = p.question + "\n\nfiles:\n" + shown.map((c: any) => c.path).join("\n");
         const r = await pixelClassify(stateText, p.question, criteria);
         const path = r.predicted === "none" || r.confidence < 0.3 ? null : r.predicted;
         return ok({ path, confidence: r.confidence, probabilities: r.probs });

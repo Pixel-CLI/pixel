@@ -1368,17 +1368,16 @@ fn is_digits(text: &str) -> bool {
 }
 
 /// The backups present in `dirs` (not recursive), sorted and without
-/// duplicates: two entries of `dirs` may name the same directory.
+/// duplicates: two entries of `dirs` may name the same directory. Directory
+/// backups count too — the classify-skill step undoes whole dirs by rename.
 fn find_backups(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = dirs
         .iter()
         .filter_map(|dir| fs::read_dir(dir).ok())
         .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
         .filter(|path| {
-            path.is_file()
-                && path
-                    .file_name()
-                    .is_some_and(|name| is_backup_name(&name.to_string_lossy()))
+            path.file_name()
+                .is_some_and(|name| is_backup_name(&name.to_string_lossy()))
         })
         .collect();
     found.sort();
@@ -1399,10 +1398,22 @@ fn backups_step(backups: &[PathBuf], dry_run: bool) -> InstallStep {
             detail: None,
         };
     }
-    let quoted: Vec<String> = backups
-        .iter()
-        .map(|path| routing::quoted_executable(path))
-        .collect();
+    let (dirs, files): (Vec<&PathBuf>, Vec<&PathBuf>) =
+        backups.iter().partition(|path| path.is_dir());
+    let quoted = |paths: &[&PathBuf]| {
+        paths
+            .iter()
+            .map(|path| routing::quoted_executable(path))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut commands = Vec::new();
+    if !files.is_empty() {
+        commands.push(format!("rm -- {}", quoted(&files)));
+    }
+    if !dirs.is_empty() {
+        commands.push(format!("rm -rf -- {}", quoted(&dirs)));
+    }
     InstallStep {
         id: "backups".into(),
         status: CheckStatus::Green,
@@ -1413,7 +1424,7 @@ fn backups_step(backups: &[PathBuf], dry_run: bool) -> InstallStep {
                 backups.len()
             ),
         ),
-        detail: Some(format!("rm -- {}", quoted.join(" "))),
+        detail: Some(commands.join(" && ")),
     }
 }
 
@@ -1756,7 +1767,8 @@ mod backup_tests {
         ] {
             fs::write(path, "x").unwrap();
         }
-        // A directory is never a backup, whatever its name.
+        // A directory backup counts too: the classify-skill step undoes a
+        // whole skills dir by renaming it with this suffix.
         fs::create_dir_all(a.join("dir.pixel-bak.3-0")).unwrap();
 
         // `a` twice: the global list can name one directory two ways
@@ -1766,6 +1778,7 @@ mod backup_tests {
         assert_eq!(
             found,
             vec![
+                a.join("dir.pixel-bak.3-0"),
                 a.join("hooks.json.pixel-bak.1-1"),
                 b.join("settings.json.pixel-bak.2-0")
             ]

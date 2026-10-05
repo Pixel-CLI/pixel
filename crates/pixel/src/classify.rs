@@ -373,6 +373,10 @@ fn open_jev_engine(model: Option<String>) -> Result<crate::decide_jev::Jev, Stri
 #[cfg_attr(test, mutants::skip)] // reads the real env and ~/.pixel; the name rule is key_env_name
 fn remote_key_value(preset: crate::decide_remote::Preset) -> Result<Option<String>, String> {
     let explicit = std::env::var("PIXEL_REMOTE_KEY_ENV").ok();
+    // A preset that takes no key (`local`) has nothing for Infisical to
+    // supply — checked before `explicit` moves into `key_env_name`.
+    let keyless_preset =
+        preset.key_env().is_none() && explicit.as_deref().is_none_or(str::is_empty);
     let from_env = crate::decide_remote::key_env_name(preset, explicit)
         .and_then(|name| std::env::var(name).ok().filter(|v| !v.is_empty()));
     if from_env.is_some() {
@@ -382,6 +386,13 @@ fn remote_key_value(preset: crate::decide_remote::Preset) -> Result<Option<Strin
     // live in every shell's environment.
     if let Some(key) = crate::config_cmd::remote_key(preset) {
         return Ok(Some(key));
+    }
+    // A preset that takes no key (`local`) has nothing for Infisical to
+    // supply — skip the lookup rather than pay its latency for nothing.
+    // An explicit PIXEL_REMOTE_KEY_ENV still reaches it: naming a key source
+    // for a keyless preset is a choice, and the override lives in Infisical.
+    if keyless_preset {
+        return Ok(None);
     }
     // Infisical is the third source, off unless configured; its own
     // contract decides what counts as absent.
