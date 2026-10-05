@@ -363,7 +363,8 @@ pub fn tail(path: &Path, limit: usize) -> std::io::Result<Vec<ActionEvent>> {
         }
         if let Ok(event) = serde_json::from_str::<ActionEvent>(&line) {
             ring.push_back(event);
-            // `>` rather than `==` before the push: a `limit` of 0 keeps nothing.
+            // Drop the oldest once the ring holds more than `limit`, so a
+            // `limit` of 0 keeps nothing.
             if ring.len() > limit {
                 ring.pop_front();
             }
