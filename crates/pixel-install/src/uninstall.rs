@@ -72,16 +72,21 @@ pub struct UninstallOptions {
 
 /// Markers that identify pixel-authored hook entries in any settings file.
 /// Each corresponds to a hook script filename installed by `pixel install`.
+/// Substrings here delete any nested entry whose command merely contains
+/// them, so they stay provider-qualified: the broad `run-hook guard` /
+/// `run-hook metrics` phrases would take a foreign command that merely
+/// mentions them with the uninstall. Flat-schema entries are matched by
+/// executable ownership instead (`remove_flat_pixel_hooks`).
 const PIXEL_HOOK_MARKERS: &[&str] = &[
     config::GUARD_HOOK,
     config::SESSION_START_HOOK,
     config::PROMPT_SUBMIT_HOOK,
     config::POST_COMPACTION_HOOK,
-    crate::codex_config::METRICS_HOOK_MARKER,
+    // Codex's metrics relay is not recognised by executable ownership, so it
+    // keeps a marker — qualified, unlike the broad `METRICS_HOOK_MARKER`.
+    "run-hook metrics --provider codex",
     crate::codex_config::PROMPT_SUBMIT_HOOK_MARKER,
     "run-hook guard --provider zcode",
-    "run-hook metrics --provider cursor",
-    "run-hook guard",
 ];
 
 /// Run `pixel uninstall`. Idempotent: safe to re-run.
@@ -1726,6 +1731,47 @@ mod backup_tests {
         ] {
             assert!(!is_backup_name(name), "{name}");
         }
+    }
+
+    /// A foreign command that merely mentions a broad hook phrase survives
+    /// the marker sweep: only provider-qualified markers delete, so `other
+    /// run-hook guard --provider claude` is not pixel's to remove.
+    #[test]
+    fn hook_markers_delete_only_provider_qualified_commands() {
+        for command in [
+            "other run-hook guard --provider claude",
+            "other run-hook metrics --provider claude",
+        ] {
+            let foreign = serde_json::json!([{
+                "matcher": ".*",
+                "hooks": [{"command": command}]
+            }]);
+            for marker in PIXEL_HOOK_MARKERS {
+                let swept = config::remove_hook_entries(&foreign, marker);
+                assert_eq!(
+                    swept, foreign,
+                    "the marker {marker:?} must not delete a foreign command {command:?}"
+                );
+            }
+        }
+        let codex = serde_json::json!([{
+            "hooks": [{"command": "'/old/pixel' run-hook metrics --provider codex"}]
+        }]);
+        assert!(
+            PIXEL_HOOK_MARKERS
+                .iter()
+                .any(|marker| config::remove_hook_entries(&codex, marker) == serde_json::json!([])),
+            "pixel's own codex metrics relay is still swept by a qualified marker"
+        );
+        let owned = serde_json::json!([{
+            "matcher": ".*",
+            "hooks": [{"command": "/opt/pixel run-hook guard --provider zcode"}]
+        }]);
+        assert_eq!(
+            config::remove_hook_entries(&owned, "run-hook guard --provider zcode"),
+            serde_json::json!([]),
+            "pixel's own zcode entry is swept by its qualified marker"
+        );
     }
 
     #[test]

@@ -631,6 +631,18 @@ switch (args[0]) {
     assert.equal(gate.continue, false);
     assert.match(gate.entries[0].content, /task state is unavailable/);
   });
+  await check("read sequences stay available when task state is unavailable", async () => {
+    const h = await host("off");
+    configure({ fail: ["run-hook"] });
+    for (const command of [
+      "cd src && cat main.rs", "ls src 2>/dev/null; cat src/main.rs", "rg needle || cat src/main.rs",
+      "nl -ba src/main.rs | head -n 40", "echo start; cat src/main.rs",
+    ]) assert.equal(await h.emit("tool_call", native(command)), undefined, command);
+    for (const command of [
+      "cat src/main.rs 2>/tmp/err", "rg needle; rm src/main.rs", "cd src && rm main.rs", "rg needle; pixel task prepare task-1",
+      "cd src && sed -i 's/a/b/' main.rs",
+    ]) assert.equal((await h.emit("tool_call", native(command))).block, true, command);
+  });
   await check("known discovery aliases remain available when task state is unavailable", async () => {
     const h = await host("off");
     configure({ fail: ["run-hook"] });
@@ -664,10 +676,10 @@ switch (args[0]) {
     const h = await host("off");
     configure({ fail: ["run-hook"] });
     const definition = JSON.stringify({ checks: [{ argv: ["/bin/sh", "-c", "test \"$(cat source.txt)\" = original"] }] });
-    for (const command of ["rg needle src | sort | uniq", "git diff --name-only | sort -u", "rg 'x|y' src | uniq -c", "cat source.txt | uniq -- -", `pixel task contract task-1 --definition '${definition}' --json`]) {
+    for (const command of ["rg needle src | sort | uniq", "git diff --name-only | sort -u", "rg 'x|y' src | uniq -c", "cat source.txt | uniq -- -", "rg needle || cat source.txt", "rg needle; cat source.txt", `pixel task contract task-1 --definition '${definition}' --json`]) {
       assert.equal(await h.emit("tool_call", native(command)), undefined, command);
     }
-    for (const command of ["rg needle | sort -o source.txt", "rg needle | sort --output=source.txt", "rg needle | uniq - source.txt", "rg needle | uniq -- - source.txt", "rg needle | tee source.txt", "rg needle | pixel task prepare task-1", "rg needle | pixel task-state prepare task-1", "rg needle || cat source.txt", "rg needle; cat source.txt", "rg needle | cat > source.txt", "rg $(touch source.txt) | sort", "rg \"$(touch source.txt)\" | sort", "pixel task contract task-1 --definition $(cat secret)", "pixel task contract task-1 --definition \"$(cat secret)\""]) {
+    for (const command of ["rg needle | sort -o source.txt", "rg needle | sort --output=source.txt", "rg needle | uniq - source.txt", "rg needle | uniq -- - source.txt", "rg needle | tee source.txt", "rg needle | pixel task prepare task-1", "rg needle | pixel task-state prepare task-1", "rg needle; pixel task prepare task-1", "rg needle || rm source.txt", "cat source.txt && sed -i s/a/b/ source.txt", "rg needle | cat > source.txt", "rg $(touch source.txt) | sort", "rg \"$(touch source.txt)\" | sort", "pixel task contract task-1 --definition $(cat secret)", "pixel task contract task-1 --definition \"$(cat secret)\""]) {
       assert.equal((await h.emit("tool_call", native(command))).block, true, command);
     }
   });

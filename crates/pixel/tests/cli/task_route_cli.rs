@@ -320,6 +320,29 @@ fn task_route_should_recover_frozen_classifier_telemetry_without_reinference() {
 }
 
 #[test]
+fn task_route_should_give_inference_its_full_budget_after_the_reservation() {
+    // The 300ms classify budget must cover inference alone, not the
+    // reservation's fsyncs before the call (task_route.rs): the fixture
+    // answers just inside the budget, and a route that charges reservation
+    // time against it falls back instead of predicting — exactly what a
+    // loaded CI runner disk made shards of #703/#704 do at 700ms, and this
+    // canary catches at 280ms where the margin is thin on purpose.
+    let server = Classifier::start(Duration::from_millis(280), false);
+    let (root, home, task) = fixture("inference-budget", &server.base, true, "local");
+    let result = decode(
+        command(&root, &home, &task, "gates_classifier")
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        !result["classifier"].is_null(),
+        "a 280ms answer must fit the 300ms inference budget: {result}"
+    );
+    assert_eq!(result["recommended"], "prepare");
+    assert_eq!(server.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn task_route_should_share_one_inflight_prediction_between_processes() {
     // The route allows the classifier 300ms minus what elapsed before the call
     // (task_route.rs), so the fixture delay must leave runner-load margin

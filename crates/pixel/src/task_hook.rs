@@ -727,20 +727,21 @@ fn substitution_writes(chars: &mut Peekable<Chars<'_>>) -> bool {
     false
 }
 
-/// Only proven read pipelines and single-command recovery bypass the edit gate.
+/// Proven reads, alone, piped or sequenced, and single-command recovery bypass
+/// the edit gate. Every leaf of a sequence is judged, so `a; b` reads only
+/// when both do; recovery stays single-command.
 fn shell_mutates(command: &str) -> bool {
     let Some(segments) = crate::guard::split_segments(command) else {
         return true;
     };
-    if segments.iter().skip(1).any(|(_, piped)| !piped) {
-        return true;
-    }
     segments
         .iter()
         .any(|(segment, _)| shell_leaf_mutates(segment, segments.len() == 1))
 }
 
 fn shell_leaf_mutates(command: &str, recovery: bool) -> bool {
+    // Discarding diagnostics writes nothing; any other redirection stays gated.
+    let command = command.strip_suffix(" 2>/dev/null").unwrap_or(command);
     let Some(words) = task_argv(command) else {
         return true;
     };
@@ -770,7 +771,8 @@ fn shell_leaf_mutates(command: &str, recovery: bool) -> bool {
         "sed" => !sed_read(args),
         "sort" => !sort_read(args),
         "uniq" => !uniq_read(args),
-        "pwd" | "true" | "false" | "cat" | "head" | "tail" | "wc" | "ls" | "read" => false,
+        "pwd" | "true" | "false" | "cat" | "head" | "tail" | "wc" | "ls" | "read" | "cd" | "nl"
+        | "echo" => false,
         _ => true,
     }
 }
@@ -796,6 +798,9 @@ fn mutation(tool: &str, input: &Value) -> bool {
         "Read" | "read" | "Glob" | "glob" | "Grep" | "grep" | "WebSearch" | "web_search"
         | "WebFetch" | "web_fetch" | "AskUserQuestion" | "ls" | "find" | "list_dir"
         | "grep_search" | "file_search" | "view_file" => false,
+        // Claude's delegation and bookkeeping tools change no file themselves;
+        // a subagent's own tool calls reach this gate with the parent session.
+        "Agent" | "Task" | "TodoWrite" | "ToolSearch" => false,
         _ => true,
     }
 }
@@ -931,28 +936,58 @@ fn envelope(provider: TaskProvider, event: TaskHookEvent, decision: &Value) -> V
     }
 }
 
-fn unavailable(event: TaskHookEvent, payload: Option<&Value>) -> Value {
-    let blocks = match event {
-        TaskHookEvent::PreToolUse => payload.is_none_or(|p| {
-            let normalized = normalize(event, p);
-            normalized["mutation"] == true
-        }),
-        TaskHookEvent::Stop | TaskHookEvent::SubagentStop => true,
-        _ => false,
-    };
+/// The decision when the ledger cannot answer. It never blocks more than an
+/// answering ledger would: an unenforced session only observes, as in
+/// `task_bridge::handle_hook`; an enforced one keeps edits and completion gated.
+fn unavailable(event: TaskHookEvent, payload: Option<&Value>, enforced: bool) -> Value {
+    let blocks = enforced
+        && match event {
+            TaskHookEvent::PreToolUse => payload.is_none_or(|p| {
+                let normalized = normalize(event, p);
+                normalized["mutation"] == true
+            }),
+            TaskHookEvent::Stop | TaskHookEvent::SubagentStop => true,
+            _ => false,
+        };
     json!({"decision": if blocks { "deny" } else { "observe" }, "reason": UNAVAILABLE, "coverage": "unavailable"})
+}
+
+fn payload_cwd(payload: &Value) -> std::path::PathBuf {
+    string(payload, &["cwd"]).map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        std::path::PathBuf::from,
+    )
+}
+
+/// Whether the unanswered decision would have been enforced. Unreadable input
+/// and an undiscoverable repository count as enforced.
+fn enforcement_applies(provider: TaskProvider, payload: Option<&Value>) -> bool {
+    let Some(payload) = payload else {
+        return true;
+    };
+    crate::discover_root(&payload_cwd(payload))
+        .ok()
+        .is_none_or(|root| {
+            crate::task_bridge::fallback_enforced(
+                &root,
+                provider.as_str(),
+                string(payload, &["session_id", "sessionId"]),
+            )
+        })
 }
 
 fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
     let Ok(payload) = serde_json::from_str::<Value>(raw) else {
-        return envelope(provider, event, &unavailable(event, None));
+        return envelope(provider, event, &unavailable(event, None, true));
     };
-    let cwd = string(&payload, &["cwd"]).map_or_else(
-        || std::env::current_dir().unwrap_or_default(),
-        std::path::PathBuf::from,
-    );
-    let decision = handle_at(&cwd, provider, event, &payload)
-        .unwrap_or_else(|_| unavailable(event, Some(&payload)));
+    let decision =
+        handle_at(&payload_cwd(&payload), provider, event, &payload).unwrap_or_else(|_| {
+            unavailable(
+                event,
+                Some(&payload),
+                enforcement_applies(provider, Some(&payload)),
+            )
+        });
     envelope(provider, event, &decision)
 }
 
@@ -977,6 +1012,7 @@ fn bounded_decision(
     raw: &str,
     timeout: Duration,
     evaluate: impl FnOnce() -> Value + Send + 'static,
+    enforced: impl FnOnce(Option<&Value>) -> bool,
 ) -> Value {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     if std::thread::Builder::new()
@@ -990,7 +1026,12 @@ fn bounded_decision(
         return decision;
     }
     let payload = serde_json::from_str(raw).ok();
-    envelope(provider, event, &unavailable(event, payload.as_ref()))
+    let enforced = enforced(payload.as_ref());
+    envelope(
+        provider,
+        event,
+        &unavailable(event, payload.as_ref(), enforced),
+    )
 }
 
 /// Read one bounded host event, dispatch it, and emit only the host's schema.
@@ -1008,11 +1049,16 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent) -> ! {
         && u64::try_from(raw.len()).is_ok_and(|length| length <= MAX_INPUT)
     {
         let input = raw.clone();
-        bounded_decision(provider, event, &raw, DECISION_TIMEOUT, move || {
-            process(provider, event, &input)
-        })
+        bounded_decision(
+            provider,
+            event,
+            &raw,
+            DECISION_TIMEOUT,
+            move || process(provider, event, &input),
+            |payload| enforcement_applies(provider, payload),
+        )
     } else {
-        envelope(provider, event, &unavailable(event, None))
+        envelope(provider, event, &unavailable(event, None, true))
     };
     // Flush the only response before exit terminates any stalled evaluator.
     let mut stdout = std::io::stdout().lock();
@@ -1188,11 +1234,12 @@ mod tests {
                         let _ = wait.recv_timeout(Duration::from_secs(1));
                         json!({"incorrect":"late result"})
                     },
+                    |seen| seen == Some(&payload),
                 );
                 let _ = release.send(());
                 assert_eq!(
                     output,
-                    envelope(provider, event, &unavailable(event, Some(&payload)))
+                    envelope(provider, event, &unavailable(event, Some(&payload), true))
                 );
             }
         }
@@ -1202,7 +1249,8 @@ mod tests {
                 TaskHookEvent::PreToolUse,
                 "{}",
                 Duration::from_secs(1),
-                || json!({"decision":"ready"})
+                || json!({"decision":"ready"}),
+                |_| true
             ),
             json!({"decision":"ready"})
         );
@@ -1297,6 +1345,13 @@ mod tests {
             "s@a@b@e touch marker",
             "s/a/b/e",
             "w",
+            "1 e touch marker",
+            "1~2w out",
+            "1,+3e touch x",
+            "1!w out",
+            "$!w out",
+            "/a/Iw out",
+            "1 w out",
             "\\#foo#w out",
             "\\#\\b#w out",
             "west",
@@ -1362,7 +1417,11 @@ mod tests {
     #[test]
     fn unavailable_should_block_edits_but_preserve_reads_and_recovery() {
         for tool in ["Write", "Edit", "apply_patch", "write", "edit"] {
-            let decision = unavailable(TaskHookEvent::PreToolUse, Some(&json!({"tool_name":tool})));
+            let decision = unavailable(
+                TaskHookEvent::PreToolUse,
+                Some(&json!({"tool_name":tool})),
+                true,
+            );
             assert_eq!(decision["decision"], "deny", "{tool}");
         }
         for command in [
@@ -1385,12 +1444,13 @@ mod tests {
         assert_eq!(
             unavailable(
                 TaskHookEvent::PreToolUse,
-                Some(&json!({"tool_name":"Read"}))
+                Some(&json!({"tool_name":"Read"})),
+                true
             )["decision"],
             "observe"
         );
         assert_eq!(
-            unavailable(TaskHookEvent::Stop, Some(&json!({})))["decision"],
+            unavailable(TaskHookEvent::Stop, Some(&json!({})), true)["decision"],
             "deny"
         );
     }
@@ -1412,7 +1472,7 @@ mod tests {
                 "{tool}"
             );
             assert_eq!(
-                unavailable(TaskHookEvent::PreToolUse, Some(&payload))["decision"],
+                unavailable(TaskHookEvent::PreToolUse, Some(&payload), true)["decision"],
                 "observe",
                 "{tool}"
             );
@@ -1424,7 +1484,8 @@ mod tests {
         assert_eq!(
             unavailable(
                 TaskHookEvent::PreToolUse,
-                Some(&json!({"tool_name":"Bash","tool_input":{"command":command}}))
+                Some(&json!({"tool_name":"Bash","tool_input":{"command":command}})),
+                true
             )["decision"],
             "deny",
             "{command}"
@@ -1512,13 +1573,17 @@ mod tests {
             assert_eq!(
                 unavailable(
                     TaskHookEvent::PreToolUse,
-                    Some(&json!({"tool_name":"Bash","tool_input":{"command":command}}))
+                    Some(&json!({"tool_name":"Bash","tool_input":{"command":command}})),
+                    true
                 )["decision"],
                 "deny",
                 "{command}"
             );
         }
         for command in [
+            "sed -n '1,40p' eval/README.md",
+            "sed -n '1,20p' website/content/docs.md",
+            "sed -n '1p' /tmp/w.txt",
             "git diff --name-only HEAD",
             "git status --porcelain=v1",
             "git diff -- --output=notes",
@@ -1568,7 +1633,11 @@ mod tests {
         for tool in ["mcp__custom__edit", "customTool", ""] {
             assert!(mutation(tool, &json!({})), "{tool}");
             assert_eq!(
-                unavailable(TaskHookEvent::PreToolUse, Some(&json!({"tool_name":tool})))["decision"],
+                unavailable(
+                    TaskHookEvent::PreToolUse,
+                    Some(&json!({"tool_name":tool})),
+                    true
+                )["decision"],
                 "deny",
                 "{tool}"
             );
@@ -1583,6 +1652,8 @@ mod tests {
             "git diff --name-only | sort -u",
             "rg 'x|y' src | uniq -c",
             "cat source.txt | uniq -- -",
+            "rg needle || cat source.txt",
+            "rg needle; cat source.txt",
         ] {
             assert!(!shell_mutates(command), "{command}");
         }
@@ -1594,8 +1665,9 @@ mod tests {
             "rg needle | tee source.txt",
             "rg needle | pixel task prepare task-1",
             "rg needle | pixel task-state prepare task-1",
-            "rg needle || cat source.txt",
-            "rg needle; cat source.txt",
+            "rg needle; pixel task prepare task-1",
+            "rg needle || rm source.txt",
+            "cat source.txt && sed -i s/a/b/ source.txt",
             "rg needle | cat > source.txt",
             "rg $(touch source.txt) | sort",
             "rg \"$(touch source.txt)\" | sort",
@@ -1680,6 +1752,97 @@ mod tests {
         assert!(!mutation(
             "pixel_project",
             &json!({"action":"review_changes"})
+        ));
+    }
+
+    #[test]
+    fn read_sequences_should_not_count_as_mutations() {
+        for command in [
+            "cd /repo && cat README.md",
+            "cd /repo && ls eval eval/scenarios 2>/dev/null; head -n 40 eval/README.md",
+            "nl -ba src/a.rs | head -n 40",
+            "echo start; cat src/a.rs",
+            "rg needle src && wc -l src/a.rs",
+        ] {
+            assert!(!shell_mutates(command), "{command}");
+        }
+        for command in [
+            "cat src/a.rs 2>/tmp/err",
+            "cat src/a.rs > /dev/null 2>/dev/null",
+            "cat src/a.rs 2>/dev/null > out",
+            "cd /repo && rm -rf target",
+            "echo x; python3 mutate.py",
+            // `sed` classification belongs to the sed parser of #649.
+            "cd /repo && sed -i s/a/b/ src/a.rs",
+        ] {
+            assert!(shell_mutates(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn delegation_and_bookkeeping_tools_should_not_count_as_mutations() {
+        for tool in ["Agent", "Task", "TodoWrite", "ToolSearch"] {
+            let payload = json!({"tool_name":tool,"tool_input":{"prompt":"edit src/a.rs"}});
+            assert_eq!(
+                normalize(TaskHookEvent::PreToolUse, &payload)["mutation"],
+                false,
+                "{tool}"
+            );
+            assert_eq!(
+                unavailable(TaskHookEvent::PreToolUse, Some(&payload), true)["decision"],
+                "observe",
+                "{tool}"
+            );
+        }
+        for tool in ["agent", "NotebookEdit", "MultiEdit"] {
+            assert!(mutation(tool, &json!({})), "{tool}");
+        }
+    }
+
+    #[test]
+    fn an_unenforced_session_should_only_observe_when_the_ledger_is_unavailable() {
+        for (event, payload) in [
+            (TaskHookEvent::PreToolUse, json!({"tool_name":"Edit"})),
+            (
+                TaskHookEvent::PreToolUse,
+                json!({"tool_name":"Bash","tool_input":{"command":"rm x"}}),
+            ),
+            (TaskHookEvent::Stop, json!({})),
+            (TaskHookEvent::SubagentStop, json!({})),
+        ] {
+            assert_eq!(
+                unavailable(event, Some(&payload), false)["decision"],
+                "observe"
+            );
+            assert_eq!(unavailable(event, Some(&payload), true)["decision"], "deny");
+            for provider in [TaskProvider::Claude, TaskProvider::Codex] {
+                assert_eq!(
+                    bounded_decision(
+                        provider,
+                        event,
+                        &payload.to_string(),
+                        Duration::from_millis(1),
+                        || {
+                            std::thread::sleep(Duration::from_millis(200));
+                            json!({})
+                        },
+                        |_| false,
+                    ),
+                    json!({}),
+                    "{event:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enforcement_should_be_assumed_without_a_payload_or_a_repository() {
+        assert!(enforcement_applies(TaskProvider::Claude, None));
+        let missing =
+            std::env::temp_dir().join(format!("pixel-no-such-dir-{}", std::process::id()));
+        assert!(enforcement_applies(
+            TaskProvider::Claude,
+            Some(&json!({"cwd": missing, "session_id":"s"}))
         ));
     }
 

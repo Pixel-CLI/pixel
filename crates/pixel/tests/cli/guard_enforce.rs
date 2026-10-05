@@ -24,12 +24,17 @@ fn hook(args: &[&str], payload: &Value, envs: &[(&str, &str)]) -> Value {
         command.env(key, value);
     }
     let mut child = command.spawn().unwrap();
-    child
+    // A switched-off hook exits before reading its payload: when it wins the
+    // race the write meets a closed pipe, which is not a test failure. The
+    // exit status below still judges the hook.
+    if let Err(error) = child
         .stdin
         .take()
         .unwrap()
         .write_all(payload.to_string().as_bytes())
-        .unwrap();
+    {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+    }
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");

@@ -15,6 +15,48 @@ use serde_json::{Value, json};
 
 use crate::task_commands::{error, observe};
 
+/// One empty file per provider/session whose task recorded enforced gates,
+/// named like its `session-locks/` entry. The hook's fallback reads it when
+/// the ledger cannot answer in time, without opening the store.
+const ENFORCED_SESSIONS: &str = ".pixel/tasks/enforced-sessions";
+
+/// Whether a hook whose ledger did not answer would have been enforced:
+/// `task.enforcement: enforce` in the repository settings (unreadable
+/// settings count as enforced), or a session `handle_hook` marked enforced.
+/// A marker lookup that fails counts as enforced. A session enforced before the
+/// marker existed is marked by its next answered hook; until then its
+/// configuration alone decides. `PIXEL_TASK_POLICY=retrieval` disables the
+/// configured enforcement exactly as it does in `handle_hook`.
+pub(crate) fn fallback_enforced(root: &Path, provider: &str, session: Option<&str>) -> bool {
+    let retrieval = std::env::var("PIXEL_TASK_POLICY").is_ok_and(|policy| policy == "retrieval");
+    fallback_enforced_under(root, provider, session, retrieval)
+}
+
+fn fallback_enforced_under(
+    root: &Path,
+    provider: &str,
+    session: Option<&str>,
+    retrieval: bool,
+) -> bool {
+    if !retrieval && crate::task_config::enabled(root).unwrap_or(true) {
+        return true;
+    }
+    let Some(session) = session.filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    session_key(session)
+        .and_then(|session| pixel_task::digest(&(provider, &session)).map_err(error))
+        .ok()
+        // An unreadable marker is not an absent one: only a lookup that proves
+        // absence releases the session.
+        .is_none_or(|name| {
+            root.join(ENFORCED_SESSIONS)
+                .join(name)
+                .try_exists()
+                .unwrap_or(true)
+        })
+}
+
 pub(crate) fn handle_hook(
     root: &Path,
     provider: &str,
@@ -148,6 +190,30 @@ pub(crate) fn handle_hook(
             "host_policy",
             json!({"enforce":true}),
         )?;
+        // The marker is what an unanswered hook's fallback reads. When it
+        // cannot be written, the same call must not fail open: the fallback
+        // would find the marker provably absent and observe, so answer here
+        // as that enforced fallback would — deny the events an enforced
+        // ledger gates, let the rest through.
+        // Written once: every later enforced hook finds it and skips the fsyncs.
+        let markers = root.join(ENFORCED_SESSIONS);
+        let marker = markers.join(&lock_name);
+        let marked = if marker.try_exists().unwrap_or(false) {
+            Ok(())
+        } else {
+            pixel_ops::durable::ensure_dir(&markers)
+                .and_then(|()| pixel_ops::durable::write_durably(&marker, b""))
+        };
+        if (event == "stop" || (event == "pre-tool-use" && mutation))
+            && let Err(failure) = marked
+        {
+            return Ok(response(
+                &task,
+                "deny",
+                &format!("enforced-session marker persistence failed: {failure}"),
+                json!([]),
+            ));
+        }
     }
     task = store.status(&task.task_id).map_err(error)?;
     drop(binding_lock);
@@ -706,6 +772,182 @@ mod tests {
             "the isolated child must run the named test: {}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+
+    #[test]
+    fn fallback_should_enforce_only_configured_or_marked_sessions() {
+        let root = Scratch::new();
+        // No settings, no marker: a ledger that answered would only observe.
+        assert!(!fallback_enforced(&root.0, "claude", Some("session-a")));
+        assert!(!fallback_enforced(&root.0, "claude", None));
+        assert!(!fallback_enforced(&root.0, "claude", Some("")));
+
+        let name = pixel_task::digest(&("claude", session_key("session-a").unwrap())).unwrap();
+        std::fs::create_dir_all(root.0.join(ENFORCED_SESSIONS)).unwrap();
+        std::fs::write(root.0.join(ENFORCED_SESSIONS).join(name), b"").unwrap();
+        assert!(fallback_enforced(&root.0, "claude", Some("session-a")));
+        // The marker is per provider and per session.
+        assert!(!fallback_enforced(&root.0, "codex", Some("session-a")));
+        assert!(!fallback_enforced(&root.0, "claude", Some("session-b")));
+
+        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
+        assert!(fallback_enforced(&root.0, "codex", None));
+        // The retrieval policy turns configured enforcement off in an answering
+        // ledger, so the fallback must not enforce it either; a marked session
+        // still keeps its obligations.
+        assert!(!fallback_enforced_under(&root.0, "codex", None, true));
+        assert!(fallback_enforced_under(
+            &root.0,
+            "claude",
+            Some("session-a"),
+            true
+        ));
+        std::fs::write(&config, "task:\n  enforcement: sometimes\n").unwrap();
+        assert!(
+            fallback_enforced(&root.0, "codex", None),
+            "unreadable settings count as enforced"
+        );
+        std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
+        assert!(!fallback_enforced(&root.0, "codex", Some("session-a")));
+        // A marker directory that cannot be read through (here: a file in its
+        // place, ENOTDIR even for root) proves nothing, so it enforces.
+        std::fs::remove_dir_all(root.0.join(ENFORCED_SESSIONS)).unwrap();
+        std::fs::write(root.0.join(ENFORCED_SESSIONS), b"not a directory").unwrap();
+        assert!(fallback_enforced(&root.0, "codex", Some("session-a")));
+    }
+
+    #[test]
+    fn an_enforced_hook_should_leave_the_marker_its_fallback_reads() {
+        let root = Scratch::new();
+        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
+        let prompt =
+            json!({"session_id":"s1","prompt":"fix the parser bug in src/a.rs","mutation":false});
+        handle_hook(&root.0, "claude", "prompt-submit", &prompt).unwrap();
+        assert!(
+            !root.0.join(ENFORCED_SESSIONS).exists(),
+            "advisory sessions leave no marker"
+        );
+
+        std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
+        handle_hook(&root.0, "claude", "prompt-submit", &prompt).unwrap();
+        // Enforcement turned off afterwards: the task keeps its obligations, and
+        // so does the fallback that cannot open the store.
+        std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
+        assert!(fallback_enforced(&root.0, "claude", Some("s1")));
+        assert!(!fallback_enforced(&root.0, "claude", Some("s2")));
+    }
+
+    #[test]
+    fn an_existing_marker_should_not_be_rewritten_by_later_enforced_hooks() {
+        let root = Scratch::new();
+        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
+        // A directory in the marker's place exists for the fallback but cannot
+        // be replaced by a file (EISDIR even for root): a hook that rewrote the
+        // marker on every call would fail here and deny for persistence.
+        let marker = root
+            .0
+            .join(ENFORCED_SESSIONS)
+            .join(pixel_task::digest(&("claude", session_key("s1").unwrap())).unwrap());
+        std::fs::create_dir_all(&marker).unwrap();
+        let prompt =
+            json!({"session_id":"s1","prompt":"fix the parser bug in src/a.rs","mutation":false});
+        handle_hook(&root.0, "claude", "prompt-submit", &prompt).unwrap();
+        let stopped = handle_hook(
+            &root.0,
+            "claude",
+            "stop",
+            &json!({"session_id":"s1","mutation":false}),
+        )
+        // Past the marker the scratch (not a git repository) fails reconcile;
+        // only a marker failure answers before it.
+        .unwrap_or_else(|failure| json!({"reason": failure}));
+        assert!(
+            !stopped["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("marker persistence failed"),
+            "{stopped}"
+        );
+        assert!(fallback_enforced(&root.0, "claude", Some("s1")));
+    }
+
+    #[test]
+    fn an_unwritable_marker_should_deny_what_an_enforced_ledger_gates() {
+        let root = Scratch::new();
+        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
+        // A read-only markers directory fails the durable write while the
+        // lookup still proves the marker absent — the state whose fallback
+        // releases the session. Root ignores directory mode bits, and so can
+        // any environment where the chmod fails to bite: when the write
+        // succeeded anyway the fixture never established that state, and the
+        // case is skipped rather than asserting a world it did not build.
+        let markers = root.0.join(ENFORCED_SESSIONS);
+        std::fs::create_dir_all(&markers).unwrap();
+        let original = std::fs::metadata(&markers).unwrap().permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut locked = original.clone();
+            locked.set_mode(locked.mode() & !0o222);
+            std::fs::set_permissions(&markers, locked).unwrap();
+        }
+        let marker_name =
+            |session: &str| pixel_task::digest(&("claude", session_key(session).unwrap())).unwrap();
+
+        // The task starts enforced: host_policy is recorded before the marker
+        // write, so the obligation survives the failure; a prompt-submit gates
+        // nothing, so its own answer continues normally.
+        let prompt =
+            json!({"session_id":"s1","prompt":"fix the parser bug in src/a.rs","mutation":false});
+        let started = handle_hook(&root.0, "claude", "prompt-submit", &prompt).unwrap();
+        assert_eq!(started["decision"], "observe", "{started}");
+        if markers.join(marker_name("s1")).exists() {
+            // The chmod did not bite (a privileged run can bypass directory
+            // mode bits): the write succeeded, the fixture never established
+            // an unwritable marker, and the deny-below would assert a state
+            // this run cannot build.
+            std::fs::set_permissions(&markers, original).unwrap();
+            return;
+        }
+
+        std::fs::write(&config, "task:\n  enforcement: advisory\n").unwrap();
+        // The settings no longer enforce, the task's host_policy record does,
+        // and the marker is provably absent — the fallback alone would observe.
+        assert!(!fallback_enforced(&root.0, "claude", Some("s1")));
+        let denied = handle_hook(
+            &root.0,
+            "claude",
+            "pre-tool-use",
+            &json!({"session_id":"s1","mutation":true}),
+        )
+        .unwrap();
+        assert_eq!(denied["decision"], "deny", "{denied}");
+        let stopped = handle_hook(
+            &root.0,
+            "claude",
+            "stop",
+            &json!({"session_id":"s1","mutation":false}),
+        )
+        .unwrap();
+        assert_eq!(stopped["decision"], "deny", "{stopped}");
+        // The marker failure denies only the gated events: a read-only
+        // pre-tool hook still answers as an observing ledger would.
+        let observed = handle_hook(
+            &root.0,
+            "claude",
+            "pre-tool-use",
+            &json!({"session_id":"s1","mutation":false}),
+        )
+        .unwrap();
+        assert_eq!(observed["decision"], "observe", "{observed}");
+
+        std::fs::set_permissions(&markers, original).unwrap();
     }
 
     #[test]
