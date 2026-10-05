@@ -6349,6 +6349,14 @@ mod tests {
     fn real_repo(name: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("pixel-guard-seq-{}-{}", name, std::process::id()));
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!(
+                "could not clear stale Git fixture {}: {error}",
+                root.display()
+            ),
+        }
         std::fs::create_dir_all(&root).unwrap();
         std::process::Command::new("git")
             .arg("init")
