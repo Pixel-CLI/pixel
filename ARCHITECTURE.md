@@ -722,7 +722,11 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   are post-merge feedback and must be triaged before the next release.
   Scans use `build-mode: none` and default security queries, preserving
   eligibility for incremental analysis in supported languages. The existing
-  CodeQL merge-protection rule remains enabled for PR analyses.
+  CodeQL merge-protection rule remains enabled for PR analyses. The three
+  `Analyze (actions)`, `Analyze (python)` and `Analyze (javascript-typescript)`
+  jobs are required checks from GitHub Actions in the main ruleset. GitHub's
+  aggregate CodeQL check can be neutral because main has a Rust configuration
+  absent on PRs; the required jobs still enforce completion of the PR scans.
   A dedicated Rust extraction cache is keyed by runner, compiler,
   manifests/lockfiles and workflow. Manual branch scans may restore it;
   only successful main analyses save it) and

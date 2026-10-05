@@ -553,15 +553,18 @@ boundary it crosses.
   CodeQL always scans workflows, Python and JavaScript with default security
   queries on every PR. Rust analysis runs after merges to main, nightly and
   on manual dispatch; a sensitive branch can be selected for a pre-merge
-  scan. The CodeQL merge-protection rule remains enabled for PR analyses.
+  scan. The CodeQL merge-protection rule retains its error/medium-security
+  alert thresholds. The main ruleset also requires all three PR analysis
+  jobs from GitHub Actions; a missing or failed analysis cannot be hidden by
+  the aggregate CodeQL check's neutral warning about the omitted Rust config.
   Its Rust extraction cache is separate from build/test caches;
   only successful main analyses save executable build-script/proc-macro
   outputs, while manual branch analyses may restore them. A cache hit never
   replaces an analysis.
 - **Status**: Partial.
 - **Residual**: Rust CodeQL findings may be discovered after merge; triage
-  them before the next release. Any pull request body can name `Task <n>` and move that
-  issue's board status; workflows that compile pull-request code on the
+  them before the next release. Any pull request body can name `Task <n>`
+  and move that issue's board status; workflows that compile pull-request code on the
   persistent self-hosted runner depend on that runner's isolation, which is
   an operational control outside this repository.
 
