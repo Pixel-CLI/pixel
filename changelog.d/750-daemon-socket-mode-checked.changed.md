@@ -1,0 +1,1 @@
+**daemon:** a test reads the bound socket's mode back and asserts it is exactly 0600, so removing or widening the `set_permissions` call after `bind` fails CI instead of leaving the mode to the process umask.

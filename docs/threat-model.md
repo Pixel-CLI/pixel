@@ -580,7 +580,7 @@ boundary it crosses.
 
 | Path | Code | Tests |
 | --- | --- | --- |
-| Daemon request framing | `daemon::handle_conn`, `read_capped_line` | `oversized_line_is_rejected_without_unbounded_drain`, `expired_connection_deadline_stops_frame_read`, `socket_identity_should_follow_the_file_not_the_path` (`daemon.rs`); no test reads the socket's 0600 mode back |
+| Daemon request framing | `daemon::handle_conn`, `read_capped_line` | `oversized_line_is_rejected_without_unbounded_drain`, `expired_connection_deadline_stops_frame_read`, `socket_identity_should_follow_the_file_not_the_path`, `the_daemon_socket_should_be_0600_after_bind` (`daemon.rs`) |
 | Protocol skew | `classify_ping`, `PROTOCOL_VERSION` | `op_name_matches_serde_tag`, `session_capabilities_track_every_real_op` (`pixel-proto`) |
 | Planted history database | `FactsStore::needs_rebuild`, `_pixel_marker` | no dedicated test of the wipe; `concurrent_open_on_poisoned_db_never_ioerrors` covers the rebuild path |
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
