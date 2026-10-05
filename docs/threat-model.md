@@ -551,14 +551,16 @@ boundary it crosses.
   `inputs.*` directly in a `run:` script; workflows default to `contents:
   read`; runs of outside contributors wait for a maintainer's approval;
   CodeQL always scans workflows, Python and JavaScript with default security
-  queries. Only Rust can skip a known non-Rust PR diff; unknown inputs or
-  missing merge history run the full Rust analysis, as do all non-PR events.
+  queries on every PR. Rust analysis runs after merges to main, nightly and
+  on manual dispatch; a sensitive branch can be selected for a pre-merge
+  scan. The CodeQL merge-protection rule remains enabled for PR analyses.
   Its Rust extraction cache is separate from build/test caches;
   only successful main analyses save executable build-script/proc-macro
-  outputs, while PR analyses can restore them. A cache hit never replaces
-  an analysis selected by the diff policy.
+  outputs, while manual branch analyses may restore them. A cache hit never
+  replaces an analysis.
 - **Status**: Partial.
-- **Residual**: any pull request body can name `Task <n>` and move that
+- **Residual**: Rust CodeQL findings may be discovered after merge; triage
+  them before the next release. Any pull request body can name `Task <n>` and move that
   issue's board status; workflows that compile pull-request code on the
   persistent self-hosted runner depend on that runner's isolation, which is
   an operational control outside this repository.
@@ -624,9 +626,10 @@ Across all of them:
   root `Cargo.toml` or `deny.toml`, for 600 s weekly, and for 120 s on every
   `v*` tag before `release.yml` builds anything.
 - **Static analysis**: `codeql.yml` scans workflows, Python and
-  JavaScript/TypeScript on every pull request into `main`; Rust is omitted
-  only for known non-Rust PR diffs. Pushes to main, weekly and manual runs
-  scan all four languages; `cargo clippy` with warnings denied runs in CI.
+  JavaScript/TypeScript on every pull request into `main`. Rust runs after
+  merge, nightly at 05:41 UTC and manually on a selected branch; those
+  events scan all four languages. Rust findings require triage before the
+  next release; `cargo clippy` with warnings denied remains in PR CI.
 - **Dependencies**: `cargo deny check` and `scripts/check-advisory-ignores.py`
   in CI; Dependabot weekly for Cargo and GitHub Actions.
 

@@ -1,1 +1,1 @@
-**codeql:** skip Rust analysis for known non-Rust PR diffs while retaining full main and scheduled scans, default security queries, and a dedicated main-written Cargo extraction cache (Task 828).
+**codeql:** move Rust analysis off the PR critical path to main pushes, nightly and manual scans; retain Actions/Python/JavaScript PR scans, default queries and a main-written Cargo cache (Task 828).

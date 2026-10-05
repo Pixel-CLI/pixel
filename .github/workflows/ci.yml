@@ -477,9 +477,9 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-prepare-only.py
 
-      - name: CodeQL Rust scope contract
+      - name: CodeQL scan policy contract
         if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-codeql-rust-scope.py
+        run: python3 scripts/test-codeql-policy.py
 
       - name: Nightly coverage selection contract
         if: ${{ needs.changes.outputs.scripts == 'true' }}

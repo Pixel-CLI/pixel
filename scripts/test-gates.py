@@ -30,7 +30,7 @@ class GatesContract(unittest.TestCase):
         # gates. Stub them here: this fixture asserts that gates.sh invokes
         # them and honours their exit code, not what the real ones check.
         self.prepare_log = self.root / "contracts.log"
-        for name in ("test-prepare.py", "test-release-candidate.py", "test-gates.py", "test-mutants-nightly-range.py", "test-mutants-config.py", "test-codeql-rust-scope.py",
+        for name in ("test-prepare.py", "test-release-candidate.py", "test-gates.py", "test-mutants-nightly-range.py", "test-mutants-config.py", "test-codeql-policy.py",
                      "test-clean.py",
                      "test-harness-recorder.py"):
             if name.endswith(".sh"):
@@ -143,7 +143,7 @@ class GatesContract(unittest.TestCase):
         self.assertEqual(
             self.contracts(),
             ["test-prepare.py", "test-release-candidate.py", "test-gates.py", "test-pre-push.sh",
-             "test-codeql-rust-scope.py", "test-mutants-nightly-range.py", "test-mutants-config.py",
+             "test-codeql-policy.py", "test-mutants-nightly-range.py", "test-mutants-config.py",
              "test-clean.py", "test-harness-recorder.py"],
         )
         self.assertEqual(self.invocations(), [])
