@@ -12,6 +12,13 @@ fail-fast = false
 # CLI contract test here runs in seconds). Warn at 60 s, kill at 180 s.
 slow-timeout = { period = "60s", terminate-after = 3 }
 
+[profile.fast]
+inherits = "default"
+# Local diagnosis only (`cargo nextest run -P fast …`): stop at the first
+# failure instead of running the rest. The default stays without fail-fast
+# for the reason above; CI never selects this profile.
+fail-fast = true
+
 [profile.ci]
 inherits = "default"
 # One retry surfaces a timing-dependent test as FLAKY in the summary instead

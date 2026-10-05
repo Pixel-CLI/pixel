@@ -2,29 +2,13 @@
 
 Always loaded: how to run the long gates without losing an afternoon.
 
-- **Validate one finished unit, not every reply.** Use contract and
-  consumer tests while editing; full local gates are due before the PR and
-  after changes that can invalidate their result. Follow CONTRIBUTING.md
-  "Agent validation workflow" for background execution: an unchanged
-  checkout or a committed worktree snapshot, its own `target/`, and a SHA,
-  command, complete log and exit status. A previous pass never covers a
-  subsequent behavior change. Keep Cargo builds sequential per build
-  directory and do not clean output used by a running gate.
-- **Mutants run remotely, not on the laptop.** Before a Rust push, the tracked
-  hook sends the committed candidate to the gate host and blocks on its
-  verdict; CI repeats that verdict as the merge gate. A 231-mutant campaign
-  held a laptop's tree for two hours (`--in-place` forbids edits meanwhile)
-  for 24 survivors that sat in six functions, all readable from the report.
-  Only when explicitly asked, run `cargo mutants --in-diff <diff> -F '<fn>'`
-  on one or two functions (minutes), never the full diff.
-- **Measure before you launch anything.** `cargo mutants --list --in-diff
-  <diff> | wc -l` gives the mutant count; CI costs about 25 s per `pixel-cli`
-  mutant after a 3 min baseline and 10 to 15 s per library-crate mutant.
-  The workflow shards the list: one job per 10 mutants, at most 10 jobs
-  (`MUTANTS_PER_SHARD`, `MAX_SHARDS` in `scripts/mutants-gate.py`), each
-  paying about 40 s of setup and its own baseline. The limit is per shard:
-  a count whose slices will not fit a 90-minute job (roughly 2 000 CLI
-  mutants) means the PR must be split by file, never by weakening the gate.
+- **Local campaigns are optional.** Use a focused local test when it helps
+  diagnosis; full suites are CI's responsibility before merge. For a chosen
+  long local check, use an unchanged snapshot, one Cargo writer per target,
+  and record its SHA, command, log and exit status. Do not clean active builds.
+- **Mutants run only in scheduled CI on main.** No local, PR or manual
+  campaigns. Diagnose survivors with ordinary tests and inspect the next
+  nightly's report after merge.
 - **Count against the merge base, with three dots.** `git diff
   origin/main...HEAD` diffs the merge base against HEAD — what the branch
   changed. `git diff origin/main..HEAD` diffs the two commits and adds
@@ -37,10 +21,6 @@ Always loaded: how to run the long gates without losing an afternoon.
   uncommitted edit it prints `Diff content doesn't match source file` and
   lists zero mutants, which reads like good news. Commit first, then write
   the diff.
-- **`--timeout 20` breaks the baseline of crates with doctests**: rustdoc's
-  doctest compile alone takes 15 to 20 s, and the cap applies to the
-  baseline too. Use `--timeout 60` for a local `-F` run; CI's automatic cap
-  is five times the measured baseline, so it is unaffected.
 - **Do not throttle the CLI suite.** `RUST_TEST_THREADS=4` made the
   process-spawning `pixel-cli` tests four times slower per mutant; the
   default thread count is right, and a flaky baseline is re-run, not
@@ -52,13 +32,5 @@ Always loaded: how to run the long gates without losing an afternoon.
   prices every worktree's build output, index and scratch in one list, and
   `just clean` takes the build output of all of them (CONTRIBUTING.md,
   "Reclaiming disk"); a `mutants.out` left by an aborted run is in that list.
-- **Stacked PRs diff against their base**, not `main`:
-  `git diff <base-branch>...HEAD > target/pr.diff && cargo mutants
-  --in-diff target/pr.diff`. A lower PR fixed after
-  review gets a follow-up commit pushed to its branch; the branches above
-  keep their diff and the merge order stays bottom-up.
-- **Work on a lower branch from a second worktree**
-  (`git worktree add /tmp/pxwt/<name> <branch>`, then `pixel commit ... <path>`)
-  while a mutants run holds the main tree; remove it afterwards.
 - **Finish with a daemon check.** `pgrep -fl "target/.*/pixel daemon"` must
   print nothing; a fixture that left a daemon serving it is a test bug.
