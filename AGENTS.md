@@ -4,23 +4,12 @@
 
 ## Mutation Testing Loop
 
-- Mutation testing has one required verdict: the `Mutants` workflow shards the pull request's diff and fails it on any surviving mutant. The pre-push gate (`scripts/mutants-push-gate.sh`) is opt-in: with `PIXEL_MUTANTS_GATE=local` it runs the same campaign (`scripts/mutants-preflight.sh --run`, pinned nightly and cargo-mutants) on the pushing machine and blocks the push on its verdict; unset or `off`, it runs nothing.
-- Set `PIXEL_MUTANTS_GATE=local` where the CPUs are yours to spend — a cloud agent session, with its own VM and `target/`, is the intended host. On a laptop leave it unset: a campaign holds the tree's machine for minutes to hours, and parallel worktrees then fight over the same cores.
-- Do not run `cargo mutants` by hand on your own initiative; the push gate and the workflow's runners are for that.
-- The loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push. Under `local`, a blocked push already lists the `MISSED`/`TIMEOUT` lines — fix them and push again; the outcome cache (`target/mutants-preflight/`) makes the retry re-test only the survivors. Without it, read the same lines from `Mutants in diff`.
-- A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.
-
-One habit keeps the CI side from being the bottleneck:
-
-- **Do not wait on the job.** Start `gh pr checks <pr> --watch` as a background task and work on the next unit (the next pull request of the stack, another worktree) until it returns; then read the `MISSED` lines. Never a foreground `sleep` loop.
-
-For each `MISSED` line either:
-
-- add a test that fails under that exact mutation (an assertion on the observable contract, not a weaker one), or
-- when the mutation cannot matter (a diagnostic formatter, a `main`, dead-by-design code), annotate the function with `#[cfg_attr(test, mutants::skip)]` plus a one-line reason, adding `mutants = { workspace = true }` to that crate's `[dependencies]` if it is the crate's first skip.
-
-Push the fix and let the workflow re-run until it reports `0 missed`. Skipping a business rule because the test is hard is not an option; see CONTRIBUTING.md "Mutation testing" for the outcome table and exit codes.
-
+- Automatic mutation testing runs once a night on `main`, only when commits remain since the last completed campaign. `.github/workflows/mutants.yml` mutates that cumulative diff; neither pull requests nor the pre-push hook run mutations.
+- The pre-push hook still fetches the base, compiles Rust changes with `cargo check --all-targets`, and enforces `pixel review-gate`. Pass the normal format, lint and test gates before publishing.
+- Do not start a mutation campaign on an agent's machine. A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, requires an explicit request. Manual CI dispatches remain available for investigating a reported range.
+- A nightly campaign keeps its previous checkpoint if a shard crashes, its baseline fails, or the results are incomplete. A complete campaign with `MISSED`/`TIMEOUT` advances the checkpoint but stays red, with outcomes and the report retained in Actions.
+- For each reported survivor, add a test that fails under that exact mutation, or use a narrowly justified `#[cfg_attr(test, mutants::skip)]` only when the mutation cannot affect a contract. Skipping a business rule because its test is hard is not an option.
+- Watch PR checks in the background with `gh pr checks <pr> --watch`; never a foreground sleep/poll loop. Mutation results are post-merge feedback, not a PR gate.
 
 ## Rules Directory
 
@@ -69,7 +58,7 @@ and its supporting files; `.claude/skills` is a symlink to it.
 | `section-redesign/` | reworking a section of the pixel-cli.dev home, "/section-redesign #<anchor>", "même méthode que le hero" | the loop the hero went through: visitor critique, an artifact of mocked variants with votable points (`assets/review-sheet.html`), synthesis iterations, every claim checked against code and benchmarks, the Hugo implementation with desktop and mobile captures; lists the decisions that already bind every section |
 | `improve-codebase-architecture/` | manual only: "/improve-codebase-architecture [area]", an architecture review, where to deepen modules | finds deepening opportunities from churn, `pixel audit`, areas and callers, writes a local HTML report of before/after cards with their measured cost (mutants, diff, `ARCHITECTURE.md` sections, impact risk), then grills the picked candidate into a project-3 task; settled decisions live in `ARCHITECTURE.md` and `.agents/rules/`; adapted from Matt Pocock's MIT skill (`UPSTREAM` pins the commit) |
 | `agent-session-debugging/` | debugging real pi, agy, Claude, or Codex behavior in Herdr, especially Pixel retrieval, metrics, or installed hooks | keeps the main operator pane beside a 2×2 agent grid; inspect real transcripts, ask the CLI directly when its UI is ambiguous, then implement, retest, and redeploy with evidence |
-| `validation-loop/` | implementing Rust, preparing a PR, or reducing compile and mutation-fix round trips | chooses scoped local feedback, freezes one candidate, uses the opt-in local mutation gate, and triages failed gates without blind push retries |
+| `validation-loop/` | implementing Rust, preparing a PR, or reducing compile and mutation-fix round trips | chooses scoped local feedback, freezes one candidate, keeps mutations in nightly main feedback, and triages failed gates without blind push retries |
 
 Rules are always-on for the files they name; a skill is read when its
 `description` matches the task. A tool without skill support reads

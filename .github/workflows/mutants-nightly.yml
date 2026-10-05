@@ -1,20 +1,11 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-name: Mutants nightly
+name: Mutants whole-tree (manual)
 
-# The whole tree, one slice a night: the pull-request gate (mutants.yml)
-# mutates only the lines a diff changes, so code merged before the gate, a
-# pull request that only weakens tests, a newer cargo-mutants' operators and
-# stale skips are never re-checked. scripts/mutants-nightly.py holds the
-# rotation (seven slices of ten round-robin shards) and the report; the
-# survivors land in one tracking issue, a section per night. The run blocks
-# no pull request: it is red when its slice has a survivor, and the issue
-# says which.
+# Optional historical whole-tree sweep. Automatic campaigns now run the
+# cumulative main diff in mutants.yml; this workflow has no schedule.
 on:
-  schedule:
-    # 01:17 UTC, when no pull request competes for the 20 concurrent jobs.
-    - cron: "17 1 * * *"
   workflow_dispatch:
     inputs:
       slice:

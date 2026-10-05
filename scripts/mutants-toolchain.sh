@@ -4,7 +4,7 @@
 
 # The toolchain every mutation campaign runs on, sourced by the lanes that
 # run mutants: scripts/mutants-preflight.sh --run (also what the pre-push
-# gate executes under PIXEL_MUTANTS_GATE=local) and scripts/gates.sh
+# manual wrapper executes under PIXEL_MUTANTS_GATE=local) and scripts/gates.sh
 # --mutants. CI installs the same pin through dtolnay/rust-toolchain in the
 # shard jobs (.github/workflows/mutants.yml, mutants-nightly.yml).
 #

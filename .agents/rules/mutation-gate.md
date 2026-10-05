@@ -5,23 +5,21 @@ paths:
 
 # Code That Passes the Mutation Gate on the First Run
 
-Loaded when a Rust source file is in play. The gate is `cargo mutants --in-diff`,
-run first by the remote pre-push campaign and again by the CI `Mutants` job
-(90-minute limit) on every PR; it is not run on the laptop, so the code must
-come out clean before a push and remain clean in CI.
+Loaded when a Rust source file is in play. `cargo mutants --in-diff` runs
+nightly against main's cumulative unjudged diff (90 minutes per shard),
+not before pushes or on PRs. These test shapes keep post-merge feedback
+useful without putting mutation compilation on the development loop.
 
 For every function with a line in the diff, the gate generates the
 mutants that sit on the changed lines (operators, match arms, guards) plus
 the replacement of the whole body (`Ok(Default::default())`, `vec![]`, `()`).
 A one-token change in an untested function is therefore enough to get its
 body replaced, and a reformatted line brings every operator on it. Measure
-the exposure before pushing, in seconds and without building:
+the exposure when designing tests, without building:
 `git diff <base>...HEAD > target/pr.diff && cargo mutants --list --in-diff
 target/pr.diff` (a file, not `<(…)`: fish has no process substitution),
 then read it line by line: every listed mutant names the test that fails
-under it, or gets one before the push: each failed remote or CI run costs a
-round trip, and 42 of 121 failed from 2026-09-21 to 26. Two
-settings in `.cargo/mutants.toml` shape the answer: `test_workspace = false` runs only
+under it. Two settings in `.cargo/mutants.toml` shape the answer: `test_workspace = false` runs only
 the mutated crate's tests (a CLI contract test never kills a library
 mutant), and `crates/*/build.rs` is excluded: cargo build scripts only, so
 `crates/pixel-graph/src/build.rs` stays under the gate. Rules that make the
@@ -77,10 +75,9 @@ first `cargo mutants` run come back clean:
   --batch-check <object>` that git rejects, so every blob measured 0 bytes),
   fix the bug in its own PR with a `changelog.d/` fragment, below the PR that
   found it. Do not bend the test to the broken behaviour.
-- **Fix from the push-gate or CI report, verify locally only per function.** Read
-  the `MISSED`/`TIMEOUT` lines (the `local` push gate reports them before a blocked
-  push; `Mutants in diff` gathers every CI shard's), write the test, and if asked to
-  check before pushing run `cargo mutants --in-diff <diff> -F <function>`
+- **Fix from the nightly report, verify locally only per function.** Read
+  its `MISSED`/`TIMEOUT` lines, write the test, and if explicitly asked run
+  `cargo mutants --in-diff <diff> -F <function>`
   (minutes). Never the full in-diff run: it is the job's work. Never edit
   the tree while a run is in flight: it mutates files in place. After a
   killed or crashed run, `grep -rl "changed by cargo-mutants" crates/` and

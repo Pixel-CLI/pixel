@@ -205,9 +205,14 @@ version, sha256 check).
 
 ### 3.10 CI and release (B7)
 
-Pull requests run `ci.yml`, `cross-build.yml`, `mutants.yml`, `codeql.yml`,
+Pull requests run `ci.yml`, `cross-build.yml`, `codeql.yml`,
 `fuzz.yml` and the others listed in ARCHITECTURE.md, "Testing and gates".
 `board-sync.yml` runs on `pull_request_target` to move the project board.
+`mutants.yml` runs the cumulative main diff nightly, with read-only contents
+and Actions metadata access. It accepts checkpoint metadata only from its
+own completed main runs, and validates checkpoint ancestry before selecting
+the diff. Only fully judged campaigns write checkpoint artifacts; manual
+ranges cannot advance them. `mutants-nightly.yml` is manual-only.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.
 
@@ -599,11 +604,11 @@ boundary it crosses.
 
 Across all of them:
 
-- **Mutation testing**: every pull request touching `crates/` must leave no
-  `MISSED` mutant in its diff (`mutants.yml`, `Mutants in diff`), and
-  `mutants-nightly.yml` rotates through the whole tree; a guard whose check
-  can be removed without a test failing does not merge (CONTRIBUTING.md,
-  "Mutation testing").
+- **Mutation testing**: `mutants.yml` checks main's cumulative diff nightly,
+  only when it has unjudged commits. Survivors and incomplete campaigns
+  fail that run and require follow-up; this is post-merge detection, not a
+  condition of merge. A test-only weakening can escape a diff campaign;
+  `mutants-nightly.yml` remains an explicitly requested whole-tree audit.
 - **Fuzzing**: `fuzz.yml` runs every cargo-fuzz target for 60 s on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
   root `Cargo.toml` or `deny.toml`, for 600 s weekly, and for 120 s on every

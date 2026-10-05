@@ -375,7 +375,7 @@ jobs:
         with:
           # One key for every job that builds the debug profile on Linux
           # (this one and mutants.yml), instead of the default per-job key.
-          # The Mutants workflow only runs on pull_request, so it can never
+          # The Mutants workflow sets save-if:false, so it can never
           # save under the main rule below: without a shared key it
           # started from an empty cache on every PR.
           shared-key: linux-debug
@@ -447,11 +447,11 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: sh scripts/test-pre-push.sh
 
-      - name: Mutation exposure pre-push contract (stub cargo, disposable repo)
+      - name: Manual mutation exposure contract (stub cargo, disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: sh scripts/test-mutants-preflight.sh
 
-      - name: Mutants push gate contract (stub campaign, disposable repo)
+      - name: Manual mutation wrapper contract (stub campaign, disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: sh scripts/test-mutants-push-gate.sh
 
@@ -485,7 +485,11 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-prepare-only.py
 
-      - name: Nightly mutants rotation and report contract
+      - name: Nightly diff checkpoint contract
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-mutants-nightly-range.py
+
+      - name: Manual whole-tree rotation and report contract
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-mutants-nightly.py
 

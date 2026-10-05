@@ -15,7 +15,7 @@ Before every `git push` of a feature branch, in this order:
    main-targeted work; the immediate base for a stack) and diff against the
    fetched ref, never a stale local `main` or tracking ref. Do not rebase by
    default: `main` does not require branches to be up to date, the review and
-   the mutation gate judge the merge-base diff, and every rebase re-runs the
+   normal CI judge the merge-base diff, and every rebase re-runs the
    whole CI. Rebase only when the pull request conflicts with the base, or
    when the change needs something that landed on it since; then resolve
    conflicts hunk by hunk before the review runs.
@@ -35,6 +35,6 @@ The tracked pre-push hook fetches the remote default, judges the branch
 against its merge-base with it (a branch behind it is not refused), then runs
 `pixel review-gate . --base <merge-base> --fail-on concern` and refuses the
 push on any BLOCKER or CONCERN finding. A stacked branch pushes with
-`PIXEL_MUTANTS_BASE=<immediate base>`: the baseline, the mutation gate and the
+`PIXEL_MUTANTS_BASE=<immediate base>`: the baseline and the
 review then judge the merge-base with that base, so the parent's commits stay
 out. `git push --no-verify` is the explicit bypass.

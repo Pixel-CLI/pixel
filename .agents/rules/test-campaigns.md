@@ -10,13 +10,10 @@ Always loaded: how to run the long gates without losing an afternoon.
   command, complete log and exit status. A previous pass never covers a
   subsequent behavior change. Keep Cargo builds sequential per build
   directory and do not clean output used by a running gate.
-- **Mutants run off the laptop.** CI's `Mutants in diff` is the merge gate;
-  a cloud agent session sets `PIXEL_MUTANTS_GATE=local` so the pre-push hook
-  runs the same campaign on its own VM before the push. A 231-mutant campaign
-  held a laptop's tree for two hours (`--in-place` forbids edits meanwhile)
-  for 24 survivors that sat in six functions, all readable from the report.
+- **Mutants run nightly on main.** No PR or pre-push mutation campaign.
   Only when explicitly asked, run `cargo mutants --in-diff <diff> -F '<fn>'`
-  on one or two functions (minutes), never the full diff.
+  on one or two functions (minutes), never the full diff on a laptop.
+  Manual CI campaigns remain available for a reported range or full sweep.
 - **Measure before you launch anything.** `cargo mutants --list --in-diff
   <diff> | wc -l` gives the mutant count; CI costs about 25 s per `pixel-cli`
   mutant after a 3 min baseline and 10 to 15 s per library-crate mutant.
@@ -24,7 +21,7 @@ Always loaded: how to run the long gates without losing an afternoon.
   (`MUTANTS_PER_SHARD`, `MAX_SHARDS` in `scripts/mutants-gate.py`), each
   paying about 40 s of setup and its own baseline. The limit is per shard:
   a count whose slices will not fit a 90-minute job (roughly 2 000 CLI
-  mutants) means the PR must be split by file, never by weakening the gate.
+  mutants) needs a bounded manual follow-up, never hidden timeouts or weakened assertions.
 - **Count against the merge base, with three dots.** `git diff
   origin/main...HEAD` diffs the merge base against HEAD — what the branch
   changed. `git diff origin/main..HEAD` diffs the two commits and adds

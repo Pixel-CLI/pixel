@@ -26,12 +26,9 @@ request exists.
   result only while the candidate and gate inputs remain unchanged; rerun after
   a behavior- or gate-affecting edit.
 - Before pushing Rust, the tracked hook fetches the base, requires
-  `cargo check --all-targets`, then, under `PIXEL_MUTANTS_GATE=local`, runs
-  the mutation campaign against that exact base and candidate. Do not bypass
-  it to discover ordinary compile failures in CI. CI remains the independent
-  merge verdict. The baseline rung is required before a mutation verdict is
-  trusted: a push blocked on a compile failure carries none, and a verdict
-  counts only for a candidate whose baseline passed.
+  `cargo check --all-targets`, and runs `pixel review-gate`. Neither this
+  hook nor pull-request CI runs mutations. The nightly main campaign is
+  post-merge feedback, independent of the normal PR verdict.
 - Classify red results before editing: a mutation **baseline failure** means
   compilation or tests failed before mutants were judged; `MISSED` needs a
   contract test or justified skip; `TIMEOUT`, unviable and infrastructure

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 # Contract for the pre-push order: a Rust baseline must compile before the
-# mutants gate runs, while non-Rust pushes avoid Cargo entirely.
+# review runs; no push starts mutations, even with the old opt-in set.
 # A branch behind origin's default is judged against its merge-base, never
 # refused for not being rebased.
 set -eu
@@ -50,18 +50,18 @@ chmod +x "$tmp/bin/git" "$tmp/bin/cargo" "$tmp/bin/pixel"
 
 run() {
     PATH="$tmp/bin:/usr/bin:/bin" PRE_PUSH_REPO="$fixture" ORDER_LOG="$tmp/order.log" \
-        CHANGED_PATHS="$1" sh "$fixture/.githooks/pre-push"
+        PIXEL_MUTANTS_GATE=local CHANGED_PATHS="$1" sh "$fixture/.githooks/pre-push"
 }
 
 : > "$tmp/order.log"
 run 'crates/demo/src/lib.rs\n'
 test "$(sed -n '1p' "$tmp/order.log")" = 'cargo check --all-targets'
-test "$(sed -n '2p' "$tmp/order.log")" = 'gate base'
+test "$(sed -n '2p' "$tmp/order.log")" = 'review review-gate . --base base --fail-on concern'
+! grep -q '^gate ' "$tmp/order.log"
 
 : > "$tmp/order.log"
 run 'docs/guide.md\n'
-test "$(sed -n '1p' "$tmp/order.log")" = 'gate base'
-test "$(sed -n '2p' "$tmp/order.log")" = 'review review-gate . --base base --fail-on concern'
+test "$(cat "$tmp/order.log")" = 'review review-gate . --base base --fail-on concern'
 
 : > "$tmp/order.log"
 if CARGO_FAIL=1 run 'crates/demo/src/lib.rs\n' > "$tmp/failed.out" 2>&1; then
@@ -82,17 +82,19 @@ if ! FETCHED_TIP=newer MERGE_BASE=older run 'crates/demo/src/lib.rs\n' > "$tmp/b
 fi
 ! grep -q 'not rebased' "$tmp/behind.out"
 test "$(sed -n '1p' "$tmp/order.log")" = 'cargo check --all-targets'
-test "$(sed -n '2p' "$tmp/order.log")" = 'gate older'
+test "$(sed -n '2p' "$tmp/order.log")" = 'review review-gate . --base older --fail-on concern'
+! grep -q '^gate ' "$tmp/order.log"
 
 # Stacked: an explicit immediate base wins over origin's default for the
-# baseline diff, the mutants gate and the review alike.
+# baseline diff and the review alike.
 : > "$tmp/order.log"
 if ! PIXEL_MUTANTS_BASE=parent-branch MERGE_BASE=parent-fork run 'crates/demo/src/lib.rs\n' > "$tmp/stacked.out" 2>&1; then
     cat "$tmp/stacked.out" >&2
     echo "expected a stacked branch to push against its parent" >&2
     exit 1
 fi
-test "$(sed -n '2p' "$tmp/order.log")" = 'gate parent-fork'
-test "$(sed -n '3p' "$tmp/order.log")" = 'review review-gate . --base parent-fork --fail-on concern'
+test "$(sed -n '2p' "$tmp/order.log")" = 'review review-gate . --base parent-fork --fail-on concern'
+
+! grep -q '^gate ' "$tmp/order.log"
 
 echo "pre-push contract: ok"

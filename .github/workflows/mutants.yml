@@ -3,64 +3,73 @@
 
 name: Mutants
 
-# Mutation testing on the code a pull request touches. cargo-mutants rewrites
-# each changed function (return a default, flip an operator, drop a match
-# guard) and requires the crate's tests to fail. A mutant that survives means
-# the change is not covered by a test that can fail, which is a gate in
-# CONTRIBUTING.md ("Mutation testing"). Full-tree runs are a local,
-# per-crate activity; CI only pays for the diff.
-#
-# Three jobs. `plan` lists the diff's mutants (no build) and sizes a matrix.
-# Each `shard` job runs one consecutive slice of that list. `gate` totals the
-# shards' outcomes against the listing and keeps the check name this workflow
-# has always reported ("Mutants in diff"). Mutants used to run one after the
-# other in a single job: 77 `pixel-cli` mutants took about 35 minutes, and a
-# 658-mutant diff could not fit the 90-minute limit at all.
-#
-# `workflow_dispatch` runs the same three jobs on a past range instead of a
-# pull request: `gh workflow run mutants.yml -f diff_range=e8a4d14...372e1c4`
-# mutates the `crates/` part of that range in the tree of its right end, so
-# the diff still matches the source even after `main` moved on. It is how a
-# pull request merged without a verdict gets one afterwards (#222). The
-# range's right end must be in the history of the branch the run is
-# dispatched from (#674).
+# Mutate main's cumulative diff once a night. The range job reads only
+# completed campaign checkpoints; unchanged main never starts Rust jobs.
+# Explicit dispatches remain available for investigation and never move the
+# automatic checkpoint. .cargo/mutants.toml is shared by every campaign.
 on:
-  pull_request:
-    paths:
-      - ".cargo/mutants.toml"
-      - ".github/workflows/mutants.yml"
-      - "Cargo.*"
-      - "crates/**"
-      - "scripts/mutants-gate.py"
+  schedule:
+    - cron: "17 1 * * *"
   workflow_dispatch:
     inputs:
       diff_range:
-        description: "Three-dot range whose crates/ changes to mutate, e.g. e8a4d14...372e1c4"
-        required: true
+        description: "Optional merged range; empty runs main since its last completed campaign"
+        required: false
         type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Release-prepare pull request? See release-prepare-scope.yml.
-  scope:
-    uses: ./.github/workflows/release-prepare-scope.yml
+  range:
+    name: Nightly range
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.range.outputs.run }}
+      diff_range: ${{ steps.range.outputs.diff_range }}
+      automatic: ${{ steps.range.outputs.automatic }}
+    steps:
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the cumulative main diff
+        id: range
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIFF_RANGE: ${{ inputs.diff_range }}
+        run: |
+          if [ -n "$DIFF_RANGE" ]; then
+            if ! [[ "$DIFF_RANGE" =~ ^[0-9a-f]{7,40}\.\.\.[0-9a-f]{7,40}$ ]]; then
+              echo "invalid diff range" >&2
+              exit 1
+            fi
+            {
+              echo "diff_range=$DIFF_RANGE"
+              echo "run=true"
+              echo "automatic=false"
+            } >> "$GITHUB_OUTPUT"
+          else
+            test "$GITHUB_REF" = refs/heads/main
+            echo "automatic=true" >> "$GITHUB_OUTPUT"
+            python3 scripts/mutants-nightly-range.py plan \
+              --repository "$GITHUB_REPOSITORY" --head "$GITHUB_SHA" \
+              --github-output "$GITHUB_OUTPUT"
+          fi
 
   plan:
     name: Mutants plan
-    # A release-prepare pull request into main mutates nothing it wrote
-    # (version bumps, Cargo.lock, changelog): skipped once `scope` verified
-    # the diff, as in ci.yml.
-    needs: scope
-    if: needs.scope.outputs.release-prepare != 'true'
+    needs: range
+    if: needs.range.outputs.run == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     outputs:
@@ -71,18 +80,7 @@ jobs:
       # (GitHub-hosted by default), so the shards spread across every host
       # the pool names instead of queueing behind one self-hosted machine.
       matrix: ${{ steps.size.outputs.matrix }}
-      # The commit the shards mutate: the range's right end on a dispatch,
-      # empty on a pull request (the checkout's default, its merge commit).
       ref: ${{ steps.diff.outputs.ref }}
-      # The skip guard's finding (#590): whether a green verdict already
-      # exists for this exact tree (same UTC day), the run that recorded it,
-      # and the tree the shards mutate -- the merge commit's on a pull
-      # request, the range tip's on a dispatch. The gate saves a fresh
-      # verdict under it.
-      duplicate: ${{ steps.dup.outputs.duplicate }}
-      verdict-run: ${{ steps.dup.outputs.verdict_run }}
-      tree: ${{ steps.key.outputs.tree }}
-      day: ${{ steps.key.outputs.day }}
     steps:
       # Full history so the merge base with the target branch is available.
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
@@ -107,27 +105,13 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
 
-      # Three-dot diff: what this branch changed since it left the target
-      # branch, so mutants are generated only in code the PR authored. The
-      # shards and the gate reuse this exact file through the artifact below
-      # rather than recomputing it against a target branch that may have
-      # moved since.
-      #
-      # On a dispatch the range is the input, restricted to `crates/`, and
-      # its right end is checked out beside this tree: the listing must come
-      # from the code the diff describes, while the gate script and config
-      # stay this branch's.
+      # Freeze the selected range and mutate its right end. The listing,
+      # shards and report reuse this exact diff and shared configuration.
       - name: Diff against the target branch
         id: diff
         env:
-          BASE_REF: ${{ github.base_ref }}
-          DIFF_RANGE: ${{ inputs.diff_range }}
+          DIFF_RANGE: ${{ needs.range.outputs.diff_range }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
-            git diff "origin/$BASE_REF...HEAD" > pr.diff
-            echo "src=." >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           if ! [[ "$DIFF_RANGE" =~ ^[0-9a-f]{7,40}\.\.\.[0-9a-f]{7,40}$ ]]; then
             echo "::error title=Bad diff_range::expected <sha>...<sha>, got '$DIFF_RANGE'"
             exit 1
@@ -147,45 +131,6 @@ jobs:
           git worktree add --detach "$RUNNER_TEMP/tip" "$tip"
           echo "ref=$tip" >> "$GITHUB_OUTPUT"
           echo "src=$RUNNER_TEMP/tip" >> "$GITHUB_OUTPUT"
-
-      # The skip-guard key (see ci.yml's changes job): the tree of the code
-      # the shards mutate. A dispatch's shards mutate the range tip, not the
-      # checkout, so the key comes from that worktree; a pull request's
-      # shards mutate the merge commit.
-      - name: Mutated tree and UTC day
-        id: key
-        env:
-          SRC: ${{ steps.diff.outputs.src }}
-        run: |
-          echo "tree=$(git -C "$SRC" rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
-          echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
-
-      # A green gate recorded a marker under mutants-verdict-<tree>-<day>
-      # (the gate below): a repush with no content change restores it and
-      # skips the shards entirely -- every mutant the diff produces was
-      # already judged by the run the marker points at. The listing still
-      # runs, so the gate's artifact and outputs keep their shape. The
-      # Actions cache makes the key a fact: an entry exists only if a green
-      # gate of this exact tree wrote it, and an entry is immutable.
-      - name: Restore a green verdict for this exact tree
-        id: verdict
-        if: github.event_name == 'pull_request'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/verdict
-          key: mutants-verdict-${{ steps.key.outputs.tree }}-${{ steps.key.outputs.day }}
-
-      - name: Skip when the tree already has a green verdict
-        id: dup
-        if: steps.verdict.outputs.cache-hit == 'true'
-        run: |
-          if [ ! -f "$RUNNER_TEMP/verdict/green" ]; then
-            echo "the restored cache holds no marker; running"
-            exit 0
-          fi
-          echo "duplicate=true" >> "$GITHUB_OUTPUT"
-          echo "verdict_run=$(cat "$RUNNER_TEMP/verdict/green")" >> "$GITHUB_OUTPUT"
-          echo "Mutants: this merge tree already has a green verdict (same UTC day); the shards will be skipped." >> "$GITHUB_STEP_SUMMARY"
 
       # `cargo mutants` exits 0 both when every mutant was caught and when it
       # produced none at all, and the run's own output cannot tell those
@@ -243,17 +188,10 @@ jobs:
     # 2/5`. cargo-mutants numbers shards from 0.
     name: Mutants shard ${{ matrix.shard }}
     needs: plan
-    if: needs.plan.outputs.mutants != '0' && needs.plan.outputs.duplicate != 'true'
-    # Compiling happens here tens of mutants at a time, which is where a
-    # self-hosted runner pays off most. The PIXEL_MUTANTS_SHARD_RUNNERS
-    # repository variable names the pool the plan job dealt the shards over
-    # (round-robin, GitHub's image when unset): same-repository pull
-    # requests included, whose authors already hold push access to this
-    # repository. A fork's pull request stays on GitHub's image: its code
-    # comes from someone without that access, and `contents: read` and
-    # `persist-credentials: false` do not isolate a host that outlives the
-    # job.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && matrix.runner || 'ubuntu-26.04' }}
+    if: needs.plan.outputs.mutants != '0'
+    # Automatic ranges contain main only. Explicit dispatches are restricted
+    # to the selected branch's history before any source reaches a shard.
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     # The Test job's value (ci.yml), at the same job level: rust-cache hashes
     # it into the `linux-debug` key, so a shard without it would restore
@@ -262,7 +200,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     strategy:
       # Every shard runs to the end even when another one has a survivor:
-      # the author needs the whole list of MISSED lines from one push.
+      # the report needs every result from the selected range.
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
@@ -448,15 +386,12 @@ jobs:
           overwrite: true
 
   gate:
-    # The check name the workflow reported before it was sharded, so links,
-    # docs and habits that point at "Mutants in diff" still land on the
-    # verdict.
+    # Preserve the report name for links to existing campaigns.
     name: Mutants in diff
-    needs: [scope, plan, shard]
-    # Runs after failed or skipped shards too: it is the job that says what
-    # they add up to. Not after a skipped plan: a release-prepare pull
-    # request has no diff to gate.
-    if: always() && needs.scope.outputs.release-prepare != 'true'
+    needs: [range, plan, shard]
+    # An unchanged main skips the plan and the report; a failed plan for
+    # an actual range must still produce a red report.
+    if: always() && needs.range.outputs.run == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -480,56 +415,43 @@ jobs:
       # gate reads both). A shard that left no artifact leaves its mutants
       # without a verdict, and the next step counts them as such.
       - name: Download every shard's mutants.out
-        if: needs.plan.outputs.mutants != '0' && needs.plan.outputs.duplicate != 'true'
+        if: needs.plan.outputs.mutants != '0'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: mutants-out-*
           path: shards
 
-      # The shards were skipped because this exact tree already has a green
-      # verdict from today (#590): say so instead of failing on unjudged
-      # mutants -- the outcomes the report step would demand were judged by
-      # the run the verdict points at.
-      - name: Report the reused verdict
-        if: needs.plan.outputs.duplicate == 'true'
-        run: |
-          {
-            echo "### Mutants in diff: skipped"
-            echo
-            echo "This merge tree already has a green verdict from ${{ needs.plan.outputs.verdict-run }} (same UTC day); no shard re-ran."
-          } >> "$GITHUB_STEP_SUMMARY"
-
       # A green job is not the same claim as "this diff was gated": a diff
       # whose every file is excluded produces no mutants, which reads as a
       # pass over untested code. This step states the tested count outright
-      # and annotates the pull request when mutable Rust changed and nothing
-      # came out of it. Pass --fail-on-vacuous to turn that annotation into
-      # a red check; it is left off because a comment-only edit to a Rust
-      # file legitimately produces no mutants and should not block a pull
-      # request. --outcomes-root fails the job unless every listed mutant
+      # and warns when mutable Rust changed and nothing came out of it.
+      # Comment-only Rust diffs legitimately produce zero mutants. --outcomes-root fails the job unless every listed mutant
       # was caught or unviable: a survivor in any shard, or a shard that
       # crashed or was cancelled before judging its slice.
       - name: Report what the gate actually tested
-        if: needs.plan.outputs.duplicate != 'true'
+        id: report
         run: >
           python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt
           --outcomes-root shards --summary "$GITHUB_STEP_SUMMARY"
 
-      # A green verdict records the mutated tree in the Actions cache under
-      # mutants-verdict-<tree>-<day>: the plan job of a later run with an
-      # identical tree finds it and skips the shards (#590). No always()
-      # here on purpose: the steps above leave a failed gate before this
-      # runs, so a run with a survivor or an unjudged mutant records
-      # nothing, and a duplicate has nothing to record (the entry exists).
-      - name: Record the green verdict
-        if: needs.plan.outputs.duplicate != 'true'
+      # A failed report may still be a complete campaign (MISSED/TIMEOUT).
+      # Never swallow its failure: upload a checkpoint only after independently
+      # checking all outcomes, while the report's red status stays red.
+      - name: Check whether every listed mutant was judged
+        id: checkpoint
+        if: always() && needs.range.outputs.automatic == 'true' && (steps.report.outcome == 'success' || steps.report.outcome == 'failure')
+        env:
+          TIP: ${{ needs.plan.outputs.ref }}
         run: |
-          mkdir -p "$RUNNER_TEMP/verdict"
-          printf '%s\n' "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > "$RUNNER_TEMP/verdict/green"
+          python3 scripts/mutants-nightly-range.py checkpoint \
+            --list mutants-list.txt --outcomes-root shards --sha "$TIP" \
+            --output checkpoint.json
 
-      - name: Save the verdict under the tree-and-day key
-        if: needs.plan.outputs.duplicate != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Record the completed campaign
+        if: always() && steps.checkpoint.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          path: ${{ runner.temp }}/verdict
-          key: mutants-verdict-${{ needs.plan.outputs.tree }}-${{ needs.plan.outputs.day }}
+          name: mutants-nightly-checkpoint
+          path: checkpoint.json
+          if-no-files-found: error
+          overwrite: true

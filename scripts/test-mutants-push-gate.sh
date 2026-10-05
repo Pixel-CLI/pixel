@@ -37,7 +37,7 @@ for value in unset off; do
         out=$(PIXEL_MUTANTS_GATE=off gate)
     fi
     test ! -s "$tmp/calls.log" || { echo "gate $value ran a campaign" >&2; exit 1; }
-    case "$out" in *"CI's Mutants in diff stays the merge gate"*) ;; *)
+    case "$out" in *"automatic mutations run nightly on main"*) ;; *)
         echo "gate $value did not say CI keeps the verdict: $out" >&2; exit 1 ;;
     esac
 done

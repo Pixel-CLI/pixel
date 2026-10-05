@@ -660,10 +660,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     (`.config/nextest.toml`: one process per test, retry once but fail on
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
-    contract scripts (installer, gate runner, pre-push baseline, mutation
-    pre-push and push gate, release prepare, Homebrew formula and Linux
+    contract scripts (installer, gate runner, pre-push baseline, manual mutation
+    helpers, release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
-    nightly mutants, mutants
+    nightly diff checkpoints, manual whole-tree mutants, mutants
     config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
     reproducible release build environment, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
@@ -676,14 +676,19 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     **Dependency policy** (`cargo deny`, then
     `scripts/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
     reads, accepts the same advisories as `deny.toml`).
-- Other workflows: `mutants.yml` (the `Mutants in diff` gate on every pull
-  request touching `crates/`, sharded over the `PIXEL_MUTANTS_SHARD_RUNNERS`
-  runner pool — a JSON array of `runs-on` values the plan job deals
-  round-robin per shard through `scripts/mutants-gate.py`, GitHub-hosted
-  `ubuntu-26.04` when the variable is unset or empty, so capacity moves
-  with a variable edit and no shard queues behind one busy self-hosted
-  host), `mutants-nightly.yml` (a whole-tree
-  rotation), `cross-build.yml` (the three release lanes),
+- Other workflows: `mutants.yml` (01:17 UTC on `main`, only the cumulative
+  diff since the latest completed campaign; no pull-request trigger).
+  `scripts/mutants-nightly-range.py` selects a checkpoint from trusted
+  completed main-run artifact metadata and refuses API/history failures.
+  A checkpoint is uploaded after every listed mutant has a recognized
+  outcome; survivors keep the run red, while missing outcomes and disk-full
+  failures leave the prior checkpoint. Unchanged main starts no Rust jobs.
+  The existing plan/shards/report share `.cargo/mutants.toml` and distribute
+  shards over `PIXEL_MUTANTS_SHARD_RUNNERS` (GitHub-hosted `ubuntu-26.04`
+  by default). Explicit range dispatches never move the nightly checkpoint.
+  `mutants-nightly.yml` is an optional manual whole-tree slice audit with no
+  schedule. The pre-push hook compiles and reviews only. Other lanes include
+  `cross-build.yml` (the three release lanes),
   `reproducible-build.yml` (the `x86_64-unknown-linux-musl` release binary
   built twice from two checkouts at different paths, no cache, failing
   unless the two sha256 match; on pull requests touching the build

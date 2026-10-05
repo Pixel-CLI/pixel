@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-# A cheap local compile proves the candidate builds before anything else judges
-# it. The mutants gate (scripts/mutants-push-gate.sh) is opt-in: with
-# PIXEL_MUTANTS_GATE=local it runs the diff's campaign on this machine and
-# blocks the push on its verdict; unset, it runs nothing. CI's Mutants in diff
-# remains the required merge gate either way.
+# Compile and review the branch before pushing. Mutation campaigns run
+# nightly on main; a push never starts one, even with PIXEL_MUTANTS_GATE set.
 set -eu
 
 repo=$(git rev-parse --show-toplevel) || exit 0
@@ -36,12 +33,10 @@ tip=$(git merge-base HEAD "$base") || {
 # scripts retain their fast push path.
 if git diff --name-only "$tip...HEAD" | grep -Eq '^crates/.*\.rs$'; then
     if ! cargo check --all-targets; then
-        echo "pre-push: cargo check --all-targets failed; fix the baseline before the mutation gate" >&2
+        echo "pre-push: cargo check --all-targets failed; fix the baseline before pushing" >&2
         exit 1
     fi
 fi
-
-PIXEL_MUTANTS_BASE="$tip" "$repo/scripts/mutants-push-gate.sh"
 
 # review-gate: the deterministic review of the branch diff against the same
 # merge-base must hold no BLOCKER or CONCERN finding. Skipped when the
