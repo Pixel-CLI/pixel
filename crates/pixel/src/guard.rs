@@ -7853,7 +7853,7 @@ mod tests {
         );
         assert_eq!(
             route["first_command"],
-            "rtk pixel find-code 'How does task preparation refresh stale source evidence?'"
+            "pixel find-code 'How does task preparation refresh stale source evidence?'"
         );
         assert!(
             command_line
@@ -7887,7 +7887,7 @@ mod tests {
         assert_eq!(route["automatic_empty_fallback"], true);
         assert_eq!(
             route["first_command"],
-            "rtk pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
+            "pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
         );
         assert!(command_line.ends_with(
             "search-content -F Foo::bar --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
@@ -7944,7 +7944,7 @@ mod tests {
         // The ordered task route is appended from the recovered request.
         assert!(message.contains("[PIXEL:EXECUTION_ROUTE]"), "{message}");
         assert!(
-            message.contains("rtk pixel find-code 'Find the identifier in project notes.'"),
+            message.contains("pixel find-code 'Find the identifier in project notes.'"),
             "{message}"
         );
         assert!(message.contains("maximum 40-line window"), "{message}");
