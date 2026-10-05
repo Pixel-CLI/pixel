@@ -100,7 +100,11 @@ fn parse_porcelain_v2_should_drop_malformed_records_and_keep_the_rest() {
 #[test]
 fn parse_porcelain_v2_should_flag_conflicts_from_unmerged_records_and_u_status() {
     let changes = parse_porcelain_v2(
-        "u AA N... 100644 100644 100644 100644 h1 h2 h3 both added.rs\01 UM N... 100644 100644 100644 h1 h2 odd.rs\0",
+        &[
+            "u AA N... 100644 100644 100644 100644 h1 h2 h3 both added.rs",
+            "1 UM N... 100644 100644 100644 h1 h2 odd.rs",
+        ]
+        .join("\0"),
     );
     assert_eq!(changes[0].path, "both added.rs");
     assert_eq!(changes[0].index_status, "A");
