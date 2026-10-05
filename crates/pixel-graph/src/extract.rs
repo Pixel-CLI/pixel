@@ -1983,12 +1983,63 @@ fn ruby_scope_of(kind: &str) -> Option<RubyScope> {
 /// otherwise the bare name is a method call.
 #[derive(Debug, Default)]
 struct RubyLocals {
-    frames: Vec<(RubyScope, Vec<String>)>,
+    frames: Vec<RubyFrame>,
+}
+
+/// One open Ruby scope: the locals it binds and how a `def` in its body is
+/// qualified.
+#[derive(Debug)]
+struct RubyFrame {
+    scope: RubyScope,
+    names: Vec<String>,
+    defs: RubyDefs,
+    /// The frame is a `module` body, where a bare `module_function` applies.
+    module: bool,
+    /// `self` is an instance here (a `def` body, or a block inside one), not
+    /// the class or module being defined.
+    instance_self: bool,
+}
+
+/// What a `def name` written in a frame's body defines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RubyDefs {
+    /// An instance method, `Klass#name`.
+    Instance,
+    /// A method of the class or module object itself, `Klass.name`: the body
+    /// of `class << self`, or a module after a bare `module_function`, which
+    /// Ruby applies to every following `def` until a `public`, `private` or
+    /// `protected`. The private instance copy `module_function` also makes is
+    /// not recorded: only an `include` of the module reaches it.
+    /// <https://docs.ruby-lang.org/en/master/Module.html#method-i-module_function>
+    Singleton,
 }
 
 impl RubyLocals {
-    fn open(&mut self, scope: RubyScope) {
-        self.frames.push((scope, Vec::new()));
+    /// Open the frame of a node of `kind`. A block keeps the enclosing
+    /// frame's `def` qualification and `self`, as a `def` in a block defines
+    /// a method of the enclosing class.
+    fn open(&mut self, scope: RubyScope, kind: &str, value_is_self: bool) {
+        let enclosing = self.frames.last();
+        let enclosing_defs = enclosing.map_or(RubyDefs::Instance, |f| f.defs);
+        let enclosing_instance = enclosing.is_some_and(|f| f.instance_self);
+        let (defs, instance_self) = match kind {
+            "block" | "do_block" | "lambda" => (enclosing_defs, enclosing_instance),
+            "method" => (RubyDefs::Instance, true),
+            // `class << self` names the class or module only where `self` is
+            // one: in a `def` body it is an instance, whose own singleton the
+            // graph cannot name, so its methods keep instance qualification.
+            "singleton_class" if value_is_self && !enclosing_instance => {
+                (RubyDefs::Singleton, false)
+            }
+            _ => (RubyDefs::Instance, false),
+        };
+        self.frames.push(RubyFrame {
+            scope,
+            names: Vec::new(),
+            defs,
+            module: kind == "module",
+            instance_self,
+        });
     }
 
     fn close(&mut self) {
@@ -1996,21 +2047,44 @@ impl RubyLocals {
     }
 
     fn bind(&mut self, name: String) {
-        if let Some((_, names)) = self.frames.last_mut() {
-            names.push(name);
+        if let Some(frame) = self.frames.last_mut() {
+            frame.names.push(name);
         }
     }
 
     fn is_local(&self, name: &str) -> bool {
-        for (scope, names) in self.frames.iter().rev() {
-            if names.iter().any(|known| known == name) {
+        for frame in self.frames.iter().rev() {
+            if frame.names.iter().any(|known| known == name) {
                 return true;
             }
-            if *scope == RubyScope::Gate {
+            if frame.scope == RubyScope::Gate {
                 return false;
             }
         }
         false
+    }
+
+    /// The qualification of a `def` whose own frame is the innermost one:
+    /// the frame around it decides.
+    fn enclosing_defs(&self) -> RubyDefs {
+        self.frames
+            .len()
+            .checked_sub(2)
+            .map_or(RubyDefs::Instance, |i| self.frames[i].defs)
+    }
+
+    /// A bare visibility word written directly in a `module` body:
+    /// `module_function` makes the following `def`s module functions, and
+    /// `public`/`private`/`protected` end that mode.
+    fn visibility(&mut self, word: &str) {
+        let Some(frame) = self.frames.last_mut().filter(|f| f.module) else {
+            return;
+        };
+        match word {
+            "module_function" => frame.defs = RubyDefs::Singleton,
+            "public" | "private" | "protected" => frame.defs = RubyDefs::Instance,
+            _ => {}
+        }
     }
 }
 
@@ -2021,7 +2095,10 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
     let mut pushed = false;
     let scope = ruby_scope_of(node.kind());
     if let Some(scope) = scope {
-        locals.open(scope);
+        let value_is_self = node
+            .child_by_field_name("value")
+            .is_some_and(|value| value.kind() == "self");
+        locals.open(scope, node.kind(), value_is_self);
     }
     match node.kind() {
         "module" => {
@@ -2047,10 +2124,15 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
                 let (kind, q) = if w.stack.is_empty() {
                     (SymbolKind::Function, name.clone())
                 } else {
-                    // Ruby convention: `Klass#instance_method`.
+                    // Ruby convention: `Klass#instance_method`, and
+                    // `Klass.class_method` for a singleton frame.
+                    let separator = match locals.enclosing_defs() {
+                        RubyDefs::Instance => '#',
+                        RubyDefs::Singleton => '.',
+                    };
                     (
                         SymbolKind::Method,
-                        format!("{}#{}", w.stack.join("::"), name),
+                        format!("{}{separator}{name}", w.stack.join("::")),
                     )
                 };
                 w.push_symbol(name, q, kind, node);
@@ -2073,6 +2155,16 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             if let Some(name) = field_text(w, node, "method") {
                 let recv = field_text(w, node, "receiver");
                 callee_name = Some(name.clone());
+                // `module_function()` and `public()` set the mode as the
+                // bare words do; with arguments they only touch the methods
+                // they name.
+                if recv.is_none()
+                    && node
+                        .child_by_field_name("arguments")
+                        .is_none_or(|args| args.named_child_count() == 0)
+                {
+                    locals.visibility(&name);
+                }
                 if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
                     if let Some(spec) = ruby_first_string_argument(w, node) {
                         w.push_import(spec, Vec::new());
@@ -2098,6 +2190,7 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             RubyIdent::Expr => {
                 let name = w.text(node);
                 if !locals.is_local(&name) {
+                    locals.visibility(&name);
                     w.push_call(name, None, node);
                 }
             }
@@ -2844,6 +2937,103 @@ namespace MyApp.Services {
             .find(|s| s.qualified == "MyApp.Services.IGreeter.Greet")
             .expect("interface method Greet should exist with full qualification");
         assert_eq!(greet_in_interface.name, "Greet");
+    }
+
+    /// `class << self` and a bare `module_function` define methods of the
+    /// class or module object (`Klass.name`); the mode ends where Ruby ends
+    /// it, and never leaks out of a `def` body or into `class << other`.
+    #[test]
+    fn ruby_singleton_defs_should_be_qualified_as_class_methods() {
+        let source = br"
+class User
+  def self.direct; end
+  class << self
+    def importable; end
+    private
+    def hidden; end
+    [1].each do
+      def in_block; end
+    end
+  end
+  def after; end
+  class << other
+    def elsewhere; end
+  end
+end
+
+module Util
+  def before; end
+  module_function
+  def slug(s); end
+  def with_private_inside
+    private
+  end
+  def still_function; end
+  public
+  def back_to_instance; end
+end
+
+module Plain
+  def helper
+    module_function
+  end
+  def instance_too; end
+end
+
+class Widget
+  def build
+    class << self
+      def per_instance; end
+    end
+  end
+  def self.setup
+    class << self
+      def meta; end
+    end
+  end
+end
+
+module Parens
+  module_function()
+  def a; end
+  private :a
+  def b; end
+  public()
+  def c; end
+end
+";
+        let extraction = extract_file("lib/user.rb", source).unwrap();
+        let methods: Vec<&str> = extraction
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .map(|s| s.qualified.as_str())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "User.direct",
+                "User.importable",
+                "User.hidden",
+                "User.in_block",
+                "User#after",
+                "User#elsewhere",
+                "Util#before",
+                "Util.slug",
+                "Util.with_private_inside",
+                "Util.still_function",
+                "Util#back_to_instance",
+                "Plain#helper",
+                "Plain#instance_too",
+                "Widget#build",
+                "Widget#per_instance",
+                "Widget.setup",
+                "Widget.meta",
+                "Parens.a",
+                "Parens.b",
+                "Parens#c",
+            ]
+        );
     }
 
     #[test]

@@ -241,3 +241,77 @@ fn ruby_bare_call_should_keep_its_own_class_method_across_incremental_updates() 
         "re-indexing the caller's file keeps the edge"
     );
 }
+
+/// The callers recorded for the method qualified `qualified`, by qualified
+/// name, across the whole graph.
+fn callers_of(db: &std::path::Path, name: &str, qualified: &str) -> BTreeSet<String> {
+    let store = GraphStore::open(db).unwrap();
+    let target = store
+        .symbols_by_name(name, None, 10)
+        .unwrap()
+        .into_iter()
+        .find(|symbol| symbol.qualified == qualified)
+        .unwrap_or_else(|| panic!("`{qualified}` is extracted"));
+    store
+        .edges_to(target.id, Some(EdgeKind::Calls))
+        .unwrap()
+        .into_iter()
+        .map(|edge| {
+            store
+                .symbols_in_file(target.file_id)
+                .unwrap()
+                .into_iter()
+                .find(|symbol| symbol.id == edge.src_id)
+                .expect("every caller is in the target's file")
+                .qualified
+        })
+        .collect()
+}
+
+/// `def self.load` calls `importable` without receiver: `self` is the class,
+/// so the call reaches the `class << self` method even though another class
+/// elsewhere defines an instance method of that name.
+const SINGLETON_CALLS: [&str; 12] = [
+    "class Catalog",
+    "  def self.load",
+    "    importable",
+    "  end",
+    "",
+    "  class << self",
+    "    def importable",
+    "      []",
+    "    end",
+    "  end",
+    "end",
+    "",
+];
+
+#[test]
+fn ruby_class_method_should_reach_a_class_self_method_across_build_and_update() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("catalog.rb"), SINGLETON_CALLS.join("\n")).unwrap();
+    fs::write(
+        root.path().join("other.rb"),
+        "class Other\n  def importable\n    []\n  end\nend\n",
+    )
+    .unwrap();
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+    let expected = BTreeSet::from(["Catalog.load".to_string()]);
+    assert_eq!(
+        callers_of(&db, "importable", "Catalog.importable"),
+        expected,
+        "the full build links the class method to its `class << self` callee"
+    );
+
+    let mut rewritten = SINGLETON_CALLS.join("\n");
+    rewritten.push_str("# touched\n");
+    fs::write(root.path().join("catalog.rb"), rewritten).unwrap();
+    update_file(root.path(), &db, "catalog.rb").unwrap();
+    assert_eq!(
+        callers_of(&db, "importable", "Catalog.importable"),
+        expected,
+        "re-indexing the file keeps the edge"
+    );
+}
