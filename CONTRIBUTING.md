@@ -100,7 +100,11 @@ CI runs the tests through [cargo-nextest](https://nexte.st) (`cargo install
 60 s is reported slow and killed at 180 s, and the `ci` profile retries a
 failure once but still fails the run when the retry passes (a flaky test
 shows up as `FLAKY`, it is never masked). `cargo test --workspace` remains
-a valid local gate; it runs the same tests in-process.
+a valid local gate; it runs the same tests in-process. For a local
+diagnosis that should stop at the first failure, the `fast` profile adds
+fail-fast on stable (`cargo nextest run -P fast -p <crate> -E 'test(<name>)'`,
+or `--fail-fast` on any profile); never use it as a gate, since it hides
+every failure after the first.
 
 The lint policy is the `[workspace.lints]` table in the root `Cargo.toml`
 (every crate opts in with `[lints] workspace = true`), so a local

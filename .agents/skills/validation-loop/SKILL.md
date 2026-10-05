@@ -11,7 +11,9 @@ mutation and coverage campaigns belong only to scheduled CI on main.
 1. Find or create the tracked task and prepare one reviewable candidate from
    the fetched actual base. Use the immediate parent for a stacked PR.
 2. Choose local tests, compilation, lint or deterministic review only if they
-   help diagnose a problem or reduce uncertainty. `scripts/gates.sh` remains
+   help diagnose a problem or reduce uncertainty. For a focused run that
+   stops at the first failure, use `cargo nextest run -P fast -p <crate>`
+   (stable; the default profile has no fail-fast). `scripts/gates.sh` remains
    available for a deliberate full local run. No local run is required.
 3. Commit, push and open the PR. State checks actually performed and checks
    deferred to CI. Rebuilding, reinstalling, indexing and doctor are optional

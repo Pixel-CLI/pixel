@@ -72,6 +72,21 @@ a rule disagree, the rule wins (and the `Cargo.toml` lint table wins over both).
 - Keep Cargo builds sequential within one `target/`; parallel workers need separate build directories and a combined CPU/memory budget. Do independent review or another unit while gates run. When no useful independent work remains, wait for completion without repeated polling.
 - The CI lanes remain required before declaring the PR ready. See CONTRIBUTING.md "Agent validation workflow" for the local/CI split and how to verify the final run.
 
+## Cloud Sessions
+
+In a hosted agent session (Claude Code on the web), the environment differs
+from a maintainer's laptop:
+
+- `gh` may be installed without a usable token. Read and write GitHub through
+  the session's GitHub tools (MCP) instead: issues, PR creation, checks, and a
+  PR-activity subscription in place of `gh pr checks --watch`. The project 3
+  Status still follows the PR through `.github/workflows/board-sync.yml`.
+- When `pixel doctor . --json` reports `graph.freshness` red, run
+  `pixel prepare-repo .` once before graph or concept retrieval; until then
+  concept search ranks poorly.
+- Give `rg` an explicit path (`rg -n 'x' .`): with no path and a non-terminal
+  stdin, it reads stdin and waits forever.
+
 ## Optional Local Install Verification
 
 Use this checklist only when local diagnosis needs the installed binary/hooks,
