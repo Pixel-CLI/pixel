@@ -127,6 +127,12 @@ impl VectorStore {
             return Ok(());
         }
         self.check_model(model_id, dim)?;
+        // Checked before the temporary file exists: a mismatch found while
+        // writing left `seg-*.vec.tmp` behind and `last_chunk_id` already
+        // raised by the rows before it (#786).
+        if rows.iter().any(|(_, vec)| vec.len() != dim) {
+            return Err("vector dim mismatch".to_string());
+        }
         let seq = self.meta.segments.len() as u64 + 1;
         let name = format!("seg-{seq:06}.vec");
         let tmp = self.dir.join(format!("{name}.tmp"));
@@ -148,9 +154,6 @@ impl VectorStore {
             w.write_all(&header).map_err(|e| e.to_string())?;
             let mut quantized = vec![0i8; dim];
             for (chunk_id, vec) in rows {
-                if vec.len() != dim {
-                    return Err("vector dim mismatch".to_string());
-                }
                 let max_abs = vec.iter().fold(0f32, |m, v| m.max(v.abs()));
                 let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 };
                 for (q, v) in quantized.iter_mut().zip(vec) {
