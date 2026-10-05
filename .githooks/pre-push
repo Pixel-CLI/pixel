@@ -16,9 +16,9 @@ repo=$(git rev-parse --show-toplevel) || exit 0
 # Fetch before any expensive validation: a local `main` may be stale even when
 # its name still resolves. The branch is judged against its merge-base with the
 # fetched default — what the pull request's three-dot diff shows — so a branch
-# behind main pushes without a rebase. main does not require branches to be up
-# to date, and a rebase per push re-ran every CI workflow for nothing; rebase
-# on a conflict or when the change needs something newer on main.
+# behind main pushes without a rebase. A stacked branch names its immediate
+# base in PIXEL_MUTANTS_BASE (a ref or commit); every gate below then judges
+# the merge-base with that base instead, so the parent's commits stay out.
 if ! git fetch --quiet origin HEAD 2>/dev/null; then
     echo "pre-push: could not fetch origin's current default; refusing to verify"
     exit 1
@@ -27,8 +27,9 @@ git rev-parse --verify --quiet FETCH_HEAD >/dev/null || {
     echo "pre-push: could not resolve origin's fetched default; refusing to verify"
     exit 1
 }
-tip=$(git merge-base HEAD FETCH_HEAD) || {
-    echo "pre-push: HEAD shares no history with origin's default; refusing to verify"
+base=${PIXEL_MUTANTS_BASE:-FETCH_HEAD}
+tip=$(git merge-base HEAD "$base") || {
+    echo "pre-push: HEAD shares no history with $base; refusing to verify"
     exit 1
 }
 
@@ -44,11 +45,11 @@ fi
 
 PIXEL_MUTANTS_BASE="$tip" "$repo/scripts/mutants-remote-gate.sh"
 
-# review-gate: the deterministic review of the branch diff against its
+# review-gate: the deterministic review of the branch diff against the same
 # merge-base must hold no BLOCKER or CONCERN finding. Skipped when the
 # installed pixel predates the command.
 if command -v pixel >/dev/null 2>&1 && pixel review-gate --help >/dev/null 2>&1; then
-    if ! pixel review-gate . --fail-on concern; then
+    if ! pixel review-gate . --base "$tip" --fail-on concern; then
         echo "pre-push: review-gate findings at CONCERN or above — fix them, or push --no-verify"
         exit 1
     fi

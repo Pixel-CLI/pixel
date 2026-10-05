@@ -33,5 +33,8 @@ as a whole", and say in the pull request that you did.
 
 The tracked pre-push hook fetches the remote default, judges the branch
 against its merge-base with it (a branch behind it is not refused), then runs
-`pixel review-gate . --fail-on concern` and refuses the push on any BLOCKER
-or CONCERN finding. `git push --no-verify` is the explicit bypass.
+`pixel review-gate . --base <merge-base> --fail-on concern` and refuses the
+push on any BLOCKER or CONCERN finding. A stacked branch pushes with
+`PIXEL_MUTANTS_BASE=<immediate base>`: the baseline, the mutation gate and the
+review then judge the merge-base with that base, so the parent's commits stay
+out. `git push --no-verify` is the explicit bypass.
