@@ -374,6 +374,17 @@ mod tests {
     }
 
     #[test]
+    fn open_should_refuse_a_row_count_whose_size_overflows_only_with_the_header() {
+        // 19 × (usize::MAX / 19) fits a usize (it is within 18 of the max);
+        // adding the 96-byte header is what overflows.
+        let dir = tempfile::tempdir().unwrap();
+        let count = u64::try_from(usize::MAX / 19).unwrap();
+        let path = segment_with_count(dir.path(), 3, 1, count);
+        let err = OpenSegment::open(&path).err();
+        assert_eq!(err.as_deref(), Some("truncated vector segment"));
+    }
+
+    #[test]
     fn open_should_measure_rows_of_sixteen_bytes_plus_dim_and_accept_the_true_count() {
         // Two rows of dimension 8 fill 96 + 2 × 24 = 144 bytes. A count of 6
         // only fits if a row were 8 bytes, so it is refused; a count of 3 is
