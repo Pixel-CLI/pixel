@@ -1,18 +1,23 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! `pixel_graph::extract::extract_file` on arbitrary bytes.
+//! `pixel_graph::extract::extract_file` and
+//! `pixel_graph::concept::extract_concepts` on arbitrary bytes.
 //!
 //! The graph is built from whatever a repository holds: half-written files,
 //! a vendored grammar test case, a binary blob with a source extension. The
 //! daemon re-extracts every saved file, so input here is untrusted.
 //!
-//! Input: `<extension>\n<file content>`, e.g. `rs\nfn main() {}`; inputs
-//! whose extension `lang_of` does not map are skipped. The seeds under
-//! `fuzz/seeds/graph_extract/` hold one per language.
+//! Input: `<extension>\n<file content>`, e.g. `rs\nfn main() {}`. Concept
+//! extraction runs on every input (it has its own extension map: `svelte`,
+//! `vue`, `html`, `json`, `yaml`, `css`, …); symbol extraction only on those
+//! `lang_of` maps. The seeds under `fuzz/seeds/graph_extract/` hold one per
+//! language.
 //!
 //! Invariants:
-//! - no panic. `extract_file` wraps the walk in `catch_unwind`, but the
+//! - no panic in `extract_concepts`: the graph build calls it outside any
+//!   `catch_unwind`, so a panic there aborts the build (#767);
+//! - no panic in `extract_file`. `extract_file` wraps the walk in `catch_unwind`, but the
 //!   panic hook libFuzzer installs aborts first, so a panic the production
 //!   code would swallow (and turn into a file missing from the graph) is a
 //!   crash here;
@@ -24,6 +29,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use pixel_graph::concept::extract_concepts;
 use pixel_graph::extract::{FileExtraction, extract_file, lang_of};
 
 fuzz_target!(|data: &[u8]| {
@@ -35,6 +41,7 @@ fuzz_target!(|data: &[u8]| {
     };
     let content = &data[newline + 1..];
     let path = format!("src/fuzz.{extension}");
+    let _ = extract_concepts(&path, content);
     if lang_of(&path).is_none() {
         return;
     }

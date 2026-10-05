@@ -686,8 +686,9 @@ fn extract_svelte_vue(path: &str, content: &[u8]) -> Vec<RawConcept> {
         let line_offset = line_of(&text, open_end).saturating_sub(1);
         out.extend(extract_ts_script(script_content, line_offset, test_path));
         // Always past this tag, whatever the bounds say: the scan must
-        // terminate on any input.
-        pos = close.max(start) + "</script>".len();
+        // terminate on any input. An unclosed `<script>` runs to the end of
+        // the text, so stop there rather than slice past it (#767).
+        pos = (close.max(start) + "</script>".len()).min(text.len());
         markup_start = pos;
     }
     markup.push_str(&text[markup_start..]);
@@ -1172,6 +1173,34 @@ mod tests {
             .unwrap_or_else(|| panic!("attr text from the markup: {concepts:?}"));
         assert_eq!(attr.start_line, 8);
         assert!(extract_svelte_vue("src/Empty.svelte", b"").is_empty());
+    }
+
+    #[test]
+    fn extract_svelte_vue_should_keep_the_script_concepts_when_the_script_is_never_closed() {
+        // A repository controls this file: an unclosed <script> must not
+        // panic the graph build (#767), and the code after the tag is
+        // still the script's.
+        let content = b"<h1>Title text here</h1>\n<script>\n  fetch(\"/api/unclosed\");\n";
+        let concepts = extract_svelte_vue("src/Broken.svelte", content);
+        let route = concepts
+            .iter()
+            .find(|c| c.kind == ConceptKind::Route && c.raw.contains("/api/unclosed"))
+            .unwrap_or_else(|| panic!("route from the unclosed script: {concepts:?}"));
+        assert_eq!(route.start_line, 3, "{route:?}");
+        assert!(
+            concepts
+                .iter()
+                .any(|c| c.kind == ConceptKind::UiText && c.raw == "Title text here"),
+            "markup before the script is still scanned: {concepts:?}"
+        );
+    }
+
+    #[test]
+    fn extract_svelte_vue_should_not_panic_when_the_script_tag_itself_is_cut_off() {
+        // No `>` and no `</script>`: the open tag runs to the end of file.
+        for content in [&b"<script"[..], b"<p>x</p><script lang=\"ts\"", b"<script>"] {
+            let _ = extract_svelte_vue("src/Cut.vue", content);
+        }
     }
 }
 
