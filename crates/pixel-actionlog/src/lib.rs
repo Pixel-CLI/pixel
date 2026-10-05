@@ -362,10 +362,11 @@ pub fn tail(path: &Path, limit: usize) -> std::io::Result<Vec<ActionEvent>> {
             continue;
         }
         if let Ok(event) = serde_json::from_str::<ActionEvent>(&line) {
-            if ring.len() == limit {
+            ring.push_back(event);
+            // `>` rather than `==` before the push: a `limit` of 0 keeps nothing.
+            if ring.len() > limit {
                 ring.pop_front();
             }
-            ring.push_back(event);
         }
     }
     Ok(ring.into_iter().collect())
@@ -455,6 +456,23 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].args, "n=3");
         assert_eq!(events[1].args, "n=4");
+    }
+
+    /// `tail(path, 0)` asks for no event: it used to return the whole log,
+    /// because the ring only dropped its oldest entry when its length equalled
+    /// the limit, which a non-empty ring never does for 0 (#788).
+    #[test]
+    fn tail_with_a_zero_limit_returns_no_event() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("actions.jsonl");
+        let mut log = ActionLog::spawn_at(path.clone());
+        for i in 0..3 {
+            log.log(ActionEvent::new("search", format!("n={i}")));
+        }
+        log.finish_flush();
+
+        assert_eq!(tail(&path, 3).unwrap().len(), 3, "the log holds 3 events");
+        assert!(tail(&path, 0).unwrap().is_empty());
     }
 
     #[test]
