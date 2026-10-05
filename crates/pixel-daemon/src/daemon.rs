@@ -1726,6 +1726,35 @@ mod tests {
 
     /// A branch switch before the watch was live rewrites files `git status`
     /// never lists: `watch_ready` re-reads what HEAD's move changed.
+    /// The catch-up re-reads only what may have changed: it diffs from the
+    /// HEAD the index opened at and re-reads the overlay's paths. Without the
+    /// opened HEAD it would diff from the empty tree and re-read every
+    /// tracked file of a large repository after each daemon start.
+    #[test]
+    fn index_catch_up_should_report_the_opened_head_and_only_the_overlay_paths() {
+        let root = committed_repo("index-catch-up");
+        std::fs::write(root.join("u.rs"), "fn untrackedNeedle() {}\n").unwrap();
+        let svc = Service::open(&root).unwrap();
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let (opened, paths) = svc.index_catch_up();
+        assert_eq!(opened.as_deref(), Some(head.trim()));
+        assert_eq!(
+            paths,
+            std::collections::BTreeSet::from(["u.rs".to_string()])
+        );
+        drop(svc);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A repository opened before its first commit has no HEAD to diff
     /// from; a file added and committed during registration is clean in
     /// `git status` and absent from the overlay, so only the empty-tree
