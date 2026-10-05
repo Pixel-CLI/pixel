@@ -92,6 +92,7 @@ impl SourceAdapter for Adapter {
         let mut by_conv: HashMap<String, usize> = HashMap::new();
         let mut sessions: Vec<ParsedSession> = Vec::new();
 
+        let mut skipped_records = 0usize;
         let mut offset = start;
         let mut line = String::new();
         loop {
@@ -108,6 +109,7 @@ impl SourceAdapter for Adapter {
             let line_start = offset;
             offset += n as u64;
             let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                skipped_records += 1;
                 continue;
             };
             let Some(display) = record.get("display").and_then(Value::as_str) else {
@@ -163,7 +165,7 @@ impl SourceAdapter for Adapter {
 
         Ok(ParseOutput {
             sessions,
-            skipped_records: 0,
+            skipped_records,
             consumed_bytes: offset,
             cursor: None,
         })

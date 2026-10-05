@@ -25,29 +25,43 @@
 name: Coverage
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".config/nextest.toml"
-      - ".github/workflows/coverage.yml"
-  workflow_dispatch:
+  schedule:
+    - cron: "47 2 * * *"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-main
+  cancel-in-progress: false
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Nightly coverage selection
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.select.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check the latest successful nightly
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          python3 scripts/coverage-nightly.py --repository "$GITHUB_REPOSITORY" \
+            --head "$GITHUB_SHA" --github-output "$GITHUB_OUTPUT"
+
   coverage:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     name: Coverage (cargo-llvm-cov)
     runs-on: ubuntu-26.04
     timeout-minutes: 60
@@ -152,6 +166,8 @@ jobs:
         run: cargo llvm-cov report --summary-only --fail-under-lines 90 > /dev/null
 
   branches:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     name: Branch coverage (cargo-llvm-cov, nightly)
     runs-on: ubuntu-26.04
     timeout-minutes: 75
