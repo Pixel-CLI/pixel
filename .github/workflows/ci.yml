@@ -477,6 +477,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-prepare-only.py
 
+      - name: Nightly coverage selection contract
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-coverage-nightly.py
+
       - name: Nightly diff checkpoint contract
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-mutants-nightly-range.py
