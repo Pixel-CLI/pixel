@@ -775,6 +775,11 @@ fn remove_classify_skill_should_backup_the_skill_dir_and_keep_foreign_skills() {
 
     assert_eq!(step.id, "classify.skill");
     assert_eq!(step.summary, "removed 1 classify skill dir(s)");
+    assert_eq!(
+        step.detail,
+        Some(skill.display().to_string()),
+        "removed dirs are named in the detail"
+    );
     assert!(!skill.exists());
     let renamed: Vec<PathBuf> = fs::read_dir(home.path().join(".claude/skills"))
         .unwrap()
