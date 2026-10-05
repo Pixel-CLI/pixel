@@ -922,7 +922,12 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
     const CONDITIONAL: &[&str] = &[".codex/config.toml", ".gemini/config/import_manifest.json"];
 
     let home = crate::support::Scratch::for_test("docs-drift", "agents-global");
-    for dir in [".config/opencode", ".config/devin", ".gemini/config"] {
+    for dir in [
+        ".config/opencode",
+        ".config/devin",
+        ".gemini/config",
+        ".pi/agent",
+    ] {
         std::fs::create_dir_all(home.join(dir)).unwrap();
     }
     let out = crate::support::pixel_command()

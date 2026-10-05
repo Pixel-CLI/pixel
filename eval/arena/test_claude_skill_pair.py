@@ -105,6 +105,18 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
         path.write_text(json.dumps(value))
         path.chmod(0o600)
 
+    def test_executable_resolution_uses_path_and_reports_missing_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "claude"
+            executable.write_text("fixture")
+            executable.chmod(0o755)
+
+            with mock.patch.object(claude_skill_pair.shutil, "which", return_value=str(executable)):
+                self.assertEqual(claude_skill_pair.resolve_executable(None, "claude"), executable.resolve())
+            with mock.patch.object(claude_skill_pair.shutil, "which", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "add it to PATH or pass --claude"):
+                    claude_skill_pair.resolve_executable(None, "claude")
+
     def test_preflight_artifact_contains_source_not_oauth_secret(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -119,8 +131,10 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
             scenario.write_text(json.dumps({"id": "fixture", "prompt": "Question"}))
             pixel = root / "pixel"
             pixel.write_text("fixture")
+            pixel.chmod(0o755)
             claude = root / "claude"
             claude.write_text("fixture")
+            claude.chmod(0o755)
             sentinel = {
                 "accessToken": "sentinel-access-secret",
                 "refreshToken": "sentinel-refresh-secret",

@@ -10,8 +10,8 @@ wire (Cursor, Copilot, ...)? You don't need `pixel install`.
    while removing Pixel's automatic retrieval prompts and metrics callbacks.
 3. **Remove retired Pixel instruction blocks** from Codex configuration and
    project `AGENTS.md`, preserving unrelated text.
-4. **Install Pi's explicit impact extension** and remove Pixel's automatic Pi
-   prompt. Repository task controls remain separate.
+4. **Install Pi's explicit impact extension when Pi is configured** and remove
+   Pixel's automatic Pi prompt. Repository task controls remain separate.
 5. **Keep other provider integrations** on their documented paths. The focused
    skills pilot does not establish behavior or performance for every host.
 

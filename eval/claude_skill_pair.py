@@ -125,6 +125,19 @@ def version_and_help(claude: str) -> tuple[str, str]:
     return version.stdout.strip().splitlines()[0], digest(help_text.stdout.encode())
 
 
+def resolve_executable(value: str | None, name: str) -> Path:
+    candidate = value or shutil.which(name)
+    if candidate is None:
+        raise RuntimeError(f"{name} executable not found; add it to PATH or pass --{name}")
+    try:
+        path = Path(candidate).expanduser().resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError(f"{name} executable does not exist or cannot be resolved: {candidate}") from error
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise RuntimeError(f"{name} executable is not an executable file: {path}")
+    return path
+
+
 def _credential_expiry_seconds(value):
     if not isinstance(value, (int, float)):
         return None
@@ -249,6 +262,8 @@ def token_totals(row: dict) -> dict:
 
 def preflight(args: argparse.Namespace) -> dict:
     setup_started = time.monotonic()
+    claude = str(resolve_executable(args.claude, "claude"))
+    pixel = str(resolve_executable(args.pixel, "pixel"))
     repo = Path(args.repo).resolve(strict=True)
     out = Path(args.results_dir).resolve()
     skill = Path(args.skill).resolve(strict=True)
@@ -272,7 +287,7 @@ def preflight(args: argparse.Namespace) -> dict:
     oauth_credentials = load_oauth_credentials(
         auth_config_dir, credentials_file, source=credential_source_name
     )
-    version, help_sha = version_and_help(args.claude)
+    version, help_sha = version_and_help(claude)
     workspace_parent = Path(tempfile.mkdtemp(prefix="pixel-claude-pair-workspace-"))
     project = workspace_parent / "project"
     project.mkdir()
@@ -286,7 +301,6 @@ def preflight(args: argparse.Namespace) -> dict:
     skill_file.parent.mkdir(parents=True)
     skill_file.write_text(baseline_skill)
     verify_project_config(project)
-    pixel = str(Path(args.pixel).resolve(strict=True))
     pixel_version = command([pixel, "--version"])
     if pixel_version.returncode:
         raise RuntimeError("Pixel version preflight failed")
@@ -324,7 +338,7 @@ def preflight(args: argparse.Namespace) -> dict:
         "pre_model_graph_query_sha256": digest(impact.stdout.encode()),
         "pre_model_graph_query_ms": lookup_ms,
         "pre_model_graph_result_count": len(graph_result) if isinstance(graph_result, list) else 1,
-        "claude_binary": str(Path(args.claude).resolve(strict=True)),
+        "claude_binary": claude,
         "claude_version": version,
         "claude_help_sha256": help_sha,
         "model_alias": args.model,
@@ -399,7 +413,9 @@ def parse_stream(path: Path) -> dict:
 def execute(args: argparse.Namespace) -> list[dict]:
     out = Path(args.results_dir).resolve(strict=True)
     manifest = json.loads((out / "preflight.json").read_text())
-    version, _ = version_and_help(args.claude)
+    claude = str(resolve_executable(args.claude, "claude"))
+    pixel = str(resolve_executable(args.pixel, "pixel"))
+    version, _ = version_and_help(claude)
     if version != manifest["claude_version"]:
         raise RuntimeError("Claude version changed since preflight")
     project = Path(manifest["workspace"])
@@ -434,14 +450,14 @@ def execute(args: argparse.Namespace) -> list[dict]:
             config.mkdir(mode=0o700)
             write_isolated_credentials(config, oauth_credentials)
             env = {
-                "PATH": f"{Path(args.pixel).resolve().parent}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                "PATH": f"{Path(pixel).parent}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                 "HOME": str(isolated_home),
                 "TMPDIR": str(root),
                 "LANG": os.environ.get("LANG", "en_US.UTF-8"),
                 "CLAUDE_CONFIG_DIR": str(config),
             }
             argv = [
-                str(Path(args.claude).resolve()), "-p", scenario["prompt"],
+                claude, "-p", scenario["prompt"],
                 "--model", args.model, "--effort", args.effort,
                 "--setting-sources", "project",
                 "--permission-mode", "plan", "--permission-prompts", "none",
@@ -510,8 +526,8 @@ def main() -> int:
     parser.add_argument("--revision", default="HEAD")
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--skill", required=True)
-    parser.add_argument("--pixel", default="/Users/livio/.local/bin/pixel")
-    parser.add_argument("--claude", default="/Users/livio/.local/bin/claude")
+    parser.add_argument("--pixel", default=shutil.which("pixel"))
+    parser.add_argument("--claude", default=shutil.which("claude"))
     parser.add_argument("--auth-config-dir", default=str(Path.home() / ".claude"))
     parser.add_argument("--credentials-file")
     parser.add_argument("--results-dir", required=True)

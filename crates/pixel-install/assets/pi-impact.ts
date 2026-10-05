@@ -27,7 +27,14 @@ export default function (pi: ExtensionAPI) {
           ], { cwd: ctx.cwd, timeout: 1_800, signal: ctx.signal });
           if (result.code !== 0 || result.killed || !result.stdout.trim()) throw new Error("Pixel impact unavailable");
           const output = JSON.stringify(JSON.parse(result.stdout));
-          if (Buffer.byteLength(output, "utf8") > MAX_OUTPUT) throw new Error("Pixel impact output exceeds the display limit");
+          if (Buffer.byteLength(output, "utf8") > MAX_OUTPUT) {
+            pi.sendMessage({
+              customType: "pixel-impact",
+              display: true,
+              content: `Pixel impact result exceeds the ${MAX_OUTPUT}-byte display limit. Continue with native search; no index refresh was attempted.`,
+            }, { triggerTurn: false });
+            return;
+          }
           pi.sendMessage({
             customType: "pixel-impact",
             display: true,
@@ -37,7 +44,7 @@ export default function (pi: ExtensionAPI) {
           pi.sendMessage({
             customType: "pixel-impact",
             display: true,
-            content: "Pixel impact is unavailable or the existing graph is stale. Continue with native search; no index refresh was attempted.",
+            content: "Pixel impact is unavailable or the existing graph could not be read. Continue with native search; no index refresh was attempted.",
           }, { triggerTurn: false });
         }
       },

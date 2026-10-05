@@ -1149,19 +1149,22 @@ enum Command {
     Install {
         #[arg(long)]
         json: bool,
-        /// Shell to install the `claude` wrapper block for
-        /// (default: $SHELL). Pass e.g. `fish` when the invoking process
-        /// does not run under your login shell.
+        /// Shell whose profile is checked for the retired `claude()` wrapper
+        /// (default: account login shell, then $SHELL). Pass e.g. `fish`
+        /// to select the profile explicitly.
         #[arg(long)]
         shell: Option<String>,
         /// Install project-local integrations into this repository only,
-        /// skipping every global step: `.claude/settings.local.json` (Claude
-        /// guard; `.claude/pixel-rtk-hooks.json` keeps an RTK hook it takes
-        /// over), `.codex/config.toml`, `.codex/hooks.json` (composed guard,
-        /// skipped when git tracks it) + `.codex/pixel-composed-guard-backup.json`,
-        /// `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`,
-        /// and removal of retired Pixel retrieval blocks from `AGENTS.md` and
-        /// Codex config. Foreign instructions and native tools are preserved.
+        /// skipping every global step. Remove retired Claude and Codex
+        /// retrieval hooks, restore adopted RTK/foreign hooks from matching
+        /// backups, and preserve independent task controls. Tracked Codex
+        /// hooks are left alone. Configure Devin and Pi project adapters and
+        /// remove retired Pixel retrieval blocks from AGENTS.md and Codex
+        /// config. Foreign instructions and native tools are preserved.
+        /// Files: `.claude/settings.local.json`, `.claude/pixel-rtk-hooks.json`,
+        /// `.codex/config.toml`, `.codex/hooks.json`,
+        /// `.codex/pixel-composed-guard-backup.json`, `.devin/config.local.json`,
+        /// `.pi/extensions/pixel-guard.ts`, and `AGENTS.md`.
         /// Machine-specific files naming this binary go into `info/exclude`.
         #[arg(long)]
         repo: Option<PathBuf>,

@@ -227,6 +227,32 @@ fn task_hook_verb(verb: &str) -> bool {
             || matches!(*event, "tool-failure" | "interrupt" | "model-response" | "user-bash"))
 }
 
+fn codex_task_hook_verb(verb: &str) -> bool {
+    let words: Vec<_> = verb.split_whitespace().collect();
+    matches!(words.as_slice(), ["task-event", "--provider", "codex", "--event", event]
+        if TASK_HOOK_EVENTS.iter().any(|(_, name)| name == event) || *event == "interrupt")
+}
+
+fn codex_hooks_are_enabled(config_path: &Path) -> bool {
+    let config = match std::fs::read_to_string(config_path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    let Ok(config) = config.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+    config
+        .get("features")
+        .and_then(|features| {
+            features
+                .get("hooks")
+                .or_else(|| features.get("codex_hooks"))
+        })
+        .and_then(toml_edit::Item::as_bool)
+        .unwrap_or(true)
+}
+
 /// Replace only Pixel task registrations, preserving foreign hooks and trust.
 pub(crate) fn merge_task_hooks(
     hooks: &mut Map<String, Value>,
@@ -298,16 +324,20 @@ pub(crate) fn task_hooks_registered(value: &Value, provider: Provider, exe: &Pat
                 .and_then(Value::as_array)
                 .is_some_and(|groups| {
                     groups.iter().any(|group| {
-                        group
-                            .get("matcher")
-                            .and_then(Value::as_str)
-                            .is_none_or(|matcher| matches!(matcher, "" | "*" | ".*"))
+                        (group.get("matcher").is_none()
+                            || group
+                                .get("matcher")
+                                .and_then(Value::as_str)
+                                .is_some_and(|matcher| matches!(matcher, "" | "*" | ".*")))
                             && group
                                 .get("hooks")
                                 .and_then(Value::as_array)
                                 .is_some_and(|inner| {
                                     inner.iter().any(|hook| {
-                                        hook.get("async").and_then(Value::as_bool) != Some(true)
+                                        hook.get("type").and_then(Value::as_str) == Some("command")
+                                            && (hook.get("async").is_none()
+                                                || hook.get("async").and_then(Value::as_bool)
+                                                    == Some(false))
                                             && hook
                                                 .get("command")
                                                 .and_then(Value::as_str)
@@ -690,6 +720,9 @@ pub(crate) enum HookScope {
     /// Remove Pixel retrieval callbacks and restore any adopted RTK
     /// registration, without registering replacement callbacks.
     NativeCleanup,
+    /// As [`NativeCleanup`], and remove project Codex task callbacks because
+    /// the complete matching task-event suite is already registered globally.
+    NativeCleanupWithGlobalCodexTasks,
 }
 
 /// Apply the pure configuration transform and return (routing enabled, RTK
@@ -771,9 +804,16 @@ fn configure_scoped(
     if delegated && saved.is_empty() {
         return Err("RTK delegate backup missing; refusing to lose its registration".into());
     }
-    if scope == HookScope::NativeCleanup {
+    if matches!(
+        scope,
+        HookScope::NativeCleanup | HookScope::NativeCleanupWithGlobalCodexTasks
+    ) {
         remove_matching_hooks(hooks, |command| {
-            pixel_hook_verb(command, exe).is_some_and(|verb| !task_hook_verb(verb))
+            pixel_hook_verb(command, exe).is_some_and(|verb| {
+                !task_hook_verb(verb)
+                    || scope == HookScope::NativeCleanupWithGlobalCodexTasks
+                        && codex_task_hook_verb(verb)
+            })
         });
     } else {
         remove_pixel_hooks(hooks, exe);
@@ -836,7 +876,10 @@ fn configure_scoped(
         merge_task_hooks(hooks, provider, exe)?;
         return Ok((enabled, adopted));
     }
-    if scope == HookScope::NativeCleanup {
+    if matches!(
+        scope,
+        HookScope::NativeCleanup | HookScope::NativeCleanupWithGlobalCodexTasks
+    ) {
         return Ok((enabled, adopted));
     }
     for (event, verb, matcher) in [
@@ -1028,6 +1071,7 @@ fn write_composed_backup(
 /// before removing the callback.
 pub(crate) fn install_project_codex_at(
     home: &Path,
+    global_hooks_path: &Path,
     path: &Path,
     exe: &Path,
     dry_run: bool,
@@ -1042,12 +1086,21 @@ pub(crate) fn install_project_codex_at(
         crate::uninstall::ComposedGuardRestore::Restored
         | crate::uninstall::ComposedGuardRestore::NotManaged => {}
     }
+    let global_codex_tasks_registered = global_hooks_path.parent().is_some_and(|codex_home| {
+        codex_hooks_are_enabled(&codex_home.join(crate::codex_config::CODEX_CONFIG_FILE))
+    }) && install::read_settings(global_hooks_path)
+        .ok()
+        .is_some_and(|settings| task_hooks_registered(&settings, Provider::Codex, exe));
     install_at_scoped(
         home,
         path,
         exe,
         Provider::Codex,
-        HookScope::NativeCleanup,
+        if global_codex_tasks_registered {
+            HookScope::NativeCleanupWithGlobalCodexTasks
+        } else {
+            HookScope::NativeCleanup
+        },
         &[],
         dry_run,
     )
@@ -1199,6 +1252,10 @@ pub(crate) fn install_at_scoped(
         ),
         HookScope::NativeCleanup => format!(
             "{} native tools preserved; Pixel retrieval callbacks removed",
+            provider.name()
+        ),
+        HookScope::NativeCleanupWithGlobalCodexTasks => format!(
+            "{} native tools preserved; Pixel retrieval callbacks and redundant project task hooks removed",
             provider.name()
         ),
         HookScope::GuardOnly => format!(
@@ -2414,7 +2471,15 @@ mod tests {
         )
         .unwrap();
 
-        install_project_codex_at(home.path(), &path, Path::new("/tmp/pixel"), false).unwrap();
+        let global_hooks = Provider::Codex.path(home.path());
+        install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &path,
+            Path::new("/tmp/pixel"),
+            false,
+        )
+        .unwrap();
         let mut installed = install::read_settings(&path).unwrap();
         assert_eq!(installed["hooks"]["PreToolUse"], original);
         assert!(
@@ -2432,11 +2497,176 @@ mod tests {
             .unwrap()
             .push(changed.clone());
         install::write_settings(&path, &installed, false).unwrap();
-        install_project_codex_at(home.path(), &path, Path::new("/tmp/pixel"), false).unwrap();
+        install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &path,
+            Path::new("/tmp/pixel"),
+            false,
+        )
+        .unwrap();
         assert_eq!(
             install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
             json!([original[0].clone(), original[1].clone(), changed])
         );
+    }
+
+    #[test]
+    fn project_codex_cleanup_should_remove_only_task_hooks_covered_by_the_global_suite() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = Path::new("/tmp/pixel");
+        let global_hooks = Provider::Codex.path(home.path());
+        let project_hooks = home.path().join("repo/.codex/hooks.json");
+        let codex_task = hook_group(
+            format!(
+                "{} run-hook task-event --provider codex --event stop",
+                quoted_executable(exe)
+            ),
+            None,
+        );
+        let claude_task = hook_group(
+            format!(
+                "{} run-hook task-event --provider claude --event stop",
+                quoted_executable(exe)
+            ),
+            None,
+        );
+        let foreign_task = hook_group(
+            "other-pixel run-hook task-event --provider codex --event stop".into(),
+            None,
+        );
+        let foreign = hook_group("audit-stop".into(), None);
+        let mut original = json!({
+            "hooks": {
+                "Stop": [codex_task, claude_task.clone(), foreign_task.clone(), foreign.clone()]
+            }
+        });
+        for (event, name) in TASK_HOOK_EVENTS
+            .iter()
+            .copied()
+            .filter(|(event, _)| *event != "Stop")
+            .chain(std::iter::once(("Interrupt", "interrupt")))
+        {
+            original["hooks"][event] = json!([hook_group(
+                format!(
+                    "{} run-hook task-event --provider codex --event {name}",
+                    quoted_executable(exe)
+                ),
+                None,
+            )]);
+        }
+        // Codex has no PostToolUseFailure event; this Claude-specific verb
+        // must remain even though the full Codex suite is registered.
+        original["hooks"]["PostToolUseFailure"] = json!([hook_group(
+            format!(
+                "{} run-hook task-event --provider codex --event tool-failure",
+                quoted_executable(exe)
+            ),
+            None,
+        )]);
+        install::write_settings(&project_hooks, &original, false).unwrap();
+
+        // A project-only suite remains active when the global config is absent.
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"]
+        );
+
+        // A partial global set does not cover the project hook's execution.
+        install::write_settings(
+            &global_hooks,
+            &json!({"hooks": {"Stop": [
+                hook_group(
+                    format!("{} run-hook task-event --provider codex --event stop", quoted_executable(exe)),
+                    None,
+                )
+            ]}}),
+            false,
+        )
+        .unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"]
+        );
+
+        // Only the complete, matching global suite makes project Codex task
+        // callbacks redundant. Other providers and foreign commands survive.
+        let mut global = json!({"hooks": {}});
+        merge_task_hooks(
+            global["hooks"].as_object_mut().unwrap(),
+            Provider::Codex,
+            exe,
+        )
+        .unwrap();
+        install::write_settings(&global_hooks, &global, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        let installed = install::read_settings(&project_hooks).unwrap();
+        assert_eq!(
+            installed["hooks"]["Stop"],
+            json!([claude_task, foreign_task, foreign])
+        );
+        for (event, _) in TASK_HOOK_EVENTS
+            .iter()
+            .copied()
+            .filter(|(event, _)| *event != "Stop")
+            .chain(std::iter::once(("Interrupt", "interrupt")))
+        {
+            assert!(
+                installed["hooks"].get(event).is_none(),
+                "redundant Codex task callback remained for {event}"
+            );
+        }
+        assert_eq!(
+            installed["hooks"]["PostToolUseFailure"], original["hooks"]["PostToolUseFailure"],
+            "unsupported Codex tool-failure callback must be preserved"
+        );
+
+        // Malformed or ineligible global entries are not evidence that the
+        // global suite will run, so keep all project-local callbacks.
+        for (field, invalid_value) in [("type", json!("mcp_tool")), ("async", json!("false"))] {
+            let mut ineligible = global.clone();
+            ineligible["hooks"]["Stop"][0]["hooks"][0][field] = invalid_value;
+            install::write_settings(&global_hooks, &ineligible, false).unwrap();
+            install::write_settings(&project_hooks, &original, false).unwrap();
+            install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false)
+                .unwrap();
+            assert_eq!(
+                install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+                original["hooks"]["Stop"],
+                "ineligible global {field} must not remove project task hooks"
+            );
+        }
+        let mut ineligible = global.clone();
+        ineligible["hooks"]["Stop"][0]["matcher"] = json!(42);
+        install::write_settings(&global_hooks, &ineligible, false).unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "a malformed global matcher must not remove project task hooks"
+        );
+
+        // A registered suite does not cover project callbacks while Codex's
+        // feature switch disables hooks globally. Respect the deprecated
+        // alias as well as the current feature name.
+        for feature in ["hooks", "codex_hooks"] {
+            install::write_settings(&project_hooks, &original, false).unwrap();
+            std::fs::write(
+                home.path().join(".codex/config.toml"),
+                format!("[features]\n{feature} = false\n"),
+            )
+            .unwrap();
+            install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false)
+                .unwrap();
+            assert_eq!(
+                install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+                original["hooks"]["Stop"],
+                "project task hooks must survive when {feature} disables Codex hooks"
+            );
+        }
     }
 
     #[test]
@@ -2457,7 +2687,8 @@ mod tests {
         .unwrap();
         write_composed_backup(&sidecar, original.as_array().unwrap(), managed, false).unwrap();
 
-        install_project_codex_at(home.path(), &path, exe, false).unwrap();
+        let global_hooks = Provider::Codex.path(home.path());
+        install_project_codex_at(home.path(), &global_hooks, &path, exe, false).unwrap();
 
         let installed = install::read_settings(&path).unwrap();
         assert_eq!(installed["hooks"]["PreToolUse"], original);
@@ -2491,7 +2722,8 @@ mod tests {
         .unwrap();
         write_composed_backup(&sidecar, original.as_array().unwrap(), managed, false).unwrap();
 
-        assert!(install_project_codex_at(home.path(), &path, exe, false).is_err());
+        let global_hooks = Provider::Codex.path(home.path());
+        assert!(install_project_codex_at(home.path(), &global_hooks, &path, exe, false).is_err());
         assert_eq!(
             install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
             changed
@@ -2516,8 +2748,23 @@ mod tests {
         )
         .unwrap();
 
-        install_project_codex_at(home.path(), &path, Path::new("/tmp/pixel"), false).unwrap();
-        install_project_codex_at(home.path(), &alias, Path::new("/tmp/pixel"), false).unwrap();
+        let global_hooks = Provider::Codex.path(home.path());
+        install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &path,
+            Path::new("/tmp/pixel"),
+            false,
+        )
+        .unwrap();
+        install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &alias,
+            Path::new("/tmp/pixel"),
+            false,
+        )
+        .unwrap();
 
         let installed = install::read_settings(&path).unwrap();
         assert_eq!(installed["hooks"]["PreToolUse"], original);

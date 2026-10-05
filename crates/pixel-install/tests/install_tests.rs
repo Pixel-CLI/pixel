@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use pixel_install::config::{MANAGED_BEGIN, MANAGED_END};
+use pixel_install::config::{MANAGED_BEGIN, MANAGED_END, PI_SETTINGS_FILE};
 use pixel_install::doctor::{CHECKS, CheckStatus, DoctorOptions, doctor};
 use pixel_install::install::{
     CheckStatus as StepStatus, InstallOptions, InstallReport, InstallStep, install,
@@ -3036,6 +3036,7 @@ fn doctor_detects_a_pre_marker_prompt_above_the_managed_block_until_install_repa
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
     let pi_path = pi_prompt_path(home);
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
     let stale = format!("My own note.\n{PRE_MARKER_PI_PROMPT}## My section\nKeep this.\n");
     fs::write(&pi_path, &stale).unwrap();
     let doctor_opts = DoctorOptions {
@@ -3070,6 +3071,7 @@ fn uninstall_reclaims_pre_marker_prompt_copies_without_erasing_user_text() {
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
     let pi_path = pi_prompt_path(home);
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
     fs::write(
         &pi_path,
         format!("Before.\n{PRE_MARKER_PI_PROMPT}## My section\nKeep this.\nAfter.\n"),
@@ -3183,6 +3185,7 @@ fn install_removes_the_automatic_prompt_written_by_an_earlier_release() {
     // prompt verbatim, no markers around it.
     let asset = PRE_MARKER_PI_PROMPT;
     let pi_path = pi_prompt_path(home);
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
     fs::write(&pi_path, format!("Before.\n{asset}After.\n")).unwrap();
 
     install_for_shell(home, TEST_SHELL);
@@ -3200,6 +3203,7 @@ fn legacy_pi_prompt_migration_preserves_surrounding_user_sections() {
     install_for_shell(home, TEST_SHELL);
     let asset = PRE_MARKER_PI_PROMPT;
     let pi_path = pi_prompt_path(home);
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
     fs::write(
         &pi_path,
         format!("My Pi note.\n{asset}\n## My notes\nKeep this.\n"),
@@ -3240,6 +3244,7 @@ fn edited_legacy_pi_prompt_is_replaced_without_consuming_following_user_text() {
                   ## REPLACEMENT MAP\nMap.\n\
                   All commands accept `[PATH]`, default current directory.\n";
     let pi_path = pi_prompt_path(home);
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
     fs::write(&pi_path, format!("Before.\n{edited}After.\n"))
         .expect("edited legacy prompt fixture");
 
@@ -3318,26 +3323,34 @@ fn uninstall_survives_a_missing_pi_prompt_file() {
 }
 
 #[test]
-fn install_reports_a_pi_prompt_it_cannot_write_instead_of_greening_it() {
+fn install_skips_pi_when_the_configuration_path_is_not_a_directory() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     // A file where the directory should be: creating ~/.pi/agent fails
     // whatever the user's permissions are.
-    fs::write(home.join(".pi"), "not a directory\n").unwrap();
+    let pi_path = home.join(".pi");
+    let original = b"not a directory\n";
+    fs::write(&pi_path, original).unwrap();
 
-    let result = install(&InstallOptions {
+    let report = install(&InstallOptions {
         repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
-    });
+    })
+    .expect("a malformed optional Pi configuration must not fail other installs");
 
-    assert!(
-        result.is_err(),
-        "a pi prompt that cannot be written must fail the install, not report a green step: {result:?}"
-    );
+    let pi_step = report
+        .steps
+        .iter()
+        .find(|step| step.id == "hooks.pi-impact")
+        .expect("Pi status is reported");
+    assert_eq!(pi_step.status, StepStatus::Green);
+    assert!(pi_step.summary.contains("not configured"));
+    assert_eq!(fs::read(&pi_path).unwrap(), original);
+    assert!(!home.join(".pi/agent/extensions/pixel-impact.ts").exists());
 }
 
 #[test]
@@ -3382,6 +3395,20 @@ fn doctor_distinguishes_retired_pi_prompt_from_explicit_impact_extension() {
     };
     assert_eq!(impact_check(home), CheckStatus::Green);
     let extension = home.join(".pi/agent/extensions/pixel-impact.ts");
+    assert!(
+        !home.join(".pi/agent").exists(),
+        "an unconfigured Pi installation must not create its configuration directory"
+    );
+
+    // A configured Pi home receives the explicit command without changing
+    // Pi's existing settings.
+    let pi_settings = home.join(PI_SETTINGS_FILE);
+    fs::create_dir_all(pi_settings.parent().unwrap()).unwrap();
+    fs::write(&pi_settings, "{\"extensions\": []}\n").unwrap();
+    let original_pi_settings = fs::read(&pi_settings).unwrap();
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(fs::read(&pi_settings).unwrap(), original_pi_settings);
+    assert_eq!(impact_check(home), CheckStatus::Green);
     let source = fs::read_to_string(&extension).expect("explicit command extension installed");
     assert!(
         source.contains("pi.registerCommand(\"pixel-impact\""),

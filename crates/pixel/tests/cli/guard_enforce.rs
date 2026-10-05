@@ -1610,7 +1610,7 @@ fn prompt_submit_should_treat_a_harness_task_notification_as_no_prompt() {
     assert!(context.contains("Pixel-first retrieval"), "{context}");
 }
 
-/// Caller facts are opt-in, source-verified, bounded, and fail open.
+/// The retired caller-facts setting cannot restore Codex prompt injection.
 #[test]
 fn codex_retired_caller_facts_setting_cannot_restore_prompt_injection() {
     let dir = indexed_dir("codex-retired-caller-facts");

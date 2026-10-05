@@ -63,6 +63,11 @@ try {
     assert.deepEqual(pkg.pi.extensions, ["./pi/extensions/pixel-impact.ts"]);
     assert.deepEqual(pkg.pi.skills, [], "Pi must not auto-discover root skill packages");
     const distributed = readFileSync(new URL("../pi/extensions/pixel-impact.ts", import.meta.url), "utf8");
+    const installerAsset = readFileSync(new URL("../crates/pixel-install/assets/pi-impact.ts", import.meta.url), "utf8")
+      .replace('const PIXEL_BIN = __PIXEL_BIN__;', 'const PIXEL_BIN = "pixel";')
+      .replace("// __MANAGED_BEGIN__\n", "")
+      .replace("// __MANAGED_END__\n", "");
+    assert.equal(distributed, installerAsset, "installer and package extensions stay in sync");
     assert.match(distributed, /const PIXEL_BIN = "pixel";/);
     assert.doesNotMatch(distributed, /__PIXEL_BIN__|__MANAGED_(?:BEGIN|END)__/);
   });
@@ -110,7 +115,8 @@ try {
   await check("large output is bounded before adding it to session context", async () => {
     const h = host({ code: 0, killed: false, stdout: JSON.stringify({ padding: "x".repeat(20_000) }) });
     await h.commands[0].handler("KnownSymbol", h.ctx);
-    assert.match(h.messages[0][0].content, /Continue with native search/);
+    assert.match(h.messages[0][0].content, /exceeds the 12000-byte display limit/);
+    assert.doesNotMatch(h.messages[0][0].content, /stale|unavailable/i);
     assert.equal(h.messages[0][1].triggerTurn, false);
   });
 } finally {

@@ -92,7 +92,7 @@ is ready. The arena does not build or install a skill package itself:
 REPO_SNAPSHOT=/path/to/foreign/repository \
 PIXEL_IMAGE_SOURCE=existing PIXEL_ARENA_IMAGE=sha256:<pinned-image-id> \
 CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium \
-rtk bash eval/arena.sh --arms "raw pixel" --tasks "g5-symbol-impact" \
+rtk bash eval/arena.sh --arms "raw pixel" --tasks "g5-transfer-status-impact" \
   --reps 1 --skill-candidate-dir /path/to/packaged/pixel-impact \
   --results-dir eval/arena-results/g5-skill-pilot-01
 ```
@@ -108,7 +108,9 @@ required-pattern score. Use a fresh output directory for each candidate.
 
 `eval/claude_skill_pair.py` runs a one-repetition raw/skill pair after a
 no-model preflight. It uses the same foreign-repository snapshot and g5
-scenario, with `sonnet` / `medium` by default. On macOS it reads only the
+scenario, with `sonnet` / `medium` by default. It resolves `claude` and `pixel`
+from `PATH` unless explicit binary paths are supplied; a missing executable
+fails with a clear message. On macOS it reads only the
 `claudeAiOauth` object from the Keychain entry for `--auth-config-dir` (default
 `~/.claude`); it never imports user settings, skills, hooks, plugins, or MCP
 configuration. An optional `--credentials-file` takes precedence over the

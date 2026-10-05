@@ -71,9 +71,9 @@ At a terminal, `pixel install` opens with a short animation before its summary: 
 
 `pixel install --repo <path>` updates project-local integration and skips global steps:
 
-- `<repo>/.claude/settings.local.json`: the guard hook, in Claude Code's personal project settings (the shared `.claude/settings.json` never carries it); `<repo>/.claude/pixel-rtk-hooks.json` keeps an `rtk hook claude` group the guard takes over
+- `<repo>/.claude/settings.local.json` and `.claude/settings.json`: removes owned retrieval guards and restores RTK hook groups from `<repo>/.claude/pixel-rtk-hooks.json`, preserving foreign hooks and independent task controls
 - `<repo>/.codex/config.toml`: removes retired Pixel `developer_instructions` while preserving foreign text
-- `<repo>/.codex/hooks.json`: the guard hook, with `<repo>/.codex/pixel-composed-guard-backup.json` holding the hooks it replays; left alone when Git tracks `.codex/hooks.json`
+- `<repo>/.codex/hooks.json`: removes owned retrieval registrations and restores adopted hooks from `<repo>/.codex/pixel-composed-guard-backup.json` when the managed snapshot still matches; preserves user changes and leaves Git-tracked hook files alone
 - `<repo>/.devin/config.local.json`: the guard hook for Devin
 - `<repo>/.pi/extensions/pixel-guard.ts`: Pi's task lifecycle adapter, loaded once Pi trusts the project
 - `<repo>/AGENTS.md`: removes the retired managed Pixel-first block; surrounding instructions are preserved
@@ -120,18 +120,18 @@ Any other agent: paste [`PIXEL.md`](https://github.com/Pixel-CLI/pixel/blob/main
 
 ## The workflow
 
-The agent prompt walks every change through the same path:
+Codex and Claude use native search and editing by default. Choose Pixel commands when their facts help with a specific task:
 
 ```bash
-pixel scope-task "<task>"        # first call on multi-file work: P0/P1/P2 targets
-pixel find-code "<phrase>"       # before any free-text search for a name
-pixel impact "<symbol>"          # before editing any symbol: its blast radius
-pixel what-changed               # before an edit batch: what already differs
+pixel scope-task "<task>"        # optional task scope and candidate targets
+pixel find-code "<phrase>"       # optional lookup by behavior
+pixel impact "<symbol>" --no-refresh # explicit impact query using an existing fresh graph
+pixel what-changed               # inspect what already differs
 pixel review-changes             # the working tree, structured
 pixel commit-and-push --files <f1> --files <f2> -m "msg" --request-id "id" origin HEAD
 ```
 
-Two rules hold throughout. `pixel impact` runs before any edit, because editing blind is how callers you never saw break. And the agent never commits or pushes unless asked: every write takes a `--request-id`, which makes it crash-safe and idempotent.
+An impact query is optional and requires a known symbol. Inspect its cited source and continue with native tools when the graph is unavailable, stale, ambiguous or unhelpful. The agent commits or pushes only when asked; commit operations use a `--request-id` for crash-safe, idempotent execution.
 
 {{< workflow-jobs >}}
 

@@ -71,23 +71,21 @@ pub struct InstallOptions {
     /// to remove, as a `$SHELL`-style value (`fish`, `/bin/bash`, …).
     /// Defaults to the account's login shell, then `$SHELL`.
     pub shell: Option<String>,
-    /// Deprecated and ignored: the retired shell wrapper needed a `claude
-    /// --version` probe to decide whether `--append-subagent-system-prompt-file`
-    /// was safe. The SessionStart hook injects the prompt now, so no Claude
-    /// probe happens.
+    /// Deprecated and ignored, retained for source compatibility. Install no
+    /// longer probes the Claude executable or its version.
     pub claude_executable: Option<PathBuf>,
     /// If true, compute and report every step's outcome exactly as a real
     /// run would, but perform no filesystem writes: no settings.json edits,
     /// no hook files, no agent-config rewrites, no backups, no directory
     /// creation. Safe to run against a real `$HOME` to preview an install.
     pub dry_run: bool,
-    /// Repository root to install project-local enforcement into
+    /// Repository root for native-hook cleanup and project task adapters
     /// (`pixel install --repo <path>`). When set, ONLY repo-local steps run:
-    /// `.codex/hooks.json`, `.devin/config.local.json`,
-    /// `.claude/settings.local.json` (PreToolUse guard), and
-    /// `.pi/extensions/pixel-guard.ts`, and removes retired Pixel blocks from
-    /// `.codex/config.toml` and `AGENTS.md`; a Pixel entry an
-    /// older release left in `.warp/.mcp.json` is removed — none of the global prompt/lifecycle-hook deploys.
+    /// retired retrieval callbacks are removed from Claude and Codex while
+    /// native hooks are preserved; Devin task hooks and the Pi project guard
+    /// are installed. Retired Pixel material is also removed from
+    /// `.codex/config.toml`, `AGENTS.md`, and `.warp/.mcp.json`. Global prompt
+    /// and lifecycle-hook installation is skipped.
     pub repo: Option<PathBuf>,
 }
 
@@ -122,21 +120,14 @@ fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
 
 /// Run `pixel install`. Idempotent: safe to re-run.
 ///
-/// The install deploys the agent system prompt, registers the Claude
-/// lifecycle hooks in `~/.claude/settings.json` (the SessionStart hook
-/// injects that prompt into EVERY Claude process — the retired `claude()`
-/// shell wrapper only ever fired for human login shells and is removed),
-/// and removes the retired always-on Pixel block from Codex's
-/// `developer_instructions`, preserving any user-owned text. Codex keeps its
-/// dedicated hooks, while optional Pixel guidance remains available to other
-/// hosts. When OpenCode is present, a managed block in its global
-/// `~/.config/opencode/AGENTS.md`. Codex also gets the metrics relay:
-/// its exec layer already merges the invocation's stderr into the tool
-/// result it records and shows, so the relay's dedupe drops the duplicate
-/// and a PostToolUse entry only re-emits the 🟩 line for the rare host
-/// whose tool result drops or fails to surface the merged stderr. No
-/// managed blocks in the home-level CLAUDE.md/AGENTS.md files; PreToolUse
-/// enforcement is repo-local (`pixel install --repo`).
+/// Global install deploys the shared agent prompt, keeps task-lifecycle
+/// accounting hooks for configured hosts, and removes retired automatic
+/// retrieval registrations. It installs Pi's explicit impact command only
+/// when the standard `~/.pi/agent` configuration directory already exists;
+/// a machine without Pi is left untouched. Repo install preserves native task
+/// hooks while removing retired retrieval callbacks. The retired Claude
+/// `claude()` shell wrapper is removed because native task hooks now provide
+/// the lifecycle integration.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let home = options
         .home
@@ -150,10 +141,10 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let exe = stable_exe_path(executable_path);
 
     let dry_run = options.dry_run;
-    if let Some(repo) = &options.repo {
-        return install_project(repo, &home, &exe, dry_run);
-    }
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
+    if let Some(repo) = &options.repo {
+        return install_project(repo, &home, &codex_home, &exe, dry_run);
+    }
     let mut steps = vec![
         deploy_agent_prompt(&home, dry_run)?,
         crate::pi_global::install(&home, &exe, dry_run)?,
@@ -277,7 +268,13 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 /// ([`crate::repo_git`]). Codex has no personal project file, so a
 /// `.codex/hooks.json` the repository tracks is left alone: the composed
 /// guard would put this machine's path into a file every clone runs.
-fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Result<InstallReport> {
+fn install_project(
+    repo: &Path,
+    home: &Path,
+    codex_home: &Path,
+    exe: &Path,
+    dry_run: bool,
+) -> Result<InstallReport> {
     let codex_dir = repo.join(".codex");
     let codex_hooks = codex_dir.join(crate::codex_config::HOOKS_FILE);
     // These two cleanup steps are independent of hook ownership. Run them
@@ -297,7 +294,13 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
             detail: Some(codex_hooks.display().to_string()),
         }
     } else {
-        crate::routing::install_project_codex_at(home, &codex_hooks, exe, dry_run)?
+        crate::routing::install_project_codex_at(
+            home,
+            &codex_home.join(crate::codex_config::HOOKS_FILE),
+            &codex_hooks,
+            exe,
+            dry_run,
+        )?
     };
     let steps = vec![
         crate::routing::install_project_claude_at(repo, home, exe, dry_run)?,
@@ -554,7 +557,14 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
 fn remove_pi_prompt(path: &Path) -> Result<bool> {
     let existing = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(false);
+        }
         Err(e) => return Err(e.into()),
     };
     let wanted = config::strip_managed_block(&strip_unmarked_pi_prompts(&existing));
@@ -1352,7 +1362,7 @@ pub fn migrate(repo_root: &Path) -> Result<MigrateReport> {
 
 #[cfg(test)]
 mod pi_prompt_io_tests {
-    use super::{InstallOptions, PI_PROMPT_REL, install};
+    use super::{CheckStatus, InstallOptions, PI_PROMPT_REL, install};
     use crate::InstallError;
     use std::fs;
     use std::io::ErrorKind;
@@ -1384,6 +1394,36 @@ mod pi_prompt_io_tests {
                 .join(crate::routing::CLAUDE_SHARED_SETTINGS)
                 .exists(),
             "install must stop before writing later provider hooks"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_should_skip_pi_prompt_cleanup_when_agent_parent_is_a_file() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_path = home.path().join(".pi/agent");
+        fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+        fs::write(&agent_path, "user-owned file").unwrap();
+
+        let report = install(&InstallOptions {
+            home: Some(home.path().to_path_buf()),
+            ..Default::default()
+        })
+        .expect("a non-directory Pi agent path contains no retired prompt to clean");
+
+        assert_eq!(fs::read_to_string(&agent_path).unwrap(), "user-owned file");
+        let pi_step = report
+            .steps
+            .iter()
+            .find(|step| step.id == "hooks.pi-impact")
+            .expect("Pi status is reported");
+        assert_eq!(pi_step.status, CheckStatus::Yellow);
+        assert!(pi_step.summary.contains("not a directory"));
+        assert!(
+            !home
+                .path()
+                .join(".pi/agent/extensions/pixel-impact.ts")
+                .exists()
         );
     }
 }

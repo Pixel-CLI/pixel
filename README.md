@@ -139,14 +139,17 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    U["🧑 USER · “implement feature”"] --> P0["0 · SCOPE, before edits<br/>pixel scope-task “task”<br/>pixel plan “task”"]
-    P0 --> P1["1 · KNOW BEFORE YOU TOUCH<br/>pixel impact “symbol”<br/>pixel what-changed"]
-    P1 --> C["🤖 pixel classify “which model + effort for this task?”"]
-    C --> P2["2 · EDIT LOOP · your tools, typecheck, test"]
+    U["🧑 USER · “implement feature”"] --> P0["Understand the task and inspect existing changes"]
+    P0 --> K{"Need impact facts for a known symbol?"}
+    K -->|explicit choice| P1["pixel impact SYMBOL --no-refresh"]
+    K -->|no| N["Native search and source inspection"]
+    P1 --> E{"Useful, fresh facts?"}
+    E -->|yes| V["Verify cited source and coverage limits"]
+    E -->|missing, stale or unhelpful| N
+    V --> P2["Edit with your tools, typecheck and test"]
+    N --> P2
     P2 -->|broke it| RB["pixel plan-rollback “problem”"] --> P2
-    P2 -->|green| C2["🤖 pixel classify “should I rebuild?”"]
-    C2 -->|yes| RD[“rebuild, then continue”] --> P3
-    C2 -->|no| P3[“3 · REVIEW<br/>pixel review-changes<br/>pixel repo-state”]
+    P2 -->|green| P3[“Review changes and repository state”]
     P3 --> G0[“pixel review-gate”]
     G0 -->|findings| FX[“fix them”] --> G0
     G0 -->|clean| P4[“4 · COMMIT, when asked<br/>pixel commit --files a.ts --files b.ts -m “msg” --request-id “id”<br/>pixel commit-and-push --files f -m “msg” origin branch --request-id “id””]
@@ -154,12 +157,10 @@ flowchart TD
     P4 --> P5["5 · CLEANUP and BRANCHES<br/>pixel scope-task --clear<br/>pixel new-branch “name” --request-id “id”<br/>pixel fetch origin<br/>pixel sync-branch<br/>pixel fast-forward --expected-head head --target-oid oid --request-id “id”"]
     P5 --> F["stderr · 🟩 round-trips · tokens saved"]
     classDef llm fill:#ffe3e3,stroke:#d64545,color:#8a1f1f
-    classDef cls fill:#ffe8cc,stroke:#e8590c,color:#8a3e10
     classDef det fill:#e6f4ea,stroke:#2ea043,color:#14522a
     classDef stop fill:#fff3cd,stroke:#b8860b,color:#6b4e00
     class P2,FX llm
-    class C,C2 cls
-    class P0,P1,P3,P4,P5,RB,RD,G0 det
+    class P0,P1,P3,P4,P5,RB,G0,N,V det
     class X stop
 ```
 

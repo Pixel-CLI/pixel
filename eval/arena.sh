@@ -174,47 +174,93 @@ PY
 
 prompt_for() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "$SCENARIOS_DIR/$1.json"; }
 
+scrub_pixel_lines() {
+  local path="$1" temp="${1}.scrubbed" status
+  if grep -vEi 'pixel' "$path" > "$temp"; then
+    :
+  else
+    status=$?
+    if [ "$status" -ne 1 ]; then
+      rm -f "$temp" || true
+      return "$status"
+    fi
+  fi
+  if ! mv "$temp" "$path"; then
+    rm -f "$temp" || true
+    return 1
+  fi
+}
+
 launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
   local arm="$1" rep="$2" image_id="$3" actual_image container
   container="arena-$arm-$RUN_ID-$rep"
   local snap="$RESULTS/snapshot-$arm-$rep"
   if [ ! -d "$snap" ]; then
-    git clone -q "$REPO_SNAPSHOT" "$snap"
+    if ! git clone -q "$REPO_SNAPSHOT" "$snap"; then
+      echo "snapshot clone failed: arm=$arm rep=$rep" >&2
+      rm -rf "$snap"
+      return 1
+    fi
     if [ "$arm" = "raw" ] || [ "$SKILL_PILOT" = "1" ]; then
       # The snapshot carries pixel's own agent-facing docs; raw must not see
       # them or codex tries `pixel …` and burns a turn on the failure.
-      rm -rf "$snap/.agents/skills/pixel" "$snap/skills/pixel" \
+      if ! rm -rf "$snap/.agents/skills/pixel" "$snap/skills/pixel" \
         "$snap/.openclaw/skills/pixel" "$snap/rules/pixel.md" \
         "$snap/PIXEL.md" "$snap/PIXEL-SUBAGENT.md" "$snap/.cursor/rules/pixel.mdc" \
         "$snap/.windsurf/rules/pixel.md" "$snap/.kiro/steering/pixel.md" \
-        "$snap/.qoder/rules/pixel.md" "$snap/.clinerules/pixel.md"
+        "$snap/.qoder/rules/pixel.md" "$snap/.clinerules/pixel.md"; then
+        echo "could not remove Pixel snapshot context: arm=$arm rep=$rep" >&2
+        return 1
+      fi
       # AGENTS.md is this repo's own dev doc and teaches pixel retrieval
       # (managed warp-retrieval block + reinstall/doctor commands). Remove
       # the managed block, then every remaining line that names pixel —
       # snapshot-only edit; the eval loses project context it doesn't need.
       if [ -f "$snap/AGENTS.md" ]; then
         if sed --version >/dev/null 2>&1; then
-          sed -i '/<!-- pixel:warp-retrieval:begin -->/,/<!-- pixel:warp-retrieval:end -->/d' "$snap/AGENTS.md"
+          if ! sed -i '/<!-- pixel:warp-retrieval:begin -->/,/<!-- pixel:warp-retrieval:end -->/d' "$snap/AGENTS.md"; then
+            echo "could not remove managed Pixel block from AGENTS.md: arm=$arm rep=$rep" >&2
+            return 1
+          fi
         else
-          sed -i '' '/<!-- pixel:warp-retrieval:begin -->/,/<!-- pixel:warp-retrieval:end -->/d' "$snap/AGENTS.md"
+          if ! sed -i '' '/<!-- pixel:warp-retrieval:begin -->/,/<!-- pixel:warp-retrieval:end -->/d' "$snap/AGENTS.md"; then
+            echo "could not remove managed Pixel block from AGENTS.md: arm=$arm rep=$rep" >&2
+            return 1
+          fi
         fi
-        grep -vEi 'pixel' "$snap/AGENTS.md" > "$snap/AGENTS.md.scrubbed" \
-          && mv "$snap/AGENTS.md.scrubbed" "$snap/AGENTS.md"
+        if ! scrub_pixel_lines "$snap/AGENTS.md"; then
+          echo "could not scrub Pixel references from AGENTS.md: arm=$arm rep=$rep" >&2
+          return 1
+        fi
       fi
-      rm -rf "$snap/.agents/skills/pixel-retro"
-      rm -rf "$snap/.agents/skills/pixel-impact"
-      [ -z "$SKILL_NAME" ] || rm -rf "$snap/.agents/skills/$SKILL_NAME"
+      if ! rm -rf "$snap/.agents/skills/pixel-retro" "$snap/.agents/skills/pixel-impact"; then
+        echo "could not remove Pixel skill snapshots: arm=$arm rep=$rep" >&2
+        return 1
+      fi
+      if [ -n "$SKILL_NAME" ] && ! rm -rf "$snap/.agents/skills/$SKILL_NAME"; then
+        echo "could not remove candidate skill from baseline snapshot: arm=$arm rep=$rep" >&2
+        return 1
+      fi
       for f in "$snap"/.agents/rules/*.md "$snap"/.agents/skills/*/SKILL.md; do
         [ -f "$f" ] || continue
-        grep -vEi 'pixel' "$f" > "$f.scrubbed" && mv "$f.scrubbed" "$f"
+        if ! scrub_pixel_lines "$f"; then
+          echo "could not scrub Pixel references from $f: arm=$arm rep=$rep" >&2
+          return 1
+        fi
       done
     fi
     if [ "$SKILL_PILOT" = "1" ]; then
-      python3 "$ARENA_DIR/arena/skill_candidate.py" stage \
+      if ! python3 "$ARENA_DIR/arena/skill_candidate.py" stage \
         --source "$SKILL_CANDIDATE_DIR" --repo "$snap" --arm "$arm" \
-        --receipt "$RESULTS/skill-stage-$arm-$rep.json"
-      SKILL_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["skill_name"])' \
-        "$RESULTS/skill-stage-$arm-$rep.json")
+        --receipt "$RESULTS/skill-stage-$arm-$rep.json"; then
+        echo "skill staging failed: arm=$arm rep=$rep" >&2
+        return 1
+      fi
+      if ! SKILL_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["skill_name"])' \
+        "$RESULTS/skill-stage-$arm-$rep.json"); then
+        echo "could not read staged skill identity: arm=$arm rep=$rep" >&2
+        return 1
+      fi
     fi
   fi
   local missing=0
@@ -222,7 +268,7 @@ launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
     [ -s "$RESULTS/$arm-$task-$rep.jsonl" ] || missing=1
   done
   [ "$missing" -eq 0 ] && { echo "skip arm=$arm rep=$rep (all tasks exist)"; return 0; }
-  "$DOCKER_BIN" create --name "$container" \
+  if ! "$DOCKER_BIN" create --name "$container" \
     -v "$snap":/repo \
   -v "$AUTH":/root/.codex/auth.json:ro \
   -v "$ARENA_DIR/arena/entrypoint.sh":/usr/local/bin/arena-entrypoint:ro \
@@ -236,8 +282,16 @@ launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
     -e ARENA_SKILL_PILOT="$SKILL_PILOT" \
     -e ARENA_REVIEWED_PIXEL_HOOKS="$REVIEWED_PIXEL_HOOKS" \
     -e CODEX_MODEL="${CODEX_MODEL:-}" -e CODEX_EFFORT="${CODEX_EFFORT:-}" \
-    "$image_id" >/dev/null
-  actual_image=$("$DOCKER_BIN" inspect --format '{{.Image}}' "$container")
+    "$image_id" >/dev/null; then
+    echo "container create failed: arm=$arm rep=$rep" >&2
+    "$DOCKER_BIN" rm -f "$container" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if ! actual_image=$("$DOCKER_BIN" inspect --format '{{.Image}}' "$container"); then
+    echo "container image inspection failed: arm=$arm rep=$rep" >&2
+    "$DOCKER_BIN" rm -f "$container" >/dev/null 2>&1 || true
+    return 1
+  fi
   if ! python3 - "$arm" "$image_id" "$actual_image" "$RESULTS/container-image-$arm-$rep.json" <<'PY'
 import json
 import sys
@@ -254,10 +308,14 @@ if expected != actual:
     sys.exit(f"container image mismatch: arm={arm} expected={expected} actual={actual}")
 PY
   then
-    "$DOCKER_BIN" rm "$container" >/dev/null
+    "$DOCKER_BIN" rm -f "$container" >/dev/null 2>&1 || true
     return 1
   fi
-  "$DOCKER_BIN" start "$container" >/dev/null
+  if ! "$DOCKER_BIN" start "$container" >/dev/null; then
+    echo "container start failed: arm=$arm rep=$rep" >&2
+    "$DOCKER_BIN" rm -f "$container" >/dev/null 2>&1 || true
+    return 1
+  fi
   echo "launched arm=$arm container=$container image=$actual_image"
 }
 
@@ -337,6 +395,7 @@ done
 CONTAINERS=()
 CONTAINER_ARMS=()
 CONTAINER_REPS=()
+LAUNCH_FAIL=0
 for rep in $(seq 1 "$REPS"); do
   # fresh snapshot per rep: prior reps' index artifacts and tool edits must
   # not leak into the next rep's starting state. Rep-scoped names —
@@ -346,7 +405,12 @@ for rep in $(seq 1 "$REPS"); do
   rep_containers=()
   arm_index=0
   for arm in $ARMS; do
-    launch_arm "$arm" "$rep" "${ARM_IMAGE_IDS[$arm_index]}"
+    if ! launch_arm "$arm" "$rep" "${ARM_IMAGE_IDS[$arm_index]}"; then
+      LAUNCH_FAIL=1
+      for task in $TASKS; do touch "$RESULTS/$arm-$task-$rep.failed"; done
+      arm_index=$((arm_index + 1))
+      continue
+    fi
     arm_index=$((arm_index + 1))
     CONTAINERS+=("arena-$arm-$RUN_ID-$rep")
     CONTAINER_ARMS+=("$arm")
@@ -355,7 +419,9 @@ for rep in $(seq 1 "$REPS"); do
   done
   # serialize reps: waiting here keeps rep N+1 from racing rep N's still
   # running containers for CPU — wall times stay comparable across reps
-  "$DOCKER_BIN" wait "${rep_containers[@]}" >/dev/null 2>&1 || true
+  if [ "${#rep_containers[@]}" -gt 0 ]; then
+    "$DOCKER_BIN" wait "${rep_containers[@]}" >/dev/null 2>&1 || true
+  fi
 done
 
 # --watch: one pane per container streaming `docker logs -f`. Inside Herdr
@@ -414,7 +480,7 @@ if [ "$WATCH" = "1" ]; then
   fi
 fi
 
-FAIL=0
+FAIL="$LAUNCH_FAIL"
 for i in "${!CONTAINERS[@]}"; do
   c="${CONTAINERS[$i]}"
   docker wait "$c" >/dev/null 2>&1 || FAIL=1

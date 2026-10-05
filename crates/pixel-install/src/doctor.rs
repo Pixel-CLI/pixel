@@ -4204,6 +4204,7 @@ Prose naming `pixel status` is not a table row.
         let home = tempfile::tempdir().unwrap();
         let old_exe = Path::new("/opt/old-pixel/pixel");
         let current_exe = Path::new("/opt/current-pixel/pixel");
+        std::fs::create_dir_all(home.path().join(".pi/agent")).unwrap();
         crate::pi_global::install(home.path(), old_exe, false).unwrap();
 
         let report = super::doctor(&super::DoctorOptions {

@@ -51,6 +51,16 @@ class ArenaImageIdentityTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "add", "README.md"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "fixture"], check=True)
 
+    def _add_pixel_only_context(self):
+        (self.repo / "AGENTS.md").write_text("Pixel-only instructions.\nPIXEL retrieval only.\n")
+        rules = self.repo / ".agents" / "rules"
+        rules.mkdir(parents=True)
+        (rules / "pixel-only.md").write_text("Pixel-only rule.\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "AGENTS.md", ".agents/rules/pixel-only.md"],
+                       check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "add Pixel-only context"],
+                       check=True)
+
     def _fake_docker(self):
         return """#!/usr/bin/env python3
 import json
@@ -88,6 +98,9 @@ elif command == "inspect":
     if "--format" in args:
         name = args[-1]
         actual = os.environ.get("ACTUAL_IMAGE_OVERRIDE", state[name])
+        if (os.environ.get("ACTUAL_IMAGE_ARM_OVERRIDE") == "pixel"
+                and "arena-pixel-" in name):
+            actual = "sha256:wrong-image"
         print(actual)
     elif "-f" in args:
         print("0")
@@ -167,6 +180,54 @@ else:
         calls = self.docker_calls()
         self.assertFalse(any(call[0] == "start" for call in calls))
         self.assertTrue(any(call[0] == "rm" for call in calls))
+
+    def test_failed_second_arm_is_marked_and_successful_first_arm_is_cleaned(self):
+        result = self.run_arena(ACTUAL_IMAGE_ARM_OVERRIDE="pixel")
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("=== ranking", result.stdout)
+        self.assertTrue((self.results / "pixel-tiny-1.failed").is_file())
+        self.assertFalse((self.results / "raw-tiny-1.failed").exists())
+        self.assertTrue((self.results / "ranking.json").is_file())
+        calls = self.docker_calls()
+        self.assertTrue(any(call[0] == "start" and any("arena-raw-" in arg for arg in call)
+                            for call in calls))
+        self.assertFalse(any(call[0] == "start" and any("arena-pixel-" in arg for arg in call)
+                             for call in calls))
+        self.assertTrue(any(call[0] == "wait" for call in calls))
+        self.assertTrue(any(call[0] == "rm" and any("arena-raw-" in arg for arg in call)
+                            for call in calls))
+        self.assertTrue(any(call[0] == "rm" and any("arena-pixel-" in arg for arg in call)
+                            for call in calls))
+
+    def test_pixel_only_context_scrub_replaces_all_removed_lines_with_empty_files(self):
+        self._add_pixel_only_context()
+
+        result = self.run_arena()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        raw_snapshot = self.results / "snapshot-raw-1"
+        self.assertEqual((raw_snapshot / "AGENTS.md").read_text(), "")
+        self.assertEqual((raw_snapshot / ".agents/rules/pixel-only.md").read_text(), "")
+
+    def test_snapshot_scrub_failure_marks_arm_and_prevents_its_container(self):
+        self._add_pixel_only_context()
+        grep = self.bin_dir / "grep"
+        grep.write_text("#!/bin/sh\nexit 2\n")
+        grep.chmod(0o755)
+
+        result = self.run_arena()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("could not scrub Pixel references from AGENTS.md", result.stderr)
+        self.assertIn("=== ranking", result.stdout)
+        self.assertTrue((self.results / "raw-tiny-1.failed").is_file())
+        self.assertFalse((self.results / "pixel-tiny-1.failed").exists())
+        calls = self.docker_calls()
+        self.assertFalse(any(call[0] == "create" and any("arena-raw-" in arg for arg in call)
+                             for call in calls))
+        self.assertTrue(any(call[0] == "create" and any("arena-pixel-" in arg for arg in call)
+                            for call in calls))
 
     def test_different_codex_versions_stop_before_arm_containers(self):
         result = self.run_arena(CODEX_PIXEL_VERSION="codex-test-2")

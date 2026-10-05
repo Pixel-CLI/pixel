@@ -24,6 +24,26 @@ fn is_managed(path: &Path) -> bool {
 }
 
 pub(crate) fn install(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let config_dir = home.join(config::PI_CONFIG_DIR);
+    if !config_dir.exists() {
+        return Ok(InstallStep {
+            id: "hooks.pi-impact".into(),
+            status: CheckStatus::Green,
+            summary: "Pi is not configured; skipped explicit impact command".into(),
+            detail: Some(format!("config_dir={}", config_dir.display())),
+        });
+    }
+    if !config_dir.is_dir() {
+        return Ok(InstallStep {
+            id: "hooks.pi-impact".into(),
+            status: CheckStatus::Yellow,
+            summary: format!(
+                "Pi configuration path is not a directory; left untouched at {}",
+                config_dir.display()
+            ),
+            detail: Some(format!("config_dir={}", config_dir.display())),
+        });
+    }
     let path = home.join(EXTENSION);
     let source = extension_source(exe);
     if fs::symlink_metadata(&path).is_ok() && !is_managed(&path) {
@@ -91,6 +111,13 @@ mod tests {
     use crate::config;
     use crate::install::CheckStatus;
 
+    fn configure_pi(home: &Path) -> std::path::PathBuf {
+        let settings = home.join(config::PI_SETTINGS_FILE);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&settings, "{\"extensions\": []}\n").unwrap();
+        settings
+    }
+
     #[test]
     fn extension_source_should_register_the_explicit_existing_graph_command() {
         let source = extension_source(Path::new("/opt/pixel tools/pixel"));
@@ -105,6 +132,8 @@ mod tests {
     #[test]
     fn install_should_write_and_refresh_only_its_managed_extension() {
         let home = tempfile::tempdir().unwrap();
+        let settings = configure_pi(home.path());
+        let original_settings = fs::read(&settings).unwrap();
         let path = home.path().join(EXTENSION);
         let step = install(home.path(), Path::new("/opt/pixel"), false).unwrap();
         assert_eq!(step.status, CheckStatus::Green);
@@ -113,12 +142,39 @@ mod tests {
             extension_source(Path::new("/opt/pixel"))
         );
         assert_eq!(installed_state(home.path()), (true, path.clone()));
+        assert_eq!(fs::read(&settings).unwrap(), original_settings);
 
         install(home.path(), Path::new("/opt/pixel-next"), false).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             extension_source(Path::new("/opt/pixel-next"))
         );
+    }
+
+    #[test]
+    fn install_should_not_create_pi_configuration_for_an_unconfigured_host() {
+        let home = tempfile::tempdir().unwrap();
+
+        let step = install(home.path(), Path::new("/opt/pixel"), false).unwrap();
+
+        assert_eq!(step.status, CheckStatus::Green);
+        assert!(step.summary.contains("Pi is not configured"));
+        assert!(!home.path().join(".pi").exists());
+    }
+
+    #[test]
+    fn install_should_preserve_a_non_directory_pi_config_path() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(config::PI_CONFIG_DIR);
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, "user-owned file").unwrap();
+
+        let step = install(home.path(), Path::new("/opt/pixel"), false).unwrap();
+
+        assert_eq!(step.status, CheckStatus::Yellow);
+        assert!(step.summary.contains("not a directory"));
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), "user-owned file");
+        assert!(!home.path().join(EXTENSION).exists());
     }
 
     #[test]
@@ -141,6 +197,7 @@ mod tests {
     #[test]
     fn uninstall_should_remove_managed_extension_and_keep_foreign_file() {
         let home = tempfile::tempdir().unwrap();
+        configure_pi(home.path());
         let path = home.path().join(EXTENSION);
         install(home.path(), Path::new("/opt/pixel"), false).unwrap();
         let original = fs::read(&path).unwrap();
@@ -163,10 +220,12 @@ mod tests {
     #[test]
     fn dry_run_should_not_create_or_remove_the_pi_extension() {
         let home = tempfile::tempdir().unwrap();
+        let settings = configure_pi(home.path());
+        let original_settings = fs::read(&settings).unwrap();
         let path = home.path().join(EXTENSION);
         let step = install(home.path(), Path::new("/opt/pixel"), true).unwrap();
         assert_eq!(step.status, CheckStatus::Green);
         assert!(!path.exists());
-        assert!(!home.path().join(".pi").exists());
+        assert_eq!(fs::read(&settings).unwrap(), original_settings);
     }
 }

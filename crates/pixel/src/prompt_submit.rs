@@ -139,7 +139,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     let asks = pixel_note.is_some() || request.is_some();
     // The opt-outs silence the task notes, not the Pixel-first guidance:
     // with both features disabled the guidance still rides an indexed
-    // repository's prompt on Codex and on a real Claude host.
+    // repository's prompt on Devin and on an explicitly wired Claude host.
     if prompt_features_disabled(task_context, task_boundary) {
         let guidance = if matches!(provider, Some(crate::guard::Provider::Devin)) && indexed {
             DEVIN_PIXEL_GUIDANCE
@@ -215,11 +215,9 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     if asks && matches!(provider, Some(crate::guard::Provider::Devin)) {
         context = render_devin_context(&context, pixel_note.as_deref());
     }
-    // Codex has already returned above for ordinary prompts and received only
-    // classifier-directed optional guidance for explicit structural tasks.
-    // Claude Code reads no per-turn mandate of its own for this contract, so a
-    // real Claude host in an *indexed* repository carries the Pixel-first
-    // guidance like Devin does. The hosting gate keeps an imported
+    // Codex has already returned. An explicitly wired Claude hook in an
+    // indexed repository carries guidance like Devin does; standard Claude
+    // installs do not register this retrieval hook. The hosting gate keeps an imported
     // Claude config (Devin reading `~/.claude/settings.json` verbatim) from
     // prepending a second guidance over Devin's own.
     if asks && claude_host && indexed {
