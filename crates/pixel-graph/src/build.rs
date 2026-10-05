@@ -111,7 +111,10 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 13: a Go package import or a Java wildcard import resolves to the
 ///    package's smallest path, not to the first one the walk or the store
 ///    happened to list (`imports.resolved_file_id`).
-pub const EXTRACTOR_VERSION: &str = "13";
+/// 14: markup concepts carry 1-based lines (HTML started at 0, Svelte/Vue
+///    markup before a `<script>` was offset), strings under `__tests__/` are
+///    no longer concepts, and `app.get("/users")` keeps its path.
+pub const EXTRACTOR_VERSION: &str = "14";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
