@@ -660,10 +660,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     (`.config/nextest.toml`: one process per test, retry once but fail on
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
-    contract scripts (installer, gate runner, pre-push baseline,
-    helpers, release prepare, Homebrew formula and Linux
+    contract scripts (installer, gate runner, pre-push no-op,
+    release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
-    nightly diff checkpoints, mutants
+    nightly diff checkpoints, coverage selection, mutants
     config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
     reproducible release build environment, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
@@ -686,7 +686,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   The existing plan/shards/report share `.cargo/mutants.toml` and distribute
   shards over `PIXEL_MUTANTS_SHARD_RUNNERS` (GitHub-hosted `ubuntu-26.04`
   by default). Only scheduled CI executes mutations; there is no manual,
-  local or pull-request campaign. The pre-push hook compiles and reviews only.
+  local or pull-request campaign. The pre-push hook is a no-op; local validation is optional.
   Other lanes include
   `cross-build.yml` (the three release lanes),
   `reproducible-build.yml` (the `x86_64-unknown-linux-musl` release binary
@@ -741,15 +741,12 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   inside the file, `enclosing_index` inside `symbols`); `search_plan` checks
   that `pixel_index::plan::plan_pattern` never drops a document the
   verifier's `grep_regex` matcher matches, for both gram extractors.
-- Local agent validation uses targeted checks during editing and the full
-  gates once a reviewable unit is ready (CONTRIBUTING.md, "Agent validation
-  workflow"). Background gates validate an unchanged checkout or a committed
-  worktree snapshot with its own build output; results identify the SHA.
-- Once an implementation unit is finished, the project rule in `AGENTS.md`
-  applies: rebuild, reinstall the binary atomically, re-index, reinstall
-  hooks, and run `pixel doctor`. Intermediate edits do not trigger this
-  loop; a check that exercises new installed behavior needs it first, and
-  later changes to the binary or installed rules require it again.
+- Local compilation, tests, lint, review and installation are optional
+  diagnostic tools. Publish the candidate promptly; CI must validate its
+  current head before merge (CONTRIBUTING.md, "Agent validation workflow").
+  A chosen background local check uses an unchanged snapshot and records its
+  SHA. Rebuild, reinstall, index and doctor are only needed for a chosen
+  installed-path diagnosis or explicitly requested local deployment.
 
 ## Release gate
 

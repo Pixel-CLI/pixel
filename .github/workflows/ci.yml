@@ -443,7 +443,7 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-gates.py
 
-      - name: Pre-push contract (stub cargo, disposable repo)
+      - name: Pre-push starts no local validation
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: sh scripts/test-pre-push.sh
 
