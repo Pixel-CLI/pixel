@@ -899,6 +899,42 @@ fn composed_codex_group(exe: &Path, backup: &Path) -> Value {
     )
 }
 
+/// Whether one Codex PreToolUse group is this installer's own composed-guard
+/// entry written by *either* of Pixel's executables — `pixel` or `pixel-dev`,
+/// at any install path — rather than the exact spelling this install would
+/// write today.
+///
+/// The hand-back case: `pixel-dev install --repo .` writes a group naming
+/// `pixel-dev`, and the managed `pixel install --repo .` must be able to take
+/// that install back instead of reading Pixel's own binary as a user edit and
+/// leaving `doctor` permanently red.
+///
+/// This stays deliberately narrow, because the refusal it replaces is a
+/// security boundary: it must admit only the exact managed shape under another
+/// Pixel executable name, and refuse everything else. So it requires
+/// [`pixel_hook_verb`] to recognise the command (which admits only an
+/// executable named `pixel`/`pixel-dev`, or this install's own `exe`, and only
+/// the known verbs), and requires the backup argument to be *this* install's
+/// backup path — a group pointing at another repo's backup is a foreign entry,
+/// not a stale spelling.
+fn is_managed_composed_group(group: &Value, exe: &Path, backup: &Path) -> bool {
+    let Some(entries) = group.get("hooks").and_then(Value::as_array) else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        entry
+            .get("command")
+            .and_then(Value::as_str)
+            .and_then(|command| pixel_hook_verb(command, exe))
+            // The verb alone is not enough: it must be the composed one, and
+            // it must name this install's backup file.
+            .and_then(|verb| verb.strip_prefix("composed-guard --provider codex --backup "))
+            .is_some_and(|written| {
+                unquoted_executable(written.trim()) == Some(backup.to_path_buf())
+            })
+    })
+}
+
 fn composed_backup(groups: Vec<Value>, managed_pre_tool_use: Value) -> Value {
     json!({
         "version": CODEX_COMPOSED_BACKUP_VERSION,
@@ -1023,17 +1059,37 @@ pub(crate) fn install_project_codex_at(
                     path: path.into(),
                     reason: "composed Codex install lost its PreToolUse group; refusing to overwrite user changes".into(),
                 })?;
+            let existing_expected = existing.as_slice() == [expected_group.clone()];
             let existing_legacy =
                 existing.as_slice() == [legacy_group.clone()] && legacy_group != expected_group;
-            if !existing_legacy && existing.as_slice() != [expected_group.clone()] {
+            // A side build (`pixel-dev install --repo .`) writes a
+            // composed-guard command naming `pixel-dev` at its own path, so
+            // handing the repo install back to the managed `pixel` finds
+            // pixel's own entry in a spelling this install would not write
+            // today. `legacy_group` above covers this install's own
+            // executable under its canonicalised spelling; this covers the
+            // binary *name*, at any install path. The count stays exactly
+            // one: a config that gained a second group is still a refusal,
+            // never a silent overwrite of the user's addition.
+            let existing_own = !existing_expected
+                && existing.len() == 1
+                && is_managed_composed_group(&existing[0], exe, &backup_path);
+            if !existing_legacy && !existing_expected && !existing_own {
                 return Err(InstallError::InvalidSettings {
                     path: path.into(),
                     reason: "composed Codex PreToolUse diverged from its managed contract; refusing to overwrite user changes".into(),
                 });
             }
+            migrate_executable_spelling = existing_legacy || existing_own;
             let stored_legacy = stored["managed_pre_tool_use"] == json!([legacy_group.clone()])
                 && legacy_group != expected_group;
-            if !stored_legacy && stored["managed_pre_tool_use"] != json!([expected_group.clone()]) {
+            let stored_expected = stored["managed_pre_tool_use"] == json!([expected_group.clone()]);
+            let stored_own = stored["managed_pre_tool_use"]
+                .as_array()
+                .is_some_and(|groups| {
+                    groups.len() == 1 && is_managed_composed_group(&groups[0], exe, &backup_path)
+                });
+            if !stored_legacy && !stored_expected && !stored_own {
                 return Err(InstallError::InvalidSettings {
                     path: backup_path.clone(),
                     reason: "composed Codex backup managed contract diverged; refusing to execute or overwrite it".into(),
@@ -1045,7 +1101,6 @@ pub(crate) fn install_project_codex_at(
                     reason: "composed Codex config and backup disagree on the managed executable spelling; refusing to overwrite either".into(),
                 });
             }
-            migrate_executable_spelling = existing_legacy;
         }
     }
 
@@ -2651,6 +2706,193 @@ mod tests {
         assert_eq!(
             read_composed_backup(&sidecar).unwrap()["pre_tool_use"],
             json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}])
+        );
+    }
+
+    /// The legacy spelling is not only a canonical path: `self-update --dev`
+    /// can point `bin/pixel` at a versioned file whose *name* is not `pixel`.
+    /// Such an entry is recognised by its canonicalised path alone, and it too
+    /// must migrate the backup, or the next install reads the config and the
+    /// backup as disagreeing and refuses.
+    #[test]
+    fn project_codex_composition_migrates_a_symlink_whose_target_has_another_name() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let real = home.path().join("store/pixel-0.7.0");
+        let stable = home.path().join("bin/pixel");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::create_dir_all(stable.parent().unwrap()).unwrap();
+        fs::write(&real, "pixel").unwrap();
+        symlink(&real, &stable).unwrap();
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            false,
+        )
+        .unwrap();
+
+        let canonical = real.canonicalize().unwrap();
+        install_project_codex_at(home.path(), &path, &canonical, false).unwrap();
+        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
+        install_project_codex_at(home.path(), &path, &stable, false).unwrap();
+
+        let installed = install::read_settings(&path).unwrap();
+        let command = installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            command.starts_with(&format!("'{}'", stable.display())),
+            "{command}"
+        );
+        assert_eq!(
+            read_composed_backup(&sidecar).unwrap()["managed_pre_tool_use"],
+            installed["hooks"]["PreToolUse"]
+        );
+    }
+
+    /// A repo install written by a side build (`pixel-dev install --repo .`)
+    /// must be taken back by the managed `pixel install --repo .`: the entry is
+    /// pixel's own, only under the other executable name. Both the config and
+    /// the backup must move to the managed spelling in one pass, or the next
+    /// install would read them as disagreeing and refuse.
+    #[test]
+    fn project_codex_composition_hands_a_side_build_install_back_to_the_managed_pixel() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let side = home.path().join("bin/pixel-dev");
+        let managed = home.path().join("bin/pixel");
+        let original = json!([
+            {"matcher":"Bash","hooks":[{"type":"command","command":"deny-unsafe-shell"}]}
+        ]);
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":original.clone()}, "keep":true}),
+            false,
+        )
+        .unwrap();
+
+        install_project_codex_at(home.path(), &path, &side, false).unwrap();
+        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
+        let side_managed = install::read_settings(&path).unwrap()["hooks"]["PreToolUse"].clone();
+
+        install_project_codex_at(home.path(), &path, &managed, false).unwrap();
+
+        let installed = install::read_settings(&path).unwrap();
+        let command = installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            command.starts_with(&format!("'{}'", managed.display())),
+            "{command}"
+        );
+        assert_ne!(installed["hooks"]["PreToolUse"], side_managed);
+        assert_eq!(installed["keep"], json!(true));
+        let stored = read_composed_backup(&sidecar).unwrap();
+        assert_eq!(stored["pre_tool_use"], original);
+        assert_eq!(
+            stored["managed_pre_tool_use"],
+            installed["hooks"]["PreToolUse"]
+        );
+    }
+
+    /// The hand-back admits exactly one group. A user group added beside the
+    /// side build's entry is still a refusal, never a silent overwrite.
+    #[test]
+    fn project_codex_composition_refuses_a_user_group_added_beside_a_side_build_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let original = json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]);
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":original.clone()}}),
+            false,
+        )
+        .unwrap();
+        install_project_codex_at(
+            home.path(),
+            &path,
+            &home.path().join("bin/pixel-dev"),
+            false,
+        )
+        .unwrap();
+
+        let mut changed = install::read_settings(&path).unwrap();
+        changed["hooks"]["PreToolUse"].as_array_mut().unwrap().push(
+            json!({"matcher":"Bash","hooks":[{"type":"command","command":"later-user-guard"}]}),
+        );
+        install::write_settings(&path, &changed, false).unwrap();
+
+        assert!(
+            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
+                .is_err()
+        );
+        assert_eq!(
+            read_composed_backup(&path.parent().unwrap().join(CODEX_COMPOSED_BACKUP)).unwrap()["pre_tool_use"],
+            original
+        );
+    }
+
+    /// A foreign executable that merely spells the composed verb is not pixel's,
+    /// even with the exact backup argument.
+    #[test]
+    fn project_codex_composition_refuses_a_foreign_executable_naming_the_composed_verb() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let side = home.path().join("bin/pixel-dev");
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            false,
+        )
+        .unwrap();
+        install_project_codex_at(home.path(), &path, &side, false).unwrap();
+
+        let mut changed = install::read_settings(&path).unwrap();
+        let command = changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .replace(&quoted_executable(&side), "'/usr/bin/notpixel'");
+        changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = json!(command);
+        install::write_settings(&path, &changed, false).unwrap();
+
+        assert!(
+            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
+                .is_err()
+        );
+    }
+
+    /// The composed entry must name *this* install's backup; one pointing at
+    /// another file is a foreign entry, not a stale spelling.
+    #[test]
+    fn project_codex_composition_refuses_a_composed_group_naming_another_backup() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let side = home.path().join("bin/pixel-dev");
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            false,
+        )
+        .unwrap();
+        install_project_codex_at(home.path(), &path, &side, false).unwrap();
+        let backup = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
+
+        let mut changed = install::read_settings(&path).unwrap();
+        let command = changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .replace(
+                &quoted_executable(&backup),
+                &quoted_executable(&home.path().join("other-backup.json")),
+            );
+        changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = json!(command);
+        install::write_settings(&path, &changed, false).unwrap();
+
+        assert!(
+            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
+                .is_err()
         );
     }
 
