@@ -205,9 +205,18 @@ version, sha256 check).
 
 ### 3.10 CI and release (B7)
 
-Pull requests run `ci.yml`, `cross-build.yml`, `mutants.yml`, `codeql.yml`,
+Pull requests run `ci.yml`, `cross-build.yml`, `codeql.yml`,
 `fuzz.yml` and the others listed in ARCHITECTURE.md, "Testing and gates".
 `board-sync.yml` runs on `pull_request_target` to move the project board.
+`mutants.yml` runs the cumulative main diff nightly, with read-only contents
+and Actions metadata access. It accepts checkpoint metadata only from its
+own completed main runs, and validates checkpoint ancestry before selecting
+the diff. Only fully judged campaigns write checkpoint artifacts; only scheduled main runs can produce or supply them.
+`coverage.yml` runs only at 02:47 UTC on main, with read-only contents and
+Actions access. Both instrumented jobs are skipped only after a successful
+scheduled measurement of the same SHA. Coverage is post-merge feedback;
+normal tests and lint still validate the PR head before merge. Local checks,
+including pre-push validation and reinstalling, are optional diagnostics.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.
 
@@ -541,10 +550,21 @@ boundary it crosses.
   an environment variable; no workflow interpolates `github.event.*` or
   `inputs.*` directly in a `run:` script; workflows default to `contents:
   read`; runs of outside contributors wait for a maintainer's approval;
-  CodeQL scans the workflows (`actions` language).
+  CodeQL always scans workflows, Python and JavaScript with default security
+  queries on every PR. Rust analysis runs after merges to main, nightly and
+  on manual dispatch; a sensitive branch can be selected for a pre-merge
+  scan. The CodeQL merge-protection rule retains its error/medium-security
+  alert thresholds. The main ruleset also requires all three PR analysis
+  jobs from GitHub Actions; a missing or failed analysis cannot be hidden by
+  the aggregate CodeQL check's neutral warning about the omitted Rust config.
+  Its Rust extraction cache is separate from build/test caches;
+  only successful main analyses save executable build-script/proc-macro
+  outputs, while manual branch analyses may restore them. A cache hit never
+  replaces an analysis.
 - **Status**: Partial.
-- **Residual**: any pull request body can name `Task <n>` and move that
-  issue's board status; workflows that compile pull-request code on the
+- **Residual**: Rust CodeQL findings may be discovered after merge; triage
+  them before the next release. Any pull request body can name `Task <n>`
+  and move that issue's board status; workflows that compile pull-request code on the
   persistent self-hosted runner depend on that runner's isolation, which is
   an operational control outside this repository.
 
@@ -599,18 +619,20 @@ boundary it crosses.
 
 Across all of them:
 
-- **Mutation testing**: every pull request touching `crates/` must leave no
-  `MISSED` mutant in its diff (`mutants.yml`, `Mutants in diff`), and
-  `mutants-nightly.yml` rotates through the whole tree; a guard whose check
-  can be removed without a test failing does not merge (CONTRIBUTING.md,
-  "Mutation testing").
+- **Mutation testing**: `mutants.yml` checks main's cumulative diff nightly,
+  only when it has unjudged commits. Survivors and incomplete campaigns
+  fail that run and require follow-up; this is post-merge detection, not a
+  condition of merge. A test-only weakening can escape a diff campaign;
+  that limitation is accepted by the nightly cumulative-diff policy.
 - **Fuzzing**: `fuzz.yml` runs every cargo-fuzz target for 60 s on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
   root `Cargo.toml` or `deny.toml`, for 600 s weekly, and for 120 s on every
   `v*` tag before `release.yml` builds anything.
-- **Static analysis**: `codeql.yml` scans Rust, the workflows, Python and
-  JavaScript/TypeScript on every pull request into `main`, every push to it,
-  and weekly; `cargo clippy` with warnings denied runs in CI.
+- **Static analysis**: `codeql.yml` scans workflows, Python and
+  JavaScript/TypeScript on every pull request into `main`. Rust runs after
+  merge, nightly at 05:41 UTC and manually on a selected branch; those
+  events scan all four languages. Rust findings require triage before the
+  next release; `cargo clippy` with warnings denied remains in PR CI.
 - **Dependencies**: `cargo deny check` and `scripts/check-advisory-ignores.py`
   in CI; Dependabot weekly for Cargo and GitHub Actions.
 
