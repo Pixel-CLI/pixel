@@ -418,12 +418,16 @@ fn make_snippet(text: &str, units: &[String]) -> String {
 /// `i̇` (3 bytes), so the offset drifts and can land past `text`'s end or
 /// inside one of its characters (#769). Each byte of the lowercased string
 /// is mapped back to the start of the character it came from.
+///
+/// Both sides fold character by character with [`fold_case`], never with
+/// `str::to_lowercase`, whose word-final `Σ` → `ς` depends on context and
+/// would stop a needle from matching the same word in `text`.
 pub(crate) fn find_case_insensitive(text: &str, needle: &str) -> Option<usize> {
-    let needle = needle.to_lowercase();
+    let needle: String = needle.chars().flat_map(fold_case).collect();
     let mut lower = String::with_capacity(text.len());
     let mut origin = Vec::with_capacity(text.len());
     for (at, ch) in text.char_indices() {
-        for lc in ch.to_lowercase() {
+        for lc in fold_case(ch) {
             lower.push(lc);
             origin.resize(lower.len(), at);
         }
@@ -431,6 +435,12 @@ pub(crate) fn find_case_insensitive(text: &str, needle: &str) -> Option<usize> {
     lower
         .find(&needle)
         .map(|pos| origin.get(pos).copied().unwrap_or(text.len()))
+}
+
+/// Context-free lowercase of one character, with the final sigma `ς`
+/// folded into `σ` so a word matches whether its sigma is final or not.
+fn fold_case(ch: char) -> impl Iterator<Item = char> {
+    ch.to_lowercase().map(|lc| if lc == 'ς' { 'σ' } else { lc })
 }
 
 /// Up to 20 bytes before `pos` and 120 after it, widened to whole
@@ -588,6 +598,17 @@ mod tests {
         assert_eq!(find_case_insensitive("abc", "x"), None);
         assert_eq!(find_case_insensitive("", ""), Some(0));
         assert_eq!(find_case_insensitive("ab", ""), Some(0));
+    }
+
+    #[test]
+    fn find_case_insensitive_should_match_greek_sigma_in_any_position_and_case() {
+        // `str::to_lowercase` turns a word-final `Σ` into `ς` while
+        // `char::to_lowercase` gives `σ`: both sides fold the same way, so
+        // the final, medial and capital forms all meet.
+        assert_eq!(find_case_insensitive("ΟΔΟΣ x", "ΟΔΟΣ"), Some(0));
+        assert_eq!(find_case_insensitive("x οδος", "ΟΔΟΣ"), Some(2));
+        assert_eq!(find_case_insensitive("x ΟΔΟΣ", "οδος"), Some(2));
+        assert_eq!(find_case_insensitive("ΟΔΟΣΟ", "οδοσ"), Some(0));
     }
 
     #[test]
