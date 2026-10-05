@@ -33,6 +33,21 @@ The `g*` scenarios target the foreign example application; the `s*`
 scenarios target Pixel itself. A scenario's expected paths must exist in the
 chosen repository.
 
+To reuse a particular candidate, set `PIXEL_IMAGE_SOURCE=existing` and
+`PIXEL_ARENA_IMAGE=sha256:<image-id>`. The runner resolves every selected image
+once, checks the actual container image before starting it, and saves that
+receipt beside the results. It also refuses comparisons across different Codex
+versions. Local builds cache Cargo's registry, Git dependencies, and build
+artifacts; the first build still needs to populate those caches. Git builds use
+the resolved commit as Cargo's actual `--rev`.
+
+Graph experiments use `--prepare-pixel-graph`; the saved setup receipt separates
+index preparation from model time. A fresh Codex home may leave installed hooks
+untrusted: static context parity alone cannot establish hook delivery. Preserve
+an actual prompt-hook response receipt before drawing conclusions about dynamic
+routing. `--assert-context-parity` additionally expects no Pixel calls and is
+intended for generic-question abstention controls.
+
 Inspect the transcripts as well as the rank table. A required-pattern score
 measures answer coverage, not semantic correctness. Token totals include
 reported input and generated tokens; cached input is part of input and must not

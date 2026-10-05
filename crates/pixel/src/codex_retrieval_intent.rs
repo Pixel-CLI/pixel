@@ -173,7 +173,6 @@ fn is_file_path(reference: &str) -> bool {
 
 fn is_identifier_like(code: &str) -> bool {
     !code.is_empty()
-        && !code.chars().any(char::is_whitespace)
         && code.chars().all(|character| {
             character.is_alphanumeric() || matches!(character, '_' | ':' | '.' | '/' | '\\' | '-')
         })
@@ -199,6 +198,11 @@ mod tests {
             "Who introduced this idea?",
             "Show git history.",
             "Trace the inline multiword description `locale routing behavior`.",
+            "Who calls `Foo!`?",
+            "Who calls ``?",
+            "Who calls src/router.rs::handler?",
+            "What is the impact of `src/router`?",
+            "Who introduced `the / idea`?",
             "Rename methodology section in the docs",
             "Rename src/foo.rs to src/bar.rs.",
             "Rename `src/foo.rs` to `src/bar.rs`.",
@@ -218,6 +222,12 @@ mod tests {
         );
         assert_eq!(
             classify("Trace callers of `Foo.bar` and its impact."),
+            Some(Intent::CallGraph)
+        );
+        assert_eq!(classify("Who calls `Foo::bar`?"), Some(Intent::CallGraph));
+        assert_eq!(classify("Who calls Foo::bar?"), Some(Intent::CallGraph));
+        assert_eq!(
+            classify("Who calls get_user_by_id?"),
             Some(Intent::CallGraph)
         );
         assert_eq!(

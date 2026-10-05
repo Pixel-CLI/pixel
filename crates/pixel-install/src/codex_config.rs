@@ -770,6 +770,7 @@ mod tests {
             format!("{MANAGED_BEGIN}\ntext\n"),
             format!("text\n{MANAGED_END}\n"),
             format!("{MANAGED_END}\n{MANAGED_BEGIN}\n"),
+            format!("{MANAGED_BEGIN}\r\ntext\n{MANAGED_END}\n"),
             format!("{MANAGED_BEGIN}\none\n{MANAGED_BEGIN}\ntwo\n{MANAGED_END}"),
             format!("{MANAGED_BEGIN}\none\n{MANAGED_END}\n{MANAGED_END}"),
         ];
@@ -794,6 +795,7 @@ mod tests {
             format!("{MANAGED_BEGIN}\npartial"),
             format!("{MANAGED_END}\n"),
             format!("{MANAGED_END}\n{MANAGED_BEGIN}\n"),
+            format!("{MANAGED_BEGIN}\r\npartial\n{MANAGED_END}\n"),
             format!("{MANAGED_BEGIN}\nfirst\n{MANAGED_BEGIN}\nsecond\n{MANAGED_END}"),
             format!("{MANAGED_BEGIN}\n{MANAGED_END}\n{MANAGED_END}"),
         ] {

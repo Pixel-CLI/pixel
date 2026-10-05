@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # pixel arm — pixel built from the main branch, indexing the repo at
 # container start. PIXEL_SRC selects the source:
 #   git   (default) compile from remote refs/heads/main; PIXEL_MAIN_SHA is
@@ -16,12 +18,16 @@ ARG PIXEL_MAIN_SHA=main
 ARG PIXEL_SRC=git
 ARG CARGO_BUILD_JOBS=2
 COPY . /src
-RUN if [ "$PIXEL_SRC" = "local" ]; then \
+RUN --mount=type=cache,id=pixel-arena-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=pixel-arena-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=pixel-arena-cargo-target,target=/var/cache/pixel-cargo-target,sharing=locked \
+    export CARGO_TARGET_DIR=/var/cache/pixel-cargo-target \
+ && if [ "$PIXEL_SRC" = "local" ]; then \
       echo "pixel local build from context" \
    && CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" cargo install --path /src/crates/pixel --locked --root /usr/local; \
     else \
       echo "pixel main pin: $PIXEL_MAIN_SHA" \
-   && CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" cargo install --git https://github.com/Pixel-CLI/pixel pixel-cli --force --locked --root /usr/local; \
+   && CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" cargo install --git https://github.com/Pixel-CLI/pixel --rev "$PIXEL_MAIN_SHA" pixel-cli --force --locked --root /usr/local; \
     fi
 
 FROM pixel-arena-base:latest

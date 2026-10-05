@@ -29,6 +29,7 @@ TASKS="${TASKS:-s1-hook-install s2-vector-recall s3-rename-impact}"
 REPS="${REPS:-1}"
 WATCH="${WATCH:-0}"
 PIXEL_IMAGE_SOURCE="${PIXEL_IMAGE_SOURCE:-build}"
+PIXEL_IMAGE_REF="${PIXEL_ARENA_IMAGE:-pixel-arena:pixel}"
 RESULTS="${ARENA_RESULTS_DIR:-$ARENA_DIR/arena-results}"
 SCENARIOS_DIR="${ARENA_SCENARIOS_DIR:-$ARENA_DIR/scenarios}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)-$$}"
@@ -92,8 +93,9 @@ done
 
 prompt_for() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "$SCENARIOS_DIR/$1.json"; }
 
-launch_arm() {  # arm rep — one container runs all tasks
-  local arm="$1" rep="$2"
+launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
+  local arm="$1" rep="$2" image_id="$3" actual_image container
+  container="arena-$arm-$RUN_ID-$rep"
   local snap="$RESULTS/snapshot-$arm-$rep"
   if [ ! -d "$snap" ]; then
     git clone -q "$REPO_SNAPSHOT" "$snap"
@@ -130,7 +132,7 @@ launch_arm() {  # arm rep — one container runs all tasks
     [ -s "$RESULTS/$arm-$task-$rep.jsonl" ] || missing=1
   done
   [ "$missing" -eq 0 ] && { echo "skip arm=$arm rep=$rep (all tasks exist)"; return 0; }
-  "$DOCKER_BIN" run -d --name "arena-$arm-$RUN_ID-$rep" \
+  "$DOCKER_BIN" create --name "$container" \
     -v "$snap":/repo \
   -v "$AUTH":/root/.codex/auth.json:ro \
   -v "$ARENA_DIR/arena/entrypoint.sh":/usr/local/bin/arena-entrypoint:ro \
@@ -140,13 +142,38 @@ launch_arm() {  # arm rep — one container runs all tasks
     -e ARM_TOOL="$arm" -e REP="$rep" -e TASKS="$TASKS" \
     -e PIXEL_ARENA_PREP_GRAPH="$PREPARE_PIXEL_GRAPH" \
     -e CODEX_MODEL="${CODEX_MODEL:-}" -e CODEX_EFFORT="${CODEX_EFFORT:-}" \
-    "pixel-arena:$arm" >/dev/null
-  echo "launched arm=$arm container=arena-$arm-$RUN_ID-$rep"
+    "$image_id" >/dev/null
+  actual_image=$("$DOCKER_BIN" inspect --format '{{.Image}}' "$container")
+  if ! python3 - "$arm" "$image_id" "$actual_image" "$RESULTS/container-image-$arm-$rep.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+arm, expected, actual, output = sys.argv[1:]
+Path(output).write_text(json.dumps({
+    "arm": arm,
+    "expected_image_id": expected,
+    "actual_container_image_id": actual,
+    "matches": expected == actual,
+}, indent=2) + "\n")
+if expected != actual:
+    sys.exit(f"container image mismatch: arm={arm} expected={expected} actual={actual}")
+PY
+  then
+    "$DOCKER_BIN" rm "$container" >/dev/null
+    return 1
+  fi
+  "$DOCKER_BIN" start "$container" >/dev/null
+  echo "launched arm=$arm container=$container image=$actual_image"
 }
 
+ARM_IMAGE_IDS=()
+PIXEL_IMAGE_ID=""
+CODEX_VERSION=""
 for arm in $ARMS; do
   docker_build="pixel-arena:$arm"
   if [ "$arm" = "pixel" ]; then
+    docker_build="$PIXEL_IMAGE_REF"
     if [ "$PIXEL_IMAGE_SOURCE" = "existing" ]; then
       if ! "$DOCKER_BIN" image inspect "$docker_build" >/dev/null 2>&1; then
         echo "requested existing Pixel image is missing: $docker_build" >&2
@@ -177,12 +204,16 @@ for arm in $ARMS; do
     echo "=== building image $docker_build"
     "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.$arm" -t "$docker_build" "$ARENA_DIR/arena" || { echo "IMAGE BUILD FAILED: $arm"; exit 1; }
   fi
+  image_id=$("$DOCKER_BIN" image inspect --format '{{.Id}}' "$docker_build")
+  ARM_IMAGE_IDS+=("$image_id")
+  if [ "$arm" = "pixel" ]; then PIXEL_IMAGE_ID="$image_id"; fi
+  image_codex_version=$("$DOCKER_BIN" run --rm --entrypoint codex "$image_id" --version)
+  if [ -n "$CODEX_VERSION" ] && [ "$image_codex_version" != "$CODEX_VERSION" ]; then
+    echo "Codex versions differ across selected images: $CODEX_VERSION versus $image_codex_version ($arm)" >&2
+    exit 2
+  fi
+  CODEX_VERSION="$image_codex_version"
 done
-PIXEL_IMAGE_ID=""
-if [[ " $ARMS " == *" pixel "* ]]; then
-  PIXEL_IMAGE_ID=$("$DOCKER_BIN" image inspect --format '{{.Id}}' pixel-arena:pixel)
-fi
-CODEX_VERSION=$("$DOCKER_BIN" run --rm --entrypoint codex pixel-arena-base:latest --version 2>&1 | tail -1)
 
 # all arms in parallel: one container each, all tasks inside
 CONTAINERS=()
@@ -195,8 +226,10 @@ for rep in $(seq 1 "$REPS"); do
   # mount it races and kills their later tasks.
   for arm in $ARMS; do rm -rf "$RESULTS/snapshot-$arm-$rep" || true; done
   rep_containers=()
+  arm_index=0
   for arm in $ARMS; do
-    launch_arm "$arm" "$rep"
+    launch_arm "$arm" "$rep" "${ARM_IMAGE_IDS[$arm_index]}"
+    arm_index=$((arm_index + 1))
     CONTAINERS+=("arena-$arm-$RUN_ID-$rep")
     CONTAINER_ARMS+=("$arm")
     CONTAINER_REPS+=("$rep")

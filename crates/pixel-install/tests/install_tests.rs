@@ -2852,6 +2852,37 @@ fn doctor_codex_config_check_is_green_without_pixel_and_red_for_a_retired_block(
             .is_some_and(|r| r.contains("retired Pixel block remains")),
         "{check:?}"
     );
+
+    for orphaned_marker in [
+        format!("{PIXEL_BLOCK_BEGIN}\nold prompt\n"),
+        format!("old prompt\n{PIXEL_BLOCK_END}\n"),
+    ] {
+        let original = format!(
+            "developer_instructions = {}\n",
+            toml_edit::Value::from(orphaned_marker)
+        );
+        fs::write(codex_config_path(home), &original).unwrap();
+
+        let check = status();
+
+        assert_eq!(
+            check.status,
+            CheckStatus::Red,
+            "an orphaned retired marker must still be reported: {check:?}"
+        );
+        assert!(
+            check
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("retired Pixel block remains")),
+            "{check:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(codex_config_path(home)).unwrap(),
+            original,
+            "doctor must not rewrite malformed user configuration"
+        );
+    }
 }
 
 #[test]
@@ -6121,6 +6152,91 @@ fn a_personal_bash_hook_that_holds_the_guard_back_is_reported_with_what_to_do() 
             repo.join(".claude/settings.local.json").display()
         )
     );
+}
+
+/// Each surviving repo artifact independently proves that installation was
+/// attempted, so doctor must report a competing Bash rewriter even when the
+/// Claude-local guard itself was held back.
+#[test]
+#[cfg(unix)]
+fn doctor_claude_guard_conflict_should_recognize_each_repo_preparation_artifact() {
+    for artifact in ["pixel-first", "codex-hooks", "devin-hooks", "pi-guard"] {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        let exe = fake_pixel_exe(&home);
+        let global = home.join(".claude/settings.json");
+        fs::write(
+            &global,
+            serde_json::to_vec(&serde_json::json!({"hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/local/bin/my-guard"}]}
+            ]}}))
+            .unwrap(),
+        )
+        .unwrap();
+
+        match artifact {
+            "pixel-first" => fs::write(
+                repo.join("AGENTS.md"),
+                "<!-- pixel:warp-retrieval:begin -->\nPixel retrieval\n<!-- pixel:warp-retrieval:end -->\n",
+            )
+            .unwrap(),
+            "codex-hooks" => {
+                let path = repo.join(".codex/hooks.json");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(
+                    path,
+                    serde_json::to_vec(&serde_json::json!({"hooks": {
+                        "PreToolUse": [task_hook_group(&exe, "codex", "pre-tool-use")]
+                    }}))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            "devin-hooks" => {
+                let path = repo.join(".devin/config.local.json");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(
+                    path,
+                    serde_json::to_vec(&serde_json::json!({"hooks": {
+                        "PreToolUse": [{"hooks":[{
+                            "type":"command",
+                            "command":format!("{} run-hook guard --provider devin", exe.display())
+                        }]}]
+                    }}))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            "pi-guard" => {
+                let path = repo.join(".pi/extensions/pixel-guard.ts");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, "export {};\n").unwrap();
+            }
+            _ => unreachable!("fixture list is exhaustive"),
+        }
+
+        let report = doctor(&DoctorOptions {
+            home: Some(home),
+            repo_root: Some(repo),
+            executable_path: Some(exe),
+            only: vec!["repo.claude-hooks".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let check = check(&report, "repo.claude-hooks");
+        assert_eq!(
+            check.status,
+            CheckStatus::Yellow,
+            "{artifact} independently proves a held-back guard: {check:?}"
+        );
+        assert!(
+            check.summary.contains("/usr/local/bin/my-guard"),
+            "{artifact}: {check:?}"
+        );
+    }
 }
 
 /// An unreadable global settings file must not block the repo install: the

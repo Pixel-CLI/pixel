@@ -1,6 +1,6 @@
 {
   "id": "g4-transfer-callers",
-  "prompt": "In /apps/notion-to-ghost, trace the call path around transferPageToGhost. What are its direct callers, what condition prevents the web endpoint from transferring, and how does the integration choose between creating and updating a Ghost post? Name the downstream Ghost methods used in each branch. Answer from source; do not modify files or call external services.",
+  "prompt": "In apps/notion-to-ghost under the repository root, trace the call path around transferPageToGhost. What are its direct callers, what condition prevents the web endpoint from transferring, and how does the integration choose between creating and updating a Ghost post? Name the downstream Ghost methods used in each branch. Answer from source; do not modify files or call external services.",
   "must": [
     {"pattern": "apps/notion-to-ghost/src/app/api/transfer/route.ts", "points": 2},
     {"pattern": "apps/notion-to-ghost/cli.js", "points": 2},

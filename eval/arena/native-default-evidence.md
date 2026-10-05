@@ -144,8 +144,12 @@ The first trust-bypass diagnostic, `g4-trusted-hook-pair`, completed with
 However, its Pixel context manifest contained 1,446 characters of permanent
 developer instructions while raw contained none, and no instrumented prompt-hook
 response was captured. It therefore does not validate the native-default
-candidate or isolate the classifier's contribution. The recorded image/source
-identity needs reconciliation with this observed installation behavior.
+candidate or isolate the classifier's contribution. Investigation confirmed
+that the temporary runner recorded candidate 2's digest but launched the mutable
+`pixel-arena:pixel` tag, which still pointed to candidate 1. Its recorded image
+identity is invalid. A no-model probe of each immutable image confirmed that
+candidate 1 creates the static instructions and candidate 2 does not. The
+corrected runner must assert the actual container image before model execution.
 
 Independent source review found both answers correct: the API POST route and
 CLI main are the two direct callers, the status gate is “Ready to Publish,”
@@ -153,6 +157,20 @@ and title matching selects `updatePost` versus `createDraft`, which lead to
 `posts.edit` versus `posts.add`. The four relevant source files had identical
 hashes between snapshots. Pixel's graph listed the two callers as probable;
 native search and source reads verified the answer.
+
+The corrected `g4-candidate2-trusted-hook-r2` pair verified the actual Pixel
+container image against the pinned candidate 2 digest. Both static instruction
+manifests were empty. Graph preparation took 578 ms, and the runtime hook
+receipt confirmed delivery of the 367-byte optional hint, identical to the
+installed binary's response. Raw used 77,934 total tokens (77,199 input,
+65,280 cached input, 735 generated) in 34 seconds; Pixel used 61,133
+(60,314 input, 50,176 cached input, 819 generated) in 32 seconds. Neither
+arm called Pixel. Coverage was 18/18 versus 16/18: the Pixel answer omitted
+the helper name `findPostsByTitle` while correctly explaining exact-title
+matching, both callers, the status gate, and the create/update Ghost methods.
+Both answers were substantively correct on the requested behavior. This one
+pair shows the optional hint was delivered and ignored, not a demonstrated
+retrieval benefit. The next bounded experiment changes only the hint wording.
 
 ## Installed validation
 
@@ -165,3 +183,14 @@ The complete local receipts are under `target/native-default-evidence/`.
 
 Focused checks passed: 474 install tests, 122 Codex guard/hook tests, and
 formatting. These are separate from the full workspace and CI gates.
+
+The first full run on `e5d53296f53df998d2126cd31c3c32defd4ee0ad` found six
+stale migration/search contract assertions and four timing-sensitive failures.
+The assertions were corrected; all four timing cases passed serially with their
+original thresholds and no retries. On frozen commit
+`9fd435bf08f3146efa4d366c02be4d0811fe8037`,
+`NEXTEST_TEST_THREADS=2 CARGO_BUILD_JOBS=2 NEXTEST_RETRIES=0 rtk proxy bash scripts/gates.sh`
+exited 0: 3,863 tests passed, six skipped, and formatting, Clippy, doctests and
+the script contracts passed. The same commit's review gate exited 0 with no
+BLOCKER or CONCERN; its lower-severity findings were capped at 200, so it is
+not an exhaustive review. CI and the remote mutation verdict remain separate.
