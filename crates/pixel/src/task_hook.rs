@@ -1484,7 +1484,8 @@ mod tests {
         assert_eq!(
             unavailable(
                 TaskHookEvent::PreToolUse,
-                Some(&json!({"tool_name":"Bash","tool_input":{"command":command}}))
+                Some(&json!({"tool_name":"Bash","tool_input":{"command":command}})),
+                true
             )["decision"],
             "deny",
             "{command}"
