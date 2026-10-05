@@ -2313,13 +2313,7 @@ fn generic_name(w: &Walker, node: Node) -> Option<String> {
 fn generic_call(w: &mut Walker, node: Node) {
     // Elixir `def`/`defmodule …` and the head a definer defines (`total(x)`
     // in `def total(x) do`) are definitions, not invocation sites.
-    if elixir_definer(w, node)
-        || node
-            .parent()
-            .filter(|args| args.kind() == "arguments")
-            .and_then(|args| args.parent())
-            .is_some_and(|def| elixir_definer(w, def))
-    {
+    if elixir_definer(w, node) || elixir_definition_head(w, node) {
         return;
     }
     let mut callee: Option<String> = None;
@@ -2419,6 +2413,21 @@ fn elixir_definer(w: &Walker, node: Node) -> bool {
             .is_some_and(|t| ELIXIR_DEFINERS.contains(&w.text(t).as_str()))
 }
 
+/// True for the head a definer defines: `total(x)` in `def total(x) do`,
+/// also behind a guard (`def total(x) when is_integer(x)`, where the head is
+/// the left operand of `when`). The guard's own calls stay call sites.
+fn elixir_definition_head(w: &Walker, node: Node) -> bool {
+    let mut up = node.parent();
+    if let Some(guard) = up.filter(|p| p.kind() == "binary_operator")
+        && guard.child_by_field_name("left") == Some(node)
+    {
+        up = guard.parent();
+    }
+    up.filter(|args| args.kind() == "arguments")
+        .and_then(|args| args.parent())
+        .is_some_and(|def| elixir_definer(w, def))
+}
+
 /// Best-effort import spec from import/use/require node kinds. Prefers source-like
 /// fields, then string/identifier children (php `require_expression`, kotlin
 /// `import_header`, swift `import_declaration`).
@@ -2435,7 +2444,14 @@ fn generic_import(w: &mut Walker, node: Node) {
     for child in each_child(node) {
         match child.kind() {
             // PHP parses a double-quoted path as `encapsed_string`.
-            "string" | "encapsed_string" => {
+            // An interpolated one (`"lib/$name.php"`) is chosen at run time:
+            // only a double-quoted path made of plain text is an import.
+            "string" | "encapsed_string"
+                if each_child(child)
+                    .into_iter()
+                    .filter(Node::is_named)
+                    .all(|c| c.kind() == "string_content") =>
+            {
                 let spec = strip_quotes(&w.text(child));
                 if !spec.is_empty() {
                     w.push_import(spec, Vec::new());

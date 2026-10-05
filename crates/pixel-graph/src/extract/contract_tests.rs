@@ -1184,11 +1184,18 @@ fn c_member_call_should_keep_its_receiver() {
 /// only the calls in the body are call sites (#775).
 #[test]
 fn elixir_definitions_should_not_be_calls() {
-    let src = "defmodule Cart do\n  def total(x) do\n    Enum.sum(x)\n  end\n  defp tax(x), do: round(x)\nend\n";
+    let src = "defmodule Cart do\n  def total(x) do\n    Enum.sum(x)\n  end\n  defp tax(x), do: round(x)\n  def pay(x) when is_integer(x) do\n    charge(x)\n  end\nend\n";
     let fx = extract("lib/cart.ex", src);
+    // A guarded head (`pay(x) when …`) is a definition too; the guard's
+    // own call (`is_integer`) is a call site.
     assert_eq!(
         calls(&fx),
-        vec![("Enum.sum".to_string(), None), ("round".to_string(), None)]
+        vec![
+            ("Enum.sum".to_string(), None),
+            ("round".to_string(), None),
+            ("is_integer".to_string(), None),
+            ("charge".to_string(), None)
+        ]
     );
 }
 
@@ -1212,8 +1219,9 @@ fn swift_calls_should_be_recorded_with_their_receiver() {
 fn php_require_once_with_double_quotes_should_be_an_import() {
     let fx = extract(
         "src/a.php",
-        "<?php\nrequire_once \"lib/double.php\";\nrequire_once 'lib/single.php';\n",
+        "<?php\nrequire_once \"lib/double.php\";\nrequire_once 'lib/single.php';\nrequire_once \"lib/$name.php\";\n",
     );
+    // The interpolated path is decided at run time: no import for it.
     assert_eq!(import_paths(&fx), vec!["lib/double.php", "lib/single.php"]);
 }
 
