@@ -15,7 +15,7 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 
 | Script | Run | What |
 | --- | --- | --- |
-| `gates.sh` | `scripts/gates.sh [--force] [--mutants]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
+| `gates.sh` | `scripts/gates.sh [--force]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
 | `test-gates.py` | `python3 scripts/test-gates.py` | contract of `gates.sh` (stub cargo in a throwaway repo) |
 | `mutants-gate.py` | `python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt` | the `Mutants` plan/report script; sizes the shard matrix and deals each shard a runner from the `PIXEL_MUTANTS_SHARD_RUNNERS` pool (JSON array of `runs-on` values, round-robin; GitHub-hosted when unset) |
 | `test-prepare.py` | `python3 scripts/test-prepare.py` | contract of `.agents/skills/release/prepare.sh`'s pull request listing (stub gh/cargo, disposable repo, needs `jq`) |

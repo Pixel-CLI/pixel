@@ -33,7 +33,7 @@ apply to:
 | `readme-webp.md` | `docs/examples/*.webp`, `docs/motion/**` | the verified lossless pipeline for README animated webp: render crf=10, 1600×1000 lanczos frames, `img2webp -lossless`, embed `width="800"` |
 | `project-task.md` | always | before any work: find the issue on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1) or open one and add it; the PR body opens with `Task <number>` (declared exceptions: `no task: <reason>`); the board Status follows the PR — In Progress at open, Done only at merge, back to Todo when closed unmerged |
 | `review-gate.md` | always | before pushing a feature branch: fetch the remote default (rebase only on a conflict or a needed change), then fix every `pixel review-gate` finding at CONCERN or above — the pre-push hook enforces the review |
-| `validation-loop.md` | always | publish one current validated candidate: scoped local feedback while editing, a frozen full-gate result, baseline compile before Rust pushes, the opt-in local mutation verdict, and precise CI triage |
+| `validation-loop.md` | always | publish one current validated candidate: scoped local feedback while editing, a frozen full-gate result, baseline compile before Rust pushes, nightly main mutation feedback, and precise CI triage |
 | `pr-swarm.md` | `scripts/pr-swarm.sh`, `.claude/settings.json` | the rmux pane-per-open-PR reconciler: the tool, the SessionStart watcher that replaces launchd (macOS TCC denies launchd any path under `~/Documents`), and the teardown rails that keep a merged PR's worktree when it is dirty, unpushed or the shared cache |
 
 `.claude/rules` is a symlink to that directory (Claude Code loads it by

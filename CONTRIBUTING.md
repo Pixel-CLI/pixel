@@ -443,8 +443,8 @@ Pixel is dogfooded on itself. When an agent works in this repository:
   after merge, not during publication. When investigating a nightly
   `MISSED` result, write an assertion that fails under the mutation, or
   document why a narrow skip is valid. Never weaken the assertion to make
-  the result green. Local mutation execution remains an explicit, bounded
-  request; listing mutants is read-only and can guide test review.
+  the result green. Mutation execution is limited to scheduled CI; listing
+  mutants is read-only and can guide test review.
 - The CodeRabbit review is a PR gate, not a suggestion
   box: read the findings when the pass lands, fix or refute each one in its
   thread, resolve it, and say in the pull request which ones you declined and
@@ -488,7 +488,7 @@ filter finds no Rust-affecting change; use `--force` when changed inputs
 read by tests (such as bundled prompts, rules or docs-drift inputs) require
 the compiled suite anyway. Do not add `--mutants` to an agent's normal loop:
 `Mutants in diff` runs the cumulative main diff nightly; local mutant runs
-remain explicit, bounded (`-F`) requests.
+are not permitted.
 
 For a long local run, use the harness's background-task facility and keep
 the full log and exit status. Keep that checkout unchanged until the run

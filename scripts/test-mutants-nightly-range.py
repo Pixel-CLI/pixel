@@ -67,6 +67,15 @@ class RangeContract(unittest.TestCase):
     def test_unchanged_main_does_not_start_a_campaign(self):
         self.assertEqual(self.run_plan([self.artifact(self.head)]), "")
 
+    def test_a_ref_suffixed_workflow_path_does_not_replay_judged_commits(self):
+        run = {"path": f"{nightly.WORKFLOW}@main", "head_branch": "main",
+               "head_sha": self.head, "event": "schedule", "status": "completed",
+               "conclusion": "success"}
+        self.assertEqual(self.run_plan([self.artifact(self.head)], run), "")
+        run["path"] = ".github/workflows/other.yml@main"
+        self.assertEqual(self.run_plan([self.artifact(self.head)], run),
+                         f"{self.before}...{self.head}")
+
     def test_a_completed_red_campaign_advances_without_hiding_its_survivors(self):
         self.assertEqual(self.run_plan([self.artifact(self.rollout)]),
                          f"{self.rollout}...{self.head}")
