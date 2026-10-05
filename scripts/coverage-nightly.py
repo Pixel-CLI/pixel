@@ -20,7 +20,7 @@ def needs_coverage(head: str, runs: list[dict]) -> bool:
         and run.get("event") == "schedule"
         and run.get("status") == "completed"
         and run.get("conclusion") == "success"
-        and run.get("path") == ".github/workflows/coverage.yml"
+        and run.get("path", "").split("@", 1)[0] == ".github/workflows/coverage.yml"
         for run in runs
     )
 
