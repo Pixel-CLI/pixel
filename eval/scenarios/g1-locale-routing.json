@@ -1,7 +1,8 @@
 {
   "id": "g1-locale-routing",
   "suite": "generic",
-  "task_class": "explain-flow",
+  "task_class": "explanation",
+  "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
   "mode": "answer",
   "max_turns": 30,
   "prompt": "How does locale routing work in this repo? Which file intercepts requests, what locales are supported, and what happens to a request for a path with no locale prefix?",

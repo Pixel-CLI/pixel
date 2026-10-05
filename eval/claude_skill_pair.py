@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -152,21 +153,41 @@ def _read_credential_file(path: Path) -> dict:
     return _oauth_payload(value)
 
 
-def load_oauth_credentials(config_dir: Path, explicit_file: Path | None = None) -> tuple[dict, str]:
+def credential_source(config_dir: Path, explicit_file: Path | None = None) -> str:
+    """Identify the configured credential location without reading its contents."""
     candidates = []
     if explicit_file is not None:
         candidates.append(("explicit-file", explicit_file.expanduser()))
-    candidates.append(("config-file", config_dir / ".credentials.json"))
+    candidates.append(("config-file", config_dir.expanduser() / ".credentials.json"))
     seen = set()
     for source, path in candidates:
-        key = str(path.expanduser().absolute())
-        if key in seen:
+        identity = str(path.absolute())
+        if identity in seen:
             continue
-        seen.add(key)
+        seen.add(identity)
         try:
-            return _read_credential_file(path.expanduser()), source
+            mode = path.stat().st_mode
         except FileNotFoundError:
             continue
+        if not stat.S_ISREG(mode):
+            raise RuntimeError("Claude credential path must be a regular file: " + str(path))
+        return source
+    if sys.platform == "darwin":
+        return "macos-keychain"
+    raise RuntimeError("Claude OAuth credentials are unavailable in the isolated config")
+
+
+def load_oauth_credentials(
+    config_dir: Path,
+    explicit_file: Path | None = None,
+    *,
+    source: str | None = None,
+) -> dict:
+    source = source or credential_source(config_dir, explicit_file)
+    if source == "explicit-file":
+        return _read_credential_file(explicit_file.expanduser())
+    if source == "config-file":
+        return _read_credential_file(config_dir.expanduser() / ".credentials.json")
 
     if sys.platform != "darwin":
         raise RuntimeError("Claude OAuth credentials are unavailable in the isolated config")
@@ -193,7 +214,7 @@ def load_oauth_credentials(config_dir: Path, explicit_file: Path | None = None) 
         value = json.loads(raw) if isinstance(raw, str) else raw
     except json.JSONDecodeError as error:
         raise RuntimeError("macOS Keychain Claude OAuth payload is invalid") from error
-    return _oauth_payload(value), "macos-keychain"
+    return _oauth_payload(value)
 
 
 def write_isolated_credentials(config_dir: Path, oauth: dict) -> None:
@@ -202,6 +223,17 @@ def write_isolated_credentials(config_dir: Path, oauth: dict) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(payload)
+
+
+def credential_receipt(source: str) -> dict[str, object]:
+    """Return provenance only; credential contents never enter the receipt."""
+    return {
+        "credential_source": source,
+        # Loading validates a non-empty OAuth payload before returning.
+        "oauth_credentials_present": True,
+        "credential_hash_saved": False,
+        "ANTHROPIC_API_KEY_forwarded": False,
+    }
 
 
 def token_totals(row: dict) -> dict:
@@ -234,9 +266,11 @@ def preflight(args: argparse.Namespace) -> dict:
     candidate_skill = invocation_variant(source_skill, True)
     if invocation_variant(candidate_skill, False) != baseline_skill:
         raise RuntimeError("candidate changes skill content beyond invocation metadata")
-    oauth_credentials, credential_source = load_oauth_credentials(
-        Path(args.auth_config_dir).expanduser(),
-        Path(args.credentials_file).expanduser() if args.credentials_file else None,
+    auth_config_dir = Path(args.auth_config_dir).expanduser()
+    credentials_file = Path(args.credentials_file).expanduser() if args.credentials_file else None
+    credential_source_name = credential_source(auth_config_dir, credentials_file)
+    oauth_credentials = load_oauth_credentials(
+        auth_config_dir, credentials_file, source=credential_source_name
     )
     version, help_sha = version_and_help(args.claude)
     workspace_parent = Path(tempfile.mkdtemp(prefix="pixel-claude-pair-workspace-"))
@@ -300,10 +334,7 @@ def preflight(args: argparse.Namespace) -> dict:
         "permission_mode": "plan",
         "setting_sources": "project",
         "config_policy": "ephemeral config containing OAuth credentials only; no host settings, skills, hooks, plugins, or MCP copied",
-        "credential_source": credential_source,
-        "oauth_credentials_present": bool(oauth_credentials),
-        "credential_hash_saved": False,
-        "ANTHROPIC_API_KEY_forwarded": False,
+        **credential_receipt(credential_source_name),
         "workspace": str(project),
         "workspace_parent": str(workspace_parent),
         "setup_ms": round((time.monotonic() - setup_started) * 1000),
@@ -373,11 +404,13 @@ def execute(args: argparse.Namespace) -> list[dict]:
         raise RuntimeError("Claude version changed since preflight")
     project = Path(manifest["workspace"])
     skill_file = project / ".claude/skills/pixel-impact/SKILL.md"
-    oauth_credentials, credential_source = load_oauth_credentials(
-        Path(args.auth_config_dir).expanduser(),
-        Path(args.credentials_file).expanduser() if args.credentials_file else None,
+    auth_config_dir = Path(args.auth_config_dir).expanduser()
+    credentials_file = Path(args.credentials_file).expanduser() if args.credentials_file else None
+    current_credential_source = credential_source(auth_config_dir, credentials_file)
+    oauth_credentials = load_oauth_credentials(
+        auth_config_dir, credentials_file, source=current_credential_source
     )
-    if credential_source != manifest.get("credential_source"):
+    if current_credential_source != manifest.get("credential_source"):
         raise RuntimeError("Claude credential source changed since preflight")
     scenario = json.loads(Path(args.scenario).read_text())
     if digest(Path(args.scenario).read_bytes()) != manifest["scenario_sha256"]:

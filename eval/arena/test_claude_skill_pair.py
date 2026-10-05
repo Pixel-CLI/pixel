@@ -5,6 +5,7 @@
 """Measurement-contract tests for the bounded Claude skill pair runner."""
 
 import json
+import shutil
 import subprocess
 import time
 import tempfile
@@ -104,6 +105,72 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
         path.write_text(json.dumps(value))
         path.chmod(0o600)
 
+    def test_preflight_artifact_contains_source_not_oauth_secret(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            (repo / ".pixel").mkdir(parents=True)
+            (repo / ".pixel/graph.v2.db").write_bytes(b"fixture graph")
+            results = root / "results"
+            results.mkdir()
+            skill = root / "SKILL.md"
+            skill.write_text("---\ndisable-model-invocation: true\n---\n")
+            scenario = root / "scenario.json"
+            scenario.write_text(json.dumps({"id": "fixture", "prompt": "Question"}))
+            pixel = root / "pixel"
+            pixel.write_text("fixture")
+            claude = root / "claude"
+            claude.write_text("fixture")
+            sentinel = {
+                "accessToken": "sentinel-access-secret",
+                "refreshToken": "sentinel-refresh-secret",
+            }
+            args = mock.Mock(
+                repo=str(repo), results_dir=str(results), skill=str(skill),
+                scenario=str(scenario), revision="HEAD", auth_config_dir=str(root / "auth"),
+                credentials_file=None, claude=str(claude), pixel=str(pixel), symbol="symbol",
+                model="sonnet", effort="medium", max_turns=1, max_budget_usd=1.0,
+            )
+            impact_result = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="[{}]", stderr=""
+            )
+            with (
+                mock.patch.object(claude_skill_pair, "git", side_effect=["commit", "tree"]),
+                mock.patch.object(claude_skill_pair, "stage_archive"),
+                mock.patch.object(claude_skill_pair, "credential_source", return_value="macos-keychain"),
+                mock.patch.object(claude_skill_pair, "load_oauth_credentials", return_value=sentinel),
+                mock.patch.object(claude_skill_pair, "MANAGED", ()),
+                mock.patch.object(claude_skill_pair, "version_and_help", return_value=("2.0", "help-hash")),
+                mock.patch.object(claude_skill_pair, "command", side_effect=[
+                    subprocess.CompletedProcess(args=[], returncode=0, stdout="pixel 1.0\n", stderr=""),
+                    impact_result,
+                ]),
+            ):
+                manifest = claude_skill_pair.preflight(args)
+
+            persisted = (results / "preflight.json").read_text()
+            self.assertEqual(manifest["credential_source"], "macos-keychain")
+            self.assertTrue(manifest["oauth_credentials_present"])
+            self.assertNotIn("sentinel-access-secret", persisted)
+            self.assertNotIn("sentinel-refresh-secret", persisted)
+            self.assertNotIn("accessToken", persisted)
+            self.assertNotIn("refreshToken", persisted)
+            shutil.rmtree(manifest["workspace_parent"], ignore_errors=True)
+
+    def test_nonregular_explicit_credential_path_fails_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            self.write_credential(config / ".credentials.json", self.credential())
+            explicit = root / "credential-directory"
+            explicit.mkdir()
+
+            with mock.patch.object(claude_skill_pair.subprocess, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "must be a regular file"):
+                    claude_skill_pair.load_oauth_credentials(config, explicit)
+
+            run.assert_not_called()
+
     def test_explicit_private_file_precedes_config_file_and_keychain(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -118,9 +185,9 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
             self.write_credential(config / ".credentials.json", second)
 
             with mock.patch.object(claude_skill_pair.subprocess, "run") as run:
-                actual, source = claude_skill_pair.load_oauth_credentials(config, explicit)
+                actual = claude_skill_pair.load_oauth_credentials(config, explicit)
 
-            self.assertEqual(source, "explicit-file")
+            self.assertEqual(claude_skill_pair.credential_source(config, explicit), "explicit-file")
             self.assertEqual(actual["accessToken"], "test-access-token")
             run.assert_not_called()
 
@@ -130,9 +197,9 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
             self.write_credential(config / ".credentials.json", self.credential())
 
             with mock.patch.object(claude_skill_pair.subprocess, "run") as run:
-                actual, source = claude_skill_pair.load_oauth_credentials(config)
+                actual = claude_skill_pair.load_oauth_credentials(config)
 
-            self.assertEqual(source, "config-file")
+            self.assertEqual(claude_skill_pair.credential_source(config), "config-file")
             self.assertEqual(actual["refreshToken"], "test-refresh-token")
             run.assert_not_called()
 
@@ -146,11 +213,11 @@ class ClaudeCredentialIsolationTests(unittest.TestCase):
                 stderr="password: " + json.dumps(secret_json),
             )
             with mock.patch.object(claude_skill_pair.subprocess, "run", return_value=result) as run:
-                actual, source = claude_skill_pair.load_oauth_credentials(config)
+                actual = claude_skill_pair.load_oauth_credentials(config)
 
             service = "Claude Code-credentials-" + claude_skill_pair.digest(
                 str(config.resolve()).encode())[:8]
-            self.assertEqual(source, "macos-keychain")
+            self.assertEqual(claude_skill_pair.credential_source(config), "macos-keychain")
             self.assertEqual(actual["accessToken"], "test-access-token")
             argv = run.call_args.args[0]
             env = run.call_args.kwargs["env"]

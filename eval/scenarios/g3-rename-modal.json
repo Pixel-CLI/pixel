@@ -1,7 +1,8 @@
 {
   "id": "g3-rename-modal",
   "suite": "generic",
-  "task_class": "rename-impact",
+  "task_class": "rename",
+  "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
   "mode": "answer",
   "max_turns": 30,
   "prompt": "If the ApplicationModal component in components/ were renamed or moved, which files would need updating? List every file that imports or references it, and note whether the same-named component under apps/sanity-check shares code or is a separate copy.",

@@ -1739,6 +1739,32 @@ mod routing_tests {
     }
 
     #[test]
+    fn project_codex_uninstall_removes_direct_hooks_without_a_composed_backup() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join("Documents/project/.codex");
+        let path = codex.join("hooks.json");
+        let exe = Path::new("/tmp/pixel");
+        let foreign = json!({"matcher":"Bash","hooks":[{
+            "type":"command","command":"user-security-check"
+        }]});
+        let current = json!({"hooks":{"PreToolUse":[foreign.clone(), {
+            "hooks":[{"type":"command","command":"'/tmp/pixel' run-hook guard --provider codex"}]
+        }]},"theme":"dark"});
+        install::write_settings(&path, &current, false).unwrap();
+        assert!(!codex.join(routing::CODEX_COMPOSED_BACKUP).exists());
+
+        remove_project_codex_hooks(home.path(), exe, true).unwrap();
+        assert_eq!(install::read_settings(&path).unwrap(), current);
+        let step = remove_project_codex_hooks(home.path(), exe, false).unwrap();
+
+        assert_eq!(step.status, CheckStatus::Green);
+        assert_eq!(
+            install::read_settings(&path).unwrap(),
+            json!({"hooks":{"PreToolUse":[foreign]},"theme":"dark"})
+        );
+    }
+
+    #[test]
     fn project_composed_guard_uninstall_preserves_changed_managed_value() {
         let home = tempfile::tempdir().unwrap();
         let codex = home.path().join("Documents/project/.codex");
