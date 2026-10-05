@@ -1,4 +1,4 @@
-# Codex native-default experiment (Task 700)
+# Native-default retrieval experiments (Task 700)
 
 The target is a routing contract: ordinary repository questions should receive
 no Pixel retrieval instructions or forced Pixel command. The current package
@@ -334,7 +334,7 @@ but semantic activation is not reliable command interception; any separate
 skill-routing experiment must account for its always-visible metadata and
 on-demand loading cost.
 
-## Preliminary installed proof and Claude pilot status
+## Historical preliminary installed proof and Claude OAuth pilot status
 
 The preliminary installed proof recorded 14 global and eight repository install
 checks, with 33 doctor checks green and no automatic Claude or Codex retrieval
@@ -345,11 +345,11 @@ its installed binary SHA-256 is
 predates the corrected approval check and final validation below. These are
 installation checks, not model benchmark results.
 
-The separate Claude g5 pair was not run: zero paid calls. An earlier private
+At this preliminary stage the Claude g5 pair had not run: zero paid calls. An earlier private
 isolated auth check found an expired access token and expired refresh token.
 Claude's local `auth status` reported stored login state but did not validate
 or renew that credential, so it was not treated as usable authentication.
-The latest credential-source check is recorded below. Anthropic documents macOS
+Later credential-source and gateway checks are recorded below. Anthropic documents macOS
 Keychain storage, per-config-directory credentials, and the `/login` renewal
 path in its [authentication guide](https://code.claude.com/docs/en/authentication).
 
@@ -361,8 +361,8 @@ candidate used the same prepared foreign repository, pinned Pixel image, model
 and effort. Raw had no staged skill; the candidate staged a copy with
 `allow_implicit_invocation: true`. Other base context was equal and contained
 zero Pixel-reference lines. Both runs' `skill-stage-*.json` and `context-*.json`
-receipts confirm that distinction. The separate, unrun Claude comparison uses
-disabled skill metadata in its raw arm and is not evidence from these pairs.
+receipts confirm that distinction. The separate Claude comparison uses
+disabled skill metadata in its raw arm; its later gateway result is reported below.
 A candidate-discovered skill is not proof that its full body was read or followed.
 
 Provenance shared by both runs:
@@ -504,7 +504,7 @@ receipt is `target/native-default-evidence/codex-trust-probe/receipt.json`;
 the fixture hook configuration has SHA-256
 `814a9a674967becfa9b7cad837ec22d926e8811803c172fa64610e9eb4994290`.
 
-## Final implementation validation
+## Earlier implementation validation
 
 Frozen implementation commit: `e50538a17df65c6338cd84b825da6a7b6ed7b44e`.
 `scripts/gates.sh` exited 0: 3,904 workspace tests passed, six skipped, with
@@ -541,11 +541,11 @@ falling back to another profile.
 The corrected default-login probe reports that a `claudeAiOauth` credential
 object is unavailable. The inspected Keychain items contain plugin OAuth data;
 the local CLI's logged-in status comes from global settings supplying a token,
-a different endpoint, and model overrides. Those settings are preserved and
-remain excluded from the isolated comparison. This is a missing compatible
-credential for the benchmark, not evidence that the configured host login is
-broken. The Claude pair still has zero paid calls and requires a compatible
-OAuth credential before execution. Sanitized receipts are in
+a different endpoint, and model overrides. Those settings were preserved and
+initially excluded from the OAuth-only comparison. This was a missing compatible
+credential for that benchmark mode, not evidence that the host login was broken.
+The later explicit configured-gateway mode below used the existing connection
+without a new login. Sanitized receipts are in
 `target/native-default-evidence/fba8d29e-gates/auth-corrected-loader.json` and
 `auth-source-final.json`; no credential values or hashes were saved.
 
@@ -554,3 +554,127 @@ correction. The log and tested harness SHA-256 are recorded in
 `target/native-default-evidence/fba8d29e-gates/arena-keychain-fix.log` and
 `keychain-contract.json`. These harness-only changes do not alter the installed
 Pixel binary or the earlier Codex model measurements.
+
+## Claude configured-gateway screening pair
+
+Run `claude-g5-gateway-r1` used Claude Code 2.1.289 with the existing configured
+gateway, separately from the Codex/Terra measurements. The requested alias was
+`sonnet`, effort `medium`; both CLI initialization and `modelUsage` identify
+`GLM-5.3-Flash`. The gateway backend was not independently attested, so this is
+not an Anthropic Sonnet comparison. Both arms received the same whitelisted
+connection settings in their child environment; other user hooks, skills,
+plugins and MCP configuration were excluded. Private values and their hashes
+were not recorded, and host settings were unchanged.
+
+The exact run command, following a successful `preflight` with the same flags:
+
+```bash
+rtk python3 eval/claude_skill_pair.py run \
+  --repo /Users/livio/Documents/architech-t \
+  --revision 5c47874700c23a6c9e976de3f553ffe75bac39d8 \
+  --scenario eval/scenarios/g5-transfer-status-impact.json \
+  --skill claude-skills/pixel-impact/SKILL.md \
+  --results-dir eval/arena-results/claude-g5-gateway-r1 \
+  --auth-mode configured-gateway \
+  --gateway-settings /Users/livio/.claude/settings.json \
+  --model sonnet --effort medium --timeout 240
+```
+
+Default limits were 10 turns and a CLI-estimated $1 per arm. The CLI reported
+an unrecognized-model warning and `costBasis: unknown`; its cost estimates
+($0.824004 raw, $1.085443 candidate) are not verified gateway billing.
+
+| Measure | Raw | Skill candidate |
+| --- | ---: | ---: |
+| Exit / result | 0 / success | 1 / `error_max_budget_usd` |
+| Final answer | Present | Absent |
+| Required-pattern coverage | 16/16 | Not scored: no answer |
+| Model wall time | 86.139s | 139.758s |
+| Tool uses | 10 | 12 |
+| Skill invocations / successful Pixel queries | 0 / 0 | 1 / 1 |
+| Row input / cache-read / output | 137,884 / 99,968 / 3,384 | 143,776 / 117,312 / 4,403 |
+| Row gross token proxy | 241,236 | 265,491 |
+| Separate `modelUsage` aggregate gross | 241,236 | 321,687 |
+| Pre-arm graph verification | 44ms | 41ms |
+
+Unlike Codex's usage fields above, this Claude result's input and cache-read
+fields are disjoint; the row proxy adds input, cache-read, cache-creation (zero
+in both arms), and output. Candidate `modelUsage` has a different aggregate
+scope (171,907 input, 143,616 cache-read, 6,164 output); it is retained separately,
+not substituted into or pooled with row accounting.
+
+Only one of two arms completed: there are zero complete eligible pairs. The
+scorer's mechanical 0/16 for the unanswered candidate is not an assessment of
+answer quality. The outer harness erroneously exited 0 because a result event
+existed; the saved arm failure remains intact. A post-run fix now requires both
+arms to have a result, no error and exit 0. Its independent failure cases passed
+in 39 focused tests and the full 79-test arena suite; the model pair was not
+rerun. These tests validate the corrected harness, not a successful model pair.
+
+The candidate's actual `pixel impact 'transferPageToGhost' --no-refresh --depth 2
+--json --metrics off` returned the pinned preflight JSON with two affected
+files, empty stderr and no interruption. No permission denial occurred. Both
+arms had the same narrow read-only Pixel permission. An independent assistant
+review found the raw answer correct on both callers, the route-only status
+check, the proposed shared enforcement boundary, and Ghost update/draft
+branches. Its additional assertion about the CLI being broken was not runtime
+verified and is outside those criteria. Human review for promotion remains
+outstanding. This failed screening pair does not justify automatic activation,
+and does not establish a causal or universal performance effect.
+
+Provenance:
+
+- Benchmark source commit `59d728ea3ab1244729d81aeacfb29f218036c003`; harness
+  SHA-256 `a15f12c32c4bde6217494a76d89981a4a7eb524ce2a4772041fa8a179acc95ef`.
+  The later exit-status fix is not attributed to this run.
+- Pinned foreign source commit `5c47874700c23a6c9e976de3f553ffe75bac39d8`;
+  preflight `project_source_sha256`
+  `85121826a17b4ab1d6e931cb5893ab3f42a85a5905a3f833b97ab8fd14a9112f`.
+- Pixel 0.7.0 binary SHA-256
+  `26fb23942f44dd235879afe70117a0e7a427391a25eba18ec69b64c0586e5a1f`;
+  graph SHA-256 `d9c3dd58b448938fc47b821439e113e68f059793e91c3d41b272736486ee329c`.
+- Scenario SHA-256
+  `0127bd4abb2064d150df4697f1f9f0aabc7fd192005f17f1beb9449dbb311fb9`;
+  disabled skill SHA-256
+  `abac98400e97d91614feb8b5837968b1fd04be2ca8290191d60a0ff626aadb25`;
+  enabled skill SHA-256
+  `605aecdc0912c01e7d2e4801fbcbb98f811e0f8a18b8985fc984b0fd2ae1f636`.
+- Setup took 577ms, separately from model time. Before each arm the harness
+  checked the source, binary and graph hashes and reran the recorded query.
+  Only the deliberately staged skill and two regular accounting files are
+  excluded from the source digest; unexpected changes still reject execution.
+- Intent: `target/native-default-evidence/3c45b2de-gates/claude-gateway-pair-intent.json`.
+  Results and redacted transcripts: `eval/arena-results/claude-g5-gateway-r1/`.
+  Receipt: `target/native-default-evidence/59d728ea-gates/claude-g5-gateway-r1-receipt.json`.
+  Log SHA-256: `6236d61b0f209032580ea833f6a048b16857d85d31158d68c300ed74f96e7e1e`.
+
+## Current candidate validation
+
+Frozen source commit: `9042b4d1e70f1e5808c6627317e3b96a5f325814`.
+`CARGO_BUILD_JOBS=2 NEXTEST_TEST_THREADS=2 NEXTEST_RETRIES=0 rtk proxy bash
+scripts/gates.sh` exited 0: 3,904 tests passed, six skipped, plus formatting,
+Clippy and documentation tests. The arena suite separately passed 79 tests.
+The evidence-report-only commit following this validation does not alter those
+tested inputs.
+
+This candidate also fixes the preceding head's coverage failure in the output
+cap test. The former assertion timed setup plus execution against a child-only
+deadline; the replacement verifies that an overflowing child's later side
+effect never occurs. Exact-cap, byte-count and outcome assertions remain.
+The focused normal and instrumented coverage tests both passed. No production
+timeout was changed.
+
+Self-update, history indexing, configuration generation, global installation
+and repository installation all exited 0. Install summaries were 14/14 and
+8/8 green. The installed binary reports the frozen commit and SHA-256
+`c6825b5485900432e6c72f443ea6e9fa7500add5a19b0f7ecba24cb07edcf26b`.
+`pixel doctor . --fix --fail-on yellow --json` exited 1: 32 green, zero red,
+one yellow, with no repairs needed or automatic repairs outstanding. The
+remaining yellow is approval of `PostToolUse #7.0` and `UserPromptSubmit #4.0`
+in the global Codex hooks file. Trust was not written. The installation
+checklist remains incomplete until the user reviews those two definitions.
+
+Commands, complete logs, exit statuses and installed identity are retained in
+`target/native-default-evidence/final-candidate-validation/validation-receipt.json`.
+The earlier passing remote mutation and dependency verdicts remain historical;
+the normal push hook and GitHub checks must validate the new published head.
