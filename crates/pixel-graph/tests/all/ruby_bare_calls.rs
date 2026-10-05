@@ -111,6 +111,55 @@ const SELF_CALLS: [&str; 19] = [
 /// controller action next to a service's private helper does.
 const COMPETING: &str = "class Other\n  def access_logs\n    []\n  end\nend\n";
 
+/// A file reopening `Svc` to define `access_logs` again makes the override
+/// depend on load order: the edge the full build gave `Svc#run` goes back
+/// to unresolved once the update sees the reopened class.
+#[test]
+fn ruby_bare_call_should_lose_its_exact_edge_when_a_reopened_class_redefines_it() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("a.rb"), SELF_CALLS.join("\n")).unwrap();
+    fs::write(root.path().join("other.rb"), COMPETING).unwrap();
+    let db = root.path().join(".pixel/graph.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    build_graph(root.path(), &db).unwrap();
+    assert_eq!(svc_access_logs_callers(&db), (only_svc_run(), 2));
+
+    fs::write(
+        root.path().join("patch.rb"),
+        "class Svc\n  def access_logs(user:)\n    []\n  end\nend\n",
+    )
+    .unwrap();
+    update_file(root.path(), &db, "patch.rb").unwrap();
+    let store = GraphStore::open(&db).unwrap();
+    let svc_definitions: Vec<_> = store
+        .symbols_by_name("access_logs", None, 10)
+        .unwrap()
+        .into_iter()
+        .filter(|symbol| symbol.qualified == "Svc#access_logs")
+        .collect();
+    assert_eq!(svc_definitions.len(), 2, "a.rb and patch.rb both define it");
+    for definition in &svc_definitions {
+        assert_eq!(
+            store
+                .edges_to(definition.id, Some(EdgeKind::Calls))
+                .unwrap()
+                .into_iter()
+                .map(|edge| edge.src_id)
+                .collect::<Vec<_>>(),
+            Vec::<i64>::new(),
+            "no Exact edge picks one of the two `Svc#access_logs`"
+        );
+    }
+    assert_eq!(
+        store
+            .envelope_for_name("access_logs")
+            .unwrap()
+            .unresolved_same_name,
+        3,
+        "`Svc#run` joins `Svc.build` and `Admin#run` among the unresolved sites"
+    );
+}
+
 /// The qualified names of the `Calls` edges into `Svc#access_logs`, and the
 /// `access_logs` call sites left unresolved.
 fn svc_access_logs_callers(db: &std::path::Path) -> (BTreeSet<String>, u64) {
