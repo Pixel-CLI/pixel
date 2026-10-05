@@ -83,12 +83,14 @@ impl Index {
                 .iter()
                 .filter(|s| s.start <= line && line <= s.end)
                 .collect();
-            // Line-only spans cannot disambiguate adjacent declarations sharing
-            // a line, or prove the nesting of identical spans. Do not guess Exact.
-            if visible.windows(2).any(|pair| {
-                (pair[0].start, pair[0].end) == (pair[1].start, pair[1].end)
-                    || !pair[0].owner.starts_with(&format!("{}::", pair[1].owner))
-            }) {
+            // A superclass expression runs outside the new class, as does a
+            // statement after `end` on the same line. Line-only spans cannot
+            // place these sites, or prove the nesting of identical spans.
+            if visible.iter().any(|s| s.start == line || s.end == line)
+                || visible
+                    .windows(2)
+                    .any(|pair| (pair[0].start, pair[0].end) == (pair[1].start, pair[1].end))
+            {
                 return None;
             }
             for scope in visible {
@@ -235,17 +237,20 @@ mod tests {
         }
         let index = Index::build(&store).unwrap();
         for (line, target) in [
-            (0, "B"),
-            (1, "A::B"),
-            (2, "A::C::B"),
-            (10, "A::C::B"),
-            (11, "A::B"),
-            (20, "A::B"),
-            (21, "B"),
+            (0, Some("B")),
+            (1, None),
+            (2, None),
+            (3, Some("A::C::B")),
+            (9, Some("A::C::B")),
+            (10, None),
+            (11, Some("A::B")),
+            (19, Some("A::B")),
+            (20, None),
+            (21, Some("B")),
         ] {
             assert_eq!(
                 index.constant(local, "B", Some(line)),
-                Some(target.into()),
+                target.map(str::to_string),
                 "line {line}"
             );
         }

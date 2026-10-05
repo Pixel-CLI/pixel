@@ -252,7 +252,7 @@ fn ruby_constructor_should_respect_an_explicit_new_override() {
 #[test]
 fn ruby_constants_should_not_guess_lexical_nesting_when_line_spans_are_indistinguishable() {
     let root = fixture(
-        "module A; class C; def invoke; B.run; end; end; end\n",
+        "module A; class C\n def invoke\n B.run\n end\nend; end\n",
         TARGETS,
     );
     assert_eq!(
@@ -268,6 +268,29 @@ fn ruby_constants_should_not_guess_lexical_nesting_when_line_spans_are_indisting
         calls(root.path()),
         vec![],
         "adjacent classes share the call's line without being nested"
+    );
+}
+
+#[test]
+fn ruby_constants_should_not_treat_class_headers_or_trailing_statements_as_class_body_calls() {
+    let targets = "class C\n class B\n def self.run; String; end\n end\nend\nclass B\n def self.run; Object; end\nend\n";
+    for caller in [
+        "class C < B.run\nend\n",
+        "class C\nend; B.run\n",
+        "class C; def invoke; B.run; end; end\n",
+    ] {
+        let root = fixture(caller, targets);
+        assert_eq!(
+            calls(root.path()),
+            vec![],
+            "line-only storage cannot place a relative receiver on a class boundary: {caller}"
+        );
+    }
+    let root = fixture("class C < ::B.run\nend\n", targets);
+    assert_eq!(
+        calls(root.path()),
+        expected(&[(1, "run", "B.run", "exact")]),
+        "an absolute constant needs no lexical scope"
     );
 }
 
