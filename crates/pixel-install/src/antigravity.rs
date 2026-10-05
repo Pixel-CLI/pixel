@@ -189,9 +189,9 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         "version": env!("CARGO_PKG_VERSION"),
         "managedBy": "pixel"
     });
-    let skill_content = format!(
-        "---\nname: pixel\ndescription: >-\n  Deterministic code retrieval: indexed search, concept resolve, impact\n  analysis, caller/callee tracing, task targets, plan generation, and git\n  history archaeology via the `pixel` CLI.\n---\n\n{AGENT_PROMPT_ASSET}"
-    );
+    // Antigravity loads both rules and skills into a session. The rule owns
+    // Pixel's full protocol; duplicating it in the skill doubles the prompt.
+    let skill_content = "---\nname: pixel\ndescription: >-\n  Pixel's retrieval protocol is provided by the installed rules/AGENTS.md.\n---\n";
     let guard_cmd = format!("'{}' run-hook guard --provider antigravity", exe.display());
     let metrics_cmd = format!(
         "'{}' run-hook metrics --provider antigravity",
@@ -240,7 +240,7 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         fs::create_dir_all(p_dir.join("skills/pixel"))?;
         fs::write(p_dir.join("plugin.json"), &manifest_text)?;
         fs::write(p_dir.join("rules/AGENTS.md"), AGENT_PROMPT_ASSET)?;
-        fs::write(p_dir.join("skills/pixel/SKILL.md"), &skill_content)?;
+        fs::write(p_dir.join("skills/pixel/SKILL.md"), skill_content)?;
         fs::write(p_dir.join("hooks.json"), &hooks_text)?;
     }
     // `agy plugin install` requires `.agent-config/{plugin,install}` files in
@@ -314,77 +314,46 @@ pub fn enable_plugin_in_config(home: &Path, dry_run: bool) -> Result<InstallStep
     })
 }
 
-/// Add or update pixel-guard in `~/.gemini/config/hooks.json`.
-pub fn install_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+/// Remove the retired global guard now owned by Pixel's Antigravity plugin.
+pub fn remove_global_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let h_path = hooks_path(home);
-    let guard_cmd = format!("'{}' run-hook guard --provider antigravity", exe.display());
-    let metrics_cmd = format!(
-        "'{}' run-hook metrics --provider antigravity",
-        exe.display()
-    );
-
     if dry_run {
         return Ok(InstallStep {
             id: "install.antigravity-hooks".into(),
             status: CheckStatus::Green,
-            summary: format!("would configure pixel-guard in {}", h_path.display()),
+            summary: format!("would remove retired pixel-guard from {}", h_path.display()),
             detail: None,
         });
     }
-
+    if !h_path.is_file() {
+        return Ok(InstallStep {
+            id: "install.antigravity-hooks".into(),
+            status: CheckStatus::Green,
+            summary: "no retired Antigravity global guard found".into(),
+            detail: None,
+        });
+    }
     let mut root_val = read_json_object(&h_path)?;
-
-    let root_map =
-        root_val
-            .as_object_mut()
-            .ok_or_else(|| crate::InstallError::InvalidSettings {
-                path: h_path.clone(),
-                reason: "hooks.json root is not an object".into(),
-            })?;
-
-    let pixel_guard_spec = json!({
-        "enabled": true,
-        "PreToolUse": [
-            {
-                "matcher": PRE_TOOL_MATCHER,
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": guard_cmd,
-                        "timeout": 10
-                    }
-                ]
-            }
-        ],
-        "PreInvocation": [
-            {
-                "type": "command",
-                "command": guard_cmd,
-                "timeout": 10
-            }
-        ],
-        "PostToolUse": [
-            {
-                "matcher": "*",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": metrics_cmd,
-                        "timeout": 10
-                    }
-                ]
-            }
-        ]
-    });
-
-    root_map.insert("pixel-guard".into(), pixel_guard_spec);
-
-    fs::write(&h_path, serde_json::to_string_pretty(&root_val)? + "\n")?;
+    let removed = root_val
+        .as_object_mut()
+        .ok_or_else(|| crate::InstallError::InvalidSettings {
+            path: h_path.clone(),
+            reason: "hooks.json root is not an object".into(),
+        })?
+        .remove("pixel-guard")
+        .is_some();
+    if removed {
+        fs::write(&h_path, serde_json::to_string_pretty(&root_val)? + "\n")?;
+    }
 
     Ok(InstallStep {
         id: "install.antigravity-hooks".into(),
         status: CheckStatus::Green,
-        summary: "configured pixel-guard in hooks.json".into(),
+        summary: if removed {
+            "removed retired pixel-guard from global hooks.json".into()
+        } else {
+            "no retired Antigravity global guard found".into()
+        },
         detail: Some(format!("path={}", h_path.display())),
     })
 }
@@ -488,13 +457,15 @@ pub fn check_antigravity_install(
     } else {
         false
     };
-    if !hooks_installed {
-        missing.push("hooks.json (pixel-guard configured)");
+    if hooks_installed {
+        return Err(
+            "Antigravity integration duplicates pixel-guard in global hooks.json and the plugin — run `pixel install`"
+                .into(),
+        );
     }
 
     let guard_command = format!("'{}' run-hook guard --provider antigravity", exe.display());
     for (path, label) in [
-        (h_path.clone(), "hooks.json (PreInvocation configured)"),
         (
             p_dir.join("hooks.json"),
             "IDE hooks.json (PreInvocation configured)",
@@ -686,11 +657,13 @@ mod tests {
         assert_eq!(config["keep"], "config");
         assert_eq!(config["plugins"]["other"]["enabled"], true);
 
-        // Install hooks
-        let step3 = install_global_hooks(home, &exe, false).unwrap();
+        // A current install removes the retired global registration: the
+        // plugin owns the one guard for both IDE and CLI.
+        let step3 = remove_global_hooks(home, false).unwrap();
         assert_eq!(step3.status, CheckStatus::Green);
         let hooks: Value = serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
         assert_eq!(hooks["other-hook"]["enabled"], true);
+        assert!(hooks.get("pixel-guard").is_none());
 
         // Doctor check should now succeed
         let (summary, detail) = check_antigravity_install(home, &exe).unwrap();
@@ -699,7 +672,6 @@ mod tests {
 
         let expected_command = "'/usr/local/bin/pixel' run-hook guard --provider antigravity";
         for (path, missing_hook) in [
-            (hooks_path(home), "hooks.json (PreInvocation configured)"),
             (
                 plugin_dir(home).join("hooks.json"),
                 "IDE hooks.json (PreInvocation configured)",
@@ -785,8 +757,7 @@ mod tests {
 
         let invalid_hooks = b"{bad hooks";
         fs::write(hooks_path(home), invalid_hooks).unwrap();
-        let exe = PathBuf::from("/usr/local/bin/pixel");
-        assert!(install_global_hooks(home, &exe, false).is_err());
+        assert!(remove_global_hooks(home, false).is_err());
         assert_eq!(fs::read(hooks_path(home)).unwrap(), invalid_hooks);
     }
 

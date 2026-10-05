@@ -575,6 +575,15 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     stacked.join(", ")
                 ));
             }
+            if claude_plugin_enabled(&value) {
+                return Ok((
+                    CheckStatus::Yellow,
+                    DoctorCheckDetail {
+                        summary: "Claude Pixel plugin and global lifecycle hooks are both enabled; the global hooks own prompt injection".into(),
+                        detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                    },
+                ));
+            }
             Ok(claude_hooks_owner_check(
                 &path,
                 &exe,
@@ -1422,6 +1431,19 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             skipped,
         },
     })
+}
+
+/// Whether Claude's settings enable Pixel as a plugin beside global hooks.
+fn claude_plugin_enabled(value: &serde_json::Value) -> bool {
+    value
+        .get("enabledPlugins")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|plugins| {
+            plugins.iter().any(|(name, enabled)| {
+                (name == "pixel" || name.starts_with("pixel@"))
+                    && enabled == &serde_json::Value::Bool(true)
+            })
+        })
 }
 
 /// Registration and stored trust are distinct from actual hook observations.

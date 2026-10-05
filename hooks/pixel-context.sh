@@ -28,6 +28,16 @@ esac
 cat >/dev/null 2>&1 || :   # drain stdin; never block the harness
 [ -f "$FILE" ] || exit 0   # missing context file → stay silent
 
+# `pixel install` owns lifecycle context when its global SessionStart hook is
+# present. A plugin may still be enabled beside it, but must not inject the
+# same protocol a second time. The plugin remains the owner when installed
+# alone, without a global Pixel lifecycle hook.
+GLOBAL_SETTINGS="${HOME:-}/.claude/settings.json"
+if [ -f "$GLOBAL_SETTINGS" ] \
+  && grep -Eq 'run-hook session-start[^"[:space:]]* --provider claude' "$GLOBAL_SETTINGS"; then
+  exit 0
+fi
+
 # Emit `text` (read from stdin) as a JSON string: backslashes and quotes
 # escaped, tabs and carriage returns as \t and \r, other control characters
 # dropped, lines joined with \n.

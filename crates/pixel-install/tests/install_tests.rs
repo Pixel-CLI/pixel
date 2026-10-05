@@ -3673,6 +3673,7 @@ fn run_context_hook(root: &std::path::Path, event: &str) -> serde_json::Value {
     let mut child = std::process::Command::new("/bin/sh")
         .arg(root.join("hooks/pixel-context.sh"))
         .arg(event)
+        .env("HOME", root)
         .env(
             "PATH",
             format!("{}:/usr/bin:/bin", root.join("bin").display()),
@@ -3724,6 +3725,37 @@ fn context_hook_injects_the_prompt_for_its_event_verbatim() {
     assert_eq!(
         unknown["hookSpecificOutput"]["hookEventName"], "SessionStart",
         "the event name in the JSON is never taken from the argument verbatim"
+    );
+}
+
+/// A plugin is useful alone, but a global `pixel install` lifecycle hook owns
+/// the same prompt when both paths are present.
+#[cfg(unix)]
+#[test]
+fn context_hook_stays_silent_when_global_pixel_lifecycle_is_installed() {
+    let root = plugin_root("PROTOCOL", "SUB", Some(0));
+    let claude_dir = root.path().join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"command":"'/usr/local/bin/pixel' run-hook session-start --provider claude"}]}]}}"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new("/bin/sh")
+        .arg(root.path().join("hooks/pixel-context.sh"))
+        .arg("SessionStart")
+        .env("HOME", root.path())
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", root.path().join("bin").display()),
+        )
+        .stdin(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        out.stdout.is_empty(),
+        "plugin must defer to global hooks: {out:?}"
     );
 }
 
@@ -5362,6 +5394,41 @@ fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged
     );
     let after = doctor_hooks();
     assert_eq!(after.status, CheckStatus::Green, "{after:?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn doctor_should_warn_when_claude_plugin_and_global_hooks_both_own_prompt() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(exe.clone()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let path = home.join(".claude/settings.json");
+    let mut settings = read_json(&path);
+    settings["enabledPlugins"] = serde_json::json!({"pixel@local": true});
+    fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+    let report = doctor(&DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(exe),
+        shell: Some(TEST_SHELL.into()),
+        only: vec!["install.claude-hooks".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let finding = check(&report, "install.claude-hooks");
+    assert_eq!(finding.status, CheckStatus::Yellow, "{finding:?}");
+    assert!(
+        finding
+            .summary
+            .contains("plugin and global lifecycle hooks"),
+        "{finding:?}"
+    );
 }
 
 /// After a global `pixel-dev install` every hook is present and registered
