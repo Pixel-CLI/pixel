@@ -1995,6 +1995,9 @@ struct RubyFrame {
     defs: RubyDefs,
     /// The frame is a `module` body, where a bare `module_function` applies.
     module: bool,
+    /// `self` is an instance here (a `def` body, or a block inside one), not
+    /// the class or module being defined.
+    instance_self: bool,
 }
 
 /// What a `def name` written in a frame's body defines.
@@ -2012,17 +2015,30 @@ enum RubyDefs {
 }
 
 impl RubyLocals {
-    /// Open a frame. `defs` is the frame's own `def` qualification; `None`
-    /// (a block) keeps the enclosing frame's, as a `def` in a block defines
+    /// Open the frame of a node of `kind`. A block keeps the enclosing
+    /// frame's `def` qualification and `self`, as a `def` in a block defines
     /// a method of the enclosing class.
-    fn open(&mut self, scope: RubyScope, defs: Option<RubyDefs>, module: bool) {
-        let defs =
-            defs.unwrap_or_else(|| self.frames.last().map_or(RubyDefs::Instance, |f| f.defs));
+    fn open(&mut self, scope: RubyScope, kind: &str, value_is_self: bool) {
+        let enclosing = self.frames.last();
+        let enclosing_defs = enclosing.map_or(RubyDefs::Instance, |f| f.defs);
+        let enclosing_instance = enclosing.is_some_and(|f| f.instance_self);
+        let (defs, instance_self) = match kind {
+            "block" | "do_block" | "lambda" => (enclosing_defs, enclosing_instance),
+            "method" => (RubyDefs::Instance, true),
+            // `class << self` names the class or module only where `self` is
+            // one: in a `def` body it is an instance, whose own singleton the
+            // graph cannot name, so its methods keep instance qualification.
+            "singleton_class" if value_is_self && !enclosing_instance => {
+                (RubyDefs::Singleton, false)
+            }
+            _ => (RubyDefs::Instance, false),
+        };
         self.frames.push(RubyFrame {
             scope,
             names: Vec::new(),
             defs,
-            module,
+            module: kind == "module",
+            instance_self,
         });
     }
 
@@ -2072,27 +2088,6 @@ impl RubyLocals {
     }
 }
 
-/// The `def` qualification a node's frame starts with; `None` for a block,
-/// which inherits it. `class << self` opens a singleton frame; `class <<
-/// other` keeps instance qualification, since the methods belong to that
-/// other object, which the graph does not name.
-fn ruby_defs_of(node: Node) -> Option<RubyDefs> {
-    match node.kind() {
-        "singleton_class" => Some(
-            if node
-                .child_by_field_name("value")
-                .is_some_and(|value| value.kind() == "self")
-            {
-                RubyDefs::Singleton
-            } else {
-                RubyDefs::Instance
-            },
-        ),
-        "block" | "do_block" | "lambda" => None,
-        _ => Some(RubyDefs::Instance),
-    }
-}
-
 fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIdent, depth: usize) {
     if depth > MAX_DEPTH {
         return;
@@ -2100,7 +2095,10 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
     let mut pushed = false;
     let scope = ruby_scope_of(node.kind());
     if let Some(scope) = scope {
-        locals.open(scope, ruby_defs_of(node), node.kind() == "module");
+        let value_is_self = node
+            .child_by_field_name("value")
+            .is_some_and(|value| value.kind() == "self");
+        locals.open(scope, node.kind(), value_is_self);
     }
     match node.kind() {
         "module" => {
@@ -2157,6 +2155,16 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             if let Some(name) = field_text(w, node, "method") {
                 let recv = field_text(w, node, "receiver");
                 callee_name = Some(name.clone());
+                // `module_function()` and `public()` set the mode as the
+                // bare words do; with arguments they only touch the methods
+                // they name.
+                if recv.is_none()
+                    && node
+                        .child_by_field_name("arguments")
+                        .is_none_or(|args| args.named_child_count() == 0)
+                {
+                    locals.visibility(&name);
+                }
                 if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
                     if let Some(spec) = ruby_first_string_argument(w, node) {
                         w.push_import(spec, Vec::new());
@@ -2971,6 +2979,28 @@ module Plain
   end
   def instance_too; end
 end
+
+class Widget
+  def build
+    class << self
+      def per_instance; end
+    end
+  end
+  def self.setup
+    class << self
+      def meta; end
+    end
+  end
+end
+
+module Parens
+  module_function()
+  def a; end
+  private :a
+  def b; end
+  public()
+  def c; end
+end
 ";
         let extraction = extract_file("lib/user.rb", source).unwrap();
         let methods: Vec<&str> = extraction
@@ -2995,6 +3025,13 @@ end
                 "Util#back_to_instance",
                 "Plain#helper",
                 "Plain#instance_too",
+                "Widget#build",
+                "Widget#per_instance",
+                "Widget.setup",
+                "Widget.meta",
+                "Parens.a",
+                "Parens.b",
+                "Parens#c",
             ]
         );
     }
