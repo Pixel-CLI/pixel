@@ -12,7 +12,8 @@
 //! Receiver honesty: a call with a real receiver expression (`x.parse()`,
 //! `SymbolKind::parse`) can never be `Exact` from name-only resolution — the
 //! receiver's type is not tracked, so linking it to a same-name function/
-//! method would be a guess. Such calls are capped at `Probable`. Calls whose
+//! method would be a guess. Name-only matches are capped at `Probable`; Ruby
+//! constant receivers can prove a unique owner through lexical lookup. Calls whose
 //! receiver is `self`/`Self`/`this` (or absent) keep the normal tier, since
 //! those resolve against the enclosing type's own methods.
 //!
@@ -50,6 +51,9 @@
 //! candidate carries the source name (`use a::push as leased;` →
 //! `leased()` calls `push`), so T1 looks the local name up and matches
 //! candidates on the source; the source name alone is not in scope there.
+//!
+//! Ruby constant receivers use lexical class/module scopes instead of name tiers.
+//! Their unique methods are Exact; Rails dispatch conventions remain Probable.
 
 use std::collections::{HashMap, HashSet};
 
@@ -60,6 +64,8 @@ use crate::store::{
     EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, SymbolKind, Tier, decode_bindings,
     decode_scope,
 };
+
+mod ruby;
 
 #[derive(Debug, Default, Clone)]
 pub struct ResolveStats {
@@ -165,6 +171,7 @@ fn scope_width(scope: &[(u32, u32)], site_line: Option<u32>) -> u32 {
 pub struct ResolveIndex {
     by_name: HashMap<String, Vec<Candidate>>,
     ruby_files: HashSet<i64>,
+    ruby_constants: ruby::Index,
     /// Class/module symbols supply the owner of a Ruby class-body reference.
     containers: HashSet<i64>,
     /// symbol_id → qualified name, for the type-qualified receiver tiebreak
@@ -292,6 +299,7 @@ impl ResolveIndex {
         Ok(Self {
             by_name,
             ruby_files,
+            ruby_constants: ruby::Index::build(store)?,
             containers,
             qualified_of,
             import_bindings,
@@ -404,12 +412,14 @@ impl ResolveIndex {
     /// class and stays `Unresolved`; the resolver paths pass the caller.
     /// Passed method symbols also need their receiving DSL: use
     /// [`Self::decide_reference`] for reference rows, never this call API.
+    /// A relative Ruby constant needs a site line to establish lexical scope;
+    /// only an absolute (`::Foo`) constant can resolve without that input.
     pub fn decide(&self, caller_file_id: i64, name: &str, receiver: Option<&str>) -> Decision {
         self.decide_from(caller_file_id, None, name, receiver, None)
     }
 
-    /// [`Self::decide`] for a call on `site_line`, which T1 checks against
-    /// the lines where each import's names are in scope.
+    /// [`Self::decide`] for a call on `site_line`, locating import bindings
+    /// and Ruby lexical class/module scopes.
     pub fn decide_at(
         &self,
         caller_file_id: i64,
@@ -486,6 +496,14 @@ impl ResolveIndex {
         site_line: Option<u32>,
     ) -> Decision {
         let (receiver, method_call) = split_method_receiver(receiver);
+        if self.ruby_files.contains(&caller_file_id)
+            && let Some(receiver) = receiver
+            && let Some(decision) =
+                self.ruby_constants
+                    .decide(caller_file_id, receiver, name, site_line)
+        {
+            return decision;
+        }
         if self.ruby_files.contains(&caller_file_id)
             && self.ambiguous_local_name(caller_file_id, name)
         {
@@ -1140,7 +1158,8 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
 
 /// Reconsider resolved calls whose target names were defined by a changed
 /// file. Adding a same-name definition can make a previously unique target
-/// ambiguous; unrelated call edges remain untouched.
+/// ambiguous. Ruby receiver calls are also replayed because changing a
+/// constant or factory can shadow their owner without redefining the callee.
 /// Both `Calls` and `References` edges are reconsidered — a reference to a
 /// previously-unique `handler` is just as stale when a second definition
 /// appears.
@@ -1157,6 +1176,21 @@ pub fn reconsider_resolved_calls(
         kind: String,
     }
     let mut calls = Vec::new();
+    // A newly shadowing constant or factory override can invalidate a Ruby
+    // call without changing its target's method name. Replay these edges even
+    // when a file removal leaves changed_names empty.
+    store.conn().execute_batch(
+        "INSERT INTO unresolved_calls
+            (file_id, name, enclosing_symbol_id, site_line, receiver, kind)
+         SELECT src.file_id, COALESCE(e.callee, dst.name), e.src_id,
+                e.site_line, e.receiver, e.kind
+           FROM edges e JOIN symbols src ON src.id=e.src_id
+           JOIN symbols dst ON dst.id=e.dst_id JOIN files f ON f.id=src.file_id
+          WHERE f.lang='ruby' AND e.kind='calls' AND e.receiver IS NOT NULL;
+         DELETE FROM edges WHERE kind='calls' AND receiver IS NOT NULL
+          AND src_id IN (SELECT s.id FROM symbols s JOIN files f ON f.id=s.file_id
+                          WHERE f.lang='ruby');",
+    )?;
     for name in changed_names {
         let found: Vec<ResolvedCall> = {
             let mut stmt = store.conn().prepare(
