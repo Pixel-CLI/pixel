@@ -390,7 +390,10 @@ impl ResolveIndex {
     /// another file keep the shadow veto.
     ///
     /// Without a site line, only the imports in scope in the whole file count
-    /// for T1; [`Self::decide_at`] places the call.
+    /// for T1; [`Self::decide_at`] places the call. Without the calling
+    /// symbol either, a Ruby call on `self` (bare or written) to a name
+    /// defined in its file and elsewhere cannot be matched to the caller's
+    /// class and stays `Unresolved`; the resolver paths pass the caller.
     pub fn decide(&self, caller_file_id: i64, name: &str, receiver: Option<&str>) -> Decision {
         self.decide_from(caller_file_id, None, name, receiver, None)
     }
@@ -420,8 +423,10 @@ impl ResolveIndex {
             && self.ambiguous_local_name(caller_file_id, name)
         {
             match receiver.map(str::trim) {
-                None => return Decision::Unresolved,
-                Some("self") => {
+                // Ruby sends a call without receiver to `self`, so a bare
+                // `access_logs(...)` names the caller's own method as surely
+                // as `self.access_logs(...)` does.
+                None | Some("self") => {
                     return caller_symbol_id
                         .and_then(|id| self.ruby_self_target(caller_file_id, id, name))
                         .map_or(Decision::Unresolved, Decision::Exact);
@@ -479,6 +484,11 @@ impl ResolveIndex {
                     .any(|candidate| candidate.file_id != caller_file_id))
     }
 
+    /// The caller's own method `name`: a candidate of the caller's class and
+    /// kind (`#` instance, `.` class) in the caller's file. `None` when that
+    /// file has none, or when another file defines the same owner's method
+    /// too: a class reopened elsewhere can redefine it, and the definition
+    /// Ruby keeps is whichever loads last, which the graph cannot tell.
     fn ruby_self_target(
         &self,
         caller_file_id: i64,
@@ -486,12 +496,11 @@ impl ResolveIndex {
         name: &str,
     ) -> Option<i64> {
         let caller_owner = ruby_owner(self.qualified_of.get(&caller_symbol_id)?)?;
-        let matches: Vec<Candidate> = self
+        let same_owner: Vec<Candidate> = self
             .by_name
             .get(name)?
             .iter()
             .copied()
-            .filter(|candidate| candidate.file_id == caller_file_id)
             .filter(|candidate| {
                 self.qualified_of
                     .get(&candidate.symbol_id)
@@ -499,7 +508,13 @@ impl ResolveIndex {
                     == Some(caller_owner)
             })
             .collect();
-        best(&matches)
+        if same_owner
+            .iter()
+            .any(|candidate| candidate.file_id != caller_file_id)
+        {
+            return None;
+        }
+        best(&same_owner)
     }
 
     /// The candidate a receiver names: the method of the type it ends with
@@ -1494,6 +1509,167 @@ mod tests {
             ),
             Decision::Unresolved
         );
+    }
+
+    /// Ruby sends a call without receiver to `self`: `access_logs(...)` in
+    /// `App#run` reaches `App#access_logs` even when another class elsewhere
+    /// defines the name, and only for a caller of that class and kind.
+    #[test]
+    fn ruby_bare_call_should_resolve_to_the_callers_own_method_like_a_self_call() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store
+            .replace_file("app/services/app.rb", "oid-local", "ruby")
+            .unwrap();
+        let remote = store
+            .replace_file("app/controllers/other.rb", "oid-remote", "ruby")
+            .unwrap();
+        let caller = store
+            .insert_symbol(
+                local,
+                "app#App#run#method",
+                "run",
+                "App#run",
+                SymbolKind::Method,
+                1,
+                3,
+                "run",
+            )
+            .unwrap();
+        let class_method_caller = store
+            .insert_symbol(
+                local,
+                "app#App.build#method",
+                "build",
+                "App.build",
+                SymbolKind::Method,
+                5,
+                7,
+                "build",
+            )
+            .unwrap();
+        let unrelated_caller = store
+            .insert_symbol(
+                local,
+                "app#Admin#run#method",
+                "run",
+                "Admin#run",
+                SymbolKind::Method,
+                9,
+                11,
+                "run",
+            )
+            .unwrap();
+        let local_target = store
+            .insert_symbol(
+                local,
+                "app#App#access_logs#method",
+                "access_logs",
+                "App#access_logs",
+                SymbolKind::Method,
+                13,
+                15,
+                "access_logs",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                remote,
+                "other#Other#access_logs#method",
+                "access_logs",
+                "Other#access_logs",
+                SymbolKind::Method,
+                1,
+                3,
+                "access_logs",
+            )
+            .unwrap();
+        let idx = ResolveIndex::build(&store).unwrap();
+
+        assert_eq!(
+            idx.decide_from(local, Some(caller), "access_logs", None, Some(2)),
+            Decision::Exact(local_target),
+            "a bare call names the caller's own instance method"
+        );
+        assert_eq!(
+            idx.decide_from(
+                local,
+                Some(class_method_caller),
+                "access_logs",
+                None,
+                Some(6)
+            ),
+            Decision::Unresolved,
+            "self in a class method is the class, which has no `access_logs`"
+        );
+        assert_eq!(
+            idx.decide_from(local, Some(unrelated_caller), "access_logs", None, Some(10)),
+            Decision::Unresolved,
+            "another class of the same file does not define it"
+        );
+        assert_eq!(
+            idx.decide(local, "access_logs", None),
+            Decision::Unresolved,
+            "without the calling symbol the owner cannot be checked"
+        );
+    }
+
+    /// A class reopened in another file that defines the same method again
+    /// leaves the override to load order: neither a bare call nor
+    /// `self.name` gets an Exact edge to the caller's file's definition.
+    #[test]
+    fn ruby_self_call_should_stay_unresolved_when_a_reopened_class_redefines_it() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store
+            .replace_file("app/models/app.rb", "oid-local", "ruby")
+            .unwrap();
+        let reopened = store
+            .replace_file("config/initializers/app_patch.rb", "oid-patch", "ruby")
+            .unwrap();
+        let caller = store
+            .insert_symbol(
+                local,
+                "app#App#run#method",
+                "run",
+                "App#run",
+                SymbolKind::Method,
+                1,
+                3,
+                "run",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                local,
+                "app#App#access_logs#method",
+                "access_logs",
+                "App#access_logs",
+                SymbolKind::Method,
+                5,
+                7,
+                "access_logs",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                reopened,
+                "patch#App#access_logs#method",
+                "access_logs",
+                "App#access_logs",
+                SymbolKind::Method,
+                1,
+                3,
+                "access_logs",
+            )
+            .unwrap();
+        let idx = ResolveIndex::build(&store).unwrap();
+
+        for receiver in [None, Some("self")] {
+            assert_eq!(
+                idx.decide_from(local, Some(caller), "access_logs", receiver, Some(2)),
+                Decision::Unresolved,
+                "receiver {receiver:?}: the reopened class may override the local definition"
+            );
+        }
     }
 
     #[test]
