@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 """Count Rust public-function declarations under pixel-rank/src."""
 
 from pathlib import Path
