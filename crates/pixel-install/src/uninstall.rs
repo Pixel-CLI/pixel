@@ -782,13 +782,13 @@ fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallSt
         let ext_file = config_dir.join("extensions").join(name);
         if ext_file.is_file() {
             if !dry_run {
-                let current = fs::read(&ext_file).unwrap_or_default();
-                let _ = config::backup_if_changing(&ext_file, &{
+                let current = fs::read(&ext_file)?;
+                config::backup_if_changing(&ext_file, &{
                     let mut s = current.clone();
                     s.push(0);
                     s
-                });
-                let _ = fs::remove_file(&ext_file);
+                })?;
+                fs::remove_file(&ext_file)?;
             }
             removed.push(format!("extensions/{name}"));
         }

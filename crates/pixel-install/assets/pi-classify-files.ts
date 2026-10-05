@@ -17,7 +17,7 @@
  * Requires `pixel config classify on`.
  */
 import { execFile } from "node:child_process";
-import { glob, readFile, stat } from "node:fs/promises";
+import { glob, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Type } from "typebox";
 
@@ -55,10 +55,17 @@ async function readFileState(path: string, cwd: string): Promise<{ path: string;
     throw new FileStateError(`not found: ${path}`, path);
   }
   if (!info.isFile()) throw new FileStateError(`not a file: ${path}`, path);
+  // The file's contents can reach a hosted classifier, so reads are confined
+  // to the session root: realpath both sides so an absolute path or a
+  // symlink escaping `cwd` is refused rather than shipped.
+  const [root, resolved] = await Promise.all([realpath(cwd), realpath(full)]);
+  if (resolved !== root && !resolved.startsWith(root + sep)) {
+    throw new FileStateError(`outside the session root: ${path}`, path);
+  }
   if (info.size > MAX_FILE_CHARS) {
     throw new FileStateError(`too large for one classify call: ${path} is ${info.size} bytes, the limit is ${MAX_FILE_CHARS}`, path);
   }
-  const buf = await readFile(full);
+  const buf = await readFile(resolved);
   if (looksBinary(buf)) throw new FileStateError(`binary: ${path}`, path);
   return { path, content: buf.toString("utf8") };
 }
