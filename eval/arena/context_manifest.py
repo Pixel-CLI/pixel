@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import tomllib
 
 
@@ -16,6 +17,111 @@ def sha256(text):
 
 def semantic_text(text):
     return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def collect_skills(repo, codex_home):
+    roots = {}
+    repo = Path(repo)
+    for ancestor in reversed((repo, *repo.parents)):
+        roots[f"repo:{ancestor}/.agents/skills"] = ancestor / ".agents" / "skills"
+    roots["$HOME/.agents/skills"] = Path(codex_home).parent / ".agents" / "skills"
+    roots["$CODEX_HOME/skills"] = Path(codex_home) / "skills"
+    roots["$CODEX_HOME/.agents/skills"] = Path(codex_home) / ".agents" / "skills"
+    roots["/etc/codex/skills"] = Path("/etc/codex/skills")
+
+    skills = {}
+    for root_label, root in roots.items():
+        if not root.is_dir():
+            continue
+        for skill_file in sorted(root.glob("*/SKILL.md")):
+            if not skill_file.is_file():
+                continue
+            key = f"{root_label}/{skill_file.parent.name}"
+            files = sorted(path for path in skill_file.parent.rglob("*") if path.is_file())
+            content_hash = hashlib.sha256()
+            pixel_mentions = 0
+            for path in files:
+                content_hash.update(path.relative_to(skill_file.parent).as_posix().encode())
+                content_hash.update(b"\0")
+                contents = path.read_bytes()
+                content_hash.update(contents)
+                content_hash.update(b"\0")
+                try:
+                    pixel_mentions += sum(
+                        "pixel" in line.casefold()
+                        for line in contents.decode("utf-8").splitlines()
+                    )
+                except UnicodeDecodeError:
+                    pass
+            policy_file = skill_file.parent / "agents" / "openai.yaml"
+            policy_text = policy_file.read_text() if policy_file.is_file() else ""
+            policy = re.search(r"(?m)^\s*allow_implicit_invocation:\s*(true|false)\s*$", policy_text)
+            skills[key] = {
+                "sha256": content_hash.hexdigest(),
+                "files": len(files),
+                "pixel_reference_lines": pixel_mentions,
+                "allow_implicit_invocation": policy.group(1) == "true" if policy else None,
+                "policy_file_present": policy_file.is_file(),
+            }
+    return skills
+
+
+def collect_hook_sources(repo, codex_home):
+    repo = Path(repo)
+    codex_home = Path(codex_home)
+    candidates = {
+        "$CODEX_HOME/config.toml": codex_home / "config.toml",
+        "$CODEX_HOME/hooks.json": codex_home / "hooks.json",
+        "$CODEX_HOME/plugins/installed_plugins.json": codex_home / "plugins" / "installed_plugins.json",
+        "repo:.codex/config.toml": repo / ".codex" / "config.toml",
+        "repo:.codex/hooks.json": repo / ".codex" / "hooks.json",
+        "repo:.codex/plugin-hooks.json": repo / ".codex" / "plugin-hooks.json",
+    }
+    for label, root in (("$CODEX_HOME/plugins", codex_home / "plugins"),
+                        ("repo:.codex/plugins", repo / ".codex" / "plugins")):
+        if root.is_dir():
+            for path in sorted(root.rglob("*")):
+                if path.is_file() and path.name in {
+                    "plugin.json", "hooks.json", "plugin-hooks.json",
+                }:
+                    candidates[f"{label}/{path.relative_to(root).as_posix()}"] = path
+    return {
+        label: sha256(path.read_text())
+        for label, path in candidates.items()
+        if path.is_file()
+    }
+
+
+def pixel_reference_lines(repo, codex_home, developer_instructions):
+    texts = [developer_instructions]
+    codex_home = Path(codex_home)
+    global_agents = codex_home / "AGENTS.md"
+    if global_agents.is_file():
+        texts.append(global_agents.read_text())
+    repo = Path(repo)
+    for path in repo.rglob("AGENTS.md"):
+        if {".git", "node_modules", "target", ".next", "dist", "build"}.intersection(
+            path.relative_to(repo).parts
+        ):
+            continue
+        texts.append(path.read_text())
+    for path in (codex_home / "config.toml", codex_home / "hooks.json",
+                 codex_home / "plugins" / "installed_plugins.json",
+                 repo / ".codex" / "config.toml", repo / ".codex" / "hooks.json",
+                 repo / ".codex" / "plugin-hooks.json"):
+        if path.is_file():
+            texts.append(path.read_text())
+    for root in (codex_home / "plugins", repo / ".codex" / "plugins"):
+        if root.is_dir():
+            for path in root.rglob("*"):
+                if path.is_file() and path.name in {
+                    "plugin.json", "hooks.json", "plugin-hooks.json",
+                }:
+                    texts.append(path.read_text())
+    return sum(
+        1 for text in texts for line in text.splitlines()
+        if "pixel" in line.casefold()
+    )
 
 
 def collect_manifest(repo, codex_home):
@@ -49,7 +155,15 @@ def collect_manifest(repo, codex_home):
             "characters": len(developer_instructions),
         },
         "agents_files": agents,
-        "sources": ["Codex developer_instructions", "global/project AGENTS.md"],
+        "skills": collect_skills(repo, codex_home),
+        "hook_config_files": collect_hook_sources(repo, codex_home),
+        "pixel_reference_lines": pixel_reference_lines(
+            repo, codex_home, developer_instructions
+        ),
+        "sources": [
+            "Codex developer_instructions", "global/project AGENTS.md",
+            "discoverable Codex skills", "known Codex hook/plugin configuration files",
+        ],
     }
 
 

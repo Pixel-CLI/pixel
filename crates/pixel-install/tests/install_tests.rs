@@ -83,8 +83,7 @@ fn without_task_hooks(value: &serde_json::Value, provider: &str, exe: &Path) -> 
     remaining
 }
 
-// The install wires the Claude lifecycle hooks into ~/.claude/settings.json
-// (the SessionStart hook injects the prompt into every Claude process) and
+// The install wires task-event accounting hooks into provider settings and
 // removes legacy `claude()` shell-wrapper blocks. Every test pins an explicit
 // shell instead of inheriting the runner's `$SHELL`, so a developer running
 // `cargo test` from fish gets the same result as one running it from zsh —
@@ -117,67 +116,40 @@ const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";
 /// This proves instruction delivery and stream preservation, not model obedience.
 #[test]
 #[cfg(unix)]
-fn installed_metrics_guidance_reaches_wrapped_agents_without_rewriting_streams() {
+fn global_install_registers_only_task_hooks_for_claude_and_codex() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let exe = fake_pixel_exe(home);
     install(&InstallOptions {
         repo: None,
         home: Some(home.to_path_buf()),
-        executable_path: Some(fake_pixel_exe(home)),
+        executable_path: Some(exe.clone()),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     })
     .unwrap();
-    let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
-    for required in [
-        "## LIVE OPERATION METRICS",
-        "tool-call result",
-        "exact line once",
-        "never a global latest",
-        // A panel already in the tool-call result is treated as relayed;
-        // the model must not echo it as a separate message.
-        "already in the tool-call result",
-        "already relayed by the host",
-        "PIXEL_METRICS=0",
-        "PIXEL_METRICS_ROUND_TRIP_MS",
-        "sequential-v1",
-        "default `round_trip_ms` is 2000",
-        "search-compat",
-        "Do not invent",
-    ] {
-        assert!(
-            prompt.contains(required),
-            "missing relay contract: {required}"
-        );
-    }
+    let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md"))
+        .expect("shared prompt asset is deployed for explicit integrations");
+    assert!(prompt.contains("## Retrieval commands"));
 
-    // Codex keeps its normal native retrieval flow; global install writes no
-    // permanent Pixel developer-instructions block.
-    assert_eq!(codex_developer_instructions(home), None);
-    // Claude gets the doctrine through the SessionStart hook, which injects
-    // the deployed prompt itself — every `claude` process, not only shells
-    // launched through the retired wrapper.
+    // Claude receives task accounting only. Retrieval prompts, metrics,
+    // PostToolUse advice and PreToolUse rewriting stay out of global hooks.
     let settings: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
             .unwrap();
-    let session_hooks = settings["hooks"]["SessionStart"].as_array().unwrap();
-    assert!(
-        session_hooks.iter().any(|g| {
-            g["hooks"].as_array().is_some_and(|h| {
-                h.iter().any(|hook| {
-                    hook["command"]
-                        .as_str()
-                        .is_some_and(|c| c.contains("run-hook session-start"))
-                })
-            })
-        }),
-        "the SessionStart hook must be registered: {settings}"
+    assert_eq!(
+        without_task_hooks(&settings, "claude", &exe)["hooks"],
+        serde_json::json!({}),
+        "Claude global hooks contain no automatic retrieval callbacks: {settings}"
     );
-    // And the file that hook injects is the verified prompt above.
-    assert!(
-        prompt.contains("## LIVE OPERATION METRICS"),
-        "the SessionStart-injected prompt carries the relay contract"
+    assert_eq!(codex_developer_instructions(home), None);
+    let codex: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap()).unwrap();
+    assert_eq!(
+        without_task_hooks(&codex, "codex", &exe)["hooks"],
+        serde_json::json!({}),
+        "Codex global hooks contain no retrieval callbacks or metrics relay: {codex}"
     );
 }
 
@@ -354,8 +326,8 @@ fn install_creates_config_with_managed_markers() {
         claude, original,
         "CLAUDE.md must be byte-identical — install no longer rewrites agent configs"
     );
-    // The lifecycle hooks + agent prompt are the install artifacts; no
-    // shell wrapper is written anymore.
+    // The agent prompt and task-event hooks are install artifacts; no shell
+    // wrapper or automatic retrieval callback is written.
     assert!(
         home.join(".local/share/pixel/agent-prompt.md").is_file(),
         "agent-prompt.md should be deployed"
@@ -367,7 +339,7 @@ fn install_creates_config_with_managed_markers() {
         settings["hooks"]["SessionStart"]
             .as_array()
             .is_some_and(|g| !g.is_empty()),
-        "claude lifecycle hooks should be installed: {settings}"
+        "Claude task-event hooks should be installed: {settings}"
     );
     assert!(
         !shell_profile_path(home).exists(),
@@ -398,7 +370,7 @@ fn install_is_idempotent() {
     assert!(r2.ok, "second install should succeed");
     assert!(r2.summary.red == 0, "no red steps on re-install");
 
-    // The install deploys the agent prompt and the Claude lifecycle hooks.
+    // The install deploys the agent prompt and Claude's task-event hooks.
     // Both must be stable across re-installs.
     let prompt = home.join(".local/share/pixel/agent-prompt.md");
     let p1 = fs::read(&prompt).expect("agent-prompt deployed");
@@ -426,7 +398,7 @@ fn install_is_idempotent() {
 }
 
 #[test]
-fn install_leaves_codex_config_untouched() {
+fn global_install_removes_retired_codex_hook_and_preserves_foreign_config() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     let codex_path = home.join(pixel_install::config::CODEX_HOOKS_FILE);
@@ -459,30 +431,21 @@ fn install_leaves_codex_config_untouched() {
     };
     install(&options).expect("install");
 
-    // Install adds the metrics relay and synchronous task lifecycle gates, and
-    // leaves every foreign hook and unrelated key untouched. Stale pixel
-    // guards are still `pixel uninstall`'s job, not install's.
+    // Global installs add the task-event suite, remove the retired Pixel
+    // retrieval hook, and preserve foreign hooks and unrelated config.
     let after: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&codex_path).unwrap()).unwrap();
-    let post_tool_use = after["hooks"]["PostToolUse"]
-        .as_array()
-        .expect("metrics hook registered under PostToolUse");
     assert!(
-        post_tool_use.iter().any(|entry| {
-            entry["hooks"].as_array().is_some_and(|hooks| {
-                hooks.iter().any(|hook| {
-                    hook["command"]
-                        .as_str()
-                        .is_some_and(|c| c.contains("run-hook metrics"))
-                })
-            })
-        }),
-        "the metrics relay must be registered: {after}"
+        !after.to_string().contains("pixel-targets-guard"),
+        "the retired Pixel retrieval hook must be removed: {after}"
     );
     assert_eq!(
         without_task_hooks(&after, "codex", options.executable_path.as_ref().unwrap())["hooks"]["PreToolUse"],
-        original["hooks"]["PreToolUse"],
-        "foreign hooks must pass through untouched"
+        serde_json::json!([{
+            "matcher": "Bash",
+            "hooks": [{ "type": "command", "command": "~/.claude/hooks/keep-this-hook" }]
+        }]),
+        "the foreign command in the mixed hook group must survive exactly"
     );
     assert_eq!(after["unrelated"], true);
 }
@@ -834,44 +797,27 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
     let prompt = fs::read_to_string(&prompt_path)
         .expect("agent-prompt.md should be deployed on a fresh home");
     assert!(
-        prompt.contains("## Retrieval route"),
+        prompt.contains("## Retrieval commands"),
         "agent-prompt.md should carry the retrieval commands"
     );
 
-    // Claude lifecycle hooks are installed in ~/.claude/settings.json; no
-    // shell profile is created or touched.
+    // Claude task-event hooks are installed in ~/.claude/settings.json; no
+    // retrieval callbacks or shell profile are created.
     let settings: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(home.join(".claude/settings.json"))
             .expect("claude settings.json should be created on a fresh home"),
     )
     .unwrap();
-    for (event, verb) in [
-        ("SessionStart", "session-start"),
-        ("UserPromptSubmit", "prompt-submit"),
-    ] {
-        let groups = settings["hooks"][event].as_array().unwrap();
-        assert!(
-            groups.iter().any(|g| {
-                g["hooks"].as_array().is_some_and(|h| {
-                    h.iter().any(|hook| {
-                        hook["command"]
-                            .as_str()
-                            .is_some_and(|c| c.contains(&format!("run-hook {verb}")))
-                    })
-                })
-            }),
-            "missing {event} → run-hook {verb}: {settings}"
-        );
-    }
-    // Task gates are global; the retrieval rewriter stays repo-local.
+    // Only task-event hooks are installed globally; retrieval callbacks are
+    // absent from every event.
     let legacy = without_task_hooks(&settings, "claude", &std::env::current_exe().unwrap());
     assert!(
-        legacy["hooks"].get("PreToolUse").is_none(),
-        "global install must not add a retrieval rewriter: {settings}"
+        legacy["hooks"] == serde_json::json!({}),
+        "global install must not add automatic callbacks: {settings}"
     );
     assert!(
         !shell_profile_path(home).exists(),
-        "no shell wrapper is written — the SessionStart hook injects the prompt"
+        "no shell wrapper is written"
     );
     assert_eq!(
         codex_developer_instructions(home),
@@ -972,7 +918,7 @@ fn doctor_install_artifact_checks_red_and_green() {
     let mut edited = fs::read_to_string(&prompt_path).expect("agent-prompt deployed");
     assert!(
         edited.contains("# Pixel — deterministic repository facts")
-            && edited.contains("## Retrieval route"),
+            && edited.contains("## Retrieval commands"),
         "fixture: the edited prompt must still satisfy the old heuristic"
     );
     edited.push_str("\nOne extra rule the bundled prompt does not carry.\n");
@@ -1628,7 +1574,7 @@ fn uninstall_reports_every_backup_it_leaves_with_a_command_that_removes_them() {
     for rel in [
         ".claude/settings.json",
         ".codex/hooks.json",
-        ".pi/agent/APPEND_SYSTEM.md",
+        ".pi/agent/extensions/pixel-impact.ts",
     ] {
         assert!(backup_of(rel), "no backup of {rel} in {on_disk:?}");
     }
@@ -1891,9 +1837,9 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
         session.iter().skip(1).any(|g| {
             g["hooks"].as_array().is_some_and(|h| {
                 h.iter().any(|hook| {
-                    hook["command"]
-                        .as_str()
-                        .is_some_and(|c| c.contains("run-hook session-start"))
+                    hook["command"].as_str().is_some_and(|c| {
+                        c.contains("task-event --provider claude --event session-start")
+                    })
                 })
             })
         }),
@@ -1974,14 +1920,9 @@ fn routing_isolated_provider_child() {
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
-    // Claude gets the lifecycle hooks (the SessionStart prompt injection is
-    // how the doctrine reaches every `claude` process); Codex gets the
-    // metrics PostToolUse relay (Codex's exec layer merges the invocation's
-    // stderr into the tool result it records and shows, so the relay's
-    // dedupe drops the duplicate and a PostToolUse entry only re-emits the
-    // 🟩 line for the rare host whose tool result drops it). Devin's config
-    // passes through untouched, and no hooks directory or hook scripts are
-    // created.
+    // Claude and Codex get only synchronous task-event hooks. Devin keeps
+    // its separate lifecycle protocol. No automatic retrieval callbacks or
+    // hook scripts are deployed globally.
     install(&opts).unwrap();
     let first = fs::read(&config).unwrap();
     install(&opts).unwrap();
@@ -1992,18 +1933,15 @@ fn routing_isolated_provider_child() {
     );
     let installed: serde_json::Value = serde_json::from_slice(&first).unwrap();
     let value = if provider == "devin" {
-        installed
+        installed.clone()
     } else {
         without_task_hooks(&installed, &provider, &exe)
     };
     match provider.as_str() {
         "codex" => {
-            let post = value["hooks"]["PostToolUse"]
-                .as_array()
-                .expect("codex gets exactly the metrics PostToolUse relay");
-            assert_eq!(post.len(), 1);
-            let command = post[0]["hooks"][0]["command"].as_str().unwrap();
-            assert!(command.contains("run-hook metrics"), "{command}");
+            assert_eq!(value["hooks"], serde_json::json!({}), "{installed}");
+            let command = pixel_commands(&installed, "PreToolUse")[0].clone();
+            assert!(command.contains("task-event --provider codex"), "{command}");
             // The executable path holds a space and a quote: it must arrive
             // shell-quoted so the hook actually launches, with the embedded
             // apostrophe emitted as the '\'' escape sequence.
@@ -2015,46 +1953,12 @@ fn routing_isolated_provider_child() {
             );
         }
         "claude" => {
-            // Beyond the task gates, no retrieval guard belongs in global settings.
-            let hooks = value["hooks"].as_object().unwrap();
+            assert_eq!(value["hooks"], serde_json::json!({}), "{installed}");
+            let command = pixel_commands(&installed, "PreToolUse")[0].clone();
             assert!(
-                hooks.get("PreToolUse").is_none(),
-                "global claude install must not wire a retrieval guard: {value}"
+                command.contains("task-event --provider claude"),
+                "{command}"
             );
-            for (event, verb) in [
-                ("SessionStart", "run-hook session-start"),
-                ("UserPromptSubmit", "run-hook prompt-submit"),
-                ("PostToolUse", "run-hook post-tool-use"),
-            ] {
-                let groups = hooks[event].as_array().unwrap();
-                assert!(
-                    groups.iter().any(|g| {
-                        g["hooks"].as_array().is_some_and(|h| {
-                            h.iter().any(|hook| {
-                                hook["command"].as_str().is_some_and(|c| c.contains(verb))
-                            })
-                        })
-                    }),
-                    "{event} must register {verb}: {value}"
-                );
-            }
-            // Claude's post-compaction rides SessionStart with matcher "compact".
-            let session = hooks["SessionStart"].as_array().unwrap();
-            assert!(
-                session.iter().any(|g| {
-                    g["matcher"].as_str() == Some("compact")
-                        && g["hooks"].as_array().is_some_and(|h| {
-                            h.iter().any(|hook| {
-                                hook["command"]
-                                    .as_str()
-                                    .is_some_and(|c| c.contains("run-hook post-compaction"))
-                            })
-                        })
-                }),
-                "the compact SessionStart entry must be registered: {value}"
-            );
-            // The quoted executable with a space and apostrophe must survive.
-            let command = session[0]["hooks"][0]["command"].as_str().unwrap();
             assert!(
                 command.starts_with('\'')
                     && command.contains("directory/pixel' run-hook")
@@ -2101,8 +2005,7 @@ fn routing_isolated_provider_child() {
         !home.join(".claude/hooks").exists(),
         "install must not create ~/.claude/hooks for any provider"
     );
-    // The install artifacts (agent-prompt + lifecycle hooks) are deployed
-    // regardless of provider.
+    // Explicitly invoked prompt assets are deployed regardless of provider.
     assert!(
         home.join(".local/share/pixel/agent-prompt.md").is_file(),
         "agent-prompt.md should be deployed"
@@ -3054,34 +2957,29 @@ fn uninstall_removes_the_subagent_prompt() {
 }
 
 // ---------------------------------------------------------------------------
-// Pi's APPEND_SYSTEM.md is a shared file: pixel owns a managed block inside
-// it, never the file. `pixel install` used to replace the whole file and
-// `pixel uninstall` deleted it, so the user's own pi instructions were lost.
+// Pi's APPEND_SYSTEM.md is auto-loaded, so upgrades remove retired Pixel
+// prompt text while preserving user instructions. Explicit impact lives in
+// a managed extension under .pi/agent/extensions.
 // ---------------------------------------------------------------------------
 
 fn pi_prompt_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".pi/agent/APPEND_SYSTEM.md")
 }
 
-const PRE_MARKER_PI_PROMPT: &str = "# Pixel Retrieval Layer — Mandatory Agent Protocol\n\n## THE COMPLETE REPLACEMENT MAP\npixel search \"term\"\n## ENVIRONMENT\nAll commands accept `[PATH]` (default: current directory).\n";
-
-/// Backup files `pixel install` wrote for the pi prompt, newest last.
-fn pi_backups(home: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut paths: Vec<std::path::PathBuf> = fs::read_dir(home.join(".pi/agent"))
-        .map(|entries| {
-            entries
-                .filter_map(std::result::Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.file_name()
-                        .is_some_and(|name| name.to_string_lossy().contains("pixel-bak"))
-                })
-                .collect()
+fn pi_prompt_backups(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fs::read_dir(home.join(".pi/agent"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("APPEND_SYSTEM.md.pixel-bak."))
         })
-        .unwrap_or_default();
-    paths.sort();
-    paths
+        .collect()
 }
+
+const PRE_MARKER_PI_PROMPT: &str = "# Pixel Retrieval Layer — Mandatory Agent Protocol\n\n## THE COMPLETE REPLACEMENT MAP\npixel search \"term\"\n## ENVIRONMENT\nAll commands accept `[PATH]` (default: current directory).\n";
 
 fn uninstall_home(home: &std::path::Path) {
     uninstall(&UninstallOptions {
@@ -3096,46 +2994,40 @@ fn uninstall_home(home: &std::path::Path) {
 }
 
 #[test]
-fn install_and_uninstall_keep_the_users_own_text_in_pis_append_system_file() {
+fn install_and_uninstall_strip_only_the_retired_pi_prompt() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     let pi_path = pi_prompt_path(home);
     fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
-    let original = "# my own pi instructions\nAlways answer in French.\n";
-    fs::write(&pi_path, original).unwrap();
+    let original =
+        format!("# my own pi instructions\nAlways answer in French.\n{PRE_MARKER_PI_PROMPT}");
+    fs::write(&pi_path, &original).unwrap();
 
     install_for_shell(home, TEST_SHELL);
 
-    let deployed = fs::read_to_string(&pi_path).expect("pi prompt deployed");
+    let migrated = "# my own pi instructions\nAlways answer in French.\n";
+    assert_eq!(fs::read_to_string(&pi_path).unwrap(), migrated);
     assert!(
-        deployed.contains(original.trim_end()),
-        "the user's own instructions must survive install:\n{deployed}"
-    );
-    assert!(
-        deployed.contains(MANAGED_BEGIN) && deployed.contains(MANAGED_END),
-        "the bundled prompt must sit inside the managed markers:\n{deployed}"
-    );
-    let backups = pi_backups(home);
-    assert_eq!(backups.len(), 1, "one backup of the file install changed");
-    assert_eq!(
-        fs::read_to_string(&backups[0]).unwrap(),
-        original,
-        "the backup holds the bytes install replaced"
+        home.join(".pi/agent/extensions/pixel-impact.ts").is_file(),
+        "the explicit impact command is installed as an extension"
     );
 
-    // A second install that finds a current block changes nothing.
     let once = fs::read(&pi_path).unwrap();
     install_for_shell(home, TEST_SHELL);
     assert_eq!(
         fs::read(&pi_path).unwrap(),
         once,
-        "a current managed block is rewritten with the same bytes"
+        "a reinstall leaves the migrated user file byte-identical"
     );
 
     uninstall_home(home);
     let after = fs::read_to_string(&pi_path).expect("the user's file survives uninstall");
-    assert_eq!(after, original, "uninstall removes the block, not the file");
+    assert_eq!(
+        after, migrated,
+        "uninstall removes Pixel files, not user text"
+    );
     assert!(!after.contains(MANAGED_BEGIN), "{after}");
+    assert!(!home.join(".pi/agent/extensions/pixel-impact.ts").exists());
 }
 
 #[test]
@@ -3144,8 +3036,7 @@ fn doctor_detects_a_pre_marker_prompt_above_the_managed_block_until_install_repa
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
     let pi_path = pi_prompt_path(home);
-    let current = fs::read_to_string(&pi_path).unwrap();
-    let stale = format!("My own note.\n{PRE_MARKER_PI_PROMPT}## My section\nKeep this.\n{current}");
+    let stale = format!("My own note.\n{PRE_MARKER_PI_PROMPT}## My section\nKeep this.\n");
     fs::write(&pi_path, &stale).unwrap();
     let doctor_opts = DoctorOptions {
         home: Some(home.to_path_buf()),
@@ -3163,13 +3054,12 @@ fn doctor_detects_a_pre_marker_prompt_above_the_managed_block_until_install_repa
     install_for_shell(home, TEST_SHELL);
     let repaired = fs::read_to_string(&pi_path).unwrap();
     assert_eq!(
-        repaired,
-        format!("My own note.\n## My section\nKeep this.\n{current}"),
+        repaired, "My own note.\n## My section\nKeep this.\n",
         "install must remove only the recognized historical prompt"
     );
     assert_eq!(pi_status(), CheckStatus::Green);
     assert_eq!(
-        fs::read_to_string(pi_backups(home).last().unwrap()).unwrap(),
+        fs::read_to_string(pi_prompt_backups(home).last().unwrap()).unwrap(),
         stale
     );
 }
@@ -3180,10 +3070,9 @@ fn uninstall_reclaims_pre_marker_prompt_copies_without_erasing_user_text() {
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
     let pi_path = pi_prompt_path(home);
-    let current = fs::read_to_string(&pi_path).unwrap();
     fs::write(
         &pi_path,
-        format!("Before.\n{PRE_MARKER_PI_PROMPT}## My section\nKeep this.\n{current}After.\n"),
+        format!("Before.\n{PRE_MARKER_PI_PROMPT}## My section\nKeep this.\nAfter.\n"),
     )
     .unwrap();
 
@@ -3227,13 +3116,12 @@ fn first_install_should_remove_duplicate_prompts_and_leave_doctor_green() {
 }
 
 #[test]
-fn install_doctor_and_uninstall_should_preserve_a_fence_spanning_the_managed_block() {
+fn install_and_uninstall_preserve_a_retired_prompt_quoted_in_user_prose() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
-    install_for_shell(home, TEST_SHELL);
     let pi_path = pi_prompt_path(home);
-    let current = fs::read_to_string(&pi_path).unwrap();
-    let existing = format!("```markdown\n{current}{PRE_MARKER_PI_PROMPT}```\nAfter.\n");
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+    let existing = format!("```markdown\n{PRE_MARKER_PI_PROMPT}```\nAfter.\n");
     fs::write(&pi_path, &existing).unwrap();
 
     let report = doctor(&DoctorOptions {
@@ -3250,22 +3138,18 @@ fn install_doctor_and_uninstall_should_preserve_a_fence_spanning_the_managed_blo
     assert_eq!(fs::read_to_string(&pi_path).unwrap(), existing);
 
     uninstall_home(home);
-    assert_eq!(
-        fs::read_to_string(pi_path).unwrap(),
-        format!("```markdown\n{PRE_MARKER_PI_PROMPT}```\nAfter.\n")
-    );
+    assert_eq!(fs::read_to_string(pi_path).unwrap(), existing);
 }
 
 #[test]
-fn pi_lifecycle_should_preserve_an_orphan_end_marker_and_repair_the_real_block() {
-    for closing in ["", MANAGED_END] {
+fn doctor_and_install_should_remove_a_managed_pi_prompt_and_preserve_orphan_markers() {
+    for closing in [MANAGED_END] {
         let dir = TempDir::new().expect("tempdir");
         let home = dir.path();
-        install_for_shell(home, TEST_SHELL);
         let pi_path = pi_prompt_path(home);
-        let current = fs::read_to_string(&pi_path).unwrap();
         let prefix = format!("{MANAGED_END}\nBefore.\n");
         let original = format!("{prefix}{MANAGED_BEGIN}\nstale\n{closing}");
+        fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
         fs::write(&pi_path, &original).unwrap();
         assert_eq!(
             pixel_install::config::strip_managed_block(&original),
@@ -3286,10 +3170,7 @@ fn pi_lifecycle_should_preserve_an_orphan_end_marker_and_repair_the_real_block()
             CheckStatus::Red
         );
         install_for_shell(home, TEST_SHELL);
-        assert_eq!(
-            fs::read_to_string(&pi_path).unwrap(),
-            format!("{prefix}{current}")
-        );
+        assert_eq!(fs::read_to_string(&pi_path).unwrap(), prefix);
         assert_eq!(
             check(&doctor(&opts).unwrap(), "install.pi-prompt").status,
             CheckStatus::Green
@@ -3300,43 +3181,34 @@ fn pi_lifecycle_should_preserve_an_orphan_end_marker_and_repair_the_real_block()
 }
 
 #[test]
-fn a_pi_prompt_written_by_an_earlier_install_is_wrapped_not_duplicated() {
+fn install_removes_the_automatic_prompt_written_by_an_earlier_release() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
     // What `pixel install` wrote before it treated the file as shared: the
     // prompt verbatim, no markers around it.
-    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md"))
-        .expect("deployed prompt");
+    let asset = PRE_MARKER_PI_PROMPT;
     let pi_path = pi_prompt_path(home);
-    fs::write(&pi_path, &asset).unwrap();
+    fs::write(&pi_path, format!("Before.\n{asset}After.\n")).unwrap();
 
     install_for_shell(home, TEST_SHELL);
 
-    let deployed = fs::read_to_string(&pi_path).expect("pi prompt deployed");
-    assert!(
-        deployed.starts_with(MANAGED_BEGIN),
-        "the upgrade must put the markers around the prompt, not above it:\n{deployed}"
-    );
-    assert_eq!(
-        deployed.matches(asset.as_str()).count(),
-        0,
-        "the long legacy prompt is replaced by Pi's short rule"
-    );
-    assert!(deployed.contains("Use the pixel tool for repository retrieval"));
+    let deployed = fs::read_to_string(&pi_path).expect("user text survives migration");
+    assert_eq!(deployed, "Before.\nAfter.\n");
+    assert!(!deployed.contains(MANAGED_BEGIN));
+    assert!(home.join(".pi/agent/extensions/pixel-impact.ts").is_file());
 }
 
 #[test]
-fn legacy_pi_prompt_migration_removes_stale_sections_and_stays_healthy() {
+fn legacy_pi_prompt_migration_preserves_surrounding_user_sections() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
-    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md"))
-        .expect("deployed legacy prompt");
+    let asset = PRE_MARKER_PI_PROMPT;
     let pi_path = pi_prompt_path(home);
     fs::write(
         &pi_path,
-        format!("My Pi note.\n{asset}\n## GitNexus — Legacy\nStale instructions.\n## My notes\nKeep this.\n"),
+        format!("My Pi note.\n{asset}\n## My notes\nKeep this.\n"),
     )
     .expect("legacy prompt fixture");
 
@@ -3345,10 +3217,9 @@ fn legacy_pi_prompt_migration_removes_stale_sections_and_stays_healthy() {
     let deployed = fs::read_to_string(&pi_path).expect("migrated Pi prompt");
     assert!(deployed.starts_with("My Pi note.\n"), "{deployed}");
     assert!(deployed.contains("## My notes\nKeep this.\n"), "{deployed}");
-    assert!(!deployed.contains("GitNexus"), "{deployed}");
-    assert!(!deployed.contains("Stale instructions."), "{deployed}");
-    assert!(!deployed.contains(&asset), "{deployed}");
-    assert_eq!(deployed.matches(MANAGED_BEGIN).count(), 1, "{deployed}");
+    assert!(!deployed.contains(asset), "{deployed}");
+    assert!(!deployed.contains(MANAGED_BEGIN), "{deployed}");
+    assert!(!deployed.contains(MANAGED_END), "{deployed}");
     let report = doctor(&DoctorOptions {
         home: Some(home.to_path_buf()),
         shell: Some(TEST_SHELL.into()),
@@ -3385,7 +3256,8 @@ fn edited_legacy_pi_prompt_is_replaced_without_consuming_following_user_text() {
     assert!(deployed.ends_with("After.\n"), "{deployed}");
     assert!(!deployed.contains("edited by hand"), "{deployed}");
     assert!(!deployed.contains("# Pixel Retrieval Layer"), "{deployed}");
-    assert_eq!(deployed.matches(MANAGED_BEGIN).count(), 1, "{deployed}");
+    assert!(!deployed.contains(MANAGED_BEGIN), "{deployed}");
+    assert!(!deployed.contains(MANAGED_END), "{deployed}");
     let report = doctor(&DoctorOptions {
         home: Some(home.to_path_buf()),
         shell: Some(TEST_SHELL.into()),
@@ -3400,7 +3272,7 @@ fn edited_legacy_pi_prompt_is_replaced_without_consuming_following_user_text() {
 }
 
 #[test]
-fn uninstall_removes_the_pi_prompt_file_when_it_held_nothing_else() {
+fn uninstall_removes_a_retired_pixel_only_pi_prompt_file() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     let pi_path = pi_prompt_path(home);
@@ -3411,12 +3283,11 @@ fn uninstall_removes_the_pi_prompt_file_when_it_held_nothing_else() {
     )
     .unwrap();
 
-    install_for_shell(home, TEST_SHELL);
     uninstall_home(home);
 
     assert!(
         !pi_path.exists(),
-        "a file that held nothing but the pixel block is pixel's to delete"
+        "a file that held only the retired Pixel prompt is Pixel's to delete"
     );
 }
 
@@ -3476,14 +3347,14 @@ fn install_reports_a_pi_prompt_it_cannot_write_instead_of_greening_it() {
 }
 
 #[test]
-fn doctor_pi_prompt_check_is_red_until_the_managed_block_is_current() {
+fn doctor_distinguishes_retired_pi_prompt_from_explicit_impact_extension() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
     let pi_path = pi_prompt_path(home);
     let doc_opts = DoctorOptions {
         home: Some(home.to_path_buf()),
-        executable_path: None,
+        executable_path: Some(home.join("pixel")),
         shell: Some(TEST_SHELL.into()),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         ..Default::default()
@@ -3502,34 +3373,71 @@ fn doctor_pi_prompt_check_is_red_until_the_managed_block_is_current() {
     assert_eq!(
         status(home),
         CheckStatus::Green,
-        "a freshly installed pi prompt is green"
+        "an absent automatic prompt is healthy"
+    );
+    let impact_check = |home: &std::path::Path| {
+        check(
+            &doctor(&DoctorOptions {
+                home: Some(home.to_path_buf()),
+                ..doc_opts.clone()
+            })
+            .expect("doctor"),
+            "install.pi-impact",
+        )
+        .status
+    };
+    assert_eq!(impact_check(home), CheckStatus::Green);
+    let extension = home.join(".pi/agent/extensions/pixel-impact.ts");
+    let source = fs::read_to_string(&extension).expect("explicit command extension installed");
+    assert!(
+        source.contains("pi.registerCommand(\"pixel-impact\""),
+        "{source}"
+    );
+    assert!(source.contains("--no-refresh"), "{source}");
+    assert!(
+        !source.contains("registerTool("),
+        "impact is explicit, not automatic"
     );
 
-    // The user's own text outside the markers is theirs: it does not make the
-    // check stale.
-    let with_user_text = format!("{}Be concise.\n", fs::read_to_string(&pi_path).unwrap());
-    fs::write(&pi_path, &with_user_text).unwrap();
+    // The user's automatic prompt is untouched and does not make the check stale.
+    fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+    fs::write(&pi_path, "my own instructions only\n").unwrap();
     assert_eq!(
         status(home),
         CheckStatus::Green,
-        "text outside the pixel markers belongs to the user"
+        "user-owned Pi system instructions remain valid"
     );
 
-    // A block that no longer matches the bundled prompt is stale.
+    // A retired Pixel automatic prompt is red until the upgrade removes it.
     fs::write(
         &pi_path,
-        format!("{MANAGED_BEGIN}\n# stale prompt\n{MANAGED_END}\n"),
+        format!("my own instructions\n{PRE_MARKER_PI_PROMPT}"),
     )
     .unwrap();
     assert_eq!(
         status(home),
         CheckStatus::Red,
-        "a stale block must send the user back to pixel install"
+        "retired automatic guidance must be removed"
     );
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(
+        fs::read_to_string(&pi_path).unwrap(),
+        "my own instructions\n"
+    );
+    assert_eq!(status(home), CheckStatus::Green);
 
-    // And the file must carry the block at all.
-    fs::write(&pi_path, "my own instructions only\n").unwrap();
-    assert_eq!(status(home), CheckStatus::Red, "no block, no green");
+    fs::write(
+        &extension,
+        format!("{source}\n// stale managed extension\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        impact_check(home),
+        CheckStatus::Red,
+        "stale binary/source is caught"
+    );
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(impact_check(home), CheckStatus::Green);
 }
 
 // ---------------------------------------------------------------------------
@@ -3548,10 +3456,9 @@ fn wrappers_step(report: &InstallReport) -> &pixel_install::install::InstallStep
         .expect("shell-wrappers step")
 }
 
-/// Plugin-manifest surfaces (skills/, .cursor/rules/, …) are generated from
-/// `assets/pixel-agent-prompt.md` by `scripts/gen-plugin-assets.sh`. They must
-/// never drift: an edited prompt with stale plugin files silently ships an old
-/// protocol to every CLI that installs via plugin manifests.
+/// Plugin-manifest skill files come from the curated impact-skill asset;
+/// other generated rule surfaces still come from `assets/pixel-agent-prompt.md`.
+/// Keep both sets synchronized through the generator.
 #[test]
 fn plugin_assets_are_in_sync() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3570,6 +3477,54 @@ fn plugin_assets_are_in_sync() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn plugin_skill_is_focused_explicit_and_replaces_the_broad_skill() {
+    let repo = repo_root();
+    let read =
+        |rel: &str| fs::read_to_string(repo.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+    let claude: serde_json::Value =
+        serde_json::from_str(&read(".claude-plugin/plugin.json")).unwrap();
+    let codex: serde_json::Value =
+        serde_json::from_str(&read(".codex-plugin/plugin.json")).unwrap();
+    assert_eq!(codex["skills"], "./skills/");
+    assert_eq!(claude["skills"], "./claude-skills/");
+    assert!(
+        codex.get("hooks").is_none(),
+        "Codex registers a retrieval hook"
+    );
+    assert!(
+        claude.get("hooks").is_none(),
+        "Claude registers a retrieval hook"
+    );
+
+    let codex_skill = read("skills/pixel-impact/SKILL.md");
+    assert!(codex_skill.contains("name: pixel-impact"));
+    assert!(codex_skill.contains("blast radius"));
+    assert!(!codex_skill.contains("disable-model-invocation"));
+    assert!(!codex_skill.contains("pixel build-index"));
+    let claude_skill = read("claude-skills/pixel-impact/SKILL.md");
+    assert!(claude_skill.contains("disable-model-invocation: true"));
+    assert_eq!(
+        claude_skill.replacen("disable-model-invocation: true\n", "", 1),
+        codex_skill,
+        "provider-specific copies must share one curated skill body"
+    );
+    let codex_policy = read("skills/pixel-impact/agents/openai.yaml");
+    assert!(codex_policy.contains("allow_implicit_invocation: false"));
+
+    for retired in [
+        "skills/pixel/SKILL.md",
+        ".agents/skills/pixel/SKILL.md",
+        ".openclaw/skills/pixel/SKILL.md",
+        ".agents/skills/pixel-impact/SKILL.md",
+    ] {
+        assert!(
+            !repo.join(retired).exists(),
+            "retired broad skill remains: {retired}"
+        );
+    }
 }
 
 #[test]
@@ -3853,7 +3808,14 @@ fn plugin_manifests_parse_and_point_at_files_that_exist() {
     );
     let package = json("package.json");
     exists("package.json", package["main"].as_str().unwrap());
-    for entry in package["files"].as_array().unwrap() {
+    let package_files = package["files"].as_array().unwrap();
+    assert!(
+        package_files
+            .iter()
+            .any(|entry| entry.as_str() == Some("claude-skills/")),
+        "npm package must include the Claude-specific explicit-only skill copy"
+    );
+    for entry in package_files {
         exists("package.json", entry.as_str().unwrap());
     }
     for entry in json("opencode.json")["plugin"].as_array().unwrap() {
@@ -3883,9 +3845,11 @@ fn plugin_manifests_parse_and_point_at_files_that_exist() {
     assert_eq!(commands, 2, "SessionStart and SubagentStart");
     exists("hooks/plugin-hooks.json", "hooks/pixel-context.sh");
 
+    // The legacy hook file remains available only to users who opt into it;
+    // the default Codex and Claude manifests above deliberately do not load it.
     // A root `plugin.json` wins over the tool directories: Copilot CLI reads
     // it before `.claude-plugin/plugin.json`, and Codex's Agent Plugins loader
-    // then ignores the hooks of `.codex-plugin/plugin.json`
+    // then ignores hooks declared in `.codex-plugin/plugin.json`
     // (openai/codex#39895). A bare one shipped neither skills nor hooks.
     assert!(
         !repo.join("plugin.json").exists(),
@@ -3909,7 +3873,7 @@ fn repo_install_options(repo: &std::path::Path, home: &std::path::Path) -> Insta
 
 #[test]
 #[cfg(unix)]
-fn repo_install_writes_five_task_scoped_artifacts_without_permanent_guidance() {
+fn repo_install_keeps_native_defaults_and_scopes_enforcement_to_supported_hosts() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -3919,10 +3883,8 @@ fn repo_install_writes_five_task_scoped_artifacts_without_permanent_guidance() {
     let report = install(&repo_install_options(&repo, &home)).expect("repo install");
     assert!(report.ok, "{report:?}");
 
-    // .claude/settings.local.json — repo-local guard only: a pixel PreToolUse
-    // group, no lifecycle events (those live in the user-level settings).
-    // The command names this machine's binary, so the team-shared
-    // settings.json is never created for it.
+    // Claude's old repo-local callbacks are removed. Lifecycle task hooks
+    // belong to the global settings, while Claude's own tools retrieve.
     assert!(
         !repo.join(".claude/settings.json").exists(),
         "the shared settings.json must not carry a machine-local guard"
@@ -3932,19 +3894,9 @@ fn repo_install_writes_five_task_scoped_artifacts_without_permanent_guidance() {
     )
     .unwrap();
     let claude_hooks = claude["hooks"].as_object().unwrap();
-    let pre = claude_hooks["PreToolUse"].as_array().unwrap();
     assert!(
-        pre.iter().any(|g| {
-            g["matcher"].as_str() == Some("Bash|Read|Grep")
-                && g["hooks"].as_array().is_some_and(|h| {
-                    h.iter().any(|hook| {
-                        hook["command"]
-                            .as_str()
-                            .is_some_and(|c| c.contains("run-hook guard --provider claude"))
-                    })
-                })
-        }),
-        "repo .claude/settings.local.json must carry the pixel guard: {claude}"
+        pixel_commands(&claude, "PreToolUse").is_empty(),
+        "repo Claude must not register retrieval callbacks: {claude}"
     );
     for event in ["SessionStart", "UserPromptSubmit", "PostToolUse"] {
         assert!(
@@ -3958,33 +3910,23 @@ fn repo_install_writes_five_task_scoped_artifacts_without_permanent_guidance() {
     assert!(!repo.join(".codex/config.toml").exists());
     assert!(!repo.join("AGENTS.md").exists());
 
-    // .codex/hooks.json — exactly the composed guard group + sidecar backup.
+    // Codex project settings remove retired callbacks but do not duplicate
+    // the global task-event suite.
     let hooks: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(repo.join(".codex/hooks.json")).unwrap()).unwrap();
-    assert_eq!(
-        hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"],
-        format!(
-            "'{}' run-hook session-start --provider codex",
-            home.join("pixel").canonicalize().unwrap().display()
-        ),
-        "the installed Codex hook must select its strict response schema"
-    );
-    let pre = hooks["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(pre.len(), 1, "{hooks}");
-    let command = pre[0]["hooks"][0]["command"].as_str().unwrap();
     assert!(
-        command.contains("run-hook composed-guard --provider codex --backup"),
-        "{command}"
+        pixel_commands(&hooks, "PreToolUse").is_empty(),
+        "repo Codex must not register retrieval callbacks: {hooks}"
     );
-    let sidecar: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(repo.join(".codex/pixel-composed-guard-backup.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(sidecar["provider"], "codex");
-    assert!(sidecar["pre_tool_use"].is_array());
-    assert_eq!(
-        sidecar["managed_pre_tool_use"],
-        hooks["hooks"]["PreToolUse"]
+    assert!(
+        pixel_commands(&hooks, "SessionStart").is_empty(),
+        "global task hooks must not be duplicated in repo settings: {hooks}"
+    );
+    assert!(
+        !repo
+            .join(".codex/pixel-composed-guard-backup.json")
+            .exists(),
+        "a fresh install has no composed-guard backup sidecar"
     );
 
     // .devin/config.local.json — pixel guard group, in the personal config
@@ -4042,8 +3984,8 @@ fn repo_install_writes_five_task_scoped_artifacts_without_permanent_guidance() {
         "Devin must silently approve only Pixel retrieval execs: {devin}"
     );
 
-    // .pi/extensions/pixel-guard.ts, the project directory pi discovers
-    // extensions from; nothing under .pi/agent/, which pi reads only in ~.
+    // Repo-scoped Pi enforcement remains a project extension; global Pi
+    // impact is installed separately under the user's agent extensions.
     let ext = fs::read_to_string(repo.join(".pi/extensions/pixel-guard.ts")).unwrap();
     assert!(ext.contains(MANAGED_BEGIN), "{ext}");
     assert!(ext.contains("pi.registerTool({"), "{ext}");
@@ -4055,13 +3997,11 @@ fn repo_install_writes_five_task_scoped_artifacts_without_permanent_guidance() {
     assert!(!home.join(".codex").exists());
 }
 
-/// A deleted `.codex/hooks.json` with a surviving composed-guard sidecar is
-/// not a user edit to reconcile: the reinstall must start fresh from the
-/// sidecar instead of refusing on the absent PreToolUse group, and the
-/// adopted groups the sidecar held come back with it.
+/// Upgrading a previous composed Codex guard restores its owned snapshot,
+/// removes the wrapper and sidecar, and adds no project task-hook duplicates.
 #[test]
 #[cfg(unix)]
-fn repo_install_recovers_a_deleted_codex_hooks_file() {
+fn repo_install_restores_foreign_codex_hooks_from_a_legacy_composed_guard() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -4069,66 +4009,61 @@ fn repo_install_recovers_a_deleted_codex_hooks_file() {
     fs::create_dir_all(repo.join(".codex")).unwrap();
 
     let foreign = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-check"}]});
+    let wrapper = serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": format!(
+                "{} run-hook composed-guard --provider codex --backup {}",
+                fake_pixel_exe(&home).display(),
+                repo.join(".codex/pixel-composed-guard-backup.json").display()
+            )
+        }]
+    });
+    let sidecar_path = repo.join(".codex/pixel-composed-guard-backup.json");
     fs::write(
-        repo.join(".codex/hooks.json"),
-        serde_json::to_string_pretty(&serde_json::json!({
-            "hooks": {"PreToolUse": [foreign.clone()]}
+        &sidecar_path,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "provider": "codex",
+            "pre_tool_use": [foreign.clone()],
+            "managed_pre_tool_use": [wrapper.clone()]
         }))
         .unwrap(),
     )
     .unwrap();
-    install(&repo_install_options(&repo, &home)).unwrap();
-
-    fs::remove_file(repo.join(".codex/hooks.json")).unwrap();
-
-    install(&repo_install_options(&repo, &home))
-        .expect("an orphaned sidecar is not a user edit: reinstall must run");
-    let hooks: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".codex/hooks.json")).unwrap()).unwrap();
-    assert!(
-        hooks["hooks"]["PreToolUse"].as_array().unwrap()[0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("composed-guard"),
-        "{hooks}"
-    );
-    let sidecar: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(repo.join(".codex/pixel-composed-guard-backup.json")).unwrap(),
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sidecar_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    fs::write(
+        repo.join(".codex/hooks.json"),
+        serde_json::to_vec(&serde_json::json!({ "hooks": { "PreToolUse": [wrapper] } })).unwrap(),
     )
     .unwrap();
+
+    install(&repo_install_options(&repo, &home)).expect("legacy config is upgraded");
+    let hooks: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.join(".codex/hooks.json")).unwrap()).unwrap();
     assert_eq!(
-        sidecar["pre_tool_use"],
+        hooks["hooks"]["PreToolUse"],
         serde_json::json!([foreign]),
-        "the groups the first install adopted survive in the sidecar"
+        "the original foreign PreToolUse group is restored exactly"
     );
     assert_eq!(
-        sidecar["managed_pre_tool_use"], hooks["hooks"]["PreToolUse"],
-        "the rewritten sidecar names the group it just published"
+        hooks["hooks"]["SessionStart"],
+        serde_json::Value::Null,
+        "the project config does not duplicate global task hooks"
     );
-}
-
-/// A reinstall that agrees with the published contract does not touch the
-/// sidecar at all: it is the runtime's private input, so even an identical
-/// rewrite (new inode, new mtime) is a change we do not make.
-#[test]
-#[cfg(unix)]
-fn repo_install_leaves_an_agreeing_sidecar_file_untouched() {
-    use std::os::unix::fs::MetadataExt;
-    let dir = TempDir::new().unwrap();
-    let home = dir.path().join("home");
-    let repo = dir.path().join("repo");
-    fs::create_dir_all(&home).unwrap();
-    fs::create_dir_all(&repo).unwrap();
-
-    install(&repo_install_options(&repo, &home)).unwrap();
-    let sidecar = repo.join(".codex/pixel-composed-guard-backup.json");
-    let inode = fs::metadata(&sidecar).unwrap().ino();
-
-    install(&repo_install_options(&repo, &home)).unwrap();
     assert_eq!(
-        fs::metadata(&sidecar).unwrap().ino(),
-        inode,
-        "a reinstall that agrees must not rewrite the sidecar"
+        hooks["hooks"]["PreToolUse"],
+        serde_json::json!([foreign.clone()]),
+        "no composed retrieval wrapper remains after upgrade"
+    );
+    assert!(
+        !sidecar_path.exists(),
+        "the consumed private backup is retired"
     );
 }
 
@@ -4145,7 +4080,6 @@ fn repo_install_is_idempotent() {
     let artifacts = [
         ".claude/settings.local.json",
         ".codex/hooks.json",
-        ".codex/pixel-composed-guard-backup.json",
         ".devin/config.local.json",
         ".pi/extensions/pixel-guard.ts",
     ];
@@ -4160,7 +4094,7 @@ fn repo_install_is_idempotent() {
 
 #[test]
 #[cfg(unix)]
-fn repo_install_preserves_foreign_hooks() {
+fn repo_install_preserves_foreign_hooks_and_removes_retired_callbacks() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -4186,24 +4120,37 @@ fn repo_install_preserves_foreign_hooks() {
     )
     .unwrap();
     let shared_before = fs::read(repo.join(".claude/settings.json")).unwrap();
-    // .claude/settings.local.json (personal): the user's own permissions and
-    // a non-shell PreToolUse group; both survive next to the pixel guard.
+    // .claude/settings.local.json (personal): a retired Pixel delegate had
+    // adopted RTK, beside an unrelated user hook. Upgrade restores RTK and
+    // removes only Pixel's callback.
     let claude_local_foreign = serde_json::json!({"matcher":"Edit","hooks":[{"type":"command","command":"keep-edit-check"}]});
+    let rtk_group = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]});
+    let retired_delegate = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":format!("{} run-hook guard --provider claude --delegate-rtk", fake_pixel_exe(&home).display())}]});
     fs::write(
         repo.join(".claude/settings.local.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "permissions": {"allow": ["Bash(ls:*)"]},
-            "hooks": {"PreToolUse": [claude_local_foreign.clone()]}
+            "hooks": {"PreToolUse": [claude_local_foreign.clone(), retired_delegate.clone()]}
         }))
         .unwrap(),
     )
     .unwrap();
+    fs::write(
+        repo.join(".claude/pixel-rtk-hooks.json"),
+        serde_json::to_vec(&serde_json::json!([rtk_group.clone()])).unwrap(),
+    )
+    .unwrap();
 
     let foreign = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-check"}]});
+    let codex_task_pre = task_hook_group(&fake_pixel_exe(&home), "codex", "pre-tool-use");
+    let codex_task_stop = task_hook_group(&fake_pixel_exe(&home), "codex", "stop");
     fs::write(
         repo.join(".codex/hooks.json"),
         serde_json::to_string_pretty(&serde_json::json!({
-            "hooks": {"PreToolUse": [foreign.clone()]}
+            "hooks": {
+                "PreToolUse": [foreign.clone(), codex_task_pre.clone()],
+                "Stop": [codex_task_stop.clone()]
+            }
         }))
         .unwrap(),
     )
@@ -4225,46 +4172,49 @@ fn repo_install_preserves_foreign_hooks() {
         shared_before,
         "the shared settings.json is not rewritten"
     );
-    // Claude local: the user's keys and group intact, the pixel guard
-    // appended, and no lifecycle events added — those live in the
-    // user-level settings.
+    // Claude local: user keys and foreign hooks survive, and no retired
+    // retrieval guard or lifecycle event is added.
     let claude: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(repo.join(".claude/settings.local.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(claude["permissions"]["allow"][0], "Bash(ls:*)");
     assert!(claude["hooks"].get("SessionStart").is_none(), "{claude}");
-    let claude_pre = claude["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(claude_pre[0], claude_local_foreign);
-    assert_eq!(claude_pre.len(), 2, "{claude}");
+    assert_eq!(
+        claude["hooks"]["PreToolUse"],
+        serde_json::json!([claude_local_foreign, rtk_group]),
+        "the exact adopted RTK registration returns beside the unrelated hook"
+    );
+    assert!(pixel_commands(&claude, "PreToolUse").is_empty(), "{claude}");
     assert!(
-        claude_pre[1]["hooks"].as_array().is_some_and(|h| {
-            h.iter().any(|hook| {
-                hook["command"]
-                    .as_str()
-                    .is_some_and(|c| c.contains("run-hook guard --provider claude"))
-            })
-        }),
-        "{claude}"
+        !repo.join(".claude/pixel-rtk-hooks.json").exists(),
+        "the backup is retired once RTK is restored"
     );
 
-    // Codex: the foreign group moved into the sidecar; the live PreToolUse is
-    // the single composed-guard group.
+    // Codex: the foreign group remains in place beside task-event hooks;
+    // native retrieval does not run through a composed wrapper.
     let codex: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(repo.join(".codex/hooks.json")).unwrap()).unwrap();
-    let sidecar: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(repo.join(".codex/pixel-composed-guard-backup.json")).unwrap(),
-    )
-    .unwrap();
     assert_eq!(
-        sidecar["pre_tool_use"],
-        serde_json::json!([foreign.clone()])
+        codex["hooks"]["PreToolUse"],
+        serde_json::json!([foreign.clone(), codex_task_pre]),
+        "foreign and pre-existing task hooks stay in their original order"
+    );
+    assert_eq!(codex["hooks"]["Stop"], serde_json::json!([codex_task_stop]));
+    assert!(
+        pixel_commands(&codex, "PreToolUse")
+            .iter()
+            .all(|command| command.contains("task-event")),
+        "repo cleanup preserves task events without retrieval callbacks: {codex}"
     );
     assert!(
-        codex["hooks"]["PreToolUse"].as_array().unwrap()[0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("composed-guard")
+        pixel_commands(&codex, "SessionStart").is_empty(),
+        "global task hooks are not duplicated by the repo install: {codex}"
+    );
+    assert!(
+        !repo
+            .join(".codex/pixel-composed-guard-backup.json")
+            .exists()
     );
 
     // Devin: foreign group and keys kept, pixel group appended.
@@ -4285,6 +4235,7 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
     let repo = dir.path().join("repo");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(repo.join(".claude")).unwrap();
+    fs::create_dir_all(repo.join(".codex")).unwrap();
     fs::create_dir_all(repo.join(".devin")).unwrap();
     let claude_foreign = serde_json::json!({"matcher":"Write","hooks":[{"type":"command","command":"keep-write-check"}]});
     fs::write(
@@ -4305,6 +4256,15 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
         .unwrap(),
     )
     .unwrap();
+    let codex_foreign = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"keep-codex-check"}]});
+    fs::write(
+        repo.join(".codex/hooks.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"PreToolUse": [codex_foreign.clone()]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
     install(&repo_install_options(&repo, &home)).unwrap();
 
@@ -4316,8 +4276,8 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
     .unwrap();
     assert!(report.ok, "{report:?}");
 
-    // Codex hooks.json: composed group + lifecycle entries + sidecar gone
-    // (there were no pre-existing project hooks to restore).
+    // Codex task hooks are removed while its original foreign PreToolUse
+    // group remains intact.
     let codex: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(repo.join(".codex/hooks.json")).unwrap()).unwrap();
     let mut pixel_commands = Vec::new();
@@ -4338,6 +4298,11 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
         pixel_commands.is_empty(),
         "no pixel hook commands may survive repo uninstall: {pixel_commands:?} in {codex}"
     );
+    assert_eq!(
+        codex["hooks"]["PreToolUse"],
+        serde_json::json!([codex_foreign]),
+        "Codex's foreign PreToolUse group survives uninstall"
+    );
     assert!(
         !repo
             .join(".codex/pixel-composed-guard-backup.json")
@@ -4347,7 +4312,7 @@ fn repo_uninstall_removes_only_pixel_artifacts() {
     // Repo install/uninstall never creates a permanent Codex prompt.
     assert!(!repo.join(".codex/config.toml").exists());
 
-    // Claude: only the foreign group remains — the pixel guard is gone.
+    // Claude's foreign group remains — no repo retrieval callback is installed.
     let claude: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(repo.join(".claude/settings.local.json")).unwrap(),
     )
@@ -4441,10 +4406,9 @@ const MACHINE_LOCAL: &[&str] = &[
     ".pi/extensions/pixel-guard.ts",
 ];
 
-/// A guard an earlier `--repo` install wrote into the team-shared
-/// `settings.json` runs this machine's binary path on every clone: the
-/// install takes it out of that file and registers it in the personal one,
-/// leaving the file's other hooks, lifecycle included, as they were.
+/// A guard an earlier `--repo` install wrote into shared settings runs this
+/// machine's path on every clone. Upgrade removes that callback and keeps
+/// the shared file's foreign hooks.
 #[test]
 #[cfg(unix)]
 fn repo_install_should_move_a_guard_left_in_shared_settings_to_the_local_file() {
@@ -4492,18 +4456,15 @@ fn repo_install_should_move_a_guard_left_in_shared_settings_to_the_local_file() 
         "{claude_step:?}"
     );
     assert!(
-        claude_step
-            .detail
-            .as_deref()
-            .is_some_and(|d| d.contains("pixel guard removed from shared")),
-        "the move is reported: {claude_step:?}"
+        claude_step.summary.contains("native tools preserved"),
+        "native cleanup is reported: {claude_step:?}"
     );
 
     let shared = read_json(&repo.join(".claude/settings.json"));
     assert_eq!(shared["hooks"]["PreToolUse"], serde_json::json!([write]));
     assert_eq!(shared["hooks"]["SessionStart"], serde_json::json!([start]));
     let local = read_json(&repo.join(".claude/settings.local.json"));
-    assert_eq!(pixel_commands(&local, "PreToolUse").len(), 1, "{local}");
+    assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
 
     let devin_legacy = read_json(&repo.join(".devin/hooks.json"));
     assert_eq!(
@@ -4522,14 +4483,15 @@ fn repo_install_should_move_a_guard_left_in_shared_settings_to_the_local_file() 
     for id in ["repo.claude-hooks", "repo.devin-hooks"] {
         let c = check(&doctor_report, id);
         assert_eq!(c.status, CheckStatus::Green, "{id}: {c:?}");
-        assert!(c.summary.contains("registered"), "{id}: {c:?}");
+        assert!(
+            c.summary.contains("native") || c.summary.contains("registered"),
+            "{id}: {c:?}"
+        );
     }
 }
 
-/// The shared settings.json keeps running in the same Claude session as the
-/// personal file. A shell rewriter there (here the RTK group an earlier
-/// delegate guard had adopted, now restored) would race the guard, so the
-/// guard is not installed and the step says why.
+/// An earlier delegated guard in shared settings is removed and its adopted
+/// RTK hook is restored; native retrieval remains available.
 #[test]
 #[cfg(unix)]
 fn repo_install_should_hold_back_the_guard_beside_a_shell_rewriter_in_shared_settings() {
@@ -4555,11 +4517,11 @@ fn repo_install_should_hold_back_the_guard_beside_a_shell_rewriter_in_shared_set
         .unwrap();
     assert_eq!(
         claude_step.status,
-        pixel_install::install::CheckStatus::Yellow,
+        pixel_install::install::CheckStatus::Green,
         "{claude_step:?}"
     );
     assert!(
-        claude_step.summary.contains("unknown overlapping hook"),
+        claude_step.summary.contains("native tools preserved"),
         "{claude_step:?}"
     );
     let shared = read_json(&repo.join(".claude/settings.json"));
@@ -4572,13 +4534,11 @@ fn repo_install_should_hold_back_the_guard_beside_a_shell_rewriter_in_shared_set
     assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
 }
 
-/// An RTK group adopted from the repo's own settings belongs to the repo:
-/// backed up under `<repo>/.claude/`, never in `$HOME`, where the next global
-/// install would inject it into `~/.claude/settings.json`. Uninstalling the
-/// repo puts it back and deletes the repo backup.
+/// A plain RTK group already in repo settings remains untouched: native
+/// cleanup neither adopts it nor creates a repository backup.
 #[test]
 #[cfg(unix)]
-fn repo_rtk_adoption_should_stay_in_the_repo_and_come_back_on_repo_uninstall() {
+fn repo_install_and_uninstall_preserve_a_plain_rtk_registration() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -4597,18 +4557,16 @@ fn repo_rtk_adoption_should_stay_in_the_repo_and_come_back_on_repo_uninstall() {
         !home.join(".claude/pixel-rtk-hooks.json").exists(),
         "the repo's adoption must not land in the global backup"
     );
+    assert!(!repo.join(".claude/pixel-rtk-hooks.json").exists());
+    let local = read_json(&repo.join(".claude/settings.local.json"));
     assert_eq!(
-        read_json(&repo.join(".claude/pixel-rtk-hooks.json")),
+        local["hooks"]["PreToolUse"],
         serde_json::json!([rtk.clone()])
     );
-    let local = read_json(&repo.join(".claude/settings.local.json"));
-    let guard = pixel_commands(&local, "PreToolUse");
-    assert_eq!(guard.len(), 1, "{local}");
-    assert!(guard[0].ends_with("--delegate-rtk"), "{guard:?}");
 
     // A reinstall reads the repo backup back (the delegate requires it).
     install(&repo_install_options(&repo, &home)).expect("reinstall finds the repo backup");
-    // A global install afterwards leaves ~/.claude/settings.json without RTK.
+    // A global install does not copy repo-local RTK into home settings.
     install(&InstallOptions {
         home: Some(home.clone()),
         executable_path: Some(fake_pixel_exe(&home)),
@@ -4924,6 +4882,16 @@ fn doctor_repo_checks_should_stay_green_on_a_project_with_its_own_configs() {
         assert_eq!(c.status, CheckStatus::Green, "{id}: {c:?}");
         if id == "repo.codex-config" {
             assert!(c.summary.contains("no retired Pixel block"), "{id}: {c:?}");
+        } else if id == "repo.codex-hooks" {
+            assert!(
+                c.summary.contains("native Codex hooks preserved"),
+                "{id}: {c:?}"
+            );
+        } else if id == "repo.claude-hooks" {
+            assert!(
+                c.summary.contains("native Claude hooks preserved"),
+                "{id}: {c:?}"
+            );
         } else {
             assert!(c.summary.contains("not installed"), "{id}: {c:?}");
         }
@@ -4947,13 +4915,11 @@ fn set_codex_trust(home: &std::path::Path, repo: &std::path::Path, level: &str) 
     .unwrap();
 }
 
-/// An installed repo-local Codex guard is byte-correct, but Codex composes the
-/// project-scoped `.codex/` layer only for a trusted project. The check stays
-/// green and its summary says which of the two it is, so an untrusted checkout
-/// is not reported as a guard that fires.
+/// Native Codex retrieval needs no project hook. Project trust therefore has
+/// no effect on the clean native-default install check.
 #[test]
 #[cfg(unix)]
-fn doctor_repo_codex_hooks_summary_reports_codex_project_trust() {
+fn doctor_repo_codex_hooks_should_not_depend_on_project_trust() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -4967,35 +4933,18 @@ fn doctor_repo_codex_hooks_summary_reports_codex_project_trust() {
         ..Default::default()
     };
 
-    // Unspecified: the install is correct, the project is simply not listed.
-    let doctor_report = doctor(&doctor_options).unwrap();
-    let c = check(&doctor_report, "repo.codex-hooks");
-    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
-    assert!(c.summary.contains("will not load until it does"), "{c:?}");
-    assert!(!c.summary.contains("codex trusts this project"), "{c:?}");
-
-    // Untrusted: an explicit refusal reads the same way.
-    set_codex_trust(&home, &repo, "untrusted");
-    let doctor_report = doctor(&doctor_options).unwrap();
-    let c = check(&doctor_report, "repo.codex-hooks");
-    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
-    assert!(c.summary.contains("will not load until it does"), "{c:?}");
-    assert!(!c.summary.contains("codex trusts this project"), "{c:?}");
-
-    // Trusted: the guard loads, and the summary says so.
-    set_codex_trust(&home, &repo, "trusted");
-    let doctor_report = doctor(&doctor_options).unwrap();
-    let c = check(&doctor_report, "repo.codex-hooks");
-    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
-    assert!(c.summary.contains("codex trusts this project"), "{c:?}");
-    assert!(!c.summary.contains("will not load"), "{c:?}");
-
-    // A trust file that does not parse degrades to "unknown", green as ever.
-    fs::write(home.join(".codex/config.toml"), "not toml = = =\n").unwrap();
-    let doctor_report = doctor(&doctor_options).unwrap();
-    let c = check(&doctor_report, "repo.codex-hooks");
-    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
-    assert!(c.summary.contains("codex trust unknown"), "{c:?}");
+    for level in ["", "untrusted", "trusted"] {
+        if !level.is_empty() {
+            set_codex_trust(&home, &repo, level);
+        }
+        let doctor_report = doctor(&doctor_options).unwrap();
+        let c = check(&doctor_report, "repo.codex-hooks");
+        assert_eq!(c.status, CheckStatus::Green, "trust={level:?}: {c:?}");
+        assert!(
+            !c.summary.contains("trust"),
+            "a native-default Codex check has no project trust claim: {c:?}"
+        );
+    }
 }
 
 /// Evidence of a Pixel install that is broken stays red: a Pixel hook without
@@ -5038,15 +4987,13 @@ fn doctor_repo_checks_should_go_red_on_a_broken_pixel_install() {
     };
 
     let report = doctor(&doctor_options).unwrap();
-    for id in [
-        "repo.codex-config",
-        "repo.codex-hooks",
-        "repo.devin-hooks",
-        "repo.claude-hooks",
-    ] {
-        let c = check(&report, id);
-        assert_eq!(c.status, CheckStatus::Red, "{id}: {c:?}");
-    }
+    assert_eq!(check(&report, "repo.codex-config").status, CheckStatus::Red);
+    assert_eq!(check(&report, "repo.codex-hooks").status, CheckStatus::Red);
+    assert_eq!(check(&report, "repo.devin-hooks").status, CheckStatus::Red);
+    assert_ne!(
+        check(&report, "repo.claude-hooks").status,
+        CheckStatus::Green
+    );
 
     let devin_without_permission_approval = serde_json::json!({
         "hooks": {
@@ -5078,20 +5025,32 @@ fn doctor_repo_checks_should_go_red_on_a_broken_pixel_install() {
     )
     .unwrap();
     let report = doctor(&doctor_options).unwrap();
-    assert_eq!(check(&report, "repo.claude-hooks").status, CheckStatus::Red);
+    assert_eq!(
+        check(&report, "repo.claude-hooks").status,
+        CheckStatus::Yellow
+    );
 
-    // A correct local guard does not excuse one left in the shared file.
+    // Existing task controls remain valid; retrieval guards are retired in
+    // both local and shared files.
     fs::remove_file(repo.join(".claude/pixel-rtk-hooks.json")).unwrap();
+    fs::write(
+        repo.join(".claude/settings.local.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": {"Stop": [{"hooks":[{"type":"command","command":"'/p/pixel' run-hook task-event --provider claude --event stop"}]}]}
+        })).unwrap(),
+    ).unwrap();
+    let report = doctor(&doctor_options).unwrap();
+    assert_eq!(
+        check(&report, "repo.claude-hooks").status,
+        CheckStatus::Green
+    );
     let guard = serde_json::to_string_pretty(&serde_json::json!({
         "hooks": {"PreToolUse": [{"matcher":"Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider claude"}]}]}
     }))
     .unwrap();
     fs::write(repo.join(".claude/settings.local.json"), &guard).unwrap();
     let report = doctor(&doctor_options).unwrap();
-    assert_eq!(
-        check(&report, "repo.claude-hooks").status,
-        CheckStatus::Green
-    );
+    assert_eq!(check(&report, "repo.claude-hooks").status, CheckStatus::Red);
     fs::write(repo.join(".claude/settings.json"), &guard).unwrap();
     let report = doctor(&doctor_options).unwrap();
     let claude = check(&report, "repo.claude-hooks");
@@ -5134,10 +5093,8 @@ fn doctor_graph_freshness_should_read_the_file_the_daemon_builds() {
     assert_eq!(graph.status, CheckStatus::Green, "{graph:?}");
 }
 
-/// Installs before `pixel run-hook` wrote bare scripts into
-/// `~/.claude/settings.json`. The global install must replace them, not add
-/// a `run-hook` entry beside them: two SessionStart hooks inject the prompt
-/// twice. A foreign command that merely mentions a Pixel verb is kept.
+/// Upgrade removes bare scripts from the automatic retrieval path, installs
+/// one task-event set, and keeps foreign hooks that merely mention Pixel.
 #[test]
 #[cfg(unix)]
 fn install_should_replace_legacy_script_hooks_instead_of_stacking_new_ones() {
@@ -5181,18 +5138,9 @@ fn install_should_replace_legacy_script_hooks_instead_of_stacking_new_ones() {
         !settings.to_string().contains("/.claude/hooks/"),
         "legacy scripts left: {settings}"
     );
-    let session = pixel_commands(&settings, "SessionStart");
-    for verb in ["run-hook session-start", "run-hook post-compaction"] {
-        assert_eq!(
-            session.iter().filter(|c| c.contains(verb)).count(),
-            1,
-            "exactly one {verb}: {session:?}"
-        );
-    }
-    assert_eq!(pixel_commands(&settings, "UserPromptSubmit").len(), 1);
     assert!(
         settings["hooks"].get("PreToolUse").is_none(),
-        "the global install registers no guard: {settings}"
+        "the global install registers no retrieval guard: {settings}"
     );
     assert!(
         settings["hooks"]["SessionStart"]
@@ -5224,39 +5172,43 @@ fn fake_exe_named(home: &std::path::Path, name: &str) -> std::path::PathBuf {
     path.canonicalize().unwrap()
 }
 
-/// How many times each pixel lifecycle verb is registered in the global
-/// Claude settings: one entry each is the only correct count, anything more
-/// runs that hook several times on every prompt, edit or session.
-fn lifecycle_counts(settings: &serde_json::Value) -> Vec<(&'static str, usize)> {
+/// Each synchronous task boundary has one global Claude task hook.
+fn task_event_counts(settings: &serde_json::Value) -> Vec<(&'static str, usize)> {
     [
-        ("SessionStart", "run-hook session-start --provider claude"),
-        ("SessionStart", "run-hook post-compaction --provider claude"),
-        (
-            "UserPromptSubmit",
-            "run-hook prompt-submit --provider claude",
-        ),
-        ("PostToolUse", "run-hook post-tool-use --provider claude"),
-        ("PostToolUse", "run-hook metrics --provider claude"),
+        ("SessionStart", "session-start"),
+        ("UserPromptSubmit", "prompt-submit"),
+        ("PreToolUse", "pre-tool-use"),
+        ("PostToolUse", "post-tool-use"),
+        ("Stop", "stop"),
+        ("SessionEnd", "session-end"),
+        ("SubagentStart", "subagent-start"),
+        ("SubagentStop", "subagent-stop"),
+        ("PostToolUseFailure", "tool-failure"),
     ]
     .into_iter()
-    .map(|(event, verb)| {
+    .map(|(event, name)| {
+        let verb = format!("task-event --provider claude --event {name}");
         (
-            verb,
+            name,
             pixel_commands(settings, event)
                 .iter()
-                .filter(|c| c.ends_with(verb))
+                .filter(|c| c.contains(&verb))
                 .count(),
         )
     })
     .collect()
 }
 
-const ONE_EACH: [(&str, usize); 5] = [
-    ("run-hook session-start --provider claude", 1),
-    ("run-hook post-compaction --provider claude", 1),
-    ("run-hook prompt-submit --provider claude", 1),
-    ("run-hook post-tool-use --provider claude", 1),
-    ("run-hook metrics --provider claude", 1),
+const ONE_EACH: [(&str, usize); 9] = [
+    ("session-start", 1),
+    ("prompt-submit", 1),
+    ("pre-tool-use", 1),
+    ("post-tool-use", 1),
+    ("stop", 1),
+    ("session-end", 1),
+    ("subagent-start", 1),
+    ("subagent-stop", 1),
+    ("tool-failure", 1),
 ];
 
 /// A build not named `pixel` must replace the entries it wrote on the last
@@ -5280,7 +5232,7 @@ fn install_by_a_binary_not_named_pixel_should_replace_its_own_hooks_not_stack_th
             .unwrap();
         }
         let settings = read_json(&home.join(".claude/settings.json"));
-        assert_eq!(lifecycle_counts(&settings), ONE_EACH, "{name}: {settings}");
+        assert_eq!(task_event_counts(&settings), ONE_EACH, "{name}: {settings}");
         assert!(
             settings.to_string().contains(&format!("{name}' run-hook")),
             "the entries name the {name} build: {settings}"
@@ -5306,7 +5258,7 @@ fn release_install_after_a_dev_install_should_replace_the_dev_hooks() {
         .unwrap();
     }
     let settings = read_json(&home.join(".claude/settings.json"));
-    assert_eq!(lifecycle_counts(&settings), ONE_EACH, "{settings}");
+    assert_eq!(task_event_counts(&settings), ONE_EACH, "{settings}");
     assert!(
         !settings.to_string().contains("pixel-dev"),
         "no dev entry left: {settings}"
@@ -5383,15 +5335,13 @@ fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged
     };
     let before = doctor_hooks();
     assert_eq!(before.status, CheckStatus::Red, "{before:?}");
-    let reason = before.reason.clone().unwrap_or_default();
-    for stacked in [
-        "SessionStart→session-start ×3",
-        "SessionStart→post-compaction --provider claude ×3",
-        "UserPromptSubmit→prompt-submit --provider claude ×3",
-        "PostToolUse→post-tool-use --provider claude ×3",
-    ] {
-        assert!(reason.contains(stacked), "{stacked} not in {reason}");
-    }
+    assert!(
+        before
+            .reason
+            .as_deref()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{before:?}"
+    );
 
     install(&InstallOptions {
         home: Some(home.to_path_buf()),
@@ -5402,7 +5352,7 @@ fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged
     .unwrap();
 
     let settings = read_json(&path);
-    assert_eq!(lifecycle_counts(&settings), ONE_EACH, "{settings}");
+    assert_eq!(task_event_counts(&settings), ONE_EACH, "{settings}");
     let groups = settings["hooks"]["SessionStart"].as_array().unwrap();
     assert!(groups.contains(&herdr), "herdr's group changed: {settings}");
     assert!(
@@ -5748,8 +5698,8 @@ fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
     fs::create_dir_all(repo.join(".claude")).unwrap();
     fs::create_dir_all(repo.join(".codex")).unwrap();
     git(&repo, &["init", "-q"]);
-    // An exact RTK group in the personal settings is adopted by the guard,
-    // which makes the install write its backup, the one conditional artifact.
+    // Native-default migration preserves RTK in place; recovery sidecars
+    // remain documented artifacts but are no longer created by a fresh install.
     fs::write(
         repo.join(".claude/settings.local.json"),
         serde_json::to_string_pretty(&serde_json::json!({"hooks": {"PreToolUse": [
@@ -5814,8 +5764,19 @@ fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
         }
     }
     written.sort();
+    let legacy_sidecars = [
+        ".claude/pixel-rtk-hooks.json",
+        ".codex/pixel-composed-guard-backup.json",
+    ];
+    for path in legacy_sidecars {
+        assert!(
+            !repo.join(path).exists(),
+            "native install must not create {path}"
+        );
+    }
     let mut listed: Vec<String> = pixel_install::install::REPO_ARTIFACTS
         .iter()
+        .filter(|a| !legacy_sidecars.contains(&a.path))
         .map(|a| a.path.to_string())
         .collect();
     listed.sort();
@@ -5909,11 +5870,8 @@ fn doctor_should_flag_a_global_rtk_backup_no_guard_delegates_to() {
     assert_eq!(c.status, CheckStatus::Green, "{c:?}");
 }
 
-/// `rtk hook claude` registered globally (`rtk init -g`) runs in every
-/// project's session: Claude Code merges the global, shared and personal
-/// settings. A repo guard beside it would be a second Bash rewriter, so the
-/// install holds the guard back and names the global hook; the global file
-/// is only read.
+/// A global RTK hook is left alone by repo native-cleanup; no additional
+/// Pixel retrieval callback is installed beside it.
 #[test]
 #[cfg(unix)]
 fn repo_install_should_hold_back_the_guard_beside_a_global_rtk_hook() {
@@ -5947,18 +5905,10 @@ fn repo_install_should_hold_back_the_guard_beside_a_global_rtk_hook() {
             .unwrap();
         assert_eq!(
             step.status,
-            pixel_install::install::CheckStatus::Yellow,
+            pixel_install::install::CheckStatus::Green,
             "{step:?}"
         );
-        assert_eq!(
-            step.summary,
-            format!(
-                "claude guard not installed: `rtk hook claude` in {} also rewrites shell calls — narrow that hook's `matcher` to tools other than Bash (an explicit list such as `Edit|Write` runs beside the guard), then run `pixel install --repo '{}'`; or keep it and work without the guard",
-                global.display(),
-                repo.display()
-            ),
-            "{step:?}"
-        );
+        assert!(step.summary.contains("native tools preserved"), "{step:?}");
         let local = repo.join(".claude/settings.local.json");
         let local = if local.is_file() {
             read_json(&local)
@@ -5972,7 +5922,7 @@ fn repo_install_should_hold_back_the_guard_beside_a_global_rtk_hook() {
 
 #[test]
 #[cfg(unix)]
-fn renamed_executable_task_gates_should_agree_between_repo_install_and_doctor() {
+fn renamed_executable_preserves_existing_local_task_hooks_without_adding_repo_hooks() {
     for shared in [false, true] {
         for foreign in [false, true] {
             let dir = TempDir::new().unwrap();
@@ -6005,35 +5955,14 @@ fn renamed_executable_task_gates_should_agree_between_repo_install_and_doctor() 
                 .iter()
                 .find(|step| step.id == "hooks.claude")
                 .unwrap();
-            let expected = if foreign {
-                CheckStatus::Yellow
-            } else {
-                CheckStatus::Green
-            };
             assert_eq!(
                 step.status,
-                if foreign {
-                    StepStatus::Yellow
-                } else {
-                    StepStatus::Green
-                },
+                StepStatus::Green,
                 "shared={shared}, foreign={foreign}: {step:?}"
             );
             assert_eq!(read_json(&inherited), settings);
             let local = read_json(&repo.join(".claude/settings.local.json"));
-            let pre = local["hooks"]["PreToolUse"].as_array().unwrap();
-            if foreign {
-                assert!(pre.is_empty(), "{local}");
-            } else {
-                assert_eq!(pre.len(), 1);
-                assert_eq!(
-                    pre[0]["hooks"][0]["command"],
-                    format!(
-                        "'{}' run-hook guard --provider claude",
-                        exe.canonicalize().unwrap().display()
-                    )
-                );
-            }
+            assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
             let report = doctor(&DoctorOptions {
                 home: Some(home),
                 repo_root: Some(repo),
@@ -6044,15 +5973,15 @@ fn renamed_executable_task_gates_should_agree_between_repo_install_and_doctor() 
             .unwrap();
             let checked = check(&report, "repo.claude-hooks");
             assert_eq!(
-                checked.status, expected,
+                checked.status,
+                CheckStatus::Green,
                 "shared={shared}, foreign={foreign}: {checked:?}"
             );
             if foreign {
                 assert!(
-                    checked.summary.contains("keep-security-check"),
-                    "{checked:?}"
+                    checked.fix.is_none(),
+                    "foreign hooks do not require a guard: {checked:?}"
                 );
-                assert!(!checked.summary.contains("task-event"), "{checked:?}");
             }
         }
     }
@@ -6067,7 +5996,7 @@ fn renamed_executable_task_gates_should_agree_between_repo_install_and_doctor() 
 /// names, must then be enough for the guard to go in and doctor to turn green.
 #[test]
 #[cfg(unix)]
-fn a_personal_bash_hook_that_holds_the_guard_back_is_reported_with_what_to_do() {
+fn repo_native_default_preserves_personal_bash_hooks_without_adding_a_guard() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     // The command the user pastes quotes the repository.
@@ -6083,10 +6012,6 @@ fn a_personal_bash_hook_that_holds_the_guard_back_is_reported_with_what_to_do() 
         .unwrap()
     };
     fs::write(&global, personal("Bash")).unwrap();
-    let hint = format!(
-        " — narrow that hook's `matcher` to tools other than Bash (an explicit list such as `Edit|Write` runs beside the guard), then run `pixel install --repo '{}'`; or keep it and work without the guard",
-        repo.display().to_string().replace('\'', "'\\''")
-    );
     let options = repo_install_options(&repo, &home);
     let claude_hooks = || {
         let report = doctor(&DoctorOptions {
@@ -6110,24 +6035,15 @@ fn a_personal_bash_hook_that_holds_the_guard_back_is_reported_with_what_to_do() 
         .iter()
         .find(|s| s.id == "hooks.claude")
         .unwrap();
-    assert_eq!(step.status, StepStatus::Yellow, "{step:?}");
-    assert_eq!(
-        step.summary,
-        format!(
-            "claude guard not installed: `/usr/local/bin/my-guard` in {} also rewrites shell calls{hint}",
-            global.display()
-        )
-    );
+    assert_eq!(step.status, StepStatus::Green, "{step:?}");
+    assert!(step.summary.contains("native tools preserved"), "{step:?}");
     assert_eq!(fs::read_to_string(&global).unwrap(), personal("Bash"));
 
     let held = claude_hooks();
-    assert_eq!(held.status, CheckStatus::Yellow, "{held:?}");
-    assert_eq!(
-        held.summary,
-        format!(
-            "claude guard not installed: `/usr/local/bin/my-guard` in {} also rewrites shell calls{hint}",
-            global.display()
-        )
+    assert_eq!(held.status, CheckStatus::Green, "{held:?}");
+    assert!(
+        held.summary.contains("native Claude hooks preserved"),
+        "{held:?}"
     );
     assert_eq!(held.fix, None, "no command can make this choice: {held:?}");
     assert_eq!(
@@ -6145,21 +6061,17 @@ fn a_personal_bash_hook_that_holds_the_guard_back_is_reported_with_what_to_do() 
     assert_eq!(step.status, StepStatus::Green, "{step:?}");
     let guarded = claude_hooks();
     assert_eq!(guarded.status, CheckStatus::Green, "{guarded:?}");
-    assert_eq!(
-        guarded.summary,
-        format!(
-            "claude guard registered in {}",
-            repo.join(".claude/settings.local.json").display()
-        )
+    assert!(
+        guarded.summary.contains("native Claude hooks preserved"),
+        "{guarded:?}"
     );
 }
 
-/// Each surviving repo artifact independently proves that installation was
-/// attempted, so doctor must report a competing Bash rewriter even when the
-/// Claude-local guard itself was held back.
+/// Existing project setup artifacts do not turn native Claude defaults into
+/// an installer-managed guard requirement.
 #[test]
 #[cfg(unix)]
-fn doctor_claude_guard_conflict_should_recognize_each_repo_preparation_artifact() {
+fn doctor_claude_native_defaults_ignore_retired_guard_conflict_artifacts() {
     for artifact in ["pixel-first", "codex-hooks", "devin-hooks", "pi-guard"] {
         let dir = TempDir::new().unwrap();
         let home = dir.path().join("home");
@@ -6227,14 +6139,10 @@ fn doctor_claude_guard_conflict_should_recognize_each_repo_preparation_artifact(
         })
         .unwrap();
         let check = check(&report, "repo.claude-hooks");
-        assert_eq!(
-            check.status,
-            CheckStatus::Yellow,
-            "{artifact} independently proves a held-back guard: {check:?}"
-        );
+        assert_eq!(check.status, CheckStatus::Green, "{artifact}: {check:?}");
         assert!(
-            check.summary.contains("/usr/local/bin/my-guard"),
-            "{artifact}: {check:?}"
+            check.fix.is_none(),
+            "native defaults need no guard fix: {check:?}"
         );
     }
 }
@@ -6260,16 +6168,12 @@ fn repo_install_should_install_the_guard_when_the_global_settings_is_unreadable(
         .unwrap();
     assert_eq!(
         step.status,
-        pixel_install::install::CheckStatus::Yellow,
+        pixel_install::install::CheckStatus::Green,
         "{step:?}"
     );
-    assert!(
-        step.summary
-            .contains("unreadable (json: key must be a string at line 1 column 3), its PreToolUse hooks were not checked"),
-        "{step:?}"
-    );
+    assert!(step.summary.contains("native tools preserved"), "{step:?}");
     let local = read_json(&repo.join(".claude/settings.local.json"));
-    assert_eq!(pixel_commands(&local, "PreToolUse").len(), 1, "{local}");
+    assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
 }
 
 /// A repository at `$HOME` has the global file as its shared one. The stale
@@ -6313,20 +6217,19 @@ fn repo_install_at_home_should_read_the_global_file_once() {
             );
         }
     }
-    // The global file is this repository's shared one: the stale guard moves
-    // out of it into the personal file, and only the guard leaves.
+    // The global file is this repository's shared one: the stale guard is
+    // removed there, with no repo-local replacement.
     let global = read_json(&home.join(".claude/settings.json"));
     assert!(pixel_commands(&global, "PreToolUse").is_empty(), "{global}");
     let local = read_json(&home.join(".claude/settings.local.json"));
-    assert_eq!(pixel_commands(&local, "PreToolUse").len(), 1, "{local}");
+    assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
 }
 
-/// A full install of an older release left pixel's own guard in the global
-/// file: the repo guard is held back like beside any rewriter, and the step
-/// names the command that takes the global guard out.
+/// A repo install leaves an older global Pixel hook to the global install;
+/// it does not add a second repository callback.
 #[test]
 #[cfg(unix)]
-fn repo_install_should_name_pixel_install_for_a_global_pixel_guard() {
+fn repo_install_should_not_duplicate_a_global_pixel_callback() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -6338,6 +6241,8 @@ fn repo_install_should_name_pixel_install_for_a_global_pixel_guard() {
     )
     .unwrap();
 
+    let global_path = home.join(".claude/settings.json");
+    let global_before = fs::read(&global_path).unwrap();
     let report = install(&repo_install_options(&repo, &home)).unwrap();
 
     let step = report
@@ -6345,22 +6250,27 @@ fn repo_install_should_name_pixel_install_for_a_global_pixel_guard() {
         .iter()
         .find(|s| s.id == "hooks.claude")
         .unwrap();
-    assert!(
-        step.summary.ends_with(
-            "also rewrites shell calls — run `pixel install` to take pixel's global guard out"
-        ),
+    assert_eq!(
+        step.status,
+        pixel_install::install::CheckStatus::Green,
         "{step:?}"
+    );
+    assert!(step.summary.contains("native tools preserved"), "{step:?}");
+    assert_eq!(fs::read(global_path).unwrap(), global_before);
+    assert!(
+        pixel_commands(
+            &read_json(&repo.join(".claude/settings.local.json")),
+            "PreToolUse"
+        )
+        .is_empty()
     );
 }
 
-/// A guard installed before `rtk init -g` (or by a release that did not read
-/// the global file) runs beside the global RTK hook: doctor turns yellow with
-/// the command that holds the guard back, and that command does. The guard
-/// is then absent while the sessions run: doctor stays yellow, naming what
-/// the user can do, and offers no command, since none can choose for them.
+/// Doctor reports a healthy native-default repo even when global hooks are
+/// present; it makes no claim that a repo retrieval callback is active.
 #[test]
 #[cfg(unix)]
-fn doctor_repo_claude_hooks_should_flag_a_guard_beside_a_global_rewriter() {
+fn doctor_repo_claude_hooks_should_ignore_global_retrieval_callbacks() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     // A space in the path: the suggested command is pasted into a shell.
@@ -6384,33 +6294,13 @@ fn doctor_repo_claude_hooks_should_flag_a_guard_beside_a_global_rewriter() {
     };
 
     let c = claude_check();
-    assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
-    assert!(
-        c.summary.contains(&format!(
-            "runs beside another shell rewriter (`rtk hook claude` in {}) — run `pixel install --repo '{}'`",
-            home.join(".claude/settings.json").display(),
-            repo.display()
-        )),
-        "{c:?}"
-    );
-
-    assert_eq!(
-        c.fix,
-        Some(format!("pixel install --repo '{}'", repo.display())),
-        "rerunning the install does hold the guard back: {c:?}"
-    );
+    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+    assert!(c.summary.contains("native Claude hooks preserved"), "{c:?}");
 
     install(&repo_install_options(&repo, &home)).unwrap();
     let c = claude_check();
-    assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
-    assert!(
-        c.summary.starts_with(&format!(
-            "claude guard not installed: `rtk hook claude` in {} also rewrites shell calls — narrow that hook's `matcher`",
-            home.join(".claude/settings.json").display()
-        )),
-        "{c:?}"
-    );
-    assert_eq!(c.fix, None, "{c:?}");
+    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+    assert!(c.fix.is_none(), "native-default is a valid state: {c:?}");
 }
 
 /// Read the `PostToolUse` groups whose command runs Pixel's metrics relay
@@ -6435,13 +6325,11 @@ fn metrics_relays(value: &serde_json::Value, provider: &str) -> Vec<(String, Str
     found
 }
 
-/// Claude's tool results carry the box already, but only the hook's
-/// `systemMessage` reaches the user's transcript: the global install
-/// registers the relay under PostToolUse on `Bash`, once, beside the edit
-/// hook and any foreign PostToolUse group, however often it reruns.
+/// Repeated global installs register every synchronous task-event boundary
+/// once and preserve unrelated PostToolUse hooks without a metrics callback.
 #[test]
 #[cfg(unix)]
-fn claude_install_should_register_one_metrics_relay_on_bash_and_keep_foreign_groups() {
+fn claude_install_should_register_one_task_event_suite_and_keep_foreign_groups() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let exe = fake_pixel_exe(home);
@@ -6465,38 +6353,20 @@ fn claude_install_should_register_one_metrics_relay_on_bash_and_keep_foreign_gro
         .unwrap();
     }
     let settings = read_json(&home.join(".claude/settings.json"));
-    let relays = metrics_relays(&settings, "claude");
-    assert_eq!(relays.len(), 1, "{settings}");
-    let (matcher, command, timeout) = &relays[0];
-    assert_eq!(matcher, "Bash");
-    assert!(
-        command.starts_with('\'')
-            && command.ends_with("/pixel' run-hook metrics --provider claude"),
-        "{command}"
-    );
-    assert!(
-        *timeout > 0,
-        "a hook with no timeout inherits the default: {settings}"
-    );
+    assert_eq!(task_event_counts(&settings), ONE_EACH, "{settings}");
     let groups = settings["hooks"]["PostToolUse"].as_array().unwrap();
     assert!(groups.contains(&foreign), "foreign group kept: {settings}");
     assert!(
-        groups.iter().any(|g| g["matcher"] == "Edit"),
-        "the edit hook stays: {settings}"
-    );
-    assert!(
-        metrics_relays(&settings, "codex").is_empty()
-            && metrics_relays(&settings, "devin").is_empty(),
-        "no other provider's relay in Claude's file: {settings}"
+        metrics_relays(&settings, "claude").is_empty(),
+        "the native-default global hooks have no automatic metrics callback: {settings}"
     );
 }
 
-/// A stale install without the relay is red with the install fix, green once
-/// reinstalled; a Claude file that never held Pixel is still the existing
-/// "not found" red, so the relay adds no new state for a foreign config.
+/// A missing task-event boundary is red with the install fix and green once
+/// the complete global task suite is restored.
 #[test]
 #[cfg(unix)]
-fn doctor_should_flag_a_claude_install_missing_the_metrics_relay() {
+fn doctor_should_flag_a_claude_install_missing_a_task_event_hook() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let exe = fake_pixel_exe(home);
@@ -6509,15 +6379,10 @@ fn doctor_should_flag_a_claude_install_missing_the_metrics_relay() {
     install(&options).unwrap();
     let path = home.join(".claude/settings.json");
     let mut settings = read_json(&path);
-    settings["hooks"]["PostToolUse"]
+    settings["hooks"]["SessionEnd"]
         .as_array_mut()
         .unwrap()
-        .retain(|g| g["matcher"] != "Bash");
-    // A foreign relay on the same matcher is not Pixel's.
-    settings["hooks"]["PostToolUse"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":"/usr/bin/other run-hook metrics --provider claude"}]}));
+        .clear();
     fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
     let doctor_hooks = || {
         let report = doctor(&DoctorOptions {
@@ -6536,8 +6401,8 @@ fn doctor_should_flag_a_claude_install_missing_the_metrics_relay() {
         stale
             .reason
             .as_deref()
-            .is_some_and(|r| r.contains("PostToolUse(Bash)→metrics")),
-        "{stale:?}"
+            .is_some_and(|reason| reason.contains("task lifecycle gates")),
+        "the missing task-event suite is named: {stale:?}"
     );
     assert!(
         stale
@@ -6634,11 +6499,11 @@ fn devin_repo_install_should_register_an_idempotent_exec_metrics_relay() {
     assert_eq!(fs::read(&config).unwrap(), first, "reinstall restores it");
 }
 
-/// Uninstall takes only Pixel's relay out: Claude's global file keeps its
-/// foreign PostToolUse group, and the Devin repo file keeps its own.
+/// Uninstall removes global task hooks while preserving foreign PostToolUse
+/// groups and the separately scoped Devin relay.
 #[test]
 #[cfg(unix)]
-fn uninstall_should_remove_the_claude_and_devin_metrics_relays_only() {
+fn uninstall_should_remove_claude_task_hooks_and_the_devin_metrics_relay() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -6669,8 +6534,8 @@ fn uninstall_should_remove_the_claude_and_devin_metrics_relays_only() {
     .unwrap();
     install(&repo_install_options(&repo, &home)).unwrap();
     assert_eq!(
-        metrics_relays(&read_json(&home.join(".claude/settings.json")), "claude").len(),
-        1
+        task_event_counts(&read_json(&home.join(".claude/settings.json"))),
+        ONE_EACH
     );
     assert_eq!(
         metrics_relays(&read_json(&repo.join(".devin/config.local.json")), "devin").len(),
@@ -6703,13 +6568,12 @@ fn uninstall_should_remove_the_claude_and_devin_metrics_relays_only() {
     }
 }
 
-/// A repository at `$HOME`: Claude's relay lives in the global file (which
-/// is also the repo's shared one) exactly once, the personal guard file
-/// carries none, and Devin's repo-local relay sits in `~/.devin`, apart from
-/// the global `~/.config/devin/config.json`.
+/// A repository at `$HOME`: the global task suite remains singular, repo
+/// cleanup adds no duplicate callbacks, and Devin's repo-local relay stays
+/// in `~/.devin`.
 #[test]
 #[cfg(unix)]
-fn repo_install_at_home_should_keep_each_metrics_relay_in_one_file() {
+fn repo_install_at_home_should_keep_global_task_hooks_singular() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
@@ -6725,9 +6589,9 @@ fn repo_install_at_home_should_keep_each_metrics_relay_in_one_file() {
         install(&repo_install_options(&home, &home)).unwrap();
     }
     let global = read_json(&home.join(".claude/settings.json"));
-    assert_eq!(metrics_relays(&global, "claude").len(), 1, "{global}");
+    assert_eq!(task_event_counts(&global), ONE_EACH, "{global}");
     let local = read_json(&home.join(".claude/settings.local.json"));
-    assert!(metrics_relays(&local, "claude").is_empty(), "{local}");
+    assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
     let devin = read_json(&home.join(".devin/config.local.json"));
     assert_eq!(metrics_relays(&devin, "devin").len(), 1, "{devin}");
     assert!(!home.join(".config/devin/config.json").exists());
@@ -7031,7 +6895,7 @@ fn hook_review_options(home: &Path, exe: &Path, id: &str, repo: Option<&Path>) -
 }
 
 /// Codex 0.159 skips a hook the user has not reviewed (`/hooks`), without a
-/// message: Pixel's metrics and prompt-submit hooks installed but never reviewed are dormant, so
+/// message: Pixel's task hooks installed but never reviewed are dormant, so
 /// doctor must say so, with the step only the user can take, and turn green
 /// once Codex's config records the review for that exact hook.
 #[test]
@@ -7060,7 +6924,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     assert_eq!(
         unreviewed.summary,
         format!(
-            "Codex skips 11 of the 11 Pixel hook(s) in {} until you review them (Interrupt #0.0, PostToolUse #0.0, PostToolUse #1.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0, UserPromptSubmit #1.0): \
+            "Codex skips 9 of the 9 Pixel hook(s) in {} until you review them (Interrupt #0.0, PostToolUse #0.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0): \
              start `codex` in this directory, run `/hooks` and trust them",
             hooks.display()
         )
@@ -7145,7 +7009,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     assert_eq!(
         reviewed.summary,
         format!(
-            "Codex has reviewed the 11 Pixel hook(s) in {}",
+            "Codex has reviewed the 9 Pixel hook(s) in {}",
             hooks.display()
         )
     );

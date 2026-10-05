@@ -156,17 +156,16 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
     let mut steps = vec![
         deploy_agent_prompt(&home, dry_run)?,
-        // The doctrine reaches EVERY Claude process through the lifecycle
-        // hooks in ~/.claude/settings.json: SessionStart injects the agent
-        // prompt itself, so direct `claude` launches (cmux, agents, cron)
-        // get it without going through a shell function. No PreToolUse here —
-        // enforcement is repo-local (`pixel install --repo`).
+        crate::pi_global::install(&home, &exe, dry_run)?,
+        // Keep task accounting and configured task gates available to every
+        // Claude session. Automatic retrieval guidance, post-edit advice and
+        // metrics are excluded from the native-default profile.
         crate::routing::install_at_scoped(
             &home,
             &crate::routing::Provider::Claude.path(&home),
             &exe,
             crate::routing::Provider::Claude,
-            crate::routing::HookScope::LifecycleOnly,
+            crate::routing::HookScope::TaskEventsOnly,
             &[],
             dry_run,
         )?,
@@ -174,7 +173,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         // and would now double-inject alongside SessionStart — strip it.
         remove_legacy_wrappers(&home, options.shell.as_deref(), dry_run)?,
         crate::codex_config::remove_developer_instructions(&codex_home, dry_run)?,
-        crate::codex_config::install_metrics_hook(&codex_home, &exe, dry_run)?,
+        crate::codex_config::install_task_hooks(&codex_home, &exe, dry_run)?,
     ];
     let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
     if opencode_dir.is_dir() {
@@ -461,6 +460,7 @@ pub(crate) const SUBAGENT_PROMPT_FILE: &str = "subagent-prompt.md";
 pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
 
 /// Pi keeps operational policy in its extension and exposes only this short rule.
+#[cfg(test)]
 pub(crate) const PI_PROMPT_ASSET: &str = "Use the pixel tool for repository retrieval and repository Git workflows. The extension injects task context and post-edit impact automatically. Policy is advisory by default; `pixel config policy enforce` (or PIXEL_POLICY=enforce) opts into supported retrieval checks, `pixel config policy off` disables them. A prior-pixel-call edit gate applies only while Pixel reports healthy — when Pixel health is unhealthy or unknown, edits stay allowed. Native compositions and unsupported capabilities remain available; a failed Pixel operation allows native tools.";
 
 const LEGACY_PI_PROMPT_BEGIN: &str = "# Pixel Retrieval Layer\n";
@@ -497,11 +497,8 @@ pub fn stale_prompts(home: &Path) -> Vec<&'static str> {
     .collect()
 }
 
-/// Copy the shared Pixel agent prompt to `~/.local/share/pixel/agent-prompt.md`,
-/// the sub-agent prompt to `~/.local/share/pixel/subagent-prompt.md`, and the
-/// short Pixel rule into Pi's system-prompt file (pi reads it automatically).
-/// Codex uses its event hooks and does not receive this shared prompt as a
-/// permanent developer instruction.
+/// Copy Pixel's explicit-use prompt references to `~/.local/share/pixel/` and
+/// migrate the retired automatic prompt out of Pi's global system-prompt file.
 fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let dest_dir = home.join(".local/share/pixel");
     let dest = dest_dir.join("agent-prompt.md");
@@ -511,7 +508,9 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
         return Ok(InstallStep {
             id: "agent-prompt".into(),
             status: CheckStatus::Green,
-            summary: format!("would deploy agent-prompt.md and {SUBAGENT_PROMPT_FILE}"),
+            summary: format!(
+                "would deploy agent-prompt.md and {SUBAGENT_PROMPT_FILE}; remove automatic Pi prompt"
+            ),
             detail: Some(format!(
                 "dest={} subagent={} pi={}",
                 dest.display(),
@@ -523,7 +522,7 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     fs::create_dir_all(&dest_dir)?;
     let needs_write = write_if_changed(&dest, AGENT_PROMPT_ASSET)?;
     let subagent_written = write_if_changed(&subagent_dest, SUBAGENT_PROMPT_ASSET)?;
-    let pi_written = write_pi_prompt(&pi_dest)?;
+    let pi_removed = remove_pi_prompt(&pi_dest)?;
     Ok(InstallStep {
         id: "agent-prompt".into(),
         status: CheckStatus::Green,
@@ -535,8 +534,8 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
             } else {
                 "verified"
             },
-            if pi_written {
-                ", updated Pi's APPEND_SYSTEM.md"
+            if pi_removed {
+                ", removed Pixel's automatic Pi APPEND_SYSTEM.md block"
             } else {
                 ""
             }
@@ -548,6 +547,27 @@ fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
             pi_dest.display()
         )),
     })
+}
+
+/// Remove Pixel-owned prompt material from Pi's automatically loaded global
+/// system prompt, preserving all user text and backing up changed bytes.
+fn remove_pi_prompt(path: &Path) -> Result<bool> {
+    let existing = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let wanted = config::strip_managed_block(&strip_unmarked_pi_prompts(&existing));
+    if wanted == existing {
+        return Ok(false);
+    }
+    if wanted.trim().is_empty() {
+        config::backup_if_changing(path, wanted.as_bytes())?;
+        fs::remove_file(path)?;
+    } else {
+        write_atomically(path, &wanted)?;
+    }
+    Ok(true)
 }
 
 /// Write `content` to `path` unless the file already holds exactly it.
@@ -569,6 +589,7 @@ fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
 /// outside the markers survives, and a failed write is an error rather than a
 /// silently green step (the prompts under `~/.local/share/pixel/` are pixel's
 /// own files; this one is not).
+#[cfg(test)]
 fn write_pi_prompt(path: &Path) -> Result<bool> {
     let existing = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -594,6 +615,7 @@ fn write_pi_prompt(path: &Path) -> Result<bool> {
 /// existing managed block are removed by their original boundaries; user
 /// text before and after survives. Anything else follows the Markdown
 /// agent-config rules ([`config::apply_managed_markers`]).
+#[cfg(test)]
 pub(crate) fn managed_pi_content(existing: &str, asset: &str) -> String {
     if !existing.contains(config::MANAGED_BEGIN) {
         let (cleaned, removed) = config::strip_stale_blocks(existing);

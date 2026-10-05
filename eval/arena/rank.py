@@ -40,6 +40,17 @@ def native_command_counts(transcript):
     return counts
 
 
+def candidate_skill_file_reads(transcript, skill_name):
+    marker = f".agents/skills/{skill_name}/SKILL.md"
+    count = 0
+    for call in codex_calls(events_of(transcript)):
+        if call["kind"] != "bash":
+            continue
+        if marker in (call.get("command") or ""):
+            count += 1
+    return count
+
+
 def read_context_manifest(results, arm, rep):
     path = results / f"context-{arm}-{rep}.json"
     if not path.is_file():
@@ -47,7 +58,7 @@ def read_context_manifest(results, arm, rep):
     return json.loads(path.read_text())
 
 
-def read_record(results, arm, task, rep, rubric):
+def read_record(results, arm, task, rep, rubric, skill_name=None):
     stem = f"{arm}-{task}-{rep}"
     transcript = results / f"{stem}.jsonl"
     failed_marker = results / f"{stem}.failed"
@@ -78,6 +89,7 @@ def read_record(results, arm, task, rep, rubric):
         "native_search_calls": None,
         "native_command_count": None,
         "native_command_counts": {},
+        "candidate_skill_file_reads": None,
         "seconds": seconds,
         "reason": "no transcript or failure marker",
     }
@@ -114,13 +126,18 @@ def read_record(results, arm, task, rep, rubric):
         native_search_calls=metrics.get("native_search_calls"),
         native_command_count=sum(native_counts.values()),
         native_command_counts=native_counts,
+        candidate_skill_file_reads=(
+            candidate_skill_file_reads(transcript, skill_name)
+            if skill_name else None
+        ),
         reason=None,
     )
     return record
 
 
 def rank_results(results, scenarios_dir, arms, tasks, reps, baseline_arm="raw",
-                 run_metadata=None, assert_context_parity=False):
+                 run_metadata=None, assert_context_parity=False,
+                 assert_skill_only=None):
     results = Path(results)
     scenarios_dir = Path(scenarios_dir)
     if not results.is_dir():
@@ -152,6 +169,12 @@ def rank_results(results, scenarios_dir, arms, tasks, reps, baseline_arm="raw",
     rep_ids = [str(number) for number in range(1, reps + 1)]
     if assert_context_parity and not {"raw", "pixel"}.issubset(arms):
         raise ValueError("context parity assertion requires both raw and pixel arms")
+    if assert_skill_only and not {"raw", "pixel"}.issubset(arms):
+        raise ValueError("skill-only assertion requires both raw and pixel arms")
+    if assert_skill_only and assert_context_parity:
+        raise ValueError("skill-only profile and exact context parity are mutually exclusive")
+    skill_audit = {"required": bool(assert_skill_only), "candidate_name": assert_skill_only,
+                   "checks": []}
     for rep in rep_ids:
         context_manifests[rep] = {
             arm: read_context_manifest(results, arm, rep) for arm in arms
@@ -163,12 +186,58 @@ def rank_results(results, scenarios_dir, arms, tasks, reps, baseline_arm="raw",
                 raise ValueError(f"context parity missing manifest for rep {rep}")
             if raw_context != pixel_context:
                 raise ValueError(f"static context differs between raw and pixel in rep {rep}")
+        if assert_skill_only:
+            raw_context = context_manifests[rep]["raw"]
+            pixel_context = context_manifests[rep]["pixel"]
+            if raw_context is None or pixel_context is None:
+                raise ValueError(f"skill-only assertion missing manifest for rep {rep}")
+            for key in ("developer_instructions", "agents_files", "hook_config_files"):
+                if raw_context.get(key) != pixel_context.get(key):
+                    raise ValueError(f"skill-only base context differs in {key} for rep {rep}")
+            for arm, context in (("raw", raw_context), ("pixel", pixel_context)):
+                if context.get("pixel_reference_lines") != 0:
+                    raise ValueError(f"skill-only {arm} context contains Pixel instruction/hook text")
+            raw_skills = raw_context.get("skills")
+            pixel_skills = pixel_context.get("skills")
+            if not isinstance(raw_skills, dict) or not isinstance(pixel_skills, dict):
+                raise ValueError(f"skill-only assertion missing skill discovery manifest for rep {rep}")
+            candidate_keys = [
+                key for key in pixel_skills
+                if key.endswith(f"/{assert_skill_only}") and key not in raw_skills
+            ]
+            if any(key.endswith(f"/{assert_skill_only}") for key in raw_skills):
+                raise ValueError(f"candidate skill already discovered in raw arm for rep {rep}")
+            if len(candidate_keys) != 1:
+                raise ValueError(f"expected exactly one staged candidate skill for rep {rep}")
+            expected_pixel_skills = dict(raw_skills)
+            expected_pixel_skills[candidate_keys[0]] = pixel_skills[candidate_keys[0]]
+            if expected_pixel_skills != pixel_skills:
+                raise ValueError(f"skill-only run changed non-candidate discovered skills in rep {rep}")
+            for arm, skills in (("raw", raw_skills), ("pixel", pixel_skills)):
+                for key, skill in skills.items():
+                    if arm == "pixel" and key == candidate_keys[0]:
+                        continue
+                    if "pixel" in key.casefold() or skill.get("pixel_reference_lines", 0):
+                        raise ValueError(f"skill-only {arm} arm has other Pixel skill context in rep {rep}")
+            candidate_policy = pixel_skills[candidate_keys[0]].get("allow_implicit_invocation")
+            if candidate_policy is not True:
+                raise ValueError(f"candidate skill is not implicitly invocable in rep {rep}")
+            skill_audit["checks"].append({
+                "rep": rep,
+                "base_context_equal": True,
+                "pixel_reference_lines": 0,
+                "candidate_discovered_raw": False,
+                "candidate_discovered_pixel": True,
+                "candidate_implicit_invocation": True,
+                "candidate_skill_sha256": pixel_skills[candidate_keys[0]]["sha256"],
+            })
     task_summaries = {}
     for task in tasks:
         task_rows = []
         complete_rep_ids = []
         for rep in rep_ids:
-            rep_rows = [read_record(results, arm, task, rep, rubrics[task]) for arm in arms]
+            rep_rows = [read_record(results, arm, task, rep, rubrics[task], assert_skill_only)
+                        for arm in arms]
             rows.extend(rep_rows)
             task_rows.extend(rep_rows)
             statuses = {row["arm"]: row["status"] for row in rep_rows}
@@ -324,10 +393,15 @@ def rank_results(results, scenarios_dir, arms, tasks, reps, baseline_arm="raw",
         "context_audit": {
             "required": assert_context_parity,
             "raw_snapshot_policy": RAW_SNAPSHOT_CONTEXT_POLICY,
-            "pixel_snapshot_policy": "repo snapshot followed by pixel install before context capture",
+            "pixel_snapshot_policy": (
+                "shared pinned Pixel image; graph prepared without pixel install; one candidate skill staged"
+                if assert_skill_only else
+                "repo snapshot followed by pixel install before context capture"
+            ),
             "manifests": context_manifests,
             "checks": context_checks,
         },
+        "skill_audit": skill_audit,
         "task_summaries": task_summaries,
         "summary": summaries,
         "ranked": ranked,
@@ -363,6 +437,8 @@ def preserve_run_metadata(results, arms, tasks, reps, baseline_arm, run_metadata
         "pixel_image_id",
         "pixel_source_id",
         "codex_version",
+        "skill_candidate_name",
+        "skill_source_sha256",
     ):
         if metadata.get(field) is None and previous_run.get(field) is not None:
             metadata[field] = previous_run[field]
@@ -399,6 +475,17 @@ def show_report(report):
         print(f"static-context parity: {len(checks)}/{len(checks)}; "
               f"Pixel calls zero: {no_calls}/{len(checks)}")
 
+    skill_audit = report["skill_audit"]
+    if skill_audit["required"]:
+        print(f"skill-only profile: {len(skill_audit['checks'])}/{report['reps']} reps verified; "
+              f"candidate={skill_audit['candidate_name']}; "
+              "discovery recorded separately from file-read commands and Pixel CLI calls")
+        for row in report["rows"]:
+            reads = ("unknown" if row["candidate_skill_file_reads"] is None
+                     else str(row["candidate_skill_file_reads"]))
+            print(f"  {row['arm']} {row['task']} rep {row['rep']}: "
+                  f"skill-file-read commands={reads}; Pixel CLI calls={row['pixel_calls']}")
+
     print("\noverall (macro-average of per-task median score percentages)")
     print(f"ranking basis: {report['rank_basis']}")
     for arm in report["ranked"]:
@@ -429,8 +516,12 @@ def main():
     parser.add_argument("--pixel-image-id")
     parser.add_argument("--pixel-source-id")
     parser.add_argument("--codex-version")
+    parser.add_argument("--skill-candidate-name")
+    parser.add_argument("--skill-source-sha256")
     parser.add_argument("--assert-context-parity", action="store_true",
                         help="require matching static Codex instructions and zero Pixel calls")
+    parser.add_argument("--assert-skill-only", metavar="NAME",
+                        help="require exactly one implicitly discoverable candidate skill and no Pixel retrieval context")
     args = parser.parse_args()
     try:
         report = rank_results(args.results, args.scenarios_dir, args.arms,
@@ -443,10 +534,12 @@ def main():
                                   "pixel_image_id": args.pixel_image_id,
                                   "pixel_source_id": args.pixel_source_id,
                                   "codex_version": args.codex_version,
+                                  "skill_candidate_name": args.skill_candidate_name or None,
+                                  "skill_source_sha256": args.skill_source_sha256 or None,
                                   "task_ids": args.tasks,
                                   "arms": args.arms,
                                   "reps": args.reps,
-                              }, args.assert_context_parity)
+                              }, args.assert_context_parity, args.assert_skill_only)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         parser.error(str(error))
     show_report(report)

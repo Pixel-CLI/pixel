@@ -37,7 +37,6 @@ mod audit_cmd;
 mod call_guard;
 mod classify;
 mod classify_setup;
-mod codex_retrieval_intent;
 mod config_cmd;
 mod config_file;
 mod coverage_cmd;
@@ -47,6 +46,7 @@ mod evaluate_cmd;
 mod execution_brief;
 mod guard;
 mod hook_input;
+mod impact_read;
 mod index_cmd;
 mod install_intro;
 mod operation_metrics;
@@ -560,6 +560,9 @@ enum Command {
         workspace: bool,
         #[arg(long)]
         no_daemon: bool,
+        /// Read a fresh existing graph within 1500 ms; never start a daemon or refresh indexes.
+        #[arg(long, conflicts_with = "workspace")]
+        no_refresh: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1142,8 +1145,7 @@ enum Command {
     // -----------------------------------------------------------------
     // M5/M6 — install / doctor / migrate / hook
     // -----------------------------------------------------------------
-    /// Idempotently deploy agent prompts and lifecycle hooks, with selective
-    /// Codex retrieval guidance instead of a permanent Pixel prompt.
+    /// Idempotently deploy agent integrations while preserving native retrieval.
     Install {
         #[arg(long)]
         json: bool,
@@ -5397,6 +5399,7 @@ fn run_command(
             depth,
             workspace,
             no_daemon,
+            no_refresh,
             json,
         } => {
             if call_guard_check("impact", &format!("{uid_or_name} {}", path.display())) {
@@ -5406,6 +5409,15 @@ fn run_command(
                 DirectionArg::Upstream => "upstream",
                 DirectionArg::Downstream => "downstream",
             };
+            if no_refresh {
+                let direction = match direction {
+                    DirectionArg::Upstream => pixel_graph::impact::Direction::Upstream,
+                    DirectionArg::Downstream => pixel_graph::impact::Direction::Downstream,
+                };
+                let data = impact_read::query(path, uid_or_name, direction, depth.unwrap_or(2))?;
+                finish_graph_cmd(data, json, |_| None)?;
+                return Ok(());
+            }
             if workspace {
                 let results = workspace_cmd::fan_out(&path, &|| Request::Impact {
                     uid_or_name: uid_or_name.clone(),

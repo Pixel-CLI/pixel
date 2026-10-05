@@ -35,8 +35,7 @@
 # exist (docs_drift.rs reads this file).
 
 # Written by every `pixel install`, whichever agents are present: the agent
-# prompt Claude Code's SessionStart hook injects, and the short prompt for
-# its sub-agents.
+# legacy prompt assets used by other integrations and explicit manual setup.
 shared = ["~/.local/share/pixel/agent-prompt.md", "~/.local/share/pixel/subagent-prompt.md", "~/.pixel/config.yaml"]
 
 # Repo-wide install artifacts and doctor checks, not owned by one agent entry.
@@ -48,11 +47,11 @@ slug = "claude-code"
 name = "Claude Code"
 logo = "claude"
 wiring = "install"
-lede = "`pixel install` adds lifecycle hooks to Claude Code's user settings, so every session starts with Pixel's protocol, and `pixel install --repo` adds an advisory guard to one repository."
+lede = "`pixel install` preserves task lifecycle hooks while removing automatic retrieval prompts and advice. The optional plugin exposes a focused impact skill; ordinary searches remain native."
 global = ["~/.claude/settings.json"]
-wires = "`SessionStart` and `UserPromptSubmit` hooks in `~/.claude/settings.json` inject the prompt as context, plus a `PostToolUse` hook on `Edit` and a `SessionStart` hook on `compact`. No shell wrapper, never blocks."
+wires = "task lifecycle hooks in `~/.claude/settings.json`; retired Pixel retrieval hooks are removed and foreign hooks are preserved"
 repo = [".claude/settings.local.json", ".claude/pixel-rtk-hooks.json"]
-plugin = "`/plugin marketplace add Pixel-CLI/pixel`, then `/plugin install pixel@pixel`: its `SessionStart` and `SubagentStart` hooks inject the protocol instead"
+plugin = "`/plugin marketplace add Pixel-CLI/pixel`, then `/plugin install pixel@pixel`: an explicit impact skill without automatic retrieval hooks"
 checks = ["install.claude-hooks", "repo.claude-hooks"]
 
 [[agent]]
@@ -60,12 +59,12 @@ slug = "codex"
 name = "Codex"
 logo = "codex"
 wiring = "install"
-lede = "`pixel install` puts Pixel's protocol into the one key of Codex's config that every Codex front end reads, and `pixel install --repo` adds a project guard."
+lede = "`pixel install` removes retired Pixel prompt and metrics hooks while retaining task lifecycle controls. The optional plugin exposes an explicit impact skill; ordinary searches remain native."
 global = ["~/.codex/config.toml", "~/.codex/hooks.json"]
 when = "in `$CODEX_HOME` instead of `~/.codex` when that variable is set"
-wires = "the `developer_instructions` key of `~/.codex/config.toml`, which every Codex front end reads, plus a metrics `PostToolUse` hook"
+wires = "task lifecycle hooks in `hooks.json`; removes Pixel's retired `developer_instructions` block while preserving foreign instructions"
 repo = [".codex/config.toml", ".codex/hooks.json", ".codex/pixel-composed-guard-backup.json"]
-repo_note = "Codex has no personal project file, so the guard is left out when Git tracks `.codex/hooks.json`: it would carry this machine's path into every clone."
+repo_note = "Codex has no personal project file, so repository hook updates are skipped when Git tracks `.codex/hooks.json`: they would carry this machine's path into every clone. Existing owned composed hooks are migrated back to their original registrations."
 plugin = "`codex plugin marketplace add Pixel-CLI/pixel`, then `codex plugin add pixel@pixel`"
 checks = ["install.codex-config", "install.codex-metrics-hook", "install.codex-hook-review", "repo.codex-config", "repo.codex-hooks", "repo.codex-hook-review"]
 
@@ -74,13 +73,13 @@ slug = "pi"
 name = "Pi"
 logo = "pi"
 wiring = "install"
-lede = "`pixel install` writes Pixel's protocol into the system-prompt file Pi reads on its own, and `pixel install --repo` adds a guard extension to one repository."
-global = ["~/.pi/agent/APPEND_SYSTEM.md"]
-wires = "`~/.pi/agent/APPEND_SYSTEM.md`, read automatically"
+lede = "`pixel install` exposes the explicit `/pixel-impact <symbol>` extension command and removes the retired Pixel system-prompt block. The project adapter retains task lifecycle controls."
+global = ["~/.pi/agent/extensions/pixel-impact.ts"]
+wires = "an explicit `/pixel-impact` command; no automatic retrieval calls or model tools by default"
 repo = [".pi/extensions/pixel-guard.ts"]
 repo_note = "Pi loads the extension once it trusts the project."
 plugin = "`pi install git:github.com/Pixel-CLI/pixel`"
-checks = ["install.pi-prompt", "repo.pi-guard"]
+checks = ["install.pi-prompt", "install.pi-impact", "repo.pi-guard"]
 
 [[agent]]
 slug = "cursor"

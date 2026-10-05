@@ -40,8 +40,8 @@ struct PostCompactionPayload {
 /// payload from stdin. Never returns an `Err` as exit 1 — every failure
 /// path is a silent exit 0 (compaction proceeds normally).
 pub fn run(provider: Option<crate::guard::Provider>) -> ! {
-    // Codex receives no saved target manifest as unsolicited context. The
-    // prompt-submit hook adds a small optional hint only for structural work.
+    // Codex receives no saved target manifest as unsolicited context. Its
+    // optional impact capability is invoked explicitly through the plugin.
     if matches!(provider, Some(crate::guard::Provider::Codex)) {
         std::process::exit(0);
     }

@@ -1,10 +1,21 @@
 # Pixel in the Pi harness
 
-Run `pixel install` to install Pi's short system rule, then `pixel install --repo .`
-in each repository. Trust the project in Pi. The project extension at
-`.pi/extensions/pixel-guard.ts` registers `pixel` and checks every tool call
-before Pi executes it. Reload or a new session loads the same project extension;
-model changes do not alter registered tools. `pixel doctor .` checks its location.
+Run `pixel install` to install Pi's command-only `/pixel-impact` extension, then
+`pixel install --repo .` in each repository for task lifecycle gates. Trust the
+project in Pi. The global extension registers no model-callable Pixel tool and
+does no startup retrieval. Invoke `/pixel-impact <symbol>` only when caller or
+impact evidence is useful; it runs `pixel impact <symbol> --no-refresh --depth
+2 --json --metrics off` once against the existing graph. Missing, stale,
+unsupported, or slow results fall back to native search without repairing or
+refreshing the index.
+
+The project extension at `.pi/extensions/pixel-guard.ts` retains task
+authorization, telemetry, and stop gates. Its older model-callable retrieval
+tool, per-prompt context, native retrieval policy, and post-edit impact advice
+are disabled by default. Set `PIXEL_PI_RETRIEVAL=1` only to opt into that
+legacy retrieval adapter. `pixel doctor .` checks the project extension.
+
+The opt-in adapter exposes these additional operations:
 
 | User outcome | Stable action | Pixel CLI operation |
 | --- | --- | --- |
@@ -29,10 +40,11 @@ checks `pixel status` before invoking an action. If the index is missing, run
 `pixel rebuild-graph .`. Then retry. Native tools remain available under the
 default advisory policy. History facts can lag; their `fresh` field is returned.
 
-## Native tool policy
+## Optional legacy native tool policy
 
-Choose the policy with `pixel config policy`, or for one environment with
-`PIXEL_POLICY`:
+Set `PIXEL_PI_RETRIEVAL=1` before starting Pi to enable this compatibility
+adapter. Then choose its policy with `pixel config policy`, or for one
+environment with `PIXEL_POLICY`:
 
 | Value | Behaviour |
 | --- | --- |
@@ -69,24 +81,16 @@ workflow preference, not a repository sandbox. Pi's permissions remain
 authoritative. The extension's `classify()` is deterministic local code;
 it does not invoke the model-based `pixel classify` command.
 
-## Automatic task context and edit feedback
+## Task lifecycle and optional legacy retrieval
 
-The extension does not wait for the model to choose Pixel. On a non-trivial
-prompt, `before_agent_start` runs `scope-task` and `repo-state` and injects
-the bounded result as task context; resolved targets also seed the `read`
-exception set. If Pixel is unavailable, the injection carries a repair
-instruction. Only `enforce` mode requires a successful structured `pixel`
-call before editing while Pixel is healthy. When health is unknown or an
-operation fails, the gate opens so recovery remains possible. Policy state
-is reset for a new session.
+Task authorization, telemetry, and stop gates remain active independently of
+retrieval settings. The explicit impact command is user-invoked and adds only
+its bounded query result to the current session.
 
-After a successful edit or write, `what-changed` inspects the updated working
-tree and adds changed symbols, flows and suggested tests after the original
-tool result. Failed edits keep their original error text. Impact feedback
-reminds the model that edits remain unverified until builds or tests run;
-it describes the working-tree changes, not a proof that the latest edit is
-correct. Automatic task context and edit feedback remain available with
-`pixel config policy off`.
+When `PIXEL_PI_RETRIEVAL=1`, the legacy project adapter also registers its
+structured tool, automatic task context, retrieval policy checks, and post-edit
+`what-changed` advice. This compatibility mode can add startup calls and
+context; it is not the default experience.
 
 `commit` and `commit_and_push` require explicit user intent in the current
 user message, plus named files, a message, and an idempotency request ID.

@@ -31,47 +31,17 @@ Use the deterministic retrieval commands below when a specific information
 gap remains. Their results are evidence for the harness/model to interpret;
 Pixel does not choose the next action.
 
-## Retrieval route — fixed order, chosen once
-
-Do not pick a Pixel command per step. The route is decided once at the start
-of a retrieval task and then followed:
-
-1. **Packet or brief present** — a `[PIXEL:TASK_CONTEXT]` packet or
-   `pixel execution-brief` output naming a first command → run that command
-   verbatim. It already classified identifier-vs-concept for you; do not
-   compose a different Pixel query first.
-2. **An identifier is named** (backticked, `CamelCase`, `snake_case`, a
-   path) → one `pixel search-content -F '<id>'` (grep-like flags work:
-   `-g glob`, `-t rust`, `-i`; `-l` for paths only). An empty result already
-   ran its find-code fallback inside the same call; do not re-issue it.
-3. **Callers or blast radius of a known symbol** ("callers of X", "rename X",
-   "what breaks if X") → `pixel who-calls 'X' --role callers` or
-   `pixel impact 'X'`. Never `find-code` a symbol you already have.
-4. **Concept, no name known** → ONE `pixel find-code '<≤6 words>'`, then a
-   bounded read of its top hit. Do not issue a second `find-code` for the
-   same gap — refine with `rg` or a bounded read instead.
-5. **Two Pixel calls that do not converge** → stop, `rg`, answer from
-   source.
-
-Rules that bound every route:
-
-- A symbol whose name you already have skips `find-code` entirely.
-- After a `path:line` hit, read at most ~40 lines around it — never a whole
-  file "for context".
-- A literal string in a file you already see, a shell pipeline, or a flag
-  Pixel lacks (`-m`, `-w`, `-v`) → native `rg` wins; do not route it through
-  Pixel.
-- `pixel execution-brief '<task>' --json` returns this whole sequence for an
-  arbitrary task: first command, alternate query, bounded read, native
-  fallback, minimal validation. Prefer it over improvising when the task
-  shape is unclear.
-
-Other deterministic tools, same fixed-route spirit:
+## Retrieval commands
 
 | Question shape | Command |
 | --- | --- |
+| exact identifier, every occurrence | `pixel search-content -F '<id>'` (grep-like flags work: `-g glob`, `-t rust`, `-i`; `-l` for paths only) |
+| code by behavior, no name known | `pixel find-code '<concept>'` |
+| callers + callees of a symbol | `pixel impact '<symbol>'` — worth a look before renames and edits |
+| direct edges only | `pixel who-calls '<fn>' --role callers` |
 | past sessions, deleted code | `pixel recall search '<token>' --since 30d` · `pixel recall ask '<topic>'` |
-| what already differs in this tree | `pixel what-changed` · `pixel review-changes` · `pixel review-gate` |
+| what already differs in this tree | `pixel what-changed` · `pixel review-changes` · `pixel review-gate` (deterministic findings: secrets, changed symbols read by untouched callers) |
+| task-specific first command and recovery route | `pixel execution-brief '<task>' --json` — one populated first command, one alternate query, a bounded read, fallback, and minimal validation |
 | before multi-file edits / "it worked before" / branch sync | `pixel scope-task '<task>'` · `pixel plan-rollback '<problem>'` · `pixel sync-branch` |
 | index freshness | `pixel status` |
 

@@ -12,8 +12,8 @@ import unittest
 
 
 class PrepFailureStopsCodexTest(unittest.TestCase):
-    def test_caller_facts_without_reviewed_hooks_stops_before_pixel_prep(self):
-        with tempfile.TemporaryDirectory(prefix="arena-facts-opt-in-") as temporary:
+    def test_skill_pilot_prepares_shared_graph_without_installing_hooks(self):
+        with tempfile.TemporaryDirectory(prefix="arena-skill-prep-") as temporary:
             root = pathlib.Path(temporary)
             bin_dir = root / "bin"
             home = root / "home"
@@ -22,27 +22,40 @@ class PrepFailureStopsCodexTest(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             calls = root / "pixel-calls"
+            codex_called = root / "codex-called"
             pixel = bin_dir / "pixel"
-            pixel.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PIXEL_CALLS\"\n")
+            pixel.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$PIXEL_CALLS\"\n"
+                "[ \"$1\" = prepare-repo ] || exit 91\n"
+                "exit 42\n"
+            )
             pixel.chmod(0o755)
+            codex = bin_dir / "codex"
+            codex.write_text("#!/bin/sh\nprintf called > \"$CODEX_CALLED\"\n")
+            codex.chmod(0o755)
             environment = os.environ.copy()
             environment.update({
-                "ARM_TOOL": "pixel",
-                "ARENA_CODEX_CALLER_FACTS": "1",
-                "ARENA_REVIEWED_PIXEL_HOOKS": "0",
+                "ARM_TOOL": "raw",
+                "ARENA_SKILL_PILOT": "1",
                 "ARENA_REPO_DIR": str(repo),
+                "CODEX_CALLED": str(codex_called),
                 "HOME": str(home),
                 "PATH": f"{bin_dir}{os.pathsep}{environment['PATH']}",
                 "PIXEL_CALLS": str(calls),
+                "REP": "1",
+                "TASKS": "g5-transfer-status-impact",
             })
             entrypoint = pathlib.Path(__file__).with_name("entrypoint.sh")
             result = subprocess.run(
                 ["bash", str(entrypoint)], check=False, capture_output=True,
                 cwd=repo, env=environment, text=True,
             )
-            self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn("caller-facts requires reviewed hooks", result.stderr)
-            self.assertFalse(calls.exists())
+
+            self.assertEqual(result.returncode, 42, result.stderr)
+            self.assertEqual(calls.read_text().split()[0:2], ["prepare-repo", "--no-daemon"])
+            self.assertEqual(calls.read_text().split()[2], str(repo))
+            self.assertFalse(codex_called.exists())
 
     def test_failed_pixel_install_stops_before_codex(self):
         self.assert_prep_failure_stops_codex(fail_command="install", expected_rc=41)

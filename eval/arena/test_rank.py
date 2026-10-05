@@ -52,6 +52,9 @@ def write_context(folder, arm, rep, developer="baseline", agents="repo-agents"):
     (folder / f"context-{arm}-{rep}.json").write_text(json.dumps({
         "developer_instructions": {"present": True, "sha256": developer},
         "agents_files": {"AGENTS.md": agents},
+        "hook_config_files": {},
+        "pixel_reference_lines": 0,
+        "skills": {},
     }))
 
 
@@ -250,6 +253,74 @@ class RankResultsTests(unittest.TestCase):
             rank_results(self.results, self.scenarios, ["raw", "pixel"],
                           ["task"], 1, assert_context_parity=True)
 
+    def test_skill_only_profile_allows_only_candidate_discovery_difference(self):
+        write_scenario(self.scenarios, "task", [("answer", 1)])
+        for arm in ("raw", "pixel"):
+            write_transcript(self.results, arm, "task", 1, "answer")
+            write_context(self.results, arm, 1)
+        candidate = {
+            "sha256": "candidate-hash", "files": 2,
+            "allow_implicit_invocation": True, "policy_file_present": True,
+        }
+        pixel_path = self.results / "context-pixel-1.json"
+        pixel_context = json.loads(pixel_path.read_text())
+        pixel_context["skills"]["repo:/repo/.agents/skills/pixel-impact"] = candidate
+        pixel_path.write_text(json.dumps(pixel_context))
+
+        report = rank_results(self.results, self.scenarios, ["raw", "pixel"],
+                              ["task"], 1, assert_skill_only="pixel-impact")
+
+        self.assertEqual(report["skill_audit"]["checks"][0]["candidate_skill_sha256"],
+                         "candidate-hash")
+        self.assertEqual(report["rows"][1]["candidate_skill_file_reads"], 0)
+
+    def test_skill_only_profile_rejects_pixel_instruction_or_hook_differences(self):
+        write_scenario(self.scenarios, "task", [("answer", 1)])
+        for arm in ("raw", "pixel"):
+            write_transcript(self.results, arm, "task", 1, "answer")
+            write_context(self.results, arm, 1)
+        pixel_path = self.results / "context-pixel-1.json"
+        pixel_context = json.loads(pixel_path.read_text())
+        pixel_context["pixel_reference_lines"] = 1
+        pixel_context["skills"]["repo:/repo/.agents/skills/pixel-impact"] = {
+            "sha256": "candidate-hash", "files": 2,
+            "allow_implicit_invocation": True, "policy_file_present": True,
+        }
+        pixel_path.write_text(json.dumps(pixel_context))
+
+        with self.assertRaisesRegex(ValueError, "Pixel instruction/hook text"):
+            rank_results(self.results, self.scenarios, ["raw", "pixel"],
+                         ["task"], 1, assert_skill_only="pixel-impact")
+
+    def test_skill_only_profile_rejects_other_shared_pixel_skills(self):
+        write_scenario(self.scenarios, "task", [("answer", 1)])
+        for arm in ("raw", "pixel"):
+            write_transcript(self.results, arm, "task", 1, "answer")
+            write_context(self.results, arm, 1)
+        raw_path = self.results / "context-raw-1.json"
+        pixel_path = self.results / "context-pixel-1.json"
+        candidate = {
+            "sha256": "candidate-hash", "files": 2,
+            "allow_implicit_invocation": True, "policy_file_present": True,
+            "pixel_reference_lines": 2,
+        }
+        shared_pixel_skill = {
+            "sha256": "old-pixel-skill", "files": 1,
+            "allow_implicit_invocation": None, "policy_file_present": False,
+            "pixel_reference_lines": 3,
+        }
+        raw_context = json.loads(raw_path.read_text())
+        pixel_context = json.loads(pixel_path.read_text())
+        raw_context["skills"]["$HOME/.agents/skills/pixel"] = shared_pixel_skill
+        pixel_context["skills"]["$HOME/.agents/skills/pixel"] = shared_pixel_skill
+        pixel_context["skills"]["repo:/repo/.agents/skills/pixel-impact"] = candidate
+        raw_path.write_text(json.dumps(raw_context))
+        pixel_path.write_text(json.dumps(pixel_context))
+
+        with self.assertRaisesRegex(ValueError, "other Pixel skill context"):
+            rank_results(self.results, self.scenarios, ["raw", "pixel"],
+                         ["task"], 1, assert_skill_only="pixel-impact")
+
     def test_context_manifest_captures_codex_prompt_and_agent_files(self):
         repo = self.root / "context-repo"
         codex_home = self.root / "codex-home"
@@ -281,6 +352,26 @@ class RankResultsTests(unittest.TestCase):
         empty = collect_manifest(repo, codex_home)
 
         self.assertEqual(missing["developer_instructions"], empty["developer_instructions"])
+
+    def test_context_manifest_records_skill_discovery_policy_and_hook_sources(self):
+        repo = self.root / "context-repo"
+        codex_home = self.root / "codex-home"
+        skill_dir = repo / ".agents" / "skills" / "sample"
+        (skill_dir / "agents").mkdir(parents=True)
+        codex_home.mkdir()
+        (skill_dir / "SKILL.md").write_text("name: sample\n")
+        (skill_dir / "agents" / "openai.yaml").write_text(
+            "policy:\n  allow_implicit_invocation: false\n"
+        )
+        (codex_home / "hooks.json").write_text('{"hooks": []}\n')
+
+        manifest = collect_manifest(repo, codex_home)
+
+        entry = manifest["skills"][f"repo:{repo}/.agents/skills/sample"]
+        self.assertFalse(entry["allow_implicit_invocation"])
+        self.assertTrue(entry["policy_file_present"])
+        self.assertEqual(entry["files"], 2)
+        self.assertIn("$CODEX_HOME/hooks.json", manifest["hook_config_files"])
 
     def test_missing_usage_fields_make_totals_unknown_but_zero_is_known(self):
         cases = [

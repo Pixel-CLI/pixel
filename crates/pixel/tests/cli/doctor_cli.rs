@@ -312,11 +312,12 @@ fn doctor_fixing(home: &Path, repo: &Path, args: &[&str]) -> Output {
 #[test]
 fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
     let (home, repo) = fixture("fix");
+    std::fs::create_dir_all(home.join(".pi/agent")).unwrap();
     let only = [
         "--only",
         "install.agent-prompt",
         "--only",
-        "install.pi-prompt",
+        "install.pi-impact",
     ];
     let before = doctor_fixing(&home, &repo, &only);
     assert_eq!(before.status.code(), Some(1), "{before:?}");
@@ -337,8 +338,8 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
         text,
         [
             "pixel doctor --fix: ran 1 repair(s) — 1 fixed, 0 not converged, 0 failed",
-            "  [fixed] pixel install --shell zsh (install.agent-prompt, install.pi-prompt)",
-            "pixel doctor: ran 2 check(s), skipped 30 — 2 green, 0 yellow, 0 red",
+            "  [fixed] pixel install --shell zsh (install.agent-prompt, install.pi-impact)",
+            "pixel doctor: ran 2 check(s), skipped 31 — 2 green, 0 yellow, 0 red",
             "",
         ]
         .join("\n")

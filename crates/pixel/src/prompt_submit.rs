@@ -19,9 +19,8 @@
 //! (`prompt_intent`). The workers share a 750ms deadline; one slow worker does
 //! not discard useful context from the others.
 
-use std::fs::File;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -41,8 +40,6 @@ const MAX_SESSION_AGE_MS: i64 = 4 * 3600 * 1000;
 const HOOK_DEADLINE: Duration = Duration::from_millis(750);
 const TASK_CONTEXT_BYTES: usize = 1024;
 const TASK_TARGET_LIMIT: usize = 8;
-const CODEX_CALLER_FACTS_DEADLINE: Duration = Duration::from_millis(150);
-const CODEX_CALLER_SOURCE_BYTES: u64 = 64 * 1024;
 pub(crate) const DEVIN_PIXEL_GUIDANCE: &str = concat!(
     "Pixel-first retrieval (non-blocking): before any repository search, file read, or other retrieval tool call, use Pixel first. ",
     "For a known identifier or call-site request, run `pixel search-content -F '<identifier>'`; for behavior, run `pixel find-code '<concept>'`. ",
@@ -102,15 +99,9 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     if !task_target_lookup_eligible(&payload.prompt) {
         std::process::exit(0);
     }
-    // Caller facts remain experimental and entirely opt-in while their
-    // quality/cost benefit is unproven. Without this exact environment value,
-    // Codex takes the native path before root discovery or graph work.
-    if matches!(provider, Some(crate::guard::Provider::Codex))
-        && !matches!(
-            std::env::var("PIXEL_CODEX_CALLER_FACTS").as_deref(),
-            Ok("1")
-        )
-    {
+    // Retired Codex registrations are silent. Retrieval is available through
+    // explicit capabilities and never requires per-prompt classification.
+    if matches!(provider, Some(crate::guard::Provider::Codex)) {
         std::process::exit(0);
     }
 
@@ -137,28 +128,6 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
             .join(pixel_index::index::SHARD_FILE)
             .is_file()
     });
-    // Explicitly opted-in Codex sessions receive only verified, bounded
-    // caller facts; the hook never starts task-target or boundary workers.
-    if matches!(provider, Some(crate::guard::Provider::Codex)) {
-        if let Some(root) = root.as_deref()
-            && let Some(symbol) = crate::codex_retrieval_intent::classify(&payload.prompt)
-        {
-            // Run all graph and source reads in a detached worker. If the
-            // database is busy or file verification is slow, the hook returns
-            // native Codex behavior at the fixed deadline without joining it.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let root = root.to_path_buf();
-            std::thread::spawn(move || {
-                let context = codex_caller_facts_context(&root, &symbol);
-                let _ = tx.send(context);
-            });
-            if let Ok(Some(context)) = rx.recv_timeout(CODEX_CALLER_FACTS_DEADLINE) {
-                emit_context(&context, event_name);
-            }
-        }
-        std::process::exit(0);
-    }
-
     let task_context =
         crate::config_cmd::feature_enabled(root.as_deref(), "task_context", "PIXEL_TASK_CONTEXT");
     let task_boundary =
@@ -263,119 +232,6 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         emit_context(&context, event_name);
     }
     std::process::exit(0);
-}
-
-/// Read and verify a few caller examples from the existing graph, or abstain.
-fn codex_caller_facts_context(root: &Path, symbol: &str) -> Option<String> {
-    use pixel_graph::store::GraphStore;
-
-    let graph_path = root
-        .join(pixel_index::index::SHARD_DIR)
-        .join(pixel_daemon::api::GRAPH_DB_FILE);
-    let graph = GraphStore::open_read_only_nonblocking(&graph_path).ok()?;
-    let examples = graph.caller_examples_by_name(symbol).ok()??;
-    if examples.target.name != symbol || examples.callers.is_empty() || examples.callers.len() > 3 {
-        return None;
-    }
-
-    let mut verified_sources = Vec::<(String, String, String)>::with_capacity(4);
-    verified_sources.push((
-        examples.target.path.clone(),
-        examples.target.blob_oid.clone(),
-        read_verified_indexed_source(root, &examples.target.path, &examples.target.blob_oid)?,
-    ));
-
-    let mut rows = Vec::with_capacity(examples.callers.len());
-    for caller in &examples.callers {
-        if !safe_caller_name(&caller.caller_name)
-            || caller.site_line == 0
-            || !matches!(caller.tier.as_str(), "exact" | "probable")
-        {
-            return None;
-        }
-
-        let source_index = if let Some((_, oid, _)) = verified_sources
-            .iter()
-            .find(|(path, _, _)| path == &caller.path)
-        {
-            let index = verified_sources
-                .iter()
-                .position(|(path, _, _)| path == &caller.path)?;
-            if oid != &caller.blob_oid {
-                return None;
-            }
-            index
-        } else {
-            let source = read_verified_indexed_source(root, &caller.path, &caller.blob_oid)?;
-            verified_sources.push((caller.path.clone(), caller.blob_oid.clone(), source));
-            verified_sources.len() - 1
-        };
-        let source = &verified_sources[source_index].2;
-        if source.lines().nth(caller.site_line as usize - 1).is_none() {
-            return None;
-        }
-        rows.push(format!(
-            "- `{}` — `{}`:{} [{}]",
-            caller.caller_name, caller.path, caller.site_line, caller.tier
-        ));
-    }
-
-    let context = format!(
-        "Indexed repository data: caller candidates for `{symbol}` (incomplete; verify source and search for other callers). Preserve full repository-relative paths when citing files:\n{}",
-        rows.join("\n")
-    );
-    (context.len() <= TASK_CONTEXT_BYTES).then_some(context)
-}
-
-/// Hash one indexed source file only after rejecting escaping and oversized paths.
-fn read_verified_indexed_source(root: &Path, rel_path: &str, expected_oid: &str) -> Option<String> {
-    use pixel_graph::build::content_oid;
-
-    if rel_path.is_empty()
-        || rel_path.len() > 4096
-        || rel_path.chars().any(char::is_control)
-        || !rel_path
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_./-".contains(character))
-    {
-        return None;
-    }
-    let relative = Path::new(rel_path);
-    if !relative
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
-    {
-        return None;
-    }
-
-    let canonical_root = root.canonicalize().ok()?;
-    let canonical_source = canonical_root.join(relative).canonicalize().ok()?;
-    if !canonical_source.starts_with(&canonical_root) {
-        return None;
-    }
-    let metadata = canonical_source.metadata().ok()?;
-    if !metadata.is_file() || metadata.len() > CODEX_CALLER_SOURCE_BYTES {
-        return None;
-    }
-
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    File::open(canonical_source)
-        .ok()?
-        .take(CODEX_CALLER_SOURCE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > CODEX_CALLER_SOURCE_BYTES || content_oid(&bytes) != expected_oid {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
-}
-
-fn safe_caller_name(name: &str) -> bool {
-    let mut characters = name.chars();
-    characters
-        .next()
-        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
-        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 /// The context that replaces keyword targets when the prompt asks for an
@@ -1095,55 +951,6 @@ mod tests {
         }
     }
     use super::*;
-
-    #[test]
-    fn caller_source_verification_rejects_stale_escaping_and_oversized_files() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("pixel-caller-source-{nonce}"));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("caller.ts");
-        let valid = b"export function caller() { return target() }\n";
-        std::fs::write(&path, valid).unwrap();
-        let oid = pixel_graph::build::content_oid(valid);
-        assert_eq!(
-            read_verified_indexed_source(&root, "caller.ts", &oid).as_deref(),
-            Some("export function caller() { return target() }\n")
-        );
-        assert_eq!(
-            read_verified_indexed_source(&root, "caller.ts", "stale-index-hash"),
-            None,
-            "changed source must not be shown as current graph evidence"
-        );
-        assert_eq!(
-            read_verified_indexed_source(&root, "../outside.ts", &oid),
-            None,
-            "repository-escaping path must abstain"
-        );
-
-        let at_limit = vec![b'x'; CODEX_CALLER_SOURCE_BYTES as usize];
-        std::fs::write(&path, &at_limit).unwrap();
-        let at_limit_oid = pixel_graph::build::content_oid(&at_limit);
-        assert_eq!(
-            read_verified_indexed_source(&root, "caller.ts", &at_limit_oid)
-                .as_deref()
-                .map(str::len),
-            Some(CODEX_CALLER_SOURCE_BYTES as usize),
-            "exactly 64 KiB remains eligible for bounded verification"
-        );
-
-        let oversized = vec![b'x'; CODEX_CALLER_SOURCE_BYTES as usize + 1];
-        std::fs::write(&path, &oversized).unwrap();
-        let oversized_oid = pixel_graph::build::content_oid(&oversized);
-        assert_eq!(
-            read_verified_indexed_source(&root, "caller.ts", &oversized_oid),
-            None,
-            "source above the 64 KiB verification budget must abstain"
-        );
-        std::fs::remove_dir_all(root).ok();
-    }
 
     #[test]
     fn devin_context_requires_pixel_before_retrieval_and_keeps_fallback_open() {

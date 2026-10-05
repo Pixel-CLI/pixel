@@ -40,7 +40,8 @@ receipt beside the results. It also refuses comparisons across different Codex
 versions. Local builds cache Cargo's registry, Git dependencies, and build
 artifacts; the first build still needs to populate those caches. Git builds use
 the resolved commit as Cargo's actual `--rev`.
-The runner bind-mounts its current entrypoint, context manifest and hook auditor
+The runner bind-mounts its current entrypoint, context manifest, hook auditor,
+and skill staging helper
 into each container, including when reusing a pinned image; harness-only edits
 do not require an image rebuild. `harness-source.json` records SHA-256 values
 and container paths for the runner files used in that run.
@@ -72,23 +73,64 @@ it does not prove the model used it. Reviewed-hook mode is limited to one task
 per run so the receipt corresponds to the selected scenario; the harness marks
 the Pixel result failed if that task produces no valid hook response.
 
-Experimental indexed-caller facts require a separate explicit flag. This also
-requires graph preparation and reviewed hooks, and sets the installed Pixel
-hook's `PIXEL_CODEX_CALLER_FACTS=1` switch only in the Pixel container:
+### Skill-only pilot
+
+Use a packaged Codex skill whose `agents/openai.yaml` explicitly sets
+`allow_implicit_invocation: false`. The disposable Pixel snapshot gets a copy
+with that policy enabled; the packaged source is never edited. Raw and Pixel
+use the same pinned Pixel image and graph preparation, but neither runs
+`pixel install` or installs retrieval hooks. Only Pixel receives the candidate
+skill. The runner captures discovered skills, skill and policy hashes, hook
+configuration fingerprints, static instructions, and setup time, then checks
+that the candidate skill is the only context difference and that no Pixel
+instruction/hook text remains in either arm.
+
+The candidate must be supplied by the packaging lane after its install/image
+is ready. The arena does not build or install a skill package itself:
 
 ```bash
 REPO_SNAPSHOT=/path/to/foreign/repository \
 PIXEL_IMAGE_SOURCE=existing PIXEL_ARENA_IMAGE=sha256:<pinned-image-id> \
 CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium \
-rtk bash eval/arena.sh --arms "raw pixel" --tasks "g4-transfer-callers" \
-  --reps 1 --prepare-pixel-graph --review-pixel-hooks --codex-caller-facts \
-  --results-dir eval/arena-results/g4-reviewed-hooks-01
+rtk bash eval/arena.sh --arms "raw pixel" --tasks "g5-symbol-impact" \
+  --reps 1 --skill-candidate-dir /path/to/packaged/pixel-impact \
+  --results-dir eval/arena-results/g5-skill-pilot-01
 ```
 
-Use a new results directory and the same pinned image/repository/model for each
-paired comparison. The flags are opt-in; caller facts are not enabled by
-`--review-pixel-hooks` alone. Compare the transcript and answer quality as
-well.
+This mode is diagnostic, not a general no-regression guarantee. Skill
+discovery is recorded separately from explicit skill-file reads and Pixel CLI
+calls. Absence of a file-read event does not prove the model did not load the
+skill, and a CLI call does not by itself establish usefulness. Review semantic
+correctness and task-specific edit/consumer completeness separately from the
+required-pattern score. Use a fresh output directory for each candidate.
+
+### Claude skill-only diagnostic
+
+`eval/claude_skill_pair.py` runs a one-repetition raw/skill pair after a
+no-model preflight. It uses the same foreign-repository snapshot and g5
+scenario, with `sonnet` / `medium` by default. On macOS it reads only the
+`claudeAiOauth` object from the Keychain entry for `--auth-config-dir` (default
+`~/.claude`); it never imports user settings, skills, hooks, plugins, or MCP
+configuration. An optional `--credentials-file` takes precedence over the
+config directory's `.credentials.json` and must have mode `0600`. Only that
+OAuth object is copied into each private, temporary arm config; credentials are
+never written to results. The preflight refuses an expired refresh token.
+
+```bash
+PAIR_ARGS=(--repo /path/to/architech-t --scenario eval/scenarios/g5-transfer-status-impact.json \
+  --skill claude-skills/pixel-impact/SKILL.md --results-dir eval/arena-results/claude-g5-r1)
+python3 eval/claude_skill_pair.py preflight "${PAIR_ARGS[@]}"
+python3 eval/claude_skill_pair.py run "${PAIR_ARGS[@]}"
+```
+
+Run the second command only after reviewing a successful preflight. The pair
+uses the existing OAuth login; a missing or expired login requires a fresh
+login before any model call. A failed or missing arm remains a failed pair,
+with unavailable token fields recorded as unknown.
+
+The old `--codex-caller-facts` route is retired and rejected. Historical runs
+remain in their original result directories and must be interpreted with
+their recorded source/image identities.
 
 The hook allowlist intentionally matches the current Pixel Codex installer.
 If its command set or event names change, update the allowlist and tests before

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
 import json
 import io
 import os
@@ -122,7 +125,7 @@ class HookAuditTest(unittest.TestCase):
         self.assertFalse(record["emitted_context"])
         self.assertFalse(record["forwarded_to_codex"])
 
-    def test_arena_requires_review_flag_for_caller_facts(self):
+    def test_arena_rejects_retired_caller_facts_flag_before_creating_results(self):
         with tempfile.TemporaryDirectory(prefix="arena-flags-") as temporary:
             root = Path(temporary)
             docker_bin = root / "bin"
@@ -143,7 +146,7 @@ class HookAuditTest(unittest.TestCase):
                 check=False, capture_output=True, cwd=runner.parents[1], env=env, text=True,
             )
             self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn("requires --review-pixel-hooks", result.stderr)
+            self.assertIn("--codex-caller-facts is retired", result.stderr)
             self.assertFalse((root / "results").exists())
 
 

@@ -476,6 +476,7 @@ console.log(JSON.stringify([before.kind, after.kind, after.reason, outside.kind]
     fn tool_result_should_unlock_bootstrap_reads_only_after_a_successful_pixel_tool_result() {
         let script = r#"
 process.env.PIXEL_POLICY = "enforce";
+process.env.PIXEL_PI_RETRIEVAL = "1";
 const root = process.cwd();
 const verdicts: Record<string, string> = {};
 for (const [toolName, isError] of [["none", false], ["pixel", false], ["pixel_project", false], ["pixel", true], ["read", false]] as const) {

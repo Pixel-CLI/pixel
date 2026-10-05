@@ -36,7 +36,7 @@ The animation illustrates a workflow; it is not a timed agent comparison.
 [Agent trials and their limits](https://pixel-cli.dev/benchmarks/#on-whole-agent-tasks) include a newer Opus trial with hooks that found no speed gain on one task.
 
 - **A local index of signatures and callers that your agent queries before it greps**: 94.5% less read volume (median) for outline questions using `pixel list-signatures` than whole-file reads on 8 large open-source files. [How we measure](https://pixel-cli.dev/benchmarks/#well-known-files)
-- **One install, zero commands to learn**: you keep prompting as usual. Works with Claude Code, Codex, Pi, Cursor, Copilot CLI, OpenCode, Devin and Antigravity.
+- **Native tools stay available**: Codex and Claude use an optional impact skill; Pi offers an explicit impact command. Other agent integrations retain their existing policies.
 - **No account. No API key. No telemetry.** Your code stays on your machine.
 - **13 languages, MIT**, macOS (Apple Silicon) and Linux, signed releases.
 
@@ -116,29 +116,23 @@ Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the
 whether `pixel doctor .` is green.
 ```
 
-If you are that agent: run the Install one-liner, tell the user it writes to their home configuration, then run `pixel install` (idempotent) and `pixel doctor . --json` — report every check that is not green, do not claim success otherwise. Restart the session afterwards: the protocol is injected at session start. Then use Pixel the way [`PIXEL.md`](PIXEL.md) describes.
+If you are that agent: run the Install one-liner, tell the user it writes to their home configuration, then run `pixel install` (idempotent) and `pixel doctor . --json` — report every check that is not green, do not claim success otherwise. Restart the session to load updated integrations. Codex and Claude keep native retrieval; their optional plugins expose the focused impact skill. Pi exposes `/pixel-impact <symbol>`. [Manual setup](docs/manual-setup.md) explains each surface.
 
 ## Now build this harness
 
-`pixel install` wired it: session start injects the contract, and a PreToolUse hook rewrites `grep`/`rg` into Pixel — fail-open for pipes, `-m/-w/-v`, >4 MiB, binary, git-ignored and unindexed paths. The LLM reasons and edits; Pixel does everything search and Git.
+Codex and Claude keep ordinary search native. Invoke the focused impact skill when a known symbol's callers or blast radius matter; Pi provides `/pixel-impact <symbol>`. The bounded query uses an existing fresh graph and falls back without rebuilding it. Task lifecycle controls remain independent. Automatic skill selection is an arena experiment, not the shipped default.
 
 **Ask about the code** — "find callers of X", "explain this flow":
 
 ```mermaid
 flowchart TD
-    U["🧑 USER · “find callers of X / explain flow”"] --> S["SESSION START · hook injects the contract<br/>PreToolUse: grep/rg → pixel search-content"]
-    S --> L["🤖 LLM agent<br/>decides WHAT to find, not HOW"]
-    L --> P["PIXEL CLI · deterministic, ~ms<br/>pixel search-content -F “ident”<br/>pixel find-code “concept”<br/>pixel find-symbol “name”<br/>pixel who-calls uid<br/>pixel pack-context uid<br/>pixel dig-history --phrase “…”"]
-    P --> E{"epistemics?"}
-    E -->|complete| A["cite and answer"]
-    E -->|capped| N["narrow the query"] --> P
-    E -->|unresolved| M["pixel search-meaning"]
-    M --> A
-    A --> F["stderr · 🟩 round-trips · tokens saved"]
-    classDef llm fill:#ffe3e3,stroke:#d64545,color:#8a1f1f
-    classDef det fill:#e6f4ea,stroke:#2ea043,color:#14522a
-    class L llm
-    class S,P,M det
+    U["USER · callers or impact of a known symbol"] --> L["Agent · explicit impact skill or Pi command"]
+    L --> P["pixel impact SYMBOL --no-refresh"]
+    P --> E{"Useful existing graph?"}
+    E -->|yes| A["Inspect cited source and verify caller coverage"]
+    E -->|missing, stale, slow or unhelpful| N["Continue with native search"]
+    N --> A
+    A --> F["Answer with evidence and coverage limits"]
 ```
 
 **Implement a feature** — "implement feature":

@@ -36,8 +36,7 @@ pub const CODEX_CONFIG_FILE: &str = "config.toml";
 /// home-relative.)
 pub const HOOKS_FILE: &str = "hooks.json";
 
-/// Substring unique to the installed metrics-relay command, used for
-/// idempotent merge and uninstall removal.
+/// Legacy marker for a Codex metrics callback, used in doctor diagnostics.
 pub const METRICS_HOOK_MARKER: &str = "run-hook metrics";
 pub const PROMPT_SUBMIT_HOOK_MARKER: &str = "run-hook prompt-submit --provider codex";
 
@@ -170,31 +169,6 @@ fn write_document(path: &Path, doc: &DocumentMut) -> Result<()> {
     Ok(())
 }
 
-/// The PostToolUse entry `pixel install` merges into `hooks.json`: Codex
-/// runs it after every tool call; `pixel run-hook metrics` self-filters to
-/// shell calls that invoked `pixel` and re-emits the finalized 🟩 line as
-/// `additionalContext` — a fallback for the rare host whose tool result
-/// drops the merged stderr Codex's exec layer normally carries.
-fn metrics_hook_entry(exe: &Path) -> serde_json::Value {
-    serde_json::json!({
-        "hooks": [{
-            "type": "command",
-            "command": format!("{} run-hook metrics --provider codex", crate::routing::quoted_executable(exe)),
-            "timeout": 10,
-        }]
-    })
-}
-
-fn prompt_submit_hook_entry(exe: &Path) -> serde_json::Value {
-    serde_json::json!({
-        "hooks": [{
-            "type": "command",
-            "command": format!("{} run-hook prompt-submit --provider codex", crate::routing::quoted_executable(exe)),
-            "timeout": 10,
-        }]
-    })
-}
-
 fn read_hooks(path: &Path) -> std::result::Result<serde_json::Value, String> {
     match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
@@ -217,20 +191,25 @@ fn write_hooks(path: &Path, value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// `pixel install` step: register Codex's metrics relay and task-boundary
-/// context hooks, idempotently alongside existing hook groups.
-pub(crate) fn install_metrics_hook(
+fn is_retired_codex_hook(command: &str, exe: &Path) -> bool {
+    crate::routing::pixel_hook_verb(command, exe)
+        .is_some_and(|verb| !verb.starts_with("task-event --provider codex --event "))
+}
+
+/// `pixel install` step: keep Codex's task-event lifecycle hooks installed,
+/// removing the retired automatic metrics and retrieval guidance hooks.
+pub(crate) fn install_task_hooks(
     codex_home: &Path,
     exe: &Path,
     dry_run: bool,
 ) -> Result<InstallStep> {
     let path = codex_home.join(HOOKS_FILE);
     let detail = Some(format!(
-        "path={} events=PostToolUse,UserPromptSubmit markers={METRICS_HOOK_MARKER},{PROMPT_SUBMIT_HOOK_MARKER}",
+        "path={} task-event lifecycle hooks; automatic metrics and retrieval hooks disabled",
         path.display()
     ));
     let step = |status, summary: String| InstallStep {
-        id: "codex-metrics-hook".into(),
+        id: "codex-task-hooks".into(),
         status,
         summary,
         detail: detail.clone(),
@@ -253,18 +232,7 @@ pub(crate) fn install_metrics_hook(
         ));
     };
     let before = hooks.clone();
-    let merged_metrics = crate::config::merge_hook_entry(
-        hooks.get("PostToolUse"),
-        METRICS_HOOK_MARKER,
-        metrics_hook_entry(exe),
-    );
-    let merged_prompt = crate::config::merge_hook_entry(
-        hooks.get("UserPromptSubmit"),
-        PROMPT_SUBMIT_HOOK_MARKER,
-        prompt_submit_hook_entry(exe),
-    );
-    hooks.insert("PostToolUse".to_string(), merged_metrics);
-    hooks.insert("UserPromptSubmit".to_string(), merged_prompt);
+    crate::routing::remove_matching_hooks(hooks, |command| is_retired_codex_hook(command, exe));
     if let Err(error) =
         crate::routing::merge_task_hooks(hooks, crate::routing::Provider::Codex, exe)
     {
@@ -273,14 +241,11 @@ pub(crate) fn install_metrics_hook(
     if *hooks == before {
         return Ok(step(
             CheckStatus::Green,
-            format!(
-                "verified metrics, prompt-submit and task hooks in {}",
-                path.display()
-            ),
+            format!("verified task-event hooks in {}", path.display()),
         ));
     }
     let summary = format!(
-        "{} metrics, prompt-submit and task hooks in {}",
+        "{} task-event hooks in {}",
         if path.is_file() {
             "updated"
         } else {
@@ -295,50 +260,47 @@ pub(crate) fn install_metrics_hook(
     Ok(step(CheckStatus::Green, summary))
 }
 
-/// `pixel doctor` check: both global Codex hooks are registered.
-pub(crate) fn check_metrics_hook(
+/// `pixel doctor` check: task-event hooks are registered without automatic
+/// retrieval or metrics hooks.
+pub(crate) fn check_task_hooks(
     codex_home: &Path,
+    exe: &Path,
 ) -> std::result::Result<(String, serde_json::Value), String> {
     let path = codex_home.join(HOOKS_FILE);
     let detail = serde_json::json!({
         "path": path.display().to_string(),
-        "events": ["PostToolUse", "UserPromptSubmit"],
-        "markers": [METRICS_HOOK_MARKER, PROMPT_SUBMIT_HOOK_MARKER],
+        "events": [
+            "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+            "Stop", "SessionEnd", "SubagentStart", "SubagentStop", "Interrupt"
+        ],
+        "retired_markers": [METRICS_HOOK_MARKER, PROMPT_SUBMIT_HOOK_MARKER],
     });
     let value = read_hooks(&path)?;
-    let has_marker = |event: &str, marker: &str| {
-        value
-            .get("hooks")
-            .and_then(|hooks| hooks.get(event))
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry
-                        .get("hooks")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|hooks| {
-                            hooks.iter().any(|hook| {
-                                hook.get("command")
-                                    .and_then(serde_json::Value::as_str)
-                                    .is_some_and(|command| command.contains(marker))
-                            })
-                        })
-                })
-            })
-    };
-    if !has_marker("PostToolUse", METRICS_HOOK_MARKER)
-        || !has_marker("UserPromptSubmit", PROMPT_SUBMIT_HOOK_MARKER)
-    {
+    let mut has_retired_pixel_hook = false;
+    if let Some(events) = value.get("hooks").and_then(serde_json::Value::as_object) {
+        for entries in events.values().filter_map(serde_json::Value::as_array) {
+            for entry in entries {
+                for hook in entry
+                    .get("hooks")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    has_retired_pixel_hook |= hook
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|command| is_retired_codex_hook(command, exe));
+                }
+            }
+        }
+    }
+    if has_retired_pixel_hook {
         return Err(format!(
-            "missing Pixel Codex hook in {} — run `pixel install`",
+            "retired automatic Pixel Codex hook remains in {} — run `pixel install`",
             path.display()
         ));
     }
-    if !crate::routing::task_hooks_registered(
-        &value,
-        crate::routing::Provider::Codex,
-        Path::new("pixel"),
-    ) {
+    if !crate::routing::task_hooks_registered(&value, crate::routing::Provider::Codex, exe) {
         return Err(format!(
             "task lifecycle hooks missing or asynchronous in {} — run `pixel install`",
             path.display()
@@ -346,7 +308,7 @@ pub(crate) fn check_metrics_hook(
     }
     Ok((
         format!(
-            "metrics, prompt-submit and task hooks registered in {} (runtime activity checked separately)",
+            "task-event hooks registered; automatic retrieval and metrics hooks absent in {}",
             path.display()
         ),
         detail,
@@ -810,7 +772,7 @@ mod tests {
         }
     }
 
-    // ---- metrics PostToolUse hook ----------------------------------------
+    // ---- native-default Codex task hooks --------------------------------
 
     fn scratch_codex_home(name: &str) -> PathBuf {
         let dir =
@@ -820,92 +782,168 @@ mod tests {
         dir
     }
 
-    fn post_tool_use(home: &Path) -> serde_json::Value {
+    fn hook_events(home: &Path) -> serde_json::Value {
         let text = fs::read_to_string(home.join(HOOKS_FILE)).unwrap();
-        serde_json::from_str::<serde_json::Value>(&text).unwrap()["hooks"]["PostToolUse"].clone()
-    }
-
-    fn user_prompt_submit(home: &Path) -> serde_json::Value {
-        let text = fs::read_to_string(home.join(HOOKS_FILE)).unwrap();
-        serde_json::from_str::<serde_json::Value>(&text).unwrap()["hooks"]["UserPromptSubmit"]
-            .clone()
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["hooks"].clone()
     }
 
     #[test]
-    fn metrics_hook_install_verify_and_preserve_foreign_entries() {
+    fn task_hooks_should_remove_pixel_retrieval_keep_foreign_hooks_and_install_lifecycle() {
         let home = scratch_codex_home("install");
         let exe = Path::new("/opt/pixel tools/pixel");
-        // A foreign PostToolUse group survives the merge.
+        // Both foreign hooks and Pixel's retired automatic hooks have to be
+        // distinguished: task lifecycle remains, retrieval and metrics leave.
         fs::write(
             home.join(HOOKS_FILE),
             serde_json::to_string_pretty(&serde_json::json!({
-                "hooks": {"PostToolUse": [
-                    {"hooks": [{"type": "command", "command": "cmux-feed"}]}
-                ]}
-            }))
+                "hooks": {
+                    "PostToolUse": [
+                        {"hooks": [{"type": "command", "command": "cmux-feed"}]},
+                        {
+                            "matcher": "Bash",
+                            "timeout": 9,
+                            "hooks": [
+                                {"type": "command", "command": "metrics-proxy --label 'run-hook metrics --provider codex'"},
+                                {"type": "command", "command": "pixel run-hook metrics --provider codex"}
+                            ]
+                        },
+                        {"hooks": [{"type": "command", "command": "pixel run-hook metrics --provider codex"}]}
+                    ],
+                    "UserPromptSubmit": [
+                        {"hooks": [{"type": "command", "command": "prompt-audit --label 'run-hook prompt-submit --provider codex'"}]},
+                        {"hooks": [{"type": "command", "command": "pixel run-hook prompt-submit --provider codex"}]}
+                    ]
+                }}
+            ))
             .unwrap(),
         )
         .unwrap();
 
-        install_metrics_hook(&home, exe, false).unwrap();
-        let entries = post_tool_use(&home).as_array().unwrap().clone();
+        install_task_hooks(&home, exe, false).unwrap();
+        let hooks = hook_events(&home);
+        let post_tool_use = hooks["PostToolUse"].as_array().unwrap();
         assert_eq!(
-            entries.len(),
+            post_tool_use.len(),
             3,
-            "foreign group preserved + metrics and task hooks added"
+            "foreign groups and lifecycle survive"
         );
-        let command = entries[1]["hooks"][0]["command"].as_str().unwrap();
-        assert!(command.contains(METRICS_HOOK_MARKER));
         assert!(
-            command.starts_with('\''),
-            "the exe path is shell-quoted: {command}"
+            post_tool_use
+                .iter()
+                .any(|entry| { entry["hooks"][0]["command"] == "cmux-feed" })
         );
-        let prompt_entries = user_prompt_submit(&home).as_array().unwrap().clone();
+        let mixed = post_tool_use
+            .iter()
+            .find(|entry| entry.get("matcher").is_some())
+            .expect("foreign hook's group remains");
+        assert_eq!(mixed["matcher"], "Bash");
+        assert_eq!(mixed["timeout"], 9);
         assert_eq!(
-            prompt_entries.len(),
-            2,
-            "prompt-submit guidance plus the task-event group"
+            mixed["hooks"],
+            serde_json::json!([{
+                "type": "command",
+                "command": "metrics-proxy --label 'run-hook metrics --provider codex'"
+            }]),
+            "foreign marker mention survives beside removed Pixel callback"
         );
-        assert!(
-            prompt_entries[0]["hooks"][0]["command"]
+        assert!(post_tool_use.iter().any(|entry| {
+            entry["hooks"][0]["command"]
                 .as_str()
-                .is_some_and(|command| command.contains(PROMPT_SUBMIT_HOOK_MARKER))
+                .is_some_and(|command| command.contains("task-event --provider codex"))
+        }));
+        assert!(
+            hooks["UserPromptSubmit"].is_array(),
+            "task-event prompt stays"
+        );
+        let prompt_hooks = hooks["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(
+            prompt_hooks.len(),
+            2,
+            "foreign prompt hook and lifecycle survive"
+        );
+        assert_eq!(
+            prompt_hooks[0]["hooks"][0]["command"],
+            "prompt-audit --label 'run-hook prompt-submit --provider codex'"
         );
         assert!(
-            check_metrics_hook(&home).is_ok(),
-            "doctor check sees the registration"
+            check_task_hooks(&home, exe).is_ok(),
+            "doctor check sees task hooks"
         );
 
         // Second install verifies instead of duplicating.
-        let step = install_metrics_hook(&home, exe, false).unwrap();
+        let step = install_task_hooks(&home, exe, false).unwrap();
         assert!(step.summary.contains("verified"), "{}", step.summary);
-        assert_eq!(post_tool_use(&home).as_array().unwrap().len(), 3);
-        assert_eq!(user_prompt_submit(&home).as_array().unwrap().len(), 2);
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn metrics_hook_reinstall_refreshes_a_stale_executable_path() {
-        let home = scratch_codex_home("refresh");
-        install_metrics_hook(&home, Path::new("/old/pixel"), false).unwrap();
-        install_metrics_hook(&home, Path::new("/new/pixel"), false).unwrap();
-        let entries = post_tool_use(&home).as_array().unwrap().clone();
         assert_eq!(
-            entries.len(),
-            2,
-            "the stale entry is replaced, not appended"
+            hook_events(&home)["PostToolUse"].as_array().unwrap().len(),
+            3,
+            "reinstall preserves both foreign groups without duplication"
         );
-        let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
-        assert!(command.contains("/new/pixel"), "{command}");
-        assert!(!command.contains("/old/pixel"), "{command}");
+        assert!(check_task_hooks(&home, exe).is_ok());
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn metrics_hook_install_refuses_unparseable_hooks_json() {
+    fn task_hook_reinstall_refreshes_the_binary_path_without_duplicating_events() {
+        let home = scratch_codex_home("refresh");
+        install_task_hooks(&home, Path::new("/old/pixel"), false).unwrap();
+        install_task_hooks(&home, Path::new("/new/pixel"), false).unwrap();
+        let hooks = hook_events(&home);
+        let commands = hooks.to_string();
+        assert!(commands.contains("/new/pixel"), "{commands}");
+        assert!(!commands.contains("/old/pixel"), "{commands}");
+        for groups in hooks.as_object().unwrap().values() {
+            let count = groups
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|group| {
+                    group["hooks"].as_array().unwrap().iter().any(|hook| {
+                        hook["command"]
+                            .as_str()
+                            .is_some_and(|command| command.contains("run-hook task-event"))
+                    })
+                })
+                .count();
+            assert_eq!(count, 1, "no duplicate task-event groups in {groups}");
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn task_hook_install_should_remove_renamed_pixel_callbacks_only() {
+        let home = scratch_codex_home("renamed");
+        let exe = Path::new("/opt/pixel custom/pixel-next");
+        install_task_hooks(&home, exe, false).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
+        value["hooks"]["PostToolUse"] = serde_json::json!([
+            {"hooks": [{"type": "command", "command": "pixel-next run-hook metrics --provider codex"}]},
+            {"hooks": [{"type": "command", "command": "pixel run-hook task-event --provider codex --event post-tool-use"}]}
+        ]);
+        fs::write(
+            home.join(HOOKS_FILE),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        install_task_hooks(&home, exe, false).unwrap();
+        let hooks = hook_events(&home);
+        let post = hooks["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 1, "renamed Pixel callback is removed");
+        assert_eq!(
+            post[0]["hooks"][0]["command"],
+            "'/opt/pixel custom/pixel-next' run-hook task-event --provider codex --event post-tool-use",
+            "task lifecycle command is preserved"
+        );
+        assert!(check_task_hooks(&home, exe).is_ok());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn task_hook_install_refuses_unparseable_hooks_json() {
         let home = scratch_codex_home("broken");
         fs::write(home.join(HOOKS_FILE), "not json").unwrap();
-        let step = install_metrics_hook(&home, Path::new("/x"), false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), false).unwrap();
         assert_eq!(step.status, CheckStatus::Red);
         assert_eq!(
             fs::read_to_string(home.join(HOOKS_FILE)).unwrap(),
@@ -913,7 +951,7 @@ mod tests {
             "an unparseable file is never rewritten"
         );
         fs::write(home.join(HOOKS_FILE), "{\"hooks\": [1]}").unwrap();
-        let step = install_metrics_hook(&home, Path::new("/x"), false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), false).unwrap();
         assert_eq!(
             step.status,
             CheckStatus::Red,
@@ -923,78 +961,82 @@ mod tests {
     }
 
     #[test]
-    fn metrics_hook_install_reports_an_unreadable_hooks_json() {
+    fn task_hook_install_reports_an_unreadable_hooks_json() {
         let home = scratch_codex_home("unreadable");
         // A directory where the file is expected fails the read for every
         // user including root — and is not "absent": it must come back Red,
         // never Ok-treated-as-empty.
         fs::create_dir(home.join(HOOKS_FILE)).unwrap();
-        let step = install_metrics_hook(&home, Path::new("/x"), false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), false).unwrap();
         assert_eq!(step.status, CheckStatus::Red, "{}", step.summary);
         assert!(step.summary.contains("not touched"), "{}", step.summary);
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn metrics_hook_check_is_red_until_registered() {
+    fn task_hook_check_requires_registration_and_rejects_retired_hooks() {
         let home = scratch_codex_home("check");
         assert!(
-            check_metrics_hook(&home).is_err(),
-            "absent file is not registered"
+            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            "absent file has no task lifecycle"
         );
         fs::write(home.join(HOOKS_FILE), "{\"hooks\": {}}").unwrap();
         assert!(
-            check_metrics_hook(&home).is_err(),
-            "empty PostToolUse is not registered"
+            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            "empty hooks object has no task lifecycle"
         );
         fs::write(
             home.join(HOOKS_FILE),
             serde_json::to_string_pretty(&serde_json::json!({
-                "hooks": {"PostToolUse": [
-                    {"hooks": [{"type": "command", "command": "pixel run-hook metrics --provider codex"}]}
-                ]}
-            }))
+                "hooks": {"SessionStart": [
+                    {"hooks": [{"type": "command", "command": "pixel run-hook task-event --provider codex --event session-start"}]}
+                ]}}
+            ))
             .unwrap(),
         )
         .unwrap();
         assert!(
-            check_metrics_hook(&home).is_err(),
-            "metrics alone satisfies neither the UserPromptSubmit nor the task gate registration"
+            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            "a partial task lifecycle is not registered"
         );
-        install_metrics_hook(&home, Path::new("pixel"), false).unwrap();
-        assert!(check_metrics_hook(&home).is_ok());
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn metrics_hook_check_is_red_when_only_the_prompt_submit_marker_is_missing() {
-        let home = scratch_codex_home("half-registered");
-        install_metrics_hook(&home, Path::new("pixel"), false).unwrap();
-        assert!(check_metrics_hook(&home).is_ok());
-
-        // Remove only the prompt-submit guidance entry: the PostToolUse
-        // metrics marker and every task gate stay registered, so the check
-        // fails iff each marker is required on its own.
+        install_task_hooks(&home, Path::new("pixel"), false).unwrap();
+        assert!(check_task_hooks(&home, Path::new("pixel")).is_ok());
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
-        value["hooks"]["UserPromptSubmit"]
-            .as_array_mut()
-            .unwrap()
-            .retain(|entry| {
-                !entry["hooks"].as_array().unwrap().iter().any(|hook| {
-                    hook["command"]
-                        .as_str()
-                        .is_some_and(|command| command.contains(PROMPT_SUBMIT_HOOK_MARKER))
-                })
-            });
+        value["hooks"]["PostToolUse"] = serde_json::json!([
+            {"hooks":[{"type":"command","command":"pixel run-hook metrics --provider codex"}]}
+        ]);
         fs::write(
             home.join(HOOKS_FILE),
             serde_json::to_string_pretty(&value).unwrap(),
         )
         .unwrap();
         assert!(
-            check_metrics_hook(&home).is_err(),
-            "a missing prompt-submit marker alone fails the check"
+            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            "legacy automatic metric entry is rejected"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn task_hook_install_keeps_the_task_prompt_event_but_removes_pixel_guidance() {
+        let home = scratch_codex_home("half-registered");
+        install_task_hooks(&home, Path::new("pixel"), false).unwrap();
+        assert!(check_task_hooks(&home, Path::new("pixel")).is_ok());
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
+        value["hooks"]["UserPromptSubmit"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| !entry["hooks"].to_string().contains("run-hook task-event"));
+        fs::write(
+            home.join(HOOKS_FILE),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            "removing the task prompt event breaks the registered lifecycle"
         );
         let _ = fs::remove_dir_all(&home);
     }

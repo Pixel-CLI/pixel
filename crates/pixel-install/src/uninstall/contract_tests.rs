@@ -191,7 +191,10 @@ fn remove_pi_extension_dir_should_remove_the_guard_and_strip_the_block_keeping_a
     let home = tempfile::tempdir().unwrap();
     let dir = home.path().join(config::PI_CONFIG_DIR);
     let ext = dir.join("extensions/pixel-guard.ts");
-    write(&ext, "export default () => {};\n");
+    write(
+        &ext,
+        &format!("{}\nexport default () => {{}};\n", config::MANAGED_BEGIN),
+    );
     let agents = dir.join("AGENTS.md");
     write(&agents, &format!("user rules\n{}", managed("pixel")));
 
@@ -234,7 +237,7 @@ fn remove_pi_extension_dir_should_keep_every_file_when_dry_run() {
     let home = tempfile::tempdir().unwrap();
     let dir = home.path().join(config::PI_CONFIG_DIR);
     let ext = dir.join("extensions/pixel-guard.ts");
-    write(&ext, "guard\n");
+    write(&ext, &format!("{}\nguard\n", config::MANAGED_BEGIN));
     let agents = dir.join("AGENTS.md");
     let text = managed("pixel");
     write(&agents, &text);

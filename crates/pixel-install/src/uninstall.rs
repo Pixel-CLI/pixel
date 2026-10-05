@@ -144,6 +144,7 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         remove_cursor_hooks(&home, &exe, dry_run)?,
         crate::copilot_config::remove_copilot_hooks(&home, dry_run)?,
         remove_pi_extension(&home, dry_run)?,
+        crate::pi_global::uninstall(&home, dry_run)?,
         // 5. Remove pixel hooks from project-level .codex/hooks.json files.
         remove_project_codex_hooks(&home, &exe, dry_run)?,
         // 6. Remove the pixel rule source file.
@@ -227,7 +228,12 @@ fn uninstall_project(
     let codex_hooks = repo.join(".codex").join(crate::codex_config::HOOKS_FILE);
     let mut patched = Vec::new();
     let mut conflicts = Vec::new();
-    if codex_hooks.is_file() {
+    if codex_hooks.is_file()
+        || repo
+            .join(".codex")
+            .join(routing::CODEX_COMPOSED_BACKUP)
+            .is_file()
+    {
         match restore_project_codex_composed_guard(&codex_hooks, dry_run)? {
             ComposedGuardRestore::Restored => {
                 patched.push(codex_hooks.display().to_string());
@@ -777,15 +783,19 @@ fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallSt
     }
     let ext_file = config_dir.join("extensions").join("pixel-guard.ts");
     let mut ext_removed = false;
-    if ext_file.is_file() {
+    let managed_ext = fs::symlink_metadata(&ext_file).is_ok_and(|metadata| metadata.is_file())
+        && fs::read_to_string(&ext_file)
+            .is_ok_and(|contents| contents.contains(config::MANAGED_BEGIN));
+    let foreign_ext = fs::symlink_metadata(&ext_file).is_ok() && !managed_ext;
+    if managed_ext {
         if !dry_run {
             let current = fs::read(&ext_file).unwrap_or_default();
-            let _ = config::backup_if_changing(&ext_file, &{
+            config::backup_if_changing(&ext_file, &{
                 let mut s = current.clone();
                 s.push(0);
                 s
-            });
-            let _ = fs::remove_file(&ext_file);
+            })?;
+            fs::remove_file(&ext_file)?;
         }
         ext_removed = true;
     }
@@ -807,7 +817,9 @@ fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallSt
 
     let summary = format!(
         "{}{}",
-        if ext_removed {
+        if foreign_ext {
+            "foreign pi extension left untouched"
+        } else if ext_removed {
             "removed pi guard extension"
         } else {
             "no pi extension found"
@@ -820,7 +832,11 @@ fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallSt
     );
     Ok(InstallStep {
         id: "hooks.pi".into(),
-        status: CheckStatus::Green,
+        status: if foreign_ext {
+            CheckStatus::Yellow
+        } else {
+            CheckStatus::Green
+        },
         summary: install::dry_run_summary(dry_run, &summary),
         detail: Some(format!("ext={}", ext_file.display())),
     })
@@ -835,7 +851,12 @@ fn remove_project_codex_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<
     let mut conflicts = Vec::new();
     for root in project_hook_search_roots(home) {
         let config_path = root.join(".codex").join("hooks.json");
-        if !config_path.is_file() {
+        if !config_path.is_file()
+            && !root
+                .join(".codex")
+                .join(routing::CODEX_COMPOSED_BACKUP)
+                .is_file()
+        {
             continue;
         }
         match restore_project_codex_composed_guard(&config_path, dry_run)? {
@@ -893,7 +914,7 @@ fn remove_project_codex_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ComposedGuardRestore {
+pub(crate) enum ComposedGuardRestore {
     /// No sidecar belongs to this project; generic Pixel-hook cleanup may run.
     NotManaged,
     /// Exact original `PreToolUse` was restored and the sidecar was removed.
@@ -911,14 +932,19 @@ enum ComposedGuardRestore {
 /// deliberately strict legacy signature permits their recovery only when the
 /// current array is exactly one unfiltered composed-guard command pointing at
 /// this project's own sidecar.
-fn restore_project_codex_composed_guard(
+pub(crate) fn restore_project_codex_composed_guard(
     config_path: &Path,
     dry_run: bool,
 ) -> Result<ComposedGuardRestore> {
-    let Some(codex_dir) = config_path.parent() else {
+    if config_path.parent().is_none() {
         return Ok(ComposedGuardRestore::NotManaged);
-    };
-    let sidecar = codex_dir.join(routing::CODEX_COMPOSED_BACKUP);
+    }
+    let sidecar = routing::composed_backup_path(config_path).map_err(|reason| {
+        InstallError::InvalidSettings {
+            path: config_path.to_path_buf(),
+            reason,
+        }
+    })?;
     if !sidecar.is_file() {
         return Ok(ComposedGuardRestore::NotManaged);
     }
@@ -949,33 +975,44 @@ fn restore_project_codex_composed_guard(
         return Ok(ComposedGuardRestore::Conflict);
     };
 
+    let settings_file_exists = config_path.is_file();
     let mut settings = install::read_settings(config_path)?;
-    let Some(current_pre) = settings
+    let current_pre = settings
         .get("hooks")
         .and_then(serde_json::Value::as_object)
         .and_then(|hooks| hooks.get("PreToolUse"))
-        .and_then(serde_json::Value::as_array)
-    else {
-        return Ok(ComposedGuardRestore::Conflict);
-    };
+        .and_then(serde_json::Value::as_array);
 
-    let unchanged = snapshot
-        .get("managed_pre_tool_use")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|managed| managed == current_pre)
-        || (snapshot.get("managed_pre_tool_use").is_none()
-            && legacy_composed_guard_signature(current_pre, &sidecar));
+    let unchanged = if !settings_file_exists {
+        // A missing config is the explicitly supported recovery case: the
+        // private snapshot is the only remaining copy of the adopted hooks.
+        true
+    } else if let Some(current_pre) = current_pre {
+        snapshot
+            .get("managed_pre_tool_use")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|managed| managed == current_pre)
+            || (snapshot.get("managed_pre_tool_use").is_none()
+                && legacy_composed_guard_signature(current_pre, &sidecar))
+    } else {
+        false
+    };
     if !unchanged {
         return Ok(ComposedGuardRestore::Conflict);
     }
 
     if !dry_run {
         let hooks = settings
-            .get_mut("hooks")
-            .and_then(serde_json::Value::as_object_mut)
-            // `current_pre` above proves this cannot fail unless an internal
-            // mutation happened between reads, which it cannot in this value.
-            .expect("validated hooks object");
+            .as_object_mut()
+            .expect("settings root remains a JSON object")
+            .entry("hooks")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or_else(|| InstallError::InvalidSettings {
+                path: config_path.to_path_buf(),
+                reason: "Codex hooks value is not an object; preserving the recovery snapshot"
+                    .into(),
+            })?;
         hooks.insert(
             "PreToolUse".into(),
             serde_json::Value::Array(original_pre.clone()),
@@ -1691,6 +1728,67 @@ mod routing_tests {
             changed
         );
         assert!(codex.join(routing::CODEX_COMPOSED_BACKUP).is_file());
+    }
+
+    fn missing_composed_config(home: &Path) -> (PathBuf, serde_json::Value) {
+        let repo = home.join("Documents/project");
+        let sidecar = repo.join(".codex").join(routing::CODEX_COMPOSED_BACKUP);
+        let original = json!([
+            {"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-policy"}]}
+        ]);
+        install::write_settings(
+            &sidecar,
+            &json!({
+                "version": 1,
+                "provider": "codex",
+                "pre_tool_use": original.clone(),
+                "managed_pre_tool_use": []
+            }),
+            false,
+        )
+        .unwrap();
+        make_private(&sidecar);
+        (repo, original)
+    }
+
+    #[test]
+    fn global_uninstall_should_recover_foreign_hooks_when_project_config_is_missing() {
+        let home = tempfile::tempdir().unwrap();
+        let (repo, original) = missing_composed_config(home.path());
+        let path = repo.join(".codex/hooks.json");
+        let sidecar = repo.join(".codex").join(routing::CODEX_COMPOSED_BACKUP);
+        let exe = Path::new("/tmp/pixel");
+
+        remove_project_codex_hooks(home.path(), exe, true).unwrap();
+        assert!(!path.exists());
+        assert!(sidecar.is_file());
+        let step = remove_project_codex_hooks(home.path(), exe, false).unwrap();
+        assert_eq!(step.status, CheckStatus::Green);
+        assert_eq!(
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
+            original
+        );
+        assert!(!sidecar.exists());
+    }
+
+    #[test]
+    fn repo_uninstall_should_recover_foreign_hooks_when_project_config_is_missing() {
+        let home = tempfile::tempdir().unwrap();
+        let (repo, original) = missing_composed_config(home.path());
+        let path = repo.join(".codex/hooks.json");
+        let sidecar = repo.join(".codex").join(routing::CODEX_COMPOSED_BACKUP);
+        let exe = Path::new("/tmp/pixel");
+
+        uninstall_project(&repo, exe, exe, true).unwrap();
+        assert!(!path.exists());
+        assert!(sidecar.is_file());
+        let report = uninstall_project(&repo, exe, exe, false).unwrap();
+        assert!(report.ok);
+        assert_eq!(
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
+            original
+        );
+        assert!(!sidecar.exists());
     }
 
     #[cfg(unix)]

@@ -57,7 +57,7 @@ The index, the code graph and the optional history data live in `.pixel/` at the
 
 ## What pixel install wires
 
-`pixel install` is global: run it once, from anywhere. It deploys the agent prompt to `~/.local/share/pixel/` (`agent-prompt.md`, plus the short `subagent-prompt.md` for sub-agents) and wires it into the agents it knows:
+`pixel install` is global: run it once, from anywhere. It retains prompt assets under `~/.local/share/pixel/` for legacy/manual integrations. Codex and Claude keep native retrieval with separate task lifecycle hooks; Pi exposes an explicit impact command:
 
 {{% agents-install %}}
 
@@ -69,18 +69,18 @@ At a terminal, `pixel install` opens with a short animation before its summary: 
 
 ### Per-repository guards
 
-`pixel install --repo <path>` writes project-local enforcement only and skips every global step:
+`pixel install --repo <path>` updates project-local integration and skips global steps:
 
 - `<repo>/.claude/settings.local.json`: the guard hook, in Claude Code's personal project settings (the shared `.claude/settings.json` never carries it); `<repo>/.claude/pixel-rtk-hooks.json` keeps an `rtk hook claude` group the guard takes over
-- `<repo>/.codex/config.toml`: the same `developer_instructions` key as the global install
+- `<repo>/.codex/config.toml`: removes retired Pixel `developer_instructions` while preserving foreign text
 - `<repo>/.codex/hooks.json`: the guard hook, with `<repo>/.codex/pixel-composed-guard-backup.json` holding the hooks it replays; left alone when Git tracks `.codex/hooks.json`
 - `<repo>/.devin/config.local.json`: the guard hook for Devin
-- `<repo>/.pi/extensions/pixel-guard.ts`: Pi's guard extension, loaded once Pi trusts the project
-- `<repo>/AGENTS.md`: a portable, managed Pixel-first retrieval block; surrounding instructions are preserved and native retrieval is never blocked
+- `<repo>/.pi/extensions/pixel-guard.ts`: Pi's task lifecycle adapter, loaded once Pi trusts the project
+- `<repo>/AGENTS.md`: removes the retired managed Pixel-first block; surrounding instructions are preserved
 
 Machine-specific artifacts that name this machine's `pixel` binary are listed in the clone's `.git/info/exclude`, so a `git add -A` cannot publish them. `.codex/config.toml` and the root `AGENTS.md` are portable and do not name the local binary.
 
-The Pi extension registers a structured `pixel` tool and provides advisory retrieval guidance by default. The root `AGENTS.md` block tells agents to attempt Pixel before native retrieval and explicitly allows native fallback; it does not produce denial messages. Run `pixel config policy enforce` to opt into supported retrieval gates or `pixel config policy off` to disable classification; `PIXEL_POLICY=enforce` or `PIXEL_POLICY=off` overrides the setting for one environment. Shell compositions and unsupported syntax retain native behavior. [Pi policy and exceptions](https://github.com/Pixel-CLI/pixel/blob/main/docs/pi-harness.md) describe the Pi boundary. `pixel doctor <repo>` reports the global wiring and the per-repository artifacts as green, stale or missing.
+Codex and Claude leave retrieval native under every shared policy setting. Pi's default integration adds an explicit `/pixel-impact <symbol>` command; the project adapter retains task controls. Legacy Pi retrieval behavior requires `PIXEL_PI_RETRIEVAL=1`. Other providers retain their existing policy settings. [Pi integration and exceptions](https://github.com/Pixel-CLI/pixel/blob/main/docs/pi-harness.md) describe the boundary. `pixel doctor <repo>` checks global and project artifacts.
 
 ## Updating
 
@@ -103,7 +103,7 @@ pixel doctor . --fix   # runs each repair a flagged check names, then re-checks
 
 ## Plugins
 
-Each agent CLI below can load Pixel's protocol through its own plugin mechanism, or for the last row a rules file you copy, with no `pixel install` step. The `pixel` binary still has to be installed: the plugin never installs it. When the binary is missing or too old for the commands the protocol names, the plugin injects a one-paragraph notice instead of the protocol.
+Codex and Claude plugins provide an explicit impact skill without automatic retrieval hooks. Pi's package provides `/pixel-impact <symbol>`. The binary must be installed separately. These focused integrations make one bounded query against an existing fresh graph; missing binaries, unsupported versions or stale indexes fall back to native tools. Other agent packages retain their existing protocol integration.
 
 | Tool | Install |
 | --- | --- |

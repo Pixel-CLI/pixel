@@ -8,7 +8,6 @@
 //! mode; per-file replacement is transactional.
 
 use std::path::Path;
-use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -285,34 +284,6 @@ pub struct EdgeRow {
     pub callee: Option<String>,
 }
 
-/// One unique symbol selected for a bounded caller-example query.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallerTarget {
-    pub name: String,
-    pub qualified: String,
-    pub path: String,
-    pub blob_oid: String,
-}
-
-/// One indexed call-site example with metadata for bounded freshness checks.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallerExample {
-    pub caller_name: String,
-    pub caller_qualified: String,
-    pub path: String,
-    pub site_line: u32,
-    pub tier: String,
-    pub blob_oid: String,
-}
-
-/// Up to three indexed callers for one unique symbol; this is not exhaustive.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallerExamples {
-    pub target: CallerTarget,
-    pub callers: Vec<CallerExample>,
-    pub truncated: bool,
-}
-
 /// One human annotation row. Annotations are HUMAN-OWNED: they are keyed by
 /// stable identity (`file_path` + symbol `name` or concept `norm`) and are
 /// NOT deleted by `replace_file`/`remove_file`, so they survive re-indexes
@@ -501,9 +472,6 @@ const DELETE_FILE_UNRESOLVED_CALLS: &str = "DELETE FROM unresolved_calls WHERE f
 /// dozen once per file, symbol, import and edge, so the connection's cache
 /// holds all of them (rusqlite keeps 16 by default).
 const STATEMENT_CACHE: usize = 64;
-/// One extra row marks that caller examples were truncated after three.
-const CALLER_QUERY_CAP: i64 = 4;
-const CALLER_EXAMPLE_CAP: usize = 3;
 
 /// `execute` through the connection's statement cache. The build loops run
 /// the same statements hundreds of thousands of times; `Connection::execute`
@@ -577,15 +545,6 @@ impl GraphStore {
 
     /// Open an existing graph without migrations or write privileges.
     pub fn open_read_only(path: &Path) -> Result<Self> {
-        Self::open_read_only_with_timeout(path, Duration::from_secs(1))
-    }
-
-    /// Opens a graph read-only and reports SQLite locks without waiting.
-    pub fn open_read_only_nonblocking(path: &Path) -> Result<Self> {
-        Self::open_read_only_with_timeout(path, Duration::ZERO)
-    }
-
-    fn open_read_only_with_timeout(path: &Path, timeout: Duration) -> Result<Self> {
         let path = match (path.parent(), path.file_name()) {
             (Some(parent), Some(name)) => nofollow_path(parent, name),
             _ => path.to_path_buf(),
@@ -594,76 +553,9 @@ impl GraphStore {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
-        conn.busy_timeout(timeout)?;
+        conn.pragma_update(None, "busy_timeout", 1000)?;
         conn.pragma_update(None, "query_only", true)?;
         Ok(Self { conn })
-    }
-
-    /// Reads at most three caller locations for a uniquely named symbol.
-    ///
-    /// Ambiguous and missing names return `None`. A fourth row marks the
-    /// examples as truncated; callers must not present them as exhaustive.
-    /// Both queries share one read transaction so concurrent graph updates
-    /// cannot change the target between resolution and edge lookup.
-    pub fn caller_examples_by_name(&self, name: &str) -> Result<Option<CallerExamples>> {
-        let tx = self.conn.unchecked_transaction()?;
-        let (target_id, target) = {
-            let mut target_stmt = tx.prepare(
-                "SELECT s.id, s.name, s.qualified, f.path, f.blob_oid
-                   FROM symbols AS s JOIN files AS f ON f.id = s.file_id
-                  WHERE s.name = ?1 LIMIT 2",
-            )?;
-            let mut targets = target_stmt.query_map(params![name], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    CallerTarget {
-                        name: row.get(1)?,
-                        qualified: row.get(2)?,
-                        path: row.get(3)?,
-                        blob_oid: row.get(4)?,
-                    },
-                ))
-            })?;
-            let Some((target_id, target)) = targets.next().transpose()? else {
-                return Ok(None);
-            };
-            if targets.next().transpose()?.is_some() {
-                return Ok(None);
-            }
-            (target_id, target)
-        };
-
-        let (callers, truncated) = {
-            let mut caller_stmt = tx.prepare(
-                "SELECT caller.name, caller.qualified, f.path, e.site_line, e.tier, f.blob_oid
-                   FROM edges AS e
-                   JOIN symbols AS caller ON caller.id = e.src_id
-                   JOIN files AS f ON f.id = caller.file_id
-                  WHERE e.dst_id = ?1 AND e.kind = 'calls' AND e.site_line > 0
-                  LIMIT ?2",
-            )?;
-            let rows = caller_stmt.query_map(params![target_id, CALLER_QUERY_CAP], |row| {
-                Ok(CallerExample {
-                    caller_name: row.get(0)?,
-                    caller_qualified: row.get(1)?,
-                    path: row.get(2)?,
-                    site_line: row.get(3)?,
-                    tier: row.get(4)?,
-                    blob_oid: row.get(5)?,
-                })
-            })?;
-            let mut callers = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-            let truncated = callers.len() > CALLER_EXAMPLE_CAP;
-            callers.truncate(CALLER_EXAMPLE_CAP);
-            (callers, truncated)
-        };
-        tx.commit()?;
-
-        Ok(Some(CallerExamples {
-            target,
-            callers,
-            truncated,
-        }))
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -2051,174 +1943,6 @@ mod tests {
 
     use super::*;
     use std::os::unix::fs::symlink;
-
-    fn caller_fixture_symbol(
-        store: &mut GraphStore,
-        path: &str,
-        blob_oid: &str,
-        name: &str,
-        qualified: &str,
-    ) -> i64 {
-        let file_id = store.replace_file(path, blob_oid, "rust").unwrap();
-        store
-            .insert_symbol(
-                file_id,
-                &format!("{path}#{qualified}#function"),
-                name,
-                qualified,
-                SymbolKind::Function,
-                1,
-                10,
-                "fn",
-            )
-            .unwrap()
-    }
-
-    #[test]
-    fn caller_examples_are_bounded_and_include_freshness_metadata() {
-        let mut store = GraphStore::open_in_memory().unwrap();
-        let target = caller_fixture_symbol(
-            &mut store,
-            "src/target.rs",
-            "target-oid",
-            "dispatch",
-            "dispatch",
-        );
-        for index in 0..5 {
-            let path = format!("src/caller_{index}.rs");
-            let name = format!("caller_{index}");
-            let caller = caller_fixture_symbol(
-                &mut store,
-                &path,
-                &format!("caller-oid-{index}"),
-                &name,
-                &name,
-            );
-            store
-                .insert_edge(&EdgeRow {
-                    src_id: caller,
-                    dst_id: target,
-                    kind: EdgeKind::Calls,
-                    tier: if index % 2 == 0 {
-                        Tier::Exact
-                    } else {
-                        Tier::Probable
-                    },
-                    site_line: index + 10,
-                    receiver: None,
-                    callee: None,
-                })
-                .unwrap();
-        }
-
-        let examples = store.caller_examples_by_name("dispatch").unwrap().unwrap();
-        assert_eq!(
-            examples.target,
-            CallerTarget {
-                name: "dispatch".to_owned(),
-                qualified: "dispatch".to_owned(),
-                path: "src/target.rs".to_owned(),
-                blob_oid: "target-oid".to_owned(),
-            }
-        );
-        assert_eq!(examples.callers.len(), CALLER_EXAMPLE_CAP);
-        assert!(
-            examples.truncated,
-            "the fourth indexed caller marks truncation"
-        );
-        for caller in examples.callers {
-            assert!(caller.site_line > 0);
-            assert!(caller.path.starts_with("src/caller_"));
-            let index = caller
-                .caller_name
-                .strip_prefix("caller_")
-                .unwrap()
-                .parse::<usize>()
-                .unwrap();
-            assert_eq!(caller.path, format!("src/caller_{index}.rs"));
-            assert_eq!(caller.blob_oid, format!("caller-oid-{index}"));
-            assert_eq!(caller.site_line, index as u32 + 10);
-            assert_eq!(
-                caller.tier,
-                if index % 2 == 0 { "exact" } else { "probable" }
-            );
-        }
-    }
-
-    #[test]
-    fn caller_examples_abstain_for_missing_or_ambiguous_names_and_ignore_non_calls() {
-        let mut store = GraphStore::open_in_memory().unwrap();
-        assert!(store.caller_examples_by_name("missing").unwrap().is_none());
-
-        let target = caller_fixture_symbol(&mut store, "a.rs", "a-oid", "dispatch", "dispatch");
-        let unrelated =
-            caller_fixture_symbol(&mut store, "b.rs", "b-oid", "unrelated", "unrelated");
-        let importer = caller_fixture_symbol(&mut store, "c.rs", "c-oid", "importer", "importer");
-        store
-            .insert_edge(&EdgeRow {
-                src_id: importer,
-                dst_id: target,
-                kind: EdgeKind::Imports,
-                tier: Tier::Exact,
-                site_line: 12,
-                receiver: None,
-                callee: None,
-            })
-            .unwrap();
-        store
-            .insert_edge(&EdgeRow {
-                src_id: unrelated,
-                dst_id: target,
-                kind: EdgeKind::Calls,
-                tier: Tier::Exact,
-                site_line: 0,
-                receiver: None,
-                callee: None,
-            })
-            .unwrap();
-
-        let no_callers = store.caller_examples_by_name("dispatch").unwrap().unwrap();
-        assert!(no_callers.callers.is_empty());
-        assert!(!no_callers.truncated);
-
-        caller_fixture_symbol(
-            &mut store,
-            "other.rs",
-            "other-oid",
-            "dispatch",
-            "other::dispatch",
-        );
-        assert!(store.caller_examples_by_name("dispatch").unwrap().is_none());
-    }
-
-    #[test]
-    fn nonblocking_read_only_open_reports_locks_without_writing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("locked.db");
-        let writer = Connection::open(&path).unwrap();
-        writer
-            .execute_batch(
-                "PRAGMA journal_mode = DELETE;
-                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                 INSERT INTO meta VALUES ('generation', 'one');
-                 BEGIN EXCLUSIVE;",
-            )
-            .unwrap();
-
-        let reader = GraphStore::open_read_only_nonblocking(&path).unwrap();
-        assert!(reader.meta_get("generation").is_err());
-        drop(reader);
-        writer.execute_batch("ROLLBACK;").unwrap();
-
-        let reader = GraphStore::open_read_only_nonblocking(&path).unwrap();
-        assert_eq!(
-            reader.meta_get("generation").unwrap().as_deref(),
-            Some("one")
-        );
-        assert!(reader.meta_set("generation", "changed").is_err());
-        assert!(GraphStore::open_read_only_nonblocking(&dir.path().join("missing.db")).is_err());
-        assert!(!dir.path().join("missing.db").exists());
-    }
 
     /// A file's refresh drops its old concepts and their search words, and
     /// only its own: a word left behind would keep answering `find-code`

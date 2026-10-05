@@ -13,7 +13,7 @@
 # Usage: eval/arena.sh [--arms "raw pixel"] [--tasks "s1 s2 s3"] [--reps N]
 #                      [--results-dir DIR] [--reuse-pixel-image] [--watch]
 #                      [--assert-context-parity] [--prepare-pixel-graph]
-#                      [--review-pixel-hooks] [--codex-caller-facts]
+#                      [--review-pixel-hooks] [--skill-candidate-dir DIR]
 #   --watch opens one Herdr pane per arm container (when inside Herdr)
 #   running `docker exec -it <c> codex` — interactive codex with and
 #   without pixel side by side; falls back to a tmux session otherwise.
@@ -37,8 +37,15 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)-$$}"
 ASSERT_CONTEXT_PARITY=0
 PREPARE_PIXEL_GRAPH="${ARENA_PREPARE_PIXEL_GRAPH:-0}"
 REVIEWED_PIXEL_HOOKS="${ARENA_REVIEWED_PIXEL_HOOKS:-0}"
-CODEX_CALLER_FACTS="${ARENA_CODEX_CALLER_FACTS:-0}"
+SKILL_CANDIDATE_DIR="${ARENA_SKILL_CANDIDATE_DIR:-}"
+SKILL_NAME=""
+SKILL_SOURCE_SHA256=""
+SKILL_IMAGE_READY=0
 START=$(date +%s)
+if [ -n "${ARENA_CODEX_CALLER_FACTS:-}" ] && [ "${ARENA_CODEX_CALLER_FACTS}" != "0" ]; then
+  echo "ARENA_CODEX_CALLER_FACTS is retired; use a skill-only candidate evaluation" >&2
+  exit 2
+fi
 
 # flags override env: --arms, --tasks, --reps, --results-dir, --watch
 while [ $# -gt 0 ]; do
@@ -51,7 +58,11 @@ while [ $# -gt 0 ]; do
     --assert-context-parity) ASSERT_CONTEXT_PARITY=1; shift ;;
     --prepare-pixel-graph) PREPARE_PIXEL_GRAPH=1; shift ;;
     --review-pixel-hooks) REVIEWED_PIXEL_HOOKS=1; shift ;;
-    --codex-caller-facts) CODEX_CALLER_FACTS=1; shift ;;
+    --skill-candidate-dir) SKILL_CANDIDATE_DIR="$2"; shift 2 ;;
+    --codex-caller-facts)
+      echo "--codex-caller-facts is retired; use a skill-only candidate evaluation" >&2
+      exit 2
+      ;;
     --watch) WATCH=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -61,10 +72,7 @@ case "$PREPARE_PIXEL_GRAPH" in
   0|1) ;;
   *) echo "ARENA_PREPARE_PIXEL_GRAPH must be 0 or 1" >&2; exit 2 ;;
 esac
-case "$REVIEWED_PIXEL_HOOKS:$CODEX_CALLER_FACTS" in
-  0:0|1:0|1:1) ;;
-  *) echo "--codex-caller-facts requires --review-pixel-hooks" >&2; exit 2 ;;
-esac
+case "$REVIEWED_PIXEL_HOOKS" in 0|1) ;; *) echo "ARENA_REVIEWED_PIXEL_HOOKS must be 0 or 1" >&2; exit 2 ;; esac
 if [ "$PREPARE_PIXEL_GRAPH" = "1" ] && [[ " $ARMS " != *" pixel "* ]]; then
   echo "--prepare-pixel-graph requires the pixel arm" >&2
   exit 2
@@ -82,9 +90,32 @@ if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
     exit 2
   fi
 fi
-if [ "$CODEX_CALLER_FACTS" = "1" ] && [ "$PREPARE_PIXEL_GRAPH" != "1" ]; then
-  echo "--codex-caller-facts requires --prepare-pixel-graph" >&2
-  exit 2
+SKILL_PILOT=0
+if [ -n "$SKILL_CANDIDATE_DIR" ]; then
+  SKILL_PILOT=1
+  if [ ! -d "$SKILL_CANDIDATE_DIR" ]; then
+    echo "skill candidate directory does not exist: $SKILL_CANDIDATE_DIR" >&2
+    exit 2
+  fi
+  SKILL_CANDIDATE_DIR="$(cd "$SKILL_CANDIDATE_DIR" && pwd)"
+  read -r -a skill_arms <<< "$ARMS"
+  if [ "${#skill_arms[@]}" -ne 2 ] || \
+     ! { [[ " ${skill_arms[*]} " == *" raw "* ]] && [[ " ${skill_arms[*]} " == *" pixel "* ]]; }; then
+    echo "--skill-candidate-dir requires exactly the raw and pixel arms" >&2
+    exit 2
+  fi
+  if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
+    echo "skill-only runs do not install or audit Pixel hooks; omit --review-pixel-hooks" >&2
+    exit 2
+  fi
+  if [ "$ASSERT_CONTEXT_PARITY" = "1" ]; then
+    echo "skill-only runs use --assert-skill-only; omit --assert-context-parity" >&2
+    exit 2
+  fi
+  skill_source_receipt=$(python3 "$ARENA_DIR/arena/skill_candidate.py" inspect \
+    --source "$SKILL_CANDIDATE_DIR")
+  SKILL_NAME=$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["skill_name"])' "$skill_source_receipt")
+  SKILL_SOURCE_SHA256=$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["source_sha256"])' "$skill_source_receipt")
 fi
 
 case "$RESULTS" in
@@ -127,6 +158,7 @@ files = {
     "entrypoint": (arena_dir / "arena/entrypoint.sh", "/usr/local/bin/arena-entrypoint"),
     "context_manifest": (arena_dir / "arena/context_manifest.py", "/usr/local/lib/arena-context-manifest.py"),
     "hook_audit": (arena_dir / "arena/hook_audit.py", "/usr/local/lib/arena-hook-audit.py"),
+    "skill_candidate": (arena_dir / "arena/skill_candidate.py", "/usr/local/lib/arena-skill-candidate.py"),
 }
 receipt = {
     name: {
@@ -143,13 +175,12 @@ PY
 prompt_for() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "$SCENARIOS_DIR/$1.json"; }
 
 launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
-  local arm="$1" rep="$2" image_id="$3" actual_image container arm_caller_facts=0
-  if [ "$arm" = "pixel" ]; then arm_caller_facts="$CODEX_CALLER_FACTS"; fi
+  local arm="$1" rep="$2" image_id="$3" actual_image container
   container="arena-$arm-$RUN_ID-$rep"
   local snap="$RESULTS/snapshot-$arm-$rep"
   if [ ! -d "$snap" ]; then
     git clone -q "$REPO_SNAPSHOT" "$snap"
-    if [ "$arm" = "raw" ]; then
+    if [ "$arm" = "raw" ] || [ "$SKILL_PILOT" = "1" ]; then
       # The snapshot carries pixel's own agent-facing docs; raw must not see
       # them or codex tries `pixel …` and burns a turn on the failure.
       rm -rf "$snap/.agents/skills/pixel" "$snap/skills/pixel" \
@@ -171,10 +202,19 @@ launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
           && mv "$snap/AGENTS.md.scrubbed" "$snap/AGENTS.md"
       fi
       rm -rf "$snap/.agents/skills/pixel-retro"
+      rm -rf "$snap/.agents/skills/pixel-impact"
+      [ -z "$SKILL_NAME" ] || rm -rf "$snap/.agents/skills/$SKILL_NAME"
       for f in "$snap"/.agents/rules/*.md "$snap"/.agents/skills/*/SKILL.md; do
         [ -f "$f" ] || continue
         grep -vEi 'pixel' "$f" > "$f.scrubbed" && mv "$f.scrubbed" "$f"
       done
+    fi
+    if [ "$SKILL_PILOT" = "1" ]; then
+      python3 "$ARENA_DIR/arena/skill_candidate.py" stage \
+        --source "$SKILL_CANDIDATE_DIR" --repo "$snap" --arm "$arm" \
+        --receipt "$RESULTS/skill-stage-$arm-$rep.json"
+      SKILL_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["skill_name"])' \
+        "$RESULTS/skill-stage-$arm-$rep.json")
     fi
   fi
   local missing=0
@@ -186,14 +226,15 @@ launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
     -v "$snap":/repo \
   -v "$AUTH":/root/.codex/auth.json:ro \
   -v "$ARENA_DIR/arena/entrypoint.sh":/usr/local/bin/arena-entrypoint:ro \
-  -v "$ARENA_DIR/arena/context_manifest.py":/usr/local/lib/arena-context-manifest.py:ro \
-  -v "$ARENA_DIR/arena/hook_audit.py":/usr/local/lib/arena-hook-audit.py:ro \
+    -v "$ARENA_DIR/arena/context_manifest.py":/usr/local/lib/arena-context-manifest.py:ro \
+    -v "$ARENA_DIR/arena/hook_audit.py":/usr/local/lib/arena-hook-audit.py:ro \
+    -v "$ARENA_DIR/arena/skill_candidate.py":/usr/local/lib/arena-skill-candidate.py:ro \
     -v "$SCENARIOS_DIR":/prompts:ro \
     -v "$RESULTS":/out \
     -e ARM_TOOL="$arm" -e REP="$rep" -e TASKS="$TASKS" -e ARENA_RUN_ID="$RUN_ID" \
     -e PIXEL_ARENA_PREP_GRAPH="$PREPARE_PIXEL_GRAPH" \
+    -e ARENA_SKILL_PILOT="$SKILL_PILOT" \
     -e ARENA_REVIEWED_PIXEL_HOOKS="$REVIEWED_PIXEL_HOOKS" \
-    -e ARENA_CODEX_CALLER_FACTS="$arm_caller_facts" \
     -e CODEX_MODEL="${CODEX_MODEL:-}" -e CODEX_EFFORT="${CODEX_EFFORT:-}" \
     "$image_id" >/dev/null
   actual_image=$("$DOCKER_BIN" inspect --format '{{.Image}}' "$container")
@@ -225,7 +266,31 @@ PIXEL_IMAGE_ID=""
 CODEX_VERSION=""
 for arm in $ARMS; do
   docker_build="pixel-arena:$arm"
-  if [ "$arm" = "pixel" ]; then
+  if [ "$SKILL_PILOT" = "1" ]; then
+    docker_build="$PIXEL_IMAGE_REF"
+    if [ "$SKILL_IMAGE_READY" = "1" ]; then
+      : # Both skill-only arms intentionally share the already-resolved image.
+    elif [ "$PIXEL_IMAGE_SOURCE" = "existing" ]; then
+      if ! "$DOCKER_BIN" image inspect "$docker_build" >/dev/null 2>&1; then
+        echo "requested existing Pixel image is missing: $docker_build" >&2
+        exit 2
+      fi
+      echo "=== using existing image $docker_build for both skill-pilot arms"
+    elif [ "${PIXEL_SRC:-git}" = "local" ]; then
+      pixel_src_dir="${PIXEL_SRC_DIR:-$(cd "$ARENA_DIR/.." && pwd)}"
+      echo "=== building shared skill-pilot image $docker_build (local: $pixel_src_dir)"
+      "$DOCKER_BIN" build -f "$pixel_src_dir/eval/arena/Dockerfile.pixel" -t "$docker_build" \
+        --build-arg PIXEL_SRC=local --build-arg ENTRYPOINT_SRC=eval/arena/entrypoint.sh "$pixel_src_dir" \
+        || { echo "IMAGE BUILD FAILED: skill-pilot"; exit 1; }
+    else
+      pixel_main_sha=$(git ls-remote https://github.com/Pixel-CLI/pixel refs/heads/main | cut -f1)
+      echo "=== building shared skill-pilot image $docker_build (main: ${pixel_main_sha:-unresolved})"
+      "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.pixel" -t "$docker_build" \
+        --build-arg "PIXEL_MAIN_SHA=${pixel_main_sha:-main}" "$ARENA_DIR/arena" \
+        || { echo "IMAGE BUILD FAILED: skill-pilot"; exit 1; }
+    fi
+    SKILL_IMAGE_READY=1
+  elif [ "$arm" = "pixel" ]; then
     docker_build="$PIXEL_IMAGE_REF"
     if [ "$PIXEL_IMAGE_SOURCE" = "existing" ]; then
       if ! "$DOCKER_BIN" image inspect "$docker_build" >/dev/null 2>&1; then
@@ -376,10 +441,13 @@ rank_results() {
     --run-id "$RUN_ID" --model "$CODEX_MODEL" --effort "$CODEX_EFFORT" \
     --repo-snapshot "$REPO_SNAPSHOT" --pixel-image-id "$PIXEL_IMAGE_ID" \
     --pixel-source-id "${PIXEL_SOURCE_ID:-${PIXEL_SRC:-git}}" \
-    --codex-version "$CODEX_VERSION"
+    --codex-version "$CODEX_VERSION" --skill-candidate-name "$SKILL_NAME" \
+    --skill-source-sha256 "$SKILL_SOURCE_SHA256"
 }
 if [ "$ASSERT_CONTEXT_PARITY" = "1" ]; then
   rank_results --assert-context-parity
+elif [ "$SKILL_PILOT" = "1" ]; then
+  rank_results --assert-skill-only "$SKILL_NAME"
 else
   rank_results
 fi

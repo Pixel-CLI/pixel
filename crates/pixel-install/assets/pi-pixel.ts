@@ -885,169 +885,175 @@ export default function activate(pi: ExtensionAPI) {
       continue: decision.decision === "continue" && event.context.canContinue,
     };
   });
+  const pixelRetrievalEnabled = process.env.PIXEL_PI_RETRIEVAL === "1";
   const resolvedPaths = new Set<string>();
   const state: { pixelHealthy?: boolean; pixelCalled: boolean } = { pixelCalled: false };
-  pi.on("session_start", async () => {
-    resolvedPaths.clear();
-    state.pixelHealthy = undefined;
-    state.pixelCalled = false;
-    installed = undefined;
+  pi.on("before_agent_start", async (event, ctx) => {
+    await observe(ctx, "prompt-submit", { prompt: String((event as any).prompt ?? "") });
   });
-  // Keep a distinct name from the global Pixel extension: Pi 0.87.1 rejects
-  // duplicate tool names during startup, before session_start can inspect them.
-  pi.registerTool({
-    name: "pixel_project", label: "Pixel (project)",
-    description: "Repository retrieval and Git interface. Provide the desired outcome as goal; actions are stable across Pixel CLI versions.",
-    parameters: Type.Object({
-      action: Type.Union(ACTIONS.map((a) => Type.Literal(a))),
-      goal: Type.Optional(Type.String()),
-      query: Type.Optional(Type.String()),
-      path: Type.Optional(Type.String()),
-      symbol: Type.Optional(Type.String()),
-      remote: Type.Optional(Type.String()),
-      refspec: Type.Optional(Type.String()),
-      files: Type.Optional(Type.Array(Type.String())),
-      message: Type.Optional(Type.String()),
-      request_id: Type.Optional(Type.String()),
-    }),
-    async execute(_id, p, _signal, _update, ctx) {
-      const root = ctx.cwd;
-      const action = p.action as Action;
-      try {
-        if (!authorized(action, ctx)) {
-          const result = { action, error: `User authorization for ${action} is absent from the current request`, next_action: "Ask the user for explicit authorization" };
-          audit(root, "blocked", action, { reason: "authorization absent" });
-          return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, isError: true };
-        }
-        const index = health(root, action);
-        let ambiguousCandidates: string[] = [];
-        if ((action === "impact" || action === "pack_context")) {
-          const wanted = String(p.symbol ?? p.query ?? p.goal ?? "").trim();
-          if (wanted && !wanted.includes("#")) {
-            const resolved = resolveSymbolUid(root, wanted, p.path ? String(p.path) : undefined);
-            if (resolved.uid) p = { ...p, symbol: resolved.uid };
-            else if (action === "pack_context") ambiguousCandidates = resolved.candidates;
+  if (pixelRetrievalEnabled) {
+    pi.on("session_start", async () => {
+      resolvedPaths.clear();
+      state.pixelHealthy = undefined;
+      state.pixelCalled = false;
+      installed = undefined;
+    });
+    // Keep a distinct name from the global Pixel extension: Pi 0.87.1 rejects
+    // duplicate tool names during startup, before session_start can inspect them.
+    pi.registerTool({
+      name: "pixel_project", label: "Pixel (project)",
+      description: "Repository retrieval and Git interface. Provide the desired outcome as goal; actions are stable across Pixel CLI versions.",
+      parameters: Type.Object({
+        action: Type.Union(ACTIONS.map((a) => Type.Literal(a))),
+        goal: Type.Optional(Type.String()),
+        query: Type.Optional(Type.String()),
+        path: Type.Optional(Type.String()),
+        symbol: Type.Optional(Type.String()),
+        remote: Type.Optional(Type.String()),
+        refspec: Type.Optional(Type.String()),
+        files: Type.Optional(Type.Array(Type.String())),
+        message: Type.Optional(Type.String()),
+        request_id: Type.Optional(Type.String()),
+      }),
+      async execute(_id, p, _signal, _update, ctx) {
+        const root = ctx.cwd;
+        const action = p.action as Action;
+        try {
+          if (!authorized(action, ctx)) {
+            const result = { action, error: `User authorization for ${action} is absent from the current request`, next_action: "Ask the user for explicit authorization" };
+            audit(root, "blocked", action, { reason: "authorization absent" });
+            return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, isError: true };
           }
-        }
-        const steps = commandFor(action, p);
-        const boxes: string[] = [];
-        const evidence = steps.map((args) => {
-          const { stdout: output, box } = runBox(root, args);
-          if (box) boxes.push(box);
-          rememberPaths(parseEvidence(output), resolvedPaths, root);
-          return { operation: args[0], output: parseEvidence(output.slice(0, MAX_OUTPUT)), truncated: output.length > MAX_OUTPUT };
-        });
-        if (action === "find_code" && /\b(investigate|analy[sz]e|understand)\b/i.test(String(p.goal ?? ""))) {
-          const found = evidence[0].output as any;
-          const matches = found?.matches;
-          if (found?.confidence === "resolved" && Array.isArray(matches) && matches.length === 1 && matches[0].symbol_kind) {
-            const match = matches[0];
-            const uid = matchUid(match)!;
-            for (const args of [["impact", uid, "--json"], ["pack-context", uid, "--json", "--budget", "1200"]]) {
-              const { stdout: output, box } = runBox(root, args);
-              if (box) boxes.push(box);
-              rememberPaths(parseEvidence(output), resolvedPaths, root);
-              evidence.push({ operation: args[0], output: parseEvidence(output.slice(0, MAX_OUTPUT)), truncated: output.length > MAX_OUTPUT });
+          const index = health(root, action);
+          let ambiguousCandidates: string[] = [];
+          if ((action === "impact" || action === "pack_context")) {
+            const wanted = String(p.symbol ?? p.query ?? p.goal ?? "").trim();
+            if (wanted && !wanted.includes("#")) {
+              const resolved = resolveSymbolUid(root, wanted, p.path ? String(p.path) : undefined);
+              if (resolved.uid) p = { ...p, symbol: resolved.uid };
+              else if (action === "pack_context") ambiguousCandidates = resolved.candidates;
             }
           }
+          const steps = commandFor(action, p);
+          const boxes: string[] = [];
+          const evidence = steps.map((args) => {
+            const { stdout: output, box } = runBox(root, args);
+            if (box) boxes.push(box);
+            rememberPaths(parseEvidence(output), resolvedPaths, root);
+            return { operation: args[0], output: parseEvidence(output.slice(0, MAX_OUTPUT)), truncated: output.length > MAX_OUTPUT };
+          });
+          if (action === "find_code" && /\b(investigate|analy[sz]e|understand)\b/i.test(String(p.goal ?? ""))) {
+            const found = evidence[0].output as any;
+            const matches = found?.matches;
+            if (found?.confidence === "resolved" && Array.isArray(matches) && matches.length === 1 && matches[0].symbol_kind) {
+              const match = matches[0];
+              const uid = matchUid(match)!;
+              for (const args of [["impact", uid, "--json"], ["pack-context", uid, "--json", "--budget", "1200"]]) {
+                const { stdout: output, box } = runBox(root, args);
+                if (box) boxes.push(box);
+                rememberPaths(parseEvidence(output), resolvedPaths, root);
+                evidence.push({ operation: args[0], output: parseEvidence(output.slice(0, MAX_OUTPUT)), truncated: output.length > MAX_OUTPUT });
+              }
+            }
+          }
+          const truncated = evidence.some((item) => item.truncated);
+          const first = evidence[0].output as any;
+          const next_action = truncated ? "Narrow the scope or query"
+            : ambiguousCandidates.length ? `Ambiguous symbol; call find_code to pick the target, then retry pack_context with a path#name#kind uid: ${ambiguousCandidates.join(", ")}`
+            : action === "find_code" && first?.confidence !== "resolved" ? "Try search_content with a concrete token"
+            : action === "search_content" && Array.isArray(first) && first.length === 0 ? "Broaden the query or check index coverage"
+            : undefined;
+          const result = { action, evidence, index, truncated, next_action };
+          state.pixelHealthy = true;
+          state.pixelCalled = true;
+          audit(root, "tool", action, { index_health: "present", graph_present: index.graph?.present, facts_fresh: index.facts?.fresh, truncated });
+          const content = [{ type: "text", text: JSON.stringify(result) }, ...(boxes.length ? [{ type: "text", text: boxes.join("\n") }] : [])];
+          return { content, details: result };
+        } catch (error) {
+          state.pixelHealthy = false;
+          installed = undefined;
+          const result = { action, error: String(error), next_action: "Repair Pixel availability or narrow the request; native tools remain available" };
+          audit(root, "unavailable", action, { reason: "Pixel unavailable or operation failed" });
+          return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, isError: true };
         }
-        const truncated = evidence.some((item) => item.truncated);
-        const first = evidence[0].output as any;
-        const next_action = truncated ? "Narrow the scope or query"
-          : ambiguousCandidates.length ? `Ambiguous symbol; call find_code to pick the target, then retry pack_context with a path#name#kind uid: ${ambiguousCandidates.join(", ")}`
-          : action === "find_code" && first?.confidence !== "resolved" ? "Try search_content with a concrete token"
-          : action === "search_content" && Array.isArray(first) && first.length === 0 ? "Broaden the query or check index coverage"
-          : undefined;
-        const result = { action, evidence, index, truncated, next_action };
+      },
+    });
+
+    // Keep both the global and project-specific Pixel tools available even when
+    // a restored tool selection predates this project extension.
+    const activatePixelTool = () => {
+      const active = pi.getActiveTools();
+      const available = new Set(pi.getAllTools().map((tool) => tool.name));
+      const pixelTools = ["pixel", "pixel_project"].filter((name) => available.has(name));
+      const missing = pixelTools.filter((name) => !active.includes(name));
+      if (missing.length) pi.setActiveTools([...active, ...missing]);
+    };
+    pi.on("session_start", activatePixelTool);
+    pi.on("model_select", activatePixelTool);
+
+    // Task context is independent of optional enforcement. Parse complete
+    // evidence before capping the text sent to the model.
+    pi.on("before_agent_start", async (event, ctx) => {
+      const root = ctx?.cwd ?? process.cwd();
+      const prompt = String((event as any).prompt ?? "");
+      if (prompt.trim().length < MIN_PROMPT_LEN) return;
+      try {
+        const index = health(root, "scope_task");
+        // Started first and awaited last: the classifier runs beside the two
+        // context calls and never fails the bootstrap. Both are quiet probes
+        // (`runAsync` passes `--metrics off`), like main's other bootstrap reads.
+        const intent = classifyIntent(root, prompt);
+        const routeAvailable = capabilities().commands.has("execution-brief");
+        const contextOperation = routeAvailable ? "execution-brief" : "scope-task";
+        const [scope, repo] = (await Promise.all([
+          runAsync(root, [contextOperation, prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"]),
+          runAsync(root, ["repo-state", "--json"]),
+        ])).map((text) => text.trim());
+        const intentText = await intent;
+        for (const text of [scope, repo]) rememberPaths(parseEvidence(text), resolvedPaths, root);
+        const brief = routeAvailable ? readBrief(scope) : { route: null, asksAboutCode: true };
+        const routeText = brief.route;
+        const evidence = routeAvailable ? briefForBudget(scope) : scope;
         state.pixelHealthy = true;
-        state.pixelCalled = true;
-        audit(root, "tool", action, { index_health: "present", graph_present: index.graph?.present, facts_fresh: index.facts?.fresh, truncated });
-        const content = [{ type: "text", text: JSON.stringify(result) }, ...(boxes.length ? [{ type: "text", text: boxes.join("\n") }] : [])];
-        return { content, details: result };
-      } catch (error) {
-        state.pixelHealthy = false;
-        installed = undefined;
-        const result = { action, error: String(error), next_action: "Repair Pixel availability or narrow the request; native tools remain available" };
-        audit(root, "unavailable", action, { reason: "Pixel unavailable or operation failed" });
-        return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, isError: true };
-      }
-    },
-  });
-
-  // Keep both the global and project-specific Pixel tools available even when
-  // a restored tool selection predates this project extension.
-  const activatePixelTool = () => {
-    const active = pi.getActiveTools();
-    const available = new Set(pi.getAllTools().map((tool) => tool.name));
-    const pixelTools = ["pixel", "pixel_project"].filter((name) => available.has(name));
-    const missing = pixelTools.filter((name) => !active.includes(name));
-    if (missing.length) pi.setActiveTools([...active, ...missing]);
-  };
-  pi.on("session_start", activatePixelTool);
-  pi.on("model_select", activatePixelTool);
-
-  // Task context is independent of optional enforcement. Parse complete
-  // evidence before capping the text sent to the model.
-  pi.on("before_agent_start", async (event, ctx) => {
-    const root = ctx?.cwd ?? process.cwd();
-    const prompt = String((event as any).prompt ?? "");
-    await observe(ctx, "prompt-submit", { prompt });
-    if (prompt.trim().length < MIN_PROMPT_LEN) return;
-    try {
-      const index = health(root, "scope_task");
-      // Started first and awaited last: the classifier runs beside the two
-      // context calls and never fails the bootstrap. Both are quiet probes
-      // (`runAsync` passes `--metrics off`), like main's other bootstrap reads.
-      const intent = classifyIntent(root, prompt);
-      const routeAvailable = capabilities().commands.has("execution-brief");
-      const contextOperation = routeAvailable ? "execution-brief" : "scope-task";
-      const [scope, repo] = (await Promise.all([
-        runAsync(root, [contextOperation, prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"]),
-        runAsync(root, ["repo-state", "--json"]),
-      ])).map((text) => text.trim());
-      const intentText = await intent;
-      for (const text of [scope, repo]) rememberPaths(parseEvidence(text), resolvedPaths, root);
-      const brief = routeAvailable ? readBrief(scope) : { route: null, asksAboutCode: true };
-      const routeText = brief.route;
-      const evidence = routeAvailable ? briefForBudget(scope) : scope;
-      state.pixelHealthy = true;
-      // A prompt that asks nothing about code (git, a release, a pasted thread)
-      // gets the repository state only: no route, no targets, as on Claude/Codex.
-      if (!brief.asksAboutCode) {
-        audit(root, "bootstrap", "repo-state injected; prompt asks nothing about code", { graph_present: index.graph?.present, route_available: false });
+        // A prompt that asks nothing about code (git, a release, a pasted thread)
+        // gets the repository state only: no route, no targets, as on Claude/Codex.
+        if (!brief.asksAboutCode) {
+          audit(root, "bootstrap", "repo-state injected; prompt asks nothing about code", { graph_present: index.graph?.present, route_available: false });
+          return {
+            message: {
+              customType: "pixel-bootstrap", display: false,
+              content: `PIXEL REPO STATE (deterministic, from pixel repo-state):\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}`,
+            },
+          };
+        }
+        audit(root, "bootstrap", `${contextOperation} and repo-state injected`, { graph_present: index.graph?.present, route_available: Boolean(routeText) });
+        const guidance = policyFor(root) === "enforce"
+          ? "Enforcement is enabled for supported native retrieval. Call the pixel tool before editing; compositions and unsupported syntax retain native behavior."
+          : "Use these targets as suggestions. Native tools remain available; `pixel config policy enforce` opts into retrieval enforcement, `pixel config policy off` disables policy checks.";
         return {
           message: {
             customType: "pixel-bootstrap", display: false,
-            content: `PIXEL REPO STATE (deterministic, from pixel repo-state):\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}`,
+            content: `PIXEL TASK CONTEXT (deterministic, from pixel ${contextOperation} + repo-state):\n\n${routeText ?? "Pixel execution route unavailable; continue normally and keep retrieval non-blocking."}\n\n${evidence.slice(0, BOOTSTRAP_BUDGET)}${evidence.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}${intentText ? `\n\n${intentText}` : ""}`,
+          },
+        };
+      } catch (error) {
+        state.pixelHealthy = false;
+        installed = undefined;
+        audit(root, "bootstrap", "pixel unavailable", { reason: String(error) });
+        return {
+          message: {
+            customType: "pixel-bootstrap", display: false,
+            content: `PIXEL UNAVAILABLE: ${String(error)}. Repair Pixel when possible. Native tools remain available.`,
           },
         };
       }
-      audit(root, "bootstrap", `${contextOperation} and repo-state injected`, { graph_present: index.graph?.present, route_available: Boolean(routeText) });
-      const guidance = policyFor(root) === "enforce"
-        ? "Enforcement is enabled for supported native retrieval. Call the pixel tool before editing; compositions and unsupported syntax retain native behavior."
-        : "Use these targets as suggestions. Native tools remain available; `pixel config policy enforce` opts into retrieval enforcement, `pixel config policy off` disables policy checks.";
-      return {
-        message: {
-          customType: "pixel-bootstrap", display: false,
-          content: `PIXEL TASK CONTEXT (deterministic, from pixel ${contextOperation} + repo-state):\n\n${routeText ?? "Pixel execution route unavailable; continue normally and keep retrieval non-blocking."}\n\n${evidence.slice(0, BOOTSTRAP_BUDGET)}${evidence.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}${intentText ? `\n\n${intentText}` : ""}`,
-        },
-      };
-    } catch (error) {
-      state.pixelHealthy = false;
-      installed = undefined;
-      audit(root, "bootstrap", "pixel unavailable", { reason: String(error) });
-      return {
-        message: {
-          customType: "pixel-bootstrap", display: false,
-          content: `PIXEL UNAVAILABLE: ${String(error)}. Repair Pixel when possible. Native tools remain available.`,
-        },
-      };
-    }
-  });
+    });
+  }
 
   pi.on("tool_call", async (event, ctx) => {
     const gate = await observe(ctx, "pre-tool-use", { toolName: event.toolName, toolCallId: event.toolCallId, input: event.input });
     if (gate.decision === "deny") return { block: true, reason: gate.reason ?? TASK_UNAVAILABLE };
+    if (!pixelRetrievalEnabled) return;
     const mode = policyFor(ctx.cwd);
     if (mode === "off") return;
     const decision = classify(event.toolName, event.input, ctx.cwd, resolvedPaths, state);
@@ -1073,6 +1079,7 @@ export default function activate(pi: ExtensionAPI) {
     await observe(ctx, event.isError ? "tool-failure" : "post-tool-use", {
       toolName: event.toolName, toolCallId: event.toolCallId, input: event.input, isError: event.isError,
     });
+    if (!pixelRetrievalEnabled) return;
     // The global `pixel` tool never runs pixel_project.execute; its result is
     // the only signal that the model consulted Pixel. Pi reports a tool's
     // returned `isError` as false unless it throws, so an error-shaped

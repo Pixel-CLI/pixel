@@ -15,10 +15,11 @@ const trace = join(root, "calls.jsonl");
 const taskTrace = join(root, "tasks.jsonl");
 const settingsPath = join(root, "settings.json");
 const editedPath = join(root, "edited.txt");
-const originalEnv = [process.env.PIXEL_POLICY, process.env.PIXEL_TARGETS_GUARD];
+const originalEnv = [process.env.PIXEL_POLICY, process.env.PIXEL_TARGETS_GUARD, process.env.PIXEL_PI_RETRIEVAL];
 let passed = 0;
 const configure = (settings = {}) => writeFileSync(settingsPath, JSON.stringify(settings));
 const calls = () => readFileSync(trace, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+const taskCalls = () => readFileSync(taskTrace, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
 const restore = (name, value) => value === undefined ? delete process.env[name] : process.env[name] = value;
 
 try {
@@ -105,12 +106,13 @@ switch (args[0]) {
     sessionManager: { getSessionId: () => `fixture-${hostId}`, getLeafId: () => "leaf", getBranch: () => [{ type: "message", message: { role: "user", content: text } }, ...storedEntries] },
   });
   let hostId = 0;
-  const host = async (mode, projectRoot = root) => {
+  const host = async (mode, projectRoot = root, legacyRetrieval = true) => {
     hostId += 1;
     storedEntries = [];
     cwd = projectRoot;
     restore("PIXEL_POLICY", mode);
     delete process.env.PIXEL_TARGETS_GUARD;
+    restore("PIXEL_PI_RETRIEVAL", legacyRetrieval ? "1" : undefined);
     // Every host (including fresh sub-projects in the policy loop) needs an
     // existing `src/` so the bash fence's canonical containment check has a
     // directory to canonicalize. The read tool stays lexical.
@@ -139,8 +141,9 @@ switch (args[0]) {
       return result;
     };
     await emit("session_start", { reason: "startup" });
-    assert.ok(active.includes("pixel") && active.includes("pixel_project"), "session start activates both pixel tools");
-    return { emit, tool, activateAgain: () => activate(api), boot: (prompt = "inspect the implementation") => emit("before_agent_start", { prompt }) };
+    if (legacyRetrieval) assert.ok(active.includes("pixel") && active.includes("pixel_project"), "explicit legacy mode activates both pixel tools");
+    else assert.deepEqual(active, ["bash", "edit", "read"], "default mode does not activate retrieval tools");
+    return { emit, tool, active: () => active, activateAgain: () => activate(api), boot: (prompt = "inspect the implementation") => emit("before_agent_start", { prompt }) };
   };
   const check = async (name, test) => {
     configure();
@@ -153,6 +156,21 @@ switch (args[0]) {
   const read = (path = "src/main.rs", limit) => ({ toolName: "read", input: { path, ...(limit === undefined ? {} : { limit }) } });
   const pixelResult = (isError = false, toolName = "pixel") => ({ toolName, toolCallId: "pixel", input: {}, content: [{ type: "text", text: "{}" }], isError });
   const count = (op) => calls().filter(([name]) => name === op).length;
+
+  await check("default Pi adapter keeps task gates but adds no retrieval tool or startup context", async () => {
+    configure({ task: { stop: { decision: "deny", reason: "task gate remains active" } } });
+    const h = await host(undefined, root, false);
+    assert.equal(h.tool, undefined);
+    assert.equal(await h.boot(), undefined);
+    assert.equal(count("status"), 0);
+    assert.equal(count("scope-task"), 0);
+    assert.equal(count("repo-state"), 0);
+    await h.emit("tool_call", native("ls src"));
+    assert.ok(taskCalls().some((entry) => entry.event === "prompt-submit"));
+    assert.ok(taskCalls().some((entry) => entry.event === "pre-tool-use"));
+    const stop = await h.emit("agent_before_settle", { outcome: "completed", context: { canContinue: true } });
+    assert.equal(stop.entries[0].content, "task gate remains active", "task stop gate remains registered with retrieval disabled");
+  });
 
   await check("advisory default and invalid settings preserve every native input", async () => {
     for (const mode of [undefined, "advisory", "invalid"]) {
@@ -764,5 +782,6 @@ switch (args[0]) {
 } finally {
   restore("PIXEL_POLICY", originalEnv[0]);
   restore("PIXEL_TARGETS_GUARD", originalEnv[1]);
+  restore("PIXEL_PI_RETRIEVAL", originalEnv[2]);
   rmSync(root, { recursive: true, force: true });
 }

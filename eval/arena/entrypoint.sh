@@ -7,12 +7,16 @@
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 REPO_DIR="${ARENA_REPO_DIR:-/repo}"
+if [ -n "${ARENA_CODEX_CALLER_FACTS:-}" ] && [ "${ARENA_CODEX_CALLER_FACTS}" != "0" ]; then
+  echo "ARENA_CODEX_CALLER_FACTS is retired" >&2
+  exit 2
+fi
 cd "$REPO_DIR" || exit 1
 REVIEWED_PIXEL_HOOKS="${ARENA_REVIEWED_PIXEL_HOOKS:-0}"
-CODEX_CALLER_FACTS="${ARENA_CODEX_CALLER_FACTS:-0}"
-case "$REVIEWED_PIXEL_HOOKS:$CODEX_CALLER_FACTS" in
-  0:0|1:0|1:1) ;;
-  *) echo "arena hook flags must be 0 or caller-facts requires reviewed hooks" >&2; exit 2 ;;
+SKILL_PILOT="${ARENA_SKILL_PILOT:-0}"
+case "$REVIEWED_PIXEL_HOOKS:$SKILL_PILOT" in
+  0:0|1:0|0:1) ;;
+  *) echo "skill-only runs cannot use reviewed Pixel hooks" >&2; exit 2 ;;
 esac
 HOOK_AUDIT_KEY="${ARENA_RUN_ID:-standalone}-${REP:-1}"
 HOOK_AUDIT_READY="/out/hook-audit-${ARM_TOOL:-raw}-${HOOK_AUDIT_KEY}.ready"
@@ -66,6 +70,25 @@ prep_pixel() {
   fi
 }
 
+prep_skill_pilot() {
+  local start end graph_db setup_receipt
+  start=$(date +%s%3N) || return $?
+  graph_db="$REPO_DIR/.pixel/graph.v2.db"
+  pixel prepare-repo --no-daemon "$REPO_DIR" || return $?
+  if [ ! -f "$graph_db" ]; then
+    echo "skill-pilot preparation completed without $graph_db" >&2
+    return 1
+  fi
+  end=$(date +%s%3N) || return $?
+  setup_receipt="/out/setup-${ARM_TOOL:-raw}-${REP:-1}.json"
+  python3 -c 'import json,sys; from pathlib import Path; db=Path(sys.argv[1]); json.dump({"arm":sys.argv[4],"rep":sys.argv[5],"prepare_commands":["pixel prepare-repo --no-daemon /repo"],"duration_ms":int(sys.argv[3])-int(sys.argv[2]),"graph_db_bytes":db.stat().st_size},open(sys.argv[6],"w"),indent=2); open(sys.argv[6],"a").write("\n")' \
+    "$graph_db" "$start" "$end" "${ARM_TOOL:-raw}" "${REP:-1}" "$setup_receipt"
+}
+
+if [ "$SKILL_PILOT" = "1" ]; then
+  prep_skill_pilot
+  prep_rc=$?
+else
 case "${ARM_TOOL:-raw}" in
   raw)      : ;;
   semble)   prep_semble ;;
@@ -76,18 +99,12 @@ case "${ARM_TOOL:-raw}" in
   pixel)    prep_pixel ;;
 esac
 prep_rc=$?
+fi
 if [ "$prep_rc" -ne 0 ]; then
   echo "arm preparation failed: arm=${ARM_TOOL:-raw} rc=$prep_rc" >&2
   exit "$prep_rc"
 fi
 
-if [ "$CODEX_CALLER_FACTS" = "1" ]; then
-  if [ "${ARM_TOOL:-raw}" != "pixel" ] || [ "${PIXEL_ARENA_PREP_GRAPH:-0}" != "1" ] || \
-     [ ! -s "$REPO_DIR/.pixel/graph.v2.db" ]; then
-    echo "caller-facts opt-in requires the pixel arm with a prepared graph" >&2
-    exit 2
-  fi
-fi
 if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
   if ! python3 /usr/local/lib/arena-hook-audit.py audit \
     --arm "${ARM_TOOL:-raw}" --codex-home "${CODEX_HOME:-$HOME/.codex}" \
@@ -116,11 +133,6 @@ if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
     exit 1
   fi
 fi
-if [ "$CODEX_CALLER_FACTS" = "1" ]; then
-  # This explicit arena-only opt-in is separate from hook trust review.
-  export PIXEL_CODEX_CALLER_FACTS=1
-fi
-
 # This receipt is captured after arm setup, immediately before Codex runs, so
 # the arena can verify the static instructions visible to each arm.
 python3 /usr/local/lib/arena-context-manifest.py \

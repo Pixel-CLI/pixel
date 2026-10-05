@@ -285,7 +285,12 @@ seven installation coverage gaps were addressed in `a4984278`; focused tests
 passed. That is not a passing mutation verdict. New implementation changes and
 CI require fresh validation.
 
-## Installed native default and experimental caller facts
+## HISTORICAL / SUPERSEDED: Installed native default and experimental caller facts
+
+This section records an earlier installed candidate and its probes. It is
+superseded by the current explicit-only skill distribution and the retirement
+of the caller-facts hook. Preserve the measurements as historical evidence;
+do not treat them as behavior of the current package.
 
 After the final routing decision, `pixel self-update --repo . --build
 "rtk cargo build --profile dev-release -p pixel-cli" --metrics off` rebuilt
@@ -293,7 +298,9 @@ and installed the binary in 97.52 seconds (exit 0). Its SHA-256 is
 `7fdea364119ea4656b43beb5879242dcb1f8fe1e14a5c12b8d8ec717eef65c25`.
 The source identity and build output are in
 `target/native-default-evidence/facts-build.json` and `facts-build.log`.
-This is the production implementation, distinct from the arena overrides.
+At that historical source identity, this candidate was installed for the
+recorded probes; it is distinct from both the arena overrides and the current
+explicit-only package.
 
 The history-index track indexed 1,045 base files, 18 overlay files and
 2,238 commits, exiting 0. In parallel, `build-agent-config` exited 0;
@@ -319,9 +326,157 @@ production packet. Its default is disabled; regression tests and final gates
 are tracked separately below.
 
 Scope: these runs exercise `pixel install`, not native plugin installation.
-The generated general Pixel skill still has a broad `.pixel/`-presence trigger.
+That historical candidate's generated general Pixel skill had a broad
+`.pixel/`-presence trigger.
 Adding narrower skills alongside it would not establish native-default
 behavior for plugin users. Skills can improve discovery and defer their bodies,
 but semantic activation is not reliable command interception; any separate
 skill-routing experiment must account for its always-visible metadata and
 on-demand loading cost.
+
+## Current installed proof and Claude pilot status
+
+The latest installed proof recorded 14 global and eight repository install
+checks, with 33 doctor checks green and no automatic Claude or Codex retrieval
+callbacks. The saved manifest is
+`target/native-default-evidence/skills-first-install/installed-native-manifest.json`;
+its installed binary SHA-256 is
+`bbe297066a628a02084e9b95d646f6b05ea0643eea4ab7d258c97b78b41297b4`. Final
+HEAD revalidation remains pending. These are installation checks, not model
+benchmark results.
+
+The separate Claude g5 pair was not run: zero paid calls. A private isolated
+auth check found an expired access token and expired refresh token. Claude's
+local `auth status` reported stored login state but did not validate or renew
+that credential, so it is not treated as usable authentication. The pair stays
+blocked until a fresh OAuth login is available. Anthropic documents macOS
+Keychain storage, per-config-directory credentials, and the `/login` renewal
+path in its [authentication guide](https://code.claude.com/docs/en/authentication).
+
+## Skill-only pilot: g3 negative control and g5 structural question
+
+These two one-repetition pairs test the packaged `pixel-impact` skill without
+installing Pixel hooks or permanent retrieval instructions. Raw and candidate
+used the same prepared foreign repository, pinned Pixel image, model and effort;
+both had the same skill body, but raw marked it `disable-model-invocation: true`
+and candidate marked it false. Other base context was equal and contained zero
+Pixel-reference lines. This differs from the Codex pilot's skill-absent raw
+control: Claude's raw arm carried disabled skill metadata. A candidate-discovered
+skill is not proof that its full body was read or followed.
+
+Provenance shared by both runs:
+
+- Pixel source snapshot tree SHA-256:
+  `3aff229d9781ab0dce14b64bf1c83d7a5ee8be15dff685060ddcda1429a969fe`
+  (1,165 files, 49,559,495 bytes), copied to
+  `target/native-default-evidence/arena-build-context` before the Docker build.
+  The copy excludes generated results, `.git`, build output, and local virtual
+  environments. The exact copied tree, not later live-checkout edits, identifies
+  the build input. Source checkout HEAD was `ac35266086d1bfba54e3370007246a9e0f389dca`.
+- Image ID `sha256:57526239cc4628d824e4944476d6f10441126725710c83d0c00b2cc50a39c23f`,
+  based on `sha256:a858f1356b2fb318023c9610ae873cf0f1e156ca1516b0cc7604fa1a9fb27cce`.
+  Pixel binary SHA-256:
+  `a3614721e10c46a09bcb13aa07af21fbcea004a35eaddca3b1001e058d7ab8f2`;
+  Pixel `0.7.0`, Codex CLI `0.160.0`.
+- Packaged skill tree SHA-256:
+  `850aa3e96222a1c43ee32852f517a3850ce42a55e2784c1216d5767fc30fbd7f`;
+  staged implicit-invocation copy SHA-256:
+  `c3d47e3897e8a17e9efcdd202cd691ce81a08bb075e2335d9cb6d40100699ed2`.
+- Foreign repository `architech-t`, commit
+  `5c47874700c23a6c9e976de3f553ffe75bac39d8`; only generated `.next` and
+  `.turbo` artifacts were dirty, and the runner clones the committed tree.
+- Build receipt and full build log:
+  `target/native-default-evidence/arena-build-context-receipt.json` and
+  `target/native-default-evidence/arena-snapshot-build.log`.
+
+The selected task/run identities and exact arena commands were:
+
+```bash
+REPO_SNAPSHOT=/Users/livio/Documents/architech-t \
+PIXEL_SRC=local \
+PIXEL_SOURCE_ID=3aff229d9781ab0dce14b64bf1c83d7a5ee8be15dff685060ddcda1429a969fe \
+PIXEL_IMAGE_SOURCE=existing \
+PIXEL_ARENA_IMAGE=sha256:57526239cc4628d824e4944476d6f10441126725710c83d0c00b2cc50a39c23f \
+CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium \
+RUN_ID=g3-skill-negative-r1 \
+rtk bash eval/arena.sh --arms "raw pixel" --tasks g3-rename-modal --reps 1 \
+  --skill-candidate-dir skills/pixel-impact \
+  --results-dir eval/arena-results/g3-skill-negative-r1
+
+REPO_SNAPSHOT=/Users/livio/Documents/architech-t \
+PIXEL_SRC=local \
+PIXEL_SOURCE_ID=3aff229d9781ab0dce14b64bf1c83d7a5ee8be15dff685060ddcda1429a969fe \
+PIXEL_IMAGE_SOURCE=existing \
+PIXEL_ARENA_IMAGE=sha256:57526239cc4628d824e4944476d6f10441126725710c83d0c00b2cc50a39c23f \
+CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium \
+RUN_ID=g5-skill-structural-r1 \
+rtk bash eval/arena.sh --arms "pixel raw" --tasks g5-transfer-status-impact --reps 1 \
+  --skill-candidate-dir skills/pixel-impact \
+  --results-dir eval/arena-results/g5-skill-structural-r1
+```
+
+| Pair / arm | Required-pattern score | Input / cached input | Output | Gross tokens | Model time | Model tool calls | Pixel calls / skill reads | Prep time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| g3 raw | 11/11 | 40,844 / 36,096 | 542 | 41,386 | 23s | 2 | 0 / 0 | 496ms |
+| g3 skill | 11/11 | 55,205 / 49,152 | 789 | 55,994 | 29s | 3 | 0 / 0 | 579ms |
+| g5 raw | 16/16 | 67,259 / 55,296 | 1,186 | 68,445 | 45s | 3 | 0 / 0 | 897ms |
+| g5 skill | 14/16 | 96,852 / 73,472 | 1,485 | 98,337 | 80s | 4 | 1 / 1 | 1,323ms |
+
+All four containers exited successfully; each pair has one complete observation.
+Gross tokens are reported input plus generated tokens; cached input is already
+included in input. Dollar cost and cache-creation usage were not reported.
+Setup preparation is separate from model time. These are noisy single pairs,
+not causal estimates or a no-regression guarantee.
+
+On g3, both answers were substantively correct: they identified the root
+consumer and definition, the separate sanity-check consumer/copy, and the
+independent alias resolution. Raw used 41,386 tokens and 23 seconds; the skill
+arm used 55,994 and 29 seconds, a 35.3% token increase with equal pattern
+coverage. The candidate skill was discovered but had zero file-read commands
+and zero model-time Pixel calls.
+
+On g5, source inspection confirmed the API route checks `Ready to Publish`
+while the CLI bypasses that check; both call `transferPageToGhost`. That shared
+method performs exact-title lookup through `findPostsByTitle`, then updates an
+existing post or creates a draft. Raw named the lookup helper and scored 16/16.
+The skill answer correctly described the callers, policy gap, shared enforcement
+boundary, and Ghost update/create branches, but called the lookup only “title
+lookup” and did not name `findPostsByTitle`, scoring 14/16. Its one model-time
+Pixel call was `pixel impact 'transferPageToGhost' --no-refresh --depth 2 --json
+--metrics off`; it also read the candidate skill once. Despite that structural
+lookup, the skill arm used 98,337 tokens and 80 seconds versus raw’s 68,445 and
+45 seconds. The result does not meet the proposed automatic-promotion bar.
+
+The g5 scenario marks `human_review_required: true`. The answer check above is
+an assistant's source-grounded review of the transcript against the checked-out
+files, not human approval; that requirement remains outstanding. Full transcripts,
+manifests, per-arm usage, staging and setup receipts are in the two result
+directories. Scenario hashes are g3
+`3d1a5762cca72f93ef2f3be7f7838c3ccdd2d300aa321027ce5829e4ce922c08` and g5
+`0127bd4abb2064d150df4697f1f9f0aabc7fd192005f17f1beb9449dbb311fb9`.
+
+Neither pair justifies automatic skill activation. Keep the packaged skill
+explicit-only by default; use more controlled, separately reviewed pairs before
+making a promotion decision.
+
+## Final installed candidate verification (2026-10-05)
+
+Run identity: `target/native-default-evidence/frozen-install/`. This verified
+the stable working-tree candidate based on `ac35266086d1bfba54e3370007246a9e0f389dca`,
+including its then-uncommitted changes; the base SHA alone does not reproduce
+this binary. Installed binary SHA-256:
+`34da805fa0ed2d026392958f01ffe732a67458d644e02f317502fbb5b9f2ffc7`.
+
+`pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"`,
+`pixel build-index --history .`, `build-agent-config`, `pixel install`,
+`pixel install --repo .`, and `pixel doctor . --fix --fail-on yellow --json`
+all exited 0. The doctor result is 33 green, zero yellow, red, skipped or
+repairs. Each global Claude/Codex config contains nine task-event callbacks
+and zero automatic retrieval/metrics callbacks; repository configs contain
+no Pixel callbacks. Pi's explicit extension is present and its retired
+automatic prompt is absent.
+
+`cargo test -p pixel-install --no-fail-fast` exited 0: 365 unit tests and
+124 integration tests passed. The arena parser/runner suite passed 46 tests.
+These scoped results precede the final committed-candidate workspace gates;
+their logs and installed callback/hash manifest are retained in that run directory.

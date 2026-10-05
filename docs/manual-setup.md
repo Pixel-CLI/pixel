@@ -5,23 +5,19 @@ wire (Cursor, Copilot, ...)? You don't need `pixel install`.
 
 `pixel install` does these things, and you can do each of them by hand:
 
-1. **Deploy the agent system prompt** to `~/.local/share/pixel/agent-prompt.md`.
-2. **Deploy the sub-agent prompt** to `~/.local/share/pixel/subagent-prompt.md`
-   (a short version for Claude Code sub-agents, which see neither the session
-   prompt nor its history).
-3. **Add lifecycle hooks to `~/.claude/settings.json`**: a `SessionStart`
-   hook injects the agent prompt as context into every Claude Code session
-   that loads those user settings, however `claude` is launched on the
-   machine where `pixel install` ran (a terminal, an IDE, an agent, cron).
-   Another machine, such as a CI runner, has neither the hooks nor the
-   binary until it is set up too ([In CI](#in-ci-claude-code-action)). No
-   shell wrapper: an older install's `claude()` function in the shell
-   profile is removed.
-4. **Register Codex's selective prompt and metrics hooks**, removing the
-   retired permanent Pixel prompt while preserving your own instructions.
-5. **Put the prompt into Pi's `~/.pi/agent/APPEND_SYSTEM.md`**, and, when
-   their config directories exist, into OpenCode's global `AGENTS.md` and an
-   Antigravity plugin under `~/.gemini/config/`.
+1. **Deploy CLI integration assets** under `~/.local/share/pixel/`.
+2. **Keep Claude and Codex task lifecycle hooks**, preserving foreign hooks,
+   while removing Pixel's automatic retrieval prompts and metrics callbacks.
+3. **Remove retired Pixel instruction blocks** from Codex configuration and
+   project `AGENTS.md`, preserving unrelated text.
+4. **Install Pi's explicit impact extension** and remove Pixel's automatic Pi
+   prompt. Repository task controls remain separate.
+5. **Keep other provider integrations** on their documented paths. The focused
+   skills pilot does not establish behavior or performance for every host.
+
+Native Codex and Claude plugins distribute a small, explicit-only
+`pixel-impact` skill. They do not register automatic retrieval hooks.
+The CLI and skill/plugin are separate installations.
 
 ## 1. Install the binary
 
@@ -62,128 +58,71 @@ cp crates/pixel-install/assets/pixel-subagent-prompt.md ~/.local/share/pixel/sub
 
 ### Claude Code
 
-```bash
-claude --append-system-prompt-file ~/.local/share/pixel/agent-prompt.md
-```
+Use the native Pixel plugin's `pixel-impact` skill explicitly when assessing
+callers or the impact of a known symbol. Its description and instructions
+are separated from the legacy full agent prompt; ordinary work keeps the
+usual tools. The plugin does not inject a session prompt or register retrieval
+hooks. It requires a compatible Pixel binary on PATH.
 
-Sub-agents (the `Agent` tool: built-in agents, `.claude/agents/*.md`, agents
-from a `--plugin-dir`) do not receive `--append-system-prompt-file`. In print
-mode (`-p`/`--print`) Claude Code accepts a second flag for them; it is not
-listed in `claude --help` and is ignored in interactive sessions. **It needs
-Claude Code 2.1.261 or newer**: older releases exit with `error: unknown
-option`, so check `claude --version` before adding it.
+`pixel install` removes its retired retrieval, post-edit advice, compaction
+and metrics registrations from Claude's user settings. Independent task-event
+hooks remain available for configured task contracts. Repository installation
+preserves foreign hooks and restores adopted RTK registrations, removing the
+Pixel retrieval wrapper. Native reads need no Pixel retrieval callback.
 
-```bash
-claude -p --append-system-prompt-file ~/.local/share/pixel/agent-prompt.md \
-          --append-subagent-system-prompt-file ~/.local/share/pixel/subagent-prompt.md \
-          "your task"
-```
-
-To make it automatic, do what `pixel install` does: register Pixel's
-lifecycle hooks in `~/.claude/settings.json`. The `SessionStart` one prints
-the deployed `agent-prompt.md` as `hookSpecificOutput.additionalContext`, so
-every session that loads these user settings gets the prompt without a flag
-or a shell function, whatever starts `claude` on this machine:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "'/path/to/pixel' run-hook session-start", "timeout": 10 }] }
-    ]
-  }
-}
-```
-
-`pixel install` writes that entry with the absolute path of the `pixel` it
-runs from, beside `UserPromptSubmit` (`run-hook prompt-submit --provider
-claude`), `PostToolUse` on `Edit` (`run-hook post-tool-use --provider claude`)
-and on `Bash` (`run-hook metrics --provider claude`, the 🟩 metrics relay)
-and a `SessionStart` entry matched on `compact` (`run-hook post-compaction
---provider claude`), and leaves any hook of yours in place. Releases before
-the hooks wrapped `claude` in a `claude()` function in `~/.zshrc`,
-`~/.bashrc` or `~/.config/fish/conf.d/pixel.fish`; `pixel install` now
-removes that block, and `pixel doctor` reports one that remains
-(`install.legacy-wrappers`). The hook does not reach sub-agents: in print
-mode, pass `--append-subagent-system-prompt-file` as above.
-
-#### In CI (claude-code-action)
-
-The action runs Claude Code on the runner, not on your machine. It reads the
-runner's `~/.claude/settings.json`, merges its `settings` input into it and
-loads the user, project and local setting sources, hooks included; but a
-fresh runner has neither the `pixel` binary nor Pixel's hooks, since nobody
-ran `pixel install` there. Two ways to give the run the prompt, both with
-the binary installed in an earlier step:
-
-- run `pixel install` in an earlier step of the job, so the runner's user
-  settings carry the `SessionStart` hook the action then loads;
-- or check the two prompt files into the repository (or copy them in an
-  earlier step) and pass the flags through `claude_args`, which the action
-  forwards to the Claude Code CLI:
-
-```yaml
-- uses: anthropics/claude-code-action@v1
-  with:
-    claude_args: >-
-      --append-system-prompt-file .pixel-prompts/agent-prompt.md
-      --append-subagent-system-prompt-file .pixel-prompts/subagent-prompt.md
-```
-
-Paths are relative to the checkout. Sub-agents forked from the main session
-(`subagent_type: "fork"`) inherit the session prompt instead and are not
-affected by the sub-agent flag.
+The deployed full prompts remain available for explicitly selected legacy
+integrations. Copying or appending them manually enables a different profile
+with additional context; it is not the focused-skill configuration.
 
 ### Codex
 
-Codex uses native retrieval by default. Pixel's `UserPromptSubmit` hook adds no
-retrieval instructions or facts unless the experimental
-`PIXEL_CODEX_CALLER_FACTS=1` environment variable is set when launching Codex.
-That experiment can supply up to three indexed caller locations for an explicit
-caller or impact question about one named symbol. It verifies the cited files,
-uses an existing graph only, and adds nothing when the graph is absent, stale,
-ambiguous or too slow. It never starts a model call to classify the prompt.
-The experiment remains opt-in because the small paired trials showed mixed
-cost and latency results; it is not a guaranteed improvement.
-This describes the `pixel install` integration. Separately installed plugins
-and skills can still contribute their own instructions; they are not removed
-by this migration.
+Use `$pixel-impact` explicitly for a known symbol whose callers or change
+impact matter. Automatic selection stays disabled until paired evaluation
+supports enabling it. The native plugin declares only this focused skill;
+its default manifest registers no retrieval hooks.
 
-For manual hook registration, use `pixel run-hook prompt-submit --provider
-codex` for `UserPromptSubmit` and `pixel run-hook metrics --provider codex` for
-`PostToolUse`. Both consume the host's JSON event on stdin. `pixel install`
-registers these in `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set),
-preserving foreign hooks. Project installation composes existing project hooks;
-Pixel adds no native-search rewrite or denial.
+Global installation removes Pixel's old retrieval `UserPromptSubmit` and
+metrics hooks and retains the independent task-event suite. The previous
+caller-facts prompt classifier has been retired. Project installation
+restores foreign hook registrations from its owned composed-guard backup and
+removes the retrieval wrapper. It adds no native-search rewrite or denial.
 
-Do not copy the shared agent prompt into Codex's `developer_instructions`.
-Installation removes older `<!-- pixel:managed:begin -->`/`end` blocks from
-global and project Codex config, keeping all foreign instructions and removing
-an otherwise empty key. It also removes the retired Pixel block in project
-`AGENTS.md`. Existing sessions retain context they already received; the new
-policy applies when those instructions are loaded again.
+Do not copy the full agent prompt into `developer_instructions`.
+Installation removes older Pixel-managed blocks from global and project
+Codex configuration and project `AGENTS.md`, preserving foreign text.
+Existing sessions retain previously received context until a fresh session.
 
 ### Pi
 
-Pi reads `~/.pi/agent/APPEND_SYSTEM.md` automatically — no flag needed:
+Pi uses an extension rather than a duplicated skill. The explicit
+`/pixel-impact <symbol>` command requests bounded graph evidence. It does
+not query Pixel at startup, classify every prompt, or replace native tools.
+See [Pi integration](pi-harness.md) for the extension and task-control modes.
+
+`pixel install` removes its managed and recognized historical automatic
+instructions from `~/.pi/agent/APPEND_SYSTEM.md`, preserving user text.
+`pixel install --repo .` maintains the separate repository task adapter;
+retrieval bootstrap and automatic post-edit advice are disabled by default.
+No Pixel-first block is added to project `AGENTS.md`.
+
+### Bounded graph queries
+
+The skill and extension use:
 
 ```bash
-mkdir -p ~/.pi/agent
-printf '%s\n' 'Use the pixel tool for repository retrieval and repository Git workflows. Request the outcome through a stable action and goal. Pixel guidance is advisory by default.' >> ~/.pi/agent/APPEND_SYSTEM.md
-pixel install --repo .
+pixel impact 'knownSymbol' --no-refresh --depth 2 --json --metrics off
 ```
 
-The repository install writes `.pi/extensions/pixel-guard.ts`, which Pi loads
-after the project is trusted. The extension registers the structured `pixel`
-tool and applies the [Pi policy](pi-harness.md) at `tool_call` time. Copying the
-short prompt alone does not install the extension.
+Use depth 1 when only direct callers are needed. `--no-refresh` checks the existing
+graph and source signature, limits the query to 1500 ms and the serialized
+result to 32 KiB, and does not start a daemon or refresh indexes. Missing,
+stale, incompatible or ambiguous data produces an error so the caller can
+continue with native tools. It cannot be combined with `--workspace`.
+Older binaries that lack this flag should be treated as unavailable for
+this capability, not repaired during an ordinary task.
 
-`pixel install --repo .` also adds a Pixel-managed block to the
-repository-root `AGENTS.md`, for Codex and every other agent that reads that
-file. It tells agents to try Pixel first for repository retrieval, but
-does not block native tools: if Pixel is unavailable, the repository is not
-indexed, or Pixel cannot answer, the agent can continue with native search or
-file reading. Existing text before and after the managed block is preserved.
+Graph results remain incomplete candidates. Verify relevant source and
+look beyond the returned list when task correctness requires it.
 
 ### Antigravity CLI (agy)
 
@@ -206,8 +145,8 @@ in the global hooks and both installed plugin copies.
 ### Optional retrieval enforcement
 
 Pixel's retrieval policy defaults to advice. Run `pixel config policy enforce`
-to opt into supported repository retrieval restrictions in Codex,
-Antigravity, Pi, or Devin — the repository file by default, the machine-wide
+to opt into supported repository retrieval restrictions in
+Antigravity or Devin — the repository file by default, the machine-wide
 `~/.pixel/config.yaml` with `--global` — or set `PIXEL_POLICY=enforce` in the
 environment that launches the agent to override every file layer.
 `pixel config policy` reports the effective value and the layer that set it.
@@ -221,15 +160,15 @@ guessed. Use `pixel config policy off` to disable policy decisions and
 rewrites. The existing `PIXEL_TARGETS_GUARD=0` (also `false` or `off`) remains
 an opt-out. Restart Devin after changing its environment.
 
-Claude retains its native permission flow and supported compatible rewrites.
-Codex and Antigravity use their own hook response contracts; a Pixel
+Claude and Codex retain native retrieval and permissions under every retrieval
+policy mode. Antigravity uses its own hook response contract; a Pixel
 recommendation does not grant host permissions. Composed Codex hooks still
 honour foreign hook decisions even when Pixel's policy is off.
 
 Shell syntax the policy cannot interpret reliably falls back to the original
 command, including its complete pipeline or sequence. Enforcement is a
-workflow preference, not a security sandbox. Pi's automatic context and
-post-edit feedback operate independently of the policy mode.
+workflow preference, not a security sandbox. Pi task contracts remain
+independent of retrieval policy.
 
 ### Any other agent
 
@@ -257,31 +196,19 @@ An old name prints one `note:` line on stderr with the new name. It never
 touches stdout or `--json` output, and `--metrics off` or `PIXEL_METRICS=0`
 silence it together with the metrics line. Hook invocations stay silent.
 
-## A note on prompt size
+## Context and evaluation
 
-The system prompt is ~275 lines (~4 150 tokens). That is deliberate.
-
-Pixel plays a central role: it replaces `grep`, `rg`, `git log -S`, `git blame`,
-manual caller tracing, and exploratory file reading with a single indexed,
-evidence-backed workflow. The prompt needs to map every native command to its
-Pixel replacement and enforce the mandatory workflow phases — otherwise the
-agent falls back to the slow, token-heavy habits the prompt exists to eliminate.
-
-In practice the prompt pays for itself quickly: a single `pixel impact` call
-can replace a dozen `grep` + file-read round trips, recovering the token cost
-of the prompt in one command.
+A discoverable skill can have metadata cost even when its body is not loaded.
+The focused skill stays explicit-only by default. Automatic activation is
+evaluated separately from command execution and task quality; more Pixel
+calls do not establish a benefit. See
+[the arena evidence](../eval/arena/native-default-evidence.md) for measured
+runs and their limits.
 
 ## Uninstall
 
-Remove the prompt files, the Pi copy, the Claude Code hooks and the Codex
-block:
-
-```bash
-rm -f ~/.local/share/pixel/agent-prompt.md
-rm -f ~/.local/share/pixel/subagent-prompt.md
-rm -f ~/.pi/agent/APPEND_SYSTEM.md
-# then remove the `run-hook` entries from ~/.claude/settings.json and the
-# pixel block from developer_instructions in ~/.codex/config.toml
-```
-
-Or just run `pixel uninstall`.
+Run `pixel uninstall` (and `pixel uninstall --repo .` for repository
+integration). It removes Pixel-owned registrations and managed text while
+preserving unrelated configuration. Remove separately installed plugins
+through the host's plugin manager. Do not delete a shared settings or
+`APPEND_SYSTEM.md` file merely because it once contained Pixel text.

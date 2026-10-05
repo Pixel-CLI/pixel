@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 //! `pixel run-hook guard` — provider-aware, exact-subset search routing.
-//! Explicit providers preserve unsupported calls silently. The policy is
-//! advisory by default; `pixel config policy enforce` (or PIXEL_POLICY=enforce)
-//! opts into known retrieval denials, `off` disables Pixel policy. Without a
-//! provider, legacy task-scoping guidance remains.
+//! Codex and Claude calls remain native in every retrieval policy mode.
+//! Other explicit providers preserve unsupported calls silently. Their policy
+//! is advisory by default; `pixel config policy enforce` (or
+//! PIXEL_POLICY=enforce) opts into supported retrieval denials, and `off`
+//! disables Pixel policy. Without a provider, legacy task-scoping guidance remains.
 //!
 //! Legacy advisory contract (without `--provider`):
 //! 1. SCOPING (ADVISORY) — while `<repo>/.pixel/targets.json` is active
@@ -41,15 +42,13 @@
 //! literal-file subset; they do not substitute enriched Pixel output.
 //! Uncovered execution shapes retain their original command and native permissions.
 //!
-//! Claude and Devin preserve their native permission flow. Codex and Antigravity
-//! enforce recognized repository discovery only under the enforce policy.
+//! Devin preserves its native permission flow. Antigravity enforces recognized
+//! repository discovery only under the enforce policy.
 //! Bounded direct reads (<=200 lines), external paths, shell filters, execution
 //! and unknown syntax stay native. Enforcement requires an indexed repository
 //! at or above the effective tool workdir; unindexed trees are never denied.
-//! Claude advisories exit 0 with a JSON note
-//! (systemMessage + additionalContext), no permissionDecision, and transparent
-//! read-only rewrites use `updatedInput`. Codex requires an explicit `allow`
-//! for the user-approved literal-file rewrite subset only.
+//! Explicit Claude RTK delegation and Codex composed foreign-hook decisions
+//! remain available independently of Pixel's retired retrieval policy.
 //! Fails open (exit 0) on any parse error or unexpected shape — a guard
 //! that crashes or wedges the session is worse than a guard that misses a
 //! case.
@@ -1276,9 +1275,9 @@ fn policy_response(
     payload: &Value,
     mode: crate::config_cmd::PolicyMode,
 ) -> Option<Value> {
-    // Codex keeps native repository search/read behavior in every policy
-    // mode; the host's own permissions remain authoritative.
-    if provider == Provider::Codex {
+    // Native retrieval remains under the host's permissions. Task contracts
+    // and foreign hook decisions are evaluated through their own paths.
+    if matches!(provider, Provider::Codex | Provider::Claude) {
         return None;
     }
     if mode == PolicyMode::Off {
@@ -1997,54 +1996,6 @@ fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
     }
     if delegate_rtk && provider == Provider::Claude {
         delegate_rtk_hook(raw);
-    }
-    // Claude's native Read/Grep tools reach the hook through the widened
-    // PreToolUse matcher installed by `routing::shell_matcher`; Claude keeps
-    // its own permission flow (no deny, no input rewrite — `policy_response`
-    // is silent for these tools), but the advisory tier the provider-less
-    // legacy path already emits is reproduced here. Glob is intentionally
-    // absent from the matcher; `non_shell_advisory` mirrors that decision.
-    if provider == Provider::Claude {
-        let event = payload
-            .get("hook_event_name")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if is_guard_event(&payload, event) {
-            let tool = payload
-                .get("tool_name")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let tool_input_value = payload.get("tool_input").cloned().unwrap_or(Value::Null);
-            if let Some(tool_input) = tool_input_value.as_object() {
-                let cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
-                    || std::env::current_dir().unwrap_or_default(),
-                    PathBuf::from,
-                );
-                let raw_path = tool_input
-                    .get("file_path")
-                    .or_else(|| tool_input.get("path"))
-                    .or_else(|| tool_input.get("AbsolutePath"))
-                    .or_else(|| tool_input.get("TargetFile"))
-                    .or_else(|| tool_input.get("target_file"))
-                    .or_else(|| tool_input.get("filePath"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let anchor = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
-                let idx_root = find_up(&anchor, ".pixel");
-                let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
-                let (manifest, manifest_expired) =
-                    manifest_pair(manifest_root.as_deref().map(load_manifest_state));
-                non_shell_advisory(
-                    tool,
-                    tool_input,
-                    &cwd,
-                    raw_path,
-                    idx_root.as_deref(),
-                    manifest.as_ref(),
-                    manifest_expired,
-                );
-            }
-        }
     }
     // Ordinary commands receive no new context or permission override.
     std::process::exit(0);

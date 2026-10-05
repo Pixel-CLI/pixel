@@ -65,7 +65,7 @@ const EVIDENCE_MAX_LINES_PER_TARGET: usize = 2;
 const TARGETS_FACTS_ALGORITHM_VERSION: u32 = 1;
 
 /// `context` and `uses`: edges returned per direction before elision.
-const EDGE_LIMIT: usize = 20;
+pub const EDGE_LIMIT: usize = 20;
 // `context` budget shape: item count and source bytes, per target and per
 // neighbour snippet.
 const MAX_CONTEXT_ITEMS: usize = 41;

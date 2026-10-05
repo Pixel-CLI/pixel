@@ -101,19 +101,19 @@ rebuilds and `shutdown`. The CLI starts a daemon on demand
 fields are agent-controlled. Entry points:
 
 - `guard` can rewrite native search and read commands into Pixel commands
-  for supported providers. Codex preserves native retrieval commands even
-  under the shared enforce policy; its
-  prompt hook can suggest a structural or historical query without approving
-  permissions or executing it.
+  for supported providers. Codex and Claude preserve native retrieval commands
+  even under the shared enforce policy. Their standard installation registers
+  no automatic retrieval prompt or metrics callback.
   `search_compat::shell_argv` accepts a small grammar only (it refuses `$`,
   backticks, `\`, newlines, and unquoted operators, globs and `~`), every
   rewritten word is re-quoted with `search_compat::shell_quote`, and an
   unsupported command stays native. For Devin and zcode `PermissionRequest`
   events, `guard::retrieval_permission_response` approves a closed set of
   read-only Pixel commands without asking the user.
-- `composed-guard` replays a sealed copy of a repository's pre-existing Codex
+- The legacy/manual `composed-guard` replays a sealed copy of a repository's pre-existing Codex
   `PreToolUse` hooks (`.codex/pixel-composed-guard-backup.json`) through
-  `/bin/sh -c` (`guard::run_foreign_command`, 2 s `COMPOSED_TIMEOUT`).
+  `/bin/sh -c` (`guard::run_foreign_command`, 2 s `COMPOSED_TIMEOUT`). Standard
+  installation restores the original registrations and removes this wrapper.
 - `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use` and
   `metrics` add text to the model's context.
 - `task-event` gates edits and completion for a task contract.
@@ -417,14 +417,13 @@ boundary it crosses.
 - **Mitigation**: the agent prompt states that Pixel output is data, not
   instructions (`crates/pixel-install/assets/pixel-agent-prompt.md`,
   `pixel-subagent-prompt.md`). Codex emits no retrieval context by default.
-  Its experimental caller-facts path in `prompt_submit.rs` returns only
-  validated names, relative paths, lines and tiers from an existing read-only
-  graph, verifies bounded source files against indexed hashes, and caps the
-  packet at 1,024 bytes with a 150 ms lookup deadline. Escaping paths and
-  control characters are rejected; the packet labels its rows as incomplete
-  repository evidence. Hook packets carry repository strings as JSON
-  values (`[PIXEL:TASK_CONTEXT]` in `prompt_submit.rs`, the dependants list
-  of `post-tool-use`) and label them; output is capped.
+  The explicit impact skill and Pi extension treat graph output as repository
+  data, not instructions. `impact --no-refresh` uses a read-only graph snapshot,
+  verifies extractor and source signatures, and bounds the query to 1500 ms and
+  the serialized result to 32 KiB. Its graph completeness claim remains open.
+  Other providers' hook packets still carry repository strings as JSON values
+  (`[PIXEL:TASK_CONTEXT]` in `prompt_submit.rs`, the dependants list of
+  `post-tool-use`) and label them; output is capped.
 - **Status**: Accepted: a retrieval tool has to return repository text.
 - **Residual**: the defence is the model's; Pixel cannot sanitise meaning.
   Anything that follows from a successful injection is bounded by the
@@ -432,16 +431,19 @@ boundary it crosses.
 
 ### T13. Foreign Codex hooks composed into the guard (E, B5)
 
-- **Scenario**: `pixel install --repo` replaces a repository's Codex
+- **Scenario**: a legacy installation replaced a repository's Codex
   `PreToolUse` hooks with its own `composed-guard`, which replays them.
-- **Mitigation**: the step is skipped when the repository tracks
-  `.codex/hooks.json` (`repo_git::is_tracked`); `guard::load_composed_backup`
+- **Mitigation**: current installation restores the original registrations
+  only when the private backup and managed hook still match their owned
+  contract, preserving changed configurations for manual resolution. It skips
+  tracked `.codex/hooks.json` (`repo_git::is_tracked`). For explicitly retained
+  legacy wrappers, `guard::load_composed_backup`
   refuses a symlink, a file over 1 MiB, a mode wider than 0600, an unknown
   version or provider, and any command that calls Pixel's own hooks
   (`invokes_pixel_hook`). Tests: `composed_*` in `guard.rs` and
   `crates/pixel/tests/cli/guard_deny.rs`.
 - **Status**: Partial.
-- **Residual**: Codex's own review of project hooks hashes the command line
+- **Residual**: for a retained legacy wrapper, Codex's review hashes the command line
   of Pixel's composed guard, not the commands in the backup it replays, so
   approving the guard approves what it composes.
 

@@ -88,7 +88,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel note` | Human notes on the map: durable annotations keyed by file + symbol name (or concept norm). |
 | `pixel repo-map` | Structural repo map: every indexed file with its symbols. |
 | `pixel pack-context` | Budget-fitted context for a symbol uid |
-| `pixel impact` | Blast radius of a symbol (callers upstream / callees downstream) |
+| `pixel impact` | Blast radius of a symbol (callers upstream / callees downstream); `--no-refresh` bounds a query against an existing fresh graph without index maintenance |
 | `pixel who-calls` | Direct callers or callees of a symbol |
 | `pixel rename` | IDE-style symbol rename: graph-resolved definition, call, reference, and import sites, each verified against a fresh tree-sitter parse before writing; unresolved same-name sites are reported, never guessed. `--dry-run` prints the edit set without touching files |
 | `pixel call-path` | Call path between two symbols; its `successor` field names the `pixel evaluate path` command that asks the same question with a bounded answer |
@@ -109,7 +109,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel daemon` | Manage the per-root background daemon |
 | `pixel recall` | Search and browse LLM CLI transcripts (machine-wide corpus) |
 | `pixel list-errors` | One-look error capture: query the sniper error sink |
-| `pixel classify` | Zero-shot decision over a bounded label set. Engines: `remote` (default; an OpenAI-compatible chat completion — `--remote-preset openrouter\|ollama\|local\|deepseek\|opencode-go` picks the endpoint and key variable, `--remote-model` the model; probabilities are verbalized, renormalized to sum 1) or `ollaya` (`--engine ollaya --ollaya-url …`: a local Ollaya decision daemon's native typed-choice readout, TypeSafe-compatible `/v1/systemone`, with calibrated confidence disclosed in the snapshot). Without `--engine` the stored preference decides (`pixel config classify-engine local\|remote\|auto`; `pixel install` proposes it with each option's accuracy), probing the local daemon and falling back to remote. Output always discloses `snapshot.deterministic=false` and `snapshot.provider`. `--context` keeps shared framing out of the state. State, context and criteria are capped separately with disclosure. Without `--label`, the local engine answers the default question battery (Ollaya's `triage` preset: `choice`/`score`/`noul` typed answers) instead of a single decision — the remote engine still requires labels. No pixel daemon; `--jsonl` serves one decision per stdin line. `--task-intent` judges the text with the built-in coding-task labels (bugfix, feature, refactor, investigate, question, review, ops) and adds the fitting pixel ops (`next:` / `next_ops`); `--if-warm` answers only from a local engine already listening — never starts it, never falls back to remote — and otherwise exits 1 with empty stdout. The Claude prompt hook asks the same `--task-intent` question itself (local daemon warm, `classify.enabled` on, 300 ms cap) and adds the verdict to the `[PIXEL:TASK_RUNTIME v1]` packet as a classifier claim |
+| `pixel classify` | Zero-shot decision over a bounded label set. Engines: `remote` (default; an OpenAI-compatible chat completion — `--remote-preset openrouter\|ollama\|local\|deepseek\|opencode-go` picks the endpoint and key variable, `--remote-model` the model; probabilities are verbalized, renormalized to sum 1) or `ollaya` (`--engine ollaya --ollaya-url …`: a local Ollaya decision daemon's native typed-choice readout, TypeSafe-compatible `/v1/systemone`, with calibrated confidence disclosed in the snapshot). Without `--engine` the stored preference decides (`pixel config classify-engine local\|remote\|auto`; `pixel install` proposes it with each option's accuracy), probing the local daemon and falling back to remote. Output always discloses `snapshot.deterministic=false` and `snapshot.provider`. `--context` keeps shared framing out of the state. State, context and criteria are capped separately with disclosure. Without `--label`, the local engine answers the default question battery (Ollaya's `triage` preset: `choice`/`score`/`noul` typed answers) instead of a single decision — the remote engine still requires labels. No pixel daemon; `--jsonl` serves one decision per stdin line. `--task-intent` judges the text with the built-in coding-task labels (bugfix, feature, refactor, investigate, question, review, ops) and adds the fitting pixel ops (`next:` / `next_ops`); `--if-warm` answers only from a local engine already listening — never starts it, never falls back to remote — and otherwise exits 1 with empty stdout. The legacy/manual Claude prompt hook asks the same `--task-intent` question itself (local daemon warm, `classify.enabled` on, 300 ms cap) and adds the verdict to the `[PIXEL:TASK_RUNTIME v1]` packet as a classifier claim |
 | `pixel web-search` | Deterministic web lookup for terms the index cannot know — the refine step of a gated `pixel plan`. SearXNG alone when `PIXEL_WEB_SEARCH_URL` is set; otherwise DuckDuckGo, then Wikipedia while the hits are fewer than `--limit`. No LLM, no daemon |
 | `pixel repo-state` | Show repo state: HEAD, branch, dirty files, fingerprints; `--include-clean` adds the capped tracked-clean list |
 | `pixel review-changes` | Review working-tree changes (staged, unstaged, untracked, conflicted) |
@@ -441,24 +441,18 @@ A global `pixel install` deploys the bundled `pixel-agent-prompt.md` and the
 short `pixel-subagent-prompt.md` under `~/.local/share/pixel/`, then wires
 each agent through its own extension point:
 
-- **Claude Code**: lifecycle hooks in `~/.claude/settings.json`:
-  `SessionStart` (injects the prompt, so every Claude process gets it,
-  direct launches included), `UserPromptSubmit`, `PostToolUse` on `Edit`
-  (dependants of the edit) and on the shell tool (the metrics relay), and
-  `SessionStart` with matcher `compact` (post-compaction re-injection). No
-  global `PreToolUse`: enforcement is repo-local. The retired `claude()`
-  shell wrapper is removed from the login shell's profile, and `doctor`
-  reports one that remains (`install.legacy-wrappers`). The hook does not
-  reach sub-agents: a print-mode run passes the deployed sub-agent prompt
-  with `--append-subagent-system-prompt-file` ([docs/manual-setup.md](docs/manual-setup.md)).
-- **Codex**: selective retrieval guidance through `UserPromptSubmit`, and the
-  `PostToolUse` metrics hook. Installation removes Pixel's retired permanent
-  `developer_instructions` block while preserving foreign instructions
-  (`$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json`), detailed below.
-- **Pi**: a short Pixel rule in `~/.pi/agent/APPEND_SYSTEM.md`. Its
-  repository extension (installed by `--repo`) registers the structured
-  `pixel` tool and applies the [pre-execution Pi policy](docs/pi-harness.md)
-  at `tool_call` time.
+- **Claude Code**: task lifecycle hooks in `~/.claude/settings.json`. Retired
+  retrieval prompt, post-edit and metrics registrations are removed; task
+  contracts and foreign hooks are preserved. The optional plugin exposes the
+  explicit `pixel-impact` skill without registering automatic retrieval hooks.
+- **Codex**: task lifecycle hooks in `$CODEX_HOME/hooks.json` (default
+  `~/.codex/hooks.json`). Retired permanent `developer_instructions` blocks,
+  retrieval prompt and metrics registrations are removed. The optional
+  `pixel-impact` skill disables implicit invocation in its packaged metadata.
+- **Pi**: an explicit `/pixel-impact <symbol>` extension command. Installing
+  removes Pixel's retired global prompt block while keeping foreign text.
+  The repository adapter retains task lifecycle handling; automatic retrieval
+  bootstrap, broad tool activation and post-edit advice are disabled by default.
 - **OpenCode** (`~/.config/opencode`: the guard plugin `pixel.js`, auto-loaded
   from `plugins/` and calling `pixel run-hook guard --provider opencode`),
   **Antigravity** (`~/.gemini/config`: the plugin, which carries the
@@ -468,58 +462,54 @@ each agent through its own extension point:
   (`~/.zcode/cli/config.json`: `run-hook guard --provider zcode`): only when
   that agent's configuration already exists.
 
-Retrieval policy is advisory by default; `pixel config policy enforce` opts
-into supported retrieval restrictions, `pixel config policy off` (or
-`PIXEL_POLICY=off`) disables policy decisions and rewrites. Unknown shell
-syntax remains native. Pi's task bootstrap and post-edit context are
-independent of that setting and preserve original tool results. Install
-preserves foreign agent settings and rule files: it only rewrites its own
-managed blocks and hook entries.
+Codex and Claude retrieval remains native for every shared policy setting.
+Other providers retain their existing advisory/enforcement configuration.
+Pi's optional legacy retrieval policy is separate from task lifecycle gates;
+changing retrieval settings cannot disable an already enforced task contract.
+Install rewrites only recognized Pixel managed content and registrations,
+preserving foreign settings and hooks.
 
-Codex has no permanent Pixel retrieval prompt. Its prompt hook classifies explicit
-structural and historical questions locally, without a model call; ordinary
-Q&A, text searches and uncertain requests receive no retrieval context or
-task-target lookup. Graph/history hints require the corresponding local database
-to already exist. A selected route is an optional, targeted hint with an
-immediate native fallback. Codex's guard leaves retrieval commands native even
-when the shared policy is `enforce`. Codex permissions and composed foreign
-hooks keep their own contracts; the other providers still use the shared policy.
+The focused capability calls `pixel impact SYMBOL --no-refresh`. This CLI path
+bypasses the daemon and all index maintenance: a read-only SQLite transaction
+checks graph schema/extractor metadata and the current source signature, then
+uses the normal impact traversal. Repository discovery, freshness checks and
+query work share a 1,500 ms deadline. Depth is limited to 1–3 and serialized
+results to 32 KiB. Missing, stale, incompatible, ambiguous or slow input fails
+back to native retrieval. Workspace fan-out is incompatible with this mode.
+Read-only SQLite access may create its WAL coordination sidecars, and normal
+CLI invocation accounting still applies; this mode does not promise zero
+filesystem writes. It never creates, migrates or refreshes graph data.
+Results retain graph truncation markers and an open-world epistemic envelope;
+no callers found does not establish that none exist.
 
-`pixel install --repo <path>` writes the project-scoped guards instead; each
-one that names this machine's binary is listed in the clone's `info/exclude`
+`pixel install --repo <path>` configures the project integrations; each
+file that names this machine's binary is listed in the clone's `info/exclude`
 so no machine path is committed:
 
 | File | Agent | Content |
 | --- | --- | --- |
-| `.claude/settings.local.json` | Claude Code | `PreToolUse` `run-hook guard --provider claude` |
-| `.codex/config.toml`, `.codex/hooks.json` (+ backup sidecar) | Codex | Removes retired Pixel `developer_instructions` text; the `composed-guard` `PreToolUse` group replays pre-existing project hooks and is skipped when the repository tracks `.codex/hooks.json` |
+| `.claude/settings.local.json` | Claude Code | Removes the retired retrieval guard and restores adopted RTK registrations; preserves foreign hooks |
+| `.codex/config.toml`, `.codex/hooks.json` (legacy backup sidecar during migration) | Codex | Removes retired Pixel `developer_instructions` text and restores foreign hooks from the owned composed-guard backup; preserves existing task hooks without duplicating the global suite; skips tracked `.codex/hooks.json` |
 | `.devin/config.local.json` | Devin | `PreToolUse` rewrite, `PermissionRequest` retrieval approval, prompt-context and metrics hooks |
-| `.pi/extensions/pixel-guard.ts` | Pi | the guard extension |
+| `.pi/extensions/pixel-guard.ts` | Pi | task lifecycle adapter; legacy retrieval behavior requires explicit opt-in |
 | retired managed block in `AGENTS.md` | any agent that reads `AGENTS.md` | Removed on install so ordinary tasks carry no permanent Pixel retrieval instructions; foreign project instructions are preserved |
 
 `doctor` checks them under the `repo.*` ids. `install --repo` and `uninstall
 --repo` also remove the MCP server entry releases up to 0.6.1 wrote into
 `.warp/.mcp.json`, and `repo.warp-mcp` reports one still there.
 
-Codex receives no Pixel retrieval context by default. The experimental
-`PIXEL_CODEX_CALLER_FACTS=1` prompt hook accepts explicit caller/impact questions
-about one bare symbol. It reads an existing graph without building or starting
-the daemon, returns at most three caller examples, and verifies the target and
-caller files against indexed hashes (at most 64 KiB per file). A 150 ms worker
-deadline and 1,024-byte output cap bound the intervention; missing, ambiguous,
-stale or unsafe inputs emit nothing. Results remain incomplete because new
-callers elsewhere may not be indexed; the model must verify source and search
-for other callers. History questions abstain. This opt-in is experimental:
-small paired arena runs showed mixed token and wall-time results.
+Automatic Codex caller-facts injection is retired. Distribution defaults
+remain explicit-only until independent paired measurements establish a benefit.
+The arena can enable implicit skill invocation in an isolated copy, recording
+both source and experimental policy hashes without changing the shipped skill.
 Global and project installation remove the retired `<!-- pixel:managed:begin
 -->`/`end` block from `developer_instructions` with `toml_edit`, preserving foreign
 text, unrelated configuration and layout. A key with no remaining instructions
 is removed. Invalid TOML is refused rather than replaced. `doctor` checks that
 the retired block is absent. `$CODEX_HOME` remains honoured; no shell wrapper or
-replacement system prompt is installed. Pi reads
-`~/.pi/agent/APPEND_SYSTEM.md` automatically; that file is shared the same way
-(markers, text outside them kept, `install.pi-prompt` in `doctor`, block — not
-the file — removed by `uninstall`), so a user's own pi instructions survive.
+replacement system prompt is installed. Pi's shared
+`~/.pi/agent/APPEND_SYSTEM.md` keeps foreign instructions; installation and
+uninstallation remove only Pixel's recognized block or historical prompt.
 OpenCode — when `~/.config/opencode` (`$XDG_CONFIG_HOME` honoured) exists —
 gets the prompt as a managed block in its global `AGENTS.md`, the one
 mechanism both generations honour: v2 accepts the `instructions` config
@@ -546,18 +536,19 @@ is reported instead of silently failing open — and skips when OpenCode is
 absent; `uninstall` strips the block (deleting the file when it held
 nothing else), removes the plugin and drops leftover instructions entries.
 
-The hook entry points, all under `pixel run-hook` (alias `hook`), and where
-`pixel install` registers them:
+The hook entry points, all under `pixel run-hook` (alias `hook`), remain
+available for legacy/manual integration. Standard Codex and Claude installation
+registers task lifecycle events, not the retrieval callbacks below:
 
 | Hook event | Command | Effect |
 | --- | --- | --- |
-| `SessionStart` | `pixel run-hook session-start` | Injects the agent prompt and the capability block from the op registry. For Claude Code the prompt is fitted to the 10 000-character inline limit of a hook's context (`CLAUDE_INLINE_CONTEXT_LIMIT` in `guard.rs`): `DEFERRABLE_SECTIONS` come out first and a closing line names them and the deployed prompt's path. Global for Claude Code and for Devin's own protocol; in a session that only imports Claude's configuration (Devin's `read_config_from.claude`), the entry carries the short Pixel-first guidance and the capability block instead of the Claude prompt. |
-| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Never rejects a prompt. Codex emits nothing by default; the explicit caller-facts experiment uses `codex_retrieval_intent` and a bounded, read-only graph lookup. Neither Codex route starts task-context/boundary work. Claude and Devin retain task-context/boundary detection. The Claude task packet is written only for a real Claude host, never for a host importing its configuration. Their code-request guidance and `[PIXEL:EXECUTION_ROUTE]` use `execution_brief::retrieval_request`, which ignores pasted content; routes require an existing index. Global for Claude Code, Codex, and Devin's own protocol. |
+| `SessionStart` | `pixel run-hook session-start` | Legacy/manual prompt injection; standard Claude and Codex installs omit it. Devin retains its provider-specific prompt integration. |
+| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Codex always emits nothing, including under the retired caller-facts setting. Claude and Devin retain their legacy explicit/manual task-context and boundary implementation; only Devin receives this retrieval registration in a standard install. |
 | `SessionStart` matcher `compact` (`PostCompaction` on Devin) | `pixel run-hook post-compaction` | Re-injects active task evidence for supported hosts. Codex emits nothing, so compaction cannot restore a target packet bypassed by native-default prompt routing. A `--provider claude` entry re-run by an importing host also exits without emitting: its session id belongs to the other harness. |
-| `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. Repo-local (`--repo`) for Claude Code and Devin; global for Antigravity and zcode; OpenCode reaches it through its auto-loaded plugin (`--provider opencode`), the one host whose plugin hook can throw a call away. |
-| `PostToolUse` (Claude `Edit`) | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
-| `PostToolUse` (Codex, Claude `Bash`, Devin `exec`) | `pixel run-hook metrics` | Codex tool results drop stderr, so the finalized invocation's 🟩 metrics line is re-emitted as `additionalContext` (Claude and Devin also get `systemMessage`/`additionalContext` output through the same relay, installed by `pixel install` and `pixel install --repo`; when the tool result already carries the box, Claude still receives it as `systemMessage` only while Codex and Devin stay silent) — correlated to the action record by cwd + argv, silent on any miss, and suppressed by the same `metrics` opt-out. An imported Claude entry re-run by an importing host exits without emitting, so it does not double Devin's own relay. |
-| `PreToolUse` (Codex, `<repo>/.codex/hooks.json`, `--repo`) | `pixel run-hook composed-guard` | Runs a sealed install-time snapshot of foreign hooks. Pixel adds no retrieval rewrite or denial; foreign denials and input mutations remain effective. |
+| `PreToolUse` | `pixel run-hook guard` | Codex and Claude emit no Pixel retrieval rewrites or advice. Claude's independent RTK delegation remains available. Other providers retain bounded compatible command routing and native fallback. |
+| `PostToolUse` (legacy/manual edit callback) | `pixel run-hook post-tool-use` | Emits indexed dependants after an edit; not registered by standard Claude/Codex installation. |
+| `PostToolUse` (legacy/manual metrics callback; installed for Devin) | `pixel run-hook metrics` | Relays finalized invocation metrics by cwd and argv, silent on a miss or metrics opt-out. Standard Claude/Codex installation removes this registration. |
+| `PreToolUse` (legacy/manual Codex integration) | `pixel run-hook composed-guard` | Runs a sealed snapshot of foreign hooks. Standard repository installation restores their original registrations and removes this wrapper. Pixel adds no retrieval rewrite or denial. |
 | Native task lifecycle (Claude Code and Codex); Pi extension lifecycle | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks; Pi persists branch-local bindings. Once enforced, a task retains its gates if runtime settings change. |
 
 `pixel doctor` checks current installation artifacts and distinguishes configured
@@ -568,10 +559,8 @@ by id or by group (`install.*`), and each yellow or red check reports that comma
 `install.claude-hooks` is also yellow when complete hooks run another binary than
 the managed one doctoring them (a global `pixel-dev install`, a previous release's
 path); a `pixel-dev` doctor never judges the home install.
-`repo.claude-hooks` is yellow with no fix when a repository `install --repo`
-prepared has no guard because a hook of the
-user's that also rewrites shell calls held it back: only the user can narrow
-that hook's matcher or accept the missing guard, and the summary says both.
+`repo.claude-hooks` checks that retired Pixel retrieval callbacks are absent;
+foreign shell hooks no longer need to make room for a Pixel rewriter.
 `--fix` runs them: `repair_plan` folds the flagged checks into one run of each
 distinct catalogue command, in catalogue order, `run_repair` executes it with
 the running binary, and the checks are re-run so each repair is judged

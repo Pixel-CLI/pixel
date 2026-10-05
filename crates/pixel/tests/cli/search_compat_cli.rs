@@ -239,7 +239,7 @@ fn repeated_search_keeps_executing_and_reports_changed_file() {
 }
 
 #[test]
-fn provider_rewrites_preserve_metadata_without_rewriting_codex_native_search() {
+fn claude_and_codex_keep_native_search_while_devin_rewrites() {
     for provider in ["claude", "codex", "devin"] {
         let fixture = Fixture::new(b"needle\n");
         let out = fixture.guard(provider, "grep -n needle 'a file.rs'", false, None);
@@ -248,10 +248,10 @@ fn provider_rewrites_preserve_metadata_without_rewriting_codex_native_search() {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        if provider == "codex" {
+        if provider != "devin" {
             assert!(
                 out.stdout.is_empty(),
-                "Codex native search must pass through: {out:?}"
+                "{provider} native search must pass through: {out:?}"
             );
             continue;
         }
@@ -339,17 +339,17 @@ fn unsupported_provider_commands_never_get_authorized_or_rewritten() {
 
     for provider in ["claude", "codex", "devin"] {
         let quoted = fixture.guard(provider, "grep -F needle '#file'", false, None);
-        if provider == "codex" {
+        if provider != "devin" {
             assert!(
                 quoted.status.success(),
-                "codex: {}",
+                "{provider}: {}",
                 String::from_utf8_lossy(&quoted.stderr)
             );
             assert!(
                 quoted.stdout.is_empty(),
-                "Codex native search must pass through: {quoted:?}"
+                "{provider} native search must pass through: {quoted:?}"
             );
-            assert!(quoted.stderr.is_empty(), "{quoted:?}");
+            assert!(quoted.stderr.is_empty(), "{provider}: {quoted:?}");
             continue;
         }
         let response: serde_json::Value = serde_json::from_slice(&quoted.stdout).unwrap();
@@ -641,12 +641,43 @@ fn native_configuration_and_environment_overrides_never_get_autoauthorized() {
 /// machine while CI, with a bare environment, passed them.
 #[test]
 fn the_other_tools_configuration_does_not_keep_a_search_native() {
-    for provider in ["claude", "devin"] {
+    for (tool, foreign_key) in [("grep", "RIPGREP_CONFIG_PATH"), ("rg", "GREP_OPTIONS")] {
+        let fixture = Fixture::new(b"needle\n");
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "exec",
+            "cwd": fixture.0,
+            "tool_input": {"command": format!("{tool} -n needle 'a file.rs'")}
+        });
+        let mut command = fixture.command(PIXEL);
+        command
+            .args(["run-hook", "guard", "--provider", "devin"])
+            .env(foreign_key, "fake-native-config");
+        let output = run_hook(command, &payload);
+        assert!(output.status.success(), "devin: {tool} with {foreign_key}");
+        let response: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+                panic!(
+                    "devin: `{tool}` must be rewritten despite {foreign_key}: {:?}",
+                    String::from_utf8_lossy(&output.stdout)
+                )
+            });
+        let rewritten = response["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            rewritten.starts_with(&format!("pixel search-like-rg {tool} --")),
+            "devin: {tool} with {foreign_key}: {rewritten}"
+        );
+    }
+    // Claude and Codex leave searches to their native permission/execution
+    // flows, regardless of which ripgrep configuration is present.
+    for provider in ["claude", "codex"] {
         for (tool, foreign_key) in [("grep", "RIPGREP_CONFIG_PATH"), ("rg", "GREP_OPTIONS")] {
             let fixture = Fixture::new(b"needle\n");
             let payload = serde_json::json!({
                 "hook_event_name": "PreToolUse",
-                "tool_name": if provider == "devin" { "exec" } else { "Bash" },
+                "tool_name": if provider == "codex" { "shell" } else { "Bash" },
                 "cwd": fixture.0,
                 "tool_input": {"command": format!("{tool} -n needle 'a file.rs'")}
             });
@@ -659,44 +690,16 @@ fn the_other_tools_configuration_does_not_keep_a_search_native() {
                 output.status.success(),
                 "{provider}: {tool} with {foreign_key}"
             );
-            let response: serde_json::Value = serde_json::from_slice(&output.stdout)
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "{provider}: `{tool}` must be rewritten despite {foreign_key}: {:?}",
-                        String::from_utf8_lossy(&output.stdout)
-                    )
-                });
-            let rewritten = response["hookSpecificOutput"]["updatedInput"]["command"]
-                .as_str()
-                .unwrap_or_default();
             assert!(
-                rewritten.starts_with(&format!("pixel search-like-rg {tool} --")),
-                "{provider}: {tool} with {foreign_key}: {rewritten}"
+                output.stdout.is_empty(),
+                "{provider} must preserve native {tool} under {foreign_key}: {:?}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "{provider}: {tool} with {foreign_key}"
             );
         }
-    }
-    // Codex leaves these searches to its native permission and execution
-    // flow, regardless of which ripgrep configuration is present.
-    for (tool, foreign_key) in [("grep", "RIPGREP_CONFIG_PATH"), ("rg", "GREP_OPTIONS")] {
-        let fixture = Fixture::new(b"needle\n");
-        let payload = serde_json::json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "shell",
-            "cwd": fixture.0,
-            "tool_input": {"command": format!("{tool} -n needle 'a file.rs'")}
-        });
-        let mut command = fixture.command(PIXEL);
-        command
-            .args(["run-hook", "guard", "--provider", "codex"])
-            .env(foreign_key, "fake-native-config");
-        let output = run_hook(command, &payload);
-        assert!(output.status.success(), "codex: {tool} with {foreign_key}");
-        assert!(
-            output.stdout.is_empty(),
-            "Codex must preserve native {tool} under {foreign_key}: {:?}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        assert!(output.stderr.is_empty(), "codex: {tool} with {foreign_key}");
     }
     // Execution applies the same per-tool rule: `grep` still runs on the
     // pixel backend under an rg configuration, and stays native under its
