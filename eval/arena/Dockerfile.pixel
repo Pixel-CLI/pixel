@@ -1,6 +1,19 @@
-# pixel arm — Pixel-CLI/pixel, installed and indexing the repo at container start.
+# pixel arm — latest pixel built from the main branch, indexing the repo at
+# container start. The build stage compiles from git main; PIXEL_MAIN_SHA is
+# the remote refs/heads/main sha the caller resolved (arena.sh does a
+# `git ls-remote`), so the layer cache busts exactly when main moves.
+# Built on rust:slim (trixie) — glibc/libstdc++ must match the runtime stage,
+# which is why Dockerfile.base is on node:22-trixie.
+FROM rust:slim AS pixel-build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git build-essential perl pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+ARG PIXEL_MAIN_SHA=main
+RUN echo "pixel main pin: $PIXEL_MAIN_SHA" \
+ && cargo install --git https://github.com/Pixel-CLI/pixel pixel-cli --force --locked --root /usr/local
+
 FROM pixel-arena-base:latest
-RUN curl -fsSL https://raw.githubusercontent.com/Pixel-CLI/pixel/main/scripts/install.sh | sh
+COPY --from=pixel-build /usr/local/bin/pixel /usr/local/bin/pixel
 ENV ARM_TOOL=pixel
 COPY entrypoint.sh /usr/local/bin/arena-entrypoint
 RUN chmod +x /usr/local/bin/arena-entrypoint

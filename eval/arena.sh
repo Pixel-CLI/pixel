@@ -10,7 +10,10 @@
 # own codex docs. The repo snapshot, auth, model, sandbox, and prompts are
 # identical across arms.
 #
-# Usage: eval/arena.sh [--arms "raw pixel"] [--tasks "s1 s2 s3"] [--reps N]
+# Usage: eval/arena.sh [--arms "raw pixel"] [--tasks "s1 s2 s3"] [--reps N] [--watch]
+#   --watch opens one Herdr pane per arm container (when inside Herdr)
+#   running `docker exec -it <c> codex` — interactive codex with and
+#   without pixel side by side; falls back to a tmux session otherwise.
 # Results: eval/arena-results/<arm>-<task>-<rep>.jsonl + rank table.
 set -euo pipefail
 ARENA_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -18,24 +21,38 @@ DOCKER="$_"   # placeholder; resolved below to bypass shell wrappers
 DOCKER_BIN="$(command -v docker)"
 REPO_SNAPSHOT="${REPO_SNAPSHOT:?set REPO_SNAPSHOT to the repo dir to mount at /repo}"
 AUTH="${AUTH:-$HOME/.codex/auth.json}"
-ARMS="${ARMS:-raw semble graft stacklit gitnexus gortex pixel}"
-CODEX_MODEL="${CODEX_MODEL:-gpt-6-luna}"
-CODEX_EFFORT="${CODEX_EFFORT:-high}"
+ARMS="${ARMS:-raw pixel}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.6-terra}"
+CODEX_EFFORT="${CODEX_EFFORT:-medium}"
 TASKS="${TASKS:-s1-hook-install s2-vector-recall s3-rename-impact}"
 REPS="${REPS:-1}"
+WATCH="${WATCH:-0}"
 RESULTS="$ARENA_DIR/arena-results"
 mkdir -p "$RESULTS"
 START=$(date +%s)
 
-# flags override env: --arms, --tasks, --reps
+# flags override env: --arms, --tasks, --reps, --watch
 while [ $# -gt 0 ]; do
   case "$1" in
     --arms) ARMS="$2"; shift 2 ;;
     --tasks) TASKS="$2"; shift 2 ;;
     --reps) REPS="$2"; shift 2 ;;
+    --watch) WATCH=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Restart hygiene: a previous run's containers and --watch panes are stale —
+# close/remove them before launching new ones.
+for stale in $(docker ps -aq --filter "name=^arena-" 2>/dev/null); do
+  docker rm -f "$stale" >/dev/null 2>&1 && echo "removed stale container $stale"
+done
+if [ -f "$RESULTS/.watch-panes" ] && command -v herdr >/dev/null 2>&1; then
+  while IFS= read -r old_pane; do
+    herdr pane close "$old_pane" >/dev/null 2>&1 && echo "closed stale pane $old_pane"
+  done < "$RESULTS/.watch-panes"
+fi
+: > "$RESULTS/.watch-panes"
 
 prompt_for() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "$ARENA_DIR/scenarios/$1.json"; }
 
@@ -61,7 +78,15 @@ launch_arm() {  # arm rep — one container runs all tasks
 
 for arm in $ARMS; do
   docker_build="pixel-arena:$arm"
-  if ! "$DOCKER_BIN" image inspect "$docker_build" >/dev/null 2>&1; then
+  if [ "$arm" = "pixel" ]; then
+    # Always build: the pixel stage pins remote refs/heads/main, so the build
+    # is a cache hit unless main actually moved.
+    pixel_main_sha=$(git ls-remote https://github.com/Pixel-CLI/pixel refs/heads/main | cut -f1)
+    echo "=== building image $docker_build (main: ${pixel_main_sha:-unresolved})"
+    "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.pixel" -t "$docker_build" \
+      --build-arg "PIXEL_MAIN_SHA=${pixel_main_sha:-main}" "$ARENA_DIR/arena" \
+      || { echo "IMAGE BUILD FAILED: $arm"; exit 1; }
+  elif ! "$DOCKER_BIN" image inspect "$docker_build" >/dev/null 2>&1; then
     echo "=== building image $docker_build"
     "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.$arm" -t "$docker_build" "$ARENA_DIR/arena" || { echo "IMAGE BUILD FAILED: $arm"; exit 1; }
   fi
@@ -78,6 +103,63 @@ for rep in $(seq 1 "$REPS"); do
     CONTAINERS+=("arena-$arm-$rep-$$")
   done
 done
+
+# --watch: one pane per container streaming `docker logs -f`. Inside Herdr
+# (HERDR_ENV=1) splits the current pane right, side by side with this one;
+# otherwise falls back to a tiled tmux session you attach separately.
+if [ "$WATCH" = "1" ]; then
+  if [ -n "${HERDR_ENV:-}" ] && command -v herdr >/dev/null 2>&1; then
+    for c in "${CONTAINERS[@]}"; do
+      watch_pane=$(herdr pane split --current --direction right \
+        | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['pane']['pane_id'])" 2>/dev/null || true)
+      if [ -n "$watch_pane" ]; then
+        echo "$watch_pane" >> "$RESULTS/.watch-panes"
+        watch_arm=${c#arena-}; watch_arm=${watch_arm%%-*}
+        herdr pane rename "$watch_pane" "arena-$watch_arm" >/dev/null 2>&1
+        # interactive codex inside the arm's container: raw pane is bare
+        # codex, pixel pane has pixel installed+indexed by the entrypoint.
+        herdr pane run "$watch_pane" \
+          "docker exec -it $c codex -m $CODEX_MODEL -c model_reasoning_effort=$CODEX_EFFORT"
+        # codex asks to trust /repo, then to trust installed hooks (pixel
+        # arm): answer both so the pane lands on the prompt, unattended.
+        (
+          pane_id="$watch_pane"
+          for _ in $(seq 1 45); do
+            screen=$(herdr pane read "$pane_id" 2>/dev/null | tail -20)
+            case "$screen" in
+              *"Trust and continue"*)
+                herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
+              *"Trust all and continue"*)
+                herdr pane send-keys "$pane_id" Down >/dev/null 2>&1
+                sleep 1
+                herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1
+                exit 0 ;;
+              *"Ask Codex"*) exit 0 ;;
+            esac
+            sleep 2
+          done
+        ) &
+      else
+        echo "WARNING: herdr pane split failed; $c logs via 'docker logs -f $c'" >&2
+      fi
+    done
+    echo "watching: herdr panes running interactive codex (${#CONTAINERS[@]} containers)"
+  elif ! command -v tmux >/dev/null 2>&1; then
+    echo "WARNING: --watch needs herdr (HERDR_ENV) or tmux; neither found" >&2
+  elif [ "${#CONTAINERS[@]}" -gt 0 ]; then
+    WATCH_SESSION="arena-$$"
+    tmux new-session -d -s "$WATCH_SESSION" -x 220 -y 50 \
+      "docker logs -f ${CONTAINERS[0]}; echo; echo 'container exited'; exec \${SHELL:-sh}"
+    for c in "${CONTAINERS[@]:1}"; do
+      tmux split-window -t "$WATCH_SESSION" \
+        "docker logs -f $c; echo; echo 'container exited'; exec \${SHELL:-sh}"
+      tmux select-layout -t "$WATCH_SESSION" tiled >/dev/null
+    done
+    tmux select-layout -t "$WATCH_SESSION" tiled >/dev/null
+    echo "watching: tmux attach -t $WATCH_SESSION"
+  fi
+fi
+
 FAIL=0
 for c in "${CONTAINERS[@]}"; do
   docker wait "$c" >/dev/null 2>&1 || FAIL=1
