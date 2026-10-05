@@ -1,1 +1,1 @@
-**graph:** C# generic calls are named without type arguments (`Parse`, `Create`), an alias `using J = N.Json;` imports only `N.Json`, and an identifier passed as an argument is a callback reference.
+**graph:** C# generic calls are named without type arguments (`Parse`, `Create`), an alias `using J = N.Json;` imports only `N.Json`, and a callback passed as an argument (`Handle(OnDone)`) is recorded as a callback reference, as in the other languages.
