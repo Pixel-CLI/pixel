@@ -19,7 +19,6 @@
 //! (`prompt_intent`). The workers share a 750ms deadline; one slow worker does
 //! not discard useful context from the others.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -96,10 +95,9 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // Suppress stderr panics in hook mode so unexpected edge cases cleanly exit 0.
     std::panic::set_hook(Box::new(|_| {}));
 
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
+    let Some(input) = crate::hook_input::read_hook_payload() else {
         std::process::exit(0);
-    }
+    };
     let Ok(payload) = serde_json::from_str::<PromptSubmitPayload>(&input) else {
         std::process::exit(0);
     };

@@ -357,15 +357,23 @@ boundary it crosses.
 - **Mitigation**: the hook never executes `tool_input.command`; the rewrite
   grammar and quoting (3.3); rewritten paths must be regular files inside the
   discovered root, outside `.git` and `.pixel`, and not credential-shaped;
-  `tool_input.env` disables the rewrite; `task-event` caps its input at
-  `MAX_INPUT` (1 MiB) and `composed-guard` at `COMPOSED_MAX_INPUT`; every hook
-  except `task-event` fails open (exit 0), and `pixel install` registers a
-  10 s timeout (`HOOK_TIMEOUT`).
+  `tool_input.env` disables the rewrite; `guard`, `prompt-submit`,
+  `post-tool-use`, `metrics` and `task-event` read their payload through one
+  bounded reader, `hook_input::read_bounded`, capped at `MAX_HOOK_INPUT`
+  (1 MiB), so an over-cap payload is refused after `cap + 1` bytes instead of
+  being allocated in full; `composed-guard` keeps its own
+  `COMPOSED_MAX_INPUT` and `post-compaction` its smaller `MANIFEST_MAX_BYTES`
+  (64 KiB, which also bounds the manifest file it reads back); over-cap
+  `task-event` input emits its unavailable response, which denies `PreToolUse`
+  on an enforced session; the other hooks take their existing fail-open exit 0
+  and leave the native tool untouched; `pixel install` registers a 10 s
+  timeout (`HOOK_TIMEOUT`).
 - **Status**: Mitigated.
-- **Residual**: `guard`, `prompt-submit`, `post-tool-use` and `metrics` read
-  stdin without a cap, trusting the host; the native fallback after a
-  rewrite re-checks the file in Pixel's emulation but not in the native
-  `rg`/`grep` it falls back to.
+- **Residual**: the cap bounds allocation, not the wait — a host that writes
+  fewer than `MAX_HOOK_INPUT + 1` bytes and holds the pipe open still stalls
+  the hook until the host's `HOOK_TIMEOUT` (10 s) ends it; the native fallback
+  after a rewrite re-checks the file in Pixel's emulation but not in the
+  native `rg`/`grep` it falls back to.
 
 ### T11. A hook grants a permission it should not (E, B2)
 
