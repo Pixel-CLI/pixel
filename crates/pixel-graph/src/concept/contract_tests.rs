@@ -99,6 +99,7 @@ fn is_test_path_should_match_test_dirs_and_test_file_names() {
         "tests/cli.rs",
         "crates/a/tests/all.rs",
         "lib/test/helper.rb",
+        "src/__tests__/cart.ts",
     ] {
         assert!(is_test_path(path), "{path} is a test file");
     }
@@ -265,14 +266,25 @@ fn status_concepts_should_come_from_status_positions_within_100_to_599() {
 #[test]
 fn app_calls_should_be_routes_only_for_http_method_names() {
     let routes = of_kind(&ts_concepts(), ConceptKind::Route);
-    assert!(routes.iter().any(|r| r.starts_with("get")), "{routes:?}");
-    assert!(routes.iter().any(|r| r.starts_with("delete")), "{routes:?}");
+    // The route keeps its path, not just the method (#772).
+    assert!(routes.contains(&"get /users".to_string()), "{routes:?}");
+    assert!(
+        routes.contains(&"delete /users/:id".to_string()),
+        "{routes:?}"
+    );
     assert!(
         !routes
             .iter()
             .any(|r| r.contains("listen") || r.contains("3000")),
         "{routes:?}"
     );
+}
+
+/// A comment before the path is not the path.
+#[test]
+fn app_route_should_skip_a_comment_before_its_path() {
+    let c = extract_concepts("src/server.ts", b"app.get(/* note */ \"/users\", list);\n");
+    assert_eq!(of_kind(&c, ConceptKind::Route), vec!["get /users"]);
 }
 
 #[test]
@@ -426,6 +438,48 @@ fn html_should_skip_comments_doctype_and_closing_tags() {
     assert_eq!(
         kinds_and_norms(&c),
         vec![(ConceptKind::UiText, "order summary".to_string())]
+    );
+}
+
+/// Markup lines are 1-based like every other concept's: HTML used to start
+/// counting at 0, and Svelte/Vue markup before a `<script>` was numbered
+/// from where the script ended (#770).
+#[test]
+fn markup_concepts_should_report_their_one_based_file_line() {
+    let html = extract_concepts(
+        "public/a.html",
+        b"<p>Order summary</p>\n<p>Pay now please</p>\n",
+    );
+    assert_eq!(
+        find(&html, ConceptKind::UiText, "order summary").start_line,
+        1
+    );
+    assert_eq!(
+        find(&html, ConceptKind::UiText, "pay now please").start_line,
+        2
+    );
+
+    let vue = "<template>\n  <button>Checkout</button>\n</template>\n<script>\nlet a = 1;\n</script>\n<p>Thanks for ordering</p>\n";
+    let c = extract_concepts("src/Cart.vue", vue.as_bytes());
+    assert_eq!(find(&c, ConceptKind::UiText, "checkout").start_line, 2);
+    assert_eq!(
+        find(&c, ConceptKind::UiText, "thanks for ordering").start_line,
+        7
+    );
+}
+
+/// Strings in a file under a `__tests__/` directory are test noise, as in a
+/// `tests/` one (#771).
+#[test]
+fn strings_under_a_tests_dunder_directory_should_not_be_concepts() {
+    let src = b"const m = \"payment was declined by the bank\";\n";
+    assert!(!extract_concepts("src/cart.ts", src).is_empty());
+    assert!(
+        of_kind(
+            &extract_concepts("src/__tests__/cart.ts", src),
+            ConceptKind::String
+        )
+        .is_empty()
     );
 }
 

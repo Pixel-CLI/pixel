@@ -8,9 +8,13 @@
 //! so a walker that drops a qualification or invents a call misleads all of
 //! them at once.
 
+use std::time::{Duration, Instant};
+
+use tree_sitter::Parser;
+
 use super::{
-    FileExtraction, ImportBinding, RawSymbol, extract_file, generic_symbol_kind, lang_of,
-    parse_file,
+    FileExtraction, ImportBinding, PARSE_BUDGET, RawSymbol, extract_file, generic_symbol_kind,
+    lang_of, language_for, over_budget, parse_file, parse_within,
 };
 use crate::store::SymbolKind;
 
@@ -1062,4 +1066,184 @@ fn elixir_remote_call_should_be_recorded_by_its_dotted_target() {
     let fx = extract("lib/cart.ex", src);
     assert!(has_call(&fx, "Enum.sum"), "{:?}", calls(&fx));
     assert!(has_call(&fx, "Logger.info"), "{:?}", calls(&fx));
+}
+
+// --- parse budget (#800) ----------------------------------------------------------
+
+/// 262 bytes of `.tsx` (the `Fuzz` job's `timeout-287dc264…` reproducer) on
+/// which TSX error recovery ran for minutes without a budget.
+fn parse_hang_reproducer() -> Vec<u8> {
+    [
+        &b"import fu\x00\x00\x00\xfbon Button({ onClick(}# Pconst Page = (=> save()} /><span>te=t</span></di<Button onClick={() => save()} /><span>te=0</s`an></dn onClick={() => save()} /><span>t"[..],
+        &[0xa9; 72][..],
+        &b"e=t</span></div>;\n"[..],
+    ]
+    .concat()
+}
+
+/// Run `work` on its own thread and give it `cap`: a regression that hangs
+/// fails this test instead of holding the whole suite until its timeout.
+fn within<T: Send + 'static>(cap: Duration, work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    rx.recv_timeout(cap)
+        .unwrap_or_else(|_| panic!("still running after {cap:?}"))
+}
+
+fn tsx_parser() -> Parser {
+    let mut parser = Parser::new();
+    parser.set_language(&language_for("tsx").unwrap()).unwrap();
+    parser
+}
+
+/// The budget is a strict bound: a parse that took exactly the budget is
+/// still within it, one nanosecond more is over.
+#[test]
+fn over_budget_should_be_strictly_past_the_budget() {
+    let budget = Duration::from_millis(200);
+    assert!(!over_budget(Duration::from_millis(199), budget));
+    assert!(!over_budget(budget, budget));
+    assert!(over_budget(budget + Duration::from_nanos(1), budget));
+}
+
+/// A well-formed file parses whole within the budget.
+#[test]
+fn parse_within_should_return_the_tree_of_a_file_inside_its_budget() {
+    let tree = parse_within(&mut tsx_parser(), b"const a = <b>hi</b>;\n", PARSE_BUDGET).unwrap();
+    assert_eq!(tree.root_node().kind(), "program");
+    assert!(!tree.root_node().has_error());
+}
+
+/// A parse past its budget is cancelled and yields no tree, shortly after
+/// the budget rather than minutes later (#800).
+#[test]
+fn parse_within_should_give_up_once_past_its_budget() {
+    let started = Instant::now();
+    let tree = within(Duration::from_secs(15), || {
+        parse_within(
+            &mut tsx_parser(),
+            &parse_hang_reproducer(),
+            Duration::from_millis(100),
+        )
+        .is_some()
+    });
+    assert!(!tree, "a cancelled parse yields no tree");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// The production paths, concept and symbol extraction alike, return on the
+/// reproducer: the file just contributes no rows.
+#[test]
+fn extraction_should_return_on_a_file_that_stalls_the_parser() {
+    let (concepts, extraction) = within(Duration::from_secs(19), || {
+        let content = parse_hang_reproducer();
+        (
+            crate::concept::extract_concepts("src/fuzz.tsx", &content),
+            extract_file("src/fuzz.tsx", &content).is_some(),
+        )
+    });
+    assert!(concepts.is_empty(), "{concepts:?}");
+    assert!(!extraction);
+}
+
+// --- generic-walker and C# regressions (#773–#778) ------------------------------
+
+/// A C function definition names its function: the identifier sits inside
+/// the `function_declarator`, through a pointer declarator too (#773).
+#[test]
+fn c_function_definitions_should_be_symbols() {
+    let fx = extract(
+        "src/add.c",
+        "int add(int a) { return a; }\nchar *name(void) { return 0; }\n",
+    );
+    assert_eq!(
+        symbols(&fx),
+        vec![
+            ("add".to_string(), SymbolKind::Function),
+            ("name".to_string(), SymbolKind::Function)
+        ]
+    );
+}
+
+/// `o->start()` keeps `o` as its receiver: C's `field_expression` holds
+/// its operand in the `argument` field (#774).
+#[test]
+fn c_member_call_should_keep_its_receiver() {
+    let fx = extract("src/add.c", "void f(void) { o->start(); helper(); }\n");
+    assert_eq!(call_receiver(&fx, "start").as_deref(), Some("o"));
+    assert_eq!(call_receiver(&fx, "helper"), None);
+}
+
+/// `def`, `defmodule … do` and the head a `def` defines are definitions:
+/// only the calls in the body are call sites (#775).
+#[test]
+fn elixir_definitions_should_not_be_calls() {
+    let src = "defmodule Cart do\n  def total(x) do\n    Enum.sum(x)\n  end\n  defp tax(x), do: round(x)\n  def pay(x) when is_integer(x) do\n    charge(x)\n  end\nend\n";
+    let fx = extract("lib/cart.ex", src);
+    // A guarded head (`pay(x) when …`) is a definition too; the guard's
+    // own call (`is_integer`) is a call site.
+    assert_eq!(
+        calls(&fx),
+        vec![
+            ("Enum.sum".to_string(), None),
+            ("round".to_string(), None),
+            ("is_integer".to_string(), None),
+            ("charge".to_string(), None)
+        ]
+    );
+}
+
+/// Swift's `call_expression` has no `function` field: the callee is its
+/// first named child, a plain name or a navigation (#776).
+#[test]
+fn swift_calls_should_be_recorded_with_their_receiver() {
+    let fx = extract("View.swift", "func f() { layout(); v.draw(x) }\n");
+    assert_eq!(
+        calls(&fx),
+        vec![
+            ("layout".to_string(), None),
+            ("draw".to_string(), Some("v".to_string()))
+        ]
+    );
+}
+
+/// A double-quoted path parses as `encapsed_string`; it is an import like
+/// the single-quoted one (#777).
+#[test]
+fn php_require_once_with_double_quotes_should_be_an_import() {
+    let fx = extract(
+        "src/a.php",
+        "<?php\nrequire_once \"lib/double.php\";\nrequire_once 'lib/single.php';\nrequire_once \"lib/$name.php\";\n",
+    );
+    // The interpolated path is decided at run time: no import for it.
+    assert_eq!(import_paths(&fx), vec!["lib/double.php", "lib/single.php"]);
+}
+
+/// C# generic calls are named without their type arguments, an alias
+/// `using` imports the namespace and not the alias, and an identifier
+/// passed as an argument is a callback reference (#778).
+#[test]
+fn csharp_generic_calls_alias_usings_and_callback_arguments() {
+    let fx = extract("Service.cs", CS_SRC);
+    assert!(has_call(&fx, "Parse"), "{:?}", calls(&fx));
+    assert_eq!(call_receiver(&fx, "Create").as_deref(), Some("Factory"));
+    assert!(
+        !fx.calls.iter().any(|c| c.callee_name.contains('<')),
+        "{:?}",
+        calls(&fx)
+    );
+    assert_eq!(import_paths(&fx), vec!["System", "Newtonsoft.Json"]);
+    let refs = references(&fx);
+    assert!(
+        refs.contains(&("OnDone".to_string(), Some("Handle".to_string()))),
+        "{refs:?}"
+    );
+    assert!(refs.contains(&("OnClick".to_string(), None)), "{refs:?}");
+    assert!(!refs.iter().any(|(n, _)| n == "null"), "{refs:?}");
 }

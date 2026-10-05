@@ -3190,12 +3190,14 @@ impl Service {
                 grouped.len(),
                 symbol_total
             );
-            let mut cur_dir = String::new();
+            // `None` until the first file: the root directory is `""`, so a
+            // `""` start would give root files that sort first no heading.
+            let mut cur_dir: Option<&str> = None;
             for (f, syms) in &grouped {
-                let dir = f.path.rsplit_once('/').map_or("", |(d, _)| d).to_string();
-                if dir != cur_dir {
-                    let _ = writeln!(md, "\n## {}", if dir.is_empty() { "." } else { &dir });
-                    cur_dir = dir;
+                let dir = f.path.rsplit_once('/').map_or("", |(d, _)| d);
+                if cur_dir != Some(dir) {
+                    let _ = writeln!(md, "\n## {}", if dir.is_empty() { "." } else { dir });
+                    cur_dir = Some(dir);
                 }
                 let _ = writeln!(md, "\n### `{}`", f.path);
                 for s in syms {

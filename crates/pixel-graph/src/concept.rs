@@ -23,6 +23,8 @@
 
 use tree_sitter::{Language, Node, Parser};
 
+use crate::extract::parse_bounded;
+
 /// The closed set of concept kinds. Mirrors PLAN.md's Engine 1 table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,9 +139,6 @@ fn string_worth_indexing(text: &str) -> bool {
 /// `__tests__` directories, and `*_test.*` / `*.spec.*` / `*.test.*` files.
 pub(crate) fn is_test_path(path: &str) -> bool {
     let file = path.rsplit('/').next().unwrap_or(path);
-    if file.contains("__tests__") {
-        return true;
-    }
     if file.contains(".spec.") || file.contains(".test.") {
         return true;
     }
@@ -148,7 +147,8 @@ pub(crate) fn is_test_path(path: &str) -> bool {
     {
         return true;
     }
-    path.split('/').any(|seg| seg == "tests" || seg == "test")
+    path.split('/')
+        .any(|seg| seg == "tests" || seg == "test" || seg == "__tests__")
 }
 
 /// The inverted-index words for a normalized concept: split on non-alphanumeric
@@ -355,10 +355,13 @@ impl<'a> TsWalker<'a> {
     }
 
     fn push_app_route(&mut self, node: Node, method: &str) {
+        // The first named argument that is not a comment: `arguments` opens
+        // on its `(` token, and a comment (`/* note */`) is a named extra.
         let path = self
             .call_args(node)
-            .first()
-            .map(|a| strip_quotes(&self.text(*a)))
+            .into_iter()
+            .find(|a| a.is_named() && !a.is_extra())
+            .map(|a| strip_quotes(&self.text(a)))
             .unwrap_or_default();
         let raw = format!("{method} {path}");
         self.push(ConceptKind::Route, raw, format!("{method} {path}"), node);
@@ -616,7 +619,7 @@ fn extract_ts(path: &str, content: &[u8]) -> Vec<RawConcept> {
     if parser.set_language(&language).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(content, None) else {
+    let Some(tree) = parse_bounded(&mut parser, content) else {
         return Vec::new();
     };
     let mut w = TsWalker {
@@ -635,7 +638,7 @@ fn extract_rust(path: &str, content: &[u8]) -> Vec<RawConcept> {
     if parser.set_language(&language).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(content, None) else {
+    let Some(tree) = parse_bounded(&mut parser, content) else {
         return Vec::new();
     };
     let mut w = TsWalker {
@@ -656,7 +659,7 @@ fn extract_ts_script(content: &str, line_offset: u32, test_path: bool) -> Vec<Ra
     if parser.set_language(&language).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(content.as_bytes(), None) else {
+    let Some(tree) = parse_bounded(&mut parser, content.as_bytes()) else {
         return Vec::new();
     };
     let mut w = TsWalker {
@@ -675,12 +678,18 @@ fn extract_svelte_vue(path: &str, content: &[u8]) -> Vec<RawConcept> {
     let text = String::from_utf8_lossy(content);
     let test_path = is_test_path(path);
     let mut out = Vec::new();
-    let mut markup = String::new();
     let mut markup_start = 0usize;
     let mut pos = 0usize;
     while let Some(rel) = text[pos..].find("<script") {
         let start = pos + rel;
-        markup.push_str(&text[markup_start..start]);
+        // Each markup stretch is scanned from its own first line: one buffer
+        // for all of them numbered markup before a `<script>` from where the
+        // last script ended (#770).
+        scan_markup(
+            &text[markup_start..start],
+            line_of(&text, markup_start),
+            &mut out,
+        );
         let (open_end, close) = script_block_bounds(&text, start);
         let script_content = &text[open_end..close];
         let line_offset = line_of(&text, open_end).saturating_sub(1);
@@ -691,9 +700,11 @@ fn extract_svelte_vue(path: &str, content: &[u8]) -> Vec<RawConcept> {
         pos = (close.max(start) + "</script>".len()).min(text.len());
         markup_start = pos;
     }
-    markup.push_str(&text[markup_start..]);
-    let markup_line = line_of(&text, markup_start).saturating_sub(1);
-    scan_markup(&markup, markup_line, &mut out);
+    scan_markup(
+        &text[markup_start..],
+        line_of(&text, markup_start),
+        &mut out,
+    );
     out
 }
 
@@ -713,7 +724,7 @@ fn script_block_bounds(text: &str, start: usize) -> (usize, usize) {
 fn extract_html(content: &[u8]) -> Vec<RawConcept> {
     let text = String::from_utf8_lossy(content);
     let mut out = Vec::new();
-    scan_markup(&text, 0, &mut out);
+    scan_markup(&text, 1, &mut out);
     out
 }
 
@@ -721,10 +732,11 @@ fn extract_html(content: &[u8]) -> Vec<RawConcept> {
 
 /// Hand-rolled markup scanner for html/svelte/vue. Emits `ui_text` from inner
 /// text, `form`/`component` from element names, and `attr_text` from the
-/// known attribute list. Line numbers are tracked as the markup is walked.
-fn scan_markup(text: &str, line_offset: u32, out: &mut Vec<RawConcept>) {
+/// known attribute list. Line numbers are tracked as the markup is walked,
+/// from `first_line`, the 1-based file line `text` starts on.
+fn scan_markup(text: &str, first_line: u32, out: &mut Vec<RawConcept>) {
     let chars: Vec<char> = text.chars().collect();
-    let mut line = line_offset;
+    let mut line = first_line;
     let mut i = 0usize;
     let mut text_buf = String::new();
     let mut text_start_line = line;
