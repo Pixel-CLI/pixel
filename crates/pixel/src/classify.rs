@@ -2640,4 +2640,180 @@ mod tests {
             "no: 0.250\nyes: 0.750\npredicted: yes\n"
         );
     }
+
+    // -- stored remote overrides ----------------------------------------------
+
+    /// Holds ENV_LOCK while pointing HOME at a scratch dir and pinning the
+    /// `PIXEL_REMOTE_*` vars the stored-* helpers consult; every mutation is
+    /// restored when the guard drops (the lock field drops last).
+    struct ScopedEnv {
+        home_dir: std::path::PathBuf,
+        saved: Vec<(String, Option<std::ffi::OsString>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ScopedEnv {
+        fn new(vars: &[(&str, Option<&str>)]) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let lock = crate::ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home_dir = std::env::temp_dir().join(format!(
+                "pixel-classify-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let mut saved: Vec<(String, Option<std::ffi::OsString>)> =
+                vec![("HOME".to_string(), std::env::var_os("HOME"))];
+            for (name, _) in vars {
+                saved.push((name.to_string(), std::env::var_os(name)));
+            }
+            // SAFETY: under ENV_LOCK for the test's whole duration; every
+            // change is restored in Drop while the lock is still held.
+            unsafe { std::env::set_var("HOME", &home_dir) };
+            for (name, value) in vars {
+                // SAFETY: under ENV_LOCK (see above).
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+            Self {
+                home_dir,
+                saved,
+                _lock: lock,
+            }
+        }
+
+        fn write_config(&self, doc: &str) {
+            let path = self.home_dir.join(".pixel/config.yaml");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, doc).unwrap();
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: still under ENV_LOCK — `_lock` drops after this.
+            unsafe {
+                for (name, value) in &self.saved {
+                    match value {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.home_dir);
+        }
+    }
+
+    #[test]
+    fn stored_base_when_unset_should_return_the_stored_https_base() {
+        let env = ScopedEnv::new(&[
+            ("PIXEL_REMOTE_BASE", None),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        env.write_config("classify: {remote_base: 'https://stored.example'}\n");
+        let config = crate::decide_remote::resolve_config(
+            crate::decide_remote::Preset::Openrouter,
+            None,
+            Some("sk-test".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            stored_base_when_unset(&config).as_deref(),
+            Ok("https://stored.example")
+        );
+    }
+
+    #[test]
+    fn stored_base_when_unset_should_let_an_explicit_env_base_win() {
+        let env = ScopedEnv::new(&[
+            ("PIXEL_REMOTE_BASE", Some("https://env.example")),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        env.write_config("classify: {remote_base: 'https://stored.example'}\n");
+        let config = crate::decide_remote::resolve_config(
+            crate::decide_remote::Preset::Openrouter,
+            None,
+            Some("sk-test".into()),
+        )
+        .unwrap();
+        assert_eq!(stored_base_when_unset(&config).unwrap(), config.base);
+    }
+
+    #[test]
+    fn stored_base_when_unset_should_treat_an_empty_env_base_as_unset() {
+        let env = ScopedEnv::new(&[
+            ("PIXEL_REMOTE_BASE", Some("")),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        env.write_config("classify: {remote_base: 'https://stored.example'}\n");
+        let config = crate::decide_remote::resolve_config(
+            crate::decide_remote::Preset::Openrouter,
+            None,
+            Some("sk-test".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            stored_base_when_unset(&config).as_deref(),
+            Ok("https://stored.example")
+        );
+    }
+
+    #[test]
+    fn stored_base_when_unset_should_refuse_a_cleartext_stored_base_only_with_a_key() {
+        let env = ScopedEnv::new(&[
+            ("PIXEL_REMOTE_BASE", None),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        env.write_config("classify: {remote_base: 'http://plain.example'}\n");
+        let keyed = crate::decide_remote::resolve_config(
+            crate::decide_remote::Preset::Openrouter,
+            None,
+            Some("sk-test".into()),
+        )
+        .unwrap();
+        assert!(stored_base_when_unset(&keyed).is_err());
+        let keyless =
+            crate::decide_remote::resolve_config(crate::decide_remote::Preset::Local, None, None)
+                .unwrap();
+        assert_eq!(
+            stored_base_when_unset(&keyless).as_deref(),
+            Ok("http://plain.example")
+        );
+    }
+
+    #[test]
+    fn stored_remote_model_when_unset_should_yield_the_stored_model() {
+        let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", None)]);
+        env.write_config("classify: {remote_model: stored-m}\n");
+        assert_eq!(
+            stored_remote_model_when_unset().as_deref(),
+            Some("stored-m")
+        );
+    }
+
+    #[test]
+    fn stored_remote_model_when_unset_should_defer_to_a_set_env_model() {
+        {
+            let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", Some("env-m"))]);
+            env.write_config("classify: {remote_model: stored-m}\n");
+            assert_eq!(stored_remote_model_when_unset(), None);
+        }
+        {
+            let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", Some(""))]);
+            env.write_config("classify: {remote_model: stored-m}\n");
+            assert_eq!(
+                stored_remote_model_when_unset().as_deref(),
+                Some("stored-m")
+            );
+        }
+    }
 }
