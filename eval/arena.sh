@@ -59,7 +59,31 @@ prompt_for() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['p
 launch_arm() {  # arm rep — one container runs all tasks
   local arm="$1" rep="$2"
   local snap="$RESULTS/snapshot-$arm"
-  [ -d "$snap" ] || git clone -q "$REPO_SNAPSHOT" "$snap"
+  if [ ! -d "$snap" ]; then
+    git clone -q "$REPO_SNAPSHOT" "$snap"
+    if [ "$arm" = "raw" ]; then
+      # The snapshot carries pixel's own agent-facing docs; raw must not see
+      # them or codex tries `pixel …` and burns a turn on the failure.
+      rm -rf "$snap/.agents/skills/pixel" "$snap/skills/pixel" \
+        "$snap/.openclaw/skills/pixel" "$snap/rules/pixel.md" \
+        "$snap/PIXEL.md" "$snap/PIXEL-SUBAGENT.md" "$snap/.cursor/rules/pixel.mdc" \
+        "$snap/.windsurf/rules/pixel.md" "$snap/.kiro/steering/pixel.md" \
+        "$snap/.qoder/rules/pixel.md" "$snap/.clinerules/pixel.md"
+      # AGENTS.md is this repo's own dev doc and teaches pixel retrieval
+      # (managed warp-retrieval block + reinstall/doctor commands). Remove
+      # the managed block, then every remaining line that names pixel —
+      # snapshot-only edit; the eval loses project context it doesn't need.
+      sed -i '' '/<!-- pixel:warp-retrieval:begin -->/,/<!-- pixel:warp-retrieval:end -->/d' "$snap/AGENTS.md" 2>/dev/null \
+        || sed -i '/<!-- pixel:warp-retrieval:begin -->/,/<!-- pixel:warp-retrieval:end -->/d' "$snap/AGENTS.md"
+      grep -vEi 'pixel' "$snap/AGENTS.md" > "$snap/AGENTS.md.scrubbed" \
+        && mv "$snap/AGENTS.md.scrubbed" "$snap/AGENTS.md"
+      rm -rf "$snap/.agents/skills/pixel-retro"
+      for f in "$snap"/.agents/rules/*.md "$snap"/.agents/skills/*/SKILL.md; do
+        [ -f "$f" ] || continue
+        grep -vEi 'pixel' "$f" > "$f.scrubbed" && mv "$f.scrubbed" "$f"
+      done
+    fi
+  fi
   local missing=0
   for task in $TASKS; do
     [ -s "$RESULTS/$arm-$task-$rep.jsonl" ] || missing=1
@@ -79,13 +103,23 @@ launch_arm() {  # arm rep — one container runs all tasks
 for arm in $ARMS; do
   docker_build="pixel-arena:$arm"
   if [ "$arm" = "pixel" ]; then
-    # Always build: the pixel stage pins remote refs/heads/main, so the build
-    # is a cache hit unless main actually moved.
-    pixel_main_sha=$(git ls-remote https://github.com/Pixel-CLI/pixel refs/heads/main | cut -f1)
-    echo "=== building image $docker_build (main: ${pixel_main_sha:-unresolved})"
-    "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.pixel" -t "$docker_build" \
-      --build-arg "PIXEL_MAIN_SHA=${pixel_main_sha:-main}" "$ARENA_DIR/arena" \
-      || { echo "IMAGE BUILD FAILED: $arm"; exit 1; }
+    # PIXEL_SRC=git (default): pin remote refs/heads/main so the layer cache
+    # busts exactly when main moves. PIXEL_SRC=local: build the source in the
+    # build context instead — arena.sh passes REPO_SNAPSHOT as the context,
+    # so the arm measures the local tree (including unpushed work).
+    if [ "${PIXEL_SRC:-git}" = "local" ]; then
+      echo "=== building image $docker_build (local: $REPO_SNAPSHOT)"
+      "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.pixel" -t "$docker_build" \
+        --build-arg PIXEL_SRC=local \
+        --build-arg ENTRYPOINT_SRC=eval/arena/entrypoint.sh "$REPO_SNAPSHOT" \
+        || { echo "IMAGE BUILD FAILED: $arm"; exit 1; }
+    else
+      pixel_main_sha=$(git ls-remote https://github.com/Pixel-CLI/pixel refs/heads/main | cut -f1)
+      echo "=== building image $docker_build (main: ${pixel_main_sha:-unresolved})"
+      "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.pixel" -t "$docker_build" \
+        --build-arg "PIXEL_MAIN_SHA=${pixel_main_sha:-main}" "$ARENA_DIR/arena" \
+        || { echo "IMAGE BUILD FAILED: $arm"; exit 1; }
+    fi
   elif ! "$DOCKER_BIN" image inspect "$docker_build" >/dev/null 2>&1; then
     echo "=== building image $docker_build"
     "$DOCKER_BIN" build -f "$ARENA_DIR/arena/Dockerfile.$arm" -t "$docker_build" "$ARENA_DIR/arena" || { echo "IMAGE BUILD FAILED: $arm"; exit 1; }
