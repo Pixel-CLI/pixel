@@ -10,18 +10,9 @@ Always loaded: how to run the long gates without losing an afternoon.
   command, complete log and exit status. A previous pass never covers a
   subsequent behavior change. Keep Cargo builds sequential per build
   directory and do not clean output used by a running gate.
-- **Mutants run nightly on main.** No PR or pre-push mutation campaign.
-  Only when explicitly asked, run `cargo mutants --in-diff <diff> -F '<fn>'`
-  on one or two functions (minutes), never the full diff on a laptop.
-  Manual CI campaigns remain available for a reported range or full sweep.
-- **Measure before you launch anything.** `cargo mutants --list --in-diff
-  <diff> | wc -l` gives the mutant count; CI costs about 25 s per `pixel-cli`
-  mutant after a 3 min baseline and 10 to 15 s per library-crate mutant.
-  The workflow shards the list: one job per 10 mutants, at most 10 jobs
-  (`MUTANTS_PER_SHARD`, `MAX_SHARDS` in `scripts/mutants-gate.py`), each
-  paying about 40 s of setup and its own baseline. The limit is per shard:
-  a count whose slices will not fit a 90-minute job (roughly 2 000 CLI
-  mutants) needs a bounded manual follow-up, never hidden timeouts or weakened assertions.
+- **Mutants run only in scheduled CI on main.** No local, PR or manual
+  campaigns. Diagnose survivors with ordinary tests and inspect the next
+  nightly's report after merge.
 - **Count against the merge base, with three dots.** `git diff
   origin/main...HEAD` diffs the merge base against HEAD — what the branch
   changed. `git diff origin/main..HEAD` diffs the two commits and adds
@@ -34,10 +25,6 @@ Always loaded: how to run the long gates without losing an afternoon.
   uncommitted edit it prints `Diff content doesn't match source file` and
   lists zero mutants, which reads like good news. Commit first, then write
   the diff.
-- **`--timeout 20` breaks the baseline of crates with doctests**: rustdoc's
-  doctest compile alone takes 15 to 20 s, and the cap applies to the
-  baseline too. Use `--timeout 60` for a local `-F` run; CI's automatic cap
-  is five times the measured baseline, so it is unaffected.
 - **Do not throttle the CLI suite.** `RUST_TEST_THREADS=4` made the
   process-spawning `pixel-cli` tests four times slower per mutant; the
   default thread count is right, and a flaky baseline is re-run, not
@@ -49,13 +36,5 @@ Always loaded: how to run the long gates without losing an afternoon.
   prices every worktree's build output, index and scratch in one list, and
   `just clean` takes the build output of all of them (CONTRIBUTING.md,
   "Reclaiming disk"); a `mutants.out` left by an aborted run is in that list.
-- **Stacked PRs diff against their base**, not `main`:
-  `git diff <base-branch>...HEAD > target/pr.diff && cargo mutants
-  --in-diff target/pr.diff`. A lower PR fixed after
-  review gets a follow-up commit pushed to its branch; the branches above
-  keep their diff and the merge order stays bottom-up.
-- **Work on a lower branch from a second worktree**
-  (`git worktree add /tmp/pxwt/<name> <branch>`, then `pixel commit ... <path>`)
-  while a mutants run holds the main tree; remove it afterwards.
 - **Finish with a daemon check.** `pgrep -fl "target/.*/pixel daemon"` must
   print nothing; a fixture that left a daemon serving it is a test bug.

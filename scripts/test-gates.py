@@ -31,7 +31,7 @@ class GatesContract(unittest.TestCase):
         # them and honours their exit code, not what the real ones check.
         self.prepare_log = self.root / "contracts.log"
         for name in ("test-prepare.py", "test-release-candidate.py", "test-gates.py", "test-mutants-nightly-range.py", "test-mutants-config.py",
-                     "test-mutants-push-gate.sh", "test-clean.py",
+                     "test-clean.py",
                      "test-harness-recorder.py"):
             if name.endswith(".sh"):
                 (self.repo / "scripts" / name).write_text(
@@ -102,6 +102,12 @@ class GatesContract(unittest.TestCase):
             return []
         return self.prepare_log.read_text().splitlines()
 
+    def test_mutations_cannot_be_started_by_the_local_gate_runner(self):
+        result = self.gates("--mutants")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unknown argument", result.stderr)
+        self.assertEqual(self.invocations(), [])
+
     def test_docs_only_change_skips_every_cargo_invocation(self):
         (self.repo / "README.md").write_text("edited\n")
         self.git("commit", "-qam", "docs")
@@ -137,7 +143,7 @@ class GatesContract(unittest.TestCase):
         self.assertEqual(
             self.contracts(),
             ["test-prepare.py", "test-release-candidate.py", "test-gates.py", "test-pre-push.sh",
-             "test-mutants-nightly-range.py", "test-mutants-config.py", "test-mutants-push-gate.sh",
+             "test-mutants-nightly-range.py", "test-mutants-config.py",
              "test-clean.py", "test-harness-recorder.py"],
         )
         self.assertEqual(self.invocations(), [])

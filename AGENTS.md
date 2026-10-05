@@ -6,7 +6,7 @@
 
 - Automatic mutation testing runs once a night on `main`, only when commits remain since the last completed campaign. `.github/workflows/mutants.yml` mutates that cumulative diff; neither pull requests nor the pre-push hook run mutations.
 - The pre-push hook still fetches the base, compiles Rust changes with `cargo check --all-targets`, and enforces `pixel review-gate`. Pass the normal format, lint and test gates before publishing.
-- Do not start a mutation campaign on an agent's machine. A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, requires an explicit request. Manual CI dispatches remain available for investigating a reported range.
+- Mutation execution is scheduled CI only. Do not run local, PR or manual-dispatch campaigns. Use ordinary tests for diagnosis and the next nightly for mutation feedback.
 - A nightly campaign keeps its previous checkpoint if a shard crashes, its baseline fails, or the results are incomplete. A complete campaign with `MISSED`/`TIMEOUT` advances the checkpoint but stays red, with outcomes and the report retained in Actions.
 - For each reported survivor, add a test that fails under that exact mutation, or use a narrowly justified `#[cfg_attr(test, mutants::skip)]` only when the mutation cannot affect a contract. Skipping a business rule because its test is hard is not an option.
 - Watch PR checks in the background with `gh pr checks <pr> --watch`; never a foreground sleep/poll loop. Mutation results are post-merge feedback, not a PR gate.

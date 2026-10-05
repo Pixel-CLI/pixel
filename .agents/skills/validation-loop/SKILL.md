@@ -46,8 +46,8 @@ head with its normal tests, lint and feature lanes.
 Mutation campaigns run once a night on main's cumulative diff, only when
 commits remain since the last completed campaign. They are post-merge
 feedback, not a prerequisite for push or PR. A read-only mutant listing can
-help test design; executing a local campaign remains an explicit, bounded
-request.
+help test design; campaigns execute only in scheduled CI, never locally or
+by manual dispatch.
 
 ## 4. Triage instead of retrying blindly
 

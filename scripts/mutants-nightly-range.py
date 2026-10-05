@@ -55,7 +55,7 @@ def select_range(repository: str, head: str) -> str:
         run = gh_json(f"repos/{repository}/actions/runs/{source['id']}")
         if (run.get("path") != WORKFLOW or run.get("head_branch") != "main"
                 or run.get("head_sha") != candidate
-                or run.get("event") not in {"schedule", "workflow_dispatch"}
+                or run.get("event") != "schedule"
                 or run.get("status") != "completed"
                 or run.get("conclusion") not in {"success", "failure"}):
             continue

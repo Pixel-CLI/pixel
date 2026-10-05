@@ -660,10 +660,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     (`.config/nextest.toml`: one process per test, retry once but fail on
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
-    contract scripts (installer, gate runner, pre-push baseline, manual mutation
+    contract scripts (installer, gate runner, pre-push baseline,
     helpers, release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
-    nightly diff checkpoints, manual whole-tree mutants, mutants
+    nightly diff checkpoints, mutants
     config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
     reproducible release build environment, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
@@ -685,9 +685,9 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   failures leave the prior checkpoint. Unchanged main starts no Rust jobs.
   The existing plan/shards/report share `.cargo/mutants.toml` and distribute
   shards over `PIXEL_MUTANTS_SHARD_RUNNERS` (GitHub-hosted `ubuntu-26.04`
-  by default). Explicit range dispatches never move the nightly checkpoint.
-  `mutants-nightly.yml` is an optional manual whole-tree slice audit with no
-  schedule. The pre-push hook compiles and reviews only. Other lanes include
+  by default). Only scheduled CI executes mutations; there is no manual,
+  local or pull-request campaign. The pre-push hook compiles and reviews only.
+  Other lanes include
   `cross-build.yml` (the three release lanes),
   `reproducible-build.yml` (the `x86_64-unknown-linux-musl` release binary
   built twice from two checkouts at different paths, no cache, failing

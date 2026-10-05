@@ -17,10 +17,6 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 | --- | --- | --- |
 | `gates.sh` | `scripts/gates.sh [--force] [--mutants]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
 | `test-gates.py` | `python3 scripts/test-gates.py` | contract of `gates.sh` (stub cargo in a throwaway repo) |
-| `mutants-preflight.sh` | `scripts/mutants-preflight.sh --check\|--ack\|--run [regex]` | local mutation-list review and optional throwaway-worktree campaign; `--run` requires an explicit local campaign request |
-| `test-mutants-preflight.sh` | `sh scripts/test-mutants-preflight.sh` | contract of the manual mutation exposure helper (stub cargo, disposable repo) |
-| `mutants-push-gate.sh` | `scripts/mutants-push-gate.sh` | manual legacy wrapper, no longer called by pre-push: `PIXEL_MUTANTS_GATE=local` runs `mutants-preflight.sh --run` against `PIXEL_MUTANTS_BASE` and returns its verdict; unset or `off` runs nothing |
-| `test-mutants-push-gate.sh` | `sh scripts/test-mutants-push-gate.sh` | contract of the manual compatibility wrapper: off by default, `local` passes the base and returns the campaign's exit code, an unknown value refuses |
 | `mutants-gate.py` | `python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt` | the `Mutants` plan/report script; sizes the shard matrix and deals each shard a runner from the `PIXEL_MUTANTS_SHARD_RUNNERS` pool (JSON array of `runs-on` values, round-robin; GitHub-hosted when unset) |
 | `test-prepare.py` | `python3 scripts/test-prepare.py` | contract of `.agents/skills/release/prepare.sh`'s pull request listing (stub gh/cargo, disposable repo, needs `jq`) |
 | `test-install.py` | `python3 scripts/test-install.py` | contract of `install.sh` (fake curl/uname, local tarball) |

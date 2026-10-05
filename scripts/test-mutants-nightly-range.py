@@ -155,12 +155,11 @@ class WorkflowContract(unittest.TestCase):
         triggers = workflow.split("on:\n", 1)[1].split("\nconcurrency:", 1)[0]
         self.assertIn('cron: "17 1 * * *"', triggers)
         self.assertNotIn("pull_request:", triggers)
-        legacy = (root / ".github/workflows/mutants-nightly.yml").read_text()
-        self.assertNotIn("  schedule:", legacy)
+        self.assertNotIn("workflow_dispatch:", triggers)
+        self.assertFalse((root / ".github/workflows/mutants-nightly.yml").exists())
         self.assertIn("if: needs.range.outputs.run == 'true'", workflow)
         self.assertIn("if: always() && needs.range.outputs.run == 'true'", workflow)
         self.assertIn('test "$GITHUB_REF" = refs/heads/main', workflow)
-        self.assertIn("needs.range.outputs.automatic == 'true'", workflow)
         self.assertIn("steps.checkpoint.outcome == 'success'", workflow)
         self.assertNotIn("continue-on-error:", workflow)
 

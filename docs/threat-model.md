@@ -211,8 +211,7 @@ Pull requests run `ci.yml`, `cross-build.yml`, `codeql.yml`,
 `mutants.yml` runs the cumulative main diff nightly, with read-only contents
 and Actions metadata access. It accepts checkpoint metadata only from its
 own completed main runs, and validates checkpoint ancestry before selecting
-the diff. Only fully judged campaigns write checkpoint artifacts; manual
-ranges cannot advance them. `mutants-nightly.yml` is manual-only.
+the diff. Only fully judged campaigns write checkpoint artifacts; only scheduled main runs can produce or supply them.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.
 
@@ -608,7 +607,7 @@ Across all of them:
   only when it has unjudged commits. Survivors and incomplete campaigns
   fail that run and require follow-up; this is post-merge detection, not a
   condition of merge. A test-only weakening can escape a diff campaign;
-  `mutants-nightly.yml` remains an explicitly requested whole-tree audit.
+  that limitation is accepted by the nightly cumulative-diff policy.
 - **Fuzzing**: `fuzz.yml` runs every cargo-fuzz target for 60 s on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
   root `Cargo.toml` or `deny.toml`, for 600 s weekly, and for 120 s on every

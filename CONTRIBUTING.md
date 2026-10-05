@@ -54,7 +54,7 @@ A change is ready for a pull request when every line below is true.
 
 No `rust-toolchain` file is pinned; CI uses `dtolnay/rust-toolchain@stable`.
 Mutation campaigns are the exception: every lane that runs mutants uses the
-pinned nightly in `scripts/mutants-toolchain.sh` (libtest `--fail-fast`), while
+pinned nightly in `.github/workflows/mutants.yml` (libtest `--fail-fast`), while
 listing mutants and all other builds stay on stable.
 
 ## Build
@@ -130,8 +130,7 @@ an advisory published since the last dependency change blocks the release
 until it is fixed or accepted as above.
 
 `scripts/gates.sh` runs the same commands (nextest when installed, `cargo
-test` otherwise) (plus `--mutants` for the
-explicit manual mutation option below) with two additions for a laptop: it exits 0 without
+test` otherwise) with two additions for a laptop: it exits 0 without
 compiling when neither the diff against fetched `origin/main` (falling back
 to local `main`) nor the working tree touches a Rust-affecting path (`*.rs`, `Cargo.*`, `build.rs`, `.cargo/`,
 toolchain and lint config), and it runs cargo under `nice` with
@@ -151,30 +150,10 @@ the base for a stacked branch's compilation and review.
 
 A `Mutants plan` job lists the selected diff; shards test it and `Mutants in
 diff` reports caught, missed, unviable, timeout and missing outcomes. Red
-nightly results require follow-up tests; they do not block PRs. To investigate
-a merged range explicitly, run
-`gh workflow run mutants.yml -f diff_range=<base>...<head>`. The tip must belong to the
-dispatched branch's history. A manual range never changes the automatic
-checkpoint; dispatch without a range runs the current cumulative diff on
-`main`.
-
-To verify a fix against the diff's mutants on the laptop — instead of waiting
-for the next nightly campaign — the preflight script still executes them in a
-throwaway git worktree (your checkout stays untouched), optionally bounded to
-the functions the last run flagged:
-
-```bash
-scripts/mutants-preflight.sh --run              # every listed mutant
-scripts/mutants-preflight.sh --run 'enforce_leaf|provider_rewrite'   # -F-style filter
-```
-
-It exits 0 only when every tested mutant is caught and prints the survivors'
-`MISSED`/`TIMEOUT` lines otherwise.
-
-Agents use this execution mode only on explicit request and with a filter
-for one or two functions. The unfiltered form is for a human choosing a
-full local campaign; isolation prevents checkout interference but does not
-remove its compilation cost.
+nightly results require follow-up tests; they do not block PRs. Mutation
+execution is confined to scheduled CI on main. There is no local, PR or
+manual-dispatch campaign. Fix survivors with ordinary contract tests and let
+the next nightly evaluate the merged fix.
 
 Optional but recommended when the change touches the CLI surface, hooks, or
 the install flow:
@@ -267,32 +246,11 @@ drop a match guard, ...) and runs the crate's tests. A mutant that survives
 is a behaviour no test can see. Configuration lives in
 `.cargo/mutants.toml`; output goes to the gitignored `mutants.out/`.
 
-An agent runs these only when asked, and then only the `-F` form (see
-"Working on this repo with an AI agent"); the full-crate and full-diff forms
-are for a human who chooses to spend the time.
-
-```bash
-cargo install --locked cargo-mutants --version 27.1.0   # the version mutants.yml pins
-
-git diff origin/main...HEAD > target/pr.diff         # the branch's diff, as CI takes it (commit first)
-cargo mutants --in-diff target/pr.diff -F '<fn>'     # one finding from the CI job
-cargo mutants -p pixel-proto                         # one crate, full sweep (about a minute)
-cargo mutants --in-diff target/pr.diff               # what CI runs; hours on a laptop for a big PR
-```
-
-The diff goes through a file rather than `<(git diff …)` so the same lines
-run in bash, zsh and fish, which has no `<(…)` process substitution.
-
-Every one of these runs the program a CI shard runs: the cargo arguments
-that decide it (`--locked`, `--all-targets`, and the test binary's
-`-Zunstable-options --fail-fast` — libtest stops a target at its first
-failing test, roughly halving the time a caught mutant's suite spends)
-live in `.cargo/mutants.toml`, never on a command line, and the campaign
-lanes source the pinned nightly first (`scripts/mutants-toolchain.sh`;
-`--fail-fast` needs it). `scripts/mutants-preflight.sh --run` and
-`scripts/gates.sh --mutants` refuse a cargo-mutants other than the pinned
-one (`scripts/mutants-version-check.sh`). A lane with a flag of its own
-judges different mutants: `scripts/test-mutants-config.py` fails on one.
+Mutation campaigns run only in scheduled CI. The workflow pins cargo-mutants
+and the Rust nightly required by libtest's `-Zunstable-options --fail-fast`.
+Cargo arguments live in `.cargo/mutants.toml`, never in per-lane overrides;
+`scripts/test-mutants-config.py` verifies that contract. Listing mutants can
+help test design, but does not authorize a local campaign.
 
 Read the summary line and `mutants.out/missed.txt`:
 
@@ -340,11 +298,8 @@ an explicit report of what was and was not tested. Runs are serialized and
 a new run does not cancel one already testing.
 
 Diff campaigns do not re-test unchanged code when only its tests weaken.
-The optional `Mutants whole-tree (manual)` workflow in
-`mutants-nightly.yml` retains the old seven-slice sweep and tracking issue
-for deliberate audits, with no schedule. Run `gh workflow run
-mutants-nightly.yml -f slice=3` to request one slice. Normal agents do not
-launch it or a full local campaign on their own.
+This is an accepted limitation of the cumulative-diff nightly policy; no
+additional full-tree or manual mutation workflow runs.
 
 ## Local install loop (once per finished implementation unit)
 

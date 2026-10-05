@@ -5,17 +5,10 @@ name: Mutants
 
 # Mutate main's cumulative diff once a night. The range job reads only
 # completed campaign checkpoints; unchanged main never starts Rust jobs.
-# Explicit dispatches remain available for investigation and never move the
-# automatic checkpoint. .cargo/mutants.toml is shared by every campaign.
+# Mutation execution is confined to this scheduled CI workflow.
 on:
   schedule:
     - cron: "17 1 * * *"
-  workflow_dispatch:
-    inputs:
-      diff_range:
-        description: "Optional merged range; empty runs main since its last completed campaign"
-        required: false
-        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -36,7 +29,6 @@ jobs:
     outputs:
       run: ${{ steps.range.outputs.run }}
       diff_range: ${{ steps.range.outputs.diff_range }}
-      automatic: ${{ steps.range.outputs.automatic }}
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
         with:
@@ -46,25 +38,11 @@ jobs:
         id: range
         env:
           GH_TOKEN: ${{ github.token }}
-          DIFF_RANGE: ${{ inputs.diff_range }}
         run: |
-          if [ -n "$DIFF_RANGE" ]; then
-            if ! [[ "$DIFF_RANGE" =~ ^[0-9a-f]{7,40}\.\.\.[0-9a-f]{7,40}$ ]]; then
-              echo "invalid diff range" >&2
-              exit 1
-            fi
-            {
-              echo "diff_range=$DIFF_RANGE"
-              echo "run=true"
-              echo "automatic=false"
-            } >> "$GITHUB_OUTPUT"
-          else
-            test "$GITHUB_REF" = refs/heads/main
-            echo "automatic=true" >> "$GITHUB_OUTPUT"
-            python3 scripts/mutants-nightly-range.py plan \
-              --repository "$GITHUB_REPOSITORY" --head "$GITHUB_SHA" \
-              --github-output "$GITHUB_OUTPUT"
-          fi
+          test "$GITHUB_REF" = refs/heads/main
+          python3 scripts/mutants-nightly-range.py plan \
+            --repository "$GITHUB_REPOSITORY" --head "$GITHUB_SHA" \
+            --github-output "$GITHUB_OUTPUT"
 
   plan:
     name: Mutants plan
@@ -117,14 +95,9 @@ jobs:
             exit 1
           fi
           tip=$(git rev-parse --verify "${DIFF_RANGE#*...}^{commit}")
-          # The shards build and test the tip, inside this run's cache
-          # scope: the dispatched branch's, so `main`'s when dispatched from
-          # it. A tip outside that branch's history would run unmerged code
-          # where it can write cache entries every later `main` run
-          # restores (CodeQL actions/cache-poisoning, #674). The dispatch
-          # exists for merged pull requests, already in that history.
+          # Only main history may reach the build/cache scope of this run.
           if ! git merge-base --is-ancestor "$tip" HEAD; then
-            echo "::error title=Range outside this branch::$tip is not in the history of $GITHUB_REF_NAME; dispatch from a branch that contains it"
+            echo "::error title=Range outside this branch::$tip is not in the history of $GITHUB_REF_NAME"
             exit 1
           fi
           git diff "$DIFF_RANGE" -- crates/ > pr.diff
@@ -135,11 +108,7 @@ jobs:
       # `cargo mutants` exits 0 both when every mutant was caught and when it
       # produced none at all, and the run's own output cannot tell those
       # apart after the fact. `--list` builds nothing, so this costs seconds.
-      # The configuration is this workflow's, copied beside the diff for the
-      # shards: cargo-mutants reads `.cargo/mutants.toml` from the tree it
-      # mutates, and a dispatch's tip may predate the arguments every lane
-      # now takes from it (`--locked`, `--all-targets`). On a pull request
-      # the two files are the same one.
+      # Freeze the workflow configuration beside the diff for every shard.
       - name: List the mutants the diff produces
         env:
           SRC: ${{ steps.diff.outputs.src }}
@@ -183,14 +152,11 @@ jobs:
           overwrite: true
 
   shard:
-    # The matrix value is the literal `--shard` argument, so the job name is
-    # also the local reproduction: `cargo mutants --in-diff pr.diff --shard
-    # 2/5`. cargo-mutants numbers shards from 0.
+    # cargo-mutants numbers shards from 0; the name identifies its slice.
     name: Mutants shard ${{ matrix.shard }}
     needs: plan
     if: needs.plan.outputs.mutants != '0'
-    # Automatic ranges contain main only. Explicit dispatches are restricted
-    # to the selected branch's history before any source reaches a shard.
+    # Ranges contain only the scheduled main history.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     # The Test job's value (ci.yml), at the same job level: rust-cache hashes
@@ -243,8 +209,7 @@ jobs:
           # -Zunstable-options --fail-fast (stop at the first failing
           # test), which stable libtest rejects. The pin is dated so two
           # campaigns a month apart run the same compiler; move it with the
-          # cargo-mutants pin above and scripts/mutants-toolchain.sh (the
-          # local lanes' copy of this pin). rust-cache keys on the
+          # cargo-mutants pin above. rust-cache keys on the
           # toolchain, so the nightly shards start a cache lane of their
           # own instead of fighting the stable jobs' entries.
           toolchain: nightly-2026-05-12
@@ -439,7 +404,7 @@ jobs:
       # checking all outcomes, while the report's red status stays red.
       - name: Check whether every listed mutant was judged
         id: checkpoint
-        if: always() && needs.range.outputs.automatic == 'true' && (steps.report.outcome == 'success' || steps.report.outcome == 'failure')
+        if: always() && (steps.report.outcome == 'success' || steps.report.outcome == 'failure')
         env:
           TIP: ${{ needs.plan.outputs.ref }}
         run: |

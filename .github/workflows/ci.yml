@@ -447,14 +447,6 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: sh scripts/test-pre-push.sh
 
-      - name: Manual mutation exposure contract (stub cargo, disposable repo)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: sh scripts/test-mutants-preflight.sh
-
-      - name: Manual mutation wrapper contract (stub campaign, disposable repo)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: sh scripts/test-mutants-push-gate.sh
-
       - name: Release prepare contract (stub gh and cargo, disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-prepare.py
@@ -488,10 +480,6 @@ jobs:
       - name: Nightly diff checkpoint contract
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-mutants-nightly-range.py
-
-      - name: Manual whole-tree rotation and report contract
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-mutants-nightly.py
 
       - name: Mutation gate config contract (no module silently excluded)
         if: ${{ needs.changes.outputs.scripts == 'true' }}

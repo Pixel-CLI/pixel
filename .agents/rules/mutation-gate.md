@@ -39,10 +39,8 @@ first `cargo mutants` run come back clean:
 - **Keep the test cap under 20 s.** CI runs cargo-mutants with its automatic
   timeout: five times the baseline test time, never below 20 s. A test that
   waits 30 s for a broken loop is reported TIMEOUT in CI while it passes
-  locally with `--timeout 300`. Run locally with `cargo mutants --timeout 60`
-  (`--timeout 20` also caps the baseline, which the doctest rustdoc compile
-  alone pushes past 20 s on this workspace) and keep every test's own wait
-  under 20 s.
+  with a generous timeout. Keep each test's own wait under 20 s; never
+  hide a timeout by changing the campaign's limits.
 - **Iterate with `for`, never with a hand-advanced index.** `while j < n {
   …; j += 1 }` has three survivors per increment (`-=`, `*=`, and the
   comparison) and a `-=` one is an infinite loop that costs the full
@@ -75,10 +73,6 @@ first `cargo mutants` run come back clean:
   --batch-check <object>` that git rejects, so every blob measured 0 bytes),
   fix the bug in its own PR with a `changelog.d/` fragment, below the PR that
   found it. Do not bend the test to the broken behaviour.
-- **Fix from the nightly report, verify locally only per function.** Read
-  its `MISSED`/`TIMEOUT` lines, write the test, and if explicitly asked run
-  `cargo mutants --in-diff <diff> -F <function>`
-  (minutes). Never the full in-diff run: it is the job's work. Never edit
-  the tree while a run is in flight: it mutates files in place. After a
-  killed or crashed run, `grep -rl "changed by cargo-mutants" crates/` and
-  restore before doing anything else.
+- **Fix from the nightly report.** Read its `MISSED`/`TIMEOUT` lines and
+  write an ordinary contract test. Mutation verification happens in the
+  next scheduled main campaign after merge, never in a local campaign.
