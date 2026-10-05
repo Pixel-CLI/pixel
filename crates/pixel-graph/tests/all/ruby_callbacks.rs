@@ -75,7 +75,7 @@ fn ruby_callbacks_should_keep_their_owner_through_full_and_incremental_builds() 
         assert_eq!(
             store.edges_to(target.id, None).unwrap().len(),
             0,
-            "no false edge to {uid}"
+            "callback must not reference a foreign owner or non-callback method"
         );
     }
 
