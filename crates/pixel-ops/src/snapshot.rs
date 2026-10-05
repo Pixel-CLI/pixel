@@ -161,11 +161,15 @@ fn parse_iso_ms(s: &str) -> Option<u64> {
     if s.len() < 19 {
         return None;
     }
-    let year: u64 = s[0..4].parse().ok()?;
-    let month: u64 = s[5..7].parse().ok()?;
-    let day: u64 = s[8..10].parse().ok()?;
-    let days = (year - 1970) * 365 + (month - 1) * 30 + (day - 1);
-    Some(days * 86400 * 1000)
+    // A stored `created_at` is untrusted text (#784): `get` refuses a range
+    // that splits a character, and a year before 1970 or a month or day of
+    // 00 is unreadable rather than an underflow. `prune` treats `None` as
+    // the oldest snapshot.
+    let year: u64 = s.get(0..4)?.parse().ok()?;
+    let month: u64 = s.get(5..7)?.parse().ok()?;
+    let day: u64 = s.get(8..10)?.parse().ok()?;
+    let days = year.checked_sub(1970)? * 365 + month.checked_sub(1)? * 30 + day.checked_sub(1)?;
+    days.checked_mul(86_400_000)
 }
 
 fn current_unix_ms() -> u64 {
@@ -259,5 +263,49 @@ mod tests {
             "{before} <= {now} <= {after}"
         );
         assert!(now > 1_577_836_800_000, "{now}"); // 2020-01-01T00:00:00Z
+    }
+
+    #[test]
+    fn parse_iso_ms_should_refuse_a_malformed_date_instead_of_panicking() {
+        // Each of these panicked (#784): a multibyte char across the year's
+        // slice bound, a year before 1970, a month or a day of 00.
+        assert_eq!(parse_iso_ms("aaaé-01-01T00:00:00Z"), None);
+        assert_eq!(parse_iso_ms("1969-12-31T00:00:00Z"), None);
+        assert_eq!(parse_iso_ms("2024-00-10T00:00:00Z"), None);
+        assert_eq!(parse_iso_ms("2024-05-00T00:00:00Z"), None);
+        assert_eq!(parse_iso_ms("2024-é1-10T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn parse_iso_ms_should_read_unix_ms_and_the_iso_day_it_approximates() {
+        assert_eq!(parse_iso_ms("1700000000000"), Some(1_700_000_000_000));
+        assert_eq!(parse_iso_ms("1970-01-01T00:00:00Z"), Some(0));
+        // One 30-day month and no day offset past the 1st.
+        assert_eq!(parse_iso_ms("1970-02-01T00:00:00Z"), Some(2_592_000_000));
+        // 54 years of 365 days plus one day.
+        assert_eq!(
+            parse_iso_ms("2024-01-02T00:00:00.000Z"),
+            Some(1_703_030_400_000)
+        );
+        assert_eq!(parse_iso_ms("2024-01-02"), None);
+    }
+
+    #[test]
+    fn record_should_succeed_and_prune_a_snapshot_whose_date_cannot_be_read() {
+        // One unreadable `created_at` used to panic `prune`, hence every
+        // later `record` in the worktree (#784). It is now the oldest entry.
+        let dir = tempdir().unwrap();
+        let store = SnapshotStore::with_state_root(dir.path().to_path_buf());
+        let root = "/test/repo";
+        let snapshots = store.snapshots_dir(root);
+        std::fs::create_dir_all(&snapshots).unwrap();
+        let mut bad = make_record(root, "old", &[("a.txt", "hash0")]);
+        bad.created_at = "1969-12-31T00:00:00Z".to_string();
+        let bad_path = snapshots.join("bad.json");
+        std::fs::write(&bad_path, serde_json::to_vec(&bad).unwrap()).unwrap();
+        let good = make_record(root, "new", &[("a.txt", "hash1")]);
+        let token = store.record(&good).unwrap();
+        assert!(store.read(root, &token).is_some());
+        assert!(!bad_path.exists(), "the unreadable snapshot is pruned");
     }
 }

@@ -1,0 +1,1 @@
+**ops:** a snapshot record whose `created_at` cannot be read (a year before 1970, a month or day of 00, a non-ASCII character) no longer panics: before, one such file made every later snapshot `record` in the worktree panic; it is now pruned as the oldest.
