@@ -656,9 +656,11 @@ fn snippet_block(text: &str, needle: &str) -> String {
     if lines.is_empty() {
         return String::new();
     }
-    let hit_line = crate::search::find_case_insensitive(text, needle).map_or(0, |pos| {
-        text[..pos].matches('\n').count().min(lines.len() - 1)
-    });
+    // `pos` is a char boundary of `text` strictly before its last byte when
+    // the needle is non-empty, so the newlines before it number at most
+    // `lines.len() - 1`; the window below is clamped to the text anyway.
+    let hit_line = crate::search::find_case_insensitive(text, needle)
+        .map_or(0, |pos| text[..pos].matches('\n').count());
     // Center the window on the hit, clamped to the text bounds.
     let start = hit_line
         .saturating_sub(SNIPPET_MAX_LINES / 2)
