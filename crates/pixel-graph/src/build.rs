@@ -120,7 +120,10 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    an import; C# generic calls are named without type arguments, an alias
 ///    `using` no longer imports its alias, and callback arguments are
 ///    references.
-pub const EXTRACTOR_VERSION: &str = "15";
+/// 16: a Ruby call without receiver to a name defined in its file and in
+///    another one resolves to the caller's own method, as `self.name` did,
+///    instead of staying unresolved.
+pub const EXTRACTOR_VERSION: &str = "16";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {

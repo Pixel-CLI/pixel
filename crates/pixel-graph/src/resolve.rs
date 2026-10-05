@@ -390,7 +390,10 @@ impl ResolveIndex {
     /// another file keep the shadow veto.
     ///
     /// Without a site line, only the imports in scope in the whole file count
-    /// for T1; [`Self::decide_at`] places the call.
+    /// for T1; [`Self::decide_at`] places the call. Without the calling
+    /// symbol either, a Ruby call on `self` (bare or written) to a name
+    /// defined in its file and elsewhere cannot be matched to the caller's
+    /// class and stays `Unresolved`; the resolver paths pass the caller.
     pub fn decide(&self, caller_file_id: i64, name: &str, receiver: Option<&str>) -> Decision {
         self.decide_from(caller_file_id, None, name, receiver, None)
     }
@@ -420,8 +423,10 @@ impl ResolveIndex {
             && self.ambiguous_local_name(caller_file_id, name)
         {
             match receiver.map(str::trim) {
-                None => return Decision::Unresolved,
-                Some("self") => {
+                // Ruby sends a call without receiver to `self`, so a bare
+                // `access_logs(...)` names the caller's own method as surely
+                // as `self.access_logs(...)` does.
+                None | Some("self") => {
                     return caller_symbol_id
                         .and_then(|id| self.ruby_self_target(caller_file_id, id, name))
                         .map_or(Decision::Unresolved, Decision::Exact);
@@ -1493,6 +1498,108 @@ mod tests {
                 None
             ),
             Decision::Unresolved
+        );
+    }
+
+    /// Ruby sends a call without receiver to `self`: `access_logs(...)` in
+    /// `App#run` reaches `App#access_logs` even when another class elsewhere
+    /// defines the name, and only for a caller of that class and kind.
+    #[test]
+    fn ruby_bare_call_should_resolve_to_the_callers_own_method_like_a_self_call() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store
+            .replace_file("app/services/app.rb", "oid-local", "ruby")
+            .unwrap();
+        let remote = store
+            .replace_file("app/controllers/other.rb", "oid-remote", "ruby")
+            .unwrap();
+        let caller = store
+            .insert_symbol(
+                local,
+                "app#App#run#method",
+                "run",
+                "App#run",
+                SymbolKind::Method,
+                1,
+                3,
+                "run",
+            )
+            .unwrap();
+        let class_method_caller = store
+            .insert_symbol(
+                local,
+                "app#App.build#method",
+                "build",
+                "App.build",
+                SymbolKind::Method,
+                5,
+                7,
+                "build",
+            )
+            .unwrap();
+        let unrelated_caller = store
+            .insert_symbol(
+                local,
+                "app#Admin#run#method",
+                "run",
+                "Admin#run",
+                SymbolKind::Method,
+                9,
+                11,
+                "run",
+            )
+            .unwrap();
+        let local_target = store
+            .insert_symbol(
+                local,
+                "app#App#access_logs#method",
+                "access_logs",
+                "App#access_logs",
+                SymbolKind::Method,
+                13,
+                15,
+                "access_logs",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                remote,
+                "other#Other#access_logs#method",
+                "access_logs",
+                "Other#access_logs",
+                SymbolKind::Method,
+                1,
+                3,
+                "access_logs",
+            )
+            .unwrap();
+        let idx = ResolveIndex::build(&store).unwrap();
+
+        assert_eq!(
+            idx.decide_from(local, Some(caller), "access_logs", None, Some(2)),
+            Decision::Exact(local_target),
+            "a bare call names the caller's own instance method"
+        );
+        assert_eq!(
+            idx.decide_from(
+                local,
+                Some(class_method_caller),
+                "access_logs",
+                None,
+                Some(6)
+            ),
+            Decision::Unresolved,
+            "self in a class method is the class, which has no `access_logs`"
+        );
+        assert_eq!(
+            idx.decide_from(local, Some(unrelated_caller), "access_logs", None, Some(10)),
+            Decision::Unresolved,
+            "another class of the same file does not define it"
+        );
+        assert_eq!(
+            idx.decide(local, "access_logs", None),
+            Decision::Unresolved,
+            "without the calling symbol the owner cannot be checked"
         );
     }
 
