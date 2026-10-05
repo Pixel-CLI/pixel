@@ -484,6 +484,11 @@ impl ResolveIndex {
                     .any(|candidate| candidate.file_id != caller_file_id))
     }
 
+    /// The caller's own method `name`: a candidate of the caller's class and
+    /// kind (`#` instance, `.` class) in the caller's file. `None` when that
+    /// file has none, or when another file defines the same owner's method
+    /// too: a class reopened elsewhere can redefine it, and the definition
+    /// Ruby keeps is whichever loads last, which the graph cannot tell.
     fn ruby_self_target(
         &self,
         caller_file_id: i64,
@@ -491,12 +496,11 @@ impl ResolveIndex {
         name: &str,
     ) -> Option<i64> {
         let caller_owner = ruby_owner(self.qualified_of.get(&caller_symbol_id)?)?;
-        let matches: Vec<Candidate> = self
+        let same_owner: Vec<Candidate> = self
             .by_name
             .get(name)?
             .iter()
             .copied()
-            .filter(|candidate| candidate.file_id == caller_file_id)
             .filter(|candidate| {
                 self.qualified_of
                     .get(&candidate.symbol_id)
@@ -504,7 +508,13 @@ impl ResolveIndex {
                     == Some(caller_owner)
             })
             .collect();
-        best(&matches)
+        if same_owner
+            .iter()
+            .any(|candidate| candidate.file_id != caller_file_id)
+        {
+            return None;
+        }
+        best(&same_owner)
     }
 
     /// The candidate a receiver names: the method of the type it ends with
@@ -1601,6 +1611,65 @@ mod tests {
             Decision::Unresolved,
             "without the calling symbol the owner cannot be checked"
         );
+    }
+
+    /// A class reopened in another file that defines the same method again
+    /// leaves the override to load order: neither a bare call nor
+    /// `self.name` gets an Exact edge to the caller's file's definition.
+    #[test]
+    fn ruby_self_call_should_stay_unresolved_when_a_reopened_class_redefines_it() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store
+            .replace_file("app/models/app.rb", "oid-local", "ruby")
+            .unwrap();
+        let reopened = store
+            .replace_file("config/initializers/app_patch.rb", "oid-patch", "ruby")
+            .unwrap();
+        let caller = store
+            .insert_symbol(
+                local,
+                "app#App#run#method",
+                "run",
+                "App#run",
+                SymbolKind::Method,
+                1,
+                3,
+                "run",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                local,
+                "app#App#access_logs#method",
+                "access_logs",
+                "App#access_logs",
+                SymbolKind::Method,
+                5,
+                7,
+                "access_logs",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                reopened,
+                "patch#App#access_logs#method",
+                "access_logs",
+                "App#access_logs",
+                SymbolKind::Method,
+                1,
+                3,
+                "access_logs",
+            )
+            .unwrap();
+        let idx = ResolveIndex::build(&store).unwrap();
+
+        for receiver in [None, Some("self")] {
+            assert_eq!(
+                idx.decide_from(local, Some(caller), "access_logs", receiver, Some(2)),
+                Decision::Unresolved,
+                "receiver {receiver:?}: the reopened class may override the local definition"
+            );
+        }
     }
 
     #[test]
