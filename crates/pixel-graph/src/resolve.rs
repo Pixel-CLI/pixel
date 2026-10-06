@@ -1213,19 +1213,21 @@ impl Affected {
 
     /// Record the Ruby ancestor declarations a batch changed: `before` and
     /// `after` list the batch files' stored and extracted `ruby_mixins`, each
-    /// with its file path: a constant resolves in the lexical scope of its
-    /// file, so a declaration moved to another file counts as changed. A
-    /// different multiset, or a changed class or module whose name a
+    /// with its file path and its position in that file's source order: a
+    /// constant resolves in the lexical scope of its file, so a declaration
+    /// moved to another file counts as changed, and the chain follows
+    /// declaration order, so `include A, B` becoming `include B, A` on one
+    /// line does too. A different multiset, or a changed class or module whose name a
     /// stored declaration's constant ends with (a new `Admin::Trackable`
     /// shadows `Trackable`), sets [`Self::ruby_ancestors`]. Call it after
     /// [`Self::record_changed_definitions`], once the batch is stored.
     pub fn record_changed_mixins(
         &mut self,
         store: &GraphStore,
-        before: &[(String, crate::extract::RawMixin)],
-        after: &[(String, crate::extract::RawMixin)],
+        before: &[(String, usize, crate::extract::RawMixin)],
+        after: &[(String, usize, crate::extract::RawMixin)],
     ) -> Result<(), StoreError> {
-        let mut count: HashMap<&(String, crate::extract::RawMixin), i64> = HashMap::new();
+        let mut count: HashMap<&(String, usize, crate::extract::RawMixin), i64> = HashMap::new();
         for mixin in before {
             *count.entry(mixin).or_default() -= 1;
         }
@@ -2905,20 +2907,37 @@ mod tests {
     }
 
     #[test]
-    fn a_ruby_ancestor_declaration_moved_to_another_file_should_count_as_changed() {
+    fn a_ruby_ancestor_declaration_moved_or_reordered_should_count_as_changed() {
         let store = GraphStore::open_in_memory().unwrap();
-        let mixin = crate::extract::RawMixin {
+        let mixin = |target: &str| crate::extract::RawMixin {
             owner: "Admin::Order".into(),
             kind: "include".into(),
-            target: Some("Trackable".into()),
+            target: Some(target.into()),
             site_line: 3,
         };
-        let at = |path: &str| vec![(path.to_string(), mixin.clone())];
+        let at = |path: &str| vec![(path.to_string(), 0, mixin("Trackable"))];
+        // `include Trackable, Sortable` on one line, in either order.
+        let pair = |first: &str, second: &str| {
+            vec![
+                ("a.rb".to_string(), 0, mixin(first)),
+                ("a.rb".to_string(), 1, mixin(second)),
+            ]
+        };
         for (before, after, changed) in [
             (at("a.rb"), at("a.rb"), false),
             (at("a.rb"), at("b.rb"), true),
             (at("a.rb"), vec![], true),
             (vec![], at("b.rb"), true),
+            (
+                pair("Trackable", "Sortable"),
+                pair("Trackable", "Sortable"),
+                false,
+            ),
+            (
+                pair("Trackable", "Sortable"),
+                pair("Sortable", "Trackable"),
+                true,
+            ),
         ] {
             let mut affected = Affected::default();
             affected
