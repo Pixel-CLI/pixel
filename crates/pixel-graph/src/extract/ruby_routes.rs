@@ -597,9 +597,11 @@ impl RouteWalker<'_> {
                     line,
                 });
             }
+            // Rails applies a resource's `module:` as a scope around its
+            // block too, so nested resources and relative targets inherit it.
             let inner = Scope {
                 path: scope.path.clone(),
-                module: scope.module.clone(),
+                module: module.clone(),
                 controller: None,
                 resource: Some((
                     Resource {
@@ -710,7 +712,7 @@ pub fn singularize(word: &str) -> String {
         stem.to_string()
     } else if let Some(stem) = word.strip_suffix("ies") {
         format!("{stem}y")
-    } else if let Some(stem) = ["sses", "shes", "ches", "xes", "zes"]
+    } else if let Some(stem) = ["sses", "shes", "ches", "xes"]
         .iter()
         .find_map(|suffix| word.strip_suffix(suffix).map(|s| (s, suffix)))
         .map(|(stem, suffix)| format!("{stem}{}", &suffix[..suffix.len() - 2]))
@@ -771,6 +773,10 @@ mod tests {
     resource :profile, except: [:new, :create, :destroy]
   end
   resources :orders, only: [:show]
+  resources :posts, only: [], module: :blog do
+    resources :comments, only: :index
+    get "feed", to: "feeds#show"
+  end
   scope "/shop", module: "store" do
     get "cart" => "carts#show"
     get "checkout", to: "checkouts#new"
@@ -803,6 +809,8 @@ end
                 "PATCH /admin/profile admin/profiles#update (Admin::ProfilesController#update)",
                 "PUT /admin/profile admin/profiles#update (Admin::ProfilesController#update)",
                 "GET /orders/:id orders#show (OrdersController#show)",
+                "GET /posts/:post_id/comments blog/comments#index (Blog::CommentsController#index)",
+                "GET /posts/:post_id/feed blog/feeds#show (Blog::FeedsController#show)",
                 "GET /shop/cart store/carts#show (Store::CartsController#show)",
                 "GET /shop/checkout store/checkouts#new (Store::CheckoutsController#new)",
                 "PATCH /items/:id api/items#update (Api::ItemsController#update)",
@@ -905,6 +913,7 @@ end
             ("boxes", "box"),
             ("addresses", "address"),
             ("glass", "glass"),
+            ("sizes", "size"),
             ("statuses", "status"),
             ("order_statuses", "order_status"),
             ("aliases", "alias"),
