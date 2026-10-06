@@ -79,6 +79,7 @@ pub fn routes(content: &[u8]) -> Vec<Route> {
     let mut walker = RouteWalker {
         src: content,
         routes: Vec::new(),
+        visits: 0,
     };
     walker.walk(tree.root_node(), &Scope::default(), 0);
     walker.routes
@@ -152,13 +153,27 @@ const SINGULAR_ACTIONS: &[(&str, &str, &str)] = &[
     ("destroy", "DELETE", ""),
 ];
 const MAX_DEPTH: usize = 256;
+/// Most routes one file yields. A `resources :a, :b do` block is walked once
+/// per name, so nesting such declarations multiplies the work; past this many
+/// routes (far above any real routes file) the rest of the file is not read.
+pub const MAX_ROUTES: usize = 10_000;
+/// Most syntax nodes the walk visits in one file, for the same reason.
+const MAX_VISITS: usize = 1_000_000;
 
 struct RouteWalker<'a> {
     src: &'a [u8],
     routes: Vec<Route>,
+    visits: usize,
 }
 
 impl RouteWalker<'_> {
+    /// Keep `route` unless the file already gave [`MAX_ROUTES`].
+    fn push(&mut self, route: Route) {
+        if self.routes.len() < MAX_ROUTES {
+            self.routes.push(route);
+        }
+    }
+
     fn text(&self, node: Node) -> String {
         String::from_utf8_lossy(&self.src[node.byte_range()]).into_owned()
     }
@@ -218,7 +233,8 @@ impl RouteWalker<'_> {
     }
 
     fn walk(&mut self, node: Node, scope: &Scope, depth: usize) {
-        if depth > MAX_DEPTH {
+        self.visits += 1;
+        if depth > MAX_DEPTH || self.visits > MAX_VISITS || self.routes.len() >= MAX_ROUTES {
             return;
         }
         if node.kind() == "call" && node.child_by_field_name("receiver").is_none() {
@@ -475,7 +491,7 @@ impl RouteWalker<'_> {
         } else {
             scope.controller_path(controller)
         };
-        self.routes.push(Route {
+        self.push(Route {
             verb: verb.to_string(),
             path,
             controller: Some(controller),
@@ -561,7 +577,7 @@ impl RouteWalker<'_> {
                     Some(rest) => format!("{member}{rest}"),
                     None => format!("{collection}{suffix}"),
                 };
-                self.routes.push(Route {
+                self.push(Route {
                     verb: (*verb).to_string(),
                     path,
                     controller: Some(controller.clone()),
@@ -613,7 +629,7 @@ impl RouteWalker<'_> {
         let (Some(constant), Some(at)) = (constant, at) else {
             return;
         };
-        self.routes.push(Route {
+        self.push(Route {
             verb: "MOUNT".to_string(),
             path: join_path(&scope.base_path(), &at),
             controller: None,
@@ -781,6 +797,21 @@ end
                 "GET /ping health#ping (HealthController#ping)",
             ]
         );
+    }
+
+    #[test]
+    fn nested_multi_name_resources_should_stop_at_the_route_cap() {
+        // Each level names two resources, so the innermost block is reached
+        // 2^20 times without a bound.
+        let mut source = String::from("Rails.application.routes.draw do\n");
+        for depth in 0..20 {
+            source.push_str(&format!("resources :a{depth}, :b{depth} do\n"));
+        }
+        source.push_str(&"end\n".repeat(21));
+        let started = std::time::Instant::now();
+        let found = routes(source.as_bytes());
+        assert_eq!(found.len(), MAX_ROUTES);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 
     #[test]
