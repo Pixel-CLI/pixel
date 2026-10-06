@@ -377,6 +377,178 @@ pub(crate) fn check(paths: &PiPaths, exe: &Path, pi_installed: bool) -> PiImpact
     PiImpactState::Current
 }
 
+/// Pixel's optional classify helper package, relative to the home directory.
+/// The classify onboarding writes it only when the person accepts the
+/// helpers, beside the impact package and declared the same way.
+pub const CLASSIFY_PACKAGE_DIR: &str = ".local/share/pixel/pi-classify";
+
+/// The classify tools inside that package, relative to the package directory.
+const CLASSIFY_EXTENSION: &str = "extensions/pixel-classify-files.ts";
+
+const CLASSIFY_STEP_ID: &str = "classify.pi-package";
+
+fn classify_manifest() -> String {
+    let manifest = json!({
+        "name": "pixel-classify",
+        "private": true,
+        "description": "Pixel's optional classify file tools, written by `pixel install` when accepted",
+        "pi": { "extensions": [format!("./{CLASSIFY_EXTENSION}")] },
+    });
+    format!("{manifest:#}\n")
+}
+
+/// The optional classify tools as a local Pi package. Like the impact
+/// package, it lives in a directory Pixel owns and is declared in the
+/// `packages` list of Pi's settings, so Pixel never writes into Pi's own
+/// `extensions/` directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifyPiPackage {
+    settings: PathBuf,
+    package_dir: PathBuf,
+    extension: String,
+}
+
+impl ClassifyPiPackage {
+    /// The package for the real home, holding `extension` as its tools:
+    /// `None` when Pi's agent directory (`$PI_CODING_AGENT_DIR`, else
+    /// `~/.pi/agent`) is not a directory.
+    #[cfg_attr(test, mutants::skip)]
+    // reason: the one-line adapter over the environment; `with_agent_dir`
+    // holds the logic and is tested.
+    pub fn for_home(home: &Path, extension: &str) -> Option<Self> {
+        Self::with_agent_dir(home, std::env::var_os("PI_CODING_AGENT_DIR"), extension)
+    }
+
+    /// [`Self::for_home`] with the value of `$PI_CODING_AGENT_DIR` given.
+    pub fn with_agent_dir(
+        home: &Path,
+        agent_dir: Option<OsString>,
+        extension: &str,
+    ) -> Option<Self> {
+        Self::at(
+            &PiPaths::resolve_with(home, false, agent_dir),
+            home,
+            extension,
+        )
+    }
+
+    fn at(paths: &PiPaths, home: &Path, extension: &str) -> Option<Self> {
+        paths.agent_dir.is_dir().then(|| Self {
+            settings: paths.settings.clone(),
+            package_dir: home.join(CLASSIFY_PACKAGE_DIR),
+            extension: extension.to_string(),
+        })
+    }
+
+    /// The files the package holds, with their content.
+    pub fn files(&self) -> Vec<(PathBuf, String)> {
+        vec![
+            (self.package_dir.join(PACKAGE_MANIFEST), classify_manifest()),
+            (
+                self.package_dir.join(CLASSIFY_EXTENSION),
+                self.extension.clone(),
+            ),
+        ]
+    }
+
+    /// Pi's settings file, whose `packages` list declares the package.
+    pub fn settings(&self) -> &Path {
+        &self.settings
+    }
+
+    /// Whether every file is current and Pi's settings declare the package.
+    pub fn is_current(&self) -> bool {
+        self.files()
+            .iter()
+            .all(|(path, content)| fs::read_to_string(path).is_ok_and(|text| text == *content))
+            && read_settings_object(&self.settings)
+                .is_ok_and(|settings| declares_package(&settings, &self.source()))
+    }
+
+    /// Write the package and append its path to `packages`, keeping every
+    /// other setting and package. Settings that cannot be edited safely
+    /// (unparsable, not an object, a non-array `packages`) are an error, and
+    /// nothing is written then.
+    pub fn install(&self) -> std::result::Result<(), String> {
+        let mut settings = read_settings_object(&self.settings)?;
+        for (path, content) in self.files() {
+            if let Some(dir) = path.parent() {
+                fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+            }
+            install::write_atomically(&path, &content)
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+        }
+        let source = self.source();
+        if !declares_package(&settings, &source)
+            && let Some(packages) = settings.as_object_mut().and_then(|root| {
+                root.entry("packages")
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+            })
+        {
+            packages.push(Value::String(source));
+            install::write_settings(&self.settings, &settings, false)
+                .map_err(|e| format!("write {}: {e}", self.settings.display()))?;
+        }
+        Ok(())
+    }
+
+    fn source(&self) -> String {
+        self.package_dir.display().to_string()
+    }
+}
+
+/// `pixel uninstall` step: remove the classify package and its `packages`
+/// entry; other settings, packages and files in the directory stay.
+pub(crate) fn uninstall_classify_package(
+    paths: &PiPaths,
+    home: &Path,
+    dry_run: bool,
+) -> Result<InstallStep> {
+    let package_dir = home.join(CLASSIFY_PACKAGE_DIR);
+    let source = package_dir.display().to_string();
+    let step = |summary: &str| InstallStep {
+        id: CLASSIFY_STEP_ID.into(),
+        status: CheckStatus::Green,
+        summary: dry_run_summary(dry_run, summary),
+        detail: Some(format!(
+            "settings={} package={}",
+            paths.settings.display(),
+            package_dir.display()
+        )),
+    };
+    let mut settings = read_settings_object(&paths.settings)
+        .ok()
+        .filter(|settings| declares_package(settings, &source));
+    if settings.is_none() && !package_dir.exists() {
+        return Ok(step("no Pixel Pi classify package found"));
+    }
+    if !dry_run {
+        if let Some(settings) = settings.as_mut() {
+            if let Some(packages) = settings.get_mut("packages").and_then(Value::as_array_mut) {
+                packages.retain(|entry| !names_package(entry, &source));
+            }
+            install::write_settings(&paths.settings, settings, false)?;
+        }
+        for file in [
+            package_dir.join(CLASSIFY_EXTENSION),
+            package_dir.join(PACKAGE_MANIFEST),
+        ] {
+            match fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        // Only empty directories go: anything else in them is not Pixel's.
+        if let Some(dir) = package_dir.join(CLASSIFY_EXTENSION).parent() {
+            let _ = fs::remove_dir(dir);
+        }
+        let _ = fs::remove_dir(&package_dir);
+    }
+    Ok(step("removed the Pixel Pi classify package"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -668,5 +840,89 @@ mod tests {
         uninstall(&paths, true).unwrap();
         assert!(paths.package_dir.exists());
         assert_eq!(fs::read(&paths.settings).unwrap(), declared);
+    }
+
+    #[test]
+    fn classify_package_should_exist_only_where_pi_is_configured() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        assert_eq!(
+            super::ClassifyPiPackage::with_agent_dir(home, None, "ext"),
+            None
+        );
+        let custom = home.join("custom-pi");
+        fs::create_dir_all(&custom).unwrap();
+        let package = super::ClassifyPiPackage::with_agent_dir(
+            home,
+            Some(custom.clone().into_os_string()),
+            "ext",
+        )
+        .unwrap();
+        assert_eq!(package.settings(), custom.join("settings.json"));
+        assert_eq!(
+            package.files(),
+            vec![
+                (
+                    home.join(super::CLASSIFY_PACKAGE_DIR).join("package.json"),
+                    super::classify_manifest()
+                ),
+                (
+                    home.join(super::CLASSIFY_PACKAGE_DIR)
+                        .join("extensions/pixel-classify-files.ts"),
+                    "ext".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_package_should_install_once_and_uninstall_only_its_own_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let paths = configure_pi(home, &json!({"packages": [{"source": "npm:mine"}]}));
+        let package = super::ClassifyPiPackage::with_agent_dir(home, None, "ext").unwrap();
+        assert!(!package.is_current());
+
+        package.install().unwrap();
+        package.install().unwrap();
+        let dir = home.join(super::CLASSIFY_PACKAGE_DIR);
+        assert!(package.is_current());
+        assert_eq!(
+            settings(&paths),
+            json!({"packages": [{"source": "npm:mine"}, dir.display().to_string()]}),
+            "a second install declares the package once"
+        );
+
+        let dry = super::uninstall_classify_package(&paths, home, true).unwrap();
+        assert_eq!(
+            dry.summary,
+            "[dry-run] would report: removed the Pixel Pi classify package"
+        );
+        assert!(package.is_current(), "a dry run changes nothing");
+
+        let step = super::uninstall_classify_package(&paths, home, false).unwrap();
+        assert_eq!(step.summary, "removed the Pixel Pi classify package");
+        assert_eq!(
+            settings(&paths),
+            json!({"packages": [{"source": "npm:mine"}]})
+        );
+        assert!(!dir.exists());
+        let again = super::uninstall_classify_package(&paths, home, false).unwrap();
+        assert_eq!(again.summary, "no Pixel Pi classify package found");
+    }
+
+    #[test]
+    fn classify_package_should_refuse_settings_it_cannot_edit() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let paths = configure_pi(home, &json!({"packages": "npm:mine"}));
+        let before = fs::read_to_string(&paths.settings).unwrap();
+        let package = super::ClassifyPiPackage::with_agent_dir(home, None, "ext").unwrap();
+
+        let err = package.install().unwrap_err();
+
+        assert!(err.ends_with("has a non-array `packages`"), "{err}");
+        assert_eq!(fs::read_to_string(&paths.settings).unwrap(), before);
+        assert!(!home.join(super::CLASSIFY_PACKAGE_DIR).exists());
     }
 }

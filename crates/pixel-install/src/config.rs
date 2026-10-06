@@ -110,6 +110,19 @@ pub const CURSOR_HOOKS_FILE: &str = ".cursor/hooks.json";
 /// The pi config directory (relative to home). The repository extension uses
 /// pi's `tool_call` event to intercept native calls before execution.
 pub const PI_CONFIG_DIR: &str = ".pi/agent";
+
+/// Harness config roots whose `skills/` dir a `pixel-classify` copy deploys
+/// into — the skill is harness-agnostic, so every configured harness gets it
+/// (`.claude` is a target unconditionally: install writes Claude's hooks
+/// before the helpers step runs).
+pub const SKILL_ROOTS: &[&str] = &[
+    ".codex",
+    ".cursor",
+    ".devin",
+    ".gemini",
+    ".pi/agent",
+    ".config/opencode",
+];
 /// The pi settings file (relative to home).
 pub const PI_SETTINGS_FILE: &str = ".pi/agent/settings.json";
 

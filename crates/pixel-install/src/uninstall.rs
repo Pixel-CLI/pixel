@@ -21,6 +21,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::InstallError;
 use crate::config;
@@ -135,8 +136,14 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         remove_cursor_hooks(&home, &exe, dry_run)?,
         crate::copilot_config::remove_copilot_hooks(&home, dry_run)?,
         remove_pi_extension(&home, dry_run)?,
+        remove_classify_skill(&home, dry_run)?,
         crate::pi_global::uninstall(
             &crate::pi_global::PiPaths::resolve(&home, options.home.is_some()),
+            dry_run,
+        )?,
+        crate::pi_global::uninstall_classify_package(
+            &crate::pi_global::PiPaths::resolve(&home, options.home.is_some()),
+            &home,
             dry_run,
         )?,
         // 5. Remove pixel hooks from project-level .codex/hooks.json files.
@@ -798,6 +805,61 @@ fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallSt
     })
 }
 
+/// Rename the skill `dir` (`<root>/skills/<name>`) to
+/// `<root>/<name>.pixel-bak.<nanos>-<seq>` — the directory counterpart of
+/// [`config::backup_if_changing`], so a user-edited copy survives an
+/// uninstall instead of being deleted outright. The backup leaves `skills/`:
+/// a harness loads every `skills/*/SKILL.md`, so a backup beside the skill
+/// would keep it active after the uninstall.
+fn rename_as_backup(dir: &Path) -> Result<()> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let name = dir
+        .file_name()
+        .map_or_else(|| "dir".into(), |n| n.to_string_lossy().into_owned());
+    let root = dir.parent().and_then(Path::parent).unwrap_or(dir);
+    fs::rename(dir, root.join(format!("{name}.pixel-bak.{nanos}-0")))?;
+    Ok(())
+}
+
+// -------------------------------------------------------------------------
+// Step 4b: remove the classify helpers' skill dirs from every harness
+// -------------------------------------------------------------------------
+
+/// Remove the `pixel-classify` skill the install-time helpers proposal can
+/// write into every configured harness's skills dir — the same roots
+/// [`config::SKILL_ROOTS`] installs into, plus Claude's always-present one.
+fn remove_classify_skill(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let dirs: Vec<PathBuf> = [PathBuf::from(".claude")]
+        .into_iter()
+        .chain(config::SKILL_ROOTS.iter().map(PathBuf::from))
+        .map(|root| home.join(root).join("skills/pixel-classify"))
+        .collect();
+    let mut removed = Vec::new();
+    for dir in &dirs {
+        if dir.is_dir() {
+            if !dry_run {
+                rename_as_backup(dir)?;
+            }
+            removed.push(dir.display().to_string());
+        }
+    }
+    Ok(InstallStep {
+        id: "classify.skill".into(),
+        status: CheckStatus::Green,
+        summary: install::dry_run_summary(
+            dry_run,
+            &if removed.is_empty() {
+                "no classify skill found".to_string()
+            } else {
+                format!("removed {} classify skill dir(s)", removed.len())
+            },
+        ),
+        detail: (!removed.is_empty()).then(|| removed.join(" ")),
+    })
+}
+
 // -------------------------------------------------------------------------
 // Step 4: remove pixel hooks from project-level .codex/hooks.json files
 // -------------------------------------------------------------------------
@@ -1285,6 +1347,11 @@ fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Ve
         crate::antigravity::cli_plugin_dir(home),
         opencode_dir.to_path_buf(),
     ];
+    // The classify-skill step renames each harness's `skills/pixel-classify`
+    // to a `.pixel-bak` dir in that harness's root (`.claude` is above).
+    for root in config::SKILL_ROOTS {
+        dirs.push(home.join(root));
+    }
     for root in project_hook_search_roots(home) {
         dirs.push(root.join(".codex"));
     }
@@ -1322,17 +1389,16 @@ fn is_digits(text: &str) -> bool {
 }
 
 /// The backups present in `dirs` (not recursive), sorted and without
-/// duplicates: two entries of `dirs` may name the same directory.
+/// duplicates: two entries of `dirs` may name the same directory. Directory
+/// backups count too — the classify-skill step undoes whole dirs by rename.
 fn find_backups(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = dirs
         .iter()
         .filter_map(|dir| fs::read_dir(dir).ok())
         .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
         .filter(|path| {
-            path.is_file()
-                && path
-                    .file_name()
-                    .is_some_and(|name| is_backup_name(&name.to_string_lossy()))
+            path.file_name()
+                .is_some_and(|name| is_backup_name(&name.to_string_lossy()))
         })
         .collect();
     found.sort();
@@ -1353,10 +1419,22 @@ fn backups_step(backups: &[PathBuf], dry_run: bool) -> InstallStep {
             detail: None,
         };
     }
-    let quoted: Vec<String> = backups
-        .iter()
-        .map(|path| routing::quoted_executable(path))
-        .collect();
+    let (dirs, files): (Vec<&PathBuf>, Vec<&PathBuf>) =
+        backups.iter().partition(|path| path.is_dir());
+    let quoted = |paths: &[&PathBuf]| {
+        paths
+            .iter()
+            .map(|path| routing::quoted_executable(path))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut commands = Vec::new();
+    if !files.is_empty() {
+        commands.push(format!("rm -- {}", quoted(&files)));
+    }
+    if !dirs.is_empty() {
+        commands.push(format!("rm -rf -- {}", quoted(&dirs)));
+    }
     InstallStep {
         id: "backups".into(),
         status: CheckStatus::Green,
@@ -1367,7 +1445,7 @@ fn backups_step(backups: &[PathBuf], dry_run: bool) -> InstallStep {
                 backups.len()
             ),
         ),
-        detail: Some(format!("rm -- {}", quoted.join(" "))),
+        detail: Some(commands.join(" && ")),
     }
 }
 
@@ -2021,7 +2099,8 @@ mod backup_tests {
         ] {
             fs::write(path, "x").unwrap();
         }
-        // A directory is never a backup, whatever its name.
+        // A directory backup counts too: the classify-skill step undoes a
+        // whole skills dir by renaming it with this suffix.
         fs::create_dir_all(a.join("dir.pixel-bak.3-0")).unwrap();
 
         // `a` twice: the global list can name one directory two ways
@@ -2031,6 +2110,7 @@ mod backup_tests {
         assert_eq!(
             found,
             vec![
+                a.join("dir.pixel-bak.3-0"),
                 a.join("hooks.json.pixel-bak.1-1"),
                 b.join("settings.json.pixel-bak.2-0")
             ]

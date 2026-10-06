@@ -55,7 +55,12 @@
 #   auto   (default): try a local Ollaya server, otherwise use a remote provider.
 #   local: use Ollaya; initial setup downloads its binary and model.
 #   remote: send the text you classify to your provider; API charges may apply.
-# remote_preset options: openrouter, ollama, deepseek, opencode-go, local.
+#   jev:   remote engine on the jev preset — TypeSafe's hosted decision model
+#          (TYPESAFE_API_KEY or an OpenCode Go key at remote_base
+#          https://opencode.ai/zen); API charges may apply.
+# remote_preset options: openrouter, ollama, deepseek, opencode-go, jev, local.
+# remote_model/remote_base pin the preset's model and endpoint; the command
+#   pixel config remote-preset <preset> [--model --base] writes all three.
 # The local preset uses an existing OpenAI-compatible server on localhost;
 # it is separate from engine: local (Ollaya).
 # Run pixel config setup for the optional local/provider setup prompts.
@@ -63,6 +68,8 @@
 #   enabled: false
 #   engine: auto
 #   remote_preset: openrouter
+#   remote_model: <preset's default>
+#   remote_base: <preset's default>
 
 # Provider credentials. Global file only; provider environment variables win.
 # Prefer an environment variable or read a key from stdin (keeps it out of

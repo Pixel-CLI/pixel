@@ -489,3 +489,20 @@ fn classify_should_be_opt_in_even_when_an_engine_or_credentials_are_present() {
         assert!(!home.join(".local/share/pixel/ollaya").exists());
     }
 }
+
+#[test]
+fn classify_engine_jev_should_store_the_remote_preset_not_a_plain_engine() {
+    let home = Scratch::for_test("config", "classify-engine-jev-home");
+    stdout(&run(&home, &home, &["config", "classify-engine", "jev"]));
+    let path = home.join(".pixel/config.yaml");
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(doc["classify"]["engine"], "remote");
+    assert_eq!(doc["classify"]["remote_preset"], "jev");
+
+    stdout(&run(&home, &home, &["config", "classify-engine", "local"]));
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(doc["classify"]["engine"], "local");
+    assert_eq!(doc["classify"]["remote_preset"], "jev");
+}

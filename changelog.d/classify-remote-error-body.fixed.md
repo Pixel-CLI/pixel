@@ -1,0 +1,1 @@
+**classify:** a remote chat failure now carries the provider's error body (bounded), so a guardrail-blocked model or rejected request names its real cause instead of a bare `http status: 404`; and the stored `remote_model` no longer leaks into the Jev engine when it belongs to a chat preset.

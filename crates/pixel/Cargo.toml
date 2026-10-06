@@ -54,7 +54,7 @@ shell-words = "1.1"
 regex = "1.13"
 ignore = "0.4.33"
 libc = "0.2"
-ureq = { version = "3", default-features = false, features = ["json", "rustls-webpki-roots"] }
+ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 tar = "0.4"
 xxhash-rust = { workspace = true }
 # Runtime now, not only a test dependency: the ai-cli-readify rewrite edits

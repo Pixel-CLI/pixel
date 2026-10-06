@@ -995,8 +995,35 @@ pub fn classify_remote_preset() -> Option<crate::decide_remote::Preset> {
     crate::decide_remote::Preset::parse_name(doc.get("classify")?.get("remote_preset")?.as_str()?)
 }
 
-/// Store the remote engine and its provider together, preserving other settings.
-pub fn set_classify_remote(preset: crate::decide_remote::Preset) -> Result<(), String> {
+/// The model chosen alongside the remote provider, if the setup asked for
+/// one (OpenCode Go's subscription carries several).
+pub fn classify_remote_model() -> Option<String> {
+    let doc = read_config_doc(&global_config_path()?)?;
+    doc.get("classify")?
+        .get("remote_model")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The endpoint base chosen alongside the remote provider, when the setup
+/// routed a provider to another host (OpenCode Go's Jev lives on its zen
+/// base, not the go chat endpoint).
+pub fn classify_remote_base() -> Option<String> {
+    let doc = read_config_doc(&global_config_path()?)?;
+    doc.get("classify")?
+        .get("remote_base")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Store the remote engine and its provider together — plus the model and
+/// endpoint base the provider should run; `None` drops each earlier choice
+/// so a stale one cannot leak across a provider switch.
+pub fn set_classify_remote_model(
+    preset: crate::decide_remote::Preset,
+    model: Option<String>,
+    base: Option<&str>,
+) -> Result<(), String> {
     let path = global_config_path().ok_or("no HOME for the global config")?;
     write_doc(&path, |doc| {
         if !doc.get("classify").is_some_and(Value::is_object) {
@@ -1004,6 +1031,24 @@ pub fn set_classify_remote(preset: crate::decide_remote::Preset) -> Result<(), S
         }
         doc["classify"]["engine"] = json!("remote");
         doc["classify"]["remote_preset"] = json!(preset.display());
+        if let Some(classify) = doc["classify"].as_object_mut() {
+            match model.filter(|m| !m.is_empty()) {
+                Some(model) => {
+                    classify.insert("remote_model".to_string(), json!(model));
+                }
+                None => {
+                    classify.remove("remote_model");
+                }
+            };
+            match base.filter(|b| !b.is_empty()) {
+                Some(base) => {
+                    classify.insert("remote_base".to_string(), json!(base));
+                }
+                None => {
+                    classify.remove("remote_base");
+                }
+            };
+        }
     })
 }
 
@@ -2692,7 +2737,7 @@ mod tests {
         assert_eq!(classify_engine().as_deref(), Some("local"));
         write(&path, r#"{"metrics":"off","classify":"stale"}"#);
         assert_eq!(classify_remote_preset(), None);
-        set_classify_remote(crate::decide_remote::Preset::Deepseek).unwrap();
+        set_classify_remote_model(crate::decide_remote::Preset::Deepseek, None, None).unwrap();
         assert_eq!(
             classify_remote_preset(),
             Some(crate::decide_remote::Preset::Deepseek)
@@ -2700,7 +2745,7 @@ mod tests {
         assert_eq!(classify_engine().as_deref(), Some("remote"));
         set_classify_engine("local").unwrap();
         assert_eq!(classify_engine().as_deref(), Some("local"));
-        set_classify_remote(crate::decide_remote::Preset::OpencodeGo).unwrap();
+        set_classify_remote_model(crate::decide_remote::Preset::OpencodeGo, None, None).unwrap();
         assert_eq!(
             classify_remote_preset(),
             Some(crate::decide_remote::Preset::OpencodeGo)
@@ -2719,7 +2764,7 @@ mod tests {
             classify_remote_preset(),
             Some(crate::decide_remote::Preset::OpencodeGo)
         );
-        set_classify_remote(crate::decide_remote::Preset::OpencodeGo).unwrap();
+        set_classify_remote_model(crate::decide_remote::Preset::OpencodeGo, None, None).unwrap();
         set_classify_engine("local").unwrap();
         assert_eq!(
             classify_remote_preset(),
@@ -2730,6 +2775,41 @@ mod tests {
         assert_eq!(stored["metrics"], "off");
         assert_eq!(stored["classify"]["engine"], "local");
         assert_eq!(stored["classify"]["ollaya"]["model"], "winnow:e4b");
+
+        restore_home(saved);
+    }
+
+    #[test]
+    fn remote_preset_should_store_the_model_and_base_and_clear_them_on_switch() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+
+        set_classify_remote_model(
+            crate::decide_remote::Preset::Jev,
+            Some("jev-latest".to_string()),
+            Some("https://jev.example.test"),
+        )
+        .unwrap();
+        assert_eq!(classify_engine().as_deref(), Some("remote"));
+        assert_eq!(
+            classify_remote_preset(),
+            Some(crate::decide_remote::Preset::Jev)
+        );
+        assert_eq!(classify_remote_model().as_deref(), Some("jev-latest"));
+        assert_eq!(
+            classify_remote_base().as_deref(),
+            Some("https://jev.example.test")
+        );
+
+        set_classify_remote_model(crate::decide_remote::Preset::Deepseek, None, None).unwrap();
+        assert_eq!(
+            classify_remote_preset(),
+            Some(crate::decide_remote::Preset::Deepseek)
+        );
+        assert_eq!(classify_remote_model(), None);
+        assert_eq!(classify_remote_base(), None);
 
         restore_home(saved);
     }

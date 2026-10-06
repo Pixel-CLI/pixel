@@ -17,14 +17,20 @@
 //! `snapshot.basis`, and the response is renormalized to sum 1 before it
 //! reaches the caller.
 //!
-//! Config: a preset (`openrouter` | `ollama` | `local`) selects the base URL,
-//! the default model, and the env var that names the API key; the preset is
-//! overridable by `--remote-model` / `PIXEL_REMOTE_MODEL`,
-//! `PIXEL_REMOTE_BASE`, and `PIXEL_REMOTE_KEY_ENV`. The key resolves from
-//! the env var first, then from `remote_keys.<preset>` in
-//! `~/.pixel/config.json` (`pixel config remote-key`). The key value itself is
+//! Config: a preset (`openrouter` | `ollama` | `local` | `deepseek` |
+//! `opencode-go` | `jev`) selects the base URL, the default model, and the
+//! env var that names the API key; the preset is overridable by
+//! `--remote-model` / `PIXEL_REMOTE_MODEL`, `PIXEL_REMOTE_BASE`, and
+//! `PIXEL_REMOTE_KEY_ENV`. The key resolves from the env var first, then
+//! from `remote_keys.<preset>` in `~/.pixel/config.json`
+//! (`pixel config remote-key`), then — when Infisical is configured — from
+//! the project's secrets (see `decide_infisical`). The key value itself is
 //! only ever written into the Authorization header — never into logs, error
 //! text, or documents — and is passed by env-var name only.
+//!
+//! `jev` is the exception in transport: TypeSafe's hosted Jev speaks the
+//! `/v1/systemone` decision shape, not `/chat/completions`, so its preset
+//! config is resolved here (base, model, key) but served by [`decide_jev`].
 
 use crate::classify::Spec;
 use serde_json::{Value, json};
@@ -45,6 +51,7 @@ pub enum Preset {
     Local,
     Deepseek,
     OpencodeGo,
+    Jev,
 }
 
 impl Preset {
@@ -56,6 +63,11 @@ impl Preset {
             Preset::Local => "http://localhost:11434/v1",
             Preset::Deepseek => "https://api.deepseek.com",
             Preset::OpencodeGo => "https://opencode.ai/zen/go/v1",
+            // TypeSafe's hosted Jev decision model. Unlike the chat presets
+            // it speaks TypeSafe's `/v1/systemone` shape, served by
+            // `decide_jev` — the base stays bare so the shared
+            // `PIXEL_REMOTE_BASE` override keeps working for it too.
+            Preset::Jev => "https://api.typesafe.ai",
         }
     }
 
@@ -68,6 +80,7 @@ impl Preset {
             Preset::Local => None,
             Preset::Deepseek => Some("DEEPSEEK_API_KEY"),
             Preset::OpencodeGo => Some("OPENCODE_API_KEY"),
+            Preset::Jev => Some("TYPESAFE_API_KEY"),
         }
     }
 
@@ -80,6 +93,7 @@ impl Preset {
             Preset::Local => "qwen3.5:4b",
             Preset::Deepseek => "deepseek-flash",
             Preset::OpencodeGo => "deepseek-v4.1-flash",
+            Preset::Jev => "jev-latest",
         }
     }
 
@@ -92,6 +106,7 @@ impl Preset {
             Preset::Local => "local",
             Preset::Deepseek => "deepseek",
             Preset::OpencodeGo => "opencode-go",
+            Preset::Jev => "jev",
         }
     }
 
@@ -110,6 +125,7 @@ impl Preset {
             Preset::Local,
             Preset::Deepseek,
             Preset::OpencodeGo,
+            Preset::Jev,
         ]
         .into_iter()
         .find(|preset| preset.display() == normalized)
@@ -124,6 +140,8 @@ pub struct Config {
     pub base: String,
     pub model: String,
     /// The API key value, read once from an env var by name. Never logged.
+    /// `pub(crate)` accessor below: the hosted Jev engine takes the same
+    /// resolved key.
     key: Option<String>,
     /// Stable per-invocation session id for providers that require one
     /// (`x-opencode-session` for OpenCode Go); `None` elsewhere.
@@ -139,6 +157,15 @@ impl std::fmt::Debug for Config {
             .field("base", &self.base)
             .field("model", &self.model)
             .finish_non_exhaustive()
+    }
+}
+
+impl Config {
+    /// The resolved API-key value, for callers that build their own
+    /// transport from a resolved [`Config`] (hosted Jev). Keep it out of
+    /// logs and documents, like `key` itself.
+    pub(crate) fn key_value(&self) -> Option<String> {
+        self.key.clone()
     }
 }
 
@@ -175,7 +202,7 @@ pub fn resolve_config(
 /// a preset that needs a key but has none (the provider would answer an
 /// opaque 401), and a key bound for a non-loopback `http://` base (it would
 /// cross the network in clear text).
-fn resolve_config_from(
+pub(crate) fn resolve_config_from(
     preset: Preset,
     model_override: Option<String>,
     key_value: Option<String>,
@@ -224,7 +251,8 @@ fn resolve_config_from(
 }
 
 /// Whether `base` is plain `http://` to a host other than this machine.
-fn sends_in_clear_text(base: &str) -> bool {
+/// `pub(crate)`: the Infisical lookup reuses it before sending its token.
+pub(crate) fn sends_in_clear_text(base: &str) -> bool {
     let Some(rest) = base
         .get(..7)
         .filter(|scheme| scheme.eq_ignore_ascii_case("http://"))
@@ -386,6 +414,10 @@ fn http_chat_within(
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .user_agent("pixel-cli classify-remote")
+        // Non-2xx handled below so the provider's error body (which usually
+        // names the real cause — blocked model, bad key, no route) reaches
+        // the error string instead of a bare status code.
+        .http_status_as_error(false)
         .build();
     let agent = ureq::Agent::new_with_config(agent);
     let mut request = agent.post(&url);
@@ -398,12 +430,21 @@ fn http_chat_within(
     let mut response = request
         .send_json(body)
         .map_err(|e| format!("remote chat {url}: {e}"))?;
+    let status = response.status().as_u16();
     let text = response
         .body_mut()
         .with_config()
         .limit(cap as u64)
-        .read_to_string()
-        .map_err(|e| format!("remote chat read {url}: {e}"))?;
+        .read_to_string();
+    if !(200..300).contains(&status) {
+        // The status is the fact; the body is a best-effort explanation, so
+        // an oversized or non-UTF-8 error body still reports the status.
+        let snippet: String = text.unwrap_or_default().chars().take(400).collect();
+        return Err(format!(
+            "remote chat {url}: http status {status}: {snippet}"
+        ));
+    }
+    let text = text.map_err(|e| format!("remote chat read {url}: {e}"))?;
     serde_json::from_str(&text).map_err(|e| format!("remote chat JSON {url}: {e}"))
 }
 
@@ -529,6 +570,13 @@ mod tests {
                 "opencode-go",
                 Some("OPENCODE_API_KEY"),
             ),
+            (
+                Preset::Jev,
+                "https://api.typesafe.ai",
+                "jev-latest",
+                "jev",
+                Some("TYPESAFE_API_KEY"),
+            ),
         ];
         for (preset, base, model, display, key_env) in table {
             assert_eq!(
@@ -547,6 +595,7 @@ mod tests {
         assert!(Preset::OpencodeGo.wants_session_header());
         assert!(!Preset::Openrouter.wants_session_header());
         assert!(!Preset::Local.wants_session_header());
+        assert!(!Preset::Jev.wants_session_header());
     }
 
     #[test]
@@ -554,7 +603,20 @@ mod tests {
         assert_eq!(Preset::parse_name("OpenRouter"), Some(Preset::Openrouter));
         assert_eq!(Preset::parse_name("opencode_go"), Some(Preset::OpencodeGo));
         assert_eq!(Preset::parse_name("  DEEPSEEK  "), Some(Preset::Deepseek));
+        assert_eq!(Preset::parse_name("jev"), Some(Preset::Jev));
         assert_eq!(Preset::parse_name("not-a-provider"), None);
+    }
+
+    #[test]
+    fn key_value_hands_the_resolved_key_to_custom_transports() {
+        // Hosted Jev builds its own transport from a resolved `Config`; the
+        // key must survive resolution without re-reading the environment.
+        let keyed =
+            resolve_config_from(Preset::Jev, None, Some("tsk-resolved".into()), env_of(&[]))
+                .unwrap();
+        assert_eq!(keyed.key_value().as_deref(), Some("tsk-resolved"));
+        let keyless = resolve_config_from(Preset::Jev, None, None, env_of(&[]));
+        assert!(keyless.is_err(), "Jev always needs a key");
     }
 
     #[test]
@@ -705,7 +767,16 @@ mod tests {
     /// body, answers `reply` (or nothing, when `None`). Polls with a
     /// deadline so a client that never connects fails instead of hanging.
     fn http_once(reply: Option<String>) -> (String, std::thread::JoinHandle<(String, String)>) {
+        http_once_with("200 OK", reply)
+    }
+
+    /// [`http_once`] answering with `status` instead of `200 OK`.
+    fn http_once_with(
+        status: &str,
+        reply: Option<String>,
+    ) -> (String, std::thread::JoinHandle<(String, String)>) {
         use std::io::{BufRead, BufReader, Read, Write};
+        let status = status.to_string();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -741,7 +812,7 @@ mod tests {
                         let mut stream = stream;
                         write!(
                             stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
                             reply.len()
                         )
                         .unwrap();
@@ -804,6 +875,57 @@ mod tests {
             !head.to_ascii_lowercase().contains("authorization"),
             "no key, no header: {head}"
         );
+    }
+
+    #[test]
+    fn the_transport_reports_a_non_2xx_status_with_the_provider_error_body() {
+        let body = format!(
+            r#"{{"error":"model blocked by guardrail","pad":"{}"}}"#,
+            "x".repeat(600)
+        );
+        let (base, server) = http_once_with("404 Not Found", Some(body.clone()));
+        let error = http_chat_within(
+            &config_for(&base, Some("sekret")),
+            &json!({}),
+            Duration::from_secs(5),
+            RESPONSE_CAP_BYTES,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        let expected: String = body.chars().take(400).collect();
+        assert_eq!(
+            error,
+            format!("remote chat {base}/chat/completions: http status 404: {expected}")
+        );
+        assert!(!error.contains("sekret"), "{error}");
+
+        // An error body over the cap still reports the status, not a read error.
+        let (base, server) = http_once_with("500 Internal Server Error", Some(body));
+        let error = http_chat_within(
+            &config_for(&base, None),
+            &json!({}),
+            Duration::from_secs(5),
+            16,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(
+            error,
+            format!("remote chat {base}/chat/completions: http status 500: ")
+        );
+
+        // 2xx is the success edge: a 299 still parses as an answer.
+        let reply = chat_with(r#"{"probs": {"a": 1}}"#).to_string();
+        let (base, server) = http_once_with("299 OK", Some(reply.clone()));
+        let response = http_chat_within(
+            &config_for(&base, None),
+            &json!({}),
+            Duration::from_secs(5),
+            RESPONSE_CAP_BYTES,
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(response.to_string(), reply);
     }
 
     #[test]

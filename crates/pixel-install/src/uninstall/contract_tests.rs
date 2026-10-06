@@ -798,3 +798,62 @@ fn uninstall_should_report_every_step_and_touch_nothing_on_a_dry_run() {
     assert!(binary.is_file(), "a dry run removes no binary");
     assert_eq!(report.executable_path, binary.display().to_string());
 }
+
+// -- classify skill ------------------------------------------------------------
+
+#[test]
+fn remove_classify_skill_should_backup_the_skill_dir_and_keep_foreign_skills() {
+    let home = tempfile::tempdir().unwrap();
+    let skill = home.path().join(".claude/skills/pixel-classify");
+    write(&skill.join("SKILL.md"), "pixel-classify\n");
+    let foreign = home.path().join(".claude/skills/other");
+    write(&foreign.join("SKILL.md"), "mine\n");
+
+    let step = remove_classify_skill(home.path(), false).unwrap();
+
+    assert_eq!(step.id, "classify.skill");
+    assert_eq!(step.summary, "removed 1 classify skill dir(s)");
+    assert_eq!(
+        step.detail,
+        Some(skill.display().to_string()),
+        "removed dirs are named in the detail"
+    );
+    assert!(!skill.exists());
+    // The backup leaves `skills/`, where the harness would still load it.
+    let skills: Vec<PathBuf> = fs::read_dir(home.path().join(".claude/skills"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(skills, vec![foreign.clone()]);
+    let renamed: Vec<PathBuf> = fs::read_dir(home.path().join(".claude"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .is_some_and(|name| is_backup_name(&name.to_string_lossy()))
+        })
+        .collect();
+    assert_eq!(renamed.len(), 1);
+    assert!(renamed[0].join("SKILL.md").is_file());
+    assert!(foreign.join("SKILL.md").is_file());
+}
+
+#[test]
+fn remove_classify_skill_should_keep_every_dir_when_dry_run() {
+    let home = tempfile::tempdir().unwrap();
+    let skill = home.path().join(".claude/skills/pixel-classify");
+    write(&skill.join("SKILL.md"), "pixel-classify\n");
+
+    let step = remove_classify_skill(home.path(), true).unwrap();
+
+    assert_eq!(
+        step.summary,
+        "[dry-run] would report: removed 1 classify skill dir(s)"
+    );
+    assert!(skill.join("SKILL.md").is_file());
+    assert!(backups_in(&home.path().join(".claude")).is_empty());
+}

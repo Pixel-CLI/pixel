@@ -3380,6 +3380,59 @@ fn uninstall_removes_a_retired_pixel_only_pi_prompt_file() {
 }
 
 #[test]
+fn uninstall_removes_the_classify_helpers_and_keeps_a_backup_of_them() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    // What the classify-helpers proposal writes: the skills, and the Pi
+    // package declared beside a package of the user's.
+    let skills = [
+        home.join(".pi/agent/skills/pixel-classify/SKILL.md"),
+        home.join(".claude/skills/pixel-classify/SKILL.md"),
+        home.join(".codex/skills/pixel-classify/SKILL.md"),
+    ];
+    for file in &skills {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "shipped content\n").unwrap();
+    }
+    let settings = home.join(".pi/agent/settings.json");
+    fs::write(&settings, r#"{"theme":"dark","packages":["npm:mine"]}"#).unwrap();
+    pixel_install::ClassifyPiPackage::with_agent_dir(home, None, "export default () => {};\n")
+        .expect("Pi is configured")
+        .install()
+        .unwrap();
+    let package = home.join(pixel_install::CLASSIFY_PACKAGE_DIR);
+    assert!(package.join("package.json").is_file());
+
+    uninstall_home(home);
+
+    for file in &skills {
+        assert!(!file.exists(), "{file:?} must be removed");
+    }
+    assert!(
+        !package.exists(),
+        "the classify package is Pixel's to remove"
+    );
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({"theme": "dark", "packages": ["npm:mine"]})
+    );
+    let backups = fs::read_dir(home.join(".claude"))
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".pixel-bak."))
+        .count();
+    assert_eq!(backups, 1, "a renamed .pixel-bak dir keeps the user copy");
+    // Outside `skills/`: a backup there would still load as a skill.
+    let left = fs::read_dir(home.join(".claude/skills"))
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .count();
+    assert_eq!(left, 0, "nothing skill-shaped stays in .claude/skills");
+}
+
+#[test]
 fn uninstall_survives_a_missing_pi_prompt_file() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();

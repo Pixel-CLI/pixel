@@ -5,11 +5,11 @@
 //! and the clean-cut deprecation of the usable-git/gitpixel/sniper MCP
 //! entries. pixel is a CLI + lifecycle integration tool, not an MCP server —
 //! install scrubs deprecated entries (and the Warp MCP entry older releases
-//! wrote), unconditionally configures Claude, Codex and Pi, and wires
-//! lifecycle hooks. OpenCode, Antigravity and zcode are integrated only
-//! when their configuration directory or file already exists, not by
-//! detecting agent CLIs. Agent-config files are rewritten with managed
-//! markers only where applicable.
+//! wrote), keeps Claude and Codex task lifecycle hooks, and gives Pi the
+//! explicit impact command as a local package. It deploys no prompt and
+//! wires no retrieval guard: what earlier releases wrote for OpenCode,
+//! Devin, Antigravity, zcode, Cursor and Copilot CLI is removed. Agent-config
+//! files are rewritten with managed markers only where applicable.
 
 use std::io;
 use std::path::PathBuf;
@@ -26,6 +26,7 @@ pub mod install;
 pub mod intro;
 pub mod opencode_config;
 mod pi_global;
+pub use pi_global::{CLASSIFY_PACKAGE_DIR, ClassifyPiPackage};
 mod pi_project;
 mod pixel_first;
 mod repo_git;

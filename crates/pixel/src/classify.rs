@@ -7,9 +7,14 @@
 //! completion (OpenRouter, Ollama Cloud, or a local llama-server) maps the
 //! state, shared framing, labels and criteria onto a probability
 //! distribution over the caller's labels — the shape a Jev-class decision
-//! model returns. Non-deterministic and network-bound by design: the local
-//! static/verdict backends were removed because no off-the-shelf local
-//! model beat Jev on the coding benchmark (see
+//! model returns. TypeSafe's hosted Jev itself is the `jev` preset: it
+//! serves the same decision shape over TypeSafe's `/v1/systemone` wire
+//! (`decide_jev`), with native calibrated probabilities instead of
+//! verbalized ones. Remote keys resolve from the env var, then
+//! `pixel config remote-key`, then — when configured — an Infisical
+//! project (`decide_infisical`). Non-deterministic and network-bound by
+//! design: the local static/verdict backends were removed because no
+//! off-the-shelf local model beat Jev on the coding benchmark (see
 //! `docs/bench/decide-bakeoff.md`).
 //!
 //! `context` stays a separate field — it is the shared framing every
@@ -197,6 +202,33 @@ impl DecisionEngine for crate::decide_ollaya::Ollaya {
     }
 }
 
+impl DecisionEngine for crate::decide_jev::Jev {
+    fn model_id(&self) -> String {
+        self.model_id().to_string()
+    }
+
+    fn provider(&self) -> Option<&'static str> {
+        Some("jev")
+    }
+
+    fn deterministic(&self) -> bool {
+        false
+    }
+
+    fn basis(&self) -> String {
+        crate::decide_jev::JEV_BASIS.to_string()
+    }
+
+    fn extra_snapshot(&self) -> Option<Value> {
+        self.last_meta()
+            .map(crate::decide_ollaya::AnswerMeta::snapshot)
+    }
+
+    fn decide(&mut self, spec: &Spec) -> Result<BTreeMap<String, f64>, String> {
+        crate::decide_jev::Jev::decide(self, spec)
+    }
+}
+
 /// The argmax label — first in the caller's label order on a tie
 /// (deterministic, never alphabetical accident).
 pub(crate) fn predicted<'a>(probs: &BTreeMap<String, f64>, labels: &'a [String]) -> &'a str {
@@ -279,22 +311,188 @@ fn open_engine(
     preset: crate::decide_remote::Preset,
     model: Option<String>,
 ) -> Result<crate::decide_remote::Remote, String> {
-    crate::decide_remote::resolve_config(preset, model, remote_key_value(preset))
-        .map(crate::decide_remote::Remote::open)
+    let overrides = RemoteOverrides::Shared;
+    let mut config =
+        crate::decide_remote::resolve_config(preset, model, remote_key_value(preset, overrides)?)?;
+    config.base = stored_base_when_unset(&config, overrides)?;
+    Ok(crate::decide_remote::Remote::open(config))
 }
 
-/// Read the remote API-key value from the preset's key env var (or
-/// `PIXEL_REMOTE_KEY_ENV` when set) by name. The value is consumed here and
-/// held only inside the `Remote` adapter — it is never logged or written to
-/// a document.
+/// Whether a remote engine reads the shared `PIXEL_REMOTE_*` overrides
+/// (`_BASE`, `_MODEL`, `_KEY_ENV`). They name one destination — the
+/// selected preset's — so a second engine opened beside it (the `--debug`
+/// Jev lane next to another preset) must not send its key there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteOverrides {
+    /// The engine is the selected preset: the overrides are its own.
+    Shared,
+    /// The engine sits beside another selected preset: only its own
+    /// sources (its key env var, its stored config, Infisical) apply.
+    Ignored,
+}
+
+impl RemoteOverrides {
+    /// One environment variable as this engine sees it.
+    fn var(self, name: &str) -> Option<String> {
+        // `PIXEL_INFISICAL_SECRET_NAME` renames the selected preset's secret
+        // the same way: read beside it, it would hand that preset's key to
+        // this engine's host.
+        if self == Self::Ignored
+            && (name.starts_with("PIXEL_REMOTE_") || name == "PIXEL_INFISICAL_SECRET_NAME")
+        {
+            return None;
+        }
+        std::env::var(name).ok()
+    }
+}
+
+/// The base the install step stored, when `PIXEL_REMOTE_BASE` does not
+/// override — re-checked for clear text since `resolve_config` validated
+/// the preset base, not this one.
+fn stored_base_when_unset(
+    config: &crate::decide_remote::Config,
+    overrides: RemoteOverrides,
+) -> Result<String, String> {
+    let Some(stored) = stored_base_for(config.preset, overrides) else {
+        return Ok(config.base.clone());
+    };
+    if config.key_value().is_some() && crate::decide_remote::sends_in_clear_text(&stored) {
+        return Err(format!(
+            "refusing to send the API key to {stored} over cleartext http; use https or a loopback base"
+        ));
+    }
+    Ok(stored)
+}
+
+/// Open the hosted Jev engine from the same preset config the chat
+/// adapters resolve: base, model override and key — so `--remote-model`,
+/// `PIXEL_REMOTE_*`, `pixel config remote-key jev` and the Infisical
+/// source all behave identically whichever preset is chosen.
+#[cfg_attr(test, mutants::skip)] // thin adapter over jev_config; the policy is decide_jev's
+fn open_jev_engine(
+    model: Option<String>,
+    overrides: RemoteOverrides,
+) -> Result<crate::decide_jev::Jev, String> {
+    let config = jev_config(model, overrides)?;
+    let key = config.key_value();
+    Ok(crate::decide_jev::Jev::open(crate::decide_jev::JevConfig {
+        base: config.base,
+        model_name: config.model,
+        key,
+        ..Default::default()
+    }))
+}
+
+/// The resolved Jev config: key, base and model, with the shared
+/// `PIXEL_REMOTE_*` overrides read only when `overrides` says they are
+/// Jev's.
+fn jev_config(
+    model: Option<String>,
+    overrides: RemoteOverrides,
+) -> Result<crate::decide_remote::Config, String> {
+    let preset = crate::decide_remote::Preset::Jev;
+    // The key follows the host it is sent to: the install step can route
+    // Jev through OpenCode's zen proxy, which takes the subscription key —
+    // a TypeSafe key in the environment must not reach it, nor the reverse.
+    let base = overrides
+        .var("PIXEL_REMOTE_BASE")
+        .filter(|s| !s.is_empty())
+        .or_else(|| stored_base_for(preset, overrides))
+        .unwrap_or_else(|| crate::decide_jev::DEFAULT_BASE.to_string());
+    let mut config = crate::decide_remote::resolve_config_from(
+        preset,
+        model,
+        remote_key_value_from(preset, jev_key_env(&base), overrides)?,
+        |name| overrides.var(name),
+    )?;
+    config.base = stored_base_when_unset(&config, overrides)?;
+    Ok(config)
+}
+
+/// The base the install step stored for `preset`, when `PIXEL_REMOTE_BASE`
+/// does not override it. The stored base/model belong to the preset the
+/// install step saved them for — applied to a different `--remote-preset`
+/// they would send that preset's key to a host it was never meant for.
+fn stored_base_for(
+    preset: crate::decide_remote::Preset,
+    overrides: RemoteOverrides,
+) -> Option<String> {
+    let env_set = overrides
+        .var("PIXEL_REMOTE_BASE")
+        .is_some_and(|s| !s.is_empty());
+    let same_preset = crate::config_cmd::classify_remote_preset() == Some(preset);
+    (!env_set && same_preset)
+        .then(crate::config_cmd::classify_remote_base)
+        .flatten()
+}
+
+/// The key variable a Jev base authenticates with: OpenCode's host proxies
+/// Jev for the OpenCode Go subscription key; every other host is
+/// TypeSafe's own key.
+fn jev_key_env(base: &str) -> Option<&'static str> {
+    let host = base
+        .split_once("://")
+        .map_or(base, |(_, rest)| rest)
+        .split(['/', ':'])
+        .next()
+        .unwrap_or_default();
+    if host.eq_ignore_ascii_case("opencode.ai") {
+        crate::decide_remote::Preset::OpencodeGo.key_env()
+    } else {
+        crate::decide_remote::Preset::Jev.key_env()
+    }
+}
+
+/// Read the remote API-key value for a preset, in disclosure order: the
+/// key env var (`PIXEL_REMOTE_KEY_ENV` names one, else the preset's own),
+/// then `pixel config remote-key <preset>`, then a configured Infisical
+/// project (see `decide_infisical`) — a configured Infisical failure is
+/// loud, an unconfigured one just falls through. The value is consumed
+/// here and held only inside the engine adapter — never logged or written
+/// to a document.
 #[cfg_attr(test, mutants::skip)] // reads the real env and ~/.pixel; the name rule is key_env_name
-fn remote_key_value(preset: crate::decide_remote::Preset) -> Option<String> {
-    let explicit = std::env::var("PIXEL_REMOTE_KEY_ENV").ok();
-    crate::decide_remote::key_env_name(preset, explicit)
-        .and_then(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
-        // Env wins; `pixel config remote-key <preset>` is the fallback so a
-        // key need not live in every shell's environment.
-        .or_else(|| crate::config_cmd::remote_key(preset))
+fn remote_key_value(
+    preset: crate::decide_remote::Preset,
+    overrides: RemoteOverrides,
+) -> Result<Option<String>, String> {
+    remote_key_value_from(preset, preset.key_env(), overrides)
+}
+
+/// [`remote_key_value`] with the preset's key variable given: hosted Jev
+/// picks it from the host its key goes to (see `jev_key_env`).
+#[cfg_attr(test, mutants::skip)] // reads the real env and ~/.pixel; the name rule is key_env_name
+fn remote_key_value_from(
+    preset: crate::decide_remote::Preset,
+    key_env: Option<&'static str>,
+    overrides: RemoteOverrides,
+) -> Result<Option<String>, String> {
+    let explicit = overrides
+        .var("PIXEL_REMOTE_KEY_ENV")
+        .filter(|s| !s.is_empty());
+    let keyless_preset = key_env.is_none() && explicit.is_none();
+    let from_env = explicit
+        .or_else(|| key_env.map(str::to_string))
+        .and_then(|name| std::env::var(name).ok().filter(|v| !v.is_empty()));
+    if from_env.is_some() {
+        return Ok(from_env);
+    }
+    // `pixel config remote-key <preset>` is the fallback so a key need not
+    // live in every shell's environment.
+    if let Some(key) = crate::config_cmd::remote_key(preset) {
+        return Ok(Some(key));
+    }
+    // A preset that takes no key (`local`) has nothing for Infisical to
+    // supply — skip the lookup rather than pay its latency for nothing.
+    // An explicit PIXEL_REMOTE_KEY_ENV still reaches it: naming a key source
+    // for a keyless preset is a choice, and the override lives in Infisical.
+    if keyless_preset {
+        return Ok(None);
+    }
+    // Infisical is the third source, off unless configured; its own
+    // contract decides what counts as absent. It reads the environment as
+    // this engine sees it, so a lane beside another preset never takes that
+    // preset's secret-name override.
+    crate::decide_infisical::lookup_key(key_env, &|name| overrides.var(name))
 }
 
 /// Parse one JSONL spec line (serve mode and tests share this path).
@@ -444,6 +642,12 @@ pub struct ClassifyOptions {
     /// and name the pixel ops that fit the verdict.
     #[arg(long, conflicts_with_all = ["labels", "context", "jsonl"])]
     pub task_intent: bool,
+    /// Debug comparison: ask every configured engine — local Ollaya, the
+    /// remote chat preset and Jev — the same question in parallel and print
+    /// each one's answer. An engine that is not set up or fails reports as
+    /// its own error row; the stored engine choice is ignored.
+    #[arg(long, conflicts_with_all = ["jsonl", "if_warm", "task_intent", "engine", "ollaya_url"], requires = "labels")]
+    pub debug: bool,
     #[arg(long)]
     pub json: bool,
 }
@@ -664,6 +868,156 @@ fn run_with(
     }
 }
 
+/// One `--debug` lane: an engine that answers the shared spec inside its
+/// own thread — nothing engine-shaped crosses a thread boundary, so the
+/// adapters' non-`Send` internals stay lane-local. The lane's outcome is
+/// captured: a missing key or an engine that fails to come up becomes that
+/// lane's error row, never the command's.
+type DebugLane = (
+    &'static str,
+    Box<dyn FnOnce(&Spec) -> Result<(String, BTreeMap<String, f64>), String> + Send>,
+);
+
+/// The engines `--debug` runs side by side: the local Ollaya daemon
+/// (auto-started through the same path `pixel classify` uses), the
+/// configured remote chat preset — omitted when it is Jev, since the Jev
+/// lane already covers that wire — and Jev itself. All three reuse the
+/// normal openers, so `--remote-model`, `PIXEL_REMOTE_*` and stored
+/// onboarding state apply to the selected preset's lane exactly as they
+/// would solo; a Jev lane beside another preset reads only Jev's own
+/// sources (see `jev_lane_inputs`).
+#[cfg_attr(test, mutants::skip)] // env/process adapters; the fan-out policy is run_debug_with's
+fn debug_lanes(
+    remote_preset: crate::decide_remote::Preset,
+    remote_model: Option<String>,
+) -> Vec<DebugLane> {
+    let mut lanes: Vec<DebugLane> = Vec::new();
+
+    // `--engine`/`--ollaya-url` are clap-conflicted under `--debug`; the
+    // local lane always uses the recorded daemon base.
+    let base = crate::classify_setup::local_base();
+    lanes.push((
+        "local",
+        Box::new(move |spec: &Spec| {
+            crate::classify_setup::ensure_local(&base)?;
+            let mut engine: Box<dyn DecisionEngine> = Box::new(crate::decide_ollaya::Ollaya::open(
+                ollaya_config(base, false),
+            ));
+            let model = engine.model_id();
+            engine.decide(spec).map(|probs| (model, probs))
+        }),
+    ));
+
+    if !matches!(remote_preset, crate::decide_remote::Preset::Jev) {
+        let model = remote_model.clone();
+        lanes.push((
+            "remote",
+            Box::new(move |spec: &Spec| {
+                let mut engine: Box<dyn DecisionEngine> =
+                    Box::new(open_engine(remote_preset, model)?);
+                let id = engine.model_id();
+                engine.decide(spec).map(|probs| (id, probs))
+            }),
+        ));
+    }
+
+    let (jev_model, jev_overrides) = jev_lane_inputs(remote_preset, remote_model);
+    lanes.push((
+        "jev",
+        Box::new(move |spec: &Spec| {
+            let mut engine: Box<dyn DecisionEngine> =
+                Box::new(open_jev_engine(jev_model, jev_overrides)?);
+            let id = engine.model_id();
+            engine.decide(spec).map(|probs| (id, probs))
+        }),
+    ));
+
+    lanes
+}
+
+/// The model and overrides the `--debug` Jev lane opens with. When Jev is
+/// the selected preset the lane is the remote lane and takes its resolved
+/// model and the shared overrides. Beside another preset, `--remote-model`
+/// and `PIXEL_REMOTE_*` name that preset's model and destination — a chat
+/// model id would make Jev fail and a proxy base would receive the Jev
+/// key — so the lane keeps only Jev's own stored model, if any.
+fn jev_lane_inputs(
+    remote_preset: crate::decide_remote::Preset,
+    remote_model: Option<String>,
+) -> (Option<String>, RemoteOverrides) {
+    let jev = crate::decide_remote::Preset::Jev;
+    if remote_preset == jev {
+        (remote_model, RemoteOverrides::Shared)
+    } else {
+        (
+            stored_remote_model_when_unset(jev, RemoteOverrides::Ignored),
+            RemoteOverrides::Ignored,
+        )
+    }
+}
+
+/// Ask every lane the same spec in parallel and print one result section
+/// per engine — the `--debug` comparison view. Lanes answer independently:
+/// one engine's failure or panic does not abort the others.
+fn run_debug_with(
+    opts: &ClassifyOptions,
+    lanes: Vec<DebugLane>,
+    output: &mut dyn ClassifyOutput,
+) -> Result<(), String> {
+    let spec = one_shot_spec(opts)?;
+    let spec_ref = &spec;
+    let rows = std::thread::scope(|scope| {
+        let (names, handles): (Vec<_>, Vec<_>) = lanes
+            .into_iter()
+            .map(|(name, run)| (name, scope.spawn(move || run(spec_ref))))
+            .unzip();
+        names
+            .into_iter()
+            .zip(handles)
+            .map(|(name, handle)| {
+                (
+                    name,
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err("engine panicked".into())),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+
+    if opts.json {
+        let engines: Vec<Value> = rows
+            .iter()
+            .map(|(name, result)| match result {
+                Ok((model, probs)) => {
+                    json!({"engine": name, "model": model, "probs": probs})
+                }
+                Err(error) => json!({"engine": name, "error": error}),
+            })
+            .collect();
+        return output.print_document(&json!({
+            "text": spec.text,
+            "labels": spec.labels,
+            "engines": engines,
+        }));
+    }
+
+    let mut text = String::new();
+    for (name, result) in &rows {
+        match result {
+            Ok((model, probs)) => {
+                text.push_str(&format!(
+                    "== {name} ({model}) ==\n{}",
+                    render_probs(probs, &spec)
+                ));
+            }
+            Err(error) => text.push_str(&format!("== {name} ==\nerror: {error}\n")),
+        }
+        text.push('\n');
+    }
+    output.write_text(&text)
+}
+
 /// The engine for this invocation: the explicit flag wins, then the stored
 /// preference, then a reachability probe of the local daemon. A resolved
 /// local engine that is not yet answering gets one auto-start chance.
@@ -751,6 +1105,23 @@ fn resolve_remote_preset(
     flag.or(stored).unwrap_or_default()
 }
 
+/// The model the install step stored, when neither `--remote-model` nor
+/// `PIXEL_REMOTE_MODEL` names one — kept below both so an explicit override
+/// always wins over the onboarding choice, and only for the preset it was
+/// stored against (a stored OpenCode Go model must never name a Jev call).
+fn stored_remote_model_when_unset(
+    preset: crate::decide_remote::Preset,
+    overrides: RemoteOverrides,
+) -> Option<String> {
+    let env_set = overrides
+        .var("PIXEL_REMOTE_MODEL")
+        .is_some_and(|s| !s.is_empty());
+    if env_set || crate::config_cmd::classify_remote_preset() != Some(preset) {
+        return None;
+    }
+    crate::config_cmd::classify_remote_model()
+}
+
 /// The Ollaya engine config for one classify call. `--if-warm` gets the
 /// prompt hook's short whole-request cap: its warm check is a TCP connect
 /// only, so a daemon that accepts while it is still loading the model would
@@ -775,11 +1146,17 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
         opts.remote_preset,
         crate::config_cmd::classify_remote_preset(),
     );
-    let remote_model = opts.remote_model.clone();
+    let remote_model = opts
+        .remote_model
+        .clone()
+        .or_else(|| stored_remote_model_when_unset(remote_preset, RemoteOverrides::Shared));
     // `opts` moves into `run_with`; the engine opener still needs the flag.
     let if_warm = opts.if_warm;
     let stdin = std::io::stdin();
     let mut output = ProductionOutput;
+    if opts.debug {
+        return run_debug_with(&opts, debug_lanes(remote_preset, remote_model), &mut output);
+    }
     run_with(
         opts,
         resolve_engine_for,
@@ -799,9 +1176,14 @@ pub(crate) fn open_resolved(
     if_warm: bool,
 ) -> Result<Box<dyn DecisionEngine>, String> {
     match resolved {
-        crate::classify_setup::ResolvedEngine::Remote => {
-            open_engine(preset, model).map(|engine| Box::new(engine) as _)
-        }
+        crate::classify_setup::ResolvedEngine::Remote => match preset {
+            // Jev speaks TypeSafe's decision wire, not `/chat/completions`;
+            // it resolves its base/model/key through the same config.
+            crate::decide_remote::Preset::Jev => {
+                open_jev_engine(model, RemoteOverrides::Shared).map(|engine| Box::new(engine) as _)
+            }
+            _ => open_engine(preset, model).map(|engine| Box::new(engine) as _),
+        },
         crate::classify_setup::ResolvedEngine::Local { base } => Ok(Box::new(
             crate::decide_ollaya::Ollaya::open(ollaya_config(base, if_warm)),
         ) as _),
@@ -839,12 +1221,15 @@ pub(crate) fn open_session(
         // prompt-intent battery (which `task_intent` selects) is never what
         // it wants.
         task_intent: false,
+        debug: false,
     };
     let resolved = resolve_engine_for(&opts)?;
+    let resolved_preset =
+        resolve_remote_preset(preset, crate::config_cmd::classify_remote_preset());
     open_resolved(
         resolved,
-        resolve_remote_preset(preset, crate::config_cmd::classify_remote_preset()),
-        model,
+        resolved_preset,
+        model.or_else(|| stored_remote_model_when_unset(resolved_preset, RemoteOverrides::Shared)),
         false,
     )
 }
@@ -1279,6 +1664,87 @@ mod tests {
             crate::decide_ollaya::OLLAYA_BASIS
         );
         assert!(ollaya.decide_battery("state").is_err());
+
+        // Hosted Jev rides the same trait: metadata disclosed, confidence
+        // carried in the snapshot, battery refused — the remote contract
+        // with Jev's own basis.
+        let mut jev = crate::decide_jev::Jev::with_post(
+            crate::decide_jev::JevConfig {
+                model_name: "test-jev".to_string(),
+                key: Some("tsk-test".to_string()),
+                ..Default::default()
+            },
+            |_config, _body| {
+                Ok(json!({
+                    "model": "test-jev",
+                    "answers": {"q1": {"type": "choice", "choice": "yes",
+                                       "probabilities": {"yes": 0.9, "no": 0.1},
+                                       "confidence": 0.8}},
+                    "usage": {}
+                }))
+            },
+        );
+        let jev_probs = jev.decide(&spec).unwrap();
+        let jev_document = document(&jev, &spec, &jev_probs);
+        assert_eq!(
+            jev_probs["yes"], 0.9,
+            "the hosted distribution passes through"
+        );
+        assert_eq!(jev_document["snapshot"]["model"], "test-jev");
+        assert_eq!(jev_document["snapshot"]["provider"], "jev");
+        assert_eq!(jev_document["snapshot"]["deterministic"], false);
+        assert_eq!(jev_document["snapshot"]["confidence"], 0.8);
+        assert_eq!(
+            jev_document["epistemics"]["basis"],
+            crate::decide_jev::JEV_BASIS
+        );
+        assert!(jev.decide_battery("state").is_err());
+    }
+
+    /// The `Jev` preset must dispatch to the TypeSafe adapter, not the
+    /// chat-completion one: the two disclose different bases, so a routing
+    /// mistake is observable without any network.
+    #[test]
+    fn open_resolved_routes_the_jev_preset_to_the_typesafe_engine() {
+        // The hosted engine refuses to open without a key; the value is
+        // never asserted on or printed. Under ENV_LOCK with a scratch HOME,
+        // so neither the user's stored preset nor another test's
+        // TYPESAFE_API_KEY leaks in, and the base is a closed loopback port
+        // so the decide below fails fast without leaving the machine.
+        let _env = jev_env(&[
+            ("TYPESAFE_API_KEY", Some("tsk-routing-test")),
+            ("PIXEL_REMOTE_BASE", Some("http://127.0.0.1:9")),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        let mut jev = open_resolved(
+            crate::classify_setup::ResolvedEngine::Remote,
+            crate::decide_remote::Preset::Jev,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(jev.provider(), Some("jev"));
+        assert_eq!(jev.basis(), crate::decide_jev::JEV_BASIS);
+        // The trait shim must really delegate: a hollowed-out decide() that
+        // fabricated an answer would pass here if this assertion only ran
+        // the inherent method — through Box<dyn DecisionEngine> a fake key
+        // or an unreachable host must surface as an Err, never an Ok.
+        let probe = spec("t", "", &["yes", "no"], &[]);
+        assert!(
+            jev.decide(&probe).is_err(),
+            "a placeholder key can never produce a real jev answer"
+        );
+        // Chat presets keep the chat adapter — the local preset needs no
+        // key at all, so the same resolution path must still open it.
+        let chat = open_resolved(
+            crate::classify_setup::ResolvedEngine::Remote,
+            crate::decide_remote::Preset::Local,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(chat.basis(), REMOTE_BASIS);
     }
 
     /// A criterion missing its `label=` prefix is rejected with the declared
@@ -1346,6 +1812,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: false,
         };
         let e = one_shot_spec(&opts(None, &["a", "b"], &[])).unwrap_err();
@@ -1360,6 +1827,121 @@ mod tests {
         assert_eq!(s.text, "t");
         assert_eq!(s.context, "the rubric");
         assert_eq!(s.criteria["a"], "desc");
+    }
+
+    /// Buffer `write_text`/`print_document` capture for output assertions.
+    struct BufferOutput {
+        text: String,
+        docs: Vec<Value>,
+    }
+
+    impl ClassifyOutput for BufferOutput {
+        fn write_text(&mut self, text: &str) -> Result<(), String> {
+            self.text.push_str(text);
+            Ok(())
+        }
+
+        fn print_document(&mut self, document: &Value) -> Result<(), String> {
+            self.docs.push(document.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn run_debug_with_runs_every_lane_and_reports_each_outcome() {
+        let opts = ClassifyOptions {
+            text: Some("t".to_string()),
+            context: None,
+            labels: vec!["yes".to_string(), "no".to_string()],
+            criteria: Vec::new(),
+            remote_preset: None,
+            remote_model: None,
+            engine: None,
+            ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
+            jsonl: false,
+            if_warm: false,
+            task_intent: false,
+            debug: true,
+            json: false,
+        };
+        let lanes: Vec<DebugLane> = vec![
+            (
+                "local",
+                Box::new(|_spec: &Spec| {
+                    Ok((
+                        "winnow:e4b".to_string(),
+                        BTreeMap::from([("yes".to_string(), 0.9), ("no".to_string(), 0.1)]),
+                    ))
+                }),
+            ),
+            (
+                "jev",
+                Box::new(|_spec: &Spec| Err("no TYPESAFE_API_KEY".to_string())),
+            ),
+        ];
+
+        let mut out = BufferOutput {
+            text: String::new(),
+            docs: Vec::new(),
+        };
+        run_debug_with(&opts, lanes, &mut out).unwrap();
+
+        assert!(
+            out.text.contains("== local (winnow:e4b) =="),
+            "{}",
+            out.text
+        );
+        assert!(out.text.contains("yes: 0.900"), "{}", out.text);
+        assert!(out.text.contains("predicted: yes"), "{}", out.text);
+        assert!(
+            out.text.contains("== jev ==\nerror: no TYPESAFE_API_KEY"),
+            "{}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn run_debug_with_json_lists_one_entry_per_engine() {
+        let opts = ClassifyOptions {
+            text: Some("t".to_string()),
+            context: None,
+            labels: vec!["yes".to_string(), "no".to_string()],
+            criteria: Vec::new(),
+            remote_preset: None,
+            remote_model: None,
+            engine: None,
+            ollaya_url: crate::decide_ollaya::DEFAULT_BASE.to_string(),
+            jsonl: false,
+            if_warm: false,
+            task_intent: false,
+            debug: true,
+            json: true,
+        };
+        let lanes: Vec<DebugLane> = vec![
+            (
+                "remote",
+                Box::new(|_spec: &Spec| {
+                    Ok((
+                        "deepseek-v4.1-flash".to_string(),
+                        BTreeMap::from([("yes".to_string(), 0.7), ("no".to_string(), 0.3)]),
+                    ))
+                }),
+            ),
+            ("jev", Box::new(|_spec: &Spec| Err("no key".to_string()))),
+        ];
+
+        let mut out = BufferOutput {
+            text: String::new(),
+            docs: Vec::new(),
+        };
+        run_debug_with(&opts, lanes, &mut out).unwrap();
+
+        let engines = out.docs[0]["engines"].as_array().unwrap();
+        assert_eq!(engines.len(), 2);
+        assert_eq!(engines[0]["engine"], "remote");
+        assert_eq!(engines[0]["probs"]["yes"], 0.7);
+        assert_eq!(engines[1]["engine"], "jev");
+        assert_eq!(engines[1]["error"], "no key");
     }
 
     #[test]
@@ -1569,6 +2151,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: false,
         };
         let mut output = RecordingOutput::default();
@@ -1600,6 +2183,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: true,
         };
         run_with(
@@ -1798,6 +2382,7 @@ mod tests {
             jsonl: true,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: false,
         };
         let mut output = RecordingOutput::default();
@@ -1864,6 +2449,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+                debug: false,
                 json: false,
             },
             test_resolve,
@@ -1914,6 +2500,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+                debug: false,
                 json: false,
             },
             |_| {
@@ -1953,6 +2540,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+                debug: false,
                 json: false,
             },
             test_resolve,
@@ -2015,6 +2603,7 @@ mod tests {
             jsonl: true,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: false,
         };
         let mut output = RecordingOutput::default();
@@ -2068,6 +2657,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+                debug: false,
                 json: true,
             },
             test_resolve,
@@ -2132,6 +2722,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+            debug: false,
             json: false,
         };
         // A dead server address fails the decision with a transport error —
@@ -2188,5 +2779,411 @@ mod tests {
             render_probs(&probs, &spec),
             "no: 0.250\nyes: 0.750\npredicted: yes\n"
         );
+    }
+
+    // -- stored remote overrides ----------------------------------------------
+
+    /// Holds ENV_LOCK while pointing HOME at a scratch dir and pinning the
+    /// `PIXEL_REMOTE_*` vars the stored-* helpers consult; every mutation is
+    /// restored when the guard drops (the lock field drops last).
+    struct ScopedEnv {
+        home_dir: std::path::PathBuf,
+        saved: Vec<(String, Option<std::ffi::OsString>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ScopedEnv {
+        fn new(vars: &[(&str, Option<&str>)]) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let lock = crate::ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home_dir = std::env::temp_dir().join(format!(
+                "pixel-classify-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let mut saved: Vec<(String, Option<std::ffi::OsString>)> =
+                vec![("HOME".to_string(), std::env::var_os("HOME"))];
+            for (name, _) in vars {
+                saved.push((name.to_string(), std::env::var_os(name)));
+            }
+            // SAFETY: under ENV_LOCK for the test's whole duration; every
+            // change is restored in Drop while the lock is still held.
+            unsafe { std::env::set_var("HOME", &home_dir) };
+            for (name, value) in vars {
+                // SAFETY: under ENV_LOCK (see above).
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+            Self {
+                home_dir,
+                saved,
+                _lock: lock,
+            }
+        }
+
+        fn write_config(&self, doc: &str) {
+            let path = self.home_dir.join(".pixel/config.yaml");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, doc).unwrap();
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: still under ENV_LOCK — `_lock` drops after this.
+            unsafe {
+                for (name, value) in &self.saved {
+                    match value {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.home_dir);
+        }
+    }
+
+    #[test]
+    fn stored_base_when_unset_should_return_the_stored_https_base() {
+        let env = ScopedEnv::new(&[
+            ("PIXEL_REMOTE_BASE", None),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        env.write_config(
+            "classify: {remote_preset: openrouter, remote_base: 'https://stored.example'}\n",
+        );
+        let config = crate::decide_remote::resolve_config(
+            crate::decide_remote::Preset::Openrouter,
+            None,
+            Some("sk-test".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            stored_base_when_unset(&config, RemoteOverrides::Shared).as_deref(),
+            Ok("https://stored.example")
+        );
+    }
+
+    #[test]
+    fn stored_base_when_unset_should_let_an_explicit_env_base_win() {
+        let env = ScopedEnv::new(&[
+            ("PIXEL_REMOTE_BASE", Some("https://env.example")),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        env.write_config(
+            "classify: {remote_preset: openrouter, remote_base: 'https://stored.example'}\n",
+        );
+        let config = crate::decide_remote::resolve_config(
+            crate::decide_remote::Preset::Openrouter,
+            None,
+            Some("sk-test".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            stored_base_when_unset(&config, RemoteOverrides::Shared).unwrap(),
+            config.base
+        );
+    }
+
+    #[test]
+    fn stored_base_when_unset_should_treat_an_empty_env_base_as_unset() {
+        let env = ScopedEnv::new(&[
+            ("PIXEL_REMOTE_BASE", Some("")),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        env.write_config(
+            "classify: {remote_preset: openrouter, remote_base: 'https://stored.example'}\n",
+        );
+        let config = crate::decide_remote::resolve_config(
+            crate::decide_remote::Preset::Openrouter,
+            None,
+            Some("sk-test".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            stored_base_when_unset(&config, RemoteOverrides::Shared).as_deref(),
+            Ok("https://stored.example")
+        );
+    }
+
+    #[test]
+    fn stored_base_when_unset_should_refuse_a_cleartext_stored_base_only_with_a_key() {
+        let env = ScopedEnv::new(&[
+            ("PIXEL_REMOTE_BASE", None),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        env.write_config(
+            "classify: {remote_preset: openrouter, remote_base: 'http://plain.example'}\n",
+        );
+        let keyed = crate::decide_remote::resolve_config(
+            crate::decide_remote::Preset::Openrouter,
+            None,
+            Some("sk-test".into()),
+        )
+        .unwrap();
+        assert!(stored_base_when_unset(&keyed, RemoteOverrides::Shared).is_err());
+        env.write_config("classify: {remote_preset: local, remote_base: 'http://plain.example'}\n");
+        let keyless =
+            crate::decide_remote::resolve_config(crate::decide_remote::Preset::Local, None, None)
+                .unwrap();
+        assert_eq!(
+            stored_base_when_unset(&keyless, RemoteOverrides::Shared).as_deref(),
+            Ok("http://plain.example")
+        );
+    }
+
+    #[test]
+    fn stored_base_when_unset_should_ignore_a_base_stored_for_another_preset() {
+        let env = ScopedEnv::new(&[
+            ("PIXEL_REMOTE_BASE", None),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
+        env.write_config(
+            "classify: {remote_preset: jev, remote_base: 'https://api.typesafe.ai'}\n",
+        );
+        let config = crate::decide_remote::resolve_config(
+            crate::decide_remote::Preset::Openrouter,
+            None,
+            Some("sk-test".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            stored_base_when_unset(&config, RemoteOverrides::Shared).unwrap(),
+            config.base
+        );
+    }
+
+    #[test]
+    fn stored_remote_model_when_unset_should_yield_the_stored_model() {
+        let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", None)]);
+        env.write_config("classify: {remote_preset: openrouter, remote_model: stored-m}\n");
+        assert_eq!(
+            stored_remote_model_when_unset(
+                crate::decide_remote::Preset::Openrouter,
+                RemoteOverrides::Shared
+            )
+            .as_deref(),
+            Some("stored-m")
+        );
+    }
+
+    #[test]
+    fn stored_remote_model_when_unset_should_defer_to_a_set_env_model() {
+        {
+            let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", Some("env-m"))]);
+            env.write_config("classify: {remote_preset: openrouter, remote_model: stored-m}\n");
+            assert_eq!(
+                stored_remote_model_when_unset(
+                    crate::decide_remote::Preset::Openrouter,
+                    RemoteOverrides::Shared
+                ),
+                None
+            );
+        }
+        {
+            let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", Some(""))]);
+            env.write_config("classify: {remote_preset: openrouter, remote_model: stored-m}\n");
+            assert_eq!(
+                stored_remote_model_when_unset(
+                    crate::decide_remote::Preset::Openrouter,
+                    RemoteOverrides::Shared
+                )
+                .as_deref(),
+                Some("stored-m")
+            );
+        }
+    }
+
+    #[test]
+    fn stored_remote_model_when_unset_should_ignore_a_model_stored_for_another_preset() {
+        let env = ScopedEnv::new(&[("PIXEL_REMOTE_MODEL", None)]);
+        env.write_config("classify: {remote_preset: jev, remote_model: jev-latest}\n");
+        assert_eq!(
+            stored_remote_model_when_unset(
+                crate::decide_remote::Preset::Openrouter,
+                RemoteOverrides::Shared
+            ),
+            None
+        );
+    }
+
+    /// Every variable the Jev key, base and model resolution reads, so a
+    /// test controls all of them (Infisical stays unconfigured).
+    const JEV_ENV_UNSET: [(&str, Option<&str>); 6] = [
+        ("PIXEL_INFISICAL_TOKEN", None),
+        ("INFISICAL_TOKEN", None),
+        ("PIXEL_INFISICAL_PROJECT_ID", None),
+        ("PIXEL_INFISICAL_URL", None),
+        ("PIXEL_INFISICAL_ENV", None),
+        ("PIXEL_INFISICAL_SECRET_NAME", None),
+    ];
+
+    fn jev_env(vars: &[(&'static str, Option<&'static str>)]) -> ScopedEnv {
+        let mut all = JEV_ENV_UNSET.to_vec();
+        all.extend_from_slice(vars);
+        ScopedEnv::new(&all)
+    }
+
+    /// A non-Jev preset's shared overrides, beside Jev's own key.
+    const OTHER_PRESET_OVERRIDES: [(&str, Option<&str>); 5] = [
+        ("PIXEL_REMOTE_BASE", Some("https://proxy.example/v1")),
+        ("PIXEL_REMOTE_MODEL", Some("chat-m")),
+        ("PIXEL_REMOTE_KEY_ENV", Some("PIXEL_TEST_OTHER_KEY")),
+        ("PIXEL_TEST_OTHER_KEY", Some("sk-other")),
+        ("TYPESAFE_API_KEY", Some("ts-key")),
+    ];
+
+    #[test]
+    fn remote_overrides_ignored_should_hide_only_the_shared_pixel_remote_vars() {
+        let _env = jev_env(&OTHER_PRESET_OVERRIDES);
+        assert_eq!(RemoteOverrides::Ignored.var("PIXEL_REMOTE_BASE"), None);
+        assert_eq!(RemoteOverrides::Ignored.var("PIXEL_REMOTE_KEY_ENV"), None);
+        assert_eq!(
+            RemoteOverrides::Ignored.var("TYPESAFE_API_KEY").as_deref(),
+            Some("ts-key")
+        );
+        assert_eq!(
+            RemoteOverrides::Shared.var("PIXEL_REMOTE_BASE").as_deref(),
+            Some("https://proxy.example/v1")
+        );
+    }
+
+    #[test]
+    fn jev_config_beside_another_preset_should_not_inherit_its_overrides() {
+        let _env = jev_env(&OTHER_PRESET_OVERRIDES);
+        let own = jev_config(None, RemoteOverrides::Ignored).unwrap();
+        assert_eq!(own.base, crate::decide_jev::DEFAULT_BASE);
+        assert_eq!(own.model, crate::decide_jev::DEFAULT_MODEL);
+        assert_eq!(own.key_value().as_deref(), Some("ts-key"));
+
+        let shared = jev_config(None, RemoteOverrides::Shared).unwrap();
+        assert_eq!(shared.base, "https://proxy.example/v1");
+        assert_eq!(shared.model, "chat-m");
+        assert_eq!(shared.key_value().as_deref(), Some("sk-other"));
+    }
+
+    #[test]
+    fn remote_overrides_ignored_should_hide_the_infisical_secret_name_override() {
+        let _env = jev_env(&[("PIXEL_INFISICAL_SECRET_NAME", Some("OPENROUTER_API_KEY"))]);
+        assert_eq!(
+            RemoteOverrides::Ignored.var("PIXEL_INFISICAL_SECRET_NAME"),
+            None
+        );
+        assert_eq!(
+            RemoteOverrides::Shared
+                .var("PIXEL_INFISICAL_SECRET_NAME")
+                .as_deref(),
+            Some("OPENROUTER_API_KEY")
+        );
+    }
+
+    #[test]
+    fn jev_key_env_should_follow_the_host_the_key_goes_to() {
+        assert_eq!(
+            jev_key_env("https://opencode.ai/zen"),
+            Some("OPENCODE_API_KEY")
+        );
+        assert_eq!(
+            jev_key_env("https://OpenCode.ai:443/zen"),
+            Some("OPENCODE_API_KEY")
+        );
+        assert_eq!(
+            jev_key_env("https://api.typesafe.ai"),
+            Some("TYPESAFE_API_KEY")
+        );
+        assert_eq!(
+            jev_key_env("https://opencode.ai.evil.example/zen"),
+            Some("TYPESAFE_API_KEY")
+        );
+    }
+
+    #[test]
+    fn jev_config_through_opencode_should_send_the_opencode_key_not_the_typesafe_one() {
+        let env = jev_env(&[
+            ("PIXEL_REMOTE_BASE", None),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+            ("OPENCODE_API_KEY", Some("oc-key")),
+            ("TYPESAFE_API_KEY", Some("ts-key")),
+        ]);
+        env.write_config(
+            "classify: {remote_preset: jev, remote_base: 'https://opencode.ai/zen'}\n",
+        );
+        let config = jev_config(None, RemoteOverrides::Shared).unwrap();
+        assert_eq!(config.base, "https://opencode.ai/zen");
+        assert_eq!(config.key_value().as_deref(), Some("oc-key"));
+
+        env.write_config("classify: {remote_preset: jev}\n");
+        let config = jev_config(None, RemoteOverrides::Shared).unwrap();
+        assert_eq!(config.base, crate::decide_jev::DEFAULT_BASE);
+        assert_eq!(config.key_value().as_deref(), Some("ts-key"));
+    }
+
+    #[test]
+    fn jev_config_beside_another_preset_should_keep_its_own_stored_base() {
+        let env = jev_env(&OTHER_PRESET_OVERRIDES);
+        env.write_config("classify: {remote_preset: jev, remote_base: 'https://jev.example'}\n");
+        let own = jev_config(None, RemoteOverrides::Ignored).unwrap();
+        assert_eq!(own.base, "https://jev.example");
+    }
+
+    #[test]
+    fn jev_lane_inputs_should_take_the_selected_model_only_when_jev_is_selected() {
+        let jev = crate::decide_remote::Preset::Jev;
+        let openrouter = crate::decide_remote::Preset::Openrouter;
+        {
+            let env = jev_env(&[("PIXEL_REMOTE_MODEL", None)]);
+            env.write_config("classify: {remote_preset: openrouter, remote_model: chat-m}\n");
+            assert_eq!(
+                jev_lane_inputs(openrouter, Some("chat-m".into())),
+                (None, RemoteOverrides::Ignored)
+            );
+            assert_eq!(
+                jev_lane_inputs(jev, Some("jev-pinned".into())),
+                (Some("jev-pinned".into()), RemoteOverrides::Shared)
+            );
+        }
+        {
+            // Saved for Jev, selected away from it by the flag: the lane
+            // keeps Jev's own model, whatever PIXEL_REMOTE_MODEL says.
+            let env = jev_env(&[("PIXEL_REMOTE_MODEL", Some("chat-env"))]);
+            env.write_config("classify: {remote_preset: jev, remote_model: jev-stored}\n");
+            assert_eq!(
+                jev_lane_inputs(openrouter, Some("chat-m".into())),
+                (Some("jev-stored".into()), RemoteOverrides::Ignored)
+            );
+        }
+    }
+
+    #[test]
+    fn debug_flag_should_reject_an_explicit_ollaya_url() {
+        const PARSER_TEST_STACK: usize = 16_777_216;
+        std::thread::Builder::new()
+            .stack_size(PARSER_TEST_STACK)
+            .spawn(move || {
+                let base = ["pixel", "classify", "state", "--label", "a,b", "--debug"];
+                assert!(crate::Cli::try_parse_from(base).is_ok());
+                let err = crate::Cli::try_parse_from(
+                    base.into_iter()
+                        .chain(["--ollaya-url", "http://127.0.0.1:9999"]),
+                )
+                .map(|_| ())
+                .unwrap_err();
+                assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
