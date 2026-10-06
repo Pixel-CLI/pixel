@@ -1988,4 +1988,68 @@ mod tests {
         );
         assert_eq!(substitute("plain", &vars), "plain");
     }
+
+    #[test]
+    fn required_var_is_enforced_only_when_missing() {
+        let flow = Flow {
+            vars: vec![FlowVar {
+                name: "acct".into(),
+                description: String::new(),
+                required: true,
+                default: None,
+            }],
+            ..flow_with(vec![])
+        };
+        let mut b = Scripted::new(vec![]);
+        let missing = execute_with(&flow, &HashMap::new(), &mut b);
+        assert!(!missing.success);
+        assert!(
+            missing
+                .error
+                .unwrap()
+                .contains("missing required variable 'acct'")
+        );
+        let vars = HashMap::from([("acct".to_string(), "a".to_string())]);
+        let given = execute_with(&flow, &vars, &mut b);
+        assert!(given.success, "{:?}", given.error);
+    }
+
+    #[test]
+    fn preconditions_are_logged_only_when_present() {
+        let mut b = Scripted::new(vec![]);
+        let none = execute_with(&flow_with(vec![]), &HashMap::new(), &mut b);
+        assert!(!none.log.contains("# Preconditions"), "{}", none.log);
+        let flow = Flow {
+            preconditions: vec!["logged out".into()],
+            ..flow_with(vec![])
+        };
+        let some = execute_with(&flow, &HashMap::new(), &mut b);
+        assert!(some.log.contains("#   - logged out"), "{}", some.log);
+    }
+
+    #[test]
+    fn js_click_on_failure_alone_triggers_the_eval_fallback() {
+        let snap = "- button \"Next\" [ref=e5]";
+        let mut b = Scripted::new(vec![Ok(snap); 64]);
+        let step = FlowStep {
+            ref_hint: Some("Next".into()),
+            on_failure: Some("use JS click".into()),
+            ..step("click")
+        };
+        let (result, log) = run_step(&step, &mut b);
+        assert_eq!(result, Ok(true), "{log}");
+        assert!(
+            b.calls().iter().any(|c| c.first() == Some(&"eval")),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn condition_of_only_stop_words_is_never_met() {
+        assert!(!evaluate_condition(
+            "page shows button",
+            "- text \"page shows button\"",
+            None
+        ));
+    }
 }

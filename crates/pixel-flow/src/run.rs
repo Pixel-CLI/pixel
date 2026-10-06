@@ -655,4 +655,14 @@ mod tests {
         assert!(!out.contains("# → THEN:"), "{out}");
         assert!(out.contains("# → ELSE:"), "{out}");
     }
+
+    #[test]
+    fn replay_prints_preconditions_only_when_present() {
+        let out = run(&make_flow(vec![], vec![]), &HashMap::new()).unwrap();
+        assert!(!out.contains("# Preconditions"), "{out}");
+        let mut flow = make_flow(vec![], vec![]);
+        flow.preconditions = vec!["signed out".into()];
+        let out = run(&flow, &HashMap::new()).unwrap();
+        assert!(out.contains("#   - signed out"), "{out}");
+    }
 }
