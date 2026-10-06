@@ -308,3 +308,46 @@ fn rewrite_input_hash_should_change_with_every_option() {
     };
     assert_eq!(rewrite_input_hash(&same_but_new_id), h);
 }
+
+#[test]
+fn resolve_base_should_skip_a_fully_pushed_self_tracking_upstream() {
+    let fx = Fixture::new();
+    let remote = TempDir::new().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    let url = remote.path().to_str().unwrap();
+    git(fx.root(), &["remote", "add", "origin", url]);
+    git(fx.root(), &["push", "-q", "origin", "main"]);
+    git(fx.root(), &["push", "-q", "-u", "origin", "feature"]);
+    let main = git(fx.root(), &["rev-parse", "main"]);
+    let runner = GitRunner::new(fx.root());
+    let default = Some("main".to_string());
+    assert_eq!(
+        resolve_base(&runner, "feature", &None, "origin", &default),
+        Ok(main)
+    );
+}
+
+#[test]
+fn resolve_base_should_keep_a_self_tracking_upstream_that_is_behind() {
+    let fx = Fixture::new();
+    let remote = TempDir::new().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    let url = remote.path().to_str().unwrap();
+    git(fx.root(), &["remote", "add", "origin", url]);
+    git(fx.root(), &["push", "-q", "origin", "main"]);
+    git(
+        fx.root(),
+        &["push", "-q", "origin", "feature~1:refs/heads/feature"],
+    );
+    git(
+        fx.root(),
+        &["branch", "-q", "--set-upstream-to=origin/feature"],
+    );
+    let pushed = git(fx.root(), &["rev-parse", "feature~1"]);
+    let runner = GitRunner::new(fx.root());
+    let default = Some("main".to_string());
+    assert_eq!(
+        resolve_base(&runner, "feature", &None, "origin", &default),
+        Ok(pushed)
+    );
+}

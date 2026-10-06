@@ -115,13 +115,10 @@ fn parse_unmerged(record: &str) -> Option<StatusChange> {
 /// branch header lines are irrelevant to fingerprinting and are skipped,
 /// callers should not pass `--branch`).
 pub fn parse_porcelain_v2(output: &str) -> Vec<StatusChange> {
-    let records: Vec<&str> = output.split('\0').collect();
+    let mut records = output.split('\0');
     let mut changes = Vec::new();
-    let mut i = 0usize;
-    while i < records.len() {
-        let record = records[i];
+    while let Some(record) = records.next() {
         if record.is_empty() {
-            i += 1;
             continue;
         }
         if record.starts_with("1 ") {
@@ -129,11 +126,11 @@ pub fn parse_porcelain_v2(output: &str) -> Vec<StatusChange> {
                 changes.push(change);
             }
         } else if record.starts_with("2 ") {
-            let original = records.get(i + 1).copied();
+            // Consume the originalPath record, same as the TS loop.
+            let original = records.next();
             if let Some(change) = parse_renamed(record, original) {
                 changes.push(change);
             }
-            i += 1; // consume the originalPath record, same as the TS loop.
         } else if record.starts_with("u ") {
             if let Some(change) = parse_unmerged(record) {
                 changes.push(change);
@@ -159,7 +156,6 @@ pub fn parse_porcelain_v2(output: &str) -> Vec<StatusChange> {
                 conflicted: false,
             });
         }
-        i += 1;
     }
     changes
 }

@@ -183,6 +183,11 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[test]
+    fn retention_age_should_be_one_day_in_ms() {
+        assert_eq!(RETENTION_MAX_AGE_MS, 86_400_000);
+    }
+
     fn make_record(root: &str, head: &str, fps: &[(&str, &str)]) -> SnapshotRecord {
         let mut fingerprints = BTreeMap::new();
         for (p, h) in fps {

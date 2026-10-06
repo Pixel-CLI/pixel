@@ -1093,6 +1093,32 @@ mod tests {
     /// kept its tables and only refused to serve them would still hand a
     /// hostile repository's rows to a later query through another path.
     #[test]
+    fn needs_rebuild_should_follow_the_marker_and_the_schema_version() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("h.db");
+        assert!(!FactsStore::needs_rebuild(&db).unwrap(), "absent");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE _pixel_marker (key TEXT PRIMARY KEY, val TEXT NOT NULL);
+             INSERT INTO _pixel_marker (key, val) VALUES ('created_by', 'pixel-facts');",
+        )
+        .unwrap();
+        let at = |version: i64| {
+            conn.execute_batch(&format!("PRAGMA user_version = {version}"))
+                .unwrap();
+            FactsStore::needs_rebuild(&db).unwrap()
+        };
+        assert!(!at(0), "pre-versioned and empty: stamped in place");
+        assert!(!at(FACTS_SCHEMA_VERSION));
+        assert!(!at(UPGRADES_IN_PLACE_FROM));
+        assert!(at(FACTS_SCHEMA_VERSION + 100));
+        conn.execute_batch("CREATE TABLE commits (id INTEGER)")
+            .unwrap();
+        assert!(at(0), "pre-versioned with rows: rebuilt");
+        assert!(!at(FACTS_SCHEMA_VERSION));
+    }
+
+    #[test]
     fn open_should_wipe_a_planted_history_database() {
         for (case, marker) in [
             ("no marker at all", None),

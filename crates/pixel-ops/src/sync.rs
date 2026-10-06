@@ -125,5 +125,11 @@ mod tests {
 
         let result = sync(dir.path(), "origin", None).unwrap();
         assert_eq!(result["synced"], json!(true));
+        let refs = result["refs"].as_array().unwrap();
+        assert!(
+            refs.iter()
+                .any(|r| r["ref"] == "origin/main" && !r["oid"].as_str().unwrap().is_empty()),
+            "{refs:?}"
+        );
     }
 }
