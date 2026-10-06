@@ -680,11 +680,24 @@ pub fn camelize_path(path: &str) -> String {
         .join("::")
 }
 
+/// Singular words ending in `s` whose plural Rails' default inflections
+/// spell with `es` (`alias`/`status` and `bus` rules).
+const ES_STEMS: &[&str] = &["alias", "status", "bus"];
+
 /// The regular English singular Rails' default inflections give the common
 /// cases (`orders` → `order`, `categories` → `category`, `boxes` → `box`);
-/// irregular words (`people`) keep their plural.
+/// irregular words (`people`) keep their plural. The words Rails' rules
+/// single out before the trailing `s` (`statuses` → `status`, `aliases`,
+/// `buses`) keep their stem, and are already singular without the `es`.
+/// <https://github.com/rails/rails/blob/main/activesupport/lib/active_support/inflections.rb>
 pub fn singularize(word: &str) -> String {
-    if let Some(stem) = word.strip_suffix("ies") {
+    if let Some(stem) = ES_STEMS.iter().find_map(|stem| {
+        word.strip_suffix("es")
+            .filter(|w| w.ends_with(stem))
+            .or_else(|| word.ends_with(stem).then_some(word))
+    }) {
+        stem.to_string()
+    } else if let Some(stem) = word.strip_suffix("ies") {
         format!("{stem}y")
     } else if let Some(stem) = ["sses", "shes", "ches", "xes", "zes"]
         .iter()
@@ -701,9 +714,12 @@ pub fn singularize(word: &str) -> String {
 
 /// The regular English plural Rails' default inflections give (`profile` →
 /// `profiles`, `category` → `categories`, `box` → `boxes`, `address` →
-/// `addresses`); a word already ending in `s` (`settings`) is kept.
+/// `addresses`, `status` → `statuses`); any other word already ending in
+/// `s` (`settings`) is kept.
 pub fn pluralize(word: &str) -> String {
-    if let Some(stem) = word.strip_suffix('y')
+    if ES_STEMS.iter().any(|stem| word.ends_with(stem)) {
+        format!("{word}es")
+    } else if let Some(stem) = word.strip_suffix('y')
         && !stem.ends_with(['a', 'e', 'i', 'o', 'u'])
     {
         format!("{stem}ies")
@@ -866,6 +882,13 @@ end
             ("boxes", "box"),
             ("addresses", "address"),
             ("glass", "glass"),
+            ("statuses", "status"),
+            ("order_statuses", "order_status"),
+            ("aliases", "alias"),
+            ("buses", "bus"),
+            ("status", "status"),
+            ("alias", "alias"),
+            ("bus", "bus"),
         ] {
             assert_eq!(singularize(plural), singular, "{plural}");
         }
@@ -876,6 +899,10 @@ end
             ("box", "boxes"),
             ("address", "addresses"),
             ("settings", "settings"),
+            ("status", "statuses"),
+            ("order_status", "order_statuses"),
+            ("alias", "aliases"),
+            ("bus", "buses"),
         ] {
             assert_eq!(pluralize(singular), plural, "{singular}");
         }
