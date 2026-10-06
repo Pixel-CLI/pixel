@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use pixel_graph::GraphStore;
-use pixel_graph::build::{apply_tree_delta, build_graph, tree_delta, update_file};
+use pixel_graph::build::{apply_tree_delta, build_graph, content_oid, tree_delta, update_file};
 use pixel_graph::extract::{extract_file, lang_of, lang_of_file};
 
 const GEMFILE: &str = "source \"https://rubygems.org\"
@@ -366,6 +366,55 @@ fn a_source_only_update_beside_a_lockfile_should_publish_a_fresh_graph() {
     );
     apply_tree_delta(root.path(), &db, &delta).unwrap();
     assert!(tree_delta(root.path(), &db).unwrap().unwrap().fresh);
+}
+
+#[test]
+fn walked_file_records_should_follow_every_lifecycle_transition() {
+    let root = tempfile::tempdir().unwrap();
+    for (rel, body) in TREE {
+        write(root.path(), rel, body);
+    }
+    let db = root.path().join("graph.db");
+    let walked = || GraphStore::open(&db).unwrap().walked_files().unwrap();
+    let oid = |body: &str| content_oid(body.as_bytes());
+    let dev = TREE.iter().find(|(rel, _)| *rel == "bin/dev").unwrap().1;
+    build_graph(root.path(), &db).unwrap();
+    // The build records each walked file it keeps no row for, with its hash.
+    assert_eq!(
+        walked(),
+        [
+            ("Gemfile.lock".to_string(), oid(LOCK)),
+            ("bin/dev".to_string(), oid(dev)),
+        ]
+    );
+    // An edited walked-only file is re-hashed by the update.
+    let edited = "#!/usr/bin/env sh\nexec overmind\n";
+    write(root.path(), "bin/dev", edited);
+    update_file(root.path(), &db, "bin/dev").unwrap();
+    assert_eq!(walked()[1], ("bin/dev".to_string(), oid(edited)));
+    // A removed one leaves no record.
+    fs::remove_file(root.path().join("Gemfile.lock")).unwrap();
+    update_file(root.path(), &db, "Gemfile.lock").unwrap();
+    assert_eq!(walked(), [("bin/dev".to_string(), oid(edited))]);
+    // One that becomes a Ruby source gets a row and loses its record.
+    let ruby = "#!/usr/bin/env ruby\nputs 1\n";
+    write(root.path(), "bin/dev", ruby);
+    update_file(root.path(), &db, "bin/dev").unwrap();
+    assert_eq!(walked(), Vec::<(String, String)>::new());
+    let row = GraphStore::open(&db)
+        .unwrap()
+        .file_by_path("bin/dev")
+        .unwrap()
+        .map(|f| f.blob_oid);
+    assert_eq!(row, Some(oid(ruby)));
+    // A full rebuild drops a stale record and rewrites the rest.
+    GraphStore::open(&db)
+        .unwrap()
+        .record_walked_file("vanished/Gemfile.lock", "0000000000000000")
+        .unwrap();
+    write(root.path(), "Gemfile.lock", LOCK);
+    build_graph(root.path(), &db).unwrap();
+    assert_eq!(walked(), [("Gemfile.lock".to_string(), oid(LOCK))]);
 }
 
 #[test]

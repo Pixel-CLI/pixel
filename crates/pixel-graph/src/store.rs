@@ -893,9 +893,10 @@ impl GraphStore {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Record that the graph walks hash `path` under `blob_oid` but keep no
-    /// source row for it (see the `walked_files` table). Replaces any earlier
-    /// record; [`Self::replace_file`] and [`Self::remove_file`] drop it.
+    /// Records the content hash of a walked file the store keeps no row for.
+    ///
+    /// See the `walked_files` table. Replaces any earlier record;
+    /// [`Self::replace_file`] and [`Self::remove_file`] drop it.
     pub fn record_walked_file(&self, path: &str, blob_oid: &str) -> Result<()> {
         self.conn.exec_cached(
             "INSERT INTO walked_files (path, blob_oid) VALUES (?1, ?2)
@@ -905,13 +906,13 @@ impl GraphStore {
         Ok(())
     }
 
-    /// Drop every `walked_files` record: a full build rewrites them all.
+    /// Drops every `walked_files` record, which a full build then rewrites.
     pub fn clear_walked_files(&self) -> Result<()> {
         self.conn.exec_cached("DELETE FROM walked_files", [])?;
         Ok(())
     }
 
-    /// `(path, blob_oid)` of every walked file the store keeps no row for.
+    /// Returns the path and hash of every walked file without a row, by path.
     pub fn walked_files(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self
             .conn
