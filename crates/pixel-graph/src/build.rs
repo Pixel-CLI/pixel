@@ -20,8 +20,8 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::extract::{FileExtraction, extract_file, lang_of};
 use crate::imports::resolve_import;
 use crate::resolve::{
-    Affected, FileCalls, FileReferences, PendingCall, PendingReference, reconsider_resolved_calls,
-    resolve_affected, resolve_calls, resolve_references,
+    Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference,
+    reconsider_resolved_calls, resolve_affected, resolve_calls, resolve_references,
 };
 use crate::store::{EdgeKind, ExecCached, GraphStore, StoreError, extract_crux};
 
@@ -1122,15 +1122,38 @@ fn update_files_in_one_transaction(
     })
 }
 
+/// A stored file's definitions, as `Affected::record_changed_definitions`
+/// compares them with the ones its new content extracts.
+fn stored_definitions(
+    store: &GraphStore,
+    file_id: i64,
+    path: &str,
+) -> Result<Vec<Definition>, StoreError> {
+    let mut stmt = store.conn().prepare_cached(
+        "SELECT name, qualified, kind, trait_impl FROM symbols WHERE file_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![file_id], |r| {
+        Ok(Definition {
+            path: path.to_string(),
+            name: r.get(0)?,
+            qualified: r.get(1)?,
+            kind: r.get(2)?,
+            trait_impl: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// The row half of an incremental update, inside the caller's transaction:
 /// files, symbols, concepts, imports, calls, references, and the re-resolution
 /// of everything a changed definition may have made ambiguous. Writes no
 /// signature: the caller decides which one (if any) describes the tree it
 /// just synchronised to.
 fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Result<(), BoxErr> {
-    let mut all_changed_names: HashSet<String> = HashSet::new();
     // What the batch changed, before and after, for the re-resolution below.
     let mut affected = Affected::default();
+    let mut before: Vec<Definition> = Vec::new();
+    let mut after: Vec<Definition> = Vec::new();
     let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
 
     let mut extracted: Vec<Extracted> = Vec::with_capacity(files.len());
@@ -1143,9 +1166,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         // re-resolution produces the correct edge type (Calls vs References).
         if let Some(old) = store.file_by_path(rel)? {
             let old_syms = store.symbols_in_file(old.id)?;
-            for sym in &old_syms {
-                affected.record_definition(&sym.name, sym.kind);
-            }
+            before.extend(stored_definitions(store, old.id, rel)?);
             affected.files.insert(old.id);
             for import in store.imports_to_file(old.id)? {
                 affected.files.insert(import.file_id);
@@ -1208,10 +1229,13 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             continue;
         };
 
-        for s in &fx.symbols {
-            all_changed_names.insert(s.name.clone());
-            affected.record_definition(&s.name, s.kind);
-        }
+        after.extend(fx.symbols.iter().map(|s| Definition {
+            path: rel.to_string(),
+            name: s.name.clone(),
+            qualified: s.qualified.clone(),
+            kind: s.kind.as_str().to_string(),
+            trait_impl: s.trait_impl,
+        }));
         extracted.push(Extracted {
             rel: rel.to_string(),
             blob_oid: content_oid(&content),
@@ -1233,6 +1257,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     );
     let added_any = extracted.iter().any(|e| !known_before.contains(&e.rel));
     let stored = store_batch(store, extracted, &all_paths)?;
+    affected.record_changed_definitions(&before, &after);
     // A file new to the graph gets its id here; its importers are any file
     // whose import already resolved to it, and the dangling ones below.
     for &(rel, _) in files {
@@ -1281,7 +1306,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     }
 
     // Any changed definition can invalidate a previously unique target.
-    reconsider_resolved_calls(store, &all_changed_names, &mut affected)?;
+    reconsider_resolved_calls(store, &mut affected)?;
     // Retry what the batch can have changed against the new candidate set.
     resolve_affected(store, &affected)?;
 
@@ -3752,6 +3777,8 @@ mod tests {
     /// - `def initialize` links `Widget.new` (Ruby constructor);
     /// - removing `Beta#shared` and the second `helper` makes each name
     ///   unique: only the definitions the batch had *before* name them;
+    /// - rewriting `Alpha` with the same definitions on other lines changes
+    ///   no name, yet its incoming edge is moved back and must return;
     /// - `export function tool` reaches the call written `t()` through an
     ///   aliased import, found through the importing file;
     /// - the revert undoes each one.
@@ -3786,6 +3813,14 @@ mod tests {
                     ("src/y.rs", Some("pub fn other() {}\n")),
                 ],
                 "Text(\"src/z.rs#caller#function\") | Text(\"src/x.rs#helper#function\")",
+            ),
+            (
+                "same definitions, shifted lines",
+                &[(
+                    "app/alpha.rb",
+                    Some("class Alpha\n  # moved down\n  def shared; end\nend\n"),
+                )],
+                "Text(\"app/caller.rb#Caller#go#method\") | Text(\"app/alpha.rb#Alpha#shared#method\")",
             ),
             (
                 "aliased source defined",

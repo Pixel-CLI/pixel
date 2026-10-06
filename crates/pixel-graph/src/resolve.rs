@@ -1095,14 +1095,48 @@ pub struct Affected {
 }
 
 impl Affected {
-    /// Record a definition of the batch, before or after the change. A
-    /// constant counts by its last segment: `class A::C::B` is named as
-    /// written, while the receiver it shadows (`B.run` inside `A::C`) only
-    /// spells `B`, and the lookup it changes is `A::C::B`'s own segment.
-    pub fn record_definition(&mut self, name: &str, kind: SymbolKind) {
-        self.names.insert(name.to_string());
-        if matches!(kind, SymbolKind::Class | SymbolKind::Module) {
-            let segment = name.rsplit("::").next().unwrap_or(name);
+    /// Record the definitions a batch changed. `before` and `after` list the
+    /// batch files' definitions as a decision reads them — path, name,
+    /// qualified name, kind, trait impl — and only those present a different
+    /// number of times on each side count: a file rewritten with the same
+    /// definitions changes no candidate set, so no decision outside it. Its
+    /// new symbol ids and lines are the demotion's concern (`write_rows`
+    /// moves every incoming edge back and records it in `replayed`).
+    pub fn record_changed_definitions(&mut self, before: &[Definition], after: &[Definition]) {
+        let mut count: HashMap<&Definition, i64> = HashMap::new();
+        for definition in before {
+            *count.entry(definition).or_default() -= 1;
+        }
+        for definition in after {
+            *count.entry(definition).or_default() += 1;
+        }
+        for (definition, n) in count {
+            if n != 0 {
+                self.record_definition(definition);
+            }
+        }
+    }
+
+    /// A changed definition: its name, and the constant a Ruby receiver
+    /// reaches it through. A class or module counts by its last segment
+    /// (`class A::C::B` is named as written, while the receiver it shadows,
+    /// `B.run` inside `A::C`, only spells `B`); a method by its owner's
+    /// (`Widget#initialize` is what `Widget.new` reads).
+    fn record_definition(&mut self, definition: &Definition) {
+        let Definition {
+            name,
+            qualified,
+            kind,
+            ..
+        } = definition;
+        self.names.insert(name.clone());
+        let constant = if matches!(kind.as_str(), "class" | "module") {
+            Some(name.as_str())
+        } else {
+            ruby_owner(qualified).map(|(owner, _)| owner)
+        };
+        if let Some(constant) = constant {
+            let segment = constant.rsplit("::").next().unwrap_or(constant);
             self.constants.insert(segment.to_string());
         }
     }
@@ -1125,6 +1159,16 @@ impl Affected {
             .split(|c: char| !(c.is_alphanumeric() || c == '_'))
             .any(|segment| self.constants.contains(segment))
     }
+}
+
+/// One definition as [`Affected::record_changed_definitions`] compares it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Definition {
+    pub path: String,
+    pub name: String,
+    pub qualified: String,
+    pub kind: String,
+    pub trait_impl: bool,
 }
 
 struct RetryRow {
@@ -1281,8 +1325,8 @@ fn retry(store: &mut GraphStore, rows: Vec<RetryRow>) -> Result<ResolveStats, St
     Ok(stats)
 }
 
-/// Reconsider resolved calls whose target names were defined by a changed
-/// file. Adding a same-name definition can make a previously unique target
+/// Reconsider resolved calls whose target names a changed definition
+/// carries ([`Affected::record_changed_definitions`]). Adding a same-name definition can make a previously unique target
 /// ambiguous. A Ruby receiver call is also replayed when it reads what the
 /// batch changed ([`Affected`]): a new constant can shadow its owner, and a
 /// new `Foo.new` can take its dispatch, without redefining the callee's
@@ -1292,7 +1336,6 @@ fn retry(store: &mut GraphStore, rows: Vec<RetryRow>) -> Result<ResolveStats, St
 /// `affected.replayed` for [`resolve_affected`].
 pub fn reconsider_resolved_calls(
     store: &mut GraphStore,
-    changed_names: &HashSet<String>,
     affected: &mut Affected,
 ) -> Result<(), StoreError> {
     struct ResolvedCall {
@@ -1342,7 +1385,7 @@ pub fn reconsider_resolved_calls(
             .conn()
             .exec_cached("DELETE FROM edges WHERE id = ?1", params![id])?;
     }
-    for name in changed_names {
+    for name in &affected.names {
         let found: Vec<ResolvedCall> = {
             let mut stmt = store.conn().prepare(
                 "SELECT src.file_id, COALESCE(e.callee, dst.name), e.src_id, e.site_line, e.receiver, e.kind
@@ -2561,16 +2604,26 @@ mod tests {
             0,
             "`Job.perform_later` reads `Job#perform` through its class, not the name"
         );
+        let def = |path: &str, name: &str, qualified: &str, kind: &str| Definition {
+            path: path.into(),
+            name: name.into(),
+            qualified: qualified.into(),
+            kind: kind.into(),
+            trait_impl: false,
+        };
         let mut job = Affected::default();
-        job.record_definition("Job", SymbolKind::Class);
-        job.record_definition("perform", SymbolKind::Method);
+        job.record_changed_definitions(
+            &[],
+            &[def("app/job.rb", "perform", "Job#perform", "method")],
+        );
         assert_eq!(
             retried(&mut store, job),
             2,
-            "a file defining `Job#perform` defines `Job`: both job dispatches"
+            "a new `Job#perform` retries both job dispatches through `Job`"
         );
         let mut nested = Affected::default();
-        nested.record_definition("A::Widget", SymbolKind::Class);
+        nested
+            .record_changed_definitions(&[def("app/w.rb", "A::Widget", "A::Widget", "class")], &[]);
         assert_eq!(
             retried(&mut store, nested),
             2,
@@ -2606,5 +2659,63 @@ mod tests {
             "every row of an affected file"
         );
         assert_eq!(resolve_all(&mut store).unwrap().unresolved, 7);
+    }
+
+    /// Only a definition that changed can change a decision elsewhere: a
+    /// file rewritten with the same definitions must leave every other row
+    /// and edge alone, or each edit of a file defining `initialize` or
+    /// `call` re-decides every call to those names in the repository.
+    #[test]
+    fn affected_should_record_only_the_definitions_a_batch_changed() {
+        let def = |path: &str, name: &str, qualified: &str, kind: &str, trait_impl| Definition {
+            path: path.into(),
+            name: name.into(),
+            qualified: qualified.into(),
+            kind: kind.into(),
+            trait_impl,
+        };
+        let same = [
+            def("a.rb", "W", "W", "class", false),
+            def("a.rb", "initialize", "W#initialize", "method", false),
+        ];
+        let recorded = |before: &[Definition], after: &[Definition]| {
+            let mut affected = Affected::default();
+            affected.record_changed_definitions(before, after);
+            let mut names: Vec<String> = affected.names.into_iter().collect();
+            let mut constants: Vec<String> = affected.constants.into_iter().collect();
+            names.sort();
+            constants.sort();
+            (names, constants)
+        };
+        let none = (Vec::<String>::new(), Vec::<String>::new());
+        assert_eq!(recorded(&same, &same), none, "same definitions, new body");
+        let moved = [def("b.rb", "W", "W", "class", false), same[1].clone()];
+        assert_eq!(
+            recorded(&same, &moved),
+            (vec!["W".into()], vec!["W".into()]),
+            "a definition in another file is another candidate"
+        );
+        let twice = [same[0].clone(), same[1].clone(), same[1].clone()];
+        assert_eq!(
+            recorded(&same, &twice),
+            (vec!["initialize".into()], vec!["W".into()]),
+            "a second same-owner definition makes the name ambiguous; the method counts through its owner"
+        );
+        let rust = [def("x.rs", "fmt", "W::fmt", "method", false)];
+        let as_trait = [def("x.rs", "fmt", "W::fmt", "method", true)];
+        assert_eq!(
+            recorded(&rust, &as_trait),
+            (vec!["fmt".into()], Vec::new()),
+            "a trait impl is no inherent method; a Rust path has no Ruby owner"
+        );
+        assert_eq!(
+            recorded(&[def("m.rb", "B", "A::C::B", "class", false)], &[]),
+            (vec!["B".into()], vec!["B".into()]),
+        );
+        assert_eq!(
+            recorded(&[], &[def("m.rb", "A::C::B", "A::C::B", "module", false)]),
+            (vec!["A::C::B".into()], vec!["B".into()]),
+            "a constant counts by the segment a receiver spells"
+        );
     }
 }
