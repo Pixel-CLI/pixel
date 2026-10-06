@@ -437,7 +437,16 @@ impl RouteWalker<'_> {
             let Some(segment) = self.literal(first) else {
                 return;
             };
+            // A `to:`, `action:` or `controller:` the interpreter could not
+            // read (a redirect, a lambda, a Rack app, a variable) names the
+            // handler; the path does not, so nothing is guessed from it.
+            let explicit = ["to", "action", "controller"]
+                .iter()
+                .any(|key| self.option(args, key).is_some());
             let target = self.target(args, scope).or_else(|| {
+                if explicit {
+                    return None;
+                }
                 // No target: in a resource scope the name is an action of
                 // the resource's controller; elsewhere `get "a/b"` is
                 // `a#b`, and `get :x` in a `controller` block is `#x`. A
@@ -872,12 +881,18 @@ end
   get "orders/:id"
   get "files/*path"
   get "feed(.:format)"
+  get "old/path", to: redirect("/new")
+  match "a/b", to: redirect("/c"), via: :get
+  get "c/d", action: some_action
+  get "e/f", controller: some_controller
   controller :pages do
     get "orders/:id"
     get "a/b"
+    get "health", to: HealthApp
   end
   resources :photos, only: [] do
     get "nested/path"
+    get "legacy", to: redirect("/x")
   end
 end
 "#;
