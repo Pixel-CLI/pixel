@@ -570,28 +570,42 @@ pub(crate) fn codex_hook_hash(
     ))
 }
 
-fn hook_state_entry<'a>(
+/// The `hooks.state` entries Codex may hold for one handler. Codex looks up
+/// the exact key `{source}:{event}:{group}:{handler}`, with `source` the
+/// hooks file's path as it resolved it: the path Pixel was given, or its
+/// canonical form when Codex canonicalized a symlinked `CODEX_HOME` or
+/// repository (`/var` -> `/private/var`). Only those two spellings are
+/// looked up, never another alias of the same file, and both are returned
+/// when both are recorded, so a caller can require every one to agree.
+fn hook_state_entries<'a>(
     doc: &'a DocumentMut,
     hooks_path: &Path,
     event: &str,
     group_index: usize,
     handler_index: usize,
-) -> Option<&'a Item> {
-    let label = hook_event_label(event)?;
-    let suffix = format!(":{label}:{group_index}:{handler_index}");
-    // Codex records the key under the path it resolved (a symlinked
-    // `CODEX_HOME`, `/var` -> `/private/var`), so compare canonical paths.
-    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let file = canonical(hooks_path);
-    doc.get("hooks")?
-        .as_table_like()?
-        .get(HOOK_STATE_TABLE)?
-        .as_table_like()?
+) -> Vec<&'a Item> {
+    let Some(label) = hook_event_label(event) else {
+        return Vec::new();
+    };
+    let Some(states) = doc
+        .get("hooks")
+        .and_then(Item::as_table_like)
+        .and_then(|hooks| hooks.get(HOOK_STATE_TABLE))
+        .and_then(Item::as_table_like)
+    else {
+        return Vec::new();
+    };
+    let mut sources = vec![hooks_path.display().to_string()];
+    if let Ok(canonical) = hooks_path.canonicalize() {
+        let canonical = canonical.display().to_string();
+        if canonical != sources[0] {
+            sources.push(canonical);
+        }
+    }
+    sources
         .iter()
-        .find_map(|(key, entry)| {
-            let source = Path::new(key.strip_suffix(&suffix)?);
-            (source == hooks_path || canonical(source) == file).then_some(entry)
-        })
+        .filter_map(|source| states.get(&format!("{source}:{label}:{group_index}:{handler_index}")))
+        .collect()
 }
 
 fn codex_hook_is_enabled_and_trusted(
@@ -606,21 +620,24 @@ fn codex_hook_is_enabled_and_trusted(
     let Some(current_hash) = codex_hook_hash(event, group, handler) else {
         return false;
     };
-    let Some(state) = hook_state_entry(doc, hooks_path, event, group_index, handler_index) else {
-        return false;
-    };
-    let Some(state) = state.as_table_like() else {
-        return false;
-    };
-    let enabled = match state.get("enabled") {
-        None => Some(true),
-        Some(value) => value.as_bool(),
-    };
-    enabled == Some(true)
-        && state
-            .get(TRUSTED_HASH_KEY)
-            .and_then(Item::as_str)
-            .is_some_and(|trusted_hash| trusted_hash == current_hash)
+    // Whichever spelling Codex resolved, its entry must approve the hook:
+    // with both recorded, a stale or disabled one is not outvoted.
+    let states = hook_state_entries(doc, hooks_path, event, group_index, handler_index);
+    !states.is_empty()
+        && states.iter().all(|state| {
+            let Some(state) = state.as_table_like() else {
+                return false;
+            };
+            let enabled = match state.get("enabled") {
+                None => Some(true),
+                Some(value) => value.as_bool(),
+            };
+            enabled == Some(true)
+                && state
+                    .get(TRUSTED_HASH_KEY)
+                    .and_then(Item::as_str)
+                    .is_some_and(|trusted_hash| trusted_hash == current_hash)
+        })
 }
 
 fn matching_task_hook_is_approved(
@@ -863,28 +880,88 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn hook_state_entry_should_match_a_key_recorded_under_the_canonical_path() {
+    fn hook_state_entries_should_read_only_the_given_and_canonical_spellings() {
         let temp = tempfile::tempdir().unwrap();
         let real = temp.path().join("real-codex");
         std::fs::create_dir_all(&real).unwrap();
         let linked = temp.path().join("linked-codex");
         std::os::unix::fs::symlink(&real, &linked).unwrap();
+        let other_link = temp.path().join("other-link");
+        std::os::unix::fs::symlink(&real, &other_link).unwrap();
         std::fs::write(real.join("hooks.json"), "{}").unwrap();
-        let recorded = real.canonicalize().unwrap().join("hooks.json");
-        let doc: DocumentMut = format!(
-            "[hooks.state.\"{}:stop:1:0\"]\ntrusted_hash = \"sha256:x\"\n",
-            recorded.display()
-        )
-        .parse()
-        .unwrap();
-
+        let canonical = real.canonicalize().unwrap().join("hooks.json");
         let through_link = linked.join("hooks.json");
-        assert!(super::hook_state_entry(&doc, &through_link, "Stop", 1, 0).is_some());
-        assert!(super::hook_state_entry(&doc, &recorded, "Stop", 1, 0).is_some());
-        assert!(super::hook_state_entry(&doc, &through_link, "Stop", 0, 0).is_none());
-        assert!(super::hook_state_entry(&doc, &through_link, "SessionEnd", 1, 0).is_none());
-        let other = temp.path().join("other/hooks.json");
-        assert!(super::hook_state_entry(&doc, &other, "Stop", 1, 0).is_none());
+        let doc = |entries: &[(&Path, &str)]| -> DocumentMut {
+            entries
+                .iter()
+                .map(|(source, body)| {
+                    format!("[hooks.state.\"{}:stop:1:0\"]\n{body}\n", source.display())
+                })
+                .collect::<String>()
+                .parse()
+                .unwrap()
+        };
+        let ok = "trusted_hash = \"sha256:x\"";
+        let off = "enabled = false\ntrusted_hash = \"sha256:x\"";
+
+        // Codex canonicalized the symlinked home: the canonical key counts.
+        let canonical_only = doc(&[(&canonical, ok)]);
+        assert_eq!(
+            super::hook_state_entries(&canonical_only, &through_link, "Stop", 1, 0).len(),
+            1
+        );
+        assert!(super::hook_state_entries(&canonical_only, &through_link, "Stop", 0, 0).is_empty());
+        assert!(
+            super::hook_state_entries(&canonical_only, &through_link, "SessionEnd", 1, 0)
+                .is_empty()
+        );
+
+        // Another alias of the same file is never Codex's key for this path.
+        let alias_only = doc(&[(&other_link.join("hooks.json"), ok)]);
+        assert!(super::hook_state_entries(&alias_only, &through_link, "Stop", 1, 0).is_empty());
+
+        // Both spellings recorded and disagreeing: both are returned, so a
+        // disabled canonical entry is not outvoted by an enabled given one.
+        let conflicting = doc(&[(&through_link, ok), (&canonical, off)]);
+        let states = super::hook_state_entries(&conflicting, &through_link, "Stop", 1, 0);
+        assert_eq!(states.len(), 2);
+        assert!(states.iter().any(|state| {
+            state
+                .as_table_like()
+                .unwrap()
+                .get("enabled")
+                .and_then(Item::as_bool)
+                == Some(false)
+        }));
+
+        // The trust decision install reads: only a unanimous approval with
+        // the current hash counts.
+        let group =
+            serde_json::json!({"hooks": [{"type": "command", "command": "x", "timeout": 10}]});
+        let hash = codex_hook_hash("Stop", &group, &group["hooks"][0]).unwrap();
+        let approve = format!("trusted_hash = {hash:?}");
+        let disable = format!("enabled = false\ntrusted_hash = {hash:?}");
+        let trusted = |entries: &[(&Path, &str)]| {
+            super::codex_hook_is_enabled_and_trusted(
+                &doc(entries),
+                &through_link,
+                "Stop",
+                1,
+                0,
+                &group,
+                &group["hooks"][0],
+            )
+        };
+        assert!(trusted(&[(&canonical, &approve)]));
+        assert!(trusted(&[
+            (&through_link, &approve),
+            (&canonical, &approve)
+        ]));
+        assert!(!trusted(&[
+            (&through_link, &approve),
+            (&canonical, &disable)
+        ]));
+        assert!(!trusted(&[(&other_link.join("hooks.json"), &approve)]));
     }
 
     /// A `hooks.state` key spells the event the way Codex does
