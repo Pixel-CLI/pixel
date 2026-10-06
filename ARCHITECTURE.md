@@ -626,17 +626,20 @@ registers task lifecycle events, not the retrieval callbacks below:
 | Native task lifecycle (Claude Code and Codex) | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks. Once enforced, a task retains its gates if runtime settings change. On `prompt-submit` it also returns the `[PIXEL:BRIEF]` evidence brief as `additionalContext` (see below). |
 
 The brief (`execution_brief/chain.rs`, `execution_brief/evidence.rs`) is built
-on every `prompt-submit` task event for a code-shaped prompt, whatever
-`pixel config policy` says. It runs at most four ops under one 750 ms
-deadline: `search-content -F -l` on the first anchor, `find-symbol` to resolve
-a uid, `impact <uid>` only for change or caller intent, and `find-code` when
-no anchor found a file. It reads a warm daemon if one answers this protocol
-and otherwise the index and graph read-only in process; it never starts a
-daemon and never builds an index or graph, so an unindexed repository or a
-stale graph yields no brief. Output is capped at 2 KiB and says how many ops
-ran (`ops: n/4`, `partial: budget` when cut short). `PIXEL_BRIEF=0|false|off`
-or `brief: false` in `.pixel/config.yaml` switches it off. Pi goes through the
-same path; no other host registers a prompt hook.
+on every Claude Code and Codex `prompt-submit` task event for a code-shaped
+prompt, whatever `pixel config policy` says. Pi gets none (`start_brief` in
+`task_hook.rs` skips `TaskProvider::Pi`), and no other host registers a prompt
+hook. It runs at most four ops under one 750 ms deadline: `search-content -F
+-l` on the first anchor, `find-symbol` to resolve a uid, `impact <uid>` only
+for change or caller intent, and `find-code` when no anchor found a file. It
+reads a warm daemon if one answers this protocol and otherwise the index and
+graph read-only in process; it never starts a daemon and never builds an
+index or graph. A repository without an index yields no brief. A missing or
+stale graph still yields the text evidence (`files:`), with the reason under
+`unresolved:` (`the graph is not built`, `the graph is stale`) and no callers.
+Output is capped at 2 KiB and says how many ops ran (`ops: n/4`,
+`partial: budget` when cut short). `PIXEL_BRIEF=0|false|off` or `brief: false`
+in `.pixel/config.yaml` switches it off.
 
 `pixel doctor` checks current installation artifacts and distinguishes configured
 or protocol-checked hooks from observed live execution.
