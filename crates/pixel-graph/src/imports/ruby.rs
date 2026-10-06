@@ -97,9 +97,14 @@ impl Projects {
     }
 
     /// The projects of `files`, reading each project's `Gemfile`,
-    /// `*.gemspec` and `Gemfile.lock` under `root`.
+    /// `*.gemspec` and `Gemfile.lock` under `root`. A manifest that is a
+    /// symlink, not a regular file, or over the source size cap is read as
+    /// absent.
     pub fn load(root: &Path, files: &[String]) -> Self {
-        Self::build(files, |rel| std::fs::read(root.join(rel)).ok())
+        // The graph's own reader: a regular file (never a symlink) within
+        // the source size cap, so a `Gemfile.lock` the walk never vetted
+        // cannot point the build at a huge or endless file.
+        Self::build(files, |rel| crate::build::read_source_file(&root.join(rel)))
     }
 
     fn build(files: &[String], read: impl Fn(&str) -> Option<Vec<u8>>) -> Self {
