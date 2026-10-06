@@ -405,12 +405,16 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             })
         },
     );
-    runner.check_status(
-        "install.pi-impact",
-        || -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    runner.record("install.pi-impact", || {
             let (managed, extension) = crate::pi_global::installed_state(&home);
-            let status = if extension.is_file() && !managed {
-                CheckStatus::Yellow
+            let config_dir = home.join(crate::config::PI_CONFIG_DIR);
+            let (status, summary, remedy) =
+                if fs::symlink_metadata(&extension).is_ok() && !managed {
+                (
+                    CheckStatus::Yellow,
+                    format!("foreign Pi extension left untouched at {}", extension.display()),
+                    Remedy::Manual,
+                )
             } else if managed {
                 let content = fs::read_to_string(&extension).map_err(|error| error.to_string())?;
                 let expected = crate::pi_global::extension_source(&exe);
@@ -420,36 +424,44 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                         extension.display()
                     ));
                 }
-                CheckStatus::Green
-            } else if home.join(".pi/agent").exists() {
+                (
+                    CheckStatus::Green,
+                    format!("explicit impact command verified at {}", extension.display()),
+                    Remedy::Catalogue,
+                )
+            } else if config_dir.exists() && !config_dir.is_dir() {
+                (
+                    CheckStatus::Yellow,
+                    format!(
+                        "Pi configuration path is not a directory; left untouched at {}",
+                        config_dir.display()
+                    ),
+                    Remedy::Manual,
+                )
+            } else if config_dir.is_dir() {
                 return Err(format!(
                     "Pi impact extension is missing from {}; run `pixel install`",
                     extension.display()
                 ));
             } else {
-                CheckStatus::Green
+                (
+                    CheckStatus::Green,
+                    "Pi is not configured; no explicit impact extension expected".into(),
+                    Remedy::Catalogue,
+                )
             };
             Ok((
                 status,
                 DoctorCheckDetail {
-                    summary: if status == CheckStatus::Yellow {
-                        format!(
-                            "foreign Pi extension left untouched at {}",
-                            extension.display()
-                        )
-                    } else if managed {
-                        format!("explicit impact command verified at {}", extension.display())
-                    } else {
-                        "Pi is not configured; no explicit impact extension expected".into()
-                    },
+                    summary,
                     detail: Some(serde_json::json!({
                         "extension_path": extension.display().to_string(),
                         "managed": managed,
                     })),
                 },
+                remedy,
             ))
-        },
-    );
+        });
 
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
     runner.check(
@@ -923,16 +935,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 crate::routing::Provider::Codex,
                 &exe,
             );
-            if incomplete_pixel_task_hooks(
-                &value,
-                crate::routing::Provider::Codex,
-                &exe,
-            ) {
-                return Err(format!(
-                    "{} has an incomplete Pixel task-hook set — run `pixel install --repo`",
-                    hooks_path.display()
-                ));
-            }
+            let pixel_task_hooks_present = crate::routing::has_pixel_hook(&value, &exe);
             let trust = task_hooks.then(|| {
                 match crate::codex_config::project_trust(&codex_home, root) {
                     Ok(crate::codex_config::ProjectTrust::Trusted) => {
@@ -956,13 +959,19 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                         format!("native Codex hooks preserved in {}; {trust}", hooks_path.display())
                     } else {
                         format!(
-                            "native Codex hooks preserved; no Pixel task hooks installed in {}",
-                            hooks_path.display()
+                            "native Codex hooks preserved; {} in {}",
+                            if pixel_task_hooks_present {
+                                "partial Pixel task hooks preserved as configured"
+                            } else {
+                                "no Pixel task hooks installed"
+                            },
+                            hooks_path.display(),
                         )
                     },
                     detail: Some(serde_json::json!({
                         "hooks": hooks_path.display().to_string(),
                         "task_hooks": task_hooks,
+                        "pixel_task_hooks_present": pixel_task_hooks_present,
                         "native_pre_tool_use": true,
                         "trust": trust,
                     })),
@@ -1600,16 +1609,6 @@ fn has_unexpected_pixel_hooks(
                 })
             })
         })
-}
-
-/// A recognized Pixel task registration is incomplete when required events are absent.
-fn incomplete_pixel_task_hooks(
-    value: &serde_json::Value,
-    provider: crate::routing::Provider,
-    exe: &Path,
-) -> bool {
-    crate::routing::has_pixel_hook(value, exe)
-        && !crate::routing::task_hooks_registered(value, provider, exe)
 }
 
 #[derive(Debug)]
@@ -4260,9 +4259,91 @@ Prose naming `pixel status` is not a table row.
             )
         );
         assert_eq!(
+            check.fix, None,
+            "install cannot replace a foreign extension"
+        );
+        assert_eq!(
             std::fs::read_to_string(&extension).unwrap(),
             "// user-owned extension\n",
             "doctor must leave the foreign extension untouched"
+        );
+    }
+
+    #[test]
+    fn pi_impact_doctor_should_not_offer_install_for_a_non_directory_config_path() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".pi/agent");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "user-owned file\n").unwrap();
+        let install =
+            crate::pi_global::install(home.path(), Path::new("/opt/pixel/pixel"), false).unwrap();
+        assert_eq!(
+            install.status,
+            crate::install::CheckStatus::Yellow,
+            "{install:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            "user-owned file\n",
+            "install must leave a non-directory Pi configuration path untouched"
+        );
+
+        let report = super::doctor(&super::DoctorOptions {
+            home: Some(home.path().to_path_buf()),
+            only: vec!["install.pi-impact".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let check = &report.checks[0];
+        assert_eq!(check.status, CheckStatus::Yellow, "{check:?}");
+        assert_eq!(check.fix, None, "install cannot change this path safely");
+        assert!(
+            check
+                .summary
+                .contains("configuration path is not a directory"),
+            "{check:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(config_path).unwrap(),
+            "user-owned file\n",
+            "doctor must preserve the malformed user path"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pi_impact_doctor_should_preserve_an_occupied_symlink_extension_path() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("foreign-extension-dir");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.ts"), "user-owned content\n").unwrap();
+        let extension = home.path().join(crate::pi_global::EXTENSION);
+        std::fs::create_dir_all(extension.parent().unwrap()).unwrap();
+        symlink(&target, &extension).unwrap();
+
+        let report = super::doctor(&super::DoctorOptions {
+            home: Some(home.path().to_path_buf()),
+            only: vec!["install.pi-impact".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let check = &report.checks[0];
+        assert_eq!(check.status, CheckStatus::Yellow, "{check:?}");
+        assert_eq!(
+            check.fix, None,
+            "install must not replace an occupied symlink"
+        );
+        assert!(
+            check
+                .summary
+                .contains("foreign Pi extension left untouched")
+        );
+        assert_eq!(std::fs::read_link(&extension).unwrap(), target);
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("foreign-extension-dir/keep.ts")).unwrap(),
+            "user-owned content\n"
         );
     }
 
@@ -4307,26 +4388,57 @@ Prose naming `pixel status` is not a table row.
     }
 
     #[test]
-    fn codex_doctor_should_reject_a_partial_pixel_task_hook_set() {
+    fn repo_codex_doctor_should_accept_partial_task_hooks_preserved_by_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
         let exe = Path::new("/opt/pixel/pixel");
+        let hooks_path = repo.join(".codex/hooks.json");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
         let partial = serde_json::json!({
             "hooks": {
-                "SessionStart": [{"hooks": [{"command": "/opt/pixel/pixel run-hook task-event --provider codex --event session-start"}]}]
+                "SessionStart": [{"hooks": [{"type": "command", "command": "/opt/pixel/pixel run-hook task-event --provider codex --event session-start"}]}],
+                "PostToolUseFailure": [{"matcher": "*", "hooks": [{"type": "command", "command": "/opt/pixel/pixel run-hook task-event --provider codex --event tool-failure"}]}]
             }
         });
-        assert!(super::incomplete_pixel_task_hooks(
-            &partial,
-            crate::routing::Provider::Codex,
-            exe
-        ));
+        std::fs::write(&hooks_path, serde_json::to_vec_pretty(&partial).unwrap()).unwrap();
 
-        let foreign_only = serde_json::json!({
-            "hooks": {"PreToolUse": [{"hooks": [{"command": "user-policy"}]}]}
-        });
-        assert!(!super::incomplete_pixel_task_hooks(
-            &foreign_only,
-            crate::routing::Provider::Codex,
-            exe
-        ));
+        let install = crate::install::install(&crate::install::InstallOptions {
+            home: Some(home.clone()),
+            executable_path: Some(exe.to_path_buf()),
+            repo: Some(repo.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(install.ok, "{install:?}");
+        let after_install: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&hooks_path).unwrap()).unwrap();
+        assert_eq!(
+            after_install["hooks"]["SessionStart"], partial["hooks"]["SessionStart"],
+            "repo install deliberately preserves partial project task hooks"
+        );
+        assert_eq!(
+            after_install["hooks"]["PostToolUseFailure"], partial["hooks"]["PostToolUseFailure"],
+            "repo install preserves the unsupported extra Codex event too"
+        );
+
+        let options = super::DoctorOptions {
+            home: Some(home),
+            repo_root: Some(repo),
+            executable_path: Some(exe.to_path_buf()),
+            only: vec!["repo.codex-hooks".into()],
+            ..Default::default()
+        };
+        let report = super::doctor(&options).unwrap();
+        let check = &report.checks[0];
+        assert_eq!(check.status, CheckStatus::Green, "{check:?}");
+        assert_eq!(check.fix, None, "an accepted native state needs no repair");
+        assert!(check.summary.contains("partial Pixel task hooks preserved"));
+        assert_eq!(check.detail.as_ref().unwrap()["task_hooks"], false);
+        assert_eq!(
+            check.detail.as_ref().unwrap()["pixel_task_hooks_present"],
+            true
+        );
     }
 }
