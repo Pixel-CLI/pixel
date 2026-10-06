@@ -1160,8 +1160,9 @@ pub struct Affected {
     pub replayed: HashSet<String>,
     /// The batch changed a Ruby ancestor declaration, or a class or module
     /// a stored declaration names: every Ruby call to `self` (bare or
-    /// written) and every Ruby method-symbol reference may now resolve
-    /// through a different chain, so all of them are replayed.
+    /// written) or to a constant receiver, and every Ruby method-symbol
+    /// reference, may now resolve through a different chain, so all of them
+    /// are replayed.
     pub ruby_ancestors: bool,
 }
 
@@ -1379,9 +1380,13 @@ pub fn resolve_affected(
 }
 
 /// The `unresolved_calls` rows a Ruby ancestor chain decides: calls on
-/// `self`, bare or written, and method-symbol references, in Ruby files.
+/// `self`, bare or written, calls on a constant receiver (`Foo.bar` and
+/// `Foo.new.bar` fall back to `Foo`'s ancestors), and method-symbol
+/// references, in Ruby files.
 const RUBY_SELF_ROWS: &str = " AND u.file_id IN (SELECT id FROM files WHERE lang = 'ruby')
-       AND (u.kind = 'references' OR u.receiver IS NULL OR TRIM(u.receiver) = 'self')";
+       AND (u.kind = 'references' OR u.receiver IS NULL OR TRIM(u.receiver) = 'self'
+            OR substr(TRIM(u.receiver), 1, 1) BETWEEN 'A' AND 'Z'
+            OR TRIM(u.receiver) LIKE '::%')";
 
 fn retry(store: &mut GraphStore, rows: Vec<RetryRow>) -> Result<ResolveStats, StoreError> {
     let idx = ResolveIndex::build(store)?;
@@ -1510,7 +1515,9 @@ pub fn reconsider_resolved_calls(
                JOIN symbols dst ON dst.id=e.dst_id JOIN files f ON f.id=src.file_id
               WHERE f.lang='ruby'
                 AND (e.kind='references'
-                     OR (e.kind='calls' AND (e.receiver IS NULL OR TRIM(e.receiver)='self')))",
+                     OR (e.kind='calls' AND (e.receiver IS NULL OR TRIM(e.receiver)='self'
+                         OR substr(TRIM(e.receiver), 1, 1) BETWEEN 'A' AND 'Z'
+                         OR TRIM(e.receiver) LIKE '::%')))",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
