@@ -370,10 +370,46 @@ fn assign_layers(regions: &[Region], inputs: &RegionsInputs) -> Vec<Layer> {
         .into_iter()
         .map(|(layer, mut regions)| {
             regions.sort();
+            // Build a concrete witness: name the regions in this layer and
+            // the call edges that place them here.
+            let region_list = regions.join(", ");
             let witness = if layer == 0 {
-                "no outgoing call edges to other region components".to_string()
+                format!(
+                    "sink layer — regions [{region_list}] have no outgoing call edges to other \
+                     region components"
+                )
             } else {
-                format!("longest call-edge path to sink = {layer}")
+                // Find the call edges from this layer to lower layers —
+                // these are the outgoing edges that place regions here.
+                let mut edges: Vec<String> = Vec::new();
+                for e in &inputs.call_edges {
+                    let (Some(&ca), Some(&cb)) = (
+                        comp_of.get(e.caller.as_str()),
+                        comp_of.get(e.callee.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    if ca == cb {
+                        continue;
+                    }
+                    let caller_layer = memo[ca].unwrap();
+                    let callee_layer = memo[cb].unwrap();
+                    if caller_layer == layer && callee_layer < layer {
+                        edges.push(format!("{} -> {}", e.caller, e.callee));
+                    }
+                }
+                if edges.is_empty() {
+                    format!(
+                        "layer {layer} — regions [{region_list}]; longest call-edge path to \
+                         sink = {layer}"
+                    )
+                } else {
+                    format!(
+                        "layer {layer} — regions [{region_list}]; call edges from later layers: \
+                         {}",
+                        edges.join(", ")
+                    )
+                }
             };
             Layer {
                 layer,
