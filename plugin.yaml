@@ -1,5 +1,5 @@
 name: pixel
-version: 0.7.0
+version: 0.7.1
 description: Deterministic code retrieval layer for agents — indexed search, impact analysis, plan generation via the pixel CLI.
 author: Livio Gama
 provides_skills:

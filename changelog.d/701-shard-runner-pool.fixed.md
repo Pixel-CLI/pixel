@@ -1,1 +1,0 @@
-**ci:** the `Mutants` shard matrix runs over the `PIXEL_MUTANTS_SHARD_RUNNERS` runner pool (a JSON array of `runs-on` values dealt round-robin per shard, GitHub-hosted `ubuntu-26.04` when unset) instead of pinning every shard to the one `PIXEL_RUNNER_LABELS` host, so shards of concurrent pull requests no longer queue behind a single self-hosted machine.

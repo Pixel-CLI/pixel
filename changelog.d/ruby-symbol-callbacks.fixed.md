@@ -1,1 +1,0 @@
-**graph:** Ruby/Rails symbol callbacks and literal `send`/`public_send` on self now reference their owning methods, including after incremental updates. Callback options and unrelated same-name methods no longer hide the actual reference or create a guessed link. Task #817.

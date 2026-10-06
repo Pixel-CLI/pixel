@@ -1,1 +1,0 @@
-**facts:** `pixel dig-history` no longer panics when a snippet window starts or ends inside a non-ASCII character, and its snippets, inline blocks and `pixel search-history` excerpts centre on the real match when lowercasing changes a character's length (`İ`).

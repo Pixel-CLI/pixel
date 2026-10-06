@@ -1,1 +1,0 @@
-**pi:** the Pi extension now injects the same `[PIXEL:EXECUTION_ROUTE]` Claude, Codex and Devin receive; it read a `route.steps` shape `execution-brief` never emitted, so real sessions only ever got "Pixel execution route unavailable". A prompt that asks nothing about code now gets the repository state alone.
