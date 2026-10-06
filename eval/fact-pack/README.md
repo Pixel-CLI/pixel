@@ -25,15 +25,26 @@ Pixel is a fact oracle in every arm; lifecycle routing is out of scope.
 Offline (default) — no provider request, no network:
 
 ```bash
-python3 eval/fact-pack/run.py \
-  --families eval/fact-pack/scenarios \
-  --out results/fact-pack-offline \
-  --pixel "$(command -v pixel)"
+repo_root=$(git rev-parse --show-toplevel)
+worktree=$(mktemp -d)
+rmdir "$worktree"
+git worktree add --detach "$worktree" 241f7e5c7616ff7db6aede6eba1610485fc9524d
+trap 'git worktree remove "$worktree"' EXIT
+(
+  cd "$worktree"
+  python3 "$repo_root/eval/fact-pack/run.py" \
+    --families "$repo_root/eval/fact-pack/scenarios" \
+    --out "$repo_root/results/fact-pack-offline" \
+    --pixel "$(command -v pixel)"
+)
 ```
 
-The offline mode uses a deterministic local fake model, so the whole pipeline
-(runs, frozen-input and trajectory recording, decision rule) is exercised
-without a provider. It verifies the harness, not a measurement.
+The harness must run from a worktree checked out at the task's pinned commit
+(`241f7e5c7616ff7db6aede6eba1610485fc9524d`), with the harness files
+themselves taken from the reviewed head. The offline mode uses a deterministic
+local fake model, so the whole pipeline (runs, frozen-input and trajectory
+recording, decision rule) is exercised without a provider. It verifies the
+harness, not a measurement.
 
 Live — unavailable: provider dispatch is not implemented. Passing `--live`
 raises `RuntimeError`. Only the offline mode is functional.

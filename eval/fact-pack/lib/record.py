@@ -58,26 +58,38 @@ def frozen_input_from_packet(packet) -> dict | None:
 def repo_signature(root: str) -> dict:
     """Repository commit plus dirty-content signature, for a frozen input.
 
-    Hashes the actual contents of dirty files so worktrees with different
-    edits to the same file produce distinct signatures.
+    Hashes the status and contents of dirty files so worktrees with different
+    edits to the same file produce distinct signatures. Includes deleted paths
+    and both old and new paths for renames.
     """
     commit = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
                             capture_output=True, text=True)
     status = subprocess.run(["git", "-C", root, "status", "--porcelain"],
                            capture_output=True, text=True)
-    dirty_files = []
+    entries = []
     for line in status.stdout.splitlines():
-        if line.strip():
-            dirty_files.append(line[3:].strip())
-    content_hashes = {}
-    for path in sorted(dirty_files):
-        full = Path(root) / path
-        if full.is_file():
-            content_hashes[path] = _sha256_text(
-                full.read_text(encoding="utf-8", errors="replace"))
+        if not line.strip():
+            continue
+        status_code = line[:2]
+        path_part = line[3:]
+        # Renames have "old -> new" format
+        if " -> " in path_part:
+            paths = [p.strip() for p in path_part.split(" -> ")]
+        else:
+            paths = [path_part.strip()]
+        content_hashes = {}
+        for path in paths:
+            full = Path(root) / path
+            if full.is_file():
+                content_hashes[path] = _sha256_text(
+                    full.read_text(encoding="utf-8", errors="replace"))
+            else:
+                content_hashes[path] = None  # deleted or missing
+        entries.append({"status": status_code, "paths": paths,
+                        "content": content_hashes})
     return {
         "commit": commit.stdout.strip() if commit.returncode == 0 else None,
-        "dirty_sha256": _sha256_text(json.dumps(content_hashes, sort_keys=True)),
+        "dirty_sha256": _sha256_text(json.dumps(entries, sort_keys=True)),
     }
 
 

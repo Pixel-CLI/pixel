@@ -161,10 +161,12 @@ class DecisionContracts(unittest.TestCase):
             "fact-auto": [
                 {"task_family": "f1", "pair_id": "t1", "verified": "success", "elapsed_s": 10.0},
                 {"task_family": "f1", "pair_id": "t2", "verified": "success", "elapsed_s": 10.0},
+                {"task_family": "f1", "pair_id": "t3", "verified": "failure", "elapsed_s": 10.0},
             ],
             "no-pixel": [
                 {"task_family": "f1", "pair_id": "t1", "verified": "failure", "elapsed_s": 50.0},
                 {"task_family": "f1", "pair_id": "t2", "verified": "failure", "elapsed_s": 50.0},
+                {"task_family": "f1", "pair_id": "t3", "verified": "success", "elapsed_s": 50.0},
             ],
         }
         verdict = decision.evaluate_candidate("fact-auto", trajectories, {})
