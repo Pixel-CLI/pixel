@@ -43,8 +43,11 @@ pub fn run(opts: CyclesOptions) -> i32 {
     let output = match enumerate(opts) {
         Ok(data) => data,
         Err(error) => {
+            // A usage error (bad --tiers) exits 2; a technical failure
+            // (transport, store) exits 3.
+            let is_usage = error.contains("unknown --tiers");
             eprintln!("cycles: {error}");
-            return 2;
+            return if is_usage { 2 } else { 3 };
         }
     };
     print_output(&output, json);
@@ -88,6 +91,17 @@ fn print_output(data: &Value, json: bool) {
 fn print_human(data: &Value) {
     let coverage = data.get("coverage");
     let components = data.get("components").and_then(|c| c.as_array());
+
+    // Gate-failure reason: the graph was unavailable or stale. This is NOT
+    // a "no cycles found" answer — it is a refusal to answer.
+    if let Some(reason) = coverage
+        .and_then(|cov| cov.get("reason"))
+        .and_then(|r| r.as_str())
+    {
+        println!("Cannot enumerate cycles: {reason}.");
+        println!("  This is NOT a 'no cycles found' answer.");
+        return;
+    }
 
     // Coverage first: an incomplete enumeration must never be read as a
     // complete "no cycles" answer.
@@ -141,7 +155,10 @@ fn print_witness(witness: &Value) {
         return;
     };
     for edge in edges {
-        let step = edge.get("step").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let step = edge
+            .get("step")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         let from = edge
             .get("from")
             .and_then(|f| f.get("uid"))
@@ -157,7 +174,10 @@ fn print_witness(witness: &Value) {
             .and_then(|s| s.get("path"))
             .and_then(|v| v.as_str())
             .unwrap_or("?");
-        let site_line = site.and_then(|s| s.get("line")).and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let site_line = site
+            .and_then(|s| s.get("line"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         let tier = edge
             .get("edge")
             .and_then(|e| e.get("tier"))

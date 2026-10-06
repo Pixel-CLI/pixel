@@ -289,9 +289,9 @@ fn witness_edge(store: &GraphStore, edge: &EdgeRow, step: u32) -> Result<Witness
 
 /// All callable symbol ids in the store, sorted.
 fn callable_symbols(store: &GraphStore) -> Result<Vec<i64>, StoreError> {
-    let mut stmt = store
-        .conn()
-        .prepare("SELECT id FROM symbols WHERE kind IN ('function', 'method', 'script') ORDER BY id")?;
+    let mut stmt = store.conn().prepare(
+        "SELECT id FROM symbols WHERE kind IN ('function', 'method', 'script') ORDER BY id",
+    )?;
     let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
     let mut out = Vec::new();
     for r in rows {
@@ -320,11 +320,16 @@ fn component_id(member_uids: &[String]) -> String {
 /// Find a concrete closed cycle within an SCC. For a size-1 component,
 /// the self-loop edge. For a multi-node component, DFS from the smallest
 /// member uid to find a path back to it.
+///
+/// Returns `None` when the time budget expires during witness construction,
+/// signaling the caller to stop enumeration.
 fn find_cycle_witness(
     store: &GraphStore,
     members: &[i64],
     tiers: TierSelection,
-) -> Result<Witness, StoreError> {
+    clock: &mut dyn Clock,
+    time_budget: Duration,
+) -> Result<Option<Witness>, StoreError> {
     if members.len() == 1 {
         let id = members[0];
         let edges = admissible_edges(store, id, tiers)?;
@@ -333,14 +338,14 @@ fn find_cycle_witness(
                 .ok_or(StoreError::Sql(rusqlite::Error::QueryReturnedNoRows))?;
             let probable = if stored.tier == Tier::Probable { 1 } else { 0 };
             let edge = witness_edge(store, &stored, 1)?;
-            return Ok(Witness::Cycle {
+            return Ok(Some(Witness::Cycle {
                 probable_edges: probable,
                 edges: vec![edge],
-            });
+            }));
         }
         // Size-1 SCC without self-loop: not a cycle (Tarjan wouldn't
         // produce this, but defensive).
-        return Ok(Witness::None);
+        return Ok(Some(Witness::None));
     }
 
     // Multi-node SCC: DFS from the smallest member uid to find a path
@@ -351,6 +356,9 @@ fn find_cycle_witness(
     visited.insert(start);
 
     while let Some((node, path)) = stack.pop() {
+        if clock.elapsed() > time_budget {
+            return Ok(None);
+        }
         let edges = admissible_edges(store, node, tiers)?;
         for edge in &edges {
             let next = edge.dst_id;
@@ -361,6 +369,9 @@ fn find_cycle_witness(
                 let mut witness_edges = Vec::with_capacity(cycle_edges.len());
                 let mut probable = 0u32;
                 for (i, e) in cycle_edges.iter().enumerate() {
+                    if clock.elapsed() > time_budget {
+                        return Ok(None);
+                    }
                     let stored = reread_edge(store, e)?
                         .ok_or(StoreError::Sql(rusqlite::Error::QueryReturnedNoRows))?;
                     if stored.tier == Tier::Probable {
@@ -369,10 +380,10 @@ fn find_cycle_witness(
                     let step = u32::try_from(i + 1).unwrap_or(u32::MAX);
                     witness_edges.push(witness_edge(store, &stored, step)?);
                 }
-                return Ok(Witness::Cycle {
+                return Ok(Some(Witness::Cycle {
                     probable_edges: probable,
                     edges: witness_edges,
-                });
+                }));
             }
             if !visited.contains(&next) && members.contains(&next) {
                 visited.insert(next);
@@ -384,7 +395,7 @@ fn find_cycle_witness(
     }
 
     // Should not happen for a true SCC, but defensive.
-    Ok(Witness::None)
+    Ok(Some(Witness::None))
 }
 
 /// Enumerate strongly connected components in the call graph, bounded by
@@ -432,15 +443,24 @@ pub fn enumerate(
     // Check budgets before starting.
     if req.budget.max_nodes == 0 {
         coverage.stopped_by = Some(BudgetParameter::MaxNodes);
-        return Ok(Enumeration { components, coverage });
+        return Ok(Enumeration {
+            components,
+            coverage,
+        });
     }
     if req.budget.max_edges == 0 {
         coverage.stopped_by = Some(BudgetParameter::MaxEdges);
-        return Ok(Enumeration { components, coverage });
+        return Ok(Enumeration {
+            components,
+            coverage,
+        });
     }
     if req.budget.max_components == 0 {
         coverage.stopped_by = Some(BudgetParameter::MaxComponents);
-        return Ok(Enumeration { components, coverage });
+        return Ok(Enumeration {
+            components,
+            coverage,
+        });
     }
 
     'outer: for &root in &nodes {
@@ -460,8 +480,10 @@ pub fn enumerate(
             break 'outer;
         }
 
-        // Iterative DFS from root.
-        let mut call_stack: Vec<(i64, usize)> = vec![(root, 0)];
+        // Iterative DFS from root. The frame caches the admissible edge
+        // list so resumed frames do not repeat the query, filter, and sort.
+        // `None` means "not yet fetched"; `Some(vec)` means "fetched".
+        let mut call_stack: Vec<(i64, usize, Option<Vec<EdgeRow>>)> = vec![(root, 0, None)];
         index.insert(root, idx);
         lowlink.insert(root, idx);
         stack.push(root);
@@ -469,24 +491,22 @@ pub fn enumerate(
         idx += 1;
         coverage.visited += 1;
 
-        while let Some((node, edge_ix)) = call_stack.pop() {
+        while let Some((node, edge_ix, edges_opt)) = call_stack.pop() {
             // Check time budget.
             if clock.elapsed() > req.budget.time_budget {
                 coverage.stopped_by = Some(BudgetParameter::TimeBudgetMs);
                 break 'outer;
             }
 
-            // Check node budget.
-            if coverage.visited >= u64::from(req.budget.max_nodes) {
-                coverage.stopped_by = Some(BudgetParameter::MaxNodes);
-                break 'outer;
-            }
-
-            let edges = admissible_edges(store, node, req.tiers)?;
+            // On first visit, fetch and cache the admissible edges.
+            let edges = match edges_opt {
+                None => admissible_edges(store, node, req.tiers)?,
+                Some(edges) => edges,
+            };
 
             if edge_ix < edges.len() {
-                // Push current state back, then follow edge.
-                call_stack.push((node, edge_ix + 1));
+                // Push current state back with cached edges, then follow edge.
+                call_stack.push((node, edge_ix + 1, Some(edges.clone())));
 
                 // Check edge budget.
                 if coverage.edges_followed >= u64::from(req.budget.max_edges) {
@@ -499,6 +519,11 @@ pub fn enumerate(
                 let next = edge.dst_id;
 
                 if let std::collections::hash_map::Entry::Vacant(e) = index.entry(next) {
+                    // Check node budget before admitting a new node.
+                    if coverage.visited >= u64::from(req.budget.max_nodes) {
+                        coverage.stopped_by = Some(BudgetParameter::MaxNodes);
+                        break 'outer;
+                    }
                     // Tree edge: visit next.
                     e.insert(idx);
                     lowlink.insert(next, idx);
@@ -506,7 +531,7 @@ pub fn enumerate(
                     on_stack.insert(next);
                     idx += 1;
                     coverage.visited += 1;
-                    call_stack.push((next, 0));
+                    call_stack.push((next, 0, None));
                 } else if on_stack.contains(&next) {
                     // Back edge: update lowlink.
                     let next_idx = index[&next];
@@ -540,7 +565,9 @@ pub fn enumerate(
 
                     if is_cycle {
                         // Check component budget.
-                        if components.len() >= usize::try_from(req.budget.max_components).unwrap_or(usize::MAX) {
+                        if components.len()
+                            >= usize::try_from(req.budget.max_components).unwrap_or(usize::MAX)
+                        {
                             coverage.stopped_by = Some(BudgetParameter::MaxComponents);
                             break 'outer;
                         }
@@ -553,7 +580,19 @@ pub fn enumerate(
                             uids
                         };
                         let id = component_id(&member_uids);
-                        let witness = find_cycle_witness(store, &scc, req.tiers)?;
+                        let witness = match find_cycle_witness(
+                            store,
+                            &scc,
+                            req.tiers,
+                            clock,
+                            req.budget.time_budget,
+                        )? {
+                            Some(w) => w,
+                            None => {
+                                coverage.stopped_by = Some(BudgetParameter::TimeBudgetMs);
+                                break 'outer;
+                            }
+                        };
                         components.push(Component {
                             id,
                             members: scc,
@@ -563,7 +602,7 @@ pub fn enumerate(
                 }
 
                 // Update parent's lowlink.
-                if let Some(&(parent, _)) = call_stack.last() {
+                if let Some(&(parent, _, _)) = call_stack.last() {
                     let parent_low = lowlink[&parent];
                     lowlink.insert(parent, parent_low.min(node_low));
                 }
@@ -578,7 +617,10 @@ pub fn enumerate(
         coverage.enumeration_exhausted = true;
     }
 
-    Ok(Enumeration { components, coverage })
+    Ok(Enumeration {
+        components,
+        coverage,
+    })
 }
 
 #[cfg(test)]
@@ -667,16 +709,20 @@ mod tests {
         fn probable(&self, from: usize, to: usize) {
             self.call(from, to, Tier::Probable);
         }
-        fn eval_with(&self, tiers: TierSelection, budget: Budget, clock: &mut dyn Clock) -> Enumeration {
-            enumerate(
-                &self.store,
-                Request { tiers, budget },
-                clock,
-            )
-            .unwrap()
+        fn eval_with(
+            &self,
+            tiers: TierSelection,
+            budget: Budget,
+            clock: &mut dyn Clock,
+        ) -> Enumeration {
+            enumerate(&self.store, Request { tiers, budget }, clock).unwrap()
         }
         fn eval(&self) -> Enumeration {
-            self.eval_with(TierSelection::Exact, unbounded(), &mut ScriptedClock::frozen())
+            self.eval_with(
+                TierSelection::Exact,
+                unbounded(),
+                &mut ScriptedClock::frozen(),
+            )
         }
     }
 
@@ -710,7 +756,10 @@ mod tests {
         let comp = &result.components[0];
         assert_eq!(comp.members, vec![fx.ids[0]]);
         match &comp.witness {
-            Witness::Cycle { probable_edges, edges } => {
+            Witness::Cycle {
+                probable_edges,
+                edges,
+            } => {
                 assert_eq!(*probable_edges, 0);
                 assert_eq!(edges.len(), 1);
                 assert_eq!(edges[0].from.uid, edges[0].to.uid);
@@ -723,7 +772,11 @@ mod tests {
     fn self_cycle_with_probable_edge_is_reported() {
         let fx = fixture(1);
         fx.probable(0, 0);
-        let result = fx.eval_with(TierSelection::ExactAndProbable, unbounded(), &mut ScriptedClock::frozen());
+        let result = fx.eval_with(
+            TierSelection::ExactAndProbable,
+            unbounded(),
+            &mut ScriptedClock::frozen(),
+        );
         assert!(result.coverage.enumeration_exhausted);
         assert_eq!(result.components.len(), 1);
         match &result.components[0].witness {
@@ -745,7 +798,10 @@ mod tests {
         let comp = &result.components[0];
         assert_eq!(comp.members.len(), 2);
         match &comp.witness {
-            Witness::Cycle { probable_edges, edges } => {
+            Witness::Cycle {
+                probable_edges,
+                edges,
+            } => {
                 assert_eq!(*probable_edges, 0);
                 assert_eq!(edges.len(), 2);
                 // The witness forms a closed loop.
@@ -856,7 +912,11 @@ mod tests {
         let fx = fixture(2);
         fx.probable(0, 1);
         fx.probable(1, 0);
-        let result = fx.eval_with(TierSelection::Exact, unbounded(), &mut ScriptedClock::frozen());
+        let result = fx.eval_with(
+            TierSelection::Exact,
+            unbounded(),
+            &mut ScriptedClock::frozen(),
+        );
         assert!(result.coverage.enumeration_exhausted);
         assert_eq!(result.components.len(), 0);
     }
@@ -866,7 +926,11 @@ mod tests {
         let fx = fixture(2);
         fx.probable(0, 1);
         fx.probable(1, 0);
-        let result = fx.eval_with(TierSelection::ExactAndProbable, unbounded(), &mut ScriptedClock::frozen());
+        let result = fx.eval_with(
+            TierSelection::ExactAndProbable,
+            unbounded(),
+            &mut ScriptedClock::frozen(),
+        );
         assert!(result.coverage.enumeration_exhausted);
         assert_eq!(result.components.len(), 1);
     }
@@ -921,7 +985,10 @@ mod tests {
             &mut ScriptedClock::script(&[1]),
         );
         assert!(!result.coverage.enumeration_exhausted);
-        assert_eq!(result.coverage.stopped_by, Some(BudgetParameter::TimeBudgetMs));
+        assert_eq!(
+            result.coverage.stopped_by,
+            Some(BudgetParameter::TimeBudgetMs)
+        );
     }
 
     #[test]
@@ -938,7 +1005,10 @@ mod tests {
             &mut ScriptedClock::frozen(),
         );
         assert!(!result.coverage.enumeration_exhausted);
-        assert_eq!(result.coverage.stopped_by, Some(BudgetParameter::MaxComponents));
+        assert_eq!(
+            result.coverage.stopped_by,
+            Some(BudgetParameter::MaxComponents)
+        );
         assert_eq!(result.components.len(), 1);
     }
 
@@ -954,6 +1024,24 @@ mod tests {
         assert!(!result.coverage.enumeration_exhausted);
         assert_eq!(result.coverage.stopped_by, Some(BudgetParameter::MaxNodes));
         assert_eq!(result.components.len(), 0);
+    }
+
+    #[test]
+    fn node_budget_equal_to_node_count_is_exhaustive() {
+        // When max_nodes equals the exact node count, the enumeration
+        // should still be exhaustive — the budget check fires only when
+        // trying to admit a node beyond the cap.
+        let fx = fixture(3);
+        fx.exact(0, 1);
+        fx.exact(1, 2);
+        fx.exact(2, 0);
+        let result = fx.eval_with(
+            TierSelection::Exact,
+            budget_with(3, 100, 100),
+            &mut ScriptedClock::frozen(),
+        );
+        assert!(result.coverage.enumeration_exhausted);
+        assert_eq!(result.components.len(), 1);
     }
 
     // --- stable ids and ordering ------------------------------------------
@@ -999,13 +1087,32 @@ mod tests {
                     // Each hop's edge must exist in the store.
                     let src = &hop.from.uid;
                     let dst = &hop.to.uid;
-                    let src_id = fx.ids.iter().find(|&&id| {
-                        fx.store.symbol_by_uid(src).unwrap().map(|s| s.id == id).unwrap_or(false)
-                    }).unwrap();
-                    let dst_id = fx.ids.iter().find(|&&id| {
-                        fx.store.symbol_by_uid(dst).unwrap().map(|s| s.id == id).unwrap_or(false)
-                    }).unwrap();
-                    let found = fx.store.edges_from(*src_id, Some(EdgeKind::Calls)).unwrap()
+                    let src_id = fx
+                        .ids
+                        .iter()
+                        .find(|&&id| {
+                            fx.store
+                                .symbol_by_uid(src)
+                                .unwrap()
+                                .map(|s| s.id == id)
+                                .unwrap_or(false)
+                        })
+                        .unwrap();
+                    let dst_id = fx
+                        .ids
+                        .iter()
+                        .find(|&&id| {
+                            fx.store
+                                .symbol_by_uid(dst)
+                                .unwrap()
+                                .map(|s| s.id == id)
+                                .unwrap_or(false)
+                        })
+                        .unwrap();
+                    let found = fx
+                        .store
+                        .edges_from(*src_id, Some(EdgeKind::Calls))
+                        .unwrap()
                         .into_iter()
                         .any(|e| e.dst_id == *dst_id && e.tier == Tier::Exact);
                     assert!(found, "witness edge {src} -> {dst} not found in store");
@@ -1023,15 +1130,15 @@ mod tests {
         fx.exact(0, 1);
         fx.exact(1, 0);
         // Insert an unresolved call.
-        let file_id = fx.store.symbol_by_uid("src/f0.rs#f0#function").unwrap().unwrap().file_id;
-        fx.store.insert_unresolved_call(
-            file_id,
-            "f1",
-            None,
-            5,
-            None,
-            "calls",
-        ).unwrap();
+        let file_id = fx
+            .store
+            .symbol_by_uid("src/f0.rs#f0#function")
+            .unwrap()
+            .unwrap()
+            .file_id;
+        fx.store
+            .insert_unresolved_call(file_id, "f1", None, 5, None, "calls")
+            .unwrap();
         let result = fx.eval();
         assert_eq!(result.coverage.unresolved_same_name_sites, 1);
     }
@@ -1067,24 +1174,28 @@ mod tests {
                 "struct",
             )
             .unwrap();
-        store.insert_edge(&EdgeRow {
-            src_id: s0,
-            dst_id: s1,
-            kind: EdgeKind::Calls,
-            tier: Tier::Exact,
-            site_line: 3,
-            receiver: None,
-            callee: None,
-        }).unwrap();
-        store.insert_edge(&EdgeRow {
-            src_id: s1,
-            dst_id: s0,
-            kind: EdgeKind::Calls,
-            tier: Tier::Exact,
-            site_line: 9,
-            receiver: None,
-            callee: None,
-        }).unwrap();
+        store
+            .insert_edge(&EdgeRow {
+                src_id: s0,
+                dst_id: s1,
+                kind: EdgeKind::Calls,
+                tier: Tier::Exact,
+                site_line: 3,
+                receiver: None,
+                callee: None,
+            })
+            .unwrap();
+        store
+            .insert_edge(&EdgeRow {
+                src_id: s1,
+                dst_id: s0,
+                kind: EdgeKind::Calls,
+                tier: Tier::Exact,
+                site_line: 9,
+                receiver: None,
+                callee: None,
+            })
+            .unwrap();
         let result = enumerate(
             &store,
             Request {

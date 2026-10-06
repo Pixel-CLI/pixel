@@ -2351,23 +2351,24 @@ impl Service {
     /// is never read as proof of safety.
     fn op_cycles(&mut self, req: CyclesRequest) -> Result<Value, String> {
         let args = req.parse()?;
-        let epistemics =
-            |caps: Vec<String>| derive_epistemics("cycles", &json!({ "caps": caps })).0;
 
         // Nothing to attribute an answer to: report it, never build one.
         if let Err(reason) = self.evaluate_gate()? {
-            let halted = evaluate::halted(reason, None, &evaluate::Args {
-                from: String::new(),
-                to: String::new(),
-                traversal: pixel_proto::evaluate::Traversal::Callees,
-                tiers: evaluate::TierSelection::Exact,
-                max_depth: 0,
-                time_budget_ms: 0,
-                scope: None,
-                at_snapshot: false,
-            }, false, epistemics(Vec::new()));
-            return serde_json::to_value(wire::Output::Evaluation(Box::new(halted)))
-                .map_err(|e| e.to_string());
+            let reason_str = match reason {
+                wire::Reason::GraphUnavailable => "graph_unavailable",
+                wire::Reason::GraphStale => "graph_stale",
+                _ => "graph_unavailable",
+            };
+            let result = json!({
+                "op": "cycles",
+                "components": [],
+                "coverage": {
+                    "enumeration_exhausted": false,
+                    "stopped_by": null,
+                    "reason": reason_str,
+                },
+            });
+            return serde_json::to_value(result).map_err(|e| e.to_string());
         }
 
         let db = self.graph_db_path();
@@ -2383,7 +2384,7 @@ impl Service {
             "op": "cycles",
             "components": enumeration.components,
             "coverage": enumeration.coverage,
-            "epistemics": epistemics(caps),
+            "caps": caps,
         });
         serde_json::to_value(result).map_err(|e| e.to_string())
     }
@@ -3560,6 +3561,7 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "processes",
     "clusters",
     "plan",
+    "cycles",
 ];
 
 fn is_retrieval_op(op_name: &str) -> bool {
@@ -3969,9 +3971,7 @@ impl CyclesRequest {
             tiers,
             max_nodes: self.max_nodes.unwrap_or(DEFAULT_CYCLES_MAX_NODES),
             max_edges: self.max_edges.unwrap_or(DEFAULT_CYCLES_MAX_EDGES),
-            time_budget_ms: self
-                .time_budget_ms
-                .unwrap_or(DEFAULT_CYCLES_TIME_BUDGET_MS),
+            time_budget_ms: self.time_budget_ms.unwrap_or(DEFAULT_CYCLES_TIME_BUDGET_MS),
             max_components: self.max_components.unwrap_or(DEFAULT_CYCLES_MAX_COMPONENTS),
         })
     }
@@ -7326,6 +7326,16 @@ mod tests {
                     query: Some("dead-code".into()),
                     tag: None,
                     limit: None,
+                },
+            ),
+            (
+                "cycles",
+                Request::Cycles {
+                    tiers: Some("exact".into()),
+                    max_nodes: None,
+                    max_edges: None,
+                    time_budget_ms: None,
+                    max_components: None,
                 },
             ),
         ];
