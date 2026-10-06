@@ -325,9 +325,6 @@ fn assert_chains(db: &Path) {
         ]
     );
     assert_eq!(unresolved_from(&store, &cycler), ["never_defined"]);
-    // A module included after `Sortable` that the graph cannot name may
-    // define `sort_key` first: no target, although only one definition
-    // exists.
     // A superclass cycle terminates and proves nothing.
     let cycle = uid("app/models/superclass_cycle.rb", "Alpha#run");
     assert_eq!(calls_from(&store, &cycle), []);
@@ -337,6 +334,9 @@ fn assert_chains(db: &Path) {
         calls_from(&store, &uid("app/reports/sales.rb", "SalesReport#build")),
         [edge("sort_key", "Sortable#sort_key", Tier::Probable)]
     );
+    // A module included after `Sortable` that the graph cannot name may
+    // define `sort_key` first: no target, although only one definition
+    // exists.
     let dynamic = uid("app/models/dynamic.rb", "Dynamic#run");
     assert_eq!(calls_from(&store, &dynamic), []);
     assert_eq!(unresolved_from(&store, &dynamic), ["sort_key"]);

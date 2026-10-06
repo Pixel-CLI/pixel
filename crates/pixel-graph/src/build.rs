@@ -1185,8 +1185,8 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     let mut affected = Affected::default();
     let mut before: Vec<Definition> = Vec::new();
     let mut after: Vec<Definition> = Vec::new();
-    let mut mixins_before: Vec<RawMixin> = Vec::new();
-    let mut mixins_after: Vec<RawMixin> = Vec::new();
+    let mut mixins_before: Vec<(String, RawMixin)> = Vec::new();
+    let mut mixins_after: Vec<(String, RawMixin)> = Vec::new();
     let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
 
     let mut extracted: Vec<Extracted> = Vec::with_capacity(files.len());
@@ -1200,7 +1200,12 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         if let Some(old) = store.file_by_path(rel)? {
             let old_syms = store.symbols_in_file(old.id)?;
             before.extend(stored_definitions(store, old.id, rel)?);
-            mixins_before.extend(store.ruby_mixins_in_file(old.id)?);
+            mixins_before.extend(
+                store
+                    .ruby_mixins_in_file(old.id)?
+                    .into_iter()
+                    .map(|mixin| (rel.to_string(), mixin)),
+            );
             affected.files.insert(old.id);
             for import in store.imports_to_file(old.id)? {
                 affected.files.insert(import.file_id);
@@ -1263,7 +1268,11 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             continue;
         };
 
-        mixins_after.extend(fx.mixins.iter().cloned());
+        mixins_after.extend(
+            fx.mixins
+                .iter()
+                .map(|mixin| (rel.to_string(), mixin.clone())),
+        );
         after.extend(fx.symbols.iter().map(|s| Definition {
             path: rel.to_string(),
             name: s.name.clone(),

@@ -293,6 +293,12 @@ fn ruby_quoted_symbols_should_name_methods_and_overridden_declarations_forward_n
   alias_method :heading, :display_name
   def heading
   end
+  def footer
+  end
+  attr_reader :footer
+  alias_method :\"quoted_alias\", :\"display_name\"
+  delegate :\"quoted_delegate\", to: :\"quoted_target\", prefix: :\"quoted_prefix\"
+  scope :\"quoted_scope\", -> { where(active: true) }
 end
 ";
     let fx = extract_file("app/models/card.rb", source.as_bytes()).unwrap();
@@ -307,11 +313,26 @@ end
         qualified,
         [
             "Card#display_name",
+            "Card#footer",
             "Card#heading",
             "Card#label",
-            "Card#title"
+            "Card#quoted_alias",
+            "Card#quoted_prefix_quoted_delegate",
+            "Card#title",
+            "Card.quoted_scope",
         ]
     );
+    // Ruby keeps the last definition in source order: the `def heading`
+    // after its alias, the `attr_reader :footer` after its `def`.
+    let span = |q: &str| -> Vec<(u32, u32)> {
+        fx.symbols
+            .iter()
+            .filter(|s| s.qualified == q)
+            .map(|s| (s.start_line, s.end_line))
+            .collect()
+    };
+    assert_eq!(span("Card#heading"), [(7, 8)]);
+    assert_eq!(span("Card#footer"), [(11, 11)]);
     // The later `alias_method :title` and the `def heading` win: the first
     // `title` alias and the `heading` alias leave no reference behind.
     let mut forwards: Vec<(String, Option<String>)> = fx
@@ -329,7 +350,15 @@ end
         forwards,
         [
             ("display_name".to_string(), Some("Card#label".to_string())),
+            (
+                "display_name".to_string(),
+                Some("Card#quoted_alias".to_string())
+            ),
             ("label".to_string(), Some("Card#title".to_string())),
+            (
+                "quoted_target".to_string(),
+                Some("Card#quoted_prefix_quoted_delegate".to_string())
+            ),
         ]
     );
 }
