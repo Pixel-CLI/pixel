@@ -95,6 +95,11 @@ pub struct ConceptMatch {
     pub kind: ConceptKind,
     pub raw: String,
     pub norm: String,
+    /// What the concept's extractor recorded beside its text: a route's
+    /// handler (`admin/orders#create (Admin::OrdersController#create)`).
+    /// Omitted when empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     /// Owner symbol name (smallest enclosing symbol), if any.
     pub owner: Option<String>,
     /// The symbol kind when this match came from the symbol fallback tier
@@ -576,6 +581,7 @@ fn finish(
             kind: row.kind,
             raw: row.raw,
             norm: row.norm,
+            detail: row.detail,
             owner,
             symbol_kind: None,
             score,
@@ -737,6 +743,7 @@ fn weak_filename_matches<'a>(
                 kind: ConceptKind::String,
                 raw: format!("filename: {stem}"),
                 norm: stem,
+                detail: String::new(),
                 owner: None,
                 symbol_kind: None,
                 score,
@@ -852,6 +859,7 @@ fn finish_symbols(
             kind,
             raw: row.name.clone(),
             norm: normalize(&row.name),
+            detail: String::new(),
             owner: None,
             symbol_kind: Some(row.kind.as_str().to_string()),
             score,

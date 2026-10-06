@@ -243,3 +243,24 @@ fn compact_repo_state_drops_the_clean_list_and_keeps_the_count() {
     compact_repo_state(&mut bare);
     assert_eq!(bare, json!([]));
 }
+
+#[test]
+fn a_find_code_match_line_shows_a_route_handler_only_when_recorded() {
+    let route = json!({
+        "path": "config/routes.rb", "start_line": 3, "kind": "route", "score": 1.0,
+        "raw": "POST /admin/orders",
+        "detail": "admin/orders#create (Admin::OrdersController#create)",
+    });
+    assert_eq!(
+        resolve_match_line(&route),
+        "config/routes.rb:3 (route, score: 1.00) POST /admin/orders → admin/orders#create (Admin::OrdersController#create)\n"
+    );
+    let plain = json!({
+        "path": "src/a.ts", "start_line": 7, "kind": "string", "score": 0.5,
+        "raw": "hello world again", "detail": "",
+    });
+    assert_eq!(
+        resolve_match_line(&plain),
+        "src/a.ts:7 (string, score: 0.50) hello world again\n"
+    );
+}

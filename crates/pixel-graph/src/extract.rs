@@ -16,9 +16,11 @@ use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Tree};
 
 use crate::store::SymbolKind;
 
+pub(crate) mod ruby_associations;
 pub(crate) mod ruby_callbacks;
 pub(crate) mod ruby_generated;
 pub(crate) mod ruby_mixins;
+pub mod ruby_routes;
 
 pub use ruby_mixins::RawMixin;
 
@@ -347,9 +349,35 @@ pub fn extract_file(path_rel: &str, content: &[u8]) -> Option<FileExtraction> {
             trait_impl: false,
             module_decl: false,
         });
+        if ruby_routes::is_routes_file(path_rel) {
+            push_route_references(&mut extraction, content);
+        }
         assign_enclosing(&mut extraction);
     }
     Some(extraction)
+}
+
+/// A Rails route's handler, referenced from the routes file: the action
+/// `name`, with the controller class in `arg_of` (`:route
+/// Admin::OrdersController`), resolved to that class's method only. One
+/// reference per declaration line and handler (`resources` declares several
+/// routes to one action, `update` twice).
+fn push_route_references(extraction: &mut FileExtraction, content: &[u8]) {
+    let mut seen = std::collections::HashSet::new();
+    for route in ruby_routes::routes(content) {
+        let (Some(action), Some(controller)) = (route.action.clone(), route.controller_constant())
+        else {
+            continue;
+        };
+        if seen.insert((route.line, controller.clone(), action.clone())) {
+            extraction.references.push(RawReference {
+                name: action,
+                enclosing_index: None,
+                site_line: route.line,
+                arg_of: Some(format!("{}{controller}", ruby_callbacks::ROUTE_REFERENCE)),
+            });
+        }
+    }
 }
 
 fn language_for(lang: &str) -> Option<Language> {
@@ -2307,6 +2335,7 @@ fn walk_ruby_call(w: &mut Walker, locals: &mut RubyLocals, node: Node) {
             locals.visibility(&name);
         }
         ruby_mixins::walk_mixin_call(w, node, &name);
+        ruby_associations::walk_association(w, node, &name);
         if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
             if let Some(spec) = ruby_first_string_argument(w, node) {
                 let path = ruby_require_path(&name, &spec);

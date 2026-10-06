@@ -143,7 +143,10 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    binstubs under `bin/`/`exe/` are Ruby files, and Ruby `require` /
 ///    `require_relative` resolve to files inside their project's load roots
 ///    (`imports.path` keeps `require_relative` as `./spec`).
-pub const EXTRACTOR_VERSION: &str = "22";
+/// 23: Rails routes files yield `route` concepts with their handler and a
+///    `references` edge to the controller action (`:route` arg_of); Active
+///    Record associations reference their model class (`:association`).
+pub const EXTRACTOR_VERSION: &str = "23";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -3662,6 +3665,15 @@ mod tests {
              def self.report\n    since\n  end\nend\n",
         ),
         ("app/base.rb", "class Base\n  def audit; end\nend\n"),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :orders, only: [:create]\nend\n",
+        ),
+        (
+            "app/controllers/orders_controller.rb",
+            "class OrdersController\n  def create; end\nend\n",
+        ),
+        ("app/line.rb", "class Line\n  belongs_to :order\nend\n"),
     ];
 
     fn write_tree(root: &Path, files: &[(&str, &str)]) {
@@ -3807,6 +3819,21 @@ mod tests {
             assert!(
                 edges.iter().any(|e| e.starts_with(&prefix)),
                 "the Ruby ancestor chain must give {src} -> {dst} ({edges:#?})"
+            );
+        }
+        for (src, dst) in [
+            (
+                "config/routes.rb#config/routes.rb#script",
+                "app/controllers/orders_controller.rb#OrdersController#create#method",
+            ),
+            ("app/line.rb#Line#class", "app/order.rb#Order#class"),
+        ] {
+            let prefix = format!(
+                "Text(\"{src}\") | Text(\"{dst}\") | Text(\"references\") | Text(\"probable\")"
+            );
+            assert!(
+                edges.iter().any(|e| e.starts_with(&prefix)),
+                "a Rails route or association must give {src} -> {dst} ({edges:#?})"
             );
         }
 
