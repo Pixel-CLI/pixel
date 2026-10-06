@@ -855,4 +855,25 @@ mod tests {
             "only a produced line records the agent, so a skipped record must have one"
         );
     }
+
+    /// `Shutdown` is acknowledged and `Recall` reaches the corpus ops; only
+    /// repository ops get the "wrong daemon" refusal.
+    #[test]
+    fn handle_should_acknowledge_shutdown_and_route_recall_to_the_corpus() {
+        let mut fx = Fixture::new("handle");
+        let shutdown = fx.service.handle(Request::Shutdown);
+        assert!(shutdown.ok);
+        assert_eq!(shutdown.result, Some(json!({"shutting_down": true})));
+
+        let recall = fx.service.handle(Request::Recall {
+            action: "nope".into(),
+            params: Value::Null,
+        });
+        assert!(!recall.ok);
+        let message = recall.error.map(|e| e.message).unwrap_or_default();
+        assert!(
+            message.contains("unknown recall action 'nope'"),
+            "{message}"
+        );
+    }
 }

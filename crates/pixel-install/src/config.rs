@@ -301,25 +301,25 @@ pub fn apply_managed_markers(original: &str, managed: &str) -> String {
 /// of leaving other, non-matching lines of that same section behind as
 /// orphaned, mangled content.
 pub fn strip_stale_blocks(text: &str) -> (String, usize) {
-    let lines: Vec<&str> = text.lines().collect();
     let mut out = String::with_capacity(text.len());
     let mut removed = 0usize;
-    let mut i = 0usize;
-    while i < lines.len() {
-        if let Some(depth) = stale_block_header_depth(lines[i]) {
-            removed += 1;
-            i += 1;
-            while i < lines.len() {
-                if header_depth(lines[i]).is_some_and(|d| d <= depth) {
-                    break;
-                }
-                i += 1;
+    // Depth of the stale section being dropped, until a header at the same
+    // or a shallower depth closes it.
+    let mut dropping: Option<usize> = None;
+    for line in text.lines() {
+        if let Some(depth) = dropping {
+            if !header_depth(line).is_some_and(|d| d <= depth) {
+                continue;
             }
+            dropping = None;
+        }
+        if let Some(depth) = stale_block_header_depth(line) {
+            removed += 1;
+            dropping = Some(depth);
             continue;
         }
-        out.push_str(lines[i]);
+        out.push_str(line);
         out.push('\n');
-        i += 1;
     }
     (out, removed)
 }

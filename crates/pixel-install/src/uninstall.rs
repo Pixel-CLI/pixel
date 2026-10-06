@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use crate::InstallError;
 use crate::config;
-use crate::install::{self, CheckStatus, InstallReport, InstallStep, InstallSummary};
+use crate::install::{self, CheckStatus, InstallReport, InstallStep};
 use crate::routing;
 
 pub type Result<T> = std::result::Result<T, InstallError>;
@@ -111,21 +111,12 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
     }
     if options.wrappers_only {
         let step = install::remove_shell_wrappers(&home, options.shell.as_deref(), dry_run)?;
-        let summary = InstallSummary {
-            green: usize::from(step.status == CheckStatus::Green),
-            yellow: usize::from(step.status == CheckStatus::Yellow),
-            red: usize::from(step.status == CheckStatus::Red),
-        };
-        let ok = summary.red == 0;
-        return Ok(InstallReport {
-            version: "v1".into(),
-            ok,
-            executable_path: binary_path.display().to_string(),
-            home: home.display().to_string(),
+        return Ok(install::install_report(
+            &binary_path,
+            &home,
             dry_run,
-            steps: vec![step],
-            summary,
-        });
+            vec![step],
+        ));
     }
     let steps = vec![
         // 1. Remove shell wrappers from the shell's profile (~/.zshrc,
@@ -176,29 +167,7 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         ),
     ];
 
-    let green = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Green)
-        .count();
-    let yellow = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Yellow)
-        .count();
-    let red = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Red)
-        .count();
-    let ok = red == 0;
-
-    Ok(InstallReport {
-        version: "v1".into(),
-        ok,
-        executable_path: binary_path.display().to_string(),
-        home: home.display().to_string(),
-        dry_run,
-        steps,
-        summary: InstallSummary { green, yellow, red },
-    })
+    Ok(install::install_report(&binary_path, &home, dry_run, steps))
 }
 
 /// Repo-scoped uninstall (`pixel uninstall --repo <path>`): removes exactly
@@ -301,28 +270,7 @@ fn uninstall_project(
         backups_step(&find_backups(&project_backup_dirs(repo)), dry_run),
     ];
 
-    let green = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Green)
-        .count();
-    let yellow = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Yellow)
-        .count();
-    let red = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Red)
-        .count();
-
-    Ok(InstallReport {
-        version: "v1".into(),
-        ok: red == 0,
-        executable_path: binary_path.display().to_string(),
-        home: repo.display().to_string(),
-        dry_run,
-        steps,
-        summary: InstallSummary { green, yellow, red },
-    })
+    Ok(install::install_report(binary_path, repo, dry_run, steps))
 }
 
 /// Take the repo-local Claude guard out of `<repo>/.claude/settings.local.json`
@@ -1721,6 +1669,71 @@ mod routing_tests {
         }
         #[cfg(not(unix))]
         let _ = path;
+    }
+
+    /// Marked hooks are found in every event: an event left empty is
+    /// dropped, a mixed one keeps its foreign group, and each counts.
+    #[test]
+    fn remove_claude_hooks_counts_each_event_it_changes_and_its_scripts() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let path = home.join(".claude/settings.json");
+        // Another binary's commands: only the marker pass can take them out.
+        let marked = |marker: &str| json!({"hooks":[{"type":"command","command":format!("/opt/other/pixel {marker}")}]});
+        let foreign = json!({"hooks":[{"type":"command","command":"keep-me"}]});
+        install::write_settings(
+            &path,
+            &json!({"hooks":{
+                "SessionStart":[marked("run-hook metrics --provider codex")],
+                "UserPromptSubmit":[marked("run-hook guard --provider zcode"), foreign.clone()],
+                "Stop":[foreign.clone()],
+            }}),
+            false,
+        )
+        .unwrap();
+        let hooks_dir = home.join(config::CLAUDE_HOOKS_DIR);
+        fs::create_dir_all(&hooks_dir).unwrap();
+        fs::write(hooks_dir.join(config::SESSION_START_HOOK), "#!/bin/sh\n").unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let dry = remove_claude_hooks(home, Path::new("/tmp/pixel"), true).unwrap();
+        assert_eq!(
+            dry.summary,
+            install::dry_run_summary(
+                true,
+                "removed 2 Claude hook event(s), deleted 1 hook script(s)"
+            )
+        );
+        assert_eq!(fs::read(&path).unwrap(), before, "a dry run writes nothing");
+        assert!(hooks_dir.join(config::SESSION_START_HOOK).is_file());
+
+        let step = remove_claude_hooks(home, Path::new("/tmp/pixel"), false).unwrap();
+        assert_eq!(
+            step.summary,
+            "removed 2 Claude hook event(s), deleted 1 hook script(s)"
+        );
+        assert_eq!(
+            install::read_settings(&path).unwrap(),
+            json!({"hooks":{"UserPromptSubmit":[foreign.clone()],"Stop":[foreign]}})
+        );
+        assert!(!hooks_dir.join(config::SESSION_START_HOOK).exists());
+    }
+
+    /// Settings without a Pixel hook are left byte for byte: no rewrite.
+    #[test]
+    fn remove_claude_hooks_leaves_settings_without_pixel_hooks_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let path = home.join(".claude/settings.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"keep-me"}]}]}}"#;
+        fs::write(&path, text).unwrap();
+        let step = remove_claude_hooks(home, Path::new("/tmp/pixel"), false).unwrap();
+        assert_eq!(
+            step.summary,
+            "removed 0 Claude hook event(s), deleted 0 hook script(s)"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
     }
 }
 

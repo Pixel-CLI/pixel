@@ -1091,6 +1091,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A file over the size cap never reaches the shard, so it must not move
+    /// the plain-tree freshness signature either.
+    #[test]
+    fn plain_signature_should_ignore_a_file_over_the_size_cap() {
+        let dir = std::env::temp_dir().join(format!("gpx-plain-sig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        let before = plain_signature(&dir);
+        let big = dir.join("big.txt");
+        std::fs::write(&big, vec![b'x'; 8192]).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&big)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        let after = plain_signature(&dir);
+        std::fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
+        let with_small = plain_signature(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(before, after);
+        assert_ne!(before, with_small);
+    }
+
+    /// A pixel-only `.gitignore` is skipped from the overlay, but only that
+    /// file: every other dirty path still lands in it.
+    #[test]
+    fn finish_open_should_skip_only_the_pixel_only_gitignore_from_the_overlay() {
+        let _cache = IsolatedCache::new("pixel-only-gitignore");
+        let dir = scratch("pixel-only-gitignore");
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn first() {}\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "one"]);
+        std::fs::write(dir.join(".gitignore"), ".pixel/\n").unwrap();
+        std::fs::write(dir.join("new.rs"), "fn dirtyOverlayNeedle() {}\n").unwrap();
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let overlay = set.open_timings().overlay_files;
+        let hits = set.search("dirtyOverlayNeedle", None).unwrap().0.len();
+        drop(set);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(overlay, 1);
+        assert_eq!(hits, 1);
+    }
+
     fn git(dir: &Path, args: &[&str]) {
         let out = Command::new("git")
             .arg("-C")

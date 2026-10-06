@@ -803,4 +803,24 @@ mod tests {
         assert!(matches!(Shard::open(&link), Err(ShardError::Io(_))));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn open_should_accept_a_path_at_the_length_cap_and_refuse_one_past_it() {
+        use super::{MAX_PATH_LEN, Shard, ShardBuilder, ShardError};
+        let dir = scratch("path-cap");
+        let path = dir.join("cap.shard");
+        let at_cap = "a".repeat(MAX_PATH_LEN);
+        let mut builder = ShardBuilder::new("ex");
+        builder.add_file(&at_cap, vec![1]);
+        builder.write(&path).unwrap();
+        assert_eq!(Shard::open(&path).unwrap().files(), [at_cap.as_str()]);
+
+        let mut builder = ShardBuilder::new("ex");
+        builder.add_file(&"a".repeat(MAX_PATH_LEN + 1), vec![1]);
+        builder.write(&path).unwrap();
+        assert!(
+            matches!(Shard::open(&path), Err(ShardError::Corrupt(reason)) if reason == "file path exceeds safety cap")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

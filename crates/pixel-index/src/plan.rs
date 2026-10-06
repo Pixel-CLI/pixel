@@ -383,4 +383,30 @@ mod tests {
             }
         }
     }
+
+    fn class_of(pattern: &str) -> Class {
+        match regex_syntax::Parser::new()
+            .parse(pattern)
+            .unwrap()
+            .into_kind()
+        {
+            HirKind::Class(class) => class,
+            other => panic!("{pattern} is not a class: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn class_alternatives_expand_up_to_the_cap_and_refuse_past_it() {
+        let unicode = class_alternatives(&class_of("[a-e]")).unwrap();
+        assert_eq!(unicode.len(), 5);
+        assert_eq!(unicode[0], b"a".to_vec());
+        assert_eq!(class_alternatives(&class_of("[a-f]")), None);
+
+        let bytes_class = class_of("(?-u)[a-c]");
+        assert!(matches!(bytes_class, Class::Bytes(_)));
+        assert_eq!(
+            class_alternatives(&bytes_class),
+            Some(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()])
+        );
+    }
 }
