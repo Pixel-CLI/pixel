@@ -18,8 +18,8 @@ use serde_json::Value;
 /// Hard deadline for the entire hook — never block after compaction.
 const HOOK_DEADLINE: Duration = Duration::from_millis(200);
 /// Manifest TTL — matches the guard's `MANIFEST_MAX_AGE_SECS`.
-const MANIFEST_MAX_AGE_SECS: u64 = 24 * 60 * 60;
-const MANIFEST_MAX_BYTES: u64 = 64 * 1024;
+const MANIFEST_MAX_AGE_SECS: u64 = 86_400; // 24 h
+const MANIFEST_MAX_BYTES: u64 = 65_536; // 64 KiB
 const CONTEXT_MAX_BYTES: usize = 4096;
 
 #[derive(Deserialize)]
@@ -34,6 +34,14 @@ struct PostCompactionPayload {
     /// provider-qualified runtime restore path.
     #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
+}
+
+/// The whole payload when it reads as UTF-8 within `cap` bytes; `None` for
+/// an unreadable stream or one past the cap, which the hook ignores.
+fn read_payload(reader: impl Read, cap: u64) -> Option<String> {
+    let mut input = String::new();
+    reader.take(cap + 1).read_to_string(&mut input).ok()?;
+    (input.len() as u64 <= cap).then_some(input)
 }
 
 /// Entry point for `pixel hook post-compaction`. Reads the PostCompaction
@@ -57,15 +65,9 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         std::process::exit(0);
     }
 
-    let mut input = String::new();
-    if std::io::stdin()
-        .take(MANIFEST_MAX_BYTES + 1)
-        .read_to_string(&mut input)
-        .is_err()
-        || input.len() as u64 > MANIFEST_MAX_BYTES
-    {
+    let Some(input) = read_payload(std::io::stdin(), MANIFEST_MAX_BYTES) else {
         std::process::exit(0);
-    }
+    };
     let Ok(payload) = serde_json::from_str::<PostCompactionPayload>(&input) else {
         std::process::exit(0);
     };
@@ -188,6 +190,18 @@ fn manifest_context(m: &Value, root: &Path, head: &str, now: u64) -> Option<Stri
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_payload_is_read_whole_up_to_its_cap_and_dropped_past_it() {
+        assert_eq!(
+            super::read_payload(&b"abcd"[..], 4).as_deref(),
+            Some("abcd")
+        );
+        assert_eq!(super::read_payload(&b"abc"[..], 4).as_deref(), Some("abc"));
+        assert_eq!(super::read_payload(&b"abcde"[..], 4), None);
+        assert_eq!(super::read_payload(&b"abcdef"[..], 4), None);
+        assert_eq!(super::read_payload(&[0xff_u8, 0xfe][..], 4), None);
+    }
+
     use super::*;
 
     fn task(name: &str, head: &str, created: u64) -> Value {

@@ -497,7 +497,9 @@ boundary it crosses.
   created 0700 (`durable::ensure_dir`).
 - **Status**: Partial.
 - **Residual**: the recall corpus and the error sink store transcripts and
-  argv unredacted; `edit-env` snapshots are plain copies of the `.env`;
+  argv unredacted (the sink keeps the whole output of every failed `sniper
+  run`, structured RSpec/RuboCop/Minitest runs included, for 7 days and
+  at most 200 outputs); `edit-env` snapshots are plain copies of the `.env`;
   `logged_args` masks only `config remote-key` values and `auth_url`, so a
   secret passed as `--var` to `pixel flow` or `--value` to `pixel edit-env`
   reaches `actions.jsonl` in clear (a 0600 file).

@@ -345,6 +345,8 @@ pub fn run(root: &Path) -> Result<(), ServeError> {
 /// ingest. Queries never block on it: the ingest shares the WAL-mode
 /// connection and yields every tick budget. Spawned on first facts use, not
 /// at daemon start.
+// Detached endless ingest thread; the tick counter only paces WAL checkpoints.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) fn spawn_facts_ingest(root: &Path) {
     let root = root.to_path_buf();
     std::thread::spawn(move || {

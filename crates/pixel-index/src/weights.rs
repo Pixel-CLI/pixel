@@ -77,3 +77,19 @@ impl Weigher for FreqTableWeigher {
         self.id
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc32_pair_table_matches_the_direct_hash() {
+        for pair in [*b"ab", *b"zq", [0x00, 0xff], [0xff, 0x00], [0x7f, 0x80]] {
+            assert_eq!(
+                Crc32Weigher.weight(&pair),
+                crc32fast::hash(&pair),
+                "{pair:?}"
+            );
+        }
+    }
+}

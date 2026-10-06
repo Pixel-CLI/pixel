@@ -16,7 +16,7 @@ use serde_json::Value;
 
 const STORE_VERSION: u8 = 1;
 const MAX_SESSIONS: usize = 16;
-const TTL_SECS: u64 = 24 * 60 * 60;
+const TTL_SECS: u64 = 86_400; // 24 h
 const MAX_SESSION_ID_BYTES: usize = 128;
 const MAX_TASK_CHARS: usize = 1024;
 const MAX_TARGETS: usize = 8;
@@ -617,6 +617,10 @@ mod tests {
         assert!(rendered.len() <= 600);
         assert!(rendered.contains("[PIXEL:TASK_RUNTIME v1]"));
         assert!(rendered.contains("not an exhaustive task map"));
+        assert!(
+            rendered.contains("\nTask: task\n"),
+            "an uncut task carries no mark: {rendered}"
+        );
         assert!(packet.render_context(100).is_none());
         std::fs::remove_dir_all(root).unwrap();
     }

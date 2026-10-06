@@ -424,13 +424,10 @@ fn anchored_literal(name: &str) -> Option<&str> {
 fn shell_overlap(group: &Value, provider: Provider) -> bool {
     let matcher = group.get("matcher").and_then(Value::as_str).unwrap_or("");
     let names: Vec<&str> = matcher.split('|').collect();
-    let matches_shell = names.iter().copied().any(|name| match provider {
-        Provider::Codex => matches!(name, "Bash" | "shell" | "unified_exec" | "local_shell"),
-        _ => name == provider.shell(),
-    });
-    if matches_shell || matches!(matcher, "" | "*" | ".*") {
-        return true;
-    }
+    // A plain shell tool name, `""`, `*` or `.*` is no anchored literal and
+    // no known non-shell name, so the last rule below reports it as an
+    // overlap.
+    //
     // A matcher made solely of anchored literal tool-name prefixes is provably
     // disjoint when none can match a current shell tool. This matters for
     // project-local Codex hooks: they shadow global hooks even when they only
@@ -3629,5 +3626,42 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn shell_overlap_reads_anchored_literals_per_provider() {
+        let overlaps =
+            |matcher: &str, provider| shell_overlap(&json!({"matcher": matcher}), provider);
+        assert!(overlaps("^shell$", Provider::Codex));
+        assert!(overlaps("^unified_exec$|^apply_patch$", Provider::Codex));
+        assert!(!overlaps("^apply_patch$", Provider::Codex));
+        assert!(overlaps("^Bash$", Provider::Claude));
+        assert!(!overlaps("^Read$|^Edit", Provider::Claude));
+        assert!(!overlaps("^shell$", Provider::Claude));
+        // Not anchored literals: an unknown regex may reach the shell.
+        assert!(overlaps("Read.*", Provider::Claude));
+        assert!(overlaps("Bash", Provider::Claude));
+        assert!(overlaps("*", Provider::Claude));
+        assert!(!overlaps("Read|Grep", Provider::Claude));
+    }
+
+    #[test]
+    fn passive_vibe_claude_bridge_requires_every_part_of_the_wrapper() {
+        let full = "/bin/sh -c '[ -x \"$HOME/.vibe-island/bin/vibe-island-bridge\" ] && \"$HOME/.vibe-island/bin/vibe-island-bridge\" --source claude; exit 0'";
+        let group =
+            |command: &str| json!({"matcher":"*","hooks":[{"type":"command","command": command}]});
+        assert!(passive_vibe_claude_bridge(&group(full), Provider::Claude));
+        assert!(!passive_vibe_claude_bridge(&group(full), Provider::Codex));
+        for broken in [
+            full.replace("vibe-island-bridge", "other-bridge"),
+            full.replace("--source claude", "--source codex"),
+            full.replace("] && ", "]; "),
+            full.replace("exit 0'", "exit 1'"),
+        ] {
+            assert!(
+                !passive_vibe_claude_bridge(&group(&broken), Provider::Claude),
+                "{broken}"
+            );
+        }
     }
 }

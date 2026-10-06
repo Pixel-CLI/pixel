@@ -152,6 +152,44 @@ pub fn counter(counters: &[(String, u64)], key: &str) -> Option<u64> {
     counters.iter().find(|(k, _)| k == key).map(|(_, v)| *v)
 }
 
+/// Lines tried as the start of a JSON document, at most: a formatter's
+/// document opens a line, and a long log is not re-parsed from every brace.
+const JSON_START_CAP: usize = 64;
+
+/// The first JSON object in `output` that `accept` takes: the document a
+/// `--format json` run prints, wherever warnings, a boot banner or a
+/// coverage note put it. Each line opening with `{` is tried as the start of
+/// one value; the text after that value is ignored. `None` when no line
+/// starts an accepted, complete object (a truncated or malformed document
+/// included): the caller reads the output as text instead.
+pub fn find_json_object(
+    output: &str,
+    accept: impl Fn(&serde_json::Value) -> bool,
+) -> Option<serde_json::Value> {
+    let mut offset = 0;
+    let mut tried = 0;
+    for line in output.split_inclusive('\n') {
+        let start = offset + (line.len() - line.trim_start().len());
+        offset += line.len();
+        if !line.trim_start().starts_with('{') {
+            continue;
+        }
+        tried += 1;
+        if tried > JSON_START_CAP {
+            break;
+        }
+        let mut values =
+            serde_json::Deserializer::from_str(&output[start..]).into_iter::<serde_json::Value>();
+        if let Some(Ok(value)) = values.next()
+            && value.is_object()
+            && accept(&value)
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -95,6 +95,12 @@ pub struct ConceptMatch {
     pub kind: ConceptKind,
     pub raw: String,
     pub norm: String,
+    /// What the concept's extractor recorded beside its text: for a Rails
+    /// route its handler (`admin/orders#create
+    /// (Admin::OrdersController#create)`), for other kinds their own label
+    /// (`component`, `key`, an HTTP route's text). Omitted when empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     /// Owner symbol name (smallest enclosing symbol), if any.
     pub owner: Option<String>,
     /// The symbol kind when this match came from the symbol fallback tier
@@ -576,6 +582,7 @@ fn finish(
             kind: row.kind,
             raw: row.raw,
             norm: row.norm,
+            detail: row.detail,
             owner,
             symbol_kind: None,
             score,
@@ -737,6 +744,7 @@ fn weak_filename_matches<'a>(
                 kind: ConceptKind::String,
                 raw: format!("filename: {stem}"),
                 norm: stem,
+                detail: String::new(),
                 owner: None,
                 symbol_kind: None,
                 score,
@@ -852,6 +860,7 @@ fn finish_symbols(
             kind,
             raw: row.name.clone(),
             norm: normalize(&row.name),
+            detail: String::new(),
             owner: None,
             symbol_kind: Some(row.kind.as_str().to_string()),
             score,
@@ -1704,6 +1713,78 @@ mod tests {
         assert_eq!(out.matches.len(), 1);
         assert_eq!(out.matches[0].raw, "handleLogin");
         assert_eq!(out.matches[0].symbol_kind.as_deref(), Some("function"));
+        assert_eq!(out.matches[0].reasons, vec!["exact symbol name match"]);
+    }
+
+    /// A single fuzzy symbol-fallback row whose words only partly cover the
+    /// query is ranked, never resolved, and scores in the overlap band.
+    #[test]
+    fn symbol_fallback_partial_overlap_stays_ranked_with_its_band_score() {
+        let mut store = store();
+        let f1 = add_file(&mut store, "src/app.tsx");
+        store
+            .insert_symbol(
+                f1,
+                "src/app.tsx#handleLoginForm#function",
+                "handleLoginForm",
+                "handleLoginForm",
+                SymbolKind::Function,
+                1,
+                3,
+                "handleLoginForm()",
+            )
+            .unwrap();
+        let out = resolve(&store, "login page", &ResolveOptions::default()).unwrap();
+        assert_eq!(out.tier, Some(Tier::Symbol), "{out:?}");
+        assert_eq!(out.confidence, Confidence::Ranked, "{out:?}");
+        assert_eq!(out.matches[0].reasons, vec!["symbol fallback"]);
+        assert!((out.matches[0].score - 0.5).abs() < 1e-9, "{out:?}");
+    }
+
+    #[test]
+    fn a_miss_after_a_capped_symbol_scan_reports_the_cap() {
+        let mut store = store();
+        let f = add_file(&mut store, "src/many.rs");
+        store.conn().execute_batch("BEGIN").unwrap();
+        for i in 0..SYMBOL_SCAN_CAP {
+            let name = format!("filler{i}");
+            store
+                .insert_symbol(f, &name, &name, &name, SymbolKind::Function, 1, 1, "()")
+                .unwrap();
+        }
+        store.conn().execute_batch("COMMIT").unwrap();
+        let out = resolve(&store, "wombat quokka", &ResolveOptions::default()).unwrap();
+        assert_eq!(out.confidence, Confidence::Unresolved, "{out:?}");
+        assert!(out.scan_capped, "{:?}", out.basis);
+    }
+
+    #[test]
+    fn tier_as_str_names_every_tier() {
+        let names: Vec<&str> = [
+            Tier::T0,
+            Tier::T1,
+            Tier::T2,
+            Tier::T3,
+            Tier::Symbol,
+            Tier::Ident,
+        ]
+        .iter()
+        .map(Tier::as_str)
+        .collect();
+        assert_eq!(names, ["T0", "T1", "T2", "T3", "symbol", "ident"]);
+    }
+
+    #[test]
+    fn trigram_set_starts_at_three_chars() {
+        assert!(trigram_set("ab").is_empty());
+        assert_eq!(trigram_set("abc").len(), 1);
+        assert_eq!(trigram_set("abcd").len(), 2);
+    }
+
+    #[test]
+    fn score_match_gives_a_mid_word_substring_the_substring_score() {
+        let r = row(ConceptKind::UiText, "checkout failed");
+        assert!((score_match(&r, "kout fai", None, "src/a.ts") - SCORE_SUBSTRING).abs() < 1e-9);
     }
 
     #[test]

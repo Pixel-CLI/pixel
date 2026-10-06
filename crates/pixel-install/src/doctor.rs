@@ -1339,33 +1339,32 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     let Runner {
         checks, skipped, ..
     } = runner;
-    let green = checks
-        .iter()
-        .filter(|c| c.status == CheckStatus::Green)
-        .count();
-    let yellow = checks
-        .iter()
-        .filter(|c| c.status == CheckStatus::Yellow)
-        .count();
-    let red = checks
-        .iter()
-        .filter(|c| c.status == CheckStatus::Red)
-        .count();
-    let ok = red == 0;
+    Ok(doctor_report(&exe, &home, checks, skipped))
+}
 
-    Ok(DoctorReport {
+/// The report over finished `checks`: one count per status, and `ok` while
+/// no check is red.
+fn doctor_report(
+    exe: &Path,
+    home: &Path,
+    checks: Vec<DoctorCheck>,
+    skipped: usize,
+) -> DoctorReport {
+    let count = |status| checks.iter().filter(|c| c.status == status).count();
+    let summary = DoctorSummary {
+        green: count(CheckStatus::Green),
+        yellow: count(CheckStatus::Yellow),
+        red: count(CheckStatus::Red),
+        skipped,
+    };
+    DoctorReport {
         version: "v1".into(),
-        ok,
+        ok: summary.red == 0,
         executable_path: exe.display().to_string(),
         home: home.display().to_string(),
         checks,
-        summary: DoctorSummary {
-            green,
-            yellow,
-            red,
-            skipped,
-        },
-    })
+        summary,
+    }
 }
 
 /// Whether `name` is a Pixel Claude plugin id (`pixel`, or `pixel@<marketplace>`).
@@ -2608,9 +2607,9 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
         // Alternation outside placeholders: pick the first alternative
         // (`report|rebase-if-clean` → `report`, `--merge|--stash-first` →
         // `--merge`).
-        let token = match token.split('|').next() {
-            Some(first) if first.len() < token.len() => first.to_string(),
-            _ => token,
+        let token = match token.split_once('|') {
+            Some((first, _)) => first.to_string(),
+            None => token,
         };
         // Well-known placeholder spellings.
         let token = match token.as_str() {
@@ -2710,14 +2709,13 @@ mod tests {
 
     use super::env_non_empty;
     use super::{
-        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary,
-        PLACEHOLDER_DUMMY, Remedy, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL,
-        age_secs, capped, catalogue_steps, claude_hooks_owner_check, extract_rule_commands,
-        fix_for, judge_repair, load_pixel_config, names_check, normalize_rule_command, one_line,
-        probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
-        rtk_backup_check, run_repair, scenario_mismatches, selected, shell_path_check, shell_word,
-        spec, split_home_repairs, validate_selection, web_search_provider_check_with,
-        web_search_provider_from,
+        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, PLACEHOLDER_DUMMY, Remedy,
+        Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs, capped, catalogue_steps,
+        claude_hooks_owner_check, extract_rule_commands, fix_for, judge_repair, load_pixel_config,
+        names_check, normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
+        render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair, scenario_mismatches,
+        selected, shell_path_check, shell_word, spec, split_home_repairs, validate_selection,
+        web_search_provider_check_with, web_search_provider_from,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
@@ -2801,21 +2799,41 @@ mod tests {
     }
 
     fn report(checks: Vec<DoctorCheck>, skipped: usize) -> DoctorReport {
-        let count = |status| checks.iter().filter(|c| c.status == status).count();
-        let summary = DoctorSummary {
-            green: count(CheckStatus::Green),
-            yellow: count(CheckStatus::Yellow),
-            red: count(CheckStatus::Red),
-            skipped,
-        };
-        DoctorReport {
-            version: "v1".into(),
-            ok: summary.red == 0,
-            executable_path: "/bin/pixel".into(),
-            home: "/home".into(),
-            checks,
-            summary,
-        }
+        super::doctor_report(Path::new("/bin/pixel"), Path::new("/home"), checks, skipped)
+    }
+
+    #[test]
+    fn doctor_report_counts_each_status_and_fails_only_on_red() {
+        let passing = report(
+            vec![
+                finding("a", CheckStatus::Green, None, None),
+                finding("b", CheckStatus::Green, None, None),
+                finding("c", CheckStatus::Yellow, None, None),
+            ],
+            4,
+        );
+        assert!(passing.ok);
+        assert_eq!(
+            (
+                passing.summary.green,
+                passing.summary.yellow,
+                passing.summary.red,
+                passing.summary.skipped
+            ),
+            (2, 1, 0, 4)
+        );
+        assert_eq!(passing.executable_path, "/bin/pixel");
+        assert_eq!(passing.home, "/home");
+        let failing = report(vec![finding("a", CheckStatus::Red, None, None)], 0);
+        assert!(!failing.ok);
+        assert_eq!(
+            (
+                failing.summary.green,
+                failing.summary.yellow,
+                failing.summary.red
+            ),
+            (0, 0, 1)
+        );
     }
 
     fn ids(list: &[&str]) -> Vec<String> {

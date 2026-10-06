@@ -1,0 +1,1 @@
+**guard:** `git -C <dir> rebase` now takes the reconcile-conflict escape when `<dir>` has a pending `pixel sync-branch` conflict, like `cd <dir> && git rebase` already did; the `-C` value was dropped before the check, so the rebase was always substituted. Repeated `-C` flags compose as in git and resolve against the `cd` target or the hook's cwd.

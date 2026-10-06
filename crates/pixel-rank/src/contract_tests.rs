@@ -380,3 +380,18 @@ fn compute_targets_should_summarise_extra_symbols_and_keep_structured_ones_for_p
     assert_eq!(core.symbols.len(), 3, "P0 keeps the first three structured");
     assert!(r.targets[1].symbols.is_empty(), "P1 carries reasons only");
 }
+
+/// A single candidate without a P0 has no runner-up to compare with:
+/// precision mode keeps it and fires no cap.
+#[test]
+fn compute_targets_should_keep_a_lone_non_p0_candidate_in_precision_mode() {
+    let inputs = SignalInputs {
+        all_paths: paths(&["src/a.rs"]),
+        content_hits: content(&[("token", "src/a.rs", 3)]),
+        graph_available: true,
+        ..Default::default()
+    };
+    let r = compute_targets("t", &query(&["token"]), inputs, &opts(20, None, true));
+    assert_eq!(listed(&r), vec![("src/a.rs".into(), "P1".into())]);
+    assert!(caps(&r).is_empty());
+}

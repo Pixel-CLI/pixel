@@ -172,6 +172,9 @@ pub fn concept_words(norm: &str) -> Vec<String> {
 /// languages plus `.svelte/.vue/.html/.json/.yaml/.css`. `None` if unsupported.
 pub fn concept_lang_of(path: &str) -> Option<&'static str> {
     let file = path.rsplit('/').next().unwrap_or(path);
+    if crate::extract::RUBY_FILE_NAMES.contains(&file) {
+        return Some("ruby");
+    }
     let ext = file.rsplit_once('.')?.1;
     match ext {
         "ts" | "mts" | "cts" => Some("ts"),
@@ -219,11 +222,35 @@ pub fn extract_concepts(path_rel: &str, content: &[u8]) -> Vec<RawConcept> {
         "yaml" => extract_yaml_config(content),
         "css" => extract_css(content),
         "rust" => extract_rust(path_rel, content),
-        // go/java/python/ruby have no concept sources defined in PLAN.md Engine 1.
+        "ruby" if crate::extract::ruby_routes::is_routes_file(path_rel) => rails_routes(content),
+        // go/java/python and other Ruby files have no concept sources.
         _ => Vec::new(),
     };
     out.extend(path_routes(path_rel, content));
     out
+}
+
+/// One `Route` concept per statically known Rails route: `raw` is the verb
+/// and path a request names (`POST /admin/orders`), `detail` the handler
+/// (`admin/orders#create (Admin::OrdersController#create)`, `mount
+/// Sidekiq::Web`), on the declaring line.
+fn rails_routes(content: &[u8]) -> Vec<RawConcept> {
+    crate::extract::ruby_routes::routes(content)
+        .into_iter()
+        .filter_map(|route| {
+            let raw = format!("{} {}", route.verb, route.path);
+            let norm = normalize(&raw);
+            (!norm.is_empty() && norm.len() <= MAX_NORM_CHARS).then(|| RawConcept {
+                kind: ConceptKind::Route,
+                detail: route.handler(),
+                raw,
+                norm,
+                start_line: route.line,
+                end_line: route.line,
+                owner_symbol_id: None,
+            })
+        })
+        .collect()
 }
 
 // --- shared tree-sitter walker -------------------------------------------
@@ -408,8 +435,14 @@ impl<'a> TsWalker<'a> {
     }
 }
 
+/// Whether a walker at `depth` has passed the recursion cap: a node at
+/// exactly `MAX_DEPTH` is still visited.
+fn too_deep(depth: usize) -> bool {
+    depth > MAX_DEPTH
+}
+
 fn walk_ts_concepts(w: &mut TsWalker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     match node.kind() {
@@ -492,7 +525,7 @@ fn walk_ts_concepts(w: &mut TsWalker, node: Node, depth: usize) {
 }
 
 fn walk_rust_concepts(w: &mut TsWalker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     match node.kind() {
@@ -1150,6 +1183,13 @@ mod tests {
     }
 
     #[test]
+    fn too_deep_visits_the_cap_and_stops_past_it() {
+        assert!(!too_deep(0));
+        assert!(!too_deep(MAX_DEPTH));
+        assert!(too_deep(MAX_DEPTH + 1));
+    }
+
+    #[test]
     fn is_uppercase_component_checks_the_first_character() {
         assert!(is_uppercase_component("Button"));
         assert!(!is_uppercase_component("button"));
@@ -1174,6 +1214,7 @@ mod tests {
             .find(|c| c.kind == ConceptKind::Route && c.raw.contains("/api/contact"))
             .unwrap_or_else(|| panic!("route from the script block: {concepts:?}"));
         assert_eq!(route.start_line, 4, "{route:?}");
+        assert_eq!(route.end_line, 4, "{route:?}");
         let component = concepts
             .iter()
             .find(|c| c.kind == ConceptKind::Component && c.raw == "Button")

@@ -1,0 +1,1 @@
+**graph:** Ruby `attr_reader`/`attr_writer`/`attr_accessor`, `alias_method`, `alias`, `delegate` (with `prefix:`) and Rails `scope` now define method symbols of their class at the declaring line, so `self.name = v` reaches the writer, a bare `name` the reader, and an alias or delegator references the method it forwards to on its own owner. Dynamic names define nothing.

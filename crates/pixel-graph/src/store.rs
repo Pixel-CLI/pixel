@@ -628,6 +628,7 @@ impl GraphStore {
             )?;
             tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
+            tx.exec_cached("DELETE FROM ruby_mixins WHERE file_id = ?1", params![id])?;
             tx.exec_cached(
                 "UPDATE files SET blob_oid = ?2, lang = ?3 WHERE id = ?1",
                 params![id, blob_oid, lang],
@@ -640,12 +641,14 @@ impl GraphStore {
             )?;
             tx.last_insert_rowid()
         };
+        tx.exec_cached("DELETE FROM walked_files WHERE path = ?1", params![path])?;
         tx.commit()?;
         Ok(id)
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<()> {
         let tx = self.conn.savepoint()?;
+        tx.exec_cached("DELETE FROM walked_files WHERE path = ?1", params![path])?;
         if let Some(id) = tx
             .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
                 r.get::<_, i64>(0)
@@ -670,6 +673,7 @@ impl GraphStore {
             )?;
             tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
+            tx.exec_cached("DELETE FROM ruby_mixins WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM files WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
@@ -887,6 +891,67 @@ impl GraphStore {
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Records the content hash of a walked file the store keeps no row for.
+    ///
+    /// See the `walked_files` table. Replaces any earlier record;
+    /// [`Self::replace_file`] and [`Self::remove_file`] drop it.
+    pub fn record_walked_file(&self, path: &str, blob_oid: &str) -> Result<()> {
+        self.conn.exec_cached(
+            "INSERT INTO walked_files (path, blob_oid) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET blob_oid = excluded.blob_oid",
+            params![path, blob_oid],
+        )?;
+        Ok(())
+    }
+
+    /// Drops every `walked_files` record, which a full build then rewrites.
+    pub fn clear_walked_files(&self) -> Result<()> {
+        self.conn.exec_cached("DELETE FROM walked_files", [])?;
+        Ok(())
+    }
+
+    /// Returns the path and hash of every walked file without a row, by path.
+    pub fn walked_files(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT path, blob_oid FROM walked_files ORDER BY path")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Store one declared Ruby ancestor of `file_id` (see `RawMixin`).
+    pub fn insert_ruby_mixin(&self, file_id: i64, mixin: &crate::extract::RawMixin) -> Result<()> {
+        self.conn.exec_cached(
+            "INSERT INTO ruby_mixins (file_id, owner, kind, target, site_line)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                file_id,
+                mixin.owner,
+                mixin.kind,
+                mixin.target,
+                mixin.site_line
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The Ruby ancestors `file_id` declares, in source order.
+    pub fn ruby_mixins_in_file(&self, file_id: i64) -> Result<Vec<crate::extract::RawMixin>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT owner, kind, target, site_line FROM ruby_mixins
+              WHERE file_id = ?1 ORDER BY site_line, id",
+        )?;
+        let rows = stmt.query_map(params![file_id], |r| {
+            Ok(crate::extract::RawMixin {
+                owner: r.get(0)?,
+                kind: r.get(1)?,
+                target: r.get(2)?,
+                site_line: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     // --- concept write path (Engine 1) ---
@@ -1751,6 +1816,26 @@ CREATE TABLE IF NOT EXISTS jsx_elements (
 );
 CREATE INDEX IF NOT EXISTS idx_jsx_elements_file_handler ON jsx_elements(file_id, has_handler);
 CREATE INDEX IF NOT EXISTS idx_jsx_elements_tag ON jsx_elements(tag);
+-- Ruby ancestors as declared: `class C < B`, `include M`, `prepend M`,
+-- `extend M` (kind, `included:` prefixed inside a concern's `included` block),
+-- the constant as written (NULL when not a literal constant) and its line.
+CREATE TABLE IF NOT EXISTS ruby_mixins (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  owner TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  target TEXT,
+  site_line INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ruby_mixins_file ON ruby_mixins(file_id);
+-- Files the graph walks hash into the freshness signature but keep no
+-- `files` row for: a `Gemfile.lock`, a binstub that is not Ruby, a generated
+-- blob, a file the parser rejected. Their content hash lets the freshness
+-- checks tell an unchanged one from an edit.
+CREATE TABLE IF NOT EXISTS walked_files (
+  path TEXT PRIMARY KEY,
+  blob_oid TEXT NOT NULL
+);
 ";
 
 /// Idempotent schema migrations for graphs created before a column existed.
@@ -1845,6 +1930,43 @@ fn migrate(conn: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn concepts_version_reads_the_stamped_schema_version() {
+        let store = super::GraphStore::open_in_memory().unwrap();
+        assert_eq!(
+            store.concepts_version().unwrap().as_deref(),
+            Some(super::CONCEPTS_VERSION)
+        );
+    }
+
+    #[test]
+    fn edge_kind_parse_round_trips_every_kind() {
+        use super::EdgeKind;
+        for kind in [
+            EdgeKind::Calls,
+            EdgeKind::Imports,
+            EdgeKind::Extends,
+            EdgeKind::Implements,
+            EdgeKind::HasMethod,
+            EdgeKind::References,
+        ] {
+            assert_eq!(EdgeKind::parse(kind.as_str()), kind);
+        }
+    }
+
+    #[test]
+    fn score_crux_line_adds_each_category_once() {
+        assert_eq!(super::score_crux_line("foo()?"), (3, vec!["bail"]));
+        assert_eq!(
+            super::score_crux_line("let x = foo()?"),
+            (6, vec!["bail", "mutation"])
+        );
+        assert_eq!(
+            super::score_crux_line("if done { return x; }"),
+            (9, vec!["guard", "bail", "mutation"])
+        );
+    }
+
     #[test]
     fn read_only_should_pin_snapshot_and_reject_writes() {
         let dir = tempfile::tempdir().unwrap();

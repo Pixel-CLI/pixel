@@ -493,3 +493,326 @@ fn ruby_surfaces_round_trip_by_name() {
         );
     }
 }
+
+/// The test a headline names (`Class#test: first line` → `Class#test`):
+/// the first line is the text formatter's quoted source line
+/// (`Failure/Error: …`), which the JSON document does not carry.
+fn identity(headline: &str) -> String {
+    headline.split(": ").next().unwrap_or_default().to_owned()
+}
+
+/// What a failure record says, minus how its formatter spelled it: the
+/// text formatter quotes the failing source line (`Failure/Error:`) and
+/// marks backtrace lines with `# `, the JSON document does neither.
+fn meaning(record: &ErrorRecord) -> Value {
+    let extra = record.extra.clone().unwrap_or_default();
+    let message: Vec<&str> = extra["message"]
+        .as_str()
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.starts_with("Failure/Error:"))
+        .collect();
+    let frames: Vec<(Option<String>, Option<u32>, Option<String>)> = record
+        .frames
+        .iter()
+        .flatten()
+        .map(|f| (f.file.clone(), f.line, f.func.clone()))
+        .collect();
+    serde_json::json!({
+        "surface": record.surface.as_str(),
+        "kind": record.kind,
+        "headline": identity(&record.message),
+        "testClass": extra["testClass"],
+        "testName": extra["testName"],
+        "file": extra["file"],
+        "line": extra["line"],
+        "expected": extra.get("expected"),
+        "actual": extra.get("actual"),
+        "rerun": extra["rerun"],
+        "message": message,
+        "frames": frames,
+        "counters": extra.get("counters"),
+        "failures": extra.get("failures").and_then(Value::as_array).map(|listed| {
+            listed
+                .iter()
+                .map(|f| {
+                    let mut f = f.clone();
+                    f["test"] = Value::String(identity(f["test"].as_str().unwrap_or_default()));
+                    f
+                })
+                .collect::<Vec<_>>()
+        }),
+        "cop": extra.get("cop"),
+        "column": extra.get("column"),
+        "severity": extra.get("severity"),
+        "correctable": extra.get("correctable"),
+    })
+}
+
+fn meanings(store: &Store) -> Vec<Value> {
+    all_errors(store).iter().map(meaning).collect()
+}
+
+#[test]
+fn rspec_json_and_text_of_one_run_give_the_same_records() {
+    let text = TempRoot::new();
+    let (text_store, _) = replay(&text, "rspec-mixed.txt", 1, Some("rspec"));
+    let json = TempRoot::new();
+    let (json_store, code) = replay(&json, "rspec-mixed.json", 1, Some("rspec"));
+    assert_eq!(code, 1);
+    let want = meanings(&text_store);
+    assert_eq!(want.len(), 3, "two failures and the summary: {want:#?}");
+    assert_eq!(meanings(&json_store), want);
+    let summary = &all_errors(&json_store)[2];
+    assert_eq!(summary.message, "7 examples, 2 failures, 1 pending");
+    assert_eq!(
+        query::test_status(&json_store).unwrap().passing,
+        Some(false)
+    );
+    // The raw document stays recoverable beside the records.
+    let raw = json_store
+        .latest_raw_fallback("run:rspec")
+        .unwrap()
+        .unwrap();
+    assert!(raw.starts_with("warning: parser/current"), "{raw}");
+    assert!(raw.contains("\"summary_line\": \"7 examples, 2 failures, 1 pending\""));
+}
+
+#[test]
+fn rubocop_json_and_text_of_one_run_give_the_same_records() {
+    let text = TempRoot::new();
+    let (text_store, _) = replay(&text, "rubocop-offenses.txt", 1, Some("rubocop"));
+    let json = TempRoot::new();
+    let (json_store, code) = replay(&json, "rubocop-offenses.json", 1, Some("rubocop"));
+    assert_eq!(code, 1);
+    let want = meanings(&text_store);
+    assert_eq!(want.len(), 3);
+    assert_eq!(meanings(&json_store), want);
+}
+
+#[test]
+fn rubocop_autocorrected_offenses_are_not_recorded_as_remaining() {
+    let state = TempRoot::new();
+    let (store, code) = replay(&state, "rubocop-autocorrect.json", 1, Some("rubocop"));
+    assert_eq!(code, 1);
+    let errors = all_errors(&store);
+    assert_eq!(
+        errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>(),
+        ["Lint/UselessAssignment: Useless assignment to variable - x."]
+    );
+    assert_eq!(extra(&errors[0], "corrected"), false);
+}
+
+#[test]
+fn rspec_json_green_and_empty_runs_are_passes_with_their_counters() {
+    let state = TempRoot::new();
+    let (store, code) = replay(&state, "rspec-green.json", 0, None);
+    assert_eq!(code, 0);
+    let pass = store
+        .latest_event_by_kind(EventKind::TestPass)
+        .unwrap()
+        .unwrap();
+    let data = pass.data.unwrap();
+    assert_eq!(
+        (
+            &data["runner"],
+            &data["examples"],
+            &data["failures"],
+            &data["pending"],
+            &data["passed"]
+        ),
+        (
+            &serde_json::json!("rspec"),
+            &serde_json::json!(36),
+            &serde_json::json!(0),
+            &serde_json::json!(1),
+            &serde_json::json!(35)
+        )
+    );
+    let empty = TempRoot::new();
+    let (store, _) = replay(&empty, "rspec-empty.json", 0, None);
+    let data = store
+        .latest_event_by_kind(EventKind::TestPass)
+        .unwrap()
+        .unwrap()
+        .data
+        .unwrap();
+    assert_eq!(
+        (&data["examples"], &data["passed"]),
+        (&serde_json::json!(0), &serde_json::json!(0))
+    );
+}
+
+#[test]
+fn rspec_json_boot_failure_is_an_error_not_a_pass() {
+    let state = TempRoot::new();
+    let (store, code) = replay(&state, "rspec-load-error.json", 1, Some("rspec"));
+    assert_eq!(code, 1);
+    let errors = all_errors(&store);
+    assert_eq!(errors.len(), 2, "{errors:#?}");
+    assert_eq!(errors[0].kind.as_deref(), Some("error"));
+    assert_eq!(extra(&errors[0], "file"), "spec/models/order_spec.rb");
+    assert!(
+        extra(&errors[0], "message")
+            .as_str()
+            .unwrap()
+            .contains("uninitialized constant Order::Customer")
+    );
+    assert_eq!(
+        extra(&errors[0], "rerun"),
+        "rspec ./spec/models/order_spec.rb"
+    );
+    assert_eq!(errors[1].kind.as_deref(), Some("summary"));
+    assert_eq!(
+        errors[1].message,
+        "0 examples, 0 failures, 1 error occurred outside of examples"
+    );
+    assert_eq!(extra(&errors[1], "counters")["errorsOutside"], 1);
+    assert_eq!(query::test_status(&store).unwrap().passing, Some(false));
+    assert!(
+        store
+            .latest_event_by_kind(EventKind::TestPass)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_truncated_json_document_falls_back_to_the_raw_tail() {
+    let state = TempRoot::new();
+    let (store, code) = replay(&state, "rspec-truncated.json", 1, Some("rspec"));
+    assert_eq!(code, 1);
+    let errors = all_errors(&store);
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert_eq!(errors[0].surface, Surface::RunWrapper);
+    assert_eq!(errors[0].kind.as_deref(), Some("exit-1"));
+    assert!(
+        store
+            .latest_raw_fallback("run:rspec")
+            .unwrap()
+            .unwrap()
+            .starts_with("{\"version\"")
+    );
+}
+
+/// Run `script` under the wrapper and return the store and exit code.
+fn run_script(state: &TempRoot, label: &str, script: &str) -> (Store, i32) {
+    let project = state.0.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let store = Store::open_at(&project, &state.0).unwrap();
+    let argv = vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()];
+    let code = run_wrapped(&store, Some(label), &argv).unwrap();
+    (store, code)
+}
+
+#[test]
+fn a_green_summary_with_a_failing_exit_is_never_a_pass() {
+    // SimpleCov fails the run after RSpec printed a green summary.
+    let state = TempRoot::new();
+    let script = format!(
+        "cat '{}'; echo 'Line coverage (79.30%) is below the expected minimum coverage (90.00%).'; echo 'SimpleCov failed with exit 2 due to a coverage related error'; exit 2",
+        fixture("rspec-green.txt").display()
+    );
+    let (store, code) = run_script(&state, "rspec", &script);
+    assert_eq!(code, 2, "the wrapped command's exit code is kept");
+    assert!(
+        store
+            .latest_event_by_kind(EventKind::TestPass)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .latest_event_by_kind(EventKind::BuildOk)
+            .unwrap()
+            .is_none()
+    );
+    let errors = all_errors(&store);
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert_eq!(errors[0].kind.as_deref(), Some("exit-2"));
+    let tail = extra(&errors[0], "tail").as_array().unwrap();
+    assert_eq!(
+        tail.last().unwrap(),
+        "SimpleCov failed with exit 2 due to a coverage related error",
+        "the late failure is the record's last line"
+    );
+}
+
+#[test]
+fn a_failing_summary_with_a_green_exit_records_its_failures() {
+    // `rspec || true`: the status is lost, the report is not.
+    let state = TempRoot::new();
+    let script = format!("cat '{}'; exit 0", fixture("rspec-mixed.txt").display());
+    let (store, code) = run_script(&state, "rspec", &script);
+    assert_eq!(code, 0, "the exit code is the child's");
+    assert!(
+        store
+            .latest_event_by_kind(EventKind::TestPass)
+            .unwrap()
+            .is_none()
+    );
+    let errors = all_errors(&store);
+    assert_eq!(errors.len(), 3, "{errors:#?}");
+    assert_eq!(errors[2].kind.as_deref(), Some("summary"));
+    assert_eq!(extra(&errors[2], "exitCode"), 0);
+    assert_eq!(query::test_status(&store).unwrap().passing, Some(false));
+}
+
+#[test]
+fn unrecognised_rake_output_stays_visible_with_the_original_command() {
+    let state = TempRoot::new();
+    let var = format!("PIXEL_SESSION_RAKE_{}_{}", std::process::id(), line!());
+    // SAFETY: the variable name is unique to this test and process; no
+    // other test reads or writes it.
+    unsafe { std::env::set_var(&var, "from-parent-env") };
+    let script = format!(
+        "echo '== 20261006120000 AddTotalToOrders: migrating ======'; echo '-- add_column(:orders, :total, :decimal)'; echo \"env=${var}\"; echo 'rake aborted!'; echo 'ActiveRecord::StatementInvalid: PG::DuplicateColumn'; exit 1"
+    );
+    let (store, code) = run_script(&state, "db:migrate", &script);
+    // SAFETY: as above.
+    unsafe { std::env::remove_var(&var) };
+    assert_eq!(code, 1);
+    let errors = all_errors(&store);
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert_eq!(errors[0].surface, Surface::RunWrapper);
+    assert_eq!(errors[0].message, "db:migrate exited 1");
+    assert_eq!(
+        extra(&errors[0], "tail"),
+        &serde_json::json!([
+            "== 20261006120000 AddTotalToOrders: migrating ======",
+            "-- add_column(:orders, :total, :decimal)",
+            "env=from-parent-env",
+            "rake aborted!",
+            "ActiveRecord::StatementInvalid: PG::DuplicateColumn"
+        ])
+    );
+    // The run keeps the command exactly as given.
+    let run = &store.latest_runs(1).unwrap()[0];
+    assert_eq!(
+        run.fingerprint.as_ref().unwrap()["argv"],
+        serde_json::json!(["sh", "-c", script])
+    );
+    // A green migration is a build, not a test pass.
+    let ok = TempRoot::new();
+    let (store, code) = run_script(
+        &ok,
+        "db:migrate",
+        "echo '== AddTotalToOrders: migrated (0.01s) =='; exit 0",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        store
+            .latest_event_by_kind(EventKind::BuildOk)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .latest_event_by_kind(EventKind::TestPass)
+            .unwrap()
+            .is_none()
+    );
+}

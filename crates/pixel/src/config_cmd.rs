@@ -2610,6 +2610,43 @@ mod tests {
     }
 
     #[test]
+    fn remote_key_set_keeps_the_other_presets_keys() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        std::fs::create_dir_all(home.0.join(".pixel")).unwrap();
+        std::fs::write(
+            home.0.join(".pixel/config.yaml"),
+            "remote_keys: {openrouter: sk-existing}\n",
+        )
+        .unwrap();
+
+        run_remote_key(
+            crate::decide_remote::Preset::Ollama,
+            Some("sk-new".to_string()),
+            false,
+        )
+        .unwrap();
+        let cfg: Value = serde_saphyr::from_str(
+            &std::fs::read_to_string(home.0.join(".pixel/config.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg["remote_keys"]["openrouter"], "sk-existing");
+        assert_eq!(cfg["remote_keys"]["ollama"], "sk-new");
+        assert!(
+            run_remote_key(
+                crate::decide_remote::Preset::Ollama,
+                Some(String::new()),
+                false
+            )
+            .is_err()
+        );
+
+        restore_home(saved);
+    }
+
+    #[test]
     fn a_failed_publish_leaves_no_tmp_file_behind() {
         let _lock = crate::ENV_LOCK.lock().unwrap();
         let home = HomeGuard::set();

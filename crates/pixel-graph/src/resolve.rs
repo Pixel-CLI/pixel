@@ -59,7 +59,8 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::params;
 
-use crate::extract::ruby_callbacks::{ReferenceKind, reference_kind};
+use crate::extract::ruby_associations::ASSOCIATION_REFERENCE;
+use crate::extract::ruby_callbacks::{ROUTE_REFERENCE, ReferenceKind, reference_kind};
 use crate::store::{
     EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, SymbolKind, Tier, decode_bindings,
     decode_scope,
@@ -434,7 +435,8 @@ impl ResolveIndex {
     ///
     /// Rails symbol callbacks name instance methods of the declaring class/module.
     /// Literal `send` on self uses the enclosing method's kind, or the class method
-    /// from a class body. An unrelated class never supplies a fallback, and reopened
+    /// from a class body. A generated alias or delegator (`alias_method`,
+    /// `delegate ... to:`) names a method of its own owner and kind. An unrelated class never supplies a fallback, and reopened
     /// definitions remain unresolved because their load order is unknown.
     /// Both initial references and stored references replay this rule; ordinary
     /// identifier arguments retain the name/import lookup of [`Self::decide_at`].
@@ -449,18 +451,48 @@ impl ResolveIndex {
         let Some(kind) = self.ruby_reference_kind(file_id, arg_of) else {
             return self.decide_at(file_id, name, None, site_line);
         };
+        // A route names its controller, an association its model class:
+        // that owner's definition or nothing, never a same-name fallback.
+        match (kind, arg_of) {
+            (ReferenceKind::Route, Some(arg_of)) => {
+                let controller = arg_of.trim_start_matches(ROUTE_REFERENCE);
+                return self.ruby_constants.route_action(controller, name);
+            }
+            (ReferenceKind::Association, Some(arg_of)) => {
+                let path = arg_of
+                    .trim_start_matches(ASSOCIATION_REFERENCE)
+                    .split_once(' ')
+                    .map_or("", |(_, path)| path);
+                return caller_id
+                    .filter(|c| self.containers.contains(c))
+                    .and_then(|c| self.qualified_of.get(&c))
+                    .map_or(Decision::Unresolved, |owner| {
+                        self.ruby_constants.association_target(owner, path)
+                    });
+            }
+            _ => {}
+        }
+        // A method its owner does not define itself may come from an
+        // ancestor: a callback in a concern, an alias of an inherited method.
+        if let Some((owner, separator)) = caller_id.and_then(|c| self.reference_side(c, kind)) {
+            match self.ruby_constants.lookup(owner, separator, name) {
+                ruby::Lookup::Found(id) => return Decision::Probable(id),
+                ruby::Lookup::Abstain => return Decision::Unresolved,
+                ruby::Lookup::Own | ruby::Lookup::NotFound => {}
+            }
+        }
         let target = caller_id.and_then(|caller| {
             let qualified = self.qualified_of.get(&caller)?;
             let (owner, separator) = if self.containers.contains(&caller) {
                 (
                     qualified.as_str(),
-                    if kind == ReferenceKind::Callback {
-                        '#'
-                    } else {
+                    if kind == ReferenceKind::Send {
                         '.'
+                    } else {
+                        '#'
                     },
                 )
-            } else if kind == ReferenceKind::Send {
+            } else if matches!(kind, ReferenceKind::Send | ReferenceKind::Alias) {
                 ruby_owner(qualified)?
             } else {
                 return None;
@@ -477,6 +509,27 @@ impl ResolveIndex {
             candidates.next().is_none().then_some(first.symbol_id)
         });
         target.map_or(Decision::Unresolved, Decision::Probable)
+    }
+
+    /// The owner and side a method-symbol reference from `caller` names: a
+    /// callback or alias in a class body the owner's instance methods, a
+    /// `send` there the owner's own, and in a method body the method's side.
+    fn reference_side(&self, caller: i64, kind: ReferenceKind) -> Option<(&str, char)> {
+        let qualified = self.qualified_of.get(&caller)?;
+        if self.containers.contains(&caller) {
+            Some((
+                qualified.as_str(),
+                if kind == ReferenceKind::Send {
+                    '.'
+                } else {
+                    '#'
+                },
+            ))
+        } else if matches!(kind, ReferenceKind::Send | ReferenceKind::Alias) {
+            ruby_owner(qualified)
+        } else {
+            None
+        }
     }
 
     fn ruby_reference_kind(&self, file_id: i64, arg_of: Option<&str>) -> Option<ReferenceKind> {
@@ -496,6 +549,29 @@ impl ResolveIndex {
         site_line: Option<u32>,
     ) -> Decision {
         let (receiver, method_call) = split_method_receiver(receiver);
+        // A call on `self`, bare or written, follows the caller's ancestor
+        // chain: a prepended module before the owner, an included concern or
+        // a superclass when the owner does not define the name.
+        if self.ruby_files.contains(&caller_file_id)
+            && matches!(receiver.map(str::trim), None | Some("self"))
+            && let Some((owner, separator)) =
+                caller_symbol_id.and_then(|id| self.ruby_self_side(id))
+        {
+            match self.ruby_constants.lookup(owner, separator, name) {
+                ruby::Lookup::Found(id) => return Decision::Probable(id),
+                ruby::Lookup::Abstain => return Decision::Unresolved,
+                ruby::Lookup::Own => {}
+                // `self` in an instance method never reaches a method of the
+                // class itself, nor the reverse: a name only the other side's
+                // chain defines is not this call's target, however unique.
+                ruby::Lookup::NotFound => {
+                    let other = if separator == '#' { '.' } else { '#' };
+                    if self.ruby_constants.lookup(owner, other, name) != ruby::Lookup::NotFound {
+                        return Decision::Unresolved;
+                    }
+                }
+            }
+        }
         if self.ruby_files.contains(&caller_file_id)
             && let Some(receiver) = receiver
             && let Some(decision) =
@@ -552,6 +628,18 @@ impl ResolveIndex {
             }
         }
         raw
+    }
+
+    /// What `self` is in the body of the Ruby symbol `caller`: an instance of
+    /// its owner in a method (`Foo#run` → `(Foo, '#')`), the owner itself in
+    /// a singleton method (`Foo.run`) or in a class or module body.
+    fn ruby_self_side(&self, caller: i64) -> Option<(&str, char)> {
+        let qualified = self.qualified_of.get(&caller)?;
+        if self.containers.contains(&caller) {
+            Some((qualified.as_str(), '.'))
+        } else {
+            ruby_owner(qualified)
+        }
     }
 
     fn ambiguous_local_name(&self, caller_file_id: i64, name: &str) -> bool {
@@ -1092,6 +1180,12 @@ pub struct Affected {
     pub files: HashSet<i64>,
     pub constants: HashSet<String>,
     pub replayed: HashSet<String>,
+    /// The batch changed a Ruby ancestor declaration, or a class or module
+    /// a stored declaration names: every Ruby call to `self` (bare or
+    /// written) or to a constant receiver, and every Ruby method-symbol
+    /// reference, may now resolve through a different chain, so all of them
+    /// are replayed.
+    pub ruby_ancestors: bool,
 }
 
 impl Affected {
@@ -1115,6 +1209,49 @@ impl Affected {
                 self.record_definition(definition);
             }
         }
+    }
+
+    /// Record the Ruby ancestor declarations a batch changed: `before` and
+    /// `after` list the batch files' stored and extracted `ruby_mixins`, each
+    /// with its file path and its position in that file's source order: a
+    /// constant resolves in the lexical scope of its file, so a declaration
+    /// moved to another file counts as changed, and the chain follows
+    /// declaration order, so `include A, B` becoming `include B, A` on one
+    /// line does too. A different multiset, or a changed class or module whose name a
+    /// stored declaration's constant ends with (a new `Admin::Trackable`
+    /// shadows `Trackable`), sets [`Self::ruby_ancestors`]. Call it after
+    /// [`Self::record_changed_definitions`], once the batch is stored.
+    pub fn record_changed_mixins(
+        &mut self,
+        store: &GraphStore,
+        before: &[(String, usize, crate::extract::RawMixin)],
+        after: &[(String, usize, crate::extract::RawMixin)],
+    ) -> Result<(), StoreError> {
+        let mut count: HashMap<&(String, usize, crate::extract::RawMixin), i64> = HashMap::new();
+        for mixin in before {
+            *count.entry(mixin).or_default() -= 1;
+        }
+        for mixin in after {
+            *count.entry(mixin).or_default() += 1;
+        }
+        if count.values().any(|n| *n != 0) {
+            self.ruby_ancestors = true;
+            return Ok(());
+        }
+        if self.constants.is_empty() {
+            return Ok(());
+        }
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT target FROM ruby_mixins WHERE target IS NOT NULL")?;
+        let targets = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for target in targets {
+            if self.reads_receiver(&target?) {
+                self.ruby_ancestors = true;
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// A changed definition: its name, and the constant a Ruby receiver
@@ -1258,10 +1395,24 @@ pub fn resolve_affected(
             }
         }
     }
+    if affected.ruby_ancestors {
+        for row in retry_rows(store, RUBY_SELF_ROWS, None)? {
+            rows.insert(row.id, row);
+        }
+    }
     let mut rows: Vec<RetryRow> = rows.into_values().collect();
     rows.sort_by_key(|row| row.id);
     retry(store, rows)
 }
+
+/// The `unresolved_calls` rows a Ruby ancestor chain decides: calls on
+/// `self`, bare or written, calls on a constant receiver (`Foo.bar` and
+/// `Foo.new.bar` fall back to `Foo`'s ancestors), and method-symbol
+/// references, in Ruby files.
+const RUBY_SELF_ROWS: &str = " AND u.file_id IN (SELECT id FROM files WHERE lang = 'ruby')
+       AND (u.kind = 'references' OR u.receiver IS NULL OR TRIM(u.receiver) = 'self'
+            OR substr(TRIM(u.receiver), 1, 1) BETWEEN 'A' AND 'Z'
+            OR TRIM(u.receiver) LIKE '::%')";
 
 fn retry(store: &mut GraphStore, rows: Vec<RetryRow>) -> Result<ResolveStats, StoreError> {
     let idx = ResolveIndex::build(store)?;
@@ -1375,6 +1526,42 @@ pub fn reconsider_resolved_calls(
             let (id, call) = row?;
             let receiver = call.receiver.as_deref().unwrap_or_default();
             if affected.reads_receiver(receiver) {
+                replay.push(id);
+                calls.push(call);
+            }
+        }
+    }
+    // A changed ancestor chain can move every Ruby call to `self` and every
+    // method-symbol reference, whatever their names.
+    if affected.ruby_ancestors {
+        let mut stmt = store.conn().prepare(
+            "SELECT e.id, src.file_id, COALESCE(e.callee, dst.name), e.src_id,
+                    e.site_line, e.receiver, e.kind
+               FROM edges e JOIN symbols src ON src.id=e.src_id
+               JOIN symbols dst ON dst.id=e.dst_id JOIN files f ON f.id=src.file_id
+              WHERE f.lang='ruby'
+                AND (e.kind='references'
+                     OR (e.kind='calls' AND (e.receiver IS NULL OR TRIM(e.receiver)='self'
+                         OR substr(TRIM(e.receiver), 1, 1) BETWEEN 'A' AND 'Z'
+                         OR TRIM(e.receiver) LIKE '::%')))",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                ResolvedCall {
+                    file_id: row.get(1)?,
+                    name: row.get(2)?,
+                    enclosing: row.get(3)?,
+                    site_line: row.get(4)?,
+                    receiver: row.get(5)?,
+                    kind: row.get(6)?,
+                },
+            ))
+        })?;
+        let known: HashSet<i64> = replay.iter().copied().collect();
+        for row in rows {
+            let (id, call) = row?;
+            if !known.contains(&id) {
                 replay.push(id);
                 calls.push(call);
             }
@@ -1509,6 +1696,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn kind_priority_prefers_functions_then_methods_classes_structs() {
+        let order = [
+            SymbolKind::Function,
+            SymbolKind::Method,
+            SymbolKind::Class,
+            SymbolKind::Struct,
+            SymbolKind::Enum,
+        ]
+        .map(kind_priority);
+        assert_eq!(order, [0, 1, 2, 3, 9]);
+    }
+
+    #[test]
+    fn resolve_calls_counts_every_decision() {
+        let (store, local_file, local_f, _, _) = fixture();
+        let call = |name: &str, src: Option<i64>, receiver: Option<&str>| PendingCall {
+            callee_name: name.into(),
+            enclosing_symbol_id: src,
+            site_line: 1,
+            receiver: receiver.map(str::to_string),
+        };
+        let pending = [FileCalls {
+            file_id: local_file,
+            calls: vec![
+                call("f", Some(local_f), None),
+                call("f", Some(local_f), None),
+                call("g", Some(local_f), None),
+                call("nosuch", Some(local_f), None),
+                call("f", None, None),
+            ],
+        }];
+        let stats = resolve_calls(&store, &pending).unwrap();
+        assert_eq!(
+            (stats.exact, stats.probable, stats.unresolved),
+            (2, 1, 2),
+            "{stats:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_references_counts_top_level_sites_as_unresolved() {
+        let (store, local_file, _, _, _) = fixture();
+        let r = |line| PendingReference {
+            name: "g".into(),
+            enclosing_symbol_id: None,
+            site_line: line,
+            arg_of: Some("register".into()),
+        };
+        let pending = [FileReferences {
+            file_id: local_file,
+            references: vec![r(1), r(2)],
+        }];
+        let stats = resolve_references(&store, &pending).unwrap();
+        assert_eq!((stats.probable, stats.unresolved), (0, 2), "{stats:?}");
     }
 
     /// Two Rust files that both define `f`: the caller's own `src/local.rs`
@@ -2717,5 +2961,46 @@ mod tests {
             (vec!["A::C::B".into()], vec!["B".into()]),
             "a constant counts by the segment a receiver spells"
         );
+    }
+
+    #[test]
+    fn a_ruby_ancestor_declaration_moved_or_reordered_should_count_as_changed() {
+        let store = GraphStore::open_in_memory().unwrap();
+        let mixin = |target: &str| crate::extract::RawMixin {
+            owner: "Admin::Order".into(),
+            kind: "include".into(),
+            target: Some(target.into()),
+            site_line: 3,
+        };
+        let at = |path: &str| vec![(path.to_string(), 0, mixin("Trackable"))];
+        // `include Trackable, Sortable` on one line, in either order.
+        let pair = |first: &str, second: &str| {
+            vec![
+                ("a.rb".to_string(), 0, mixin(first)),
+                ("a.rb".to_string(), 1, mixin(second)),
+            ]
+        };
+        for (before, after, changed) in [
+            (at("a.rb"), at("a.rb"), false),
+            (at("a.rb"), at("b.rb"), true),
+            (at("a.rb"), vec![], true),
+            (vec![], at("b.rb"), true),
+            (
+                pair("Trackable", "Sortable"),
+                pair("Trackable", "Sortable"),
+                false,
+            ),
+            (
+                pair("Trackable", "Sortable"),
+                pair("Sortable", "Trackable"),
+                true,
+            ),
+        ] {
+            let mut affected = Affected::default();
+            affected
+                .record_changed_mixins(&store, &before, &after)
+                .unwrap();
+            assert_eq!(affected.ruby_ancestors, changed, "{before:?} -> {after:?}");
+        }
     }
 }

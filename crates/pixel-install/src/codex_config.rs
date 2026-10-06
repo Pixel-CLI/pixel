@@ -1806,4 +1806,21 @@ mod tests {
 
         let _ = fs::remove_dir_all(&home);
     }
+
+    /// A multi-line value is written as a TOML literal string, so the file
+    /// keeps the prompt readable; text a literal cannot carry falls back to
+    /// a basic string.
+    #[test]
+    fn string_value_writes_a_literal_unless_the_text_forbids_it() {
+        for (text, literal) in [("a\nb", true), ("a\r\nb", false), ("a'\'\'b", false)] {
+            let value = string_value(text);
+            assert_eq!(value.as_str(), Some(text));
+            let rendered = value.to_string();
+            assert_eq!(
+                rendered.trim_start().starts_with('\''),
+                literal,
+                "{rendered}"
+            );
+        }
+    }
 }

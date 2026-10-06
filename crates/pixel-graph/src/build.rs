@@ -17,8 +17,10 @@ use pixel_index::indexset::millis;
 use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::extract::{FileExtraction, extract_file, lang_of};
-use crate::imports::resolve_import;
+use crate::extract::{
+    FileExtraction, RawMixin, extract_file, is_binstub_candidate, lang_of, lang_of_file,
+};
+use crate::imports::{resolve_import_in, ruby as ruby_projects};
 use crate::resolve::{
     Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference,
     reconsider_resolved_calls, resolve_affected, resolve_calls, resolve_references,
@@ -142,7 +144,27 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    preserving that owner during incremental resolution.
 /// 19: Ruby constant receivers resolve against lexical owners, including
 ///    constructors and probable Rails dispatch; factory receivers are normalized.
-pub const EXTRACTOR_VERSION: &str = "19";
+/// 20: `generic_import` takes the first string or identifier child only (the
+///    field lookup is gone) and every walker shares the `too_deep` depth
+///    guard; rebuild so no graph keeps rows from the older extractor.
+/// 21: Ruby `attr_*`, `alias_method`/`alias`, `delegate` and `scope` declare
+///    methods of their owner (and are no longer calls of it), an alias or
+///    delegator references its own owner's target, and an assignment through
+///    a receiver calls the writer (`self.name = v` → `name=`).
+/// 22: Ruby superclass/`include`/`prepend`/`extend` declarations are stored
+///    (`ruby_mixins`), a concern's `class_methods` block defines its
+///    `ClassMethods` module, and calls on `self` follow Ruby's ancestor
+///    lookup order; an instance call no longer reaches a class method. A
+///    `delegate` option written as Ruby 3.1 shorthand (`allow_nil:`) no
+///    longer stops the declaration from generating its methods.
+/// 23: `Gemfile`, `Rakefile`, `Guardfile`, `Capfile` and Ruby-shebang
+///    binstubs under `bin/`/`exe/` are Ruby files, and Ruby `require` /
+///    `require_relative` resolve to files inside their project's load roots
+///    (`imports.path` keeps `require_relative` as `./spec`).
+/// 24: Rails routes files yield `route` concepts with their handler and a
+///    `references` edge to the controller action (`:route` arg_of); Active
+///    Record associations reference their model class (`:association`).
+pub const EXTRACTOR_VERSION: &str = "24";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -326,7 +348,7 @@ pub enum Indexability {
 /// the file appeared, or dropped at the file cap), which is the caller's
 /// distinction to make.
 pub fn indexability(root: &Path, rel: &str) -> Indexability {
-    if lang_of(rel).is_none() {
+    if !is_graph_candidate(rel) {
         return Indexability::UnsupportedLanguage;
     }
     let path = root.join(rel);
@@ -348,10 +370,32 @@ pub fn indexability(root: &Path, rel: &str) -> Indexability {
     if is_binary(&content) {
         return Indexability::Binary;
     }
+    if lang_of_file(rel, &content).is_none() {
+        return Indexability::UnsupportedLanguage;
+    }
     if crate::extract::is_generated_blob(&content) {
         return Indexability::Generated;
     }
     Indexability::Indexable
+}
+
+/// True iff the graph walks read `rel`: a file of a supported language, a
+/// binstub whose shebang [`lang_of_file`] reads, or a `Gemfile.lock`. The
+/// build, the freshness walks and [`indexability`] all filter through it, so
+/// they see one file set; a binstub that is not Ruby is walked and hashed,
+/// then extraction drops it, as it drops a generated blob. A lockfile is
+/// never extracted either, but it decides which `require`s name an external
+/// gem, so it is hashed into the freshness signature: a lockfile edited
+/// while no watcher ran makes the graph stale, and the delta that applies it
+/// re-resolves every Ruby import.
+fn is_graph_candidate(rel: &str) -> bool {
+    lang_of(rel).is_some() || is_binstub_candidate(rel) || is_lockfile(rel)
+}
+
+/// `Gemfile.lock`, at the root or in any directory: the companion
+/// `ruby_projects::Projects` reads beside a Gemfile.
+fn is_lockfile(rel: &str) -> bool {
+    rel == "Gemfile.lock" || rel.ends_with("/Gemfile.lock")
 }
 
 /// Walk `root` collecting supported source files (skips .git, .pixel,
@@ -382,7 +426,7 @@ fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
         let Some(rel) = rel_path(root, entry.path()) else {
             continue;
         };
-        if lang_of(&rel).is_none() {
+        if !is_graph_candidate(&rel) {
             continue;
         }
         let Some(content) = read_source_file(entry.path()) else {
@@ -450,19 +494,31 @@ fn build_graph_with(
     let snapshot_signature = input_signature(&inputs);
     phases.collect_ms = millis(t0.elapsed());
     let clock = Instant::now();
-    let extracted: Vec<Extracted> = inputs
+    // A walked file extraction drops is hashed into the signature all the
+    // same, so its hash is kept beside the rows (`walked_files`).
+    let outcomes: Vec<Result<Extracted, (String, String)>> = inputs
         .into_par_iter()
-        .filter_map(|(rel, content)| {
-            let fx = extract_file(&rel, &content)?;
+        .map(|(rel, content)| {
             let blob_oid = content_oid(&content);
-            Some(Extracted {
-                rel,
-                blob_oid,
-                content,
-                fx,
-            })
+            match extract_file(&rel, &content) {
+                Some(fx) => Ok(Extracted {
+                    rel,
+                    blob_oid,
+                    content,
+                    fx,
+                }),
+                None => Err((rel, blob_oid)),
+            }
         })
         .collect();
+    let mut extracted: Vec<Extracted> = Vec::with_capacity(outcomes.len());
+    let mut dropped: Vec<(String, String)> = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Ok(file) => extracted.push(file),
+            Err(walked) => dropped.push(walked),
+        }
+    }
     phases.extract_ms = millis(clock.elapsed());
     let clock = Instant::now();
 
@@ -485,8 +541,13 @@ fn build_graph_with(
     for path in &stale {
         store.remove_file(path)?;
     }
+    store.clear_walked_files()?;
+    for (rel, blob_oid) in &dropped {
+        store.record_walked_file(rel, blob_oid)?;
+    }
 
-    let stored = store_batch(&mut store, extracted, &all_paths)?;
+    let projects = ruby_projects::Projects::load(root, &all_paths);
+    let stored = store_batch(&mut store, extracted, &all_paths, &projects)?;
     phases.store_ms = millis(stored.stored_at.duration_since(clock));
     phases.concepts_ms = millis(stored.concepts);
     phases.imports_ms = millis(stored.imports);
@@ -560,6 +621,7 @@ fn store_batch(
     store: &mut GraphStore,
     mut files: Vec<Extracted>,
     all_paths: &[String],
+    projects: &ruby_projects::Projects,
 ) -> Result<StoredBatch, BoxErr> {
     let mut concepts = Duration::ZERO;
     let mut stored_ids: Vec<(i64, Vec<i64>)> = Vec::with_capacity(files.len());
@@ -610,6 +672,9 @@ fn store_batch(
         let concept_clock = Instant::now();
         insert_concepts(store, file_id, &e.rel, &e.content, &ids, &lines)?;
         concepts += concept_clock.elapsed();
+        for mixin in &e.fx.mixins {
+            store.insert_ruby_mixin(file_id, mixin)?;
+        }
         // Plan pass: persist JSX elements for dead-interactive queries.
         for jsx in &e.fx.jsx_elements {
             store.insert_jsx_element(
@@ -634,7 +699,7 @@ fn store_batch(
     for (e, (file_id, symbol_ids)) in files.iter().zip(&stored_ids) {
         let file_id = *file_id;
         for imp in &e.fx.imports {
-            let resolved = resolve_import(&imp.path, &e.rel, all_paths)
+            let resolved = resolve_import_in(&imp.path, &e.rel, all_paths, projects)
                 .and_then(|p| path_to_id.get(&p).copied());
             store.insert_import_at(
                 file_id,
@@ -712,7 +777,7 @@ fn source_candidates(root: &Path) -> Vec<(String, std::path::PathBuf)> {
                 return None;
             }
             let rel = rel_path(root, entry.path())?;
-            lang_of(&rel)?;
+            is_graph_candidate(&rel).then_some(())?;
             Some((rel, entry.into_path()))
         })
         .collect()
@@ -943,17 +1008,14 @@ fn tree_delta_with(
     }
     let current = hashes(root);
     let signature = signature_of(&current);
-    let known: HashMap<String, String> = store
-        .files()?
-        .into_iter()
-        .map(|f| (f.path, f.blob_oid))
-        .collect();
+    let indexed_files = store.files()?.len();
+    let known = known_hashes(&store)?;
     if stored == signature {
         return Ok(Some(TreeDelta {
             fresh: true,
             changed: Vec::new(),
             removed: Vec::new(),
-            indexed_files: known.len(),
+            indexed_files,
             signature,
         }));
     }
@@ -973,7 +1035,7 @@ fn tree_delta_with(
         fresh: false,
         changed,
         removed,
-        indexed_files: known.len(),
+        indexed_files,
         signature,
     }))
 }
@@ -1003,11 +1065,17 @@ pub fn apply_tree_delta(root: &Path, db_path: &Path, delta: &TreeDelta) -> Resul
         db_path,
         &files,
         |store, _batch| {
+            let walked: HashMap<String, String> = store.walked_files()?.into_iter().collect();
             for (rel, hash) in &delta.changed {
-                let stored = store.file_by_path(rel)?.map(|f| f.blob_oid);
-                // A changed file that extraction dropped (unparseable, vanished)
-                // has no row; that is its stable state, not a race.
-                if stored.is_some_and(|oid| oid != format!("{hash:016x}")) {
+                // A changed file the store keeps no row for still has its walked
+                // hash; one with neither vanished after the delta was taken, so
+                // the delta's signature no longer describes the tree.
+                let expected = format!("{hash:016x}");
+                let stored = store
+                    .file_by_path(rel)?
+                    .map(|f| f.blob_oid)
+                    .or_else(|| walked.get(rel).cloned());
+                if stored.as_deref() != Some(expected.as_str()) {
                     drifted = Some(rel.clone());
                     return Ok(None);
                 }
@@ -1091,15 +1159,24 @@ fn update_files_probed(
         files,
         |store, batch| {
             let walk = tree_hashes(root);
-            let known: HashMap<String, String> = store
-                .files()?
-                .into_iter()
-                .map(|f| (f.path, f.blob_oid))
-                .collect();
+            let known = known_hashes(store)?;
             Ok(rows_match_tree(&known, &walk, batch).then(|| signature_of(&walk)))
         },
         probe,
     )
+}
+
+/// Path to stored content hash of every file the graph walks account for:
+/// the source rows and the walked files extraction keeps no row for
+/// (`walked_files`). The freshness checks compare a walk against it.
+fn known_hashes(store: &GraphStore) -> Result<HashMap<String, String>, BoxErr> {
+    let mut known: HashMap<String, String> = store
+        .files()?
+        .into_iter()
+        .map(|f| (f.path, f.blob_oid))
+        .collect();
+    known.extend(store.walked_files()?);
+    Ok(known)
 }
 
 /// True iff the rows (`known`: path to stored content hash) describe exactly
@@ -1216,6 +1293,8 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     let mut affected = Affected::default();
     let mut before: Vec<Definition> = Vec::new();
     let mut after: Vec<Definition> = Vec::new();
+    let mut mixins_before: Vec<(String, usize, RawMixin)> = Vec::new();
+    let mut mixins_after: Vec<(String, usize, RawMixin)> = Vec::new();
     let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
 
     let mut extracted: Vec<Extracted> = Vec::with_capacity(files.len());
@@ -1229,6 +1308,13 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         if let Some(old) = store.file_by_path(rel)? {
             let old_syms = store.symbols_in_file(old.id)?;
             before.extend(stored_definitions(store, old.id, rel)?);
+            mixins_before.extend(
+                store
+                    .ruby_mixins_in_file(old.id)?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mixin)| (rel.to_string(), i, mixin)),
+            );
             affected.files.insert(old.id);
             for import in store.imports_to_file(old.id)? {
                 affected.files.insert(import.file_id);
@@ -1288,9 +1374,20 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
 
         let Some(fx) = extract_file(rel, &content) else {
             store.remove_file(rel)?;
+            // The walks hash it as they hash the build's inputs (binaries
+            // excluded), so its hash is what the freshness checks compare.
+            if is_graph_candidate(rel) && !is_binary(&content) {
+                store.record_walked_file(rel, &content_oid(&content))?;
+            }
             continue;
         };
 
+        mixins_after.extend(
+            fx.mixins
+                .iter()
+                .enumerate()
+                .map(|(i, mixin)| (rel.to_string(), i, mixin.clone())),
+        );
         after.extend(fx.symbols.iter().map(|s| Definition {
             path: rel.to_string(),
             name: s.name.clone(),
@@ -1318,8 +1415,10 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             .map(|e| e.rel.clone()),
     );
     let added_any = extracted.iter().any(|e| !known_before.contains(&e.rel));
-    let stored = store_batch(store, extracted, &all_paths)?;
+    let projects = ruby_projects::Projects::load(root, &all_paths);
+    let stored = store_batch(store, extracted, &all_paths, &projects)?;
     affected.record_changed_definitions(&before, &after);
+    affected.record_changed_mixins(store, &mixins_before, &mixins_after)?;
     // A file new to the graph gets its id here; its importers are any file
     // whose import already resolved to it, and the dangling ones below.
     for &(rel, _) in files {
@@ -1348,7 +1447,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             rows.collect::<std::result::Result<_, _>>()?
         };
         for (import_id, importer_id, import_path, importer) in dangling {
-            if let Some(target) = resolve_import(&import_path, &importer, &all_paths)
+            if let Some(target) = resolve_import_in(&import_path, &importer, &all_paths, &projects)
                 .and_then(|p| path_to_id.get(&p).copied())
             {
                 affected.files.insert(importer_id);
@@ -1358,6 +1457,16 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
                 )?;
             }
         }
+    }
+
+    // A Ruby require resolves against the project's manifests and load
+    // roots, which any Ruby file or manifest of the batch can move: a path
+    // gem declared, a second file on another load root, a gem added to the
+    // Gemfile. Re-resolve every Ruby import, resolved or not.
+    if files.iter().any(|(rel, _)| {
+        ruby_projects::is_manifest(rel) || lang_of(rel) == Some("ruby") || is_binstub_candidate(rel)
+    }) {
+        re_resolve_ruby_imports(store, &all_paths, &projects, &mut affected)?;
     }
 
     if !stored.calls.is_empty() {
@@ -1381,6 +1490,42 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         "DELETE FROM process_steps; DELETE FROM processes;
          DELETE FROM cluster_members; DELETE FROM clusters;",
     )?;
+    Ok(())
+}
+
+/// Resolve every stored import of a Ruby file again against `projects`,
+/// updating the rows whose target moved and recording their importers in
+/// `affected`.
+fn re_resolve_ruby_imports(
+    store: &GraphStore,
+    all_paths: &[String],
+    projects: &ruby_projects::Projects,
+    affected: &mut Affected,
+) -> Result<(), BoxErr> {
+    let path_to_id: HashMap<String, i64> =
+        store.files()?.into_iter().map(|f| (f.path, f.id)).collect();
+    let rows: Vec<(i64, i64, String, String, Option<i64>)> = {
+        let mut stmt = store.conn().prepare(
+            "SELECT i.id, i.file_id, i.path, f.path, i.resolved_file_id FROM imports i
+               JOIN files f ON f.id = i.file_id
+              WHERE f.lang = 'ruby'",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    for (import_id, importer_id, import_path, importer, before) in rows {
+        let after = resolve_import_in(&import_path, &importer, all_paths, projects)
+            .and_then(|p| path_to_id.get(&p).copied());
+        if after != before {
+            affected.files.insert(importer_id);
+            store.conn().exec_cached(
+                "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
+                rusqlite::params![import_id, after],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -3689,6 +3834,36 @@ mod tests {
             "class Svc\n  def target\n    1\n  end\n  def bare\n    target\n  end\n  \
              def chained\n    @ids ||= target.to_set\n  end\nend\n",
         ),
+        (
+            "app/account.rb",
+            "class Account\n  attr_accessor :name\n  alias_method :label, :name\n  \
+             delegate :email, to: :owner, prefix: true\n  def owner; end\n  \
+             def rename\n    self.name = label\n  end\nend\n",
+        ),
+        (
+            "app/concerns/tracked.rb",
+            "module Tracked\n  extend ActiveSupport::Concern\n  included do\n    include Audited\n  \
+             end\n  class_methods do\n    def since; end\n  end\n  def track; end\nend\n",
+        ),
+        (
+            "app/concerns/audited.rb",
+            "module Audited\n  def audit; end\nend\n",
+        ),
+        (
+            "app/order.rb",
+            "class Order < Base\n  include Tracked\n  def run\n    track\n    audit\n  end\n  \
+             def self.report\n    since\n  end\nend\n",
+        ),
+        ("app/base.rb", "class Base\n  def audit; end\nend\n"),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :orders, only: [:create]\nend\n",
+        ),
+        (
+            "app/controllers/orders_controller.rb",
+            "class OrdersController\n  def create; end\nend\n",
+        ),
+        ("app/line.rb", "class Line\n  belongs_to :order\nend\n"),
     ];
 
     fn write_tree(root: &Path, files: &[(&str, &str)]) {
@@ -3724,6 +3899,11 @@ mod tests {
                 "edges",
                 "SELECT a.uid, b.uid, e.kind, e.tier, e.site_line, e.receiver, e.callee FROM edges e \
                  LEFT JOIN symbols a ON a.id = e.src_id LEFT JOIN symbols b ON b.id = e.dst_id",
+            ),
+            (
+                "ruby_mixins",
+                "SELECT f.path, m.owner, m.kind, m.target, m.site_line FROM ruby_mixins m \
+                 LEFT JOIN files f ON f.id = m.file_id",
             ),
             (
                 "unresolved_calls",
@@ -3809,6 +3989,43 @@ mod tests {
             )),
             "`schema.plugin(helper)` must give a references edge in the reference ({edges:#?})"
         );
+        for (src, dst) in [
+            (
+                "app/order.rb#Order#run",
+                "app/concerns/tracked.rb#Tracked#track",
+            ),
+            (
+                "app/order.rb#Order#run",
+                "app/concerns/audited.rb#Audited#audit",
+            ),
+            (
+                "app/order.rb#Order.report",
+                "app/concerns/tracked.rb#Tracked::ClassMethods#since",
+            ),
+        ] {
+            let prefix = format!(
+                "Text(\"{src}#method\") | Text(\"{dst}#method\") | Text(\"calls\") | Text(\"probable\")"
+            );
+            assert!(
+                edges.iter().any(|e| e.starts_with(&prefix)),
+                "the Ruby ancestor chain must give {src} -> {dst} ({edges:#?})"
+            );
+        }
+        for (src, dst) in [
+            (
+                "config/routes.rb#config/routes.rb#script",
+                "app/controllers/orders_controller.rb#OrdersController#create#method",
+            ),
+            ("app/line.rb#Line#class", "app/order.rb#Order#class"),
+        ] {
+            let prefix = format!(
+                "Text(\"{src}\") | Text(\"{dst}\") | Text(\"references\") | Text(\"probable\")"
+            );
+            assert!(
+                edges.iter().any(|e| e.starts_with(&prefix)),
+                "a Rails route or association must give {src} -> {dst} ({edges:#?})"
+            );
+        }
 
         let all: Vec<(&str, bool)> = EQUIVALENCE_TREE
             .iter()
@@ -3875,7 +4092,12 @@ mod tests {
         (
             "app/caller.rb",
             "class Caller\n  def go\n    MailJob.perform_later(1)\n    Widget.new(1)\n    \
-             Widget.build\n    shared\n  end\nend\n",
+             Widget.build\n    shared\n    assist\n  end\nend\n",
+        ),
+        ("app/mixin.rb", "module Mixin\n  def assist; end\nend\n"),
+        (
+            "app/other_mixin.rb",
+            "module OtherMixin\n  def assist; end\nend\n",
         ),
         ("app/alpha.rb", "class Alpha\n  def shared; end\nend\n"),
         ("app/beta.rb", "class Beta\n  def shared; end\nend\n"),
@@ -3954,6 +4176,14 @@ mod tests {
                 "Text(\"app/caller.rb#Caller#go#method\") | Text(\"app/alpha.rb#Alpha#shared#method\")",
             ),
             (
+                "ancestor declared in a reopening",
+                &[(
+                    "app/caller_ext.rb",
+                    Some("class Caller\n  include Mixin\nend\n"),
+                )],
+                "Text(\"app/caller.rb#Caller#go#method\") | Text(\"app/mixin.rb#Mixin#assist#method\")",
+            ),
+            (
                 "aliased source defined",
                 &[(
                     "web/b.ts",
@@ -3998,11 +4228,20 @@ mod tests {
                 "{label}: the full build must link {edge} ({edges:#?})"
             );
         }
-        // Back to the first tree: every edge above becomes a row again.
+        // Back to the first tree: every edge above becomes a row again, and
+        // a file a step added is removed.
         write_tree(&dir, RETRY_TREE);
+        let first: HashSet<&str> = RETRY_TREE.iter().map(|(rel, _)| *rel).collect();
         let batch: Vec<(&str, bool)> = steps
             .iter()
-            .flat_map(|(_, changes, _)| changes.iter().map(|(rel, _)| (*rel, false)))
+            .flat_map(|(_, changes, _)| changes.iter().map(|(rel, _)| *rel))
+            .map(|rel| {
+                let added = !first.contains(rel);
+                if added {
+                    let _ = std::fs::remove_file(dir.join(rel));
+                }
+                (rel, added)
+            })
             .collect();
         update_files(&dir, &db, &batch).unwrap();
         check("revert", &RETRY_TREE.iter().copied().collect());
