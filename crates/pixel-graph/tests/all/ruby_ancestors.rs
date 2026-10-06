@@ -158,6 +158,26 @@ end
 ",
     ),
     (
+        "app/models/superclass_cycle.rb",
+        "class Alpha < Beta
+  def run
+    never_defined
+  end
+end
+class Beta < Alpha
+end
+",
+    ),
+    (
+        "app/reports/sales.rb",
+        "class SalesReport
+  def build
+    Admin::Order.sort_key
+  end
+end
+",
+    ),
+    (
         "app/models/dynamic.rb",
         "class Dynamic
   include Sortable
@@ -308,6 +328,15 @@ fn assert_chains(db: &Path) {
     // A module included after `Sortable` that the graph cannot name may
     // define `sort_key` first: no target, although only one definition
     // exists.
+    // A superclass cycle terminates and proves nothing.
+    let cycle = uid("app/models/superclass_cycle.rb", "Alpha#run");
+    assert_eq!(calls_from(&store, &cycle), []);
+    assert_eq!(unresolved_from(&store, &cycle), ["never_defined"]);
+    // A constant receiver reaches what its class extends.
+    assert_eq!(
+        calls_from(&store, &uid("app/reports/sales.rb", "SalesReport#build")),
+        [edge("sort_key", "Sortable#sort_key", Tier::Probable)]
+    );
     let dynamic = uid("app/models/dynamic.rb", "Dynamic#run");
     assert_eq!(calls_from(&store, &dynamic), []);
     assert_eq!(unresolved_from(&store, &dynamic), ["sort_key"]);
@@ -440,6 +469,24 @@ fn ruby_ancestor_edges_should_follow_incremental_changes() {
     );
     update_file(root.path(), &db, ORDER).unwrap();
     assert_eq!(track(), Vec::<String>::new());
+    write(root.path(), ORDER, order);
+    update_file(root.path(), &db, ORDER).unwrap();
+    assert_chains(&db);
+
+    // Dropping the `extend` from the class moves the call another file makes
+    // on its constant, although no definition changed.
+    let sales = uid("app/reports/sales.rb", "SalesReport#build");
+    write(
+        root.path(),
+        ORDER,
+        &order.replace("    extend Sortable\n", "\n"),
+    );
+    update_file(root.path(), &db, ORDER).unwrap();
+    {
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(calls_from(&store, &sales), []);
+        assert_eq!(unresolved_from(&store, &sales), ["sort_key"]);
+    }
     write(root.path(), ORDER, order);
     update_file(root.path(), &db, ORDER).unwrap();
     assert_chains(&db);
