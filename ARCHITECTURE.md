@@ -38,7 +38,7 @@ MCP server. `pixel install` registers no MCP server with any agent.
 
 | Crate | Role | Depends on (pixel crates) |
 | --- | --- | --- |
-| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry points under `run-hook` (alias `hook`: `guard`, `composed-guard`, `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`, `metrics`), `rescue`, `recall`, and `sniper` sub-commands. | every library crate except `pixel-context` (reached through the daemon) and `pixel-bench` |
+| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry point under `run-hook` (alias `hook`: `task-event`), `rescue`, `recall`, and `sniper` sub-commands. | every library crate except `pixel-context` (reached through the daemon) and `pixel-bench` |
 | `pixel-proto` | The shared contract crate: `Envelope`, `PixelError` and `ErrorCode`, `Epistemics`, `SnapshotInfo`, `Budget`, `Warning`, the `Op` request enum, and `commands::RENAMED_COMMANDS`, the old-to-new CLI subcommand names the CLI accepts as hidden aliases until 1.0. No I/O, no business logic. Every other crate that speaks the wire format depends on it, and it depends on nothing internal. | none |
 | `pixel-daemon` | Transport-agnostic `Service` (`api.rs`) and the Unix-socket NDJSON daemon with filesystem watching (`daemon.rs`). Dispatches each `Op` to the right library, attaches snapshot and epistemics metadata, and is the one place a retrieval envelope is built. Also hosts the recall daemon service. | index, graph, context, rank, proto, ops, facts, session, recall, git |
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
@@ -133,7 +133,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel check-release` | Check that a release tag is consistent with the tree before anything is built or published: crates/pixel/Cargo.toml carries the version, Cargo.lock is fresh for every workspace member, CHANGELOG.md has the `## [x.y.z]` heading and an empty Unreleased section. |
 | `pixel self-update` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
 | `pixel doctor` | Health check: install state, daemon, index/graph/facts freshness |
-| `pixel run-hook` | Hook entrypoints (guard, session-start, metrics relay) invoked by agent hooks |
+| `pixel run-hook` | Hook entry point `task-event`, invoked by the Claude and Codex task lifecycle hooks; the retired verbs exit 0 silently |
 | `pixel config` | Show effective settings and their sources; `setup` offers guided terminal configuration (also offered on interactive global install); `classify on\|off` controls the global classify kill switch (disabled by default); `classify-engine` stores the engine preference (`local\|remote\|jev\|auto`), `remote-preset <preset> [--model --base]` the provider it runs, `remote-key <preset>` its key; `edit [--repo]` opens commented YAML in `$VISUAL`/`$EDITOR`. Global `~/.pixel/config.yaml`, repository `.pixel/config.yaml`; legacy JSON remains supported. |
 | `pixel task-state` | Alias `task`: begin, contract, prepare, verify, review, finish, status, events, route, replay, evaluate, cancel and recover a durable task; show/reset retain the Claude packet interface |
 | `pixel action-log` | Self-assessment: pixel's own action log (what ran, what went wrong). |
@@ -157,9 +157,8 @@ Per repository, under `.pixel/` (git-ignored):
 | `graph.v2.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. The name moves with the schema (`pixel_daemon::api::GRAPH_DB_FILE`); user-facing messages still say `graph.db`. |
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
-| `targets.json` | CLI `targets` | Active task map (version 2): tasks with ids, timestamps, and P0/P1/P2 paths. Read by the guard hook and re-injected after compaction. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
-| `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker left by `reconcile` for the guard, and the pre-mutation copies `env` takes. |
+| `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker `reconcile` writes and clears (no hook reads it), and the pre-mutation copies `env` takes. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
 | `task-runtime.json` | CLI `task-state show/reset` and Claude hooks | Existing bounded Claude context packets; independent of completion evidence. |
 | `tasks/<id>/journal.jsonl`, `tasks/<id>/task.json`, `tasks/<id>/lock`, `tasks/<id>/run-<run_id>.json` | `pixel-task` | Authoritative checksummed task transactions and a rebuildable view, serialized by task lock; verification leases record child ownership for interruption recovery. Legacy v1 records migrate as unverified. |
@@ -180,17 +179,6 @@ name, permissions set on the descriptor) and every directory through
 `pixel_git::sidecar::private_dir`, which refuses a link; the SQLite stores
 open with `SQLITE_OPEN_NOFOLLOW`. Paths read back from a shard or the graph
 are used only when `pixel_git::repo_path` finds them inside the root.
-
-Under `pixel config policy enforce` (and never for Codex), the prompt-submit
-hook emits a `[PIXEL:TASK_CONTEXT]` fact packet only when a
-compatible warm daemon can serve fresh `targets_facts`; the packet is bounded,
-declares its snapshot identity, and is omitted rather than partially rendered
-on timeout or unavailable/stale facts. It is evidence and candidate entry
-points, never an action recommendation or a read/edit boundary. The hook also
-emits a `[PIXEL:TASK_BOUNDARY]` notice and reads
-`.pixel/actions.jsonl`, then `~/.pixel/actions.jsonl`, to spot a task that
-just ended. On Claude Code it also writes the task-runtime packet above. It
-never rejects a prompt: every failure path exits 0 and the prompt proceeds.
 
 Machine-wide:
 
@@ -538,12 +526,9 @@ releases deployed, then handles each agent through its own extension point:
   `~/.zcode/cli/config.json`, `~/.cursor/hooks.json` and
   `~/.copilot/hooks/pixel.json`. `doctor` reports a leftover as red.
 
-The shared policy (`pixel config policy`) defaults to `advisory`, under which
-`pixel run-hook guard` and `prompt-submit` emit nothing for any provider.
-Only `enforce` lets a guard someone wires by hand rewrite, approve or deny a
-call, or inject task context; Codex and Claude stay native under every setting.
-Task lifecycle gates are separate from that policy: changing it cannot disable
-an already enforced task contract.
+The `policy` key of `pixel config` (`advisory`, `enforce`, `off`) is retired:
+no hook reads it and every value leaves native tools untouched. It stays
+readable and writable so an existing configuration file keeps validating.
 Install and uninstall rewrite only recognized Pixel managed content and
 registrations, preserving foreign settings and hooks.
 
@@ -610,24 +595,23 @@ does not parse as strict JSON is skipped, not rewritten.
 `install.opencode-agents-md` is red while the block or the managed plugin
 remains, and passes when OpenCode is absent.
 
-The hook entry points, all under `pixel run-hook` (alias `hook`), remain
-available for legacy/manual integration. Standard Codex and Claude installation
-registers task lifecycle events, not the retrieval callbacks below:
+`pixel run-hook` (alias `hook`) has one live entry point, `task-event`, and it
+is the only hook `pixel install` registers (Claude Code and Codex):
 
 | Hook event | Command | Effect |
 | --- | --- | --- |
-| `SessionStart` | `pixel run-hook session-start` | Legacy/manual: describes Pixel's commands as available, without mandating them; no standard install registers it. |
-| `UserPromptSubmit` | `pixel run-hook prompt-submit` | Codex always emits nothing. For other providers the task context, guidance and route are emitted only under `pixel config policy enforce`; no standard install registers it. |
-| `SessionStart` matcher `compact` (`PostCompaction` on Devin) | `pixel run-hook post-compaction` | Re-injects active task evidence for supported hosts. Codex emits nothing, so compaction cannot restore a target packet bypassed by native-default prompt routing. A `--provider claude` entry re-run by an importing host also exits without emitting: its session id belongs to the other harness. |
-| `PreToolUse` | `pixel run-hook guard` | Codex and Claude emit no Pixel retrieval rewrites or advice. Claude's independent RTK delegation remains available. Other providers get a rewrite, approval or denial only under `pixel config policy enforce`; the default `advisory` answers nothing. |
-| `PostToolUse` (legacy/manual edit callback) | `pixel run-hook post-tool-use` | Emits indexed dependants after an edit; not registered by standard Claude/Codex installation. |
-| `PostToolUse` (legacy/manual metrics callback) | `pixel run-hook metrics` | Relays finalized invocation metrics by cwd and argv, silent on a miss or metrics opt-out. Standard Claude/Codex installation removes this registration. |
-| `PreToolUse` (legacy/manual Codex integration) | `pixel run-hook composed-guard` | Runs a sealed snapshot of foreign hooks. Standard repository installation restores their original registrations and removes this wrapper. Pixel adds no retrieval rewrite or denial. |
-| Native task lifecycle (Claude Code and Codex) | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks. Once enforced, a task retains its gates if runtime settings change. On `prompt-submit` it also returns the `[PIXEL:BRIEF]` evidence brief as `additionalContext` (see below). |
+| `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`, `SubagentStart`, `SubagentStop`, plus `PostToolUseFailure` (Claude) or `Interrupt` (Codex) | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks. Once enforced, a task retains its gates if runtime settings change. On `prompt-submit` it also returns the `[PIXEL:BRIEF]` evidence brief as `additionalContext` (see below). |
+
+The verbs earlier releases registered (`guard`, `composed-guard`,
+`session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`,
+`metrics`) are still accepted and exit 0 with no output, so a registration an
+old install left in an agent's settings cannot block or fail a host. `pixel
+install` and `pixel uninstall` remove those registrations from every agent
+file above; `crates/pixel-install/src/routing.rs` recognises them by verb.
 
 The brief (`execution_brief/chain.rs`, `execution_brief/evidence.rs`) is built
 on every Claude Code and Codex `prompt-submit` task event for a code-shaped
-prompt, whatever `pixel config policy` says. Pi gets none (`start_brief` in
+prompt. Pi gets none (`start_brief` in
 `task_hook.rs` skips `TaskProvider::Pi`), and no other host registers a prompt
 hook. It runs at most four ops under one 750 ms deadline: `search-content -F
 -l` on the first anchor, `find-symbol` to resolve a uid, `impact <uid>` only

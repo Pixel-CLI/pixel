@@ -729,11 +729,64 @@ fn substitution_writes(chars: &mut Peekable<Chars<'_>>) -> bool {
     false
 }
 
+/// Environment markers set by a harness that loads Claude Code's configuration
+/// rather than being Claude Code. Devin reads `~/.claude/settings.json` by
+/// default (its `read_config_from.claude`) and runs the hook commands it finds
+/// there unchanged, so `--provider claude` on a hook names the install, not
+/// the host that invoked it. Such an entry must not act on Claude's behalf:
+/// the host's own protocol carries the behavior, and the imported copy
+/// double-runs beside it.
+const IMPORTED_CLAUDE_CONFIG_MARKERS: &[&str] = &["DEVIN_PROJECT_DIR"];
+
+/// The imported-config marker set in this process, if any.
+fn imported_config_host() -> Option<&'static str> {
+    IMPORTED_CLAUDE_CONFIG_MARKERS
+        .iter()
+        .copied()
+        .find(|marker| std::env::var_os(marker).is_some())
+}
+
+/// Split only unquoted pipeline/sequence operators, retaining stdin provenance.
+/// `None` when a quote is unbalanced or a segment is empty, which the caller
+/// treats as a mutating command.
+fn split_segments(text: &str) -> Option<Vec<(&str, bool)>> {
+    let mut segments = Vec::new();
+    let mut quote = None;
+    let mut start = 0;
+    let mut piped = false;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, c)) = chars.next() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if matches!(c, '\'' | '"') => quote = Some(c),
+            None if matches!(c, '|' | ';' | '&' | '\n') => {
+                let segment = text[start..index].trim();
+                if segment.is_empty() {
+                    return None;
+                }
+                segments.push((segment, piped));
+                let doubled =
+                    matches!(c, '|' | '&') && chars.peek().is_some_and(|(_, next)| *next == c);
+                let end = if doubled { chars.next()?.0 } else { index };
+                piped = c == '|' && !doubled;
+                start = end + c.len_utf8();
+            }
+            None => {}
+        }
+    }
+    if quote.is_some() || text[start..].trim().is_empty() {
+        return None;
+    }
+    segments.push((text[start..].trim(), piped));
+    Some(segments)
+}
+
 /// Proven reads, alone, piped or sequenced, and single-command recovery bypass
 /// the edit gate. Every leaf of a sequence is judged, so `a; b` reads only
 /// when both do; recovery stays single-command.
 fn shell_mutates(command: &str) -> bool {
-    let Some(segments) = crate::guard::split_segments(command) else {
+    let Some(segments) = split_segments(command) else {
         return true;
     };
     segments
@@ -1068,9 +1121,7 @@ fn bounded_decision(
 
 /// Read one bounded host event, dispatch it, and emit only the host's schema.
 pub fn run(provider: TaskProvider, event: TaskHookEvent) -> ! {
-    if provider == TaskProvider::Claude
-        && crate::prompt_submit::imported_claude_entry(Some(crate::guard::Provider::Claude))
-    {
+    if provider == TaskProvider::Claude && imported_config_host().is_some() {
         std::process::exit(0);
     }
     let output =
@@ -1097,6 +1148,50 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Claude-argued `task-event` inside a host that imports Claude's
+    /// configuration must exit without acting: the marker names the real host.
+    #[test]
+    fn imported_config_host_is_the_marker_set_in_the_process() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("DEVIN_PROJECT_DIR");
+        // SAFETY: DEVIN_PROJECT_DIR is only changed under ENV_LOCK.
+        unsafe { std::env::set_var("DEVIN_PROJECT_DIR", "/tmp/devin-repo") };
+        assert_eq!(imported_config_host(), Some("DEVIN_PROJECT_DIR"));
+        // SAFETY: same lock as above.
+        unsafe { std::env::remove_var("DEVIN_PROJECT_DIR") };
+        assert_eq!(imported_config_host(), None);
+        if let Some(restored) = saved {
+            // SAFETY: same lock as above.
+            unsafe { std::env::set_var("DEVIN_PROJECT_DIR", restored) };
+        }
+    }
+
+    /// A single `|` marks the NEXT segment as piped; `&&`, `||` and a lone
+    /// `&` are separators that carry no such flag. Quotes protect operators.
+    #[test]
+    fn split_segments_marks_pipes_quotes_and_doubles() {
+        assert_eq!(
+            split_segments("a | b"),
+            Some(vec![("a", false), ("b", true)])
+        );
+        assert_eq!(
+            split_segments("a && b"),
+            Some(vec![("a", false), ("b", false)])
+        );
+        assert_eq!(
+            split_segments("a & b"),
+            Some(vec![("a", false), ("b", false)])
+        );
+        assert_eq!(
+            split_segments("a || b"),
+            Some(vec![("a", false), ("b", false)])
+        );
+        assert_eq!(
+            split_segments("echo 'a|b' && git status"),
+            Some(vec![("echo 'a|b'", false), ("git status", false)])
+        );
+    }
 
     #[test]
     fn contextual_envelopes_should_name_every_native_event_exactly() {

@@ -64,12 +64,7 @@ The contract text below is inventory evidence, not an endorsement of wording; no
 | `graph` | Force (re)build of the code graph db | A1 | A1 PASS: contains `symbols`; valid JSON |
 | `history` | Commit history with detail levels and byte caps | A1 | A1 PASS: contains `fixture`; valid JSON |
 | `history-search` | M3: history-wide fact + diff search | A1 | A1 PASS: contains `removed_manual_history`; valid JSON |
-| `hook composed-guard` | `pixel hook composed-guard --provider codex --backup <path>` — run a sealed install-time foreign-hook snapshot before Pixel's Codex rewrite | A1 | A1 PASS: contains `audit foreign context`; valid JSON |
-| `hook guard` | `pixel hook guard "$@"` — targets enforcement guard | A1 | A1 PASS: contains `pixel search-compat`; valid JSON |
-| `hook post-compaction` | `pixel hook post-compaction` — re-inject targets manifest after context compaction | A1 | A1 PASS: contains `lib.rs`; valid JSON |
-| `hook post-tool-use` | `pixel hook post-tool-use` — P0·3 blast-radius: after an edit, emit the dependants of what was just changed (unsolicited) | A1 | A1 PASS: contains `PostToolUse`; valid JSON |
-| `hook prompt-submit` | `pixel hook prompt-submit "$@"` — task boundary detector | A1 | A1 PASS: contains `lib.rs`; valid JSON |
-| `hook session-start` | `pixel hook session-start` — emit capability block from op registry | A1 | A1 PASS: contains `capabilities`; valid JSON |
+| `hook guard`, `composed-guard`, `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`, `metrics` | Retired verbs, kept as silent no-ops so an old hook registration cannot fail a host | A1 | `scripts/system_audit.py` asserts exit 0 and empty stdout for each; the 2026-09-12 run predates the retirement |
 | `impact` | Blast radius of a symbol (callers upstream / callees downstream) | A1 | A1 PASS: valid JSON |
 | `index` | Build (or rebuild) the text index for a directory tree | A1 | A1 PASS: exit 0; fixture state checked |
 | `inspect` | Show repo state: HEAD, branch, dirty files, fingerprints | A1 | A1 PASS: contains `lib.rs`; valid JSON |
@@ -193,7 +188,7 @@ The contract text below is inventory evidence, not an endorsement of wording; no
 | Rust CLI → TypeScript sniper | Integration lane: 39/39 tests + tsgo exit 0; real error/run/event JSON, retention, unknown surface refusal | Final installed same-candidate gate recorded below |
 | Vite plugin/client/reporter | Real local server: browser POST mapping, GET refusal, HTTP 500 excerpt, HMR and pid/port, included in JS suite | No personal or authenticated browser |
 | Sniper → stdio MCP | A1 initialize, list exactly five tools, call all five against populated store, EOF exits 0 | Not every transport timing fault |
-| Provider hooks → Pixel | A1 Codex rewrite, preserved foreign-hook context, Claude/Codex prompt packets, edit signal and current-HEAD restoration | Protocol fixture proof is distinct from live installed host delivery |
+| Provider hooks → Pixel | A1 retired hook verbs answer nothing: exit 0, empty stdout | Protocol fixture proof is distinct from live installed host delivery; `task-event` is covered by the `pixel-cli` hook tests |
 | Task workers/race | A1 all 18 leaves; real temp worktrees, fake process groups, accepted→prepare→worker running→stop, winner edit promoted and losers cleaned | No paid/authenticated provider execution |
 | Flow → command sequence | F1–F3 real shell/fake browser, malicious-looking argument/comment data inert, JSON and success/failure/refusal | Actual browser intentionally substituted |
 | Upgrade → daemon socket | U1 scoped Shutdown does not contact unrelated daemon; withheld response bounded with error | Not every filesystem crash point |

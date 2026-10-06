@@ -11,8 +11,7 @@
 #   crates/pixel-install/assets/pixel-subagent-prompt.md  → PIXEL-SUBAGENT.md
 #   assets/plugin-skills/pixel-impact/                   → focused plugin skill
 #
-# The Codex and Claude manifests do not register retrieval-prompt hooks.
-# hooks/plugin-hooks.json remains an explicit opt-in legacy integration.
+# The plugin manifests register no hooks: a plugin ships skills only.
 #
 # Usage:
 #   scripts/gen-plugin-assets.sh          # write all derived files

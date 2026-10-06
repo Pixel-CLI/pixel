@@ -18,15 +18,12 @@ mod evaluate_cli;
 mod execution_brief;
 #[cfg(unix)]
 mod flow_cli;
-mod guard_deny;
-mod guard_enforce;
 mod hook_stdin_cap_cli;
 mod impact_read_cli;
 mod install_exit;
 mod json_contract;
 mod list_errors_cli;
 mod metrics_cli;
-mod post_edit_cli;
 mod prompt_brief_cli;
 mod publish_cli;
 mod recall_cli;

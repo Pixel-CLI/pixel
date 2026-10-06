@@ -245,7 +245,7 @@ impl Plan {
     /// `None` for a prompt that does not ask about code, pasted text aside, and
     /// for a continuation or a harness envelope, which are not the user's task.
     pub(crate) fn from_prompt(prompt: &str) -> Option<Self> {
-        if crate::prompt_submit::is_trivial_continuation(prompt) {
+        if crate::prompt_continuation::is_trivial_continuation(prompt) {
             return None;
         }
         let typed = retrieval_request(prompt)?;

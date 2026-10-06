@@ -33,7 +33,6 @@
     "skills/",
     "claude-skills/",
     "pi/",
-    "hooks/",
     ".opencode/",
     ".agents/plugins/",
     ".cursor/",

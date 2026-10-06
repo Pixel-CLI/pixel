@@ -164,20 +164,6 @@ pub(crate) fn overview_answer(root: &Path) -> String {
     format!("no concept match; read {}", files.join(", "))
 }
 
-/// The hook context injected for an overview prompt, in place of keyword
-/// targets. Names files to read and states no read/edit boundary.
-pub(crate) fn overview_context(root: &Path) -> String {
-    let files = existing_overview_files(root);
-    let read = if files.is_empty() {
-        "the top-level directories and manifests".to_owned()
-    } else {
-        files.join(", ")
-    };
-    format!(
-        "[PIXEL:TASK_CONTEXT] This prompt asks for an overview of the project, not for a code location. No keyword targets were computed: matching the word \"repo\" against source would return unrelated files. Start with {read}, then follow what they reference. This is a pointer, not a read/edit boundary."
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,27 +274,5 @@ mod tests {
             overview_answer(&dir)
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn the_hook_context_points_at_files_and_sets_no_boundary() {
-        let dir = fixture(&["README.md", "ARCHITECTURE.md"]);
-        let text = overview_context(&dir);
-        assert!(text.starts_with("[PIXEL:TASK_CONTEXT]"), "{text}");
-        assert!(
-            text.contains("Start with README.md, ARCHITECTURE.md, then"),
-            "{text}"
-        );
-        assert!(text.contains("not a read/edit boundary"), "{text}");
-        assert!(!text.to_lowercase().contains("restrict"), "{text}");
-
-        let empty = fixture(&[]);
-        assert!(
-            overview_context(&empty).contains("Start with the top-level directories"),
-            "{}",
-            overview_context(&empty)
-        );
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&empty).ok();
     }
 }

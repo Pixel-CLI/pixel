@@ -125,37 +125,6 @@ this capability, not repaired during an ordinary task.
 Graph results remain incomplete candidates. Verify relevant source and
 look beyond the returned list when task correctness requires it.
 
-### Optional retrieval enforcement
-
-`pixel install` wires no guard for any agent, and Pixel's retrieval policy
-defaults to `advisory`, under which `pixel run-hook guard` and
-`pixel run-hook prompt-submit` answer nothing. To have Pixel steer an agent
-anyway, do both by hand:
-
-1. Register the hook in the agent's own configuration, for example
-   `pixel run-hook guard --provider devin` as a `PreToolUse` hook in Devin, or
-   `pixel run-hook guard --provider antigravity` in Antigravity's hooks.
-2. Run `pixel config policy enforce` — the repository file by default, the
-   machine-wide `~/.pixel/config.yaml` with `--global` — or set
-   `PIXEL_POLICY=enforce` in the environment that launches the agent to
-   override every file layer. `pixel config policy` reports the effective
-   value and the layer that set it.
-
-Under `enforce`, the guard rewrites the simple `cat`, `ls`, `find` and search
-forms Pixel can map, and denies other supported repository retrieval with a
-redirect; for Antigravity, its `PreInvocation` hook runs a bounded
-`pixel search-content` on the initial request and sends the matches with the
-same model invocation. Larger reads and unsupported shell syntax fall back to
-the original command, including its complete pipeline or sequence.
-`pixel config policy off` disables policy decisions; the existing
-`PIXEL_TARGETS_GUARD=0` (also `false` or `off`) remains an opt-out. Restart
-the agent after changing its environment.
-
-Claude and Codex retain native retrieval and permissions under every retrieval
-policy mode. Composed Codex hooks still honour foreign hook decisions even when
-Pixel's policy is off. Enforcement is a workflow preference, not a security
-sandbox.
-
 ### Any other agent
 
 `pixel install` wires only the agents above; the website's

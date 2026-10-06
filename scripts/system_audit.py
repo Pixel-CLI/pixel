@@ -60,7 +60,7 @@ class Audit:
     def git(self, *args):
         return subprocess.check_output(["git", *args], cwd=self.repo, env=self.env, text=True, stderr=subprocess.PIPE).strip()
 
-    def call(self, leaf, args, *, contains=None, json_output=False, exit_code=0, input_text=None):
+    def call(self, leaf, args, *, contains=None, json_output=False, exit_code=0, input_text=None, silent=False):
         started = time.monotonic()
         output = subprocess.run([str(self.pixel), *args], cwd=self.repo, env=self.env,
                                 input=input_text, capture_output=True, text=True, timeout=30)
@@ -69,6 +69,8 @@ class Audit:
             assert output.returncode == exit_code, f"expected exit {exit_code}, got {output.returncode}: {output.stderr}"
             if contains is not None:
                 assert contains in output.stdout, f"missing {contains!r}: {output.stdout[:1200]}"
+            if silent:
+                assert not output.stdout, f"expected no output, got: {output.stdout[:1200]}"
             if json_output == "ndjson":
                 assert output.stdout.strip(), "expected at least one log record"
                 for line in output.stdout.splitlines():
@@ -79,7 +81,7 @@ class Audit:
             error = str(failure)
         row = {"leaf": leaf, "argv": args, "exit_code": output.returncode,
                "seconds": round(time.monotonic() - started, 4),
-               "assertion": {"contains": contains, "json": json_output, "exit": exit_code},
+               "assertion": {"contains": contains, "json": json_output, "exit": exit_code, "silent": silent},
                "status": "FAIL" if error else "PASS", "error": error}
         self.results.append(row)
         print(json.dumps(row), flush=True)
@@ -226,33 +228,17 @@ class Audit:
         self.call("task-state reset", ["task-state", "reset", "--session", "audit-session", "--json"], json_output=True)
 
     def hooks(self):
-        # Prior mutation fixtures rewrote HEAD; refresh history before saving a
-        # current-head manifest. Post-compaction correctly refuses stale hints.
+        # Prior mutation fixtures rewrote HEAD; refresh the index before scoping.
         self.call("build-index", ["build-index", "--history"])
         self.call("prepare-repo", ["prepare-repo", "--json"], json_output=True)
         self.call("scope-task", ["scope-task", "fix login_user", "--json"], contains="lib.rs", json_output=True)
+        # `pixel install` registers only `run-hook task-event`. The verbs earlier
+        # releases registered stay accepted so an old registration cannot fail a
+        # host: each must exit 0 and print nothing, whatever the payload says.
         payload = {"cwd": str(self.repo), "session_id": "hook-audit", "hook_event_name": "PreToolUse", "tool_name": "shell", "tool_input": {"command": "grep -n login_user lib.rs"}}
-        self.call("run-hook guard", ["run-hook", "guard", "--provider", "codex"], input_text=json.dumps(payload), contains="pixel search-like-rg", json_output=True)
-        foreign = self.root / "foreign-hook.sh"
-        foreign.write_text("printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"audit foreign context\"}}'\n")
-        backup = self.root / "foreign-hook.json"
-        backup.write_text(json.dumps({"version": 1, "provider": "codex", "pre_tool_use": [{"matcher": "shell", "hooks": [{"type": "command", "command": f'/bin/sh "{foreign}"'}]}], "managed_pre_tool_use": []}))
-        backup.chmod(0o600)
-        self.call("run-hook composed-guard", ["run-hook", "composed-guard", "--backup", str(backup)], input_text=json.dumps(payload), contains="audit foreign context", json_output=True)
-        self.call("run-hook session-start", ["run-hook", "session-start"], input_text="{}", contains="capabilities", json_output=True)
-        # This hook only queries an already-running daemon; warm the disposable one.
-        try:
-            self.call("run-hook prompt-submit", ["run-hook", "prompt-submit", "--provider", "codex"], input_text=json.dumps({"cwd": str(self.repo), "session_id": "hook-audit", "prompt": "Fix login_user validation", "hook_event_name": "UserPromptSubmit"}), contains="lib.rs", json_output=True)
-            # A question creates a real session packet without an automatic coding handoff.
-            self.call("run-hook prompt-submit", ["run-hook", "prompt-submit", "--provider", "claude"], input_text=json.dumps({"cwd": str(self.repo), "session_id": "display-session", "prompt": "How does login_user validation work?", "hook_event_name": "UserPromptSubmit"}), contains="lib.rs", json_output=True)
-            self.call("task-state show", ["task-state", "show", "--session", "display-session", "--json"], contains="display-session", json_output=True)
-            self.call("task-state reset", ["task-state", "reset", "--session", "display-session", "--json"], json_output=True)
-            reset = self.call("task-state show", ["task-state", "show", "--session", "display-session", "--json"], json_output=True)
-            assert json.loads(reset)["status"] == "absent" and json.loads(reset)["task_id"] is None, "reset retained the populated session packet"
-        finally:
-            self.call("daemon stop", ["daemon", "stop"])
-        self.call("run-hook post-compaction", ["run-hook", "post-compaction"], input_text=json.dumps({"cwd": str(self.repo), "session_id": "hook-audit", "hook_event_name": "PostCompaction"}), contains="lib.rs", json_output=True)
-        self.call("run-hook post-tool-use", ["run-hook", "post-tool-use", "--provider", "claude"], input_text=json.dumps({"cwd": str(self.repo), "tool_name": "Edit", "tool_input": {"file_path": str(self.repo / "lib.rs")}}), contains="PostToolUse", json_output=True)
+        for verb in ["guard", "composed-guard", "session-start", "prompt-submit", "post-compaction", "post-tool-use", "metrics"]:
+            self.call(f"run-hook {verb}", ["run-hook", verb, "--provider", "codex"], input_text=json.dumps(payload), silent=True)
+        self.call("daemon stop", ["daemon", "stop"])
 
 
 def main():
