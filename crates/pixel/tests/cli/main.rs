@@ -24,6 +24,7 @@ mod install_exit;
 mod json_contract;
 mod list_errors_cli;
 mod metrics_cli;
+mod ollaya_fresh_install_cli;
 mod prompt_brief_cli;
 mod publish_cli;
 mod recall_cli;
