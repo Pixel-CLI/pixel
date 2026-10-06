@@ -122,14 +122,32 @@ mod tests {
         let dir = tempdir().unwrap();
         let remote = tempdir().unwrap();
         init_repo_with_remote(dir.path(), remote.path());
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        // Advance the remote's main, then rewind the local tracking ref so
+        // only a real fetch can make origin/main reach the new commit.
+        git(&["commit", "-q", "--allow-empty", "-m", "next"]);
+        git(&["push", "-q", "origin", "main"]);
+        let advanced = git(&["rev-parse", "HEAD"]);
+        let advanced_short = git(&["rev-parse", "--short", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD~1"]);
 
         let result = sync(dir.path(), "origin", None).unwrap();
         assert_eq!(result["synced"], json!(true));
         let refs = result["refs"].as_array().unwrap();
         assert!(
             refs.iter()
-                .any(|r| r["ref"] == "origin/main" && !r["oid"].as_str().unwrap().is_empty()),
+                .any(|r| r["ref"] == "origin/main" && r["oid"] == json!(advanced_short)),
             "{refs:?}"
         );
+        assert_eq!(git(&["rev-parse", "refs/remotes/origin/main"]), advanced);
     }
 }

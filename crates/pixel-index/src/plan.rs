@@ -129,7 +129,7 @@ fn class_alternatives(class: &Class) -> Option<Vec<Vec<u8>>> {
             let mut alts = Vec::new();
             for range in b.ranges() {
                 let (lo, hi) = (range.start(), range.end());
-                if usize::from(hi - lo) + alts.len() > MAX_CLASS_EXPANSION {
+                if usize::from(hi - lo) + 1 + alts.len() > MAX_CLASS_EXPANSION {
                     return None;
                 }
                 for byte in lo..=hi {
@@ -142,7 +142,7 @@ fn class_alternatives(class: &Class) -> Option<Vec<Vec<u8>>> {
             let mut alts: Vec<Vec<u8>> = Vec::new();
             for range in u.ranges() {
                 let (lo, hi) = (range.start() as u32, range.end() as u32);
-                if (hi - lo) as usize + alts.len() > MAX_CLASS_EXPANSION {
+                if (hi - lo) as usize + 1 + alts.len() > MAX_CLASS_EXPANSION {
                     return None;
                 }
                 for cp in lo..=hi {
@@ -397,10 +397,13 @@ mod tests {
 
     #[test]
     fn class_alternatives_expand_up_to_the_cap_and_refuse_past_it() {
-        let unicode = class_alternatives(&class_of("[a-e]")).unwrap();
-        assert_eq!(unicode.len(), 5);
+        let unicode = class_alternatives(&class_of("[a-d]")).unwrap();
+        assert_eq!(unicode.len(), MAX_CLASS_EXPANSION);
         assert_eq!(unicode[0], b"a".to_vec());
-        assert_eq!(class_alternatives(&class_of("[a-f]")), None);
+        assert_eq!(class_alternatives(&class_of("[a-e]")), None);
+        // Disjoint single-member ranges count one each.
+        assert_eq!(class_alternatives(&class_of("[acegi]")), None);
+        assert_eq!(class_alternatives(&class_of("[aceg]")).unwrap().len(), 4);
 
         let bytes_class = class_of("(?-u)[a-c]");
         assert!(matches!(bytes_class, Class::Bytes(_)));
@@ -408,5 +411,10 @@ mod tests {
             class_alternatives(&bytes_class),
             Some(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()])
         );
+        assert_eq!(
+            class_alternatives(&class_of("(?-u)[a-d]")).unwrap().len(),
+            4
+        );
+        assert_eq!(class_alternatives(&class_of("(?-u)[a-e]")), None);
     }
 }

@@ -218,6 +218,15 @@ mod tests {
         };
         let err = update_with_state(dir.path(), &opts, state.path()).unwrap_err();
         assert!(err.starts_with("UNSUPPORTED_STATE: dirty files"), "{err}");
+        // The journal lives under the supplied state root, not the default one.
+        let journal = OperationJournal::with_state_root(state.path().to_path_buf());
+        assert!(
+            journal
+                .read(&repo_identity(dir.path()), "upd-dirty")
+                .is_some(),
+            "no journal record under {}",
+            state.path().display()
+        );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "local edit"

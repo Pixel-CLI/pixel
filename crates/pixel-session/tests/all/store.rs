@@ -411,13 +411,21 @@ fn state_root_prefers_sniper_root_then_xdg_then_home_skipping_empty_values() {
 #[test]
 fn record_event_raw_returns_the_new_row_id() {
     let state = TempRoot::new();
-    let store = Store::open_at(Path::new("/tmp/raw-ev"), state.path()).unwrap();
+    let project = Path::new("/tmp/raw-ev");
+    let store = Store::open_at(project, state.path()).unwrap();
     let first = store.record_event_raw("note", None, None).unwrap();
     let second = store
         .record_event_raw("note", Some(&serde_json::json!({"a": 1})), Some("r"))
         .unwrap();
-    assert!(first >= 1, "{first}");
-    assert_eq!(second, first + 1);
+    let conn = rusqlite::Connection::open(store_path(project, state.path())).unwrap();
+    let stored: Vec<(i64, Option<String>)> = conn
+        .prepare("SELECT id, run_id FROM events WHERE kind = 'note' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(stored, vec![(first, None), (second, Some("r".to_string()))]);
 }
 
 #[test]
@@ -443,6 +451,9 @@ fn gc_counts_rows_dropped_by_age_and_by_row_cap() {
             ts: Some(1000),
         })
         .unwrap();
+    let aged = store.gc(false).unwrap();
+    assert_eq!(aged.errors_deleted, 1, "aged error");
+    assert_eq!(aged.events_deleted, 1, "aged event");
     {
         let mut conn = rusqlite::Connection::open(store_path(project, state.path())).unwrap();
         let tx = conn.transaction().unwrap();
@@ -464,7 +475,7 @@ fn gc_counts_rows_dropped_by_age_and_by_row_cap() {
         }
         tx.commit().unwrap();
     }
-    let outcome = store.gc(false).unwrap();
-    assert_eq!(outcome.errors_deleted, 2);
-    assert_eq!(outcome.events_deleted, 2);
+    let capped = store.gc(false).unwrap();
+    assert_eq!(capped.errors_deleted, 1, "one error past the row cap");
+    assert_eq!(capped.events_deleted, 1, "one event past the row cap");
 }

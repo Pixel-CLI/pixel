@@ -760,6 +760,23 @@ mod tests {
         );
         assert_eq!(store.mark_policy_skips().unwrap(), 2);
         assert_eq!(store.embed_backlog().unwrap(), 2);
+        let embedded: Vec<(String, i64)> = store
+            .connection()
+            .prepare("SELECT text, embedded FROM turns ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            embedded,
+            vec![
+                ("keep".to_string(), 0),
+                ("injected".to_string(), 2),
+                ("tool output".to_string(), 2),
+                ("answer".to_string(), 0),
+            ]
+        );
         assert_eq!(store.mark_policy_skips().unwrap(), 0);
     }
 
@@ -771,7 +788,7 @@ mod tests {
         let ids = store.insert_chunks(1, &[(0, 1), (1, 2), (2, 3)]).unwrap();
         assert_eq!(store.drop_orphan_chunks(ids[2]).unwrap(), 0);
         assert_eq!(store.drop_orphan_chunks(ids[0]).unwrap(), 2);
-        assert_eq!(store.chunk_turns(&ids).unwrap().len(), 1);
+        assert_eq!(store.chunk_turns(&ids).unwrap(), vec![(ids[0], 1, 0)]);
     }
 
     /// The ingest state is what makes the next pass incremental: a write

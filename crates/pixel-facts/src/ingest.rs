@@ -229,19 +229,19 @@ pub const DEFAULT_LAZY_INGEST_BUDGET_MS: u64 = 3000;
 
 /// Env-tunable lazy-ingest budget: `PIXEL_FACTS_QUERY_BUDGET_MS` (canonical)
 /// with `PIXEL_FACTS_LAZY_BUDGET_MS` accepted as an alias.
-#[cfg_attr(test, mutants::skip)] // one-line adapter over the env; `lazy_budget_from` is tested
+#[cfg_attr(test, mutants::skip)] // process-env adapter; `lazy_budget_from_env` is tested
 pub fn lazy_ingest_budget_ms() -> u64 {
-    lazy_budget_from(
-        std::env::var("PIXEL_FACTS_QUERY_BUDGET_MS").ok(),
-        std::env::var("PIXEL_FACTS_LAZY_BUDGET_MS").ok(),
-    )
+    lazy_budget_from_env(|name| std::env::var(name))
 }
 
-/// `lazy_ingest_budget_ms` for given values of the canonical variable and
-/// its alias: the canonical one wins when set, even if it does not parse.
-fn lazy_budget_from(query: Option<String>, lazy: Option<String>) -> u64 {
-    query
-        .or(lazy)
+/// `lazy_ingest_budget_ms` over an injectable variable lookup: the
+/// canonical variable wins when set, even if it does not parse.
+fn lazy_budget_from_env(
+    mut var: impl FnMut(&str) -> std::result::Result<String, std::env::VarError>,
+) -> u64 {
+    var("PIXEL_FACTS_QUERY_BUDGET_MS")
+        .or_else(|_| var("PIXEL_FACTS_LAZY_BUDGET_MS"))
+        .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_LAZY_INGEST_BUDGET_MS)
 }
@@ -1632,21 +1632,36 @@ body"
     #[test]
     fn parse_phase_c_should_drop_the_text_of_a_binary_file() {
         for marker in ["Binary files a/x and b/x differ", "GIT binary patch"] {
-            let out = format!("\x1eabc\ndiff --git a/x b/x\n+text\n{marker}\n");
+            let out = format!("\x1eabc\ndiff --git a/x b/x\n+text\n-gone\n{marker}\n");
             let parsed = parse_phase_c(out.as_bytes());
             assert_eq!(parsed[0].files.len(), 1, "{marker}");
             assert_eq!(parsed[0].files[0].path, "x");
             assert_eq!(parsed[0].files[0].added, "", "{marker}");
+            assert_eq!(parsed[0].files[0].removed, "", "{marker}");
         }
     }
 
     #[test]
-    fn lazy_budget_from_should_prefer_the_canonical_variable() {
-        assert_eq!(lazy_budget_from(None, None), DEFAULT_LAZY_INGEST_BUDGET_MS);
-        assert_eq!(lazy_budget_from(Some("7".into()), Some("9".into())), 7);
-        assert_eq!(lazy_budget_from(None, Some("9".into())), 9);
+    fn lazy_budget_from_env_should_prefer_the_canonical_variable() {
+        let env = |query: Option<&'static str>, lazy: Option<&'static str>| {
+            move |name: &str| {
+                let v = match name {
+                    "PIXEL_FACTS_QUERY_BUDGET_MS" => query,
+                    "PIXEL_FACTS_LAZY_BUDGET_MS" => lazy,
+                    other => panic!("unexpected variable {other}"),
+                };
+                v.map(str::to_string).ok_or(std::env::VarError::NotPresent)
+            }
+        };
         assert_eq!(
-            lazy_budget_from(Some("x".into()), Some("9".into())),
+            lazy_budget_from_env(env(None, None)),
+            DEFAULT_LAZY_INGEST_BUDGET_MS
+        );
+        assert_eq!(lazy_budget_from_env(env(Some("7"), None)), 7);
+        assert_eq!(lazy_budget_from_env(env(Some("7"), Some("9"))), 7);
+        assert_eq!(lazy_budget_from_env(env(None, Some("9"))), 9);
+        assert_eq!(
+            lazy_budget_from_env(env(Some("x"), Some("9"))),
             DEFAULT_LAZY_INGEST_BUDGET_MS
         );
     }

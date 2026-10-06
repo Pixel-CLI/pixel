@@ -175,6 +175,9 @@ mod tests {
         assert_eq!(io.to_string(), "io: disk");
         assert_eq!(IngestError::Other("corrupt".into()).to_string(), "corrupt");
         let store = IngestError::Store(rusqlite::Error::InvalidQuery);
-        assert!(store.to_string().starts_with("store: "), "{store}");
+        assert_eq!(
+            store.to_string(),
+            format!("store: {}", rusqlite::Error::InvalidQuery)
+        );
     }
 }

@@ -455,6 +455,8 @@ mod tests {
                     (1, vec![0.5, 0.5]),
                     (2, vec![1.0, 0.0]),
                     (3, vec![1.0, 0.0]),
+                    // Ties rows 2 and 3 at the cutoff: it must not displace them.
+                    (4, vec![1.0, 0.0]),
                 ],
             )
             .unwrap();

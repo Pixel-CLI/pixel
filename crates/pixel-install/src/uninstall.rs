@@ -1685,7 +1685,12 @@ mod routing_tests {
             &path,
             &json!({"hooks":{
                 "SessionStart":[marked("run-hook metrics --provider codex")],
-                "UserPromptSubmit":[marked("run-hook guard --provider zcode"), foreign.clone()],
+                // Not a pixel executable name, so `routing::pixel_hook_verb`
+                // ignores it and only `PIXEL_HOOK_MARKERS` can remove it.
+                "UserPromptSubmit":[
+                    json!({"hooks":[{"type":"command","command":"/opt/other/zcode-shim run-hook guard --provider zcode"}]}),
+                    foreign.clone(),
+                ],
                 "Stop":[foreign.clone()],
             }}),
             false,

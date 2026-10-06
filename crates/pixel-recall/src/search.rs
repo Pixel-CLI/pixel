@@ -605,7 +605,27 @@ mod tests {
 
     #[test]
     fn count_matches_should_count_every_matching_turn_and_its_sessions() {
-        let (_tmp, store, segments) = corpus();
+        let (_tmp, mut store, mut segments) = corpus();
+        let session_ids = |store: &RecallStore| -> HashSet<i64> {
+            store
+                .connection()
+                .prepare("SELECT id FROM sessions")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let matching = session_ids(&store);
+        add_session(
+            &mut store,
+            "pi",
+            "cccc3333",
+            &[(Role::User, "nothing to find here")],
+        );
+        segments.index_new(&store).unwrap();
+        let unrelated: Vec<i64> = session_ids(&store).difference(&matching).copied().collect();
+        assert_eq!(unrelated.len(), 1);
         let (turns, sessions) = count_matches(
             &store,
             &segments,
@@ -615,16 +635,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(turns, 3);
-        let ids: HashSet<i64> = store
-            .connection()
-            .prepare("SELECT id FROM sessions")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert_eq!(sessions, ids);
+        assert_eq!(sessions, matching);
         assert_eq!(sessions.len(), 2);
+        assert!(!sessions.contains(&unrelated[0]));
     }
 
     /// A pattern without required literals scans the corpus in ts order and

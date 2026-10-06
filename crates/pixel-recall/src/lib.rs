@@ -122,6 +122,9 @@ mod potion_marker_tests {
     const CODE_64M: &str = "minishlab/potion-code-64M-v2";
     const CODE_16M: &str = "minishlab/potion-code-16M-v2";
 
+    /// Serialises the tests that write `PIXEL_RECALL_DIR`.
+    static RECALL_DIR_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn potion_marker_should_be_one_file_per_repository() {
         let models = Path::new("/m");
@@ -166,6 +169,24 @@ mod potion_marker_tests {
 
     #[test]
     fn recall_dir_should_read_the_override_then_home() {
+        {
+            let _guard = RECALL_DIR_ENV
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let saved = std::env::var_os("PIXEL_RECALL_DIR");
+            let explicit = tempfile::tempdir().unwrap();
+            // SAFETY: `PIXEL_RECALL_DIR` is only written under `RECALL_DIR_ENV`.
+            unsafe { std::env::set_var("PIXEL_RECALL_DIR", explicit.path()) };
+            let got = recall_dir();
+            // SAFETY: as above, restoring the value read under the lock.
+            unsafe {
+                match saved {
+                    Some(v) => std::env::set_var("PIXEL_RECALL_DIR", v),
+                    None => std::env::remove_var("PIXEL_RECALL_DIR"),
+                }
+            }
+            assert_eq!(got, explicit.path());
+        }
         assert_eq!(
             recall_dir(),
             recall_dir_from(

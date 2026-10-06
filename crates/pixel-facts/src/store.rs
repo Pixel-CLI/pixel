@@ -412,8 +412,9 @@ impl FactsStore {
             return Ok(false);
         }
         if version == 0 {
-            // Pre-versioned. Rebuild only if it already has rows; an empty one
-            // is stamped in place on open.
+            // Pre-versioned. Rebuild only if it already has a `commits`
+            // table (even an empty one: its schema predates versioning); a
+            // db without one is stamped in place on open.
             let has_rows: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='commits'",
@@ -1108,13 +1109,19 @@ mod tests {
                 .unwrap();
             FactsStore::needs_rebuild(&db).unwrap()
         };
-        assert!(!at(0), "pre-versioned and empty: stamped in place");
+        assert!(
+            !at(0),
+            "pre-versioned without a commits table: stamped in place"
+        );
         assert!(!at(FACTS_SCHEMA_VERSION));
         assert!(!at(UPGRADES_IN_PLACE_FROM));
         assert!(at(FACTS_SCHEMA_VERSION + 100));
         conn.execute_batch("CREATE TABLE commits (id INTEGER)")
             .unwrap();
-        assert!(at(0), "pre-versioned with rows: rebuilt");
+        assert!(
+            at(0),
+            "pre-versioned with a commits table, even empty: rebuilt"
+        );
         assert!(!at(FACTS_SCHEMA_VERSION));
     }
 
