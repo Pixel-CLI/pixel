@@ -2665,7 +2665,7 @@ fn delegate_rtk_hook(raw: &str) -> ! {
 /// Entry point for `pixel run-hook guard`. Reads the PreToolUse hook payload
 /// from stdin. Never returns an `Err` that would surface as exit 1 — every
 /// failure path is a deliberate exit 0 (allow, optionally with advice).
-#[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; decoding and routing are `guard_request`, the edit verdict `edit_advice`
+#[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; decoding is `guard_request`, dispatch and precedence `guard_outcome`, the edit verdict `edit_advice`
 pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     if env_flag_off("PIXEL_TARGETS_GUARD") {
         std::process::exit(0);
@@ -2683,12 +2683,12 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         std::process::exit(0);
     };
     let GuardRequest {
-        post_tool_use,
         tool,
         cwd,
         tool_input,
         raw_path,
         route,
+        ..
     } = &request;
     let (tool, cwd, raw_path) = (tool.as_str(), cwd.as_path(), raw_path.as_str());
     let anchor = resolve(raw_path, cwd).unwrap_or_else(|| canonical(cwd));
@@ -2701,50 +2701,33 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     // into a *delivered fact*: the PreToolUse doctrine says "run pixel impact
     // before editing a symbol", butthe bench shows agents don't. Here the
     // dependants arrive after the edit, unsolicited.
-    if *post_tool_use {
-        post_tool_use_blast_radius(&anchor, idx_root.as_deref(), tool);
-        std::process::exit(0);
-    }
-
+    let idx = idx_root.as_deref();
     let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
-    let (manifest, manifest_expired) =
-        manifest_pair(manifest_root.as_deref().map(load_manifest_state));
-
-    if let GuardRoute::Shell(cmd) = route {
-        let cmd = cmd.as_str();
-        // SAFETY TIER FIRST: destructive git + git substitute + transcript store
-        // advisories. These run before rewrite attempts so a safe read-only
-        // rewrite never hides a more important mutation warning.
-        if let Some(lines) = bash_deny_lines(cmd, idx_root.as_deref()) {
-            advise(&non_blocking_advisory_lines(&lines));
+    let load_manifest = || manifest_pair(manifest_root.as_deref().map(load_manifest_state));
+    let probes = ShellProbes {
+        deny: &|cmd| bash_deny_lines(cmd, idx),
+        substitute: &|cmd| git_mutation_substitute_lines(cmd, idx, cwd),
+        transcript: &transcript_store_hit,
+        rewrite: &|original| crate::search_compat::rewrite(original, cwd),
+    };
+    match guard_outcome(&request, idx.is_some(), &probes) {
+        GuardOutcome::BlastRadius => {
+            post_tool_use_blast_radius(&anchor, idx, tool);
+            std::process::exit(0);
         }
-        if let Some(lines) = git_mutation_substitute_lines(cmd, idx_root.as_deref(), cwd) {
-            advise(&non_blocking_advisory_lines(&lines));
-        }
-        if let Some(store) = transcript_store_hit(cmd) {
-            advise(&transcript_archaeology_advisory_lines(store));
-        }
-        // REWRITE TIER: try transparent bash → pixel squash-branch BEFORE any advisory.
-        // Advisories (scoping, transcript) call advise() which exits, precluding
-        // the rewrite. By checking rewrite first, we ensure the rewrite takes
-        // priority over the advisory — the rewrite IS the resolution.
-        if idx_root.is_some()
-            && let Some(original) = tool_input.get("command").and_then(Value::as_str)
-            && let Some(rewritten) = crate::search_compat::rewrite(original, cwd)
-        {
-            // Read-only search rewrites are semantically equivalent, so
-            // transparently replace the input and let the normal tool
-            // permission flow continue.
-            let mut updated = Value::Object(tool_input.clone());
-            updated["command"] = Value::String(rewritten);
+        GuardOutcome::Advise(lines) => advise(&lines),
+        GuardOutcome::Rewrite(updated) => {
             print!("{}", rewrite_json(Provider::Claude, updated));
             std::process::exit(0);
         }
-
-        // ADVISORY TIER (only if no rewrite applied): scoping advisory
-        check_bash_advisories(cmd, cwd, idx_root.as_deref(), manifest.as_ref());
-        std::process::exit(0);
+        GuardOutcome::ShellAdvisories(cmd) => {
+            let (manifest, _) = load_manifest();
+            check_bash_advisories(&cmd, cwd, idx, manifest.as_ref());
+            std::process::exit(0);
+        }
+        GuardOutcome::Tool => {}
     }
+    let (manifest, manifest_expired) = load_manifest();
 
     match route {
         GuardRoute::Read => {
@@ -2800,6 +2783,65 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         GuardRoute::Shell(_) | GuardRoute::Other => {}
     }
     std::process::exit(0);
+}
+
+/// The I/O-backed lookups the shell branch of [`guard_outcome`] consults.
+struct ShellProbes<'a> {
+    /// Destructive-git advisory lines ([`bash_deny_lines`]).
+    deny: &'a dyn Fn(&str) -> Option<Vec<String>>,
+    /// Git-substitute advisory lines ([`git_mutation_substitute_lines`]).
+    substitute: &'a dyn Fn(&str) -> Option<Vec<String>>,
+    /// The transcript store a command reads ([`transcript_store_hit`]).
+    transcript: &'a dyn Fn(&str) -> Option<&'static str>,
+    /// The read-only pixel rewrite of a command string.
+    rewrite: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// What the guard does with a decoded request.
+#[derive(Debug, Clone, PartialEq)]
+enum GuardOutcome {
+    /// PostToolUse: deliver the edited file's blast radius.
+    BlastRadius,
+    /// Print these advisory lines and allow.
+    Advise(Vec<String>),
+    /// Replace the tool input with this one (a transparent rewrite).
+    Rewrite(Value),
+    /// No safety advisory and no rewrite: run the scoping advisories on this command.
+    ShellAdvisories(String),
+    /// A non-shell tool: continue with the read/edit branches.
+    Tool,
+}
+
+/// The guard's dispatch for a decoded request. Precedence on a shell call:
+/// the safety tier (destructive git, git substitute, transcript store) first,
+/// so a read-only rewrite never hides a mutation warning; then the rewrite,
+/// only in an indexed repo and only for a string `command`; then the
+/// scoping advisories.
+fn guard_outcome(req: &GuardRequest, indexed: bool, probes: &ShellProbes<'_>) -> GuardOutcome {
+    if req.post_tool_use {
+        return GuardOutcome::BlastRadius;
+    }
+    let GuardRoute::Shell(cmd) = &req.route else {
+        return GuardOutcome::Tool;
+    };
+    if let Some(lines) = (probes.deny)(cmd) {
+        return GuardOutcome::Advise(non_blocking_advisory_lines(&lines));
+    }
+    if let Some(lines) = (probes.substitute)(cmd) {
+        return GuardOutcome::Advise(non_blocking_advisory_lines(&lines));
+    }
+    if let Some(store) = (probes.transcript)(cmd) {
+        return GuardOutcome::Advise(transcript_archaeology_advisory_lines(store));
+    }
+    if indexed
+        && let Some(original) = req.tool_input.get("command").and_then(Value::as_str)
+        && let Some(rewritten) = (probes.rewrite)(original)
+    {
+        let mut updated = Value::Object(req.tool_input.clone());
+        updated["command"] = Value::String(rewritten);
+        return GuardOutcome::Rewrite(updated);
+    }
+    GuardOutcome::ShellAdvisories(cmd.clone())
 }
 
 /// Which branch of the guard a tool call takes.
@@ -5419,6 +5461,68 @@ mod tests {
             PathBuf::new,
         );
         assert_eq!(off, None);
+    }
+
+    fn shell_req(tool_input: &str) -> GuardRequest {
+        decode(&format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{tool_input}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn outcome(req: &GuardRequest, indexed: bool, hits: [bool; 4]) -> GuardOutcome {
+        let probes = ShellProbes {
+            deny: &|c| hits[0].then(|| vec![format!("deny {c}")]),
+            substitute: &|c| hits[1].then(|| vec![format!("sub {c}")]),
+            transcript: &|_| hits[2].then_some("store"),
+            rewrite: &|c| hits[3].then(|| format!("pixel {c}")),
+        };
+        guard_outcome(req, indexed, &probes)
+    }
+
+    #[test]
+    fn guard_outcome_delivers_blast_radius_after_an_edit() {
+        let req = decode(
+            r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(outcome(&req, true, [true; 4]), GuardOutcome::BlastRadius);
+        let read = decode(r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{}}"#)
+            .unwrap();
+        assert_eq!(outcome(&read, true, [true; 4]), GuardOutcome::Tool);
+    }
+
+    #[test]
+    fn guard_outcome_puts_safety_before_rewrite_before_advisories() {
+        let req = shell_req(r#"{"command":"rg x"}"#);
+        let deny = non_blocking_advisory_lines(&["deny rg x".to_string()]);
+        let sub = non_blocking_advisory_lines(&["sub rg x".to_string()]);
+        assert_eq!(outcome(&req, true, [true; 4]), GuardOutcome::Advise(deny));
+        assert_eq!(
+            outcome(&req, true, [false, true, true, true]),
+            GuardOutcome::Advise(sub)
+        );
+        assert_eq!(
+            outcome(&req, true, [false, false, true, true]),
+            GuardOutcome::Advise(transcript_archaeology_advisory_lines("store"))
+        );
+        assert_eq!(
+            outcome(&req, true, [false, false, false, true]),
+            GuardOutcome::Rewrite(serde_json::json!({"command": "pixel rg x"}))
+        );
+        let advisories = GuardOutcome::ShellAdvisories("rg x".to_string());
+        assert_eq!(outcome(&req, true, [false; 4]), advisories);
+        // No index: no rewrite even when one exists.
+        assert_eq!(
+            outcome(&req, false, [false, false, false, true]),
+            advisories
+        );
+        // Only a string `command` is rewritten: an argv array is not.
+        let argv = shell_req(r#"{"command":["rg","x"]}"#);
+        assert_eq!(
+            outcome(&argv, true, [false, false, false, true]),
+            GuardOutcome::ShellAdvisories(command_text(&serde_json::json!(["rg", "x"])))
+        );
     }
 
     #[test]
