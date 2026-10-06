@@ -93,17 +93,17 @@ slug = "reduce-claude-code-tokens"
 gist = "compare whole-file reads with signatures; read-volume estimates do not establish session cost savings."
 short = '''Ask for an outline before reading a whole file. On {kept.count} pinned large files, signatures were {kept.range} smaller than full reads, median {kept.median}, with tokens estimated from UTF-8 bytes divided by four. This does not measure total session tokens or billed cost.'''
 bench = ["well-known-files", "on-whole-agent-tasks"]
-limits = '''Edits still need code bodies. The Opus medium trial with hooks found no speed gain on its scoping task; raw runs are outside the repository. File/signature volumes do not establish whole-session token or cost savings.'''
+limits = '''Edits still need code bodies. In one Opus 5.5 medium trial on a low-research scoping task, install hooks were slower (+11%), with more tokens read (+12%) and higher provider-reported API cost (+31%); raw runs are not archived. This does not establish a general result. File/signature volumes do not establish whole-session token or cost savings.'''
 related = ["for/claude-code/", "savings/", "vs/shunt/"]
-checked = 2026-09-30
+checked = 2026-10-03
 
   [[answer.row]]
   label = "File versus signatures, estimated tokens"
   value = "{kept.range} less, median {kept.median}"
 
   [[answer.row]]
-  label = "Opus medium trial, median duration"
-  value = "42.9 s without Pixel, 47.6 s with hooks"
+  label = "Opus 5.5 medium trial, median duration"
+  value = "42.9 s without Pixel, 47.6 s with hooks (+11%)"
 
 [[answer]]
 slug = "grep-or-code-index"

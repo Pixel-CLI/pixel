@@ -52,12 +52,17 @@ command, time and token count comes from a recording.
 The source recording predates this protocol: Claude Sonnet 5, Pixel
 0.5.0 with its agent prompt appended instead of its hooks, in the source
 tree itself (`src/demo/meta.txt`). Three of its 22 runs read the demo's own
-files, which is why the script now works in a separate worktree. An Opus
-medium re-recording with the hooks gave no gain on this task (median 42.9 s
-without Pixel, 47.6 s with it), and is kept outside the repository with the
-earlier raw runs, as a limited summary, not replaced by a task selected for a favourable result.
-The exact versions, date and sample size of that newer trial are not archived
-here. It establishes neither a general slowdown nor a speedup.
+files, which is why the script now works in a separate worktree. An Opus 5.5
+medium-effort re-recording with the hooks used 11 runs per arm on the same
+low-research scoping task. The hooks arm had higher medians for duration
+(42.9 s without Pixel, 47.6 s with it; +11%), tokens read (11,945 vs. 13,350;
++12%) and provider-reported API cost ($0.283 vs. $0.372; +31%). It made 0–4
+Pixel calls per run, versus zero without Pixel. All 22 responses were in
+English, none read the demo files, and the worktree was clean at `v0.5.0`.
+The raw bundle is not archived, so its per-run values, exact date, exact
+CLI/harness versions beyond that tag and token-counting method cannot be
+reconstructed. This is a limited negative result on one low-research task,
+not evidence of general slowdown or speedup; see the [trial note](../bench/opus-install-hook-trial.md).
 
 Any future re-recording should keep the task and report all outcomes, not select
 a task for a favourable result. Re-record after a release that changes the agent prompt or the commands it

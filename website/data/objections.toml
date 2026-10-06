@@ -31,7 +31,7 @@
 question = "Will my agent actually use it?"
 audience = "dev"
 answer = [
-  '''Not every time: agents fall back to <code>grep</code>. <code>pixel install</code> puts Pixel's protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files; it advises, never blocks. Tool use is not a time or cost measurement: an Opus trial with hooks found no speed gain on its scoping task. <a class="link" href="{bench}#on-whole-agent-tasks">Method and limits</a>''',
+  '''Not every time: agents fall back to <code>grep</code>. <code>pixel install</code> puts Pixel's protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files; it advises, never blocks. In one Opus 5.5 medium trial on a low-research scoping task, hooks were slower (+11%), with more tokens read (+12%) and higher provider-reported API cost (+31%). This is not a general result. <a class="link" href="{bench}#on-whole-agent-tasks">Method and limits</a>''',
 ]
 check = '''<code>pixel action-log</code> what Pixel ran in this repository, and how it went'''
 

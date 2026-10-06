@@ -1,0 +1,25 @@
+{
+  "id": "lease-retry",
+  "tasks": [
+    {
+      "id": "lease-retry-1",
+      "prompt": "Task: retry a leased push when the remote branch moved. Before anyone edits anything, find the files that would need to change and list them, most important first, with one line each on why. Do not edit any file.",
+      "mode": "answer",
+      "must": [
+        {"pattern": "push\\.rs", "points": 1},
+        {"pattern": "reconcile\\.rs", "points": 1}
+      ],
+      "commit": "241f7e5c7616ff7db6aede6eba1610485fc9524d"
+    },
+    {
+      "id": "lease-retry-2",
+      "prompt": "Task: find where a leased push records its journal before it contacts the remote. List the files that would need to change to add a new journal field, most important first. Do not edit any file.",
+      "mode": "answer",
+      "must": [
+        {"pattern": "journal\\.rs", "points": 1},
+        {"pattern": "push\\.rs", "points": 1}
+      ],
+      "commit": "241f7e5c7616ff7db6aede6eba1610485fc9524d"
+    }
+  ]
+}
