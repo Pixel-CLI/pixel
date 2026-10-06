@@ -221,11 +221,18 @@ impl Index {
         uncertain: &mut bool,
         out: &mut Vec<Step>,
     ) {
-        self.own_chain(owner, depth, seen, uncertain, out);
+        // An owner already walked, or one past the depth cap, has no
+        // superclass to follow either.
+        if !self.own_chain(owner, depth, seen, uncertain, out) {
+            return;
+        }
         let (superclasses, _) = self.declared(owner, &["superclass"]);
         let distinct: HashSet<&Option<String>> = superclasses.iter().collect();
         match distinct.into_iter().collect::<Vec<_>>()[..] {
             [] => {}
+            // `class A < B` with `class B < A` is a cycle Ruby itself
+            // refuses: whatever follows is unknown.
+            [Some(parent)] if seen.contains(parent) => out.push(Step::Unknown),
             [Some(parent)] => self.instance_chain(parent, depth + 1, seen, uncertain, out),
             // A dynamic or external superclass, or two reopenings that
             // disagree: whatever comes next is unknown.
@@ -233,7 +240,9 @@ impl Index {
         }
     }
 
-    /// [`Self::instance_chain`] up to, not including, the superclass.
+    /// [`Self::instance_chain`] up to, not including, the superclass. False
+    /// when it walked nothing: the owner is past the depth cap (an unknown
+    /// step is pushed) or already on the chain.
     fn own_chain(
         &self,
         owner: &str,
@@ -241,15 +250,15 @@ impl Index {
         seen: &mut HashSet<String>,
         uncertain: &mut bool,
         out: &mut Vec<Step>,
-    ) {
+    ) -> bool {
         if depth > MAX_ANCESTOR_DEPTH {
             out.push(Step::Unknown);
-            return;
+            return false;
         }
         // A module already on the chain is skipped, as Ruby skips including
         // it twice; a cycle stops there too.
         if !seen.insert(owner.to_string()) {
-            return;
+            return false;
         }
         let (prepends, multi) = self.declared(owner, &["prepend"]);
         *uncertain |= multi;
@@ -260,6 +269,7 @@ impl Index {
         for module in self.includes_of(owner, uncertain).into_iter().rev() {
             self.module_chain(module, depth, seen, uncertain, out);
         }
+        true
     }
 
     fn module_chain(
