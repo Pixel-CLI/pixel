@@ -32,6 +32,10 @@ const FEATURES: &[(&str, &str)] = &[
     ("daemon_auto_start", "PIXEL_DAEMON_AUTO_START"),
     ("task_context", "PIXEL_TASK_CONTEXT"),
     ("task_boundary", "PIXEL_TASK_BOUNDARY"),
+    (
+        crate::execution_brief::chain::BRIEF_FEATURE,
+        crate::execution_brief::chain::BRIEF_ENV,
+    ),
 ];
 
 /// Configuration layers nearest first: the repository file, then the global one.

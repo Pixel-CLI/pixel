@@ -844,7 +844,7 @@ fn cwd_matches(a: &Path, b: &Path) -> bool {
 
 /// Trivial continuations that are almost certainly not new tasks, and
 /// harness envelopes (see [`is_harness_envelope`]), which are not the user's.
-fn is_trivial_continuation(prompt: &str) -> bool {
+pub(crate) fn is_trivial_continuation(prompt: &str) -> bool {
     if is_harness_envelope(prompt) {
         return true;
     }

@@ -982,6 +982,9 @@ fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
     let Ok(payload) = serde_json::from_str::<Value>(raw) else {
         return envelope(provider, event, &unavailable(event, None, true));
     };
+    // The brief runs beside the ledger: it needs neither, and a slow ledger
+    // must not use up its window.
+    let brief = start_brief(provider, event, &payload);
     let decision =
         handle_at(&payload_cwd(&payload), provider, event, &payload).unwrap_or_else(|_| {
             unavailable(
@@ -990,7 +993,34 @@ fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
                 enforcement_applies(provider, Some(&payload)),
             )
         });
-    envelope(provider, event, &decision)
+    envelope(provider, event, &with_brief(decision, brief))
+}
+
+/// Start the evidence brief for a Claude or Codex prompt; Pi, every other
+/// event and a prompt outside a repository start none.
+fn start_brief(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    payload: &Value,
+) -> Option<crate::execution_brief::chain::Pending> {
+    if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {
+        return None;
+    }
+    let prompt = string(payload, &["prompt"])?;
+    let root = crate::discover_root(&payload_cwd(payload)).ok()?;
+    crate::execution_brief::chain::start(prompt, &root)
+}
+
+/// `decision` with the brief as its `context`, which the envelope delivers as
+/// the host's additional context. A decision that already carries a context
+/// keeps it.
+fn with_brief(mut decision: Value, brief: Option<crate::execution_brief::chain::Pending>) -> Value {
+    if decision.get("context").is_none()
+        && let Some(text) = brief.and_then(crate::execution_brief::chain::Pending::finish)
+    {
+        decision["context"] = Value::String(text);
+    }
+    decision
 }
 
 fn handle_at(
@@ -1859,5 +1889,130 @@ mod tests {
                 json!({})
             );
         }
+    }
+
+    /// A source that answers one file for every search, so a brief exists.
+    struct OneFile;
+
+    impl crate::execution_brief::chain::Evidence for OneFile {
+        fn files_with(
+            &self,
+            _: &str,
+            _: std::time::Instant,
+        ) -> Result<crate::execution_brief::chain::Found, String> {
+            Ok(crate::execution_brief::chain::Found {
+                hits: vec![crate::execution_brief::chain::FileHit {
+                    path: "src/a.ts".into(),
+                    line: 2,
+                }],
+                capped: false,
+            })
+        }
+        fn concept(
+            &self,
+            _: &str,
+            _: std::time::Instant,
+        ) -> Result<crate::execution_brief::chain::Found, String> {
+            Err("unused".into())
+        }
+        fn symbols(
+            &self,
+            _: &str,
+            _: std::time::Instant,
+        ) -> Result<Vec<crate::execution_brief::chain::SymbolHit>, String> {
+            Err("unused".into())
+        }
+        fn callers(
+            &self,
+            _: &str,
+            _: std::time::Instant,
+        ) -> Result<Vec<crate::execution_brief::chain::CallerHit>, String> {
+            Err("unused".into())
+        }
+    }
+
+    fn pending_brief() -> crate::execution_brief::chain::Pending {
+        crate::execution_brief::chain::start_with(
+            "where is `fetchUser` used",
+            crate::execution_brief::chain::Gate {
+                enabled: true,
+                indexed: true,
+            },
+            Duration::from_secs(5),
+            |_| Box::new(OneFile),
+        )
+        .expect("a code prompt in an open gate starts a brief")
+    }
+
+    #[test]
+    fn a_brief_should_become_the_context_the_envelope_delivers_to_the_host() {
+        let decision = with_brief(
+            json!({"decision":"observe","coverage":"partial"}),
+            Some(pending_brief()),
+        );
+        let context = decision["context"].as_str().unwrap().to_string();
+        assert!(context.starts_with("[PIXEL:BRIEF]\n"), "{context}");
+        assert!(context.contains("\nfiles: src/a.ts:2\n"), "{context}");
+        for provider in [TaskProvider::Claude, TaskProvider::Codex] {
+            assert_eq!(
+                envelope(provider, TaskHookEvent::PromptSubmit, &decision),
+                json!({"hookSpecificOutput":{
+                    "hookEventName":"UserPromptSubmit","additionalContext":context
+                }})
+            );
+        }
+    }
+
+    #[test]
+    fn a_decision_should_keep_its_own_context_and_stay_unchanged_without_a_brief() {
+        let own = json!({"decision":"observe","context":"ledger note"});
+        assert_eq!(with_brief(own.clone(), Some(pending_brief())), own);
+        let plain = json!({"decision":"observe","coverage":"partial"});
+        assert_eq!(with_brief(plain.clone(), None), plain);
+        assert_eq!(
+            envelope(TaskProvider::Claude, TaskHookEvent::PromptSubmit, &plain),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository() {
+        let root = std::env::temp_dir().join(format!("pixel-hook-brief-{}", std::process::id()));
+        let shard_dir = root.join(pixel_index::index::SHARD_DIR);
+        std::fs::create_dir_all(&shard_dir).unwrap();
+        std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b"x").unwrap();
+        let root = root.canonicalize().unwrap();
+        let prompt = json!({"prompt":"callers of `fetchUser`","cwd":root});
+        for provider in [TaskProvider::Claude, TaskProvider::Codex] {
+            assert!(start_brief(provider, TaskHookEvent::PromptSubmit, &prompt).is_some());
+            for event in [
+                TaskHookEvent::PreToolUse,
+                TaskHookEvent::PostToolUse,
+                TaskHookEvent::Stop,
+                TaskHookEvent::SessionStart,
+            ] {
+                assert!(start_brief(provider, event, &prompt).is_none(), "{event:?}");
+            }
+        }
+        assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());
+        let no_prompt = json!({"cwd":root});
+        assert!(
+            start_brief(
+                TaskProvider::Claude,
+                TaskHookEvent::PromptSubmit,
+                &no_prompt
+            )
+            .is_none()
+        );
+        let elsewhere = json!({"prompt":"callers of `fetchUser`","cwd":root.join("missing")});
+        assert!(
+            start_brief(
+                TaskProvider::Claude,
+                TaskHookEvent::PromptSubmit,
+                &elsewhere
+            )
+            .is_none()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

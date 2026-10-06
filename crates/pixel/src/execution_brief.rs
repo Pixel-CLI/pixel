@@ -7,6 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
+pub(crate) mod chain;
+mod evidence;
+
 const MAX_CAPS: usize = 32;
 const MAX_EVIDENCE_PER_TARGET: usize = 8;
 const MAX_SYMBOLS_PER_TARGET: usize = 32;

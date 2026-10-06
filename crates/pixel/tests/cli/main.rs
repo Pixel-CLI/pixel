@@ -27,6 +27,7 @@ mod json_contract;
 mod list_errors_cli;
 mod metrics_cli;
 mod post_edit_cli;
+mod prompt_brief_cli;
 mod publish_cli;
 mod recall_cli;
 mod release_check_cli;
