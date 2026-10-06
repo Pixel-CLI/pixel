@@ -189,6 +189,9 @@ pub fn from_scope_task(task: &str, data: &Value) -> Value {
 /// start with behavior search. A non-converging first call gets one alternate
 /// Pixel query, then a bounded native fallback. Search warnings and call-count
 /// notices are informational; only the result itself advances the route.
+/// Commands are bare (`pixel`, `rg`, `sed`): the route must run where rtk is
+/// not installed, an installed rtk hook adds its own prefix, and the guard
+/// reads `rtk X` and `X` alike.
 pub fn retrieval_route(task: &str) -> Value {
     let task = truncate_chars(task.trim(), MAX_ROUTE_TASK_CHARS);
     let identifier = explicit_identifier(&task);
@@ -210,14 +213,14 @@ pub fn retrieval_route(task: &str) -> Value {
         .clone()
         .unwrap_or_else(|| bounded_native_query(&task));
     let native_fallback = format!(
-        "rtk rg -m 5 -n -F -- {} . | rtk sed -n '1,20p'",
+        "rg -m 5 -n -F -- {} . | sed -n '1,20p'",
         shell_quote(&fallback_query)
     );
     let alternate = if identifier.is_some() {
         native_fallback.clone()
     } else {
         format!(
-            "rtk pixel find-code {}",
+            "pixel find-code {}",
             shell_quote(&format!("{task} implementation and callers"))
         )
     };
@@ -425,7 +428,7 @@ pub fn retrieval_request(prompt: &str) -> Option<String> {
 
 fn route_command(subcommand: &str, args: &[String]) -> String {
     format!(
-        "rtk pixel {subcommand} {}",
+        "pixel {subcommand} {}",
         args.iter()
             .map(|argument| match argument.as_str() {
                 "-F" | "--fallback-query" | "--no-daemon" => argument.clone(),
@@ -877,11 +880,29 @@ mod tests {
     }
 
     #[test]
+    fn every_route_command_runs_without_rtk_installed() {
+        for task in ["Trace callers of `Foo::bar`", "Why does the parser panic?"] {
+            let route = retrieval_route(task);
+            let rendered = pretty_retrieval_route(&route);
+            for command in [
+                &route["first_command"],
+                &route["first_on_empty_or_irrelevant"],
+                &route["after_two_nonconverging_calls"],
+            ] {
+                let command = command.as_str().unwrap();
+                assert!(!command.contains("rtk"), "{command}");
+                assert!(rendered.contains(command), "{rendered}");
+            }
+            assert!(!rendered.contains("rtk"), "{rendered}");
+        }
+    }
+
+    #[test]
     fn explicit_identifier_starts_exact_and_empty_result_routes_to_find_code() {
         let route = retrieval_route("Trace callers of `Foo::bar`");
         assert_eq!(
             route["first_command"],
-            "rtk pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
+            "pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
         );
         assert_eq!(
             route["first_operation"],
@@ -893,7 +914,7 @@ mod tests {
         assert_eq!(route["automatic_empty_fallback"], true);
         assert_eq!(
             route["first_on_empty_or_irrelevant"],
-            "rtk rg -m 5 -n -F -- 'Foo::bar' . | rtk sed -n '1,20p'"
+            "rg -m 5 -n -F -- 'Foo::bar' . | sed -n '1,20p'"
         );
         let rendered = pretty_retrieval_route(&route);
         assert!(
@@ -901,7 +922,7 @@ mod tests {
         );
         assert!(rendered.contains("maximum 40-line window"));
         assert!(rendered.contains("warnings or prior-call counts alone never trigger it"));
-        assert!(!rendered.contains("run exactly once: rtk pixel find-code"));
+        assert!(!rendered.contains("run exactly once: pixel find-code"));
         assert_eq!(
             next_retrieval_command(&route, 1, RetrievalOutcome::NoUsableResult),
             route["first_on_empty_or_irrelevant"].as_str()
@@ -926,7 +947,7 @@ mod tests {
         assert_eq!(route["automatic_empty_fallback"], false);
         assert_eq!(
             route["first_command"],
-            "rtk pixel find-code 'How does task preparation refresh stale source evidence?'"
+            "pixel find-code 'How does task preparation refresh stale source evidence?'"
         );
         assert_eq!(
             route["first_operation"],
@@ -937,14 +958,14 @@ mod tests {
         );
         assert_eq!(
             route["first_on_empty_or_irrelevant"],
-            "rtk pixel find-code 'How does task preparation refresh stale source evidence? implementation and callers'"
+            "pixel find-code 'How does task preparation refresh stale source evidence? implementation and callers'"
         );
         // The native fallback carries the bounded term derived from the
         // task — not the whole sentence and not an empty or placeholder
         // term — shell-quoted into one literal `rg` query.
         assert_eq!(
             route["after_two_nonconverging_calls"],
-            "rtk rg -m 5 -n -F -- 'preparation' . | rtk sed -n '1,20p'"
+            "rg -m 5 -n -F -- 'preparation' . | sed -n '1,20p'"
         );
         assert_eq!(
             route["progression"],
@@ -960,7 +981,7 @@ mod tests {
             route["first_command"]
                 .as_str()
                 .unwrap()
-                .starts_with("rtk pixel find-code ")
+                .starts_with("pixel find-code ")
         );
     }
 
@@ -969,7 +990,7 @@ mod tests {
         let route = retrieval_route("Trace callers of `Foo::bar` in Livio's code");
         assert_eq!(
             route["first_command"],
-            "rtk pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar` in Livio'\\''s code' --no-daemon"
+            "pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar` in Livio'\\''s code' --no-daemon"
         );
     }
 

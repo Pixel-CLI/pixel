@@ -2669,10 +2669,9 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         std::process::exit(0);
     }
 
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
+    let Some(input) = crate::hook_input::read_hook_payload() else {
         std::process::exit(0);
-    }
+    };
     if let Some(provider) = provider {
         run_provider_guard(provider, delegate_rtk, &input);
     }
@@ -2938,10 +2937,9 @@ fn find_up(start: &Path, rel: impl AsRef<Path>) -> Option<PathBuf> {
 /// index, and emits a NON-BLOCKING blast-radius advisory; a graph/index miss
 /// is a silent allow (exit 0, never a denial).
 pub fn run_post_tool_use(provider: Option<Provider>) -> ! {
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
+    let Some(input) = crate::hook_input::read_hook_payload() else {
         std::process::exit(0);
-    }
+    };
     // No run_provider_guard call here: that path emits *PreToolUse*
     // permission rewrites and never returns, which would make an installed
     // `post-tool-use --provider claude` hook exit before the blast radius
@@ -3139,10 +3137,9 @@ pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
     if crate::prompt_submit::imported_claude_entry(provider) {
         std::process::exit(0);
     }
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
+    let Some(input) = crate::hook_input::read_hook_payload() else {
         std::process::exit(0);
-    }
+    };
     let Ok(payload) = serde_json::from_str::<Value>(&input) else {
         std::process::exit(0);
     };
@@ -7853,7 +7850,7 @@ mod tests {
         );
         assert_eq!(
             route["first_command"],
-            "rtk pixel find-code 'How does task preparation refresh stale source evidence?'"
+            "pixel find-code 'How does task preparation refresh stale source evidence?'"
         );
         assert!(
             command_line
@@ -7887,7 +7884,7 @@ mod tests {
         assert_eq!(route["automatic_empty_fallback"], true);
         assert_eq!(
             route["first_command"],
-            "rtk pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
+            "pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
         );
         assert!(command_line.ends_with(
             "search-content -F Foo::bar --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
@@ -7944,7 +7941,7 @@ mod tests {
         // The ordered task route is appended from the recovered request.
         assert!(message.contains("[PIXEL:EXECUTION_ROUTE]"), "{message}");
         assert!(
-            message.contains("rtk pixel find-code 'Find the identifier in project notes.'"),
+            message.contains("pixel find-code 'Find the identifier in project notes.'"),
             "{message}"
         );
         assert!(message.contains("maximum 40-line window"), "{message}");

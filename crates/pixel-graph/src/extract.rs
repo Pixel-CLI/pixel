@@ -2155,7 +2155,7 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
         "call" => {
             let mut callee_name: Option<String> = None;
             if let Some(name) = field_text(w, node, "method") {
-                let recv = field_text(w, node, "receiver");
+                let recv = ruby_receiver(w, node);
                 callee_name = Some(name.clone());
                 // `module_function()` and `public()` set the mode as the
                 // bare words do; with arguments they only touch the methods
@@ -2230,6 +2230,22 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
     if pushed {
         w.stack.pop();
     }
+}
+
+/// Preserve receiver text except AST-confirmed constant factories/configurators.
+/// Arguments cannot change which constant `Foo.new(args)` or `Job.set(args)`
+/// names; keeping `Foo.new` / `Job.set` also survives stored-call replay.
+fn ruby_receiver(w: &Walker, call: Node) -> Option<String> {
+    let receiver = call.child_by_field_name("receiver")?;
+    if receiver.kind() == "call"
+        && let Some(method) = field_text(w, receiver, "method")
+        && matches!(method.as_str(), "new" | "set")
+        && let Some(owner) = receiver.child_by_field_name("receiver")
+        && matches!(owner.kind(), "constant" | "scope_resolution")
+    {
+        return Some(format!("{}.{method}", w.text(owner)));
+    }
+    Some(w.text(receiver))
 }
 
 /// Literal text of the first `string` argument of a Ruby `call`, or `None`

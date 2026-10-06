@@ -39,7 +39,7 @@ checklist below defines readiness to merge, with required gates run in CI.
 - [ ] If the change crosses a trust boundary of [`docs/threat-model.md`](docs/threat-model.md) (a new entry point, a file under `.pixel/` or the machine-wide state, a network destination, a secret, a hook or install target, an op on the daemon socket, a listed mitigation, or a workflow's triggers, permissions or secrets), the matching threat and attack-surface entries are updated in the same pull request. A suspected vulnerability goes to the private advisory (SECURITY.md), not into that file.
 - [ ] The PR distinguishes CI evidence, optional local checks and any requested local deployment; no reinstall is required for publication.
 - [ ] Every CodeRabbit finding on the pull request has an answer in its own thread — a fix naming its commit, or the reason it does not apply — and the thread is resolved (see "CodeRabbit reviews").
-- [ ] The work was tracked on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1): the PR body opens with `Task <number>`, or with `no task: <reason>` for the declared exceptions (see [`.agents/rules/project-task.md`](.agents/rules/project-task.md)).
+- [ ] The work has an issue, and the PR body opens with `Closes #<number>` (`Refs #<number>` for part of an issue): GitHub then lists the PR on the issue, closes it on merge, and `board-sync.yml` moves it on [project 3](https://github.com/users/LivioGama/projects/3/views/1) without you needing access to the board. Only a typo fix, a CI rerun or an emergency revert goes without an issue (see [`.agents/rules/project-task.md`](.agents/rules/project-task.md)).
 - [ ] Any optional local verification is reported accurately; `pixel review-gate` is a diagnostic tool, not a pre-push requirement.
 
 ## Prerequisites
@@ -569,8 +569,10 @@ Scopes are crate short names or areas: `proto`, `graph`, `metrics`,
 `feat(graph): add Ruby (Rails-oriented) tree-sitter extraction`,
 `fix: restore install/doctor/uninstall after dependabot merge conflict`.
 
-Pull request body, in this order:
+Pull request body, in this order (`.github/pull_request_template.md`
+pre-fills it):
 
+0. `Closes #<number>` on the first line, naming the issue the PR resolves.
 1. **What** changed, one paragraph.
 2. **Why**, including the user-visible effect or the bug reproduced.
 3. **How it was verified**: paste the gate commands you ran and their

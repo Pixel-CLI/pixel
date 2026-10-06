@@ -20,6 +20,7 @@ mod execution_brief;
 mod flow_cli;
 mod guard_deny;
 mod guard_enforce;
+mod hook_stdin_cap_cli;
 mod install_exit;
 mod json_contract;
 mod list_errors_cli;

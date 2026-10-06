@@ -369,15 +369,23 @@ boundary it crosses.
 - **Mitigation**: the hook never executes `tool_input.command`; the rewrite
   grammar and quoting (3.3); rewritten paths must be regular files inside the
   discovered root, outside `.git` and `.pixel`, and not credential-shaped;
-  `tool_input.env` disables the rewrite; `task-event` caps its input at
-  `MAX_INPUT` (1 MiB) and `composed-guard` at `COMPOSED_MAX_INPUT`; every hook
-  except `task-event` fails open (exit 0), and `pixel install` registers a
-  10 s timeout (`HOOK_TIMEOUT`).
+  `tool_input.env` disables the rewrite; `guard`, `prompt-submit`,
+  `post-tool-use`, `metrics` and `task-event` read their payload through one
+  bounded reader, `hook_input::read_bounded`, capped at `MAX_HOOK_INPUT`
+  (1 MiB), so an over-cap payload is refused after `cap + 1` bytes instead of
+  being allocated in full; `composed-guard` keeps its own
+  `COMPOSED_MAX_INPUT` and `post-compaction` its smaller `MANIFEST_MAX_BYTES`
+  (64 KiB, which also bounds the manifest file it reads back); over-cap
+  `task-event` input emits its unavailable response, which denies `PreToolUse`
+  on an enforced session; the other hooks take their existing fail-open exit 0
+  and leave the native tool untouched; `pixel install` registers a 10 s
+  timeout (`HOOK_TIMEOUT`).
 - **Status**: Mitigated.
-- **Residual**: `guard`, `prompt-submit`, `post-tool-use` and `metrics` read
-  stdin without a cap, trusting the host; the native fallback after a
-  rewrite re-checks the file in Pixel's emulation but not in the native
-  `rg`/`grep` it falls back to.
+- **Residual**: the cap bounds allocation, not the wait — a host that writes
+  fewer than `MAX_HOOK_INPUT + 1` bytes and holds the pipe open still stalls
+  the hook until the host's `HOOK_TIMEOUT` (10 s) ends it; the native fallback
+  after a rewrite re-checks the file in Pixel's emulation but not in the
+  native `rg`/`grep` it falls back to.
 
 ### T11. A hook grants a permission it should not (E, B2)
 
@@ -546,8 +554,8 @@ boundary it crosses.
   write tokens (a "pwn request"), or injects through an interpolated title or
   body.
 - **Mitigation**: `board-sync.yml` (`pull_request_target`) never checks out
-  the pull request, runs with `permissions: {}`, and reads the body through
-  an environment variable; no workflow interpolates `github.event.*` or
+  the pull request, runs with `permissions: {}`, and never reads the
+  body: it takes the PR's closing issues from GitHub's GraphQL API; no workflow interpolates `github.event.*` or
   `inputs.*` directly in a `run:` script; workflows default to `contents:
   read`; runs of outside contributors wait for a maintainer's approval;
   CodeQL always scans workflows, Python and JavaScript with default security
@@ -603,7 +611,7 @@ boundary it crosses.
 
 | Path | Code | Tests |
 | --- | --- | --- |
-| Daemon request framing | `daemon::handle_conn`, `read_capped_line` | `oversized_line_is_rejected_without_unbounded_drain`, `expired_connection_deadline_stops_frame_read`, `socket_identity_should_follow_the_file_not_the_path` (`daemon.rs`); no test reads the socket's 0600 mode back |
+| Daemon request framing | `daemon::handle_conn`, `read_capped_line` | `oversized_line_is_rejected_without_unbounded_drain`, `expired_connection_deadline_stops_frame_read`, `socket_identity_should_follow_the_file_not_the_path`, `the_daemon_socket_should_be_0600_after_bind` (`daemon.rs`) |
 | Protocol skew | `classify_ping`, `PROTOCOL_VERSION` | `op_name_matches_serde_tag`, `session_capabilities_track_every_real_op` (`pixel-proto`) |
 | Planted history database | `FactsStore::needs_rebuild`, `_pixel_marker` | no dedicated test of the wipe; `concurrent_open_on_poisoned_db_never_ioerrors` covers the rebuild path |
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |

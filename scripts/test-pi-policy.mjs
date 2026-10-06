@@ -58,10 +58,10 @@ switch (args[0]) {
   case "execution-brief": {
     // The shape \`pixel execution-brief --json\` emits (execution_brief::from_scope_task).
     const quoted = "'" + args[1].replaceAll("'", "'\\\\''") + "'";
-    const text = ["[PIXEL:EXECUTION_ROUTE]", "1. Run: rtk pixel find-code " + quoted,
-      "   If it returns no usable or relevant result, run exactly once: rtk pixel find-code 'narrower behavior'",
+    const text = ["[PIXEL:EXECUTION_ROUTE]", "1. Run: pixel find-code " + quoted,
+      "   If it returns no usable or relevant result, run exactly once: pixel find-code 'narrower behavior'",
       "2. Read: Read only a path returned by Pixel, in a maximum 40-line window around its line.",
-      "3. If both Pixel calls do not converge, use: rtk rg -m 5 -n -F -- 'task' . | rtk sed -n '1,20p'",
+      "3. If both Pixel calls do not converge, use: rg -m 5 -n -F -- 'task' . | sed -n '1,20p'",
       "4. Validate: After an edit, run the smallest relevant test for the changed behavior; read-only tasks need no test.",
       "[/PIXEL:EXECUTION_ROUTE]"].join("\\n");
     // Keys in the binary's order: serde_json sorts them, so the route text
@@ -69,7 +69,7 @@ switch (args[0]) {
     console.log(JSON.stringify({
       asks_about_code: settings.asksAboutCode ?? true,
       padding: "x".repeat(settings.scopePadding ?? 0),
-      retrieval_route: { first_command: "rtk pixel find-code " + quoted },
+      retrieval_route: { first_command: "pixel find-code " + quoted },
       ...(settings.legacyBrief ? {} : { retrieval_route_text: text }),
       task: args[1], version: 1,
       workstreams: [{ path: "src/main.rs", tier: "P0" }],
@@ -199,8 +199,8 @@ switch (args[0]) {
     const boot = await h.boot(prompt);
     const route = boot.message.content;
     // The same rendered route Claude, Codex and Devin receive.
-    assert.match(route, /\[PIXEL:EXECUTION_ROUTE\]\n1\. Run: rtk pixel find-code /);
-    assert.ok(route.includes(`rtk pixel find-code '${prompt}'`));
+    assert.match(route, /\[PIXEL:EXECUTION_ROUTE\]\n1\. Run: pixel find-code /);
+    assert.ok(route.includes(`pixel find-code '${prompt}'`));
     assert.ok(route.indexOf("1. Run:") < route.indexOf("2. Read:"));
     assert.ok(route.indexOf("2. Read:") < route.indexOf("3. If both Pixel calls do not converge"));
     assert.match(route, /maximum 40-line window/);
