@@ -35,13 +35,8 @@ The offline mode uses a deterministic local fake model, so the whole pipeline
 (runs, frozen-input and trajectory recording, decision rule) is exercised
 without a provider. It verifies the harness, not a measurement.
 
-Live — explicit setup only; refuses to run without both:
-
-```bash
-FACT_PACK_MODEL=claude-opus-5-5 FACT_PACK_CLI=claude \
-  python3 eval/fact-pack/run.py --families eval/fact-pack/scenarios \
-  --out results/fact-pack-live --pixel "$(command -v pixel)" --live
-```
+Live — unavailable: provider dispatch is not implemented. Passing `--live`
+raises `RuntimeError`. Only the offline mode is functional.
 
 ## What it writes
 

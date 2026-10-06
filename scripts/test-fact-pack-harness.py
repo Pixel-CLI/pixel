@@ -154,6 +154,23 @@ class DecisionContracts(unittest.TestCase):
         self.assertAlmostEqual(result["median"], 0.02)
         self.assertFalse(result["meets_threshold"])
 
+    def test_evaluate_candidate_disjoint_success_produces_no_time_observations(self):
+        # Candidate succeeds where baseline fails and vice versa: no paired
+        # time observations survive the both-succeeded filter.
+        trajectories = {
+            "fact-auto": [
+                {"task_family": "f1", "pair_id": "t1", "verified": "success", "elapsed_s": 10.0},
+                {"task_family": "f1", "pair_id": "t2", "verified": "success", "elapsed_s": 10.0},
+            ],
+            "no-pixel": [
+                {"task_family": "f1", "pair_id": "t1", "verified": "failure", "elapsed_s": 50.0},
+                {"task_family": "f1", "pair_id": "t2", "verified": "failure", "elapsed_s": 50.0},
+            ],
+        }
+        verdict = decision.evaluate_candidate("fact-auto", trajectories, {})
+        self.assertEqual(verdict["time"]["no-pixel"]["n"], 0)
+        self.assertFalse(verdict["time"]["no-pixel"]["meets_threshold"])
+
     def test_cost_per_verified_completion(self):
         self.assertAlmostEqual(decision.cost_per_verified_completion([1.0, 2.0, 3.0], [1, 1, 0]), 3.0)
         self.assertIsNone(decision.cost_per_verified_completion([1.0], [0]))

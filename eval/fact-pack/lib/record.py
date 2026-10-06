@@ -56,14 +56,28 @@ def frozen_input_from_packet(packet) -> dict | None:
 
 
 def repo_signature(root: str) -> dict:
-    """Repository commit plus dirty-content signature, for a frozen input."""
+    """Repository commit plus dirty-content signature, for a frozen input.
+
+    Hashes the actual contents of dirty files so worktrees with different
+    edits to the same file produce distinct signatures.
+    """
     commit = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
                             capture_output=True, text=True)
-    dirty = subprocess.run(["git", "-C", root, "status", "--porcelain"],
+    status = subprocess.run(["git", "-C", root, "status", "--porcelain"],
                            capture_output=True, text=True)
+    dirty_files = []
+    for line in status.stdout.splitlines():
+        if line.strip():
+            dirty_files.append(line[3:].strip())
+    content_hashes = {}
+    for path in sorted(dirty_files):
+        full = Path(root) / path
+        if full.is_file():
+            content_hashes[path] = _sha256_text(
+                full.read_text(encoding="utf-8", errors="replace"))
     return {
         "commit": commit.stdout.strip() if commit.returncode == 0 else None,
-        "dirty_sha256": _sha256_text(dirty.stdout),
+        "dirty_sha256": _sha256_text(json.dumps(content_hashes, sort_keys=True)),
     }
 
 

@@ -100,9 +100,14 @@ def run_experiment(families_dir: str, out_dir: str, pixel_bin: str,
     packets_by_arm = {aid: [] for aid in arms.ARM_ORDER}
     ground_truth_by_pair = {}
 
+    repo = record.repo_signature(".")
     for family_path in families:
         family = scenario.load(family_path)
         for task in family.get("tasks", []):
+            pinned = task.get("commit")
+            if pinned and pinned != repo["commit"]:
+                raise RuntimeError(
+                    f"task {task['id']} pinned to {pinned} but checkout is {repo['commit']}")
             truth = task.get("ground_truth")
             if truth:
                 ground_truth_by_pair[task["id"]] = set(truth)
@@ -115,8 +120,7 @@ def run_experiment(families_dir: str, out_dir: str, pixel_bin: str,
                     pkt.pair_id = task["id"]
                     packets_by_arm[arm_id].append(pkt)
                     record.record_frozen_input(frozen_path, pkt, arm_id,
-                                               family["id"], task["id"],
-                                               {"commit": task.get("commit"), "dirty_sha256": None})
+                                               family["id"], task["id"], repo)
                 if live:
                     result = live_model(arm_id, task, pkt, model, cli)
                 else:

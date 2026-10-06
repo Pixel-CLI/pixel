@@ -178,8 +178,12 @@ def evaluate_candidate(candidate_id, trajectories_by_arm, packets_by_arm,
             "difference": diff, "lower_bound": lower, "non_inferior": ok,
             "n_pairs": len(paired_cand),
         }
-        cand_times = [t["elapsed_s"] for t in paired_cand if t["verified"] == "success"]
-        base_times = [t["elapsed_s"] for t in paired_base if t["verified"] == "success"]
+        cand_times = []
+        base_times = []
+        for ct, bt in zip(paired_cand, paired_base):
+            if ct["verified"] == "success" and bt["verified"] == "success":
+                cand_times.append(ct["elapsed_s"])
+                base_times.append(bt["elapsed_s"])
         verdict["time"][baseline] = paired_time_improvement(cand_times, base_times)
     # Cost components.
     cand_costs = [t.get("api_usage", {}).get("cost_usd", 0.0) for t in cand]
