@@ -18,6 +18,9 @@ use crate::store::SymbolKind;
 
 pub(crate) mod ruby_callbacks;
 pub(crate) mod ruby_generated;
+pub(crate) mod ruby_mixins;
+
+pub use ruby_mixins::RawMixin;
 
 #[derive(Debug, Clone)]
 pub struct RawSymbol {
@@ -128,6 +131,8 @@ pub struct FileExtraction {
     pub references: Vec<RawReference>,
     pub imports: Vec<RawImport>,
     pub jsx_elements: Vec<RawJsxElement>,
+    /// Ruby only: the superclass and modules each class or module declares.
+    pub mixins: Vec<RawMixin>,
 }
 
 /// Language tag for a repo-relative path, or `None` if unsupported.
@@ -334,6 +339,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         in_trait_impl: false,
         use_scopes: std::collections::HashMap::new(),
         generated: Vec::new(),
+        mixins: Vec::new(),
     };
     let root = tree.root_node();
     match lang {
@@ -357,6 +363,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         references: w.references,
         imports: w.imports,
         jsx_elements: w.jsx_elements,
+        mixins: w.mixins,
     };
     assign_enclosing(&mut fx);
     Some(fx)
@@ -410,6 +417,8 @@ struct Walker<'a> {
     /// Indices in `symbols` of the Ruby methods a declaration generated
     /// (`attr_reader`, `delegate`, ...), for `ruby_generated::drop_overridden`.
     generated: Vec<usize>,
+    /// Ruby ancestors declared so far (`ruby_mixins`).
+    mixins: Vec<RawMixin>,
 }
 
 impl<'a> Walker<'a> {
@@ -2137,6 +2146,7 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
                 w.push_symbol(name.clone(), q, SymbolKind::Class, node);
                 w.stack.push(name);
                 pushed = true;
+                ruby_mixins::walk_superclass(w, node);
             }
         }
         "method" => {
@@ -2170,7 +2180,17 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
                 w.push_symbol(name, q, SymbolKind::Method, node);
             }
         }
-        "call" => walk_ruby_call(w, locals, node),
+        "call" => {
+            walk_ruby_call(w, locals, node);
+            // `class_methods do ... end` defines the concern's `ClassMethods`
+            // module, which the includer extends.
+            if !w.stack.is_empty() && ruby_mixins::is_class_methods_block(w, node) {
+                let q = w.qualify("ClassMethods", "::");
+                w.push_symbol("ClassMethods".to_string(), q, SymbolKind::Module, node);
+                w.stack.push("ClassMethods".to_string());
+                pushed = true;
+            }
+        }
         // A name read without receiver or parentheses (`target`, or the
         // receiver of `target.to_set`) calls the method unless a local of
         // that name is in scope; tree-sitter cannot tell the two apart.
@@ -2237,6 +2257,7 @@ fn walk_ruby_call(w: &mut Walker, locals: &mut RubyLocals, node: Node) {
         {
             locals.visibility(&name);
         }
+        ruby_mixins::walk_mixin_call(w, node, &name);
         if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
             if let Some(spec) = ruby_first_string_argument(w, node) {
                 w.push_import(spec, Vec::new());
@@ -2812,6 +2833,7 @@ mod tests {
             imports: vec![],
             jsx_elements: vec![],
             references: vec![],
+            mixins: vec![],
         };
         assign_enclosing(&mut fx);
         let owners: Vec<Option<usize>> = fx.calls.iter().map(|c| c.enclosing_index).collect();

@@ -369,6 +369,21 @@ envelope talks to the daemon socket directly.
   in the file replaces the generated one. An alias or delegator stores a
   `references` edge to its own owner's target (`arg_of` `:alias` /
   `:delegate`), never to the delegate's method, whose type is unknown.
+- Ruby ancestors are stored as declared, in the graph's `ruby_mixins` table
+  (owner, `superclass`/`include`/`prepend`/`extend`, `included:`-prefixed
+  inside a concern's `included do`, the constant as written, its line;
+  `pixel-graph/src/extract/ruby_mixins.rs`). `ruby::Index::lookup` walks
+  Ruby's method lookup order from the caller's `self` — prepended modules,
+  the owner, included modules and concerns, the superclass; on the class
+  side the singleton methods, extended modules and each concern's
+  `ClassMethods` (`class_methods do` defines it) — resolving each constant
+  where the declaration is evaluated. A unique ancestor definition is
+  `Probable`; a definition past an unnamed ancestor (dynamic `include`,
+  external module), or several in an order reopenings in other files leave
+  unproven, is unresolved; the owner's own definition keeps the existing
+  own-method rules. An incremental batch that changes a declaration, or a
+  constant a stored declaration ends with, sets `Affected::ruby_ancestors`
+  and replays every Ruby `self` call and method-symbol reference.
 - The `graph` op rebuilds from scratch by default (`rebuild-graph`,
   `prepare-repo --rebuild-graph`). With `"if_stale": true` (a request field
   that defaults to `false` and is sent only when set, so an older daemon
