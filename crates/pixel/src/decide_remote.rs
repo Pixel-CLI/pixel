@@ -202,7 +202,7 @@ pub fn resolve_config(
 /// a preset that needs a key but has none (the provider would answer an
 /// opaque 401), and a key bound for a non-loopback `http://` base (it would
 /// cross the network in clear text).
-fn resolve_config_from(
+pub(crate) fn resolve_config_from(
     preset: Preset,
     model_override: Option<String>,
     key_value: Option<String>,

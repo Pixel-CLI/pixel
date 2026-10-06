@@ -64,7 +64,9 @@ Other modes:
 - `pixel classify --debug` — asks every configured engine (local Ollaya,
   the remote chat preset, and Jev) the same labeled question in parallel
   and prints each answer or per-engine error; the comparison view for
-  checking whether the engines agree before you trust one.
+  checking whether the engines agree before you trust one. `--remote-model`
+  and `PIXEL_REMOTE_*` reach only the selected preset's lane: beside
+  another preset, the Jev lane uses Jev's own key, base and model.
 - `pixel classify --jsonl` — serve mode: one JSON spec per stdin line, one
   result per line. Use for batches instead of a shell loop.
 

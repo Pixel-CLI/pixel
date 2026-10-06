@@ -393,22 +393,36 @@ export default function (pi: any) {
     label: "Pick the file to open first",
     description:
       "After ask_pixel_files, choose which of a list of files to open first for a goal. One choice keyed by path, so the pick is always a real file. " +
-      "Returns { path | null, confidence, probabilities }. Pass a short note per path if you have one, for example the answers you already got.",
+      "Returns { path | null, confidence, probabilities (keyed by path), none (probability that no file fits) }. Pass a short note per path if you have one, for example the answers you already got.",
     parameters: Type.Object({
       question: Type.String({ description: "The goal, for example: Which file should I open first to fix the proration bug?" }),
       candidates: Type.Array(Type.Object({ path: Type.String(), note: Type.Optional(Type.String()) }), { description: "Paths, with an optional one line note each" }),
     }),
     async execute(_id: string, p: any, _signal: AbortSignal) {
       try {
-        if (!p.candidates.length) return ok({ path: null, confidence: 0, probabilities: {} });
+        if (!p.candidates.length) return ok({ path: null, confidence: 0, probabilities: {}, none: 1 });
         const shown = p.candidates.slice(0, MAX_FILES - 1);
-        const criteria: Record<string, string | null> = {};
-        for (const c of shown) criteria[c.path] = c.note ?? null;
+        // Generated labels, not paths: a path named `none` would overwrite
+        // the abstain label, `__proto__` is no plain-object key, and a `=`
+        // would split the `--criterion label=…` pair. Each label maps back
+        // to its path, and the criterion carries the path to the model.
+        const pathOf = new Map<string, string>();
+        const criteria: Record<string, string | null> = Object.create(null);
+        shown.forEach((c: any, i: number) => {
+          const label = `file_${i + 1}`;
+          pathOf.set(label, c.path);
+          criteria[label] = c.note ? `${c.path}: ${c.note}` : c.path;
+        });
         criteria.none = "No file in the list fits";
-        const stateText = p.question + "\n\nfiles:\n" + shown.map((c: any) => c.path).join("\n");
+        const stateText = p.question + "\n\nfiles:\n" + shown.map((c: any, i: number) => `file_${i + 1}: ${c.path}`).join("\n");
         const r = await pixelClassify(stateText, p.question, criteria);
-        const path = r.predicted === "none" || r.confidence < 0.3 ? null : r.predicted;
-        return ok({ path, confidence: r.confidence, probabilities: r.probs });
+        const picked = pathOf.get(r.predicted);
+        const path = picked === undefined || r.confidence < 0.3 ? null : picked;
+        // Keyed by path; the abstain probability gets its own field so a
+        // candidate named `none` cannot collide with it.
+        const probabilities: Record<string, number> = Object.create(null);
+        for (const [label, candidate] of pathOf) probabilities[candidate] = r.probs[label] ?? 0;
+        return ok({ path, confidence: r.confidence, probabilities, none: r.probs.none ?? 0 });
       } catch (err) { return fail(err); }
     },
   });

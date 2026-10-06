@@ -374,7 +374,10 @@ fn propose_classify_helpers_at(
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
-        let _ = pixel_install::config::backup_if_changing(path, content.as_bytes());
+        // A failed backup stops the overwrite: an edited helper is never
+        // replaced without its copy.
+        pixel_install::config::backup_if_changing(path, content.as_bytes())
+            .map_err(|e| format!("back up {}: {e}", path.display()))?;
         fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     writeln!(
@@ -1611,6 +1614,33 @@ mod tests {
             "my edited copy"
         );
         assert_eq!(fs::read_to_string(&skill).unwrap(), CLASSIFY_SKILL);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_helpers_should_stop_before_writing_when_the_backup_fails() {
+        // A self-referencing symlink fails every read with ELOOP, root or
+        // not, so the backup step is the first to fail and must say so.
+        let home = std::env::temp_dir().join(format!(
+            "pixel-classify-helpers-backup-fails-{}",
+            std::process::id()
+        ));
+        let skill = home.join(".claude/skills/pixel-classify/SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&skill, &skill).unwrap();
+
+        let err = propose_classify_helpers_at(
+            &home,
+            &mut std::io::Cursor::new(b"\n".to_vec()),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.starts_with(&format!("back up {}: ", skill.display())),
+            "{err}"
+        );
         std::fs::remove_dir_all(home).unwrap();
     }
 
