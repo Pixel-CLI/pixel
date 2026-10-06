@@ -42,8 +42,7 @@ fn audit_prompt_exists_and_is_committed() {
 
 #[test]
 fn audit_prompt_covers_all_seven_languages() {
-    let content = std::fs::read_to_string(prompt_path())
-        .expect("audit prompt must be readable");
+    let content = std::fs::read_to_string(prompt_path()).expect("audit prompt must be readable");
     for language in [
         "Rust",
         "TypeScript / Bun",
@@ -62,8 +61,7 @@ fn audit_prompt_covers_all_seven_languages() {
 
 #[test]
 fn audit_prompt_covers_all_five_criteria() {
-    let content = std::fs::read_to_string(prompt_path())
-        .expect("audit prompt must be readable");
+    let content = std::fs::read_to_string(prompt_path()).expect("audit prompt must be readable");
     for criterion in [
         "Correctness",
         "Runtime performance",
@@ -80,8 +78,7 @@ fn audit_prompt_covers_all_five_criteria() {
 
 #[test]
 fn audit_prompt_defines_audit_procedure() {
-    let content = std::fs::read_to_string(prompt_path())
-        .expect("audit prompt must be readable");
+    let content = std::fs::read_to_string(prompt_path()).expect("audit prompt must be readable");
     assert!(
         content.contains("Audit procedure"),
         "audit prompt must define the audit procedure"
@@ -98,8 +95,7 @@ fn audit_prompt_defines_audit_procedure() {
 
 #[test]
 fn audit_prompt_is_reusable() {
-    let content = std::fs::read_to_string(prompt_path())
-        .expect("audit prompt must be readable");
+    let content = std::fs::read_to_string(prompt_path()).expect("audit prompt must be readable");
     assert!(
         content.contains("Reusability"),
         "audit prompt must define how to re-run the audit"
