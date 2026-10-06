@@ -1123,7 +1123,9 @@ mod tests {
                 .unwrap();
             drop(clean);
 
-            // Rows a hostile checkout would want a later query to return.
+            // Rows a hostile checkout would want a later query to return,
+            // one of them in Pixel's own `commits` table, which the store
+            // reads back without knowing who wrote it.
             let planted = Connection::open(&planted_path).unwrap();
             if let Some(by) = marker {
                 planted
@@ -1138,19 +1140,11 @@ mod tests {
                     "CREATE TABLE planted_commits (oid TEXT PRIMARY KEY, subject TEXT);
                      INSERT INTO planted_commits (oid, subject) VALUES ('deadbeef', 'planted by a hostile repo');
                      CREATE TABLE planted_only (secret TEXT);
-                     INSERT INTO planted_only (secret) VALUES ('attacker payload');",
+                     INSERT INTO planted_only (secret) VALUES ('attacker payload');
+                     INSERT INTO commits (oid, message) VALUES ('deadbeef', 'planted by a hostile repo');",
                 )
                 .unwrap();
             drop(planted);
-            // `Connection::open` leaves the file at the process umask, which
-            // is not what the store's own open finds in a 0700 `.pixel/`. A
-            // real planted db is written the same way.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&planted_path, std::fs::Permissions::from_mode(0o600))
-                    .unwrap();
-            }
 
             assert!(
                 FactsStore::needs_rebuild(&planted_path).unwrap(),
@@ -1197,7 +1191,7 @@ mod tests {
             assert_eq!(
                 store.index_state().total_commits,
                 0,
-                "{case}: a wiped db must report no inherited commits"
+                "{case}: the planted `commits` row survived the wipe"
             );
         }
     }

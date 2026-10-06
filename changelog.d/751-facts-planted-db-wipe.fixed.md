@@ -1,1 +1,0 @@
-**facts:** a test plants a foreign history database at the history path — once with no `_pixel_marker`, once with another writer's `created_by` — and asserts both are wiped on open: the planted tables are gone by name and the marker reads `pixel-facts` afterwards.
