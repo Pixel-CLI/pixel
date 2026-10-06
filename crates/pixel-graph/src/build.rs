@@ -361,13 +361,23 @@ pub fn indexability(root: &Path, rel: &str) -> Indexability {
     Indexability::Indexable
 }
 
-/// True iff the graph walks read `rel`: a file of a supported language, or
-/// a binstub whose shebang [`lang_of_file`] reads. The build, the freshness
-/// walks and [`indexability`] all filter through it, so they see one file
-/// set; a binstub that is not Ruby is walked and hashed, then extraction
-/// drops it, as it drops a generated blob.
+/// True iff the graph walks read `rel`: a file of a supported language, a
+/// binstub whose shebang [`lang_of_file`] reads, or a `Gemfile.lock`. The
+/// build, the freshness walks and [`indexability`] all filter through it, so
+/// they see one file set; a binstub that is not Ruby is walked and hashed,
+/// then extraction drops it, as it drops a generated blob. A lockfile is
+/// never extracted either, but it decides which `require`s name an external
+/// gem, so it is hashed into the freshness signature: a lockfile edited
+/// while no watcher ran makes the graph stale, and the delta that applies it
+/// re-resolves every Ruby import.
 fn is_graph_candidate(rel: &str) -> bool {
-    lang_of(rel).is_some() || is_binstub_candidate(rel)
+    lang_of(rel).is_some() || is_binstub_candidate(rel) || is_lockfile(rel)
+}
+
+/// `Gemfile.lock`, at the root or in any directory: the companion
+/// `ruby_projects::Projects` reads beside a Gemfile.
+fn is_lockfile(rel: &str) -> bool {
+    rel == "Gemfile.lock" || rel.ends_with("/Gemfile.lock")
 }
 
 /// Walk `root` collecting supported source files (skips .git, .pixel,

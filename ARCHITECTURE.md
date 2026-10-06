@@ -397,8 +397,10 @@ envelope talks to the daemon socket directly.
   a sibling project. `require_relative` is relative to the requiring file.
   The manifests are read as literals from disk at each build and update; an
   update touching a Ruby file or manifest re-resolves every Ruby import. A
-  `Gemfile.lock` is not a graph file, so an edit to it alone takes effect
-  at the next update that touches a Ruby file.
+  `Gemfile.lock` is never stored as a graph file, but the graph walks hash
+  it into the freshness signature (`is_graph_candidate`), so an edit to it
+  alone makes the graph stale and the delta that applies it re-resolves
+  every Ruby import.
 - Rails routes (`config/routes.rb` and drawn `config/routes/*.rb`) are read
   statically by `pixel-graph/src/extract/ruby_routes.rs`: verbs, `root`,
   `resources`/`resource` (`only`/`except`/`controller`/`path`/`param`),
