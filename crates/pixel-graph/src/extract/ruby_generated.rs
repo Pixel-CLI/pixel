@@ -274,40 +274,40 @@ fn push(w: &mut Walker, node: Node, generated: Generated) -> bool {
     any
 }
 
-/// Drop the generated symbols another definition of the same method in the
-/// file overrides: a `def` of that name wins whatever the order, being the
-/// body a reader navigates to, and of two generated ones the later wins, as
-/// the later definition is the one Ruby keeps. The store keys a symbol by
-/// its file, qualified name and kind, so two such rows would replace each
-/// other there and leave the references of the first pointing at nothing.
+/// Drop the definitions a later one of the same method overrides, wherever
+/// a generated method is involved: Ruby keeps the last definition in source
+/// order, whether it is a `def` or a declaration (`def name` then
+/// `attr_reader :name` leaves the reader; the reverse leaves the `def`).
+/// The store keys a symbol by its file, qualified name and kind, so two such
+/// rows would replace each other there and leave the references of the first
+/// pointing at nothing. The calls of an overridden `def` body then belong to
+/// its owner. Methods no declaration generated keep the store's behaviour.
+/// <https://docs.ruby-lang.org/en/master/Module.html#method-i-attr_reader>
 pub(super) fn drop_overridden(w: &mut Walker) {
     if w.generated.is_empty() {
         return;
     }
     let generated: std::collections::HashSet<usize> = w.generated.iter().copied().collect();
-    // One pass over the symbols: per qualified name and kind, whether a
-    // `def` defines it, and the last generated symbol that does.
+    // One pass over the symbols (walk order is source order): per
+    // qualified name and kind, whether a generated method is among them, and
+    // the last definition.
     let mut owners: std::collections::HashMap<(&str, &str), (bool, usize)> =
         std::collections::HashMap::new();
     for (i, symbol) in w.symbols.iter().enumerate() {
         let entry = owners
             .entry((symbol.qualified.as_str(), symbol.kind.as_str()))
             .or_insert((false, i));
-        if generated.contains(&i) {
-            entry.1 = i;
-        } else {
-            entry.0 = true;
-        }
+        entry.0 |= generated.contains(&i);
+        entry.1 = i;
     }
     let drop: Vec<bool> = w
         .symbols
         .iter()
         .enumerate()
         .map(|(i, symbol)| {
-            generated.contains(&i)
-                && owners
-                    .get(&(symbol.qualified.as_str(), symbol.kind.as_str()))
-                    .is_some_and(|&(defined, last)| defined || last != i)
+            owners
+                .get(&(symbol.qualified.as_str(), symbol.kind.as_str()))
+                .is_some_and(|&(involves_generated, last)| involves_generated && last != i)
         })
         .collect();
     // An overridden declaration forwards nothing: its references go with it.
