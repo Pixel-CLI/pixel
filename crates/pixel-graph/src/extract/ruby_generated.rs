@@ -212,12 +212,13 @@ fn positional(args: Node) -> Vec<Node> {
         .collect()
 }
 
-/// The text of a literal method name: `:name`, `"name"` or `'name'`, without
-/// interpolation. `None` for anything else (a variable, a splat, `:"a#{b}"`).
+/// The text of a literal method name: `:name`, `:"name"`, `"name"` or
+/// `'name'`, without interpolation. `None` for anything else (a variable, a
+/// splat, `:"a#{b}"`).
 fn literal_name(w: &Walker, node: Node) -> Option<String> {
     let name = match node.kind() {
         "simple_symbol" => w.text(node).get(1..)?.to_string(),
-        "string" => {
+        "string" | "delimited_symbol" => {
             let mut text = String::new();
             for part in each_child(node) {
                 match part.kind() {
@@ -237,7 +238,7 @@ fn literal_name(w: &Walker, node: Node) -> Option<String> {
 /// an operator, a setter or a symbol; `None` for a global variable.
 fn method_name(w: &Walker, node: Node) -> Option<String> {
     match node.kind() {
-        "simple_symbol" | "string" => literal_name(w, node),
+        "simple_symbol" | "string" | "delimited_symbol" => literal_name(w, node),
         "global_variable" => None,
         _ => Some(w.text(node)),
     }
@@ -284,24 +285,41 @@ pub(super) fn drop_overridden(w: &mut Walker) {
         return;
     }
     let generated: std::collections::HashSet<usize> = w.generated.iter().copied().collect();
-    let key = |s: &super::RawSymbol| (s.qualified.clone(), s.kind);
-    let mut drop = vec![false; w.symbols.len()];
+    // One pass over the symbols: per qualified name and kind, whether a
+    // `def` defines it, and the last generated symbol that does.
+    let mut owners: std::collections::HashMap<(&str, &str), (bool, usize)> =
+        std::collections::HashMap::new();
     for (i, symbol) in w.symbols.iter().enumerate() {
-        if !generated.contains(&i) {
-            continue;
+        let entry = owners
+            .entry((symbol.qualified.as_str(), symbol.kind.as_str()))
+            .or_insert((false, i));
+        if generated.contains(&i) {
+            entry.1 = i;
+        } else {
+            entry.0 = true;
         }
-        drop[i] = w.symbols.iter().enumerate().any(|(j, other)| {
-            j != i && key(other) == key(symbol) && (!generated.contains(&j) || j > i)
-        });
     }
-    // Reindex the references placed on a generated symbol; one whose symbol
-    // was dropped falls back to the smallest enclosing symbol.
+    let drop: Vec<bool> = w
+        .symbols
+        .iter()
+        .enumerate()
+        .map(|(i, symbol)| {
+            generated.contains(&i)
+                && owners
+                    .get(&(symbol.qualified.as_str(), symbol.kind.as_str()))
+                    .is_some_and(|&(defined, last)| defined || last != i)
+        })
+        .collect();
+    // An overridden declaration forwards nothing: its references go with it.
+    // The others are reindexed onto the symbols that remain.
     let mut new_index = Vec::with_capacity(drop.len());
     let mut next = 0;
     for dropped in &drop {
         new_index.push((!dropped).then_some(next));
         next += usize::from(!dropped);
     }
+    w.references
+        .retain(|reference| reference.enclosing_index.is_none_or(|i| !drop[i]));
     for reference in &mut w.references {
         reference.enclosing_index = reference.enclosing_index.and_then(|i| new_index[i]);
     }

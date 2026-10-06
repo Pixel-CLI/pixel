@@ -282,3 +282,54 @@ fn ruby_generated_methods_should_be_navigable_after_full_and_incremental_builds(
     update_file(root.path(), &db, "app/models/other.rb").unwrap();
     assert_navigation(root.path());
 }
+
+#[test]
+fn ruby_quoted_symbols_should_name_methods_and_overridden_declarations_forward_nothing() {
+    let source = "class Card
+  attr_reader :\"display_name\"
+  alias :\"label\" :\"display_name\"
+  alias_method :title, :display_name
+  alias_method :title, :label
+  alias_method :heading, :display_name
+  def heading
+  end
+end
+";
+    let fx = extract_file("app/models/card.rb", source.as_bytes()).unwrap();
+    let mut qualified: Vec<&str> = fx
+        .symbols
+        .iter()
+        .filter(|s| s.kind == pixel_graph::SymbolKind::Method)
+        .map(|s| s.qualified.as_str())
+        .collect();
+    qualified.sort_unstable();
+    assert_eq!(
+        qualified,
+        [
+            "Card#display_name",
+            "Card#heading",
+            "Card#label",
+            "Card#title"
+        ]
+    );
+    // The later `alias_method :title` and the `def heading` win: the first
+    // `title` alias and the `heading` alias leave no reference behind.
+    let mut forwards: Vec<(String, Option<String>)> = fx
+        .references
+        .iter()
+        .map(|r| {
+            (
+                r.name.clone(),
+                r.enclosing_index.map(|i| fx.symbols[i].qualified.clone()),
+            )
+        })
+        .collect();
+    forwards.sort();
+    assert_eq!(
+        forwards,
+        [
+            ("display_name".to_string(), Some("Card#label".to_string())),
+            ("label".to_string(), Some("Card#title".to_string())),
+        ]
+    );
+}
