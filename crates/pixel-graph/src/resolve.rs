@@ -1057,45 +1057,214 @@ pub fn resolve_references(
     Ok(stats)
 }
 
-/// Re-attempt resolution of every stored `unresolved_calls` row against the
-/// current index. Rows that resolve become edges and are deleted; the rest
-/// stay (keeping the epistemic envelope honest). Used after incremental
-/// updates so callers into a rebuilt file re-link. The stored `receiver` is
-/// replayed so the receiver downgrade stays consistent across re-resolutions.
-pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
-    struct Row {
-        id: i64,
-        file_id: i64,
-        name: String,
-        enclosing: i64,
-        site_line: u32,
-        receiver: Option<String>,
-        kind: String,
+/// What an incremental batch changed that a stored decision can read, so
+/// that [`resolve_affected`] and [`reconsider_resolved_calls`] re-decide only
+/// the rows and edges whose answer can differ. A decision on a row (file,
+/// name, receiver, caller) reads:
+///
+/// - the candidates of its name (`by_name`, their qualified names, kinds and
+///   files) — `names` holds every symbol name a batch file defined before
+///   **or** after the change: a definition that disappears can make an
+///   ambiguous name unique, one that appears can make a unique one ambiguous;
+/// - its own file's imports, scopes and caller symbols, and an aliased
+///   import's source name, which differs from the name the call wrote —
+///   `files` holds the batch's files and the files importing one of them;
+/// - for a Ruby constant receiver, the class/module constants its segments
+///   name, and the owner's methods the Ruby rules read (`Foo.new` reads
+///   `Foo.new` and `Foo#initialize`, `perform_later` reads `#perform`) —
+///   `constants` holds the last segment of the batch's classes and modules.
+///   A method's owner is the class or module whose body declares it in the
+///   same file, and the receiver that resolves to that owner ends with that
+///   segment, so a changed `#initialize` or `#perform` retries the receiver
+///   rows through its class. A `def Foo.bar` outside `Foo`'s body has no
+///   owner in its qualified name, so `ruby::Index` never reads it.
+///
+/// `replayed` holds the names of the rows the update itself moved back to
+/// `unresolved_calls` (a demoted incoming edge, a reconsidered one): under
+/// an alias the name the call wrote is not the target's.
+///
+/// Over-inclusion only costs time (an unchanged input gives the same
+/// decision); omission leaves a stale row, which
+/// `an_incremental_update_should_store_what_a_full_build_stores` rules out.
+#[derive(Debug, Default)]
+pub struct Affected {
+    pub names: HashSet<String>,
+    pub files: HashSet<i64>,
+    pub constants: HashSet<String>,
+    pub replayed: HashSet<String>,
+}
+
+impl Affected {
+    /// Record the definitions a batch changed. `before` and `after` list the
+    /// batch files' definitions as a decision reads them — path, name,
+    /// qualified name, kind, trait impl — and only those present a different
+    /// number of times on each side count: a file rewritten with the same
+    /// definitions changes no candidate set, so no decision outside it. Its
+    /// new symbol ids and lines are the demotion's concern (`write_rows`
+    /// moves every incoming edge back and records it in `replayed`).
+    pub fn record_changed_definitions(&mut self, before: &[Definition], after: &[Definition]) {
+        let mut count: HashMap<&Definition, i64> = HashMap::new();
+        for definition in before {
+            *count.entry(definition).or_default() -= 1;
+        }
+        for definition in after {
+            *count.entry(definition).or_default() += 1;
+        }
+        for (definition, n) in count {
+            if n != 0 {
+                self.record_definition(definition);
+            }
+        }
     }
 
-    let idx = ResolveIndex::build(store)?;
-    let rows: Vec<Row> = {
-        let mut stmt = store.conn().prepare(
-            "SELECT u.id, u.file_id, u.name, u.enclosing_symbol_id, u.site_line, u.receiver, u.kind
-               FROM unresolved_calls u
-               JOIN symbols s ON s.id = u.enclosing_symbol_id
-              WHERE u.enclosing_symbol_id IS NOT NULL",
-        )?;
-        let mapped = stmt.query_map([], |r| {
-            Ok(Row {
-                id: r.get(0)?,
-                file_id: r.get(1)?,
-                name: r.get(2)?,
-                enclosing: r.get(3)?,
-                site_line: r.get(4)?,
-                receiver: r.get(5)?,
-                kind: r
-                    .get::<_, Option<String>>(6)?
-                    .unwrap_or_else(|| "calls".to_string()),
-            })
-        })?;
-        mapped.collect::<Result<_, _>>()?
+    /// A changed definition: its name, and the constant a Ruby receiver
+    /// reaches it through. A class or module counts by its last segment
+    /// (`class A::C::B` is named as written, while the receiver it shadows,
+    /// `B.run` inside `A::C`, only spells `B`); a method by its owner's
+    /// (`Widget#initialize` is what `Widget.new` reads).
+    fn record_definition(&mut self, definition: &Definition) {
+        let Definition {
+            name,
+            qualified,
+            kind,
+            ..
+        } = definition;
+        self.names.insert(name.clone());
+        let constant = if matches!(kind.as_str(), "class" | "module") {
+            Some(name.as_str())
+        } else {
+            ruby_owner(qualified).map(|(owner, _)| owner)
+        };
+        if let Some(constant) = constant {
+            let segment = constant.rsplit("::").next().unwrap_or(constant);
+            self.constants.insert(segment.to_string());
+        }
+    }
+
+    /// The call names whose decision can read a changed name: the batch's
+    /// definitions and the rows the update moved back.
+    fn call_names(&self) -> HashSet<&str> {
+        self.names
+            .iter()
+            .chain(&self.replayed)
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// True iff a call on `receiver` can resolve differently: one of its
+    /// constant segments is a changed class or module (`Gamma::Delta`,
+    /// `Widget.new`), compared whole, never as a prefix.
+    fn reads_receiver(&self, receiver: &str) -> bool {
+        receiver
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|segment| self.constants.contains(segment))
+    }
+}
+
+/// One definition as [`Affected::record_changed_definitions`] compares it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Definition {
+    pub path: String,
+    pub name: String,
+    pub qualified: String,
+    pub kind: String,
+    pub trait_impl: bool,
+}
+
+struct RetryRow {
+    id: i64,
+    file_id: i64,
+    name: String,
+    enclosing: i64,
+    site_line: u32,
+    receiver: Option<String>,
+    kind: String,
+}
+
+const RETRY_COLUMNS: &str =
+    "SELECT u.id, u.file_id, u.name, u.enclosing_symbol_id, u.site_line, u.receiver, u.kind
+       FROM unresolved_calls u
+       JOIN symbols s ON s.id = u.enclosing_symbol_id
+      WHERE u.enclosing_symbol_id IS NOT NULL";
+
+fn retry_rows(
+    store: &GraphStore,
+    filter: &str,
+    param: Option<&dyn rusqlite::ToSql>,
+) -> Result<Vec<RetryRow>, StoreError> {
+    let mut stmt = store
+        .conn()
+        .prepare_cached(&format!("{RETRY_COLUMNS}{filter}"))?;
+    let map = |r: &rusqlite::Row<'_>| {
+        Ok(RetryRow {
+            id: r.get(0)?,
+            file_id: r.get(1)?,
+            name: r.get(2)?,
+            enclosing: r.get(3)?,
+            site_line: r.get(4)?,
+            receiver: r.get(5)?,
+            kind: r
+                .get::<_, Option<String>>(6)?
+                .unwrap_or_else(|| "calls".to_string()),
+        })
     };
+    let rows = match param {
+        Some(p) => stmt.query_map([p], map)?.collect::<Result<_, _>>()?,
+        None => stmt.query_map([], map)?.collect::<Result<_, _>>()?,
+    };
+    Ok(rows)
+}
+
+/// Re-attempt resolution of every stored `unresolved_calls` row against the
+/// current index. Rows that resolve become edges and are deleted; the rest
+/// stay (keeping the epistemic envelope honest). The stored `receiver` is
+/// replayed so the receiver downgrade stays consistent across
+/// re-resolutions. An incremental update calls [`resolve_affected`], which
+/// retries only the rows its batch can have changed; this full retry is
+/// the reference that one is held equal to.
+pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
+    let rows = retry_rows(store, "", None)?;
+    retry(store, rows)
+}
+
+/// [`resolve_all`] restricted to the rows whose decision reads something
+/// `affected` changed (see [`Affected`]): rows named by a changed name, rows
+/// of an affected file, and receiver rows naming a changed constant. Each
+/// selection goes through an index except the receiver scan, which runs only
+/// when the batch changed a class or a module.
+pub fn resolve_affected(
+    store: &mut GraphStore,
+    affected: &Affected,
+) -> Result<ResolveStats, StoreError> {
+    let mut rows: HashMap<i64, RetryRow> = HashMap::new();
+    for name in affected.call_names() {
+        for row in retry_rows(store, " AND u.name = ?1", Some(&name))? {
+            rows.insert(row.id, row);
+        }
+    }
+    for file in &affected.files {
+        for row in retry_rows(store, " AND u.file_id = ?1", Some(file))? {
+            rows.insert(row.id, row);
+        }
+    }
+    if !affected.constants.is_empty() {
+        for row in retry_rows(store, " AND u.receiver IS NOT NULL", None)? {
+            if row
+                .receiver
+                .as_deref()
+                .is_some_and(|r| affected.reads_receiver(r))
+            {
+                rows.insert(row.id, row);
+            }
+        }
+    }
+    let mut rows: Vec<RetryRow> = rows.into_values().collect();
+    rows.sort_by_key(|row| row.id);
+    retry(store, rows)
+}
+
+fn retry(store: &mut GraphStore, rows: Vec<RetryRow>) -> Result<ResolveStats, StoreError> {
+    let idx = ResolveIndex::build(store)?;
     let mut stats = ResolveStats::default();
     for row in &rows {
         let decision = if row.kind == "references" {
@@ -1156,16 +1325,18 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
     Ok(stats)
 }
 
-/// Reconsider resolved calls whose target names were defined by a changed
-/// file. Adding a same-name definition can make a previously unique target
-/// ambiguous. Ruby receiver calls are also replayed because changing a
-/// constant or factory can shadow their owner without redefining the callee.
-/// Both `Calls` and `References` edges are reconsidered — a reference to a
-/// previously-unique `handler` is just as stale when a second definition
-/// appears.
+/// Reconsider resolved calls whose target names a changed definition
+/// carries ([`Affected::record_changed_definitions`]). Adding a same-name definition can make a previously unique target
+/// ambiguous. A Ruby receiver call is also replayed when it reads what the
+/// batch changed ([`Affected`]): a new constant can shadow its owner, and a
+/// new `Foo.new` can take its dispatch, without redefining the callee's
+/// name. Both `Calls` and `References` edges are reconsidered — a
+/// reference to a previously-unique `handler` is just as stale when a second
+/// definition appears. The names of the rows it moves back are recorded in
+/// `affected.replayed` for [`resolve_affected`].
 pub fn reconsider_resolved_calls(
     store: &mut GraphStore,
-    changed_names: &HashSet<String>,
+    affected: &mut Affected,
 ) -> Result<(), StoreError> {
     struct ResolvedCall {
         file_id: i64,
@@ -1176,22 +1347,45 @@ pub fn reconsider_resolved_calls(
         kind: String,
     }
     let mut calls = Vec::new();
-    // A newly shadowing constant or factory override can invalidate a Ruby
-    // call without changing its target's method name. Replay these edges even
-    // when a file removal leaves changed_names empty.
-    store.conn().execute_batch(
-        "INSERT INTO unresolved_calls
-            (file_id, name, enclosing_symbol_id, site_line, receiver, kind)
-         SELECT src.file_id, COALESCE(e.callee, dst.name), e.src_id,
-                e.site_line, e.receiver, e.kind
-           FROM edges e JOIN symbols src ON src.id=e.src_id
-           JOIN symbols dst ON dst.id=e.dst_id JOIN files f ON f.id=src.file_id
-          WHERE f.lang='ruby' AND e.kind='calls' AND e.receiver IS NOT NULL;
-         DELETE FROM edges WHERE kind='calls' AND receiver IS NOT NULL
-          AND src_id IN (SELECT s.id FROM symbols s JOIN files f ON f.id=s.file_id
-                          WHERE f.lang='ruby');",
-    )?;
-    for name in changed_names {
+    let mut replay: Vec<i64> = Vec::new();
+    // An edge whose target's name changed is the loop below's; a Ruby
+    // receiver edge also reads its owner's constant, which no name carries.
+    if !affected.constants.is_empty() {
+        let mut stmt = store.conn().prepare(
+            "SELECT e.id, src.file_id, COALESCE(e.callee, dst.name), e.src_id,
+                    e.site_line, e.receiver, e.kind
+               FROM edges e JOIN symbols src ON src.id=e.src_id
+               JOIN symbols dst ON dst.id=e.dst_id JOIN files f ON f.id=src.file_id
+              WHERE f.lang='ruby' AND e.kind='calls' AND e.receiver IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                ResolvedCall {
+                    file_id: row.get(1)?,
+                    name: row.get(2)?,
+                    enclosing: row.get(3)?,
+                    site_line: row.get(4)?,
+                    receiver: row.get(5)?,
+                    kind: row.get(6)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (id, call) = row?;
+            let receiver = call.receiver.as_deref().unwrap_or_default();
+            if affected.reads_receiver(receiver) {
+                replay.push(id);
+                calls.push(call);
+            }
+        }
+    }
+    for id in replay {
+        store
+            .conn()
+            .exec_cached("DELETE FROM edges WHERE id = ?1", params![id])?;
+    }
+    for name in &affected.names {
         let found: Vec<ResolvedCall> = {
             let mut stmt = store.conn().prepare(
                 "SELECT src.file_id, COALESCE(e.callee, dst.name), e.src_id, e.site_line, e.receiver, e.kind
@@ -1221,6 +1415,7 @@ pub fn reconsider_resolved_calls(
         )?;
     }
     for call in calls {
+        affected.replayed.insert(call.name.clone());
         store.insert_unresolved_call(
             call.file_id,
             &call.name,
@@ -2350,5 +2545,177 @@ mod tests {
         assert_eq!(scope_width(&scope, Some(1)), 0);
         assert_eq!(scope_width(&[], Some(5)), u32::MAX);
         assert_eq!(scope_width(&scope, None), u32::MAX);
+    }
+
+    /// `resolve_affected` retries the rows whose decision reads what the
+    /// batch changed, and only those: that is what keeps an incremental
+    /// update's cost with its batch instead of the whole table (Task 833).
+    /// No row here can resolve, so `unresolved` counts the rows retried.
+    #[test]
+    fn resolve_affected_should_retry_only_the_rows_reading_a_changed_input() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let file = store.replace_file("app/caller.rb", "oid", "ruby").unwrap();
+        let other = store.replace_file("app/other.rb", "oid2", "ruby").unwrap();
+        let caller = store
+            .insert_symbol(file, "go", "go", "Caller#go", SymbolKind::Method, 1, 9, "")
+            .unwrap();
+        let elsewhere = store
+            .insert_symbol(
+                other,
+                "run",
+                "run",
+                "Other#run",
+                SymbolKind::Method,
+                1,
+                3,
+                "",
+            )
+            .unwrap();
+        for (name, receiver) in [
+            ("alpha", None),
+            ("beta", Some("Gamma::Delta")),
+            ("new", Some("Widget")),
+            ("step", Some("Widget.new")),
+            ("perform_later", Some("Job")),
+            ("perform_now", Some("Job.set")),
+        ] {
+            store
+                .insert_unresolved_call(file, name, Some(caller), 2, receiver, "calls")
+                .unwrap();
+        }
+        store
+            .insert_unresolved_call(other, "zeta", Some(elsewhere), 2, None, "calls")
+            .unwrap();
+        let retried = |store: &mut GraphStore, affected: Affected| {
+            resolve_affected(store, &affected).unwrap().unresolved
+        };
+        let names = |names: &[&str]| Affected {
+            names: names.iter().map(|n| (*n).to_string()).collect(),
+            ..Affected::default()
+        };
+        assert_eq!(retried(&mut store, Affected::default()), 0);
+        assert_eq!(
+            retried(&mut store, names(&["alpha"])),
+            1,
+            "the row's own name"
+        );
+        assert_eq!(
+            retried(&mut store, names(&["perform"])),
+            0,
+            "`Job.perform_later` reads `Job#perform` through its class, not the name"
+        );
+        let def = |path: &str, name: &str, qualified: &str, kind: &str| Definition {
+            path: path.into(),
+            name: name.into(),
+            qualified: qualified.into(),
+            kind: kind.into(),
+            trait_impl: false,
+        };
+        let mut job = Affected::default();
+        job.record_changed_definitions(
+            &[],
+            &[def("app/job.rb", "perform", "Job#perform", "method")],
+        );
+        assert_eq!(
+            retried(&mut store, job),
+            2,
+            "a new `Job#perform` retries both job dispatches through `Job`"
+        );
+        let mut nested = Affected::default();
+        nested
+            .record_changed_definitions(&[def("app/w.rb", "A::Widget", "A::Widget", "class")], &[]);
+        assert_eq!(
+            retried(&mut store, nested),
+            2,
+            "`class A::Widget` is reached through `Widget`: `Widget.new`, `Widget.new.step`"
+        );
+        for (constant, expected) in [("Delta", 1), ("Gamma", 1), ("Gam", 0), ("Widget", 2)] {
+            let affected = Affected {
+                constants: HashSet::from([constant.to_string()]),
+                ..Affected::default()
+            };
+            assert_eq!(
+                retried(&mut store, affected),
+                expected,
+                "constant {constant}"
+            );
+        }
+        let replayed = Affected {
+            replayed: HashSet::from(["zeta".to_string()]),
+            ..Affected::default()
+        };
+        assert_eq!(
+            retried(&mut store, replayed),
+            1,
+            "a row the update moved back"
+        );
+        let files = Affected {
+            files: HashSet::from([file]),
+            ..Affected::default()
+        };
+        assert_eq!(
+            retried(&mut store, files),
+            6,
+            "every row of an affected file"
+        );
+        assert_eq!(resolve_all(&mut store).unwrap().unresolved, 7);
+    }
+
+    /// Only a definition that changed can change a decision elsewhere: a
+    /// file rewritten with the same definitions must leave every other row
+    /// and edge alone, or each edit of a file defining `initialize` or
+    /// `call` re-decides every call to those names in the repository.
+    #[test]
+    fn affected_should_record_only_the_definitions_a_batch_changed() {
+        let def = |path: &str, name: &str, qualified: &str, kind: &str, trait_impl| Definition {
+            path: path.into(),
+            name: name.into(),
+            qualified: qualified.into(),
+            kind: kind.into(),
+            trait_impl,
+        };
+        let same = [
+            def("a.rb", "W", "W", "class", false),
+            def("a.rb", "initialize", "W#initialize", "method", false),
+        ];
+        let recorded = |before: &[Definition], after: &[Definition]| {
+            let mut affected = Affected::default();
+            affected.record_changed_definitions(before, after);
+            let mut names: Vec<String> = affected.names.into_iter().collect();
+            let mut constants: Vec<String> = affected.constants.into_iter().collect();
+            names.sort();
+            constants.sort();
+            (names, constants)
+        };
+        let none = (Vec::<String>::new(), Vec::<String>::new());
+        assert_eq!(recorded(&same, &same), none, "same definitions, new body");
+        let moved = [def("b.rb", "W", "W", "class", false), same[1].clone()];
+        assert_eq!(
+            recorded(&same, &moved),
+            (vec!["W".into()], vec!["W".into()]),
+            "a definition in another file is another candidate"
+        );
+        let twice = [same[0].clone(), same[1].clone(), same[1].clone()];
+        assert_eq!(
+            recorded(&same, &twice),
+            (vec!["initialize".into()], vec!["W".into()]),
+            "a second same-owner definition makes the name ambiguous; the method counts through its owner"
+        );
+        let rust = [def("x.rs", "fmt", "W::fmt", "method", false)];
+        let as_trait = [def("x.rs", "fmt", "W::fmt", "method", true)];
+        assert_eq!(
+            recorded(&rust, &as_trait),
+            (vec!["fmt".into()], Vec::new()),
+            "a trait impl is no inherent method; a Rust path has no Ruby owner"
+        );
+        assert_eq!(
+            recorded(&[def("m.rb", "B", "A::C::B", "class", false)], &[]),
+            (vec!["B".into()], vec!["B".into()]),
+        );
+        assert_eq!(
+            recorded(&[], &[def("m.rb", "A::C::B", "A::C::B", "module", false)]),
+            (vec!["A::C::B".into()], vec!["B".into()]),
+            "a constant counts by the segment a receiver spells"
+        );
     }
 }

@@ -20,8 +20,8 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::extract::{FileExtraction, extract_file, lang_of};
 use crate::imports::resolve_import;
 use crate::resolve::{
-    FileCalls, FileReferences, PendingCall, PendingReference, reconsider_resolved_calls,
-    resolve_all, resolve_calls, resolve_references,
+    Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference,
+    reconsider_resolved_calls, resolve_affected, resolve_calls, resolve_references,
 };
 use crate::store::{EdgeKind, ExecCached, GraphStore, StoreError, extract_crux};
 
@@ -1122,13 +1122,38 @@ fn update_files_in_one_transaction(
     })
 }
 
+/// A stored file's definitions, as `Affected::record_changed_definitions`
+/// compares them with the ones its new content extracts.
+fn stored_definitions(
+    store: &GraphStore,
+    file_id: i64,
+    path: &str,
+) -> Result<Vec<Definition>, StoreError> {
+    let mut stmt = store.conn().prepare_cached(
+        "SELECT name, qualified, kind, trait_impl FROM symbols WHERE file_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![file_id], |r| {
+        Ok(Definition {
+            path: path.to_string(),
+            name: r.get(0)?,
+            qualified: r.get(1)?,
+            kind: r.get(2)?,
+            trait_impl: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// The row half of an incremental update, inside the caller's transaction:
 /// files, symbols, concepts, imports, calls, references, and the re-resolution
 /// of everything a changed definition may have made ambiguous. Writes no
 /// signature: the caller decides which one (if any) describes the tree it
 /// just synchronised to.
 fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Result<(), BoxErr> {
-    let mut all_changed_names: HashSet<String> = HashSet::new();
+    // What the batch changed, before and after, for the re-resolution below.
+    let mut affected = Affected::default();
+    let mut before: Vec<Definition> = Vec::new();
+    let mut after: Vec<Definition> = Vec::new();
     let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
 
     let mut extracted: Vec<Extracted> = Vec::with_capacity(files.len());
@@ -1141,6 +1166,11 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         // re-resolution produces the correct edge type (Calls vs References).
         if let Some(old) = store.file_by_path(rel)? {
             let old_syms = store.symbols_in_file(old.id)?;
+            before.extend(stored_definitions(store, old.id, rel)?);
+            affected.files.insert(old.id);
+            for import in store.imports_to_file(old.id)? {
+                affected.files.insert(import.file_id);
+            }
             let mut demoted: Vec<(i64, String, i64, u32, Option<String>, String)> = Vec::new();
             for sym in &old_syms {
                 for kind in [EdgeKind::Calls, EdgeKind::References] {
@@ -1172,6 +1202,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
                 }
             }
             for (src_file, name, src_id, site_line, receiver, kind) in demoted {
+                affected.replayed.insert(name.clone());
                 store.insert_unresolved_call(
                     src_file,
                     &name,
@@ -1198,9 +1229,13 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             continue;
         };
 
-        for s in &fx.symbols {
-            all_changed_names.insert(s.name.clone());
-        }
+        after.extend(fx.symbols.iter().map(|s| Definition {
+            path: rel.to_string(),
+            name: s.name.clone(),
+            qualified: s.qualified.clone(),
+            kind: s.kind.as_str().to_string(),
+            trait_impl: s.trait_impl,
+        }));
         extracted.push(Extracted {
             rel: rel.to_string(),
             blob_oid: content_oid(&content),
@@ -1222,6 +1257,17 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     );
     let added_any = extracted.iter().any(|e| !known_before.contains(&e.rel));
     let stored = store_batch(store, extracted, &all_paths)?;
+    affected.record_changed_definitions(&before, &after);
+    // A file new to the graph gets its id here; its importers are any file
+    // whose import already resolved to it, and the dangling ones below.
+    for &(rel, _) in files {
+        if let Some(file) = store.file_by_path(rel)? {
+            affected.files.insert(file.id);
+            for import in store.imports_to_file(file.id)? {
+                affected.files.insert(import.file_id);
+            }
+        }
+    }
 
     // A file that appeared in this batch may be the target of imports that
     // UNCHANGED files could never resolve before (`import x from "./new"`
@@ -1230,19 +1276,20 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     if added_any {
         let path_to_id: HashMap<String, i64> =
             store.files()?.into_iter().map(|f| (f.path, f.id)).collect();
-        let dangling: Vec<(i64, String, String)> = {
+        let dangling: Vec<(i64, i64, String, String)> = {
             let mut stmt = store.conn().prepare(
-                "SELECT i.id, i.path, f.path FROM imports i
+                "SELECT i.id, i.file_id, i.path, f.path FROM imports i
                    JOIN files f ON f.id = i.file_id
                   WHERE i.resolved_file_id IS NULL",
             )?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
-        for (import_id, import_path, importer) in dangling {
+        for (import_id, importer_id, import_path, importer) in dangling {
             if let Some(target) = resolve_import(&import_path, &importer, &all_paths)
                 .and_then(|p| path_to_id.get(&p).copied())
             {
+                affected.files.insert(importer_id);
                 store.conn().exec_cached(
                     "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
                     rusqlite::params![import_id, target],
@@ -1259,9 +1306,9 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     }
 
     // Any changed definition can invalidate a previously unique target.
-    reconsider_resolved_calls(store, &all_changed_names)?;
-    // Retry everything unresolved against the complete new candidate set.
-    resolve_all(store)?;
+    reconsider_resolved_calls(store, &mut affected)?;
+    // Retry what the batch can have changed against the new candidate set.
+    resolve_affected(store, &affected)?;
 
     // Persisted analyses (`processes`, `clusters`) are keyed by symbol id,
     // and `replace_file` hands re-extracted symbols NEW ids: the cached
@@ -3683,5 +3730,151 @@ mod tests {
         for dir in [reference, batch, single, edited] {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    /// A tree whose unresolved rows each depend on something other than
+    /// their own name or file: the input the incremental retry has to find
+    /// without rereading every row (`Affected`).
+    const RETRY_TREE: &[(&str, &str)] = &[
+        ("app/mail_job.rb", "class MailJob\n  def run; end\nend\n"),
+        (
+            "app/widget.rb",
+            "class Widget\n  def self.build; end\nend\n",
+        ),
+        (
+            "app/caller.rb",
+            "class Caller\n  def go\n    MailJob.perform_later(1)\n    Widget.new(1)\n    \
+             Widget.build\n    shared\n  end\nend\n",
+        ),
+        ("app/alpha.rb", "class Alpha\n  def shared; end\nend\n"),
+        ("app/beta.rb", "class Beta\n  def shared; end\nend\n"),
+        ("src/lib.rs", "pub mod x;\npub mod y;\npub mod z;\n"),
+        ("src/x.rs", "pub fn helper() {}\n"),
+        ("src/y.rs", "pub fn helper() {}\n"),
+        ("src/z.rs", "pub fn caller() { helper(); }\n"),
+        (
+            "web/a.ts",
+            "import { tool as t } from './b';\nexport function main() { t(); }\n",
+        ),
+        ("web/b.ts", "export function other() {}\n"),
+    ];
+
+    /// One edit of `RETRY_TREE`: its label, the files it writes (`None`
+    /// removes one), and the edge a full build of the result must hold.
+    type RetryStep = (
+        &'static str,
+        &'static [(&'static str, Option<&'static str>)],
+        &'static str,
+    );
+
+    /// The incremental update retries only the rows its batch can have
+    /// changed, so a row it skips must be one a full build would decide the
+    /// same way. Each step changes an input a stored row reads without
+    /// carrying the row's name, then holds the update to a fresh full build
+    /// of the same tree:
+    ///
+    /// - `def perform` links `MailJob.perform_later` (Rails job dispatch);
+    /// - `def initialize` links `Widget.new` (Ruby constructor);
+    /// - removing `Beta#shared` and the second `helper` makes each name
+    ///   unique: only the definitions the batch had *before* name them;
+    /// - rewriting `Alpha` with the same definitions on other lines changes
+    ///   no name, yet its incoming edge is moved back and must return;
+    /// - `export function tool` reaches the call written `t()` through an
+    ///   aliased import, found through the importing file;
+    /// - the revert undoes each one.
+    #[test]
+    fn an_incremental_update_should_retry_every_row_whose_inputs_changed() {
+        let dir = tmpdir("retry-incremental");
+        write_tree(&dir, RETRY_TREE);
+        let db = dir.join(".pixel").join("graph.db");
+        build_graph(&dir, &db).unwrap();
+        let mut tree: std::collections::BTreeMap<&str, &str> = RETRY_TREE.iter().copied().collect();
+        let steps: &[RetryStep] = &[
+            (
+                "perform defined",
+                &[(
+                    "app/mail_job.rb",
+                    Some("class MailJob\n  def run; end\n  def perform; end\nend\n"),
+                )],
+                "Text(\"app/caller.rb#Caller#go#method\") | Text(\"app/mail_job.rb#MailJob#perform#method\")",
+            ),
+            (
+                "initialize defined",
+                &[(
+                    "app/widget.rb",
+                    Some("class Widget\n  def self.build; end\n  def initialize(x); end\nend\n"),
+                )],
+                "Text(\"app/caller.rb#Caller#go#method\") | Text(\"app/widget.rb#Widget#initialize#method\")",
+            ),
+            (
+                "second definitions removed",
+                &[
+                    ("app/beta.rb", None),
+                    ("src/y.rs", Some("pub fn other() {}\n")),
+                ],
+                "Text(\"src/z.rs#caller#function\") | Text(\"src/x.rs#helper#function\")",
+            ),
+            (
+                "same definitions, shifted lines",
+                &[(
+                    "app/alpha.rb",
+                    Some("class Alpha\n  # moved down\n  def shared; end\nend\n"),
+                )],
+                "Text(\"app/caller.rb#Caller#go#method\") | Text(\"app/alpha.rb#Alpha#shared#method\")",
+            ),
+            (
+                "aliased source defined",
+                &[(
+                    "web/b.ts",
+                    Some("export function other() {}\nexport function tool() {}\n"),
+                )],
+                "Text(\"web/a.ts#main#function\") | Text(\"web/b.ts#tool#function\")",
+            ),
+        ];
+        let check = |label: &str, tree: &std::collections::BTreeMap<&str, &str>| {
+            let full = tmpdir("retry-full");
+            let files: Vec<(&str, &str)> = tree.iter().map(|(k, v)| (*k, *v)).collect();
+            write_tree(&full, &files);
+            let full_db = full.join(".pixel").join("graph.db");
+            build_graph(&full, &full_db).unwrap();
+            let want = graph_rows(&full_db);
+            assert_same_graph(label, &graph_rows(&db), &want);
+            let _ = std::fs::remove_dir_all(full);
+            want
+        };
+        for (label, changes, edge) in steps {
+            for (rel, body) in *changes {
+                match body {
+                    Some(body) => {
+                        write_tree(&dir, &[(rel, body)]);
+                        tree.insert(rel, body);
+                    }
+                    None => {
+                        std::fs::remove_file(dir.join(rel)).unwrap();
+                        tree.remove(rel);
+                    }
+                }
+            }
+            let batch: Vec<(&str, bool)> = changes
+                .iter()
+                .map(|(rel, body)| (*rel, body.is_none()))
+                .collect();
+            update_files(&dir, &db, &batch).unwrap();
+            let want = check(label, &tree);
+            let edges = &want.iter().find(|(t, _)| *t == "edges").unwrap().1;
+            assert!(
+                edges.iter().any(|e| e.starts_with(edge)),
+                "{label}: the full build must link {edge} ({edges:#?})"
+            );
+        }
+        // Back to the first tree: every edge above becomes a row again.
+        write_tree(&dir, RETRY_TREE);
+        let batch: Vec<(&str, bool)> = steps
+            .iter()
+            .flat_map(|(_, changes, _)| changes.iter().map(|(rel, _)| (*rel, false)))
+            .collect();
+        update_files(&dir, &db, &batch).unwrap();
+        check("revert", &RETRY_TREE.iter().copied().collect());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
