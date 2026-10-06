@@ -1893,6 +1893,43 @@ fn migrate(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn concepts_version_reads_the_stamped_schema_version() {
+        let store = super::GraphStore::open_in_memory().unwrap();
+        assert_eq!(
+            store.concepts_version().unwrap().as_deref(),
+            Some(super::CONCEPTS_VERSION)
+        );
+    }
+
+    #[test]
+    fn edge_kind_parse_round_trips_every_kind() {
+        use super::EdgeKind;
+        for kind in [
+            EdgeKind::Calls,
+            EdgeKind::Imports,
+            EdgeKind::Extends,
+            EdgeKind::Implements,
+            EdgeKind::HasMethod,
+            EdgeKind::References,
+        ] {
+            assert_eq!(EdgeKind::parse(kind.as_str()), kind);
+        }
+    }
+
+    #[test]
+    fn score_crux_line_adds_each_category_once() {
+        assert_eq!(super::score_crux_line("foo()?"), (3, vec!["bail"]));
+        assert_eq!(
+            super::score_crux_line("let x = foo()?"),
+            (6, vec!["bail", "mutation"])
+        );
+        assert_eq!(
+            super::score_crux_line("if done { return x; }"),
+            (9, vec!["guard", "bail", "mutation"])
+        );
+    }
+
+    #[test]
     fn read_only_should_pin_snapshot_and_reject_writes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("read-only.db");

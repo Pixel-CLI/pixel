@@ -214,3 +214,39 @@ fn run_wrapped_should_record_the_pass_event_for_the_command_class() {
     );
     assert_eq!(events[0].data.as_ref().unwrap()["argv"][1], "test");
 }
+
+/// A Ruby tool's run takes `Gemfile.lock` even beside a JavaScript
+/// lockfile; any other command keeps the historical order, with
+/// `Gemfile.lock` only when no other lockfile exists.
+#[test]
+fn lockfile_hash_should_prefer_gemfile_lock_for_ruby_commands_only() {
+    let root = Scratch::new();
+    std::fs::write(root.path().join("yarn.lock"), b"yarn\n").unwrap();
+    std::fs::write(root.path().join("Gemfile.lock"), b"GEM\n").unwrap();
+    let yarn = sha256_file(&root.path().join("yarn.lock"));
+    let gems = sha256_file(&root.path().join("Gemfile.lock"));
+    assert_ne!(yarn, gems);
+    assert_eq!(lockfile_hash(root.path(), true), gems);
+    assert_eq!(lockfile_hash(root.path(), false), yarn);
+    std::fs::remove_file(root.path().join("yarn.lock")).unwrap();
+    assert_eq!(lockfile_hash(root.path(), false), gems);
+    std::fs::remove_file(root.path().join("Gemfile.lock")).unwrap();
+    assert_eq!(lockfile_hash(root.path(), true), None);
+
+    for ruby in [
+        &["bundle", "exec", "rspec"][..],
+        &["bin/rails", "test"],
+        &["/usr/local/bin/rake", "db:migrate"],
+        &["rubocop", "-A"],
+        &["ruby", "-Itest", "test/a_test.rb"],
+    ] {
+        assert!(is_ruby_command(&argv(ruby)), "{ruby:?}");
+    }
+    for other in [
+        &["cargo", "test"][..],
+        &["sh", "-c", "make test"],
+        &["vitest"],
+    ] {
+        assert!(!is_ruby_command(&argv(other)), "{other:?}");
+    }
+}

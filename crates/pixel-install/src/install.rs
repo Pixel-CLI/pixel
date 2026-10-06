@@ -226,29 +226,33 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         steps.push(install_cursor_hooks(&home, &exe, dry_run)?);
     }
 
-    let green = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Green)
-        .count();
-    let yellow = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Yellow)
-        .count();
-    let red = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Red)
-        .count();
-    let ok = red == 0;
+    Ok(install_report(&exe, &home, dry_run, steps))
+}
 
-    Ok(InstallReport {
+/// The report over finished install or uninstall `steps`: one count per
+/// status, and `ok` while no step is red. `home` is the home directory, or
+/// the repository for a `--repo` run.
+pub(crate) fn install_report(
+    executable: &Path,
+    home: &Path,
+    dry_run: bool,
+    steps: Vec<InstallStep>,
+) -> InstallReport {
+    let count = |status| steps.iter().filter(|s| s.status == status).count();
+    let summary = InstallSummary {
+        green: count(CheckStatus::Green),
+        yellow: count(CheckStatus::Yellow),
+        red: count(CheckStatus::Red),
+    };
+    InstallReport {
         version: "v1".into(),
-        ok,
-        executable_path: exe.display().to_string(),
+        ok: summary.red == 0,
+        executable_path: executable.display().to_string(),
         home: home.display().to_string(),
         dry_run,
         steps,
-        summary: InstallSummary { green, yellow, red },
-    })
+        summary,
+    }
 }
 
 /// Repo-local install (`pixel install --repo <path>`): project-scoped agent
@@ -305,28 +309,7 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
         exclude_project_artifacts(repo, dry_run)?,
     ];
 
-    let green = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Green)
-        .count();
-    let yellow = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Yellow)
-        .count();
-    let red = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Red)
-        .count();
-
-    Ok(InstallReport {
-        version: "v1".into(),
-        ok: red == 0,
-        executable_path: exe.display().to_string(),
-        home: repo.display().to_string(),
-        dry_run,
-        steps,
-        summary: InstallSummary { green, yellow, red },
-    })
+    Ok(install_report(exe, repo, dry_run, steps))
 }
 
 /// The Codex project hook file, relative to the repository.
@@ -1711,6 +1694,63 @@ mod cursor_hooks_tests {
             left.iter()
                 .any(|name| name.starts_with("hooks.json.pixel-bak.")),
             "the pre-image was backed up: {left:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    fn step(id: &str, status: CheckStatus) -> InstallStep {
+        InstallStep {
+            id: id.into(),
+            status,
+            summary: String::new(),
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn install_report_counts_each_status_and_fails_only_on_red() {
+        let passing = install_report(
+            Path::new("/bin/pixel"),
+            Path::new("/home/u"),
+            true,
+            vec![
+                step("a", CheckStatus::Green),
+                step("b", CheckStatus::Green),
+                step("c", CheckStatus::Yellow),
+            ],
+        );
+        assert!(passing.ok);
+        assert!(passing.dry_run);
+        assert_eq!(
+            (
+                passing.summary.green,
+                passing.summary.yellow,
+                passing.summary.red
+            ),
+            (2, 1, 0)
+        );
+        assert_eq!(passing.executable_path, "/bin/pixel");
+        assert_eq!(passing.home, "/home/u");
+        assert_eq!(passing.steps.len(), 3);
+
+        let failing = install_report(
+            Path::new("/bin/pixel"),
+            Path::new("/repo"),
+            false,
+            vec![step("a", CheckStatus::Red)],
+        );
+        assert!(!failing.ok);
+        assert_eq!(
+            (
+                failing.summary.green,
+                failing.summary.yellow,
+                failing.summary.red
+            ),
+            (0, 0, 1)
         );
     }
 }

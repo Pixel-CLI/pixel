@@ -97,4 +97,37 @@ mod tests {
         assert_eq!(DeltaState::load(&root).unwrap().base_oid, "abc");
         std::fs::remove_dir_all(&root).ok();
     }
+
+    #[test]
+    fn load_rejects_each_oversized_field_on_its_own() {
+        let root = std::env::temp_dir().join(format!("gpx-state-bounds-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let ok = DeltaState {
+            base_oid: "a".repeat(64),
+            delta_oid: Some("b".repeat(64)),
+            tombstones: vec!["p".repeat(MAX_STATE_PATH_BYTES)],
+        };
+        ok.save(&root).unwrap();
+        assert!(DeltaState::load(&root).is_some(), "limits are inclusive");
+        let cases = [
+            DeltaState {
+                base_oid: "a".repeat(65),
+                ..ok.clone()
+            },
+            DeltaState {
+                delta_oid: Some("b".repeat(65)),
+                ..ok.clone()
+            },
+            DeltaState {
+                tombstones: vec!["p".repeat(MAX_STATE_PATH_BYTES + 1)],
+                ..ok.clone()
+            },
+        ];
+        for state in cases {
+            state.save(&root).unwrap();
+            assert!(DeltaState::load(&root).is_none());
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

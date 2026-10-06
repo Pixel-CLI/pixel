@@ -361,6 +361,26 @@ mod tests {
     }
 
     #[test]
+    fn journal_operation_should_display_its_snake_case_name() {
+        for (op, name) in [
+            (JournalOperation::Publish, "publish"),
+            (JournalOperation::Push, "push"),
+            (JournalOperation::Branch, "branch"),
+            (JournalOperation::Update, "update"),
+            (JournalOperation::Ship, "ship"),
+            (JournalOperation::Sync, "sync"),
+            (JournalOperation::Rewrite, "rewrite"),
+        ] {
+            assert_eq!(op.to_string(), name);
+        }
+    }
+
+    #[test]
+    fn retention_age_should_be_thirty_days_in_ms() {
+        assert_eq!(RETENTION_MAX_AGE_MS, 2_592_000_000);
+    }
+
+    #[test]
     fn begin_creates_started_record() {
         let dir = tempdir().unwrap();
         let j = make_journal(dir.path());

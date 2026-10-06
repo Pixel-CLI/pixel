@@ -1031,4 +1031,21 @@ mod tests {
         reap_finished_workers(&mut workers);
         assert!(workers.is_empty());
     }
+
+    #[test]
+    fn modified_nanos_reads_the_file_mtime_since_the_epoch() {
+        let path =
+            std::env::temp_dir().join(format!("pixel-evidence-mtime-{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let when = std::time::Duration::new(1_000_000, 5_000);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + when)
+            .unwrap();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(modified_nanos(&meta), when.as_nanos());
+    }
 }

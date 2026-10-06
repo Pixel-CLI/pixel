@@ -151,6 +151,24 @@ mod tests {
     use super::*;
     use std::process::Command;
 
+    #[test]
+    fn ancestor_modules_dir_alone_does_not_make_a_submodule() {
+        let root = tmpdir("anc-modules");
+        let modules = root.join(".git").join("modules");
+        std::fs::create_dir_all(modules.join("sub")).unwrap();
+        let cur = root.join("sub");
+        assert!(is_under_ancestor_git_modules(&cur, &modules.join("sub")));
+        assert!(!is_under_ancestor_git_modules(
+            &cur,
+            &root.join("elsewhere")
+        ));
+        let bare = tmpdir("anc-no-modules");
+        assert!(!is_under_ancestor_git_modules(
+            &bare.join("sub"),
+            &bare.join(".git").join("modules").join("sub")
+        ));
+    }
+
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
             "pixel-git-discover-{tag}-{}-{}",

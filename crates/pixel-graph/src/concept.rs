@@ -408,8 +408,14 @@ impl<'a> TsWalker<'a> {
     }
 }
 
+/// Whether a walker at `depth` has passed the recursion cap: a node at
+/// exactly `MAX_DEPTH` is still visited.
+fn too_deep(depth: usize) -> bool {
+    depth > MAX_DEPTH
+}
+
 fn walk_ts_concepts(w: &mut TsWalker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     match node.kind() {
@@ -492,7 +498,7 @@ fn walk_ts_concepts(w: &mut TsWalker, node: Node, depth: usize) {
 }
 
 fn walk_rust_concepts(w: &mut TsWalker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     match node.kind() {
@@ -1150,6 +1156,13 @@ mod tests {
     }
 
     #[test]
+    fn too_deep_visits_the_cap_and_stops_past_it() {
+        assert!(!too_deep(0));
+        assert!(!too_deep(MAX_DEPTH));
+        assert!(too_deep(MAX_DEPTH + 1));
+    }
+
+    #[test]
     fn is_uppercase_component_checks_the_first_character() {
         assert!(is_uppercase_component("Button"));
         assert!(!is_uppercase_component("button"));
@@ -1174,6 +1187,7 @@ mod tests {
             .find(|c| c.kind == ConceptKind::Route && c.raw.contains("/api/contact"))
             .unwrap_or_else(|| panic!("route from the script block: {concepts:?}"));
         assert_eq!(route.start_line, 4, "{route:?}");
+        assert_eq!(route.end_line, 4, "{route:?}");
         let component = concepts
             .iter()
             .find(|c| c.kind == ConceptKind::Component && c.raw == "Button")

@@ -499,6 +499,8 @@ fn html_markup_should_emit_forms_components_and_listed_attributes() {
         find(&c, ConceptKind::Component, "widget").detail,
         "component"
     );
+    // Newlines inside a tag still advance the line count.
+    assert_eq!(find(&c, ConceptKind::Component, "widget").start_line, 4);
     assert_eq!(find(&c, ConceptKind::AttrText, "cart").detail, "name");
     // An empty attribute value labels nothing.
     assert_eq!(of_kind(&c, ConceptKind::AttrText).len(), 2);

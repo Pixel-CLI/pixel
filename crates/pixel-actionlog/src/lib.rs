@@ -315,6 +315,14 @@ fn open_log_file(path: &Path) -> Option<File> {
     pixel_git::nofollow::open_append(path).ok()
 }
 
+/// Bound memory on pathological inputs: once `lines` holds more than twice
+/// `keep`, drop all but its last `keep` entries.
+fn bound_to_tail(lines: &mut Vec<String>, keep: usize) {
+    if lines.len() > keep * 2 {
+        lines.drain(0..lines.len() - keep);
+    }
+}
+
 /// If the log has grown past `MAX_LOG_BYTES`, rewrite it keeping only the
 /// most recent `MAX_KEPT_LINES` lines. Best-effort: any failure just leaves
 /// the file as-is (an unbounded log is still preferable to losing the file).
@@ -331,10 +339,7 @@ fn rotate_if_needed(path: &Path) -> std::io::Result<()> {
     let mut lines: Vec<String> = Vec::new();
     for line in reader.lines() {
         lines.push(line?);
-        if lines.len() > MAX_KEPT_LINES * 2 {
-            // Bound memory on pathological inputs; keep only the tail as we go.
-            lines.drain(0..lines.len() - MAX_KEPT_LINES);
-        }
+        bound_to_tail(&mut lines, MAX_KEPT_LINES);
     }
     let start = lines.len().saturating_sub(MAX_KEPT_LINES);
     let mut kept = Vec::new();
@@ -682,6 +687,54 @@ mod tests {
         let link = base.path().join("actions.jsonl");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(tail(&link, 10).is_err());
+    }
+
+    #[test]
+    fn truncate_should_back_off_to_a_char_boundary_and_keep_the_prefix() {
+        assert_eq!(truncate("abc", 1), "a… (truncated)");
+        assert_eq!(truncate("éé", 1), "… (truncated)");
+        assert_eq!(truncate("ab", 2), "ab");
+    }
+
+    #[test]
+    fn bound_to_tail_should_keep_only_the_newest_entries_past_twice_the_budget() {
+        let mut lines: Vec<String> = (0..21).map(|i| i.to_string()).collect();
+        bound_to_tail(&mut lines, 10);
+        assert_eq!(lines.len(), 10);
+        assert_eq!(lines[0], "11");
+        let mut short: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        bound_to_tail(&mut short, 10);
+        assert_eq!(short.len(), 20);
+    }
+
+    /// Thousands of short lines under `MAX_LOG_BYTES` are not rotated:
+    /// the budget is bytes, and a few KB are far below it.
+    #[test]
+    fn rotate_if_needed_should_leave_a_small_log_with_many_lines_alone() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("actions.jsonl");
+        let body = "x\n".repeat(MAX_KEPT_LINES + 1000);
+        fs::write(&path, &body).unwrap();
+        rotate_if_needed(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), body);
+    }
+
+    /// The writer checks rotation every `ROTATE_CHECK_EVERY` events, not on
+    /// the first one: a single event appended to an oversized log leaves
+    /// every older line in place.
+    #[test]
+    fn writer_should_not_rotate_before_the_check_interval() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("actions.jsonl");
+        let line = format!("{}\n", "y".repeat(1024));
+        let lines = MAX_KEPT_LINES + 1500;
+        fs::write(&path, line.repeat(lines)).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() > MAX_LOG_BYTES);
+        let mut log = ActionLog::spawn_at(path.clone());
+        log.log(ActionEvent::new("search", "one"));
+        log.finish_flush();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), lines + 1);
     }
 }
 

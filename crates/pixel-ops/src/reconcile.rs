@@ -837,7 +837,7 @@ pub fn reconcile_with_hooks(
                                 let unmerged: Vec<String> = runner
                                     .status_porcelain()
                                     .into_iter()
-                                    .filter(|(xy, _)| xy.contains('U') || xy == "AA" || xy == "DD")
+                                    .filter(|(xy, _)| is_unmerged_status(xy))
                                     .map(|(_, p)| p)
                                     .collect();
                                 // Never leave the repo mid-rebase.
@@ -1137,7 +1137,7 @@ fn reconcile_into(
         let unmerged: Vec<String> = runner
             .status_porcelain()
             .into_iter()
-            .filter(|(xy, _)| xy.contains('U') || xy == "AA" || xy == "DD")
+            .filter(|(xy, _)| is_unmerged_status(xy))
             .map(|(_, p)| p)
             .collect();
         safe_rebase_abort(runner);
@@ -1556,8 +1556,24 @@ fn non_conflicting_paths(root: &Path, merge_base: &str, ours: &str, theirs: &str
     })
 }
 
+/// A porcelain v1 `XY` status that marks an unmerged (conflicted) path:
+/// any `U`, or both sides added (`AA`) or deleted (`DD`).
+fn is_unmerged_status(xy: &str) -> bool {
+    xy.contains('U') || xy == "AA" || xy == "DD"
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn is_unmerged_status_should_match_only_conflict_codes() {
+        for xy in ["UU", "AU", "UD", "DU", "AA", "DD"] {
+            assert!(is_unmerged_status(xy), "{xy}");
+        }
+        for xy in ["M ", " M", "A ", "D ", "AM", "AD", "??", "R "] {
+            assert!(!is_unmerged_status(xy), "{xy}");
+        }
+    }
+
     use super::*;
     use tempfile::tempdir;
 

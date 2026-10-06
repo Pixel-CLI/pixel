@@ -325,6 +325,16 @@ mod tests {
             !summaries.is_empty(),
             "four mutually calling functions form a cluster"
         );
+        assert_eq!(summaries.len(), 1, "{summaries:?}");
+        assert_eq!(
+            summaries[0].label, "root",
+            "a ring of four is no misc bucket"
+        );
+        assert_eq!(summaries[0].symbol_count, 4);
+        assert!(
+            (summaries[0].cohesion - 1.0).abs() < 1e-9,
+            "every edge stays inside the ring: {summaries:?}"
+        );
         let members: u64 = summaries.iter().map(|s| s.symbol_count).sum();
         assert!(
             members >= 3,
@@ -342,6 +352,13 @@ mod tests {
 
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn top_keywords_ranks_by_frequency_before_name() {
+        let names = ["zeta_alpha", "zeta_beta", "zeta"].map(String::from);
+        assert_eq!(top_keywords(&names, 1), "zeta");
+        assert_eq!(top_keywords(&names, 3), "zeta,alpha,beta");
     }
 
     #[test]

@@ -78,18 +78,50 @@ fn git_head(root: &Path) -> Option<String> {
     pixel_git::GitRunner::new(root).rev_parse_head()
 }
 
-fn lockfile_hash(root: &Path) -> Option<String> {
-    const LOCKFILES: [&str; 6] = [
+/// Programs whose run depends on the Ruby bundle, by file name.
+const RUBY_PROGRAMS: &[&str] = &[
+    "ruby",
+    "bundle",
+    "bundler",
+    "rake",
+    "rails",
+    "rspec",
+    "rubocop",
+    "standardrb",
+];
+
+/// True iff `argv` runs a Ruby tool: its program, or the command `bundle
+/// exec`/`bin/rails`-style wrappers run, is one of [`RUBY_PROGRAMS`].
+pub fn is_ruby_command(argv: &[String]) -> bool {
+    argv.iter().take(3).any(|a| {
+        Path::new(a)
+            .file_name()
+            .is_some_and(|f| RUBY_PROGRAMS.contains(&f.to_string_lossy().as_ref()))
+    })
+}
+
+/// The hash of the lockfile a run's dependencies come from: `Gemfile.lock`
+/// first for a Ruby tool (a Rails app also carries a JavaScript lockfile),
+/// otherwise the JavaScript and Rust lockfiles in their historical order,
+/// with `Gemfile.lock` last so a project that has one of those keeps it.
+fn lockfile_hash(root: &Path, ruby: bool) -> Option<String> {
+    const LOCKFILES: [&str; 7] = [
         "bun.lock",
         "bun.lockb",
         "package-lock.json",
         "yarn.lock",
         "pnpm-lock.yaml",
         "Cargo.lock",
+        "Gemfile.lock",
     ];
-    LOCKFILES
-        .iter()
-        .find_map(|name| sha256_file(&root.join(name)))
+    let ruby_first = ruby
+        .then(|| sha256_file(&root.join("Gemfile.lock")))
+        .flatten();
+    ruby_first.or_else(|| {
+        LOCKFILES
+            .iter()
+            .find_map(|name| sha256_file(&root.join(name)))
+    })
 }
 
 /// Tee one child stream to one of our streams while capturing it. Chunked,
@@ -185,10 +217,19 @@ pub enum RubyReport {
     Rubocop(rubocop::Report),
 }
 
-/// Sniff the captured output for a Ruby tool. RuboCop's offense grammar is
-/// the most specific so it goes first; Minitest's `# Running:` banner beats
-/// RSpec's summary (a Rails app printing both is a Minitest run).
+/// Sniff the captured output for a Ruby tool. A JSON formatter document
+/// (RuboCop's, then RSpec's) is the most precise record and goes first;
+/// then the text formats: RuboCop's offense grammar is the most specific,
+/// and Minitest's `# Running:` banner beats RSpec's summary (a Rails app
+/// printing both is a Minitest run). A truncated or malformed JSON
+/// document is no document: the text parsers read the output instead.
 pub fn detect_ruby(output: &str) -> Option<RubyReport> {
+    if let Some(report) = rubocop::parse_json(output) {
+        return Some(RubyReport::Rubocop(report));
+    }
+    if let Some(report) = rspec::parse_json(output) {
+        return Some(RubyReport::Rspec(report));
+    }
     if rubocop::detect(output) {
         return Some(RubyReport::Rubocop(rubocop::parse(output)));
     }
@@ -229,6 +270,17 @@ pub fn ruby_pass_data(report: &RubyReport) -> Option<serde_json::Value> {
             }))
         }
         RubyReport::Rubocop(_) => None,
+    }
+}
+
+/// True iff a test runner's report says tests failed: a failure record, or
+/// a summary that is not green. A green process exit does not make such a
+/// run a pass (`rspec || true`, a wrapper that drops the status).
+pub fn ruby_tests_failed(report: &RubyReport) -> bool {
+    match report {
+        RubyReport::Minitest(r) => !r.failures.is_empty() || r.counters.is_some_and(|c| !c.green()),
+        RubyReport::Rspec(r) => !r.failures.is_empty() || r.counters.is_some_and(|c| !c.green()),
+        RubyReport::Rubocop(_) => false,
     }
 }
 
@@ -312,6 +364,7 @@ pub fn offense_input(offense: &rubocop::Offense, run_id: &str) -> ErrorInput {
             "severity": offense.severity,
             "cop": offense.cop,
             "correctable": offense.correctable,
+            "corrected": offense.corrected,
         })),
         run_id: Some(run_id.to_owned()),
         ts: None,
@@ -390,8 +443,8 @@ pub fn minitest_summary_line(report: &minitest::Report) -> (String, serde_json::
     }
 }
 
-/// `7 examples, 2 failures, 1 pending` (pending shown only when non-zero,
-/// as RSpec does).
+/// `7 examples, 2 failures, 1 pending` (pending and errors outside of
+/// examples shown only when non-zero, as RSpec does).
 pub fn rspec_summary_line(report: &rspec::Report) -> (String, serde_json::Value) {
     match report.counters {
         Some(c) => {
@@ -399,14 +452,26 @@ pub fn rspec_summary_line(report: &rspec::Report) -> (String, serde_json::Value)
             if c.pending > 0 {
                 line.push_str(&format!(", {} pending", c.pending));
             }
-            (
-                line,
-                json!({
-                    "examples": c.examples,
-                    "failures": c.failures,
-                    "pending": c.pending,
-                }),
-            )
+            let mut counters = json!({
+                "examples": c.examples,
+                "failures": c.failures,
+                "pending": c.pending,
+            });
+            // As RSpec prints it, and only then: a spec file that failed to
+            // load is why a `0 failures` run is red.
+            if c.errors_outside > 0 {
+                let noun = if c.errors_outside == 1 {
+                    "error"
+                } else {
+                    "errors"
+                };
+                line.push_str(&format!(
+                    ", {} {noun} occurred outside of examples",
+                    c.errors_outside
+                ));
+                counters["errorsOutside"] = json!(c.errors_outside);
+            }
+            (line, counters)
         }
         None => (
             format!(
@@ -431,10 +496,14 @@ pub fn record_ruby_failure(
 ) -> Result<bool, String> {
     let (surface, failures, summary) = match report {
         RubyReport::Rubocop(report) => {
-            if report.offenses.is_empty() {
+            // An offense `--autocorrect` fixed in this run is not left in
+            // the file.
+            let remaining: Vec<&rubocop::Offense> =
+                report.offenses.iter().filter(|o| !o.corrected).collect();
+            if remaining.is_empty() {
                 return Ok(false);
             }
-            for offense in &report.offenses {
+            for offense in remaining {
                 store
                     .record_error(&offense_input(offense, run_id))
                     .map_err(|e| e.to_string())?;
@@ -522,7 +591,7 @@ pub fn run_wrapped(store: &Store, label: Option<&str>, argv: &[String]) -> Resul
             pid: Some(i64::from(child.id())),
             port: None,
             git_head: git_head(&root),
-            lockfile_hash: lockfile_hash(&root),
+            lockfile_hash: lockfile_hash(&root, is_ruby_command(argv)),
             vite_dep_hash: None,
             fingerprint: Some(json!({
                 "kind": "sniper-run",
@@ -567,7 +636,10 @@ pub fn run_wrapped(store: &Store, label: Option<&str>, argv: &[String]) -> Resul
         CommandClass::Test | CommandClass::Build => detect_ruby(&combined),
     };
 
-    if exit_code == 0 {
+    // A green exit is a pass unless the test runner itself reported
+    // failures; the exit code the wrapper returns is the child's either way.
+    let failed_tests = ruby.as_ref().is_some_and(ruby_tests_failed);
+    if exit_code == 0 && !failed_tests {
         let ruby_pass = ruby.as_ref().and_then(ruby_pass_data);
         let kind = match (class, &ruby_pass) {
             (_, Some(_)) | (CommandClass::Test, None) => EventKind::TestPass,
@@ -609,7 +681,13 @@ pub fn run_wrapped(store: &Store, label: Option<&str>, argv: &[String]) -> Resul
             None => false,
         },
     };
-    if !parsed {
+    if parsed && ruby.is_some() {
+        // The structured records are a reading of the output; the output
+        // itself stays recoverable (a late `rake aborted!`, a deprecation).
+        store
+            .record_raw_fallback(&format!("run:{label}"), &combined, None)
+            .map_err(|e| e.to_string())?;
+    } else if !parsed {
         record_generic_failure(store, &run_id, &label, &combined, exit_code)?;
     }
     Ok(exit_code)
