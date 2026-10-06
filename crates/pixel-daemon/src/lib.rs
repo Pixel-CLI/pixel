@@ -5,6 +5,7 @@
 //! NDJSON daemon with fs watching (`daemon`).
 
 pub mod api;
+pub mod cycles;
 pub mod daemon;
 pub mod evaluate;
 pub mod evidence;

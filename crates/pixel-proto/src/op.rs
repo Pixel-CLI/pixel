@@ -362,6 +362,25 @@ pub enum Op {
         #[serde(default)]
         at_snapshot: bool,
     },
+    /// Bounded recursion-cycle enumeration with witnesses and explicit
+    /// coverage: finds strongly connected components in the call graph
+    /// (potential recursion cycles), bounded by node/edge/time/component
+    /// budgets, each reported cycle carrying a concrete closed-path witness
+    /// re-read from the store.
+    Cycles {
+        /// `exact` or `exact,probable`; selects the relation, not a
+        /// confidence threshold.
+        #[serde(default)]
+        tiers: Option<String>,
+        #[serde(default)]
+        max_nodes: Option<u32>,
+        #[serde(default)]
+        max_edges: Option<u32>,
+        #[serde(default)]
+        time_budget_ms: Option<u64>,
+        #[serde(default)]
+        max_components: Option<u32>,
+    },
     /// IDE-style symbol rename: the graph drives the edit set (definition,
     /// resolved call/reference sites, import bindings) and a tree-sitter
     /// re-parse verifies every rewritten identifier is the symbol — sites
@@ -425,6 +444,7 @@ impl Op {
             Op::Map { .. } => "map",
             Op::Plan { .. } => "plan",
             Op::Evaluate { .. } => "evaluate",
+            Op::Cycles { .. } => "cycles",
             Op::Rename { .. } => "rename",
             Op::Shutdown => "shutdown",
             Op::Reindex { .. } => "reindex",
@@ -481,6 +501,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "map",
     "plan",
     "evaluate",
+    "cycles",
     "rename",
     "flow",
 ];
@@ -930,6 +951,16 @@ mod tests {
                 "evaluate",
             ),
             (
+                Op::Cycles {
+                    tiers: None,
+                    max_nodes: None,
+                    max_edges: None,
+                    time_budget_ms: None,
+                    max_components: None,
+                },
+                "cycles",
+            ),
+            (
                 Op::Rename {
                     name: "".into(),
                     new_name: "".into(),
@@ -1012,6 +1043,7 @@ mod tests {
             "map",
             "plan",
             "evaluate",
+            "cycles",
             "flow",
             "rename",
             "shutdown",

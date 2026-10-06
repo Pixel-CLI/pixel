@@ -93,6 +93,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel rename` | IDE-style symbol rename: graph-resolved definition, call, reference, and import sites, each verified against a fresh tree-sitter parse before writing; unresolved same-name sites are reported, never guessed. `--dry-run` prints the edit set without touching files |
 | `pixel call-path` | Call path between two symbols; its `successor` field names the `pixel evaluate path` command that asks the same question with a bounded answer |
 | `pixel evaluate` | Bounded predicate evaluation with a witness: does a path exist between two symbols in the indexed call graph, with the snapshot the answer is about, an exhaustive-traversal absence, or a typed reason for not answering |
+| `pixel cycles` | Bounded recursion-cycle enumeration with witnesses and explicit coverage: finds strongly connected components in the call graph (potential recursion cycles) over `Calls` edges only — `HasMethod` ownership is excluded because ownership is not runtime invocation. Bounded by node, edge, time, and component budgets; each reported cycle carries a concrete closed-path witness re-read from the store. The coverage report states whether the enumeration was exhaustive or which budget stopped it, so an incomplete graph is never read as proof of safety |
 | `pixel list-flows` | Discovered execution flows |
 | `pixel list-areas` | Functional-area clusters |
 | `pixel what-changed` | Symbols/flows affected by working-tree changes |

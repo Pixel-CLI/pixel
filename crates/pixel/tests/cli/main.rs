@@ -12,6 +12,7 @@ mod ask_contract;
 mod audit_cli;
 mod classify_cli;
 mod config_cli;
+mod cycles_cli;
 mod docs_drift;
 mod doctor_cli;
 mod evaluate_cli;

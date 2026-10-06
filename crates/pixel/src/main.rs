@@ -40,6 +40,7 @@ mod classify_setup;
 mod config_cmd;
 mod config_file;
 mod coverage_cmd;
+mod cycles_cmd;
 mod decide_infisical;
 mod decide_jev;
 mod decide_ollaya;
@@ -631,6 +632,39 @@ enum Command {
     Evaluate {
         #[command(subcommand)]
         cmd: EvaluateCmd,
+    },
+    /// Enumerate recursion cycles in the call graph with witnesses and
+    /// explicit coverage.
+    ///
+    /// Finds strongly connected components (potential recursion cycles)
+    /// over `Calls` edges only — `HasMethod` ownership is excluded because
+    /// ownership is not runtime invocation. Bounded by node, edge, time,
+    /// and component budgets; each reported cycle carries a concrete
+    /// closed-path witness re-read from the store. The coverage report
+    /// states whether the enumeration was exhaustive or which budget
+    /// stopped it, so an incomplete graph is never read as proof of
+    /// safety.
+    Cycles {
+        /// `exact` or `exact,probable`; selects the relation, not a
+        /// confidence threshold.
+        #[arg(long, default_value = "exact")]
+        tiers: String,
+        /// Maximum number of nodes to visit.
+        #[arg(long)]
+        max_nodes: Option<u32>,
+        /// Maximum number of edges to follow.
+        #[arg(long)]
+        max_edges: Option<u32>,
+        /// Wall-clock budget in milliseconds.
+        #[arg(long)]
+        time_budget_ms: Option<u64>,
+        /// Maximum number of components to report.
+        #[arg(long)]
+        max_components: Option<u32>,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
     /// Discovered execution flows.
     #[command(alias = "processes")]
@@ -5615,6 +5649,26 @@ fn run_command(
                 time_budget_ms,
                 scope,
                 at_snapshot,
+                path,
+                json,
+            })));
+            Ok(())
+        }
+        Command::Cycles {
+            tiers,
+            max_nodes,
+            max_edges,
+            time_budget_ms,
+            max_components,
+            path,
+            json,
+        } => {
+            owned_exit.set(Some(cycles_cmd::run(cycles_cmd::CyclesOptions {
+                tiers,
+                max_nodes,
+                max_edges,
+                time_budget_ms,
+                max_components,
                 path,
                 json,
             })));
