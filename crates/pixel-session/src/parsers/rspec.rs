@@ -17,6 +17,10 @@
 //!
 //! rspec ./spec/models/user_spec.rb:10 # User validation requires a name
 //! ```
+//!
+//! and its JSON formatter (`--format json`, [`parse_json`]), whose document
+//! gives the same records: one per failed example, the counters, and an
+//! error outside of examples (a spec file that fails to load) as a failure.
 
 use super::ruby::{
     FailureKind, TestFailure, blocks, cap_message, counter, counters, project_frame,
@@ -28,6 +32,9 @@ pub struct Counters {
     pub examples: u64,
     pub failures: u64,
     pub pending: u64,
+    /// `N errors occurred outside of examples`: a spec file that raised
+    /// while loading, or a hook that failed around the suite.
+    pub errors_outside: u64,
 }
 
 impl Counters {
@@ -39,7 +46,7 @@ impl Counters {
     }
 
     pub fn green(&self) -> bool {
-        self.failures == 0
+        self.failures == 0 && self.errors_outside == 0
     }
 }
 
@@ -63,6 +70,7 @@ pub fn parse_summary(line: &str) -> Option<Counters> {
         examples: counter(&c, "example")?,
         failures: counter(&c, "failure")?,
         pending: counter(&c, "pending").unwrap_or(0),
+        errors_outside: counter(&c, "error").unwrap_or(0),
     })
 }
 
@@ -229,6 +237,171 @@ pub fn parse(output: &str) -> Report {
     Report { counters, failures }
 }
 
+/// True iff `value` is an RSpec JSON formatter document.
+fn is_rspec_document(value: &serde_json::Value) -> bool {
+    value
+        .get("examples")
+        .is_some_and(serde_json::Value::is_array)
+        && value
+            .get("summary")
+            .is_some_and(serde_json::Value::is_object)
+}
+
+/// Parse the document RSpec's JSON formatter printed somewhere in `output`,
+/// or `None` when there is none (or it is incomplete): the caller then
+/// reads the text formatter's output.
+///
+/// One failure per `failed` example: its location is the first project
+/// frame in a `_spec.rb` file (else the first project frame, else the
+/// example's own `file_path:line_number`), as the text parser takes it; the
+/// rerun is `rspec <file_path>:<line_number>`, the line the text
+/// formatter's `Failed examples:` prints. Each `messages` entry of a run
+/// with errors outside of examples is one error record.
+/// <https://rspec.info/documentation/3.13/rspec-core/RSpec/Core/Formatters/JsonFormatter.html>
+pub fn parse_json(output: &str) -> Option<Report> {
+    let doc = super::ruby::find_json_object(output, is_rspec_document)?;
+    let summary = &doc["summary"];
+    let count = |key: &str| summary.get(key).and_then(serde_json::Value::as_u64);
+    let counters = Some(Counters {
+        examples: count("example_count")?,
+        failures: count("failure_count")?,
+        pending: count("pending_count").unwrap_or(0),
+        errors_outside: count("errors_outside_of_examples_count").unwrap_or(0),
+    });
+    let mut failures = Vec::new();
+    for example in doc["examples"].as_array()? {
+        if example.get("status").and_then(serde_json::Value::as_str) != Some("failed") {
+            continue;
+        }
+        let text = |key: &str| example.get(key).and_then(serde_json::Value::as_str);
+        let description = text("full_description")
+            .or_else(|| text("description"))
+            .unwrap_or_default()
+            .to_owned();
+        let spec_file = text("file_path").map(|f| f.strip_prefix("./").unwrap_or(f).to_owned());
+        let spec_line = example
+            .get("line_number")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok());
+        let exception = example.get("exception");
+        let class = exception
+            .and_then(|e| e.get("class"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let raw_message = exception
+            .and_then(|e| e.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let lines: Vec<&str> = raw_message
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let expected = lines
+            .iter()
+            .find_map(|l| l.strip_prefix("expected: "))
+            .map(str::to_owned);
+        let actual = lines
+            .iter()
+            .find_map(|l| l.strip_prefix("got: "))
+            .map(str::to_owned);
+        let expectation = class.is_empty() || class.starts_with("RSpec::Expectations::");
+        let message = if expectation {
+            lines.join("\n")
+        } else {
+            format!("{class}: {}", lines.join("\n"))
+        };
+        let mut backtrace = Vec::new();
+        let mut spec_location = None;
+        let mut first_project = None;
+        for line in exception
+            .and_then(|e| e.get("backtrace"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            let Some(frame) = project_frame(line) else {
+                continue;
+            };
+            if let (Some(file), Some(line_no)) = (&frame.file, frame.line) {
+                if spec_location.is_none() && file.contains("_spec.rb") {
+                    spec_location = Some((file.clone(), line_no));
+                }
+                if first_project.is_none() {
+                    first_project = Some((file.clone(), line_no));
+                }
+            }
+            backtrace.push(frame.raw);
+        }
+        let (file, line) = match spec_location.or(first_project) {
+            Some((file, line)) => (Some(file), Some(line)),
+            None => (spec_file.clone(), spec_line),
+        };
+        let rerun = spec_file.as_ref().map(|f| match spec_line {
+            Some(n) => format!("rspec ./{f}:{n}"),
+            None => format!("rspec ./{f}"),
+        });
+        failures.push(TestFailure {
+            kind: if expectation {
+                FailureKind::Failure
+            } else {
+                FailureKind::Error
+            },
+            test_class: leading_constant(&description),
+            test_name: description,
+            file,
+            line,
+            message: cap_message(&message),
+            expected,
+            actual,
+            backtrace,
+            rerun,
+        });
+    }
+    for message in doc
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|m| m.contains("error occurred") || m.contains("An error occurred"))
+    {
+        failures.push(outside_error(message));
+    }
+    Some(Report { counters, failures })
+}
+
+/// One error RSpec reported outside of any example: `An error occurred
+/// while loading ./spec/x_spec.rb.` followed by the exception, located at
+/// the file it names.
+fn outside_error(message: &str) -> TestFailure {
+    let file = message
+        .split_whitespace()
+        .find(|w| w.contains("_spec.rb"))
+        .map(|w| {
+            let w = w.trim_end_matches(['.', ',', ':']);
+            w.strip_prefix("./").unwrap_or(w).to_owned()
+        });
+    let backtrace: Vec<String> = message
+        .lines()
+        .filter_map(project_frame)
+        .map(|f| f.raw)
+        .collect();
+    TestFailure {
+        kind: FailureKind::Error,
+        test_class: None,
+        test_name: message.lines().next().unwrap_or_default().trim().to_owned(),
+        rerun: file.as_ref().map(|f| format!("rspec ./{f}")),
+        file,
+        line: None,
+        message: cap_message(message.trim()),
+        expected: None,
+        actual: None,
+        backtrace,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,7 +430,8 @@ mod tests {
             Some(Counters {
                 examples: 7,
                 failures: 2,
-                pending: 1
+                pending: 1,
+                errors_outside: 0
             })
         );
         assert_eq!(
@@ -265,7 +439,8 @@ mod tests {
             Some(Counters {
                 examples: 1,
                 failures: 1,
-                pending: 0
+                pending: 0,
+                errors_outside: 0
             })
         );
         assert!(parse_summary("7 examples").is_none());
@@ -288,7 +463,8 @@ mod tests {
             Some(Counters {
                 examples: 10,
                 failures: 1,
-                pending: 0
+                pending: 0,
+                errors_outside: 0
             })
         );
         assert_eq!(report.failures.len(), 1);
@@ -377,7 +553,8 @@ mod tests {
             Some(Counters {
                 examples: 28,
                 failures: 1,
-                pending: 0
+                pending: 0,
+                errors_outside: 0
             })
         );
         assert_eq!(report.failures.len(), 1);
@@ -520,5 +697,71 @@ mod tests {
         assert_eq!(error_class_line("Failure/Error: x"), None);
         assert_eq!(error_class_line("Some words:"), None);
         assert_eq!(error_class_line(":"), None);
+    }
+
+    #[test]
+    fn json_is_found_after_a_preamble_and_ignored_when_incomplete_or_foreign() {
+        let mixed = include_str!("../../tests/fixtures/rspec-mixed.json");
+        let report = parse_json(mixed).unwrap();
+        assert_eq!(
+            report.counters,
+            Some(Counters {
+                examples: 7,
+                failures: 2,
+                pending: 1,
+                errors_outside: 0
+            })
+        );
+        assert_eq!(
+            report
+                .failures
+                .iter()
+                .map(|f| (f.kind, f.test_name.as_str(), f.line))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    FailureKind::Failure,
+                    "Billing::Invoice#total includes VAT",
+                    Some(23)
+                ),
+                (
+                    FailureKind::Error,
+                    "Billing::Invoice#to_pdf renders the template",
+                    Some(31)
+                ),
+            ]
+        );
+        let truncated = include_str!("../../tests/fixtures/rspec-truncated.json");
+        assert_eq!(parse_json(truncated), None);
+        assert_eq!(parse_json("{\"files\": [], \"summary\": {}}"), None);
+        assert_eq!(parse_json("no json here\n{ not json"), None);
+        assert_eq!(parse_json(""), None);
+    }
+
+    #[test]
+    fn errors_outside_of_examples_are_never_green() {
+        let c =
+            parse_summary("0 examples, 0 failures, 1 error occurred outside of examples").unwrap();
+        assert_eq!(c.errors_outside, 1);
+        assert!(!c.green());
+        let load = include_str!("../../tests/fixtures/rspec-load-error.json");
+        let report = parse_json(load).unwrap();
+        assert!(!report.counters.unwrap().green());
+        assert_eq!(
+            report.failures.len(),
+            1,
+            "the `Run options` message is not an error"
+        );
+        assert_eq!(
+            report.failures[0].file.as_deref(),
+            Some("spec/models/order_spec.rb")
+        );
+        assert_eq!(
+            report.failures[0].backtrace,
+            [
+                "# ./app/models/order.rb:3:in '<class:Order>'",
+                "# ./spec/models/order_spec.rb:1:in '<top (required)>'"
+            ]
+        );
     }
 }

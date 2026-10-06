@@ -378,6 +378,58 @@ fn resolve_project_root_climbs_to_the_git_toplevel_or_keeps_the_start() {
 }
 
 #[test]
+fn raw_outputs_follow_the_error_retention() {
+    const SEVEN_DAYS_MS: i64 = 604_800_000;
+    let state = TempRoot::new();
+    let store = Store::open_at(Path::new("/tmp/raw-retention"), state.path()).unwrap();
+    let now = now_ms();
+    for (source, ts) in [
+        ("run:old", now - 8 * 86_400_000),
+        ("run:cutoff", now - SEVEN_DAYS_MS),
+        ("run:before-cutoff", now - SEVEN_DAYS_MS - 1),
+        ("run:new", now),
+    ] {
+        store
+            .record_raw_fallback(source, &format!("{source} output"), Some(ts))
+            .unwrap();
+    }
+    store.retain(now).unwrap();
+    let latest = |source: &str| store.latest_raw_fallback(source).unwrap();
+    assert_eq!(latest("run:old"), None);
+    assert_eq!(latest("run:before-cutoff"), None, "one millisecond too old");
+    assert_eq!(
+        latest("run:cutoff").as_deref(),
+        Some("run:cutoff output"),
+        "exactly seven days old is kept"
+    );
+    assert_eq!(latest("run:new").as_deref(), Some("run:new output"));
+    // Two rows survive; 198 more make exactly 200 and keep the oldest.
+    for n in 0..198 {
+        store
+            .record_raw_fallback("run:many", &format!("output {n}"), Some(now))
+            .unwrap();
+    }
+    store.retain(now).unwrap();
+    assert_eq!(latest("run:many").as_deref(), Some("output 197"));
+    assert_eq!(
+        latest("run:cutoff").as_deref(),
+        Some("run:cutoff output"),
+        "the oldest row stays at 200 rows"
+    );
+    store
+        .record_raw_fallback("run:many", "output 198", Some(now))
+        .unwrap();
+    store.retain(now).unwrap();
+    assert_eq!(
+        latest("run:cutoff"),
+        None,
+        "the oldest row goes at 201 rows"
+    );
+    assert_eq!(latest("run:new").as_deref(), Some("run:new output"));
+    assert_eq!(latest("run:many").as_deref(), Some("output 198"));
+}
+
+#[test]
 fn state_root_prefers_sniper_root_then_xdg_then_home_skipping_empty_values() {
     use pixel_session::store::state_root_from;
     let lookup = |pairs: &'static [(&'static str, &'static str)]| {
