@@ -569,15 +569,22 @@ Scopes are crate short names or areas: `proto`, `graph`, `metrics`,
 `feat(graph): add Ruby (Rails-oriented) tree-sitter extraction`,
 `fix: restore install/doctor/uninstall after dependabot merge conflict`.
 
-Pull request body, in this order (`.github/pull_request_template.md`
-pre-fills it):
+Pull request body: fill [`.github/pull_request_template.md`](.github/pull_request_template.md),
+which GitHub pre-fills, section by section (agents follow
+[`.agents/skills/pr/`](.agents/skills/pr/SKILL.md)):
 
 0. `Closes #<number>` on the first line, naming the issue the PR resolves.
-1. **What** changed, one paragraph.
-2. **Why**, including the user-visible effect or the bug reproduced.
-3. **How it was verified**: paste the gate commands you ran and their
-   result. State explicitly what was *not* run (for example the musl
-   cross-build or the smoke test).
+1. **Summary**: what changed and why in one or two sentences, plus, when it
+   helps, the smallest sketch (a call tree from `pixel impact`, a file tree,
+   pseudocode), as a `diff` when the shape already exists.
+2. **Evidence**: before and after, each with its command: the test that
+   fails without the change and passes with it, or the output that moved.
+   Say what CI ran, which local checks you chose, and what was *not* run
+   (for example the musl cross-build or the smoke test).
+3. **Merge Danger**: the **door** (two-way when a revert restores every
+   user's state; one-way for an `EXTRACTOR_VERSION` or `PROTOCOL_VERSION`
+   bump, a file format under `.pixel/`, what `pixel install` writes, a
+   release tag) and the **blast radius** (who a bad merge breaks).
 4. **Docs touched**: `changelog.d/`, `ARCHITECTURE.md`, agent prompt, README.
 
 Keep PRs to one concern. A change over roughly 400 lines of diff or mixing

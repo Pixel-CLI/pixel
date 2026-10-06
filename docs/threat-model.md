@@ -571,8 +571,8 @@ boundary it crosses.
   replaces an analysis.
 - **Status**: Partial.
 - **Residual**: Rust CodeQL findings may be discovered after merge; triage
-  them before the next release. Any pull request body can name `Task <n>`
-  and move that issue's board status; workflows that compile pull-request code on the
+  them before the next release. Any pull request can link an issue with a
+  closing keyword (`Closes #<n>`) and move that issue's board status; workflows that compile pull-request code on the
   persistent self-hosted runner depend on that runner's isolation, which is
   an operational control outside this repository.
 
