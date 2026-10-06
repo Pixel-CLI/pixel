@@ -36,6 +36,9 @@ mod ai_cli_readify;
 mod audit_cmd;
 mod call_guard;
 mod classify;
+mod classify_eval;
+mod classify_history;
+mod classify_history_cmd;
 mod classify_setup;
 mod config_cmd;
 mod config_file;
@@ -797,6 +800,21 @@ enum Command {
     /// network-bound; `--remote-preset` picks the provider. `--jsonl`
     /// serves one decision per stdin line.
     Classify(classify::ClassifyOptions),
+    /// Offline go/no-go evaluation of the verified-history retrieval tier
+    /// against frozen baselines. Reports per-label precision/recall, macro
+    /// scores, confusion matrix, coverage-vs-error curves with Wilson CIs,
+    /// and system metrics. Exits 0 on go, 1 on no-go.
+    ClassifyEval {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage the verified-history store: list, add, remove, correct, or
+    /// clear stored examples. The store is a bounded project-local file
+    /// under `.pixel/classify-history.jsonl`.
+    ClassifyHistory {
+        #[command(subcommand)]
+        cmd: ClassifyHistoryCmd,
+    },
     /// Deterministic web lookup for terms the index cannot know — the
     /// refine step of a gated `pixel plan`. No LLM, no daemon.
     WebSearch {
@@ -1518,6 +1536,33 @@ enum EvaluateCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ClassifyHistoryCmd {
+    /// List all stored history entries.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a verified example to the store.
+    Add {
+        text: String,
+        label: String,
+        #[arg(long, default_value = "human-verified")]
+        source: String,
+    },
+    /// Remove an entry by ID.
+    Remove { id: String },
+    /// Correct an entry's label (supersedes the old entry).
+    Correct {
+        id: String,
+        label: String,
+        #[arg(long, default_value = "human-verified")]
+        source: String,
+    },
+    /// Clear all entries from the store.
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -5913,6 +5958,11 @@ fn run_command(
         Command::Recall { cmd } => recall_cmd::run_recall(cmd),
         Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
         Command::Classify(options) => classify::run(options),
+        Command::ClassifyEval { json } => {
+            classify_eval::run(classify_eval::ClassifyEvalOptions { json });
+            Ok(())
+        }
+        Command::ClassifyHistory { cmd } => classify_history_cmd::run_classify_history(cmd),
         Command::WebSearch { query, limit, json } => {
             web_search::run(web_search::WebSearchOptions { query, limit, json })
         }
