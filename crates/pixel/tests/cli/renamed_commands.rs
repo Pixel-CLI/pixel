@@ -247,8 +247,12 @@ fn migrate_is_a_hidden_no_op_that_exits_zero() {
 /// before the rename. Frozen here because CI checks out without tags.
 const PROMPT_0_2_4: &str = include_str!("fixtures/agent-prompt-0.2.4.md");
 
+/// No host reads a deployed Pixel prompt any more, so the copy every
+/// pre-rename install left is not judged for its vocabulary: it is a retired
+/// file, red until `pixel install` removes it, and the checks that dry-ran its
+/// commands (`rule.parity`, `rule.scenarios`) are gone with it.
 #[test]
-fn doctor_accepts_the_agent_prompt_every_pre_rename_install_deployed() {
+fn doctor_names_the_agent_prompt_every_pre_rename_install_deployed_as_retired() {
     assert!(
         PROMPT_0_2_4.contains("pixel targets") && !PROMPT_0_2_4.contains("pixel scope-task"),
         "the fixture must be the pre-rename vocabulary"
@@ -266,15 +270,25 @@ fn doctor_accepts_the_agent_prompt_every_pre_rename_install_deployed() {
     );
     let report: serde_json::Value = serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|e| panic!("doctor --json ({e}): {out:?}"));
-    for id in ["rule.parity", "rule.scenarios"] {
-        let check = report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["id"] == id)
-            .unwrap_or_else(|| panic!("{id} missing: {report}"));
-        // Other checks legitimately fail in a bare HOME; these two judge
-        // only whether the deployed prompt still matches the binary.
-        assert_eq!(check["status"], "green", "{id}: {check}");
+    let checks = report["checks"].as_array().unwrap();
+    let find = |id: &str| checks.iter().find(|c| c["id"] == id);
+    for retired in ["rule.parity", "rule.scenarios", "install.subagent-prompt"] {
+        assert!(find(retired).is_none(), "{retired}: {report}");
     }
+    let prompt = find("install.agent-prompt").unwrap_or_else(|| panic!("{report}"));
+    assert_eq!(prompt["status"], "red", "{prompt}");
+    assert_eq!(
+        prompt["reason"],
+        format!(
+            "retired Pixel prompt file(s) remain: {} — run `pixel install` to remove them",
+            prompts.join("agent-prompt.md").display()
+        ),
+        "{prompt}"
+    );
+    assert_eq!(prompt["fix"], "pixel install --shell fish", "{prompt}");
+    assert_eq!(
+        std::fs::read_to_string(prompts.join("agent-prompt.md")).unwrap(),
+        PROMPT_0_2_4,
+        "doctor without --fix leaves the file"
+    );
 }

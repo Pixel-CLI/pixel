@@ -9,10 +9,12 @@
 //! an unset layer defaults to on. `--metrics=off` and `PIXEL_METRICS=0`
 //! still veto a single invocation above every file layer.
 //!
-//! The `policy` key says what the guard does when a coding agent reaches for
-//! native retrieval instead of Pixel: `advisory` (suggest, never deny, the
-//! default), `enforce` (deny supported native retrieval in Codex,
-//! Antigravity, Devin and Pi), or `off` (no decisions, no rewrites).
+//! The `policy` key says what a Pixel guard hook does when a coding agent
+//! reaches for native retrieval: `advisory` (the default) and `off` leave
+//! every native call untouched, with no rewrite, suggestion or approval;
+//! `enforce` rewrites or denies supported native retrieval, and only on a
+//! host whose guard hook the user wired by hand, since `pixel install`
+//! registers none. Codex and Claude retrieval stays native in every mode.
 //! `PIXEL_POLICY` overrides it for one environment, and the legacy
 //! `PIXEL_TARGETS_GUARD=0` kill switch still forces `off`.
 //!
@@ -66,9 +68,10 @@ fn feature_resolution(root: Option<&Path>, key: &str, env: &str) -> (bool, Strin
 /// value, and the `pixel config policy` argument.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 pub enum PolicyMode {
-    /// Suggest Pixel and keep every native tool call (the default).
+    /// Keep every native tool call: no rewrite, suggestion or approval (the default).
     Advisory,
-    /// Deny supported native retrieval on Codex, Antigravity, Devin and Pi;
+    /// Rewrite or deny supported native retrieval through a guard hook wired
+    /// by hand (`pixel install` registers none); Codex, Claude and
     /// unsupported shapes stay native.
     Enforce,
     /// No policy decisions and no rewrites.
@@ -719,9 +722,12 @@ fn setup_with_keys(
         ),
         (
             "task_context",
-            "Suggest relevant code when an agent receives a prompt?",
+            "Suggest relevant code when an agent receives a prompt (enforce policy only)?",
         ),
-        ("task_boundary", "Detect task changes in agent prompts?"),
+        (
+            "task_boundary",
+            "Detect task changes in agent prompts (hand-wired prompt hook only)?",
+        ),
     ] {
         let current = doc.get(key).and_then(Value::as_bool).unwrap_or(true);
         let Some(value) = ask_bool(input, output, label, current, keys, color)? else {
@@ -732,7 +738,7 @@ fn setup_with_keys(
     let Some(enforce) = ask_bool(
         input,
         output,
-        "Enforce Pixel retrieval in coding agents (deny native search)?",
+        "Enforce Pixel retrieval through hand-wired guard hooks (rewrite or deny native search)?",
         doc.get("policy").and_then(Value::as_str) == Some(PolicyMode::Enforce.as_str()),
         keys,
         color,
@@ -1225,6 +1231,10 @@ fn run_metrics_with(
     }
 }
 
+/// Printed when `enforce` is set: the hosts it cannot reach, so a success
+/// message is never read as enforcement everywhere.
+const ENFORCE_SCOPE_NOTE: &str = "note: enforce acts only through a `pixel run-hook guard` you wire into an agent yourself; `pixel install` registers none, and Codex and Claude keep native retrieval under every policy";
+
 /// `pixel config policy [advisory|enforce|off] [--global] [--json]`: without
 /// a value, report the effective policy and the layer that set it; with one,
 /// persist it to the chosen layer. `--json` is the Pi extension's
@@ -1272,6 +1282,9 @@ pub fn run_policy(
                 doc["policy"] = Value::String(mode.as_str().to_string());
             })?;
             println!("policy: {} — wrote {}", mode.as_str(), target.display());
+            if mode == PolicyMode::Enforce {
+                println!("{ENFORCE_SCOPE_NOTE}");
+            }
             Ok(())
         }
     }

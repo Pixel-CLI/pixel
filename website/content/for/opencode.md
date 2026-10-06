@@ -1,6 +1,6 @@
 ---
 title: "Pixel for OpenCode"
-description: "What pixel install writes into OpenCode's global AGENTS.md, how to check the wiring and how to remove it."
+description: "OpenCode keeps its native tools: what pixel install removes from its global AGENTS.md and plugins, and how pixel doctor checks that nothing of Pixel's is left."
 agent: "opencode"
 ---
 

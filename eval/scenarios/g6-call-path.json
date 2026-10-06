@@ -1,0 +1,20 @@
+{
+  "id": "g6-call-path",
+  "prompt": "In apps/notion-to-ghost, trace the call path from the transfer API route's POST handler to GhostClient.findPostsByTitle. Give the ordered internal functions between them and the repository-relative source file for each hop. What Ghost SDK call does findPostsByTitle make? Do not modify files or contact external services.",
+  "must": [
+    {"pattern": "apps/notion-to-ghost/src/app/api/transfer/route.ts", "points": 2},
+    {"pattern": "apps/notion-to-ghost/src/lib/integration.ts", "points": 2},
+    {"pattern": "apps/notion-to-ghost/src/lib/ghost.ts", "points": 2},
+    {"pattern": "POST", "points": 1},
+    {"pattern": "transferPageToGhost", "points": 2},
+    {"pattern": "findPostsByTitle", "points": 2},
+    {"pattern": "posts\\.browse", "points": 2}
+  ],
+  "never": [],
+  "semantic_review": {
+    "criteria": [
+      "Names POST, transferPageToGhost and findPostsByTitle in call order, with the source file for each internal hop.",
+      "States that findPostsByTitle calls this.api.posts.browse, with source citations."
+    ]
+  }
+}

@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Devin"
-description: "Pixel reaches Devin as a plugin, and pixel install --repo adds a guard to one repository: how to add both, how to check them and how to remove them."
+description: "Pixel reaches Devin as an optional plugin; pixel install writes nothing for it and removes the hooks earlier releases wrote: how to add the plugin, check it and remove it."
 agent: "devin"
 ---
 

@@ -7,12 +7,12 @@
 # native plugin mechanism (ponytail-style).
 #
 # Sources of truth:
-#   crates/pixel-install/assets/pixel-agent-prompt.md     → every rules/skill surface + PIXEL.md
+#   crates/pixel-install/assets/pixel-agent-prompt.md     → legacy prompt and rule surfaces
 #   crates/pixel-install/assets/pixel-subagent-prompt.md  → PIXEL-SUBAGENT.md
+#   assets/plugin-skills/pixel-impact/                   → focused plugin skill
 #
-# The plugin hook (hooks/pixel-context.sh) injects PIXEL.md at SessionStart
-# and PIXEL-SUBAGENT.md at SubagentStart, the same split `pixel install`
-# makes between the agent and the sub-agent prompt.
+# The Codex and Claude manifests do not register retrieval-prompt hooks.
+# hooks/plugin-hooks.json remains an explicit opt-in legacy integration.
 #
 # Usage:
 #   scripts/gen-plugin-assets.sh          # write all derived files
@@ -22,15 +22,27 @@ set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 SRC="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
 SUB_SRC="$ROOT/crates/pixel-install/assets/pixel-subagent-prompt.md"
+PI_IMPACT_SRC="$ROOT/crates/pixel-install/assets/pi-impact.ts"
+SKILL_SRC="$ROOT/assets/plugin-skills/pixel-impact/SKILL.md"
+SKILL_CODEX_META="$ROOT/assets/plugin-skills/pixel-impact/agents/openai.yaml"
 VERSION=$(grep -m1 '^version' "$ROOT/crates/pixel/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')
 
 [ -f "$SRC" ] || { echo "missing $SRC" >&2; exit 1; }
 [ -f "$SUB_SRC" ] || { echo "missing $SUB_SRC" >&2; exit 1; }
+[ -f "$PI_IMPACT_SRC" ] || { echo "missing $PI_IMPACT_SRC" >&2; exit 1; }
+[ -f "$SKILL_SRC" ] || { echo "missing $SKILL_SRC" >&2; exit 1; }
+[ -f "$SKILL_CODEX_META" ] || { echo "missing $SKILL_CODEX_META" >&2; exit 1; }
 
 # Every derived file, relative to the output root.
-FILES="skills/pixel/SKILL.md .agents/skills/pixel/SKILL.md .openclaw/skills/pixel/SKILL.md .cursor/rules/pixel.mdc
+FILES="skills/pixel-impact/SKILL.md skills/pixel-impact/agents/openai.yaml
+claude-skills/pixel-impact/SKILL.md
+pi/extensions/pixel-impact.ts
+.openclaw/skills/pixel/SKILL.md
+.cursor/rules/pixel.mdc
 .windsurf/rules/pixel.md .kiro/steering/pixel.md .qoder/rules/pixel.md .clinerules/pixel.md
 rules/pixel.md PIXEL.md PIXEL-SUBAGENT.md"
+RETIRED_FILES="skills/pixel/SKILL.md .agents/skills/pixel/SKILL.md
+.agents/skills/pixel-impact/SKILL.md .agents/skills/pixel-impact/agents/openai.yaml"
 
 # --check mode: render into a scratch dir and compare, without rewriting.
 if [ "${1:-}" = "--check" ]; then
@@ -44,12 +56,30 @@ if [ "${1:-}" = "--check" ]; then
       stale=1
     fi
   done
+  for f in $RETIRED_FILES; do
+    if [ -e "$ROOT/$f" ] || [ -L "$ROOT/$f" ]; then
+      echo "STALE (retired): $f"
+      stale=1
+    fi
+  done
   [ "$stale" -eq 0 ] && echo "plugin assets in sync (v$VERSION)"
   exit "$stale"
 fi
 
 # OUT_ROOT lets --check render into a scratch dir; default is the repo root.
 OUT_ROOT=${OUT_ROOT:-$ROOT}
+
+# Remove only the pilot's retired generated skills. `rmdir` keeps
+# any neighboring user files and non-empty directories intact.
+for f in $RETIRED_FILES; do
+  retired="$OUT_ROOT/$f"
+  if [ -e "$retired" ] || [ -L "$retired" ]; then
+    rm -f "$retired"
+    parent=$(dirname "$retired")
+    rmdir "$parent" 2>/dev/null || :
+    rmdir "$(dirname "$parent")" 2>/dev/null || :
+  fi
+done
 
 # Header of every agent surface. A plugin can reach a machine without the
 # binary; the agent must not fetch and run an installer on its own.
@@ -85,7 +115,30 @@ write_file() { # $1 = rel path, $2 = frontmatter (may be empty), $3 = source, $4
   echo "wrote $1"
 }
 
-SKILL_FRONT='---
+write_claude_skill() { # $1 = rel path; adds Claude's explicit-invocation metadata to the curated skill
+  dest="$OUT_ROOT/$1"
+  mkdir -p "$(dirname "$dest")"
+  tmp="${dest}.tmp.$$"
+  awk 'NR == 1 { print; print "disable-model-invocation: true"; next } { print }' "$SKILL_SRC" >"$tmp"
+  mv "$tmp" "$dest"
+  echo "wrote $1"
+}
+
+write_pi_extension() {
+  dest="$OUT_ROOT/pi/extensions/pixel-impact.ts"
+  mkdir -p "$(dirname "$dest")"
+  tmp="${dest}.tmp.$$"
+  sed \
+    -e 's/const PIXEL_BIN = __PIXEL_BIN__;/const PIXEL_BIN = "pixel";/' \
+    -e '/^\/\/ __MANAGED_BEGIN__$/d' \
+    -e '/^\/\/ __MANAGED_END__$/d' \
+    "$PI_IMPACT_SRC" >"$tmp"
+  mv "$tmp" "$dest"
+  echo "wrote pi/extensions/pixel-impact.ts"
+}
+
+# OpenClaw is outside this pilot and retains its existing profile.
+OPENCLAW_SKILL_FRONT='---
 name: pixel
 description: >
   Deterministic code retrieval: indexed search, concept resolve, impact
@@ -108,9 +161,11 @@ trigger: always_on
 ---
 '
 
-write_file "skills/pixel/SKILL.md"            "$SKILL_FRONT"  "$SRC" yes
-write_file ".agents/skills/pixel/SKILL.md"    "$SKILL_FRONT"  "$SRC" yes
-write_file ".openclaw/skills/pixel/SKILL.md"  "$SKILL_FRONT"  "$SRC" yes
+write_file "skills/pixel-impact/SKILL.md" "" "$SKILL_SRC" no
+write_file "skills/pixel-impact/agents/openai.yaml" "" "$SKILL_CODEX_META" no
+write_claude_skill "claude-skills/pixel-impact/SKILL.md"
+write_pi_extension
+write_file ".openclaw/skills/pixel/SKILL.md" "$OPENCLAW_SKILL_FRONT" "$SRC" yes
 write_file ".cursor/rules/pixel.mdc"          "$CURSOR_FRONT" "$SRC" yes
 write_file ".windsurf/rules/pixel.md"         ""              "$SRC" yes
 write_file ".kiro/steering/pixel.md"          ""              "$SRC" yes

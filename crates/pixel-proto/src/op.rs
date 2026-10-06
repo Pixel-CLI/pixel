@@ -491,11 +491,9 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
 /// scenario-consistency check can compare the installed rule text against
 /// exactly what the binary injects.
 ///
-/// Must name every mandatory scenario: targets (mandatory first call,
-/// advisory fence — the guard warns on out-of-scope files rather than
-/// silently allowing drift), resolve, rescue/excavate, reconcile, and
-/// impact/changes (blast radius before edits).
-pub const SESSION_USAGE: &str = "pixel is the unified retrieval + git engine. Use `pixel <verb>` for search, resolve, targets, history, and safe git ops. Five mandatory scenarios: (1) `pixel scope-task \"<task>\"` — mandatory first call before the first file read (advisory fence: the guard warns on out-of-list files); (2) `pixel find-code \"<phrase>\"` before any free-text search; (3) `pixel plan-rollback`/`pixel dig-history` the moment code was working before; (4) `pixel sync-branch` for any branch sync; (5) `pixel impact <symbol>` before editing any symbol and `pixel what-changed` before any edit batch — measure the blast radius before edits.";
+/// Describes what Pixel offers without directing the agent: native tools
+/// stay the default, and Pixel is one option among them.
+pub const SESSION_USAGE: &str = "pixel offers deterministic repository retrieval and git commands: `pixel search-content`, `pixel find-code`, `pixel impact <symbol>` for callers and blast radius, `pixel dig-history` for past code, and `pixel what-changed`. Use one when it answers a question faster than your native tools; native search and reads remain available. `pixel --help` lists every command.";
 
 #[cfg(test)]
 mod tests {
@@ -951,21 +949,23 @@ mod tests {
     }
 
     #[test]
-    fn session_usage_names_all_five_mandatory_scenarios() {
-        for scenario in [
-            "scope-task",
+    fn session_usage_describes_pixel_without_mandating_it() {
+        for command in [
+            "search-content",
             "find-code",
-            "plan-rollback",
-            "sync-branch",
             "impact",
+            "dig-history",
             "what-changed",
         ] {
+            assert!(SESSION_USAGE.contains(command), "{command}");
+        }
+        for directive in ["mandatory", "must", "before any", "before editing"] {
             assert!(
-                SESSION_USAGE.contains(scenario),
-                "SESSION_USAGE must name the mandatory scenario '{scenario}' — \
-                 an injected session that never hears about a scenario will never use it"
+                !SESSION_USAGE.contains(directive),
+                "SESSION_USAGE must not direct the agent: {directive}"
             );
         }
+        assert!(SESSION_USAGE.contains("native search and reads remain available"));
     }
 
     #[test]

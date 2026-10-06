@@ -228,13 +228,23 @@ class UnitContracts(unittest.TestCase):
     def test_the_real_corpus_is_sound(self):
         shallow = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
                                  capture_output=True, text=True).stdout.strip() == "true"
-        argv = [sys.executable, str(EVAL / "lib/scenario.py"), "check", str(EVAL / "scenarios"), str(EVAL / "heldout")]
-        if not shallow:
-            argv.append(str(ROOT))   # also: every pinned commit exists and holds no answer
-        result = subprocess.run(argv, capture_output=True, text=True)
+        check = [sys.executable, str(EVAL / "lib/scenario.py"), "check"]
+        # Generic arena scenarios pin foreign repositories; their commits do
+        # not belong to Pixel's object graph and are checked against their own
+        # snapshots. Only Pixel's ab626 suite is reachable from ROOT here.
+        result = subprocess.run([*check, str(EVAL / "scenarios"), str(EVAL / "heldout")],
+                                capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         suite = subprocess.run([sys.executable, str(EVAL / "lib/scenario.py"), "list", str(EVAL / "scenarios"), "ab626"],
                                capture_output=True, text=True, check=True).stdout.split()
+        if not shallow:
+            with tempfile.TemporaryDirectory() as scenario_dir:
+                for scenario_id in suite:
+                    shutil.copyfile(EVAL / "scenarios" / f"{scenario_id}.json",
+                                    Path(scenario_dir) / f"{scenario_id}.json")
+                result = subprocess.run([*check, scenario_dir, str(EVAL / "heldout"), str(ROOT)],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         classes = {json.loads((EVAL / "scenarios" / f"{s}.json").read_text())["task_class"] for s in suite}
         self.assertEqual(len(suite), 14, suite)
         self.assertEqual(classes, set(scenario.TASK_CLASSES), "every task class has a scenario")

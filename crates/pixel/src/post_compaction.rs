@@ -48,6 +48,11 @@ fn read_payload(reader: impl Read, cap: u64) -> Option<String> {
 /// payload from stdin. Never returns an `Err` as exit 1 — every failure
 /// path is a silent exit 0 (compaction proceeds normally).
 pub fn run(provider: Option<crate::guard::Provider>) -> ! {
+    // Codex receives no saved target manifest as unsolicited context. Its
+    // optional impact capability is invoked explicitly through the plugin.
+    if matches!(provider, Some(crate::guard::Provider::Codex)) {
+        std::process::exit(0);
+    }
     // An imported Claude entry re-injects the Claude session packet keyed by
     // the payload's session id — under an importing host that id belongs to
     // the other harness, so the entry either injects nothing or, on an id

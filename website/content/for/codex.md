@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Codex"
-description: "What pixel install writes into Codex's config.toml and hooks.json, the per-repository guard, the plugin alternative, how to check the wiring and how to remove it."
+description: "What pixel install writes into Codex's config.toml and hooks.json, the per-repository cleanup, the plugin alternative, how to check the wiring and how to remove it."
 agent: "codex"
 ---
 

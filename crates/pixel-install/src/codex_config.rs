@@ -11,18 +11,16 @@
 //! bundled binary, the VS Code extension, `spawn_agent` sub-agents — where a
 //! shell function only fronts interactive shells that sourced the profile.
 //!
-//! Codex 0.154 has no file-backed variant of the key, so the prompt is
-//! embedded in the file as a TOML literal multi-line string. The value is
-//! managed the way the Markdown agent configs were: the Pixel prompt sits
-//! between [`config::MANAGED_BEGIN`] and [`config::MANAGED_END`] marker
-//! lines, and text the user keeps outside the markers survives every
-//! `pixel install`. The rest of the file is rewritten by `toml_edit` with its
-//! formatting and comments preserved, because the desktop app writes to the
-//! same file.
+//! Older versions embedded Pixel's prompt in the value between
+//! [`config::MANAGED_BEGIN`] and [`config::MANAGED_END`]. Installation now
+//! removes only that retired block, preserving user-owned instructions and
+//! the rest of the TOML file.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde_json::{Value as JsonValue, json};
+use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, Value};
 
 use crate::config::{MANAGED_BEGIN, MANAGED_END};
@@ -40,13 +38,13 @@ pub const CODEX_CONFIG_FILE: &str = "config.toml";
 /// home-relative.)
 pub const HOOKS_FILE: &str = "hooks.json";
 
-/// Substring unique to the installed metrics-relay command, used for
-/// idempotent merge and uninstall removal.
+/// Legacy marker for a Codex metrics callback, used in doctor diagnostics.
 pub const METRICS_HOOK_MARKER: &str = "run-hook metrics";
 pub const PROMPT_SUBMIT_HOOK_MARKER: &str = "run-hook prompt-submit --provider codex";
 
 /// The agent prompt as bundled in the binary.
-pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
+#[cfg(test)]
+const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
 
 /// The Codex home directory: `$CODEX_HOME` when the caller did not pin a
 /// home directory (a real `pixel install`, where Codex itself honours the
@@ -62,17 +60,23 @@ pub(crate) fn codex_home(home: &Path, home_was_explicit: bool) -> PathBuf {
     home.join(".codex")
 }
 
-/// The managed block exactly as `pixel install` embeds it: markers on their
-/// own lines around the bundled prompt.
-pub(crate) fn managed_block() -> String {
+/// A legacy block fixture for cleanup tests.
+#[cfg(test)]
+fn managed_block() -> String {
     format!("{MANAGED_BEGIN}\n{AGENT_PROMPT_ASSET}{MANAGED_END}\n")
 }
 
 /// Byte range of the managed block inside a `developer_instructions` value,
 /// from the begin marker to the end of the line holding the end marker.
 fn managed_range(value: &str) -> Option<std::ops::Range<usize>> {
+    if value.matches(MANAGED_BEGIN).count() != 1 || value.matches(MANAGED_END).count() != 1 {
+        return None;
+    }
     let start = value.find(MANAGED_BEGIN)?;
     let end_marker = start + value[start..].find(MANAGED_END)?;
+    if start >= end_marker || value[start..end_marker].contains('\r') {
+        return None;
+    }
     let mut end = end_marker + MANAGED_END.len();
     if value[end..].starts_with('\n') {
         end += 1;
@@ -83,7 +87,8 @@ fn managed_range(value: &str) -> Option<std::ops::Range<usize>> {
 /// The value `pixel install` writes for a current value of `existing`:
 /// the block replaces a previous one in place, or is appended after the
 /// user's own text, separated by a blank line.
-pub(crate) fn merged_value(existing: Option<&str>) -> String {
+#[cfg(test)]
+fn merged_value(existing: Option<&str>) -> String {
     let block = managed_block();
     match existing {
         None => block,
@@ -166,91 +171,6 @@ fn write_document(path: &Path, doc: &DocumentMut) -> Result<()> {
     Ok(())
 }
 
-/// `pixel install` step: put the managed block into `developer_instructions`.
-pub(crate) fn install_developer_instructions(
-    codex_home: &Path,
-    dry_run: bool,
-) -> Result<InstallStep> {
-    let path = codex_home.join(CODEX_CONFIG_FILE);
-    let detail = Some(format!(
-        "path={} key={DEVELOPER_INSTRUCTIONS_KEY}",
-        path.display()
-    ));
-    let step = |status, summary: String| InstallStep {
-        id: "codex-config".into(),
-        status,
-        summary,
-        detail: detail.clone(),
-    };
-    let mut doc = match read_document(&path) {
-        Ok(doc) => doc,
-        // A file Codex itself could not load is not ours to repair; a
-        // rewrite from a failed parse would drop whatever it holds.
-        Err(e) => return Ok(step(CheckStatus::Red, format!("{e} — not touched"))),
-    };
-    let existing = match current_value(&doc) {
-        Ok(existing) => existing,
-        Err(e) => return Ok(step(CheckStatus::Red, format!("{e} — not touched"))),
-    };
-    let wanted = merged_value(existing.as_deref());
-    if existing.as_deref() == Some(wanted.as_str()) {
-        return Ok(step(
-            CheckStatus::Green,
-            format!(
-                "verified {DEVELOPER_INSTRUCTIONS_KEY} in {}",
-                path.display()
-            ),
-        ));
-    }
-    let kept_user_text = wanted != managed_block();
-    let verb = match &existing {
-        None => "installed",
-        Some(current) if managed_range(current).is_some() => "updated",
-        Some(_) => "appended",
-    };
-    let summary = format!(
-        "{} {DEVELOPER_INSTRUCTIONS_KEY} in {}{}",
-        verb,
-        path.display(),
-        if kept_user_text {
-            ", keeping the text outside the pixel markers"
-        } else {
-            ""
-        }
-    );
-    if dry_run {
-        return Ok(step(CheckStatus::Green, dry_run_summary(true, &summary)));
-    }
-    doc[DEVELOPER_INSTRUCTIONS_KEY] = Item::Value(string_value(&wanted));
-    write_document(&path, &doc)?;
-    Ok(step(CheckStatus::Green, summary))
-}
-
-/// The PostToolUse entry `pixel install` merges into `hooks.json`: Codex
-/// runs it after every tool call; `pixel run-hook metrics` self-filters to
-/// shell calls that invoked `pixel` and re-emits the finalized 🟩 line as
-/// `additionalContext` — a fallback for the rare host whose tool result
-/// drops the merged stderr Codex's exec layer normally carries.
-fn metrics_hook_entry(exe: &Path) -> serde_json::Value {
-    serde_json::json!({
-        "hooks": [{
-            "type": "command",
-            "command": format!("{} run-hook metrics --provider codex", crate::routing::quoted_executable(exe)),
-            "timeout": 10,
-        }]
-    })
-}
-
-fn prompt_submit_hook_entry(exe: &Path) -> serde_json::Value {
-    serde_json::json!({
-        "hooks": [{
-            "type": "command",
-            "command": format!("{} run-hook prompt-submit --provider codex", crate::routing::quoted_executable(exe)),
-            "timeout": 10,
-        }]
-    })
-}
-
 fn read_hooks(path: &Path) -> std::result::Result<serde_json::Value, String> {
     match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
@@ -273,20 +193,25 @@ fn write_hooks(path: &Path, value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// `pixel install` step: register Codex's metrics relay and task-boundary
-/// context hooks, idempotently alongside existing hook groups.
-pub(crate) fn install_metrics_hook(
+fn is_retired_codex_hook(command: &str, exe: &Path) -> bool {
+    crate::routing::pixel_hook_verb(command, exe)
+        .is_some_and(|verb| !verb.starts_with("task-event --provider codex --event "))
+}
+
+/// `pixel install` step: keep Codex's task-event lifecycle hooks installed,
+/// removing the retired automatic metrics and retrieval guidance hooks.
+pub(crate) fn install_task_hooks(
     codex_home: &Path,
     exe: &Path,
     dry_run: bool,
 ) -> Result<InstallStep> {
     let path = codex_home.join(HOOKS_FILE);
     let detail = Some(format!(
-        "path={} events=PostToolUse,UserPromptSubmit markers={METRICS_HOOK_MARKER},{PROMPT_SUBMIT_HOOK_MARKER}",
+        "path={} task-event lifecycle hooks; automatic metrics and retrieval hooks disabled",
         path.display()
     ));
     let step = |status, summary: String| InstallStep {
-        id: "codex-metrics-hook".into(),
+        id: "codex-task-hooks".into(),
         status,
         summary,
         detail: detail.clone(),
@@ -309,18 +234,7 @@ pub(crate) fn install_metrics_hook(
         ));
     };
     let before = hooks.clone();
-    let merged_metrics = crate::config::merge_hook_entry(
-        hooks.get("PostToolUse"),
-        METRICS_HOOK_MARKER,
-        metrics_hook_entry(exe),
-    );
-    let merged_prompt = crate::config::merge_hook_entry(
-        hooks.get("UserPromptSubmit"),
-        PROMPT_SUBMIT_HOOK_MARKER,
-        prompt_submit_hook_entry(exe),
-    );
-    hooks.insert("PostToolUse".to_string(), merged_metrics);
-    hooks.insert("UserPromptSubmit".to_string(), merged_prompt);
+    crate::routing::remove_matching_hooks(hooks, |command| is_retired_codex_hook(command, exe));
     if let Err(error) =
         crate::routing::merge_task_hooks(hooks, crate::routing::Provider::Codex, exe)
     {
@@ -329,14 +243,11 @@ pub(crate) fn install_metrics_hook(
     if *hooks == before {
         return Ok(step(
             CheckStatus::Green,
-            format!(
-                "verified metrics, prompt-submit and task hooks in {}",
-                path.display()
-            ),
+            format!("verified task-event hooks in {}", path.display()),
         ));
     }
     let summary = format!(
-        "{} metrics, prompt-submit and task hooks in {}",
+        "{} task-event hooks in {}",
         if path.is_file() {
             "updated"
         } else {
@@ -351,50 +262,47 @@ pub(crate) fn install_metrics_hook(
     Ok(step(CheckStatus::Green, summary))
 }
 
-/// `pixel doctor` check: both global Codex hooks are registered.
-pub(crate) fn check_metrics_hook(
+/// `pixel doctor` check: task-event hooks are registered without automatic
+/// retrieval or metrics hooks.
+pub(crate) fn check_task_hooks(
     codex_home: &Path,
+    exe: &Path,
 ) -> std::result::Result<(String, serde_json::Value), String> {
     let path = codex_home.join(HOOKS_FILE);
     let detail = serde_json::json!({
         "path": path.display().to_string(),
-        "events": ["PostToolUse", "UserPromptSubmit"],
-        "markers": [METRICS_HOOK_MARKER, PROMPT_SUBMIT_HOOK_MARKER],
+        "events": [
+            "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+            "Stop", "SessionEnd", "SubagentStart", "SubagentStop", "Interrupt"
+        ],
+        "retired_markers": [METRICS_HOOK_MARKER, PROMPT_SUBMIT_HOOK_MARKER],
     });
     let value = read_hooks(&path)?;
-    let has_marker = |event: &str, marker: &str| {
-        value
-            .get("hooks")
-            .and_then(|hooks| hooks.get(event))
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry
-                        .get("hooks")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|hooks| {
-                            hooks.iter().any(|hook| {
-                                hook.get("command")
-                                    .and_then(serde_json::Value::as_str)
-                                    .is_some_and(|command| command.contains(marker))
-                            })
-                        })
-                })
-            })
-    };
-    if !has_marker("PostToolUse", METRICS_HOOK_MARKER)
-        || !has_marker("UserPromptSubmit", PROMPT_SUBMIT_HOOK_MARKER)
-    {
+    let mut has_retired_pixel_hook = false;
+    if let Some(events) = value.get("hooks").and_then(serde_json::Value::as_object) {
+        for entries in events.values().filter_map(serde_json::Value::as_array) {
+            for entry in entries {
+                for hook in entry
+                    .get("hooks")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    has_retired_pixel_hook |= hook
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|command| is_retired_codex_hook(command, exe));
+                }
+            }
+        }
+    }
+    if has_retired_pixel_hook {
         return Err(format!(
-            "missing Pixel Codex hook in {} — run `pixel install`",
+            "retired automatic Pixel Codex hook remains in {} — run `pixel install`",
             path.display()
         ));
     }
-    if !crate::routing::task_hooks_registered(
-        &value,
-        crate::routing::Provider::Codex,
-        Path::new("pixel"),
-    ) {
+    if !crate::routing::task_hooks_registered(&value, crate::routing::Provider::Codex, exe) {
         return Err(format!(
             "task lifecycle hooks missing or asynchronous in {} — run `pixel install`",
             path.display()
@@ -402,7 +310,7 @@ pub(crate) fn check_metrics_hook(
     }
     Ok((
         format!(
-            "metrics, prompt-submit and task hooks registered in {} (runtime activity checked separately)",
+            "task-event hooks registered; automatic retrieval and metrics hooks absent in {}",
             path.display()
         ),
         detail,
@@ -436,16 +344,26 @@ pub(crate) fn remove_developer_instructions(
         Ok(doc) => doc,
         Err(e) => return Ok(step(CheckStatus::Red, format!("{e} — not touched"))),
     };
-    let Some(current) = current_value(&doc).ok().flatten() else {
+    let current = match current_value(&doc) {
+        Ok(Some(current)) => current,
+        Ok(None) => {
+            return Ok(step(
+                CheckStatus::Green,
+                dry_run_summary(dry_run, "no pixel block in codex config.toml — skipping"),
+            ));
+        }
+        Err(error) => return Ok(step(CheckStatus::Red, format!("{error} — not touched"))),
+    };
+    if !current.contains(MANAGED_BEGIN) && !current.contains(MANAGED_END) {
         return Ok(step(
             CheckStatus::Green,
             dry_run_summary(dry_run, "no pixel block in codex config.toml — skipping"),
         ));
-    };
+    }
     if managed_range(&current).is_none() {
         return Ok(step(
-            CheckStatus::Green,
-            dry_run_summary(dry_run, "no pixel block in codex config.toml — skipping"),
+            CheckStatus::Red,
+            format!("partial Pixel markers in {} — not touched", path.display()),
         ));
     }
     let summary = match value_without_block(&current) {
@@ -474,18 +392,15 @@ pub(crate) fn remove_developer_instructions(
     Ok(step(CheckStatus::Green, dry_run_summary(dry_run, &summary)))
 }
 
-/// `pixel doctor` check: the managed block is present and current.
-/// Whether `codex_home`'s config.toml holds pixel's begin marker in
-/// `developer_instructions`: the evidence that `pixel install` wrote there.
-/// A missing file, a missing key, or a value without the marker is none, so
-/// a project that keeps its own Codex config is not a broken install.
+/// `pixel doctor` check: no always-on Pixel block remains in the setting.
 ///
 /// # Errors
 ///
 /// The file cannot be read or parsed, or the key is not a string.
 pub(crate) fn carries_pixel_block(codex_home: &Path) -> std::result::Result<bool, String> {
     let doc = read_document(&codex_home.join(CODEX_CONFIG_FILE))?;
-    Ok(current_value(&doc)?.is_some_and(|value| value.contains(MANAGED_BEGIN)))
+    Ok(current_value(&doc)?
+        .is_some_and(|value| value.contains(MANAGED_BEGIN) || value.contains(MANAGED_END)))
 }
 
 /// The table Codex keeps its per-project settings in.
@@ -557,7 +472,7 @@ const TRUSTED_HASH_KEY: &str = "trusted_hash";
 
 /// The label Codex spells an event with in a `hooks.state` key
 /// (`hook_event_key_label` in codex-rs `hooks/src/lib.rs`).
-fn hook_event_label(event: &str) -> Option<&'static str> {
+pub(crate) fn hook_event_label(event: &str) -> Option<&'static str> {
     Some(match event {
         "PreToolUse" => "pre_tool_use",
         "PermissionRequest" => "permission_request",
@@ -580,19 +495,258 @@ fn hook_event_label(event: &str) -> Option<&'static str> {
 pub(crate) struct HookReview {
     /// Pixel hook handlers in the file, as `Event #group.handler`.
     pub pixel: Vec<String>,
-    /// The subset without a `trusted_hash` in Codex's config.
+    /// Handlers without an enabled state and exact trusted identity, or whose
+    /// configuration shape is not supported by the bounded verifier.
     pub unreviewed: Vec<String>,
 }
 
-/// Which of Pixel's hooks in `hooks_path` Codex will skip.
+/// Recompute the normalized identity Codex uses for its hook trust decision.
+/// Pixel's generated command shape is intentionally the supported boundary;
+/// unknown fields fail closed so an altered hook is never treated as approved.
+pub(crate) fn codex_hook_hash(
+    event: &str,
+    group: &JsonValue,
+    handler: &JsonValue,
+) -> Option<String> {
+    let label = hook_event_label(event)?;
+    let command = handler.get("command")?.as_str()?;
+    if handler.get("type")?.as_str()? != "command"
+        || handler
+            .as_object()?
+            .keys()
+            .any(|key| !matches!(key.as_str(), "type" | "command" | "timeout" | "async"))
+    {
+        return None;
+    }
+    let timeout = match handler.get("timeout") {
+        None => None,
+        Some(value) => Some(value.as_u64()?),
+    };
+    let timeout = match event {
+        "SessionEnd" | "Interrupt" => timeout.unwrap_or(1).clamp(1, 3),
+        _ => timeout.unwrap_or(600).max(1),
+    };
+    let is_async = match handler.get("async") {
+        None => false,
+        Some(value) => value.as_bool()?,
+    };
+    let matcher = match group.get("matcher") {
+        None => None,
+        Some(JsonValue::String(matcher)) => Some(matcher.clone()),
+        Some(_) => return None,
+    };
+    if group
+        .as_object()?
+        .keys()
+        .any(|key| !matches!(key.as_str(), "matcher" | "hooks"))
+    {
+        return None;
+    }
+
+    // Codex serializes `NormalizedHookIdentity { event_name, group }` where
+    // the group contains one normalized handler. `None` matcher/options are
+    // omitted by the TOML serializer before it fingerprints the JSON value.
+    let mut identity = json!({
+        "event_name": label,
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": timeout,
+            "async": is_async,
+        }],
+    });
+    if let Some(matcher) = matcher {
+        identity["matcher"] = JsonValue::String(matcher);
+    }
+    identity.sort_all_objects();
+    let serialized = serde_json::to_vec(&identity).ok()?;
+    let digest = Sha256::digest(serialized);
+    Some(format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+/// The `hooks.state` entries Codex may hold for one handler. Codex looks up
+/// the exact key `{source}:{event}:{group}:{handler}`, with `source` the
+/// hooks file's path as it resolved it: the path Pixel was given, or its
+/// canonical form when Codex canonicalized a symlinked `CODEX_HOME` or
+/// repository (`/var` -> `/private/var`). Only those two spellings are
+/// looked up, never another alias of the same file, and both are returned
+/// when both are recorded, so a caller can require every one to agree.
+fn hook_state_entries<'a>(
+    doc: &'a DocumentMut,
+    hooks_path: &Path,
+    event: &str,
+    group_index: usize,
+    handler_index: usize,
+) -> Vec<&'a Item> {
+    let Some(label) = hook_event_label(event) else {
+        return Vec::new();
+    };
+    let Some(states) = doc
+        .get("hooks")
+        .and_then(Item::as_table_like)
+        .and_then(|hooks| hooks.get(HOOK_STATE_TABLE))
+        .and_then(Item::as_table_like)
+    else {
+        return Vec::new();
+    };
+    let mut sources = vec![hooks_path.display().to_string()];
+    if let Ok(canonical) = hooks_path.canonicalize() {
+        let canonical = canonical.display().to_string();
+        if canonical != sources[0] {
+            sources.push(canonical);
+        }
+    }
+    sources
+        .iter()
+        .filter_map(|source| states.get(&format!("{source}:{label}:{group_index}:{handler_index}")))
+        .collect()
+}
+
+fn codex_hook_is_enabled_and_trusted(
+    doc: &DocumentMut,
+    hooks_path: &Path,
+    event: &str,
+    group_index: usize,
+    handler_index: usize,
+    group: &JsonValue,
+    handler: &JsonValue,
+) -> bool {
+    let Some(current_hash) = codex_hook_hash(event, group, handler) else {
+        return false;
+    };
+    // Whichever spelling Codex resolved, its entry must approve the hook:
+    // with both recorded, a stale or disabled one is not outvoted.
+    let states = hook_state_entries(doc, hooks_path, event, group_index, handler_index);
+    !states.is_empty()
+        && states.iter().all(|state| {
+            let Some(state) = state.as_table_like() else {
+                return false;
+            };
+            let enabled = match state.get("enabled") {
+                None => Some(true),
+                Some(value) => value.as_bool(),
+            };
+            enabled == Some(true)
+                && state
+                    .get(TRUSTED_HASH_KEY)
+                    .and_then(Item::as_str)
+                    .is_some_and(|trusted_hash| trusted_hash == current_hash)
+        })
+}
+
+fn matching_task_hook_is_approved(
+    groups: &[JsonValue],
+    doc: &DocumentMut,
+    hooks_path: &Path,
+    event: &str,
+    task_verb: &str,
+    exe: &Path,
+) -> bool {
+    groups.iter().enumerate().any(|(group_index, group)| {
+        if group.get("matcher").is_some() {
+            return false;
+        }
+        let Some(handlers) = group.get("hooks").and_then(JsonValue::as_array) else {
+            return false;
+        };
+        if handlers.len() != 1 {
+            return false;
+        }
+        let handler = &handlers[0];
+        let is_expected = handler
+            .get("command")
+            .and_then(JsonValue::as_str)
+            .and_then(|command| crate::routing::pixel_hook_verb(command, exe))
+            .is_some_and(|verb| verb == task_verb);
+        let is_synchronous = handler
+            .get("async")
+            .is_none_or(|value| value.as_bool() == Some(false));
+        let expected_timeout = if matches!(event, "SessionEnd" | "Interrupt") {
+            3
+        } else {
+            10
+        };
+        is_expected
+            && is_synchronous
+            && handler.get("timeout").and_then(JsonValue::as_u64) == Some(expected_timeout)
+            && codex_hook_is_enabled_and_trusted(
+                doc,
+                hooks_path,
+                event,
+                group_index,
+                0,
+                group,
+                handler,
+            )
+    })
+}
+
+/// Whether every generated global Codex task hook is enabled and still has
+/// the exact identity the user reviewed. Never writes Codex trust state.
+pub(crate) fn task_hook_suite_is_enabled_and_trusted(
+    codex_home: &Path,
+    hooks_path: &Path,
+    hooks: &JsonValue,
+    exe: &Path,
+) -> bool {
+    let Ok(doc) = read_document(&codex_home.join(CODEX_CONFIG_FILE)) else {
+        return false;
+    };
+    if let Some(profiles) = doc.get("profiles") {
+        let Some(profiles) = profiles.as_table_like() else {
+            return false;
+        };
+        if profiles.iter().next().is_some() {
+            return false;
+        }
+    }
+    // `[features] hooks = false` (or the older `codex_hooks` spelling) turns
+    // every hook off; an unreadable value does too.
+    if let Some(features) = doc.get("features") {
+        let Some(features) = features.as_table_like() else {
+            return false;
+        };
+        if let Some(enabled) = features
+            .get("hooks")
+            .or_else(|| features.get("codex_hooks"))
+            && enabled.as_bool() != Some(true)
+        {
+            return false;
+        }
+    }
+    crate::routing::TASK_HOOK_EVENTS
+        .iter()
+        .copied()
+        .chain(std::iter::once(("Interrupt", "interrupt")))
+        .all(|(event, name)| {
+            hooks
+                .get("hooks")
+                .and_then(|events| events.get(event))
+                .and_then(JsonValue::as_array)
+                .is_some_and(|groups| {
+                    matching_task_hook_is_approved(
+                        groups,
+                        &doc,
+                        hooks_path,
+                        event,
+                        &format!("task-event --provider codex --event {name}"),
+                        exe,
+                    )
+                })
+        })
+}
+
+/// Which Pixel hooks in `hooks_path` have enabled, verifiable current approval.
 ///
-/// Codex 0.159 runs a user or project hook only after the user reviewed it
-/// (`/hooks` in the TUI), which records `[hooks.state."<file>:<event>:<group>:
-/// <handler>"] trusted_hash = "sha256:…"` in `<codex_home>/config.toml`; an
-/// unreviewed hook is skipped without a message, even in `codex exec`. The
-/// hash is not recomputed here: a present `trusted_hash` counts as reviewed,
-/// so a hook Pixel rewrote after the review (Codex's `Modified` state) is not
-/// reported. The file part of the key is compared by canonical path.
+/// Codex runs an unmanaged hook only when it is enabled and the stored hash
+/// exactly matches its normalized event/group/handler identity. The key is
+/// scoped to the exact source path and event/group/handler indexes.
 ///
 /// # Errors
 ///
@@ -604,40 +758,13 @@ pub(crate) fn pixel_hook_review(
 ) -> std::result::Result<HookReview, String> {
     let hooks = read_hooks(hooks_path)?;
     let doc = read_document(&codex_home.join(CODEX_CONFIG_FILE))?;
-    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let file = canonical(hooks_path);
-    let reviewed: Vec<String> = doc
-        .get("hooks")
-        .and_then(Item::as_table_like)
-        .and_then(|hooks| hooks.get(HOOK_STATE_TABLE))
-        .and_then(Item::as_table_like)
-        .map(|state| {
-            state
-                .iter()
-                .filter(|(_, entry)| {
-                    entry
-                        .as_table_like()
-                        .and_then(|entry| entry.get(TRUSTED_HASH_KEY))
-                        .and_then(Item::as_str)
-                        .is_some()
-                })
-                .map(|(key, _)| key.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    let is_reviewed = |suffix: &str| {
-        reviewed.iter().any(|key| {
-            key.strip_suffix(suffix)
-                .is_some_and(|source| canonical(Path::new(source)) == file)
-        })
-    };
     let mut review = HookReview {
         pixel: Vec::new(),
         unreviewed: Vec::new(),
     };
     let events = hooks.get("hooks").and_then(serde_json::Value::as_object);
     for (event, groups) in events.into_iter().flatten() {
-        let Some(label) = hook_event_label(event) else {
+        let Some(_label) = hook_event_label(event) else {
             continue;
         };
         let groups = groups.as_array().map_or(&[][..], Vec::as_slice);
@@ -661,7 +788,15 @@ pub(crate) fn pixel_hook_review(
                     continue;
                 }
                 let name = format!("{event} #{group_index}.{handler_index}");
-                if !is_reviewed(&format!(":{label}:{group_index}:{handler_index}")) {
+                if !codex_hook_is_enabled_and_trusted(
+                    &doc,
+                    hooks_path,
+                    event,
+                    group_index,
+                    handler_index,
+                    group,
+                    handler,
+                ) {
                     review.unreviewed.push(name.clone());
                 }
                 review.pixel.push(name);
@@ -697,8 +832,8 @@ pub(crate) fn hook_review_outcome(
     (
         crate::doctor::CheckStatus::Yellow,
         format!(
-            "Codex skips {} of the {} Pixel hook(s) in {file} until you review them ({}): \
-             start `codex` in this directory, run `/hooks` and trust them",
+            "approval for {} of the {} Pixel hook(s) in {file} is missing, stale, disabled, or not verifiable ({}): \
+             start `codex` in this directory and inspect `/hooks`",
             review.unreviewed.len(),
             review.pixel.len(),
             review.unreviewed.join(", ")
@@ -715,41 +850,119 @@ pub(crate) fn check_developer_instructions(
         "key": DEVELOPER_INSTRUCTIONS_KEY,
     });
     if !path.is_file() {
-        return Err(format!(
-            "{} not found — run `pixel install`",
-            path.display()
+        return Ok((
+            "no Pixel developer-instructions block installed".into(),
+            detail,
         ));
     }
     let doc = read_document(&path)?;
     let Some(current) = current_value(&doc)? else {
-        return Err(format!(
-            "{DEVELOPER_INSTRUCTIONS_KEY} missing from {} — run `pixel install`",
-            path.display()
+        return Ok((
+            "no Pixel developer-instructions block installed".into(),
+            detail,
         ));
     };
-    match managed_range(&current) {
-        None => Err(format!(
-            "{DEVELOPER_INSTRUCTIONS_KEY} in {} carries no pixel block — run `pixel install`",
+    if current.contains(MANAGED_BEGIN) || current.contains(MANAGED_END) {
+        return Err(format!(
+            "retired Pixel block remains in {DEVELOPER_INSTRUCTIONS_KEY} in {} — run `pixel install` to remove it",
             path.display()
-        )),
-        Some(range) if current[range.clone()] != managed_block() => Err(format!(
-            "{DEVELOPER_INSTRUCTIONS_KEY} in {} is stale — run `pixel install` to update",
-            path.display()
-        )),
-        Some(_) => Ok((
-            format!(
-                "{DEVELOPER_INSTRUCTIONS_KEY} carries the agent prompt in {} ({} bytes)",
-                path.display(),
-                current.len()
-            ),
-            detail,
-        )),
+        ));
     }
+    Ok((
+        "no Pixel developer-instructions block installed".into(),
+        detail,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_state_entries_should_read_only_the_given_and_canonical_spellings() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real-codex");
+        std::fs::create_dir_all(&real).unwrap();
+        let linked = temp.path().join("linked-codex");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        let other_link = temp.path().join("other-link");
+        std::os::unix::fs::symlink(&real, &other_link).unwrap();
+        std::fs::write(real.join("hooks.json"), "{}").unwrap();
+        let canonical = real.canonicalize().unwrap().join("hooks.json");
+        let through_link = linked.join("hooks.json");
+        let doc = |entries: &[(&Path, &str)]| -> DocumentMut {
+            entries
+                .iter()
+                .map(|(source, body)| {
+                    format!("[hooks.state.\"{}:stop:1:0\"]\n{body}\n", source.display())
+                })
+                .collect::<String>()
+                .parse()
+                .unwrap()
+        };
+        let ok = "trusted_hash = \"sha256:x\"";
+        let off = "enabled = false\ntrusted_hash = \"sha256:x\"";
+
+        // Codex canonicalized the symlinked home: the canonical key counts.
+        let canonical_only = doc(&[(&canonical, ok)]);
+        assert_eq!(
+            super::hook_state_entries(&canonical_only, &through_link, "Stop", 1, 0).len(),
+            1
+        );
+        assert!(super::hook_state_entries(&canonical_only, &through_link, "Stop", 0, 0).is_empty());
+        assert!(
+            super::hook_state_entries(&canonical_only, &through_link, "SessionEnd", 1, 0)
+                .is_empty()
+        );
+
+        // Another alias of the same file is never Codex's key for this path.
+        let alias_only = doc(&[(&other_link.join("hooks.json"), ok)]);
+        assert!(super::hook_state_entries(&alias_only, &through_link, "Stop", 1, 0).is_empty());
+
+        // Both spellings recorded and disagreeing: both are returned, so a
+        // disabled canonical entry is not outvoted by an enabled given one.
+        let conflicting = doc(&[(&through_link, ok), (&canonical, off)]);
+        let states = super::hook_state_entries(&conflicting, &through_link, "Stop", 1, 0);
+        assert_eq!(states.len(), 2);
+        assert!(states.iter().any(|state| {
+            state
+                .as_table_like()
+                .unwrap()
+                .get("enabled")
+                .and_then(Item::as_bool)
+                == Some(false)
+        }));
+
+        // The trust decision install reads: only a unanimous approval with
+        // the current hash counts.
+        let group =
+            serde_json::json!({"hooks": [{"type": "command", "command": "x", "timeout": 10}]});
+        let hash = codex_hook_hash("Stop", &group, &group["hooks"][0]).unwrap();
+        let approve = format!("trusted_hash = {hash:?}");
+        let disable = format!("enabled = false\ntrusted_hash = {hash:?}");
+        let trusted = |entries: &[(&Path, &str)]| {
+            super::codex_hook_is_enabled_and_trusted(
+                &doc(entries),
+                &through_link,
+                "Stop",
+                1,
+                0,
+                &group,
+                &group["hooks"][0],
+            )
+        };
+        assert!(trusted(&[(&canonical, &approve)]));
+        assert!(trusted(&[
+            (&through_link, &approve),
+            (&canonical, &approve)
+        ]));
+        assert!(!trusted(&[
+            (&through_link, &approve),
+            (&canonical, &disable)
+        ]));
+        assert!(!trusted(&[(&other_link.join("hooks.json"), &approve)]));
+    }
 
     /// A `hooks.state` key spells the event the way Codex does
     /// (`hook_event_key_label`); a wrong or missing label reads every
@@ -774,6 +987,344 @@ mod tests {
             assert_eq!(hook_event_label(event), Some(label), "{event}");
         }
         assert_eq!(hook_event_label("NotAnEvent"), None);
+    }
+
+    #[test]
+    fn codex_hook_hash_matches_the_deployed_codex_0160_identity_vectors() {
+        let vectors = [
+            (
+                "Interrupt",
+                "interrupt",
+                3,
+                "sha256:e1b9f0136319de932653a58aba7daadc81ac6ba11087b56e9642264967c6c5bd",
+            ),
+            (
+                "PostToolUse",
+                "post-tool-use",
+                10,
+                "sha256:e823b27c09032bbf495660b2b2768810f9955a2d8c8821ad0ec3b59d483315c5",
+            ),
+            (
+                "PreToolUse",
+                "pre-tool-use",
+                10,
+                "sha256:40528cc1a93d61a88f1ef8def24aeda9a35df3f769ab7ffabc1e23cb15ca68cb",
+            ),
+            (
+                "SessionEnd",
+                "session-end",
+                3,
+                "sha256:592671cbeab88cb52beb144a4a8430e1aa45930d39f97dbefda4efbeb66a3737",
+            ),
+            (
+                "SessionStart",
+                "session-start",
+                10,
+                "sha256:297139f8a7d4ad7c8c5e44305725dab6d58754e3c25fe3d9d338d44b5eef8206",
+            ),
+            (
+                "Stop",
+                "stop",
+                10,
+                "sha256:fed5e0c7cf5936eeac3f2cb180b47e9492031238ee325bab135a25f7e891a864",
+            ),
+            (
+                "SubagentStart",
+                "subagent-start",
+                10,
+                "sha256:226885cf987ba4c08cd94d411e055c9d9f23984042099f943559af79daf350b8",
+            ),
+            (
+                "SubagentStop",
+                "subagent-stop",
+                10,
+                "sha256:9bb4267598af13529d2948086891f50b76bee7728e618358a3aa08d7bdf6da2c",
+            ),
+            (
+                "UserPromptSubmit",
+                "prompt-submit",
+                10,
+                "sha256:72f75c5ee09194fa84fdab917b746b99b0941db9241d660bee579d6048676037",
+            ),
+        ];
+        for (event, verb, timeout, expected) in vectors {
+            let group = serde_json::json!({
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("/usr/local/bin/pixel run-hook task-event --provider codex --event {verb}"),
+                    "timeout": timeout,
+                }]
+            });
+            assert_eq!(
+                codex_hook_hash(event, &group, &group["hooks"][0]).as_deref(),
+                Some(expected),
+                "Codex currentHash for {event}"
+            );
+        }
+
+        let command = "/usr/local/bin/pixel run-hook task-event --provider codex --event stop";
+        let absent_timeout = serde_json::json!({"hooks":[{"type":"command","command":command}]});
+        let default_timeout =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":600}]});
+        assert_eq!(
+            codex_hook_hash("Stop", &absent_timeout, &absent_timeout["hooks"][0]),
+            codex_hook_hash("Stop", &default_timeout, &default_timeout["hooks"][0]),
+            "Codex normalizes an absent regular-event timeout to 600 seconds"
+        );
+        let short_timeout =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":1}]});
+        let zero_timeout =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":0}]});
+        assert_eq!(
+            codex_hook_hash("Stop", &short_timeout, &short_timeout["hooks"][0]),
+            codex_hook_hash("Stop", &zero_timeout, &zero_timeout["hooks"][0]),
+            "Codex clamps a zero timeout to one second"
+        );
+        let session_end_three =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":3}]});
+        let session_end_overflow =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":99}]});
+        assert_eq!(
+            codex_hook_hash(
+                "SessionEnd",
+                &session_end_three,
+                &session_end_three["hooks"][0]
+            ),
+            codex_hook_hash(
+                "SessionEnd",
+                &session_end_overflow,
+                &session_end_overflow["hooks"][0]
+            ),
+            "Codex clamps SessionEnd timeouts to three seconds"
+        );
+        let with_matcher = serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":command,"timeout":10}]});
+        let without_matcher =
+            serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":10}]});
+        assert_ne!(
+            codex_hook_hash("PreToolUse", &with_matcher, &with_matcher["hooks"][0]),
+            codex_hook_hash("PreToolUse", &without_matcher, &without_matcher["hooks"][0]),
+            "Codex fingerprints the matcher"
+        );
+        let unknown_field = serde_json::json!({"hooks":[{"type":"command","command":command,"timeout":10,"custom":true}]});
+        assert!(codex_hook_hash("Stop", &unknown_field, &unknown_field["hooks"][0]).is_none());
+        let unknown_group_field = serde_json::json!({"custom":true,"hooks":[{"type":"command","command":command,"timeout":10}]});
+        assert!(
+            codex_hook_hash(
+                "Stop",
+                &unknown_group_field,
+                &unknown_group_field["hooks"][0]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn task_hook_approval_requires_the_same_synchronous_reviewed_handler() {
+        let home = tempfile::tempdir().unwrap();
+        let codex_home = home.path().join(".codex");
+        fs::create_dir_all(&codex_home).unwrap();
+        let hooks_path = codex_home.join(HOOKS_FILE);
+        let config_path = codex_home.join(CODEX_CONFIG_FILE);
+        let exe = Path::new("/usr/local/bin/pixel");
+        let mut hooks = serde_json::json!({"hooks": {}});
+        let mut trust = String::new();
+
+        for (event, name) in crate::routing::TASK_HOOK_EVENTS
+            .iter()
+            .copied()
+            .chain(std::iter::once(("Interrupt", "interrupt")))
+        {
+            let mut handler = serde_json::json!({
+                "type": "command",
+                "command": format!(
+                    "/usr/local/bin/pixel run-hook task-event --provider codex --event {name}"
+                ),
+                "timeout": if matches!(event, "SessionEnd" | "Interrupt") {
+                    3
+                } else {
+                    10
+                },
+            });
+            if event == "SessionStart" {
+                handler["async"] = serde_json::json!(false);
+            }
+            let group = serde_json::json!({"hooks": [handler]});
+            hooks["hooks"][event] = serde_json::json!([group]);
+            let hash = codex_hook_hash(event, &group, &group["hooks"][0]).unwrap();
+            let state_key = format!(
+                "{}:{}:0:0",
+                hooks_path.display(),
+                hook_event_label(event).unwrap()
+            );
+            trust.push_str(&format!(
+                "[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n\n"
+            ));
+        }
+        fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+        fs::write(&config_path, &trust).unwrap();
+
+        assert!(
+            task_hook_suite_is_enabled_and_trusted(&codex_home, &hooks_path, &hooks, exe,),
+            "an explicitly synchronous, exactly reviewed handler must be eligible"
+        );
+
+        // A trusted asynchronous callback cannot authorize a separate
+        // synchronous callback whose current hash was never reviewed.
+        let mut trusted_async = hooks["hooks"]["SessionStart"][0].clone();
+        trusted_async["hooks"][0]["async"] = serde_json::json!(true);
+        let mut mixed_trust = String::new();
+        for (event, _) in crate::routing::TASK_HOOK_EVENTS
+            .iter()
+            .copied()
+            .chain(std::iter::once(("Interrupt", "interrupt")))
+        {
+            let group = if event == "SessionStart" {
+                &trusted_async
+            } else {
+                &hooks["hooks"][event][0]
+            };
+            let hash = codex_hook_hash(event, group, &group["hooks"][0]).unwrap();
+            let state_key = format!(
+                "{}:{}:0:0",
+                hooks_path.display(),
+                hook_event_label(event).unwrap()
+            );
+            mixed_trust.push_str(&format!(
+                "[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n\n"
+            ));
+        }
+        let untrusted_sync = hooks["hooks"]["SessionStart"][0].clone();
+        hooks["hooks"]["SessionStart"] = serde_json::json!([trusted_async, untrusted_sync]);
+        fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+        fs::write(&config_path, mixed_trust).unwrap();
+
+        assert!(
+            !task_hook_suite_is_enabled_and_trusted(&codex_home, &hooks_path, &hooks, exe,),
+            "approval for an asynchronous group must not combine with an unreviewed synchronous group"
+        );
+    }
+
+    #[test]
+    fn hook_approval_requires_exact_source_enabled_state_and_current_hash() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks_path = home.path().join("hooks.json");
+        let group = serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "command": "/usr/local/bin/pixel run-hook task-event --provider codex --event session-start",
+                "timeout": 10,
+            }]
+        });
+        let handler = &group["hooks"][0];
+        let hash = codex_hook_hash("SessionStart", &group, handler).unwrap();
+        let state_key = format!("{}:session_start:0:0", hooks_path.display());
+        let config_path = home.path().join(CODEX_CONFIG_FILE);
+        fs::write(
+            &config_path,
+            format!("[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n"),
+        )
+        .unwrap();
+        let doc = read_document(&config_path).unwrap();
+        assert!(codex_hook_is_enabled_and_trusted(
+            &doc,
+            &hooks_path,
+            "SessionStart",
+            0,
+            0,
+            &group,
+            handler,
+        ));
+
+        fs::write(
+            &config_path,
+            format!("[hooks.state.{state_key:?}]\nenabled = false\ntrusted_hash = {hash:?}\n"),
+        )
+        .unwrap();
+        let doc = read_document(&config_path).unwrap();
+        assert!(!codex_hook_is_enabled_and_trusted(
+            &doc,
+            &hooks_path,
+            "SessionStart",
+            0,
+            0,
+            &group,
+            handler,
+        ));
+
+        fs::write(
+            &config_path,
+            format!(
+                "[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = \"sha256:stale\"\n"
+            ),
+        )
+        .unwrap();
+        let doc = read_document(&config_path).unwrap();
+        assert!(!codex_hook_is_enabled_and_trusted(
+            &doc,
+            &hooks_path,
+            "SessionStart",
+            0,
+            0,
+            &group,
+            handler,
+        ));
+
+        let aliased_key = format!(
+            "{}:session_start:0:0",
+            home.path().join("alias/hooks.json").display()
+        );
+        fs::write(
+            &config_path,
+            format!("[hooks.state.{aliased_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n"),
+        )
+        .unwrap();
+        let doc = read_document(&config_path).unwrap();
+        assert!(!codex_hook_is_enabled_and_trusted(
+            &doc,
+            &hooks_path,
+            "SessionStart",
+            0,
+            0,
+            &group,
+            handler,
+        ));
+    }
+
+    #[test]
+    fn pixel_hook_review_accepts_only_the_current_enabled_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks_path = home.path().join("hooks.json");
+        let exe = Path::new("/tmp/pixel");
+        let group = serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "command": "'/tmp/pixel' run-hook task-event --provider codex --event session-start",
+                "timeout": 10,
+            }]
+        });
+        let hooks = serde_json::json!({"hooks":{"SessionStart":[group.clone()]}});
+        fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+        let hash = codex_hook_hash("SessionStart", &group, &group["hooks"][0]).unwrap();
+        let state_key = format!("{}:session_start:0:0", hooks_path.display());
+        let config_path = home.path().join(CODEX_CONFIG_FILE);
+        fs::write(
+            &config_path,
+            format!("[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n"),
+        )
+        .unwrap();
+        let reviewed = pixel_hook_review(home.path(), &hooks_path, exe).unwrap();
+        assert_eq!(reviewed.pixel, ["SessionStart #0.0"]);
+        assert!(reviewed.unreviewed.is_empty());
+
+        fs::write(
+            &config_path,
+            format!(
+                "[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = \"sha256:stale\"\n"
+            ),
+        )
+        .unwrap();
+        let stale = pixel_hook_review(home.path(), &hooks_path, exe).unwrap();
+        assert_eq!(stale.unreviewed, ["SessionStart #0.0"]);
     }
 
     #[test]
@@ -821,7 +1372,53 @@ mod tests {
         assert_eq!(value_without_block(&managed_block()), None);
     }
 
-    // ---- metrics PostToolUse hook ----------------------------------------
+    #[test]
+    fn managed_marker_range_rejects_duplicate_stray_and_reordered_markers() {
+        let malformed = [
+            format!("{MANAGED_BEGIN}\ntext\n"),
+            format!("text\n{MANAGED_END}\n"),
+            format!("{MANAGED_END}\n{MANAGED_BEGIN}\n"),
+            format!("{MANAGED_BEGIN}\r\ntext\n{MANAGED_END}\n"),
+            format!("{MANAGED_BEGIN}\none\n{MANAGED_BEGIN}\ntwo\n{MANAGED_END}"),
+            format!("{MANAGED_BEGIN}\none\n{MANAGED_END}\n{MANAGED_END}"),
+        ];
+        for value in malformed {
+            assert!(
+                managed_range(&value).is_none(),
+                "malformed markers must not produce a removable range: {value:?}"
+            );
+            assert!(
+                value_without_block(&value).is_none(),
+                "malformed marker content must remain untouched: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn removal_refuses_malformed_marker_sets_without_rewriting_codex_config() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(CODEX_CONFIG_FILE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for value in [
+            format!("{MANAGED_BEGIN}\npartial"),
+            format!("{MANAGED_END}\n"),
+            format!("{MANAGED_END}\n{MANAGED_BEGIN}\n"),
+            format!("{MANAGED_BEGIN}\r\npartial\n{MANAGED_END}\n"),
+            format!("{MANAGED_BEGIN}\nfirst\n{MANAGED_BEGIN}\nsecond\n{MANAGED_END}"),
+            format!("{MANAGED_BEGIN}\n{MANAGED_END}\n{MANAGED_END}"),
+        ] {
+            let original = format!("developer_instructions = {}\n", string_value(&value));
+            fs::write(&path, &original).unwrap();
+
+            let step = remove_developer_instructions(home.path(), false).unwrap();
+
+            assert_eq!(step.status, CheckStatus::Red, "{value:?}");
+            assert!(step.summary.contains("not touched"), "{step:?}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    // ---- native-default Codex task hooks --------------------------------
 
     fn scratch_codex_home(name: &str) -> PathBuf {
         let dir =
@@ -831,92 +1428,222 @@ mod tests {
         dir
     }
 
-    fn post_tool_use(home: &Path) -> serde_json::Value {
+    fn hook_events(home: &Path) -> serde_json::Value {
         let text = fs::read_to_string(home.join(HOOKS_FILE)).unwrap();
-        serde_json::from_str::<serde_json::Value>(&text).unwrap()["hooks"]["PostToolUse"].clone()
-    }
-
-    fn user_prompt_submit(home: &Path) -> serde_json::Value {
-        let text = fs::read_to_string(home.join(HOOKS_FILE)).unwrap();
-        serde_json::from_str::<serde_json::Value>(&text).unwrap()["hooks"]["UserPromptSubmit"]
-            .clone()
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["hooks"].clone()
     }
 
     #[test]
-    fn metrics_hook_install_verify_and_preserve_foreign_entries() {
+    fn task_hooks_should_remove_pixel_retrieval_keep_foreign_hooks_and_install_lifecycle() {
         let home = scratch_codex_home("install");
         let exe = Path::new("/opt/pixel tools/pixel");
-        // A foreign PostToolUse group survives the merge.
+        // Both foreign hooks and Pixel's retired automatic hooks have to be
+        // distinguished: task lifecycle remains, retrieval and metrics leave.
         fs::write(
             home.join(HOOKS_FILE),
             serde_json::to_string_pretty(&serde_json::json!({
-                "hooks": {"PostToolUse": [
-                    {"hooks": [{"type": "command", "command": "cmux-feed"}]}
-                ]}
-            }))
+                "hooks": {
+                    "PostToolUse": [
+                        {"hooks": [{"type": "command", "command": "cmux-feed"}]},
+                        {
+                            "matcher": "Bash",
+                            "timeout": 9,
+                            "hooks": [
+                                {"type": "command", "command": "metrics-proxy --label 'run-hook metrics --provider codex'"},
+                                {"type": "command", "command": "pixel run-hook metrics --provider codex"}
+                            ]
+                        },
+                        {"hooks": [{"type": "command", "command": "pixel run-hook metrics --provider codex"}]}
+                    ],
+                    "UserPromptSubmit": [
+                        {"hooks": [{"type": "command", "command": "prompt-audit --label 'run-hook prompt-submit --provider codex'"}]},
+                        {"hooks": [{"type": "command", "command": "pixel run-hook prompt-submit --provider codex"}]}
+                    ]
+                }}
+            ))
             .unwrap(),
         )
         .unwrap();
 
-        install_metrics_hook(&home, exe, false).unwrap();
-        let entries = post_tool_use(&home).as_array().unwrap().clone();
+        install_task_hooks(&home, exe, false).unwrap();
+        let hooks = hook_events(&home);
+        let post_tool_use = hooks["PostToolUse"].as_array().unwrap();
         assert_eq!(
-            entries.len(),
+            post_tool_use.len(),
             3,
-            "foreign group preserved + metrics and task hooks added"
+            "foreign groups and lifecycle survive"
         );
-        let command = entries[1]["hooks"][0]["command"].as_str().unwrap();
-        assert!(command.contains(METRICS_HOOK_MARKER));
         assert!(
-            command.starts_with('\''),
-            "the exe path is shell-quoted: {command}"
+            post_tool_use
+                .iter()
+                .any(|entry| { entry["hooks"][0]["command"] == "cmux-feed" })
         );
-        let prompt_entries = user_prompt_submit(&home).as_array().unwrap().clone();
+        let mixed = post_tool_use
+            .iter()
+            .find(|entry| entry.get("matcher").is_some())
+            .expect("foreign hook's group remains");
+        assert_eq!(mixed["matcher"], "Bash");
+        assert_eq!(mixed["timeout"], 9);
         assert_eq!(
-            prompt_entries.len(),
-            2,
-            "prompt-submit guidance plus the task-event group"
+            mixed["hooks"],
+            serde_json::json!([{
+                "type": "command",
+                "command": "metrics-proxy --label 'run-hook metrics --provider codex'"
+            }]),
+            "foreign marker mention survives beside removed Pixel callback"
         );
-        assert!(
-            prompt_entries[0]["hooks"][0]["command"]
+        assert!(post_tool_use.iter().any(|entry| {
+            entry["hooks"][0]["command"]
                 .as_str()
-                .is_some_and(|command| command.contains(PROMPT_SUBMIT_HOOK_MARKER))
+                .is_some_and(|command| command.contains("task-event --provider codex"))
+        }));
+        assert!(
+            hooks["UserPromptSubmit"].is_array(),
+            "task-event prompt stays"
+        );
+        let prompt_hooks = hooks["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(
+            prompt_hooks.len(),
+            2,
+            "foreign prompt hook and lifecycle survive"
+        );
+        assert_eq!(
+            prompt_hooks[0]["hooks"][0]["command"],
+            "prompt-audit --label 'run-hook prompt-submit --provider codex'"
         );
         assert!(
-            check_metrics_hook(&home).is_ok(),
-            "doctor check sees the registration"
+            check_task_hooks(&home, exe).is_ok(),
+            "doctor check sees task hooks"
         );
 
         // Second install verifies instead of duplicating.
-        let step = install_metrics_hook(&home, exe, false).unwrap();
+        let step = install_task_hooks(&home, exe, false).unwrap();
         assert!(step.summary.contains("verified"), "{}", step.summary);
-        assert_eq!(post_tool_use(&home).as_array().unwrap().len(), 3);
-        assert_eq!(user_prompt_submit(&home).as_array().unwrap().len(), 2);
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn metrics_hook_reinstall_refreshes_a_stale_executable_path() {
-        let home = scratch_codex_home("refresh");
-        install_metrics_hook(&home, Path::new("/old/pixel"), false).unwrap();
-        install_metrics_hook(&home, Path::new("/new/pixel"), false).unwrap();
-        let entries = post_tool_use(&home).as_array().unwrap().clone();
         assert_eq!(
-            entries.len(),
-            2,
-            "the stale entry is replaced, not appended"
+            hook_events(&home)["PostToolUse"].as_array().unwrap().len(),
+            3,
+            "reinstall preserves both foreign groups without duplication"
         );
-        let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
-        assert!(command.contains("/new/pixel"), "{command}");
-        assert!(!command.contains("/old/pixel"), "{command}");
+        assert!(check_task_hooks(&home, exe).is_ok());
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn metrics_hook_install_refuses_unparseable_hooks_json() {
+    fn task_hook_check_rejects_retired_pixel_hook_after_non_retired_hooks() {
+        let home = scratch_codex_home("check-retired-order");
+        let exe = Path::new("/opt/pixel");
+        install_task_hooks(&home, exe, false).unwrap();
+
+        let path = home.join(HOOKS_FILE);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["hooks"]["SessionStart"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "hooks": [{"type": "command", "command": "foreign-session-hook"}]
+            }));
+        value["hooks"]["SessionStart"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "hooks": [{
+                    "type": "command",
+                    "command": "/opt/pixel run-hook metrics --provider codex"
+                }]
+            }));
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = check_task_hooks(&home, exe).unwrap_err();
+        assert!(
+            error.contains("retired automatic Pixel Codex hook remains"),
+            "the later retired hook must be reported even after a non-retired hook: {error}"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn carries_pixel_block_detects_either_orphaned_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(CODEX_CONFIG_FILE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        for marker in [MANAGED_BEGIN, MANAGED_END] {
+            fs::write(
+                &path,
+                format!("{DEVELOPER_INSTRUCTIONS_KEY} = {}\n", string_value(marker)),
+            )
+            .unwrap();
+
+            assert!(
+                carries_pixel_block(home.path()).unwrap(),
+                "an orphaned marker must remain detectable: {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_hook_reinstall_refreshes_the_binary_path_without_duplicating_events() {
+        let home = scratch_codex_home("refresh");
+        install_task_hooks(&home, Path::new("/old/pixel"), false).unwrap();
+        install_task_hooks(&home, Path::new("/new/pixel"), false).unwrap();
+        let hooks = hook_events(&home);
+        let commands = hooks.to_string();
+        assert!(commands.contains("/new/pixel"), "{commands}");
+        assert!(!commands.contains("/old/pixel"), "{commands}");
+        for groups in hooks.as_object().unwrap().values() {
+            let count = groups
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|group| {
+                    group["hooks"].as_array().unwrap().iter().any(|hook| {
+                        hook["command"]
+                            .as_str()
+                            .is_some_and(|command| command.contains("run-hook task-event"))
+                    })
+                })
+                .count();
+            assert_eq!(count, 1, "no duplicate task-event groups in {groups}");
+        }
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn task_hook_install_should_remove_renamed_pixel_callbacks_only() {
+        let home = scratch_codex_home("renamed");
+        let exe = Path::new("/opt/pixel custom/pixel-next");
+        install_task_hooks(&home, exe, false).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
+        value["hooks"]["PostToolUse"] = serde_json::json!([
+            {"hooks": [{"type": "command", "command": "pixel-next run-hook metrics --provider codex"}]},
+            {"hooks": [{"type": "command", "command": "pixel run-hook task-event --provider codex --event post-tool-use"}]}
+        ]);
+        fs::write(
+            home.join(HOOKS_FILE),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        install_task_hooks(&home, exe, false).unwrap();
+        let hooks = hook_events(&home);
+        let post = hooks["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 1, "renamed Pixel callback is removed");
+        assert_eq!(
+            post[0]["hooks"][0]["command"],
+            "'/opt/pixel custom/pixel-next' run-hook task-event --provider codex --event post-tool-use",
+            "task lifecycle command is preserved"
+        );
+        assert!(check_task_hooks(&home, exe).is_ok());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn task_hook_install_refuses_unparseable_hooks_json() {
         let home = scratch_codex_home("broken");
         fs::write(home.join(HOOKS_FILE), "not json").unwrap();
-        let step = install_metrics_hook(&home, Path::new("/x"), false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), false).unwrap();
         assert_eq!(step.status, CheckStatus::Red);
         assert_eq!(
             fs::read_to_string(home.join(HOOKS_FILE)).unwrap(),
@@ -924,7 +1651,7 @@ mod tests {
             "an unparseable file is never rewritten"
         );
         fs::write(home.join(HOOKS_FILE), "{\"hooks\": [1]}").unwrap();
-        let step = install_metrics_hook(&home, Path::new("/x"), false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), false).unwrap();
         assert_eq!(
             step.status,
             CheckStatus::Red,
@@ -934,78 +1661,82 @@ mod tests {
     }
 
     #[test]
-    fn metrics_hook_install_reports_an_unreadable_hooks_json() {
+    fn task_hook_install_reports_an_unreadable_hooks_json() {
         let home = scratch_codex_home("unreadable");
         // A directory where the file is expected fails the read for every
         // user including root — and is not "absent": it must come back Red,
         // never Ok-treated-as-empty.
         fs::create_dir(home.join(HOOKS_FILE)).unwrap();
-        let step = install_metrics_hook(&home, Path::new("/x"), false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), false).unwrap();
         assert_eq!(step.status, CheckStatus::Red, "{}", step.summary);
         assert!(step.summary.contains("not touched"), "{}", step.summary);
         let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn metrics_hook_check_is_red_until_registered() {
+    fn task_hook_check_requires_registration_and_rejects_retired_hooks() {
         let home = scratch_codex_home("check");
         assert!(
-            check_metrics_hook(&home).is_err(),
-            "absent file is not registered"
+            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            "absent file has no task lifecycle"
         );
         fs::write(home.join(HOOKS_FILE), "{\"hooks\": {}}").unwrap();
         assert!(
-            check_metrics_hook(&home).is_err(),
-            "empty PostToolUse is not registered"
+            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            "empty hooks object has no task lifecycle"
         );
         fs::write(
             home.join(HOOKS_FILE),
             serde_json::to_string_pretty(&serde_json::json!({
-                "hooks": {"PostToolUse": [
-                    {"hooks": [{"type": "command", "command": "pixel run-hook metrics --provider codex"}]}
-                ]}
-            }))
+                "hooks": {"SessionStart": [
+                    {"hooks": [{"type": "command", "command": "pixel run-hook task-event --provider codex --event session-start"}]}
+                ]}}
+            ))
             .unwrap(),
         )
         .unwrap();
         assert!(
-            check_metrics_hook(&home).is_err(),
-            "metrics alone satisfies neither the UserPromptSubmit nor the task gate registration"
+            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            "a partial task lifecycle is not registered"
         );
-        install_metrics_hook(&home, Path::new("pixel"), false).unwrap();
-        assert!(check_metrics_hook(&home).is_ok());
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn metrics_hook_check_is_red_when_only_the_prompt_submit_marker_is_missing() {
-        let home = scratch_codex_home("half-registered");
-        install_metrics_hook(&home, Path::new("pixel"), false).unwrap();
-        assert!(check_metrics_hook(&home).is_ok());
-
-        // Remove only the prompt-submit guidance entry: the PostToolUse
-        // metrics marker and every task gate stay registered, so the check
-        // fails iff each marker is required on its own.
+        install_task_hooks(&home, Path::new("pixel"), false).unwrap();
+        assert!(check_task_hooks(&home, Path::new("pixel")).is_ok());
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
-        value["hooks"]["UserPromptSubmit"]
-            .as_array_mut()
-            .unwrap()
-            .retain(|entry| {
-                !entry["hooks"].as_array().unwrap().iter().any(|hook| {
-                    hook["command"]
-                        .as_str()
-                        .is_some_and(|command| command.contains(PROMPT_SUBMIT_HOOK_MARKER))
-                })
-            });
+        value["hooks"]["PostToolUse"] = serde_json::json!([
+            {"hooks":[{"type":"command","command":"pixel run-hook metrics --provider codex"}]}
+        ]);
         fs::write(
             home.join(HOOKS_FILE),
             serde_json::to_string_pretty(&value).unwrap(),
         )
         .unwrap();
         assert!(
-            check_metrics_hook(&home).is_err(),
-            "a missing prompt-submit marker alone fails the check"
+            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            "legacy automatic metric entry is rejected"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn task_hook_install_keeps_the_task_prompt_event_but_removes_pixel_guidance() {
+        let home = scratch_codex_home("half-registered");
+        install_task_hooks(&home, Path::new("pixel"), false).unwrap();
+        assert!(check_task_hooks(&home, Path::new("pixel")).is_ok());
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
+        value["hooks"]["UserPromptSubmit"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| !entry["hooks"].to_string().contains("run-hook task-event"));
+        fs::write(
+            home.join(HOOKS_FILE),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            check_task_hooks(&home, Path::new("pixel")).is_err(),
+            "removing the task prompt event breaks the registered lifecycle"
         );
         let _ = fs::remove_dir_all(&home);
     }
@@ -1091,50 +1822,5 @@ mod tests {
                 "{rendered}"
             );
         }
-    }
-
-    #[test]
-    fn install_developer_instructions_names_what_it_did_to_the_value() {
-        let home = scratch_codex_home("developer-instructions");
-        let config = home.join(CODEX_CONFIG_FILE);
-        let summary = |home: &Path| install_developer_instructions(home, false).unwrap().summary;
-        let shown = config.display().to_string();
-
-        assert_eq!(
-            summary(&home),
-            format!("installed {DEVELOPER_INSTRUCTIONS_KEY} in {shown}")
-        );
-        let written = fs::read_to_string(&config).unwrap();
-        assert!(written.contains("= '''"), "{written}");
-        assert_eq!(
-            current_value(&read_document(&config).unwrap()).unwrap(),
-            Some(managed_block())
-        );
-        assert_eq!(
-            summary(&home),
-            format!("verified {DEVELOPER_INSTRUCTIONS_KEY} in {shown}")
-        );
-
-        fs::write(
-            &config,
-            format!("{DEVELOPER_INSTRUCTIONS_KEY} = \"mine\"\n"),
-        )
-        .unwrap();
-        assert_eq!(
-            summary(&home),
-            format!(
-                "appended {DEVELOPER_INSTRUCTIONS_KEY} in {shown}, keeping the text outside the pixel markers"
-            )
-        );
-
-        let stale = format!("{MANAGED_BEGIN}\nold\n{MANAGED_END}\n");
-        let mut doc = DocumentMut::new();
-        doc[DEVELOPER_INSTRUCTIONS_KEY] = Item::Value(Value::from(stale.as_str()));
-        fs::write(&config, doc.to_string()).unwrap();
-        assert_eq!(
-            summary(&home),
-            format!("updated {DEVELOPER_INSTRUCTIONS_KEY} in {shown}")
-        );
-        let _ = fs::remove_dir_all(&home);
     }
 }

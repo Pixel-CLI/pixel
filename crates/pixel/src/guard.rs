@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 //! `pixel run-hook guard` — provider-aware, exact-subset search routing.
-//! Explicit providers preserve unsupported calls silently. The policy is
-//! advisory by default; `pixel config policy enforce` (or PIXEL_POLICY=enforce)
-//! opts into known retrieval denials, `off` disables Pixel policy. Without a
-//! provider, legacy task-scoping guidance remains.
+//! Codex and Claude calls remain native in every retrieval policy mode.
+//! Other explicit providers preserve unsupported calls silently. Their policy
+//! is advisory by default; `pixel config policy enforce` (or
+//! PIXEL_POLICY=enforce) opts into supported retrieval denials, and `off`
+//! disables Pixel policy. Without a provider, legacy task-scoping guidance remains.
 //!
 //! Legacy advisory contract (without `--provider`):
 //! 1. SCOPING (ADVISORY) — while `<repo>/.pixel/targets.json` is active
@@ -41,15 +42,13 @@
 //! literal-file subset; they do not substitute enriched Pixel output.
 //! Uncovered execution shapes retain their original command and native permissions.
 //!
-//! Claude and Devin preserve their native permission flow. Codex and Antigravity
-//! enforce recognized repository discovery only under the enforce policy.
+//! Devin preserves its native permission flow. Antigravity enforces recognized
+//! repository discovery only under the enforce policy.
 //! Bounded direct reads (<=200 lines), external paths, shell filters, execution
 //! and unknown syntax stay native. Enforcement requires an indexed repository
 //! at or above the effective tool workdir; unindexed trees are never denied.
-//! Claude advisories exit 0 with a JSON note
-//! (systemMessage + additionalContext), no permissionDecision, and transparent
-//! read-only rewrites use `updatedInput`. Codex requires an explicit `allow`
-//! for the user-approved literal-file rewrite subset only.
+//! Explicit Claude RTK delegation and Codex composed foreign-hook decisions
+//! remain available independently of Pixel's retired retrieval policy.
 //! Fails open (exit 0) on any parse error or unexpected shape — a guard
 //! that crashes or wedges the session is worse than a guard that misses a
 //! case.
@@ -526,7 +525,7 @@ struct Manifest {
 }
 
 /// Provider adapters only change the command field. Timeouts, cwd, metadata
-/// and future provider arguments survive untouched. Codex requires allow
+/// and future provider arguments survive untouched. ZCode requires allow
 /// alongside updatedInput; that authorization is restricted to this exact
 /// read-only compatibility subset, never applied to fallback calls.
 fn rewrite_json(provider: Provider, updated_input: Value) -> Value {
@@ -534,7 +533,7 @@ fn rewrite_json(provider: Provider, updated_input: Value) -> Value {
         "hookEventName": "PreToolUse",
         "updatedInput": updated_input,
     });
-    if matches!(provider, Provider::Codex | Provider::Zcode) {
+    if provider == Provider::Zcode {
         output["permissionDecision"] = Value::String("allow".into());
         output["permissionDecisionReason"] =
             Value::String("Pixel compatibility routing: single-file literal read only.".into());
@@ -569,11 +568,8 @@ fn provider_rewrite_with(
     }
     let tool = payload.get("tool_name")?.as_str()?;
     let shell = match provider {
-        Provider::Claude => tool == "Bash",
-        Provider::Codex => matches!(
-            tool,
-            "Bash" | "shell" | "unified_exec" | "local_shell" | "exec_command"
-        ),
+        // Native retrieval: `policy_response` never routes these here.
+        Provider::Claude | Provider::Codex => return None,
         Provider::Devin => tool == "exec" || tool == "Bash",
         Provider::Zcode => tool == "Bash" || tool == "exec",
         // OpenCode names the same tools as Claude but lowercases them.
@@ -717,13 +713,12 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
         .filter(|cwd| !cwd.is_empty())
         .map(PathBuf::from)
         // Cursor sends `cwd: ""` on Shell calls and puts the repo in
-        // `workspace_roots` instead (observed on cursor-agent 2026.10.01).
+        // `workspace_roots` instead (observed on cursor-agent 2026.10.01);
+        // Antigravity's PreInvocation payload names only `workspacePaths`.
         .or_else(|| {
-            payload
-                .get("workspace_roots")
-                .and_then(Value::as_array)
-                .and_then(|roots| roots.first())
-                .and_then(Value::as_str)
+            ["workspace_roots", "workspacePaths"]
+                .into_iter()
+                .find_map(|key| payload.get(key)?.as_array()?.first()?.as_str())
                 .map(PathBuf::from)
         })
         .or_else(|| std::env::current_dir().ok())?;
@@ -737,13 +732,13 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
     )
 }
 
-/// Recognized retrieval gets guidance, or an opt-in denial on Codex/Antigravity.
-/// Unsupported capabilities remain the host's responsibility.
+/// Recognized retrieval is governed for providers whose hooks own that policy.
+/// Codex and unsupported capabilities remain the host's responsibility.
 fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
-    // Claude keeps its native permission flow (and its RTK delegate). Devin
-    // has a documented PreToolUse block contract, so its retrieval calls are
-    // subject to policy like Codex and Antigravity.
-    if provider == Provider::Claude {
+    // Claude and Codex keep their native permission flow (and Claude its RTK
+    // delegate). Devin has a documented PreToolUse block contract, so its
+    // retrieval calls are subject to policy alongside Antigravity.
+    if matches!(provider, Provider::Claude | Provider::Codex) {
         return None;
     }
     let payload = &if provider == Provider::Opencode {
@@ -1234,7 +1229,7 @@ fn enforce_leaf(
     }
 }
 
-/// Codex and Antigravity have different documented denial envelopes.
+/// Providers have different documented denial envelopes.
 fn enforce_deny(provider: Provider, reason: &str) -> Value {
     let reason = format!("pixel policy: {reason}");
     match provider {
@@ -1276,7 +1271,15 @@ fn policy_response(
     payload: &Value,
     mode: crate::config_cmd::PolicyMode,
 ) -> Option<Value> {
-    if mode == PolicyMode::Off {
+    // Native retrieval remains under the host's permissions. Task contracts
+    // and foreign hook decisions are evaluated through their own paths.
+    if matches!(provider, Provider::Codex | Provider::Claude) {
+        return None;
+    }
+    // Steering is opt-in: under the default advisory policy, and under
+    // `off`, every host keeps its native retrieval — no rewrite, suggestion
+    // or retrieval approval.
+    if mode != PolicyMode::Enforce {
         return None;
     }
     if matches!(provider, Provider::Devin | Provider::Zcode)
@@ -1288,26 +1291,7 @@ fn policy_response(
         return Some(response);
     }
     let reason = enforce_reason(provider, payload)?;
-    match mode {
-        PolicyMode::Enforce => Some(enforce_deny(provider, &reason)),
-        // Codex and Devin both document `additionalContext` on PreToolUse;
-        // Claude and Antigravity do not (no response leaves their own
-        // permissions authoritative).
-        PolicyMode::Advisory if matches!(provider, Provider::Codex | Provider::Devin) => {
-            Some(advisory_json(&format!(
-                "Pixel suggestion: {reason}. Original call proceeds."
-            )))
-        }
-        // Cursor's preToolUse injects `additional_context` (documented on
-        // the deny path, accepted on pass-through); its own permissions
-        // stay authoritative — advisory only.
-        PolicyMode::Advisory if provider == Provider::Cursor => Some(serde_json::json!({
-            "additional_context": format!(
-                "Pixel suggestion: {reason}. Original call proceeds."
-            )
-        })),
-        _ => None,
-    }
+    Some(enforce_deny(provider, &reason))
 }
 
 /// Approve only standalone Pixel retrieval commands in supported permission hooks.
@@ -1979,7 +1963,10 @@ fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
     let Ok(payload) = serde_json::from_str::<Value>(raw) else {
         std::process::exit(0);
     };
+    // The pre-invocation search steers the model before it picks a tool, so
+    // it runs only under the opt-in enforce policy, like every rewrite.
     if provider == Provider::Antigravity
+        && policy_mode(&payload) == PolicyMode::Enforce
         && let Some(response) = antigravity_pre_invocation(&payload)
     {
         print!("{response}");
@@ -1992,54 +1979,6 @@ fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
     }
     if delegate_rtk && provider == Provider::Claude {
         delegate_rtk_hook(raw);
-    }
-    // Claude's native Read/Grep tools reach the hook through the widened
-    // PreToolUse matcher installed by `routing::shell_matcher`; Claude keeps
-    // its own permission flow (no deny, no input rewrite — `policy_response`
-    // is silent for these tools), but the advisory tier the provider-less
-    // legacy path already emits is reproduced here. Glob is intentionally
-    // absent from the matcher; `non_shell_advisory` mirrors that decision.
-    if provider == Provider::Claude {
-        let event = payload
-            .get("hook_event_name")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if is_guard_event(&payload, event) {
-            let tool = payload
-                .get("tool_name")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let tool_input_value = payload.get("tool_input").cloned().unwrap_or(Value::Null);
-            if let Some(tool_input) = tool_input_value.as_object() {
-                let cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
-                    || std::env::current_dir().unwrap_or_default(),
-                    PathBuf::from,
-                );
-                let raw_path = tool_input
-                    .get("file_path")
-                    .or_else(|| tool_input.get("path"))
-                    .or_else(|| tool_input.get("AbsolutePath"))
-                    .or_else(|| tool_input.get("TargetFile"))
-                    .or_else(|| tool_input.get("target_file"))
-                    .or_else(|| tool_input.get("filePath"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let anchor = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
-                let idx_root = find_up(&anchor, ".pixel");
-                let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
-                let (manifest, manifest_expired) =
-                    manifest_pair(manifest_root.as_deref().map(load_manifest_state));
-                non_shell_advisory(
-                    tool,
-                    tool_input,
-                    &cwd,
-                    raw_path,
-                    idx_root.as_deref(),
-                    manifest.as_ref(),
-                    manifest_expired,
-                );
-            }
-        }
     }
     // Ordinary commands receive no new context or permission override.
     std::process::exit(0);
@@ -2442,15 +2381,6 @@ fn has_foreign_mutation(value: &Value) -> bool {
         || value.get("permissionDecision").is_some()
 }
 
-fn foreign_allow(value: &Value) -> bool {
-    value
-        .get("hookSpecificOutput")
-        .and_then(|specific| specific.get("permissionDecision"))
-        .and_then(Value::as_str)
-        == Some("allow")
-        || value.get("permissionDecision").and_then(Value::as_str) == Some("allow")
-}
-
 fn foreign_denial(value: &Value) -> bool {
     value
         .get("hookSpecificOutput")
@@ -2559,28 +2489,17 @@ pub fn run_composed_codex(backup: &Path) -> ! {
         }
     }
     if let Some(foreign) = terminal_foreign {
-        // A foreign allow is not authority over Pixel's own policy: under
-        // PIXEL_POLICY=enforce a recognized retrieval call still denies.
-        // Foreign denials and input mutations keep their precedence.
-        if foreign_allow(&foreign)
-            && policy_mode(&payload) == PolicyMode::Enforce
-            && let Some(reason) = enforce_reason(Provider::Codex, &payload)
-        {
-            print!("{}", enforce_deny(Provider::Codex, &reason));
-            std::process::exit(0);
-        }
-        // Never place a Pixel rewrite after foreign authority. Returning this
-        // valid response preserves foreign authority.
+        // Never place a Pixel rewrite or retrieval denial after foreign
+        // authority. Returning this valid response preserves foreign
+        // denials and input mutations.
         print!("{foreign}");
         std::process::exit(0);
     }
     if incomplete_foreign {
         std::process::exit(0);
     }
-    if let Some(response) = policy_response(Provider::Codex, &payload, policy_mode(&payload)) {
-        print!("{}", compose_context(response, &contexts));
-        std::process::exit(0);
-    }
+    // Pixel adds no retrieval policy of its own to Codex: only the foreign
+    // hooks' combined context remains.
     if !contexts.is_empty() {
         print!("{}", compose_context(advisory_json(""), &contexts));
     }
@@ -5692,8 +5611,11 @@ mod tests {
         (root, source)
     }
 
+    /// Steering is opt-in: under the default advisory policy and under
+    /// `off`, an unbounded read stays native with no suggestion; only
+    /// `enforce` turns it into a denial naming the Pixel route.
     #[test]
-    fn devin_advises_for_unbounded_large_repository_reads_without_blocking() {
+    fn devin_large_repository_reads_are_left_alone_unless_enforced() {
         let (root, source) = indexed_large_source("devin-large-read");
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
@@ -5701,32 +5623,33 @@ mod tests {
             "tool_input": {"file_path": source},
             "cwd": root,
         });
-
-        let response = policy_response(
+        for mode in [
+            crate::config_cmd::PolicyMode::Advisory,
+            crate::config_cmd::PolicyMode::Off,
+        ] {
+            assert_eq!(
+                policy_response(Provider::Devin, &payload, mode),
+                None,
+                "{mode:?}"
+            );
+        }
+        let denied = policy_response(
             Provider::Devin,
             &payload,
-            crate::config_cmd::PolicyMode::Advisory,
+            crate::config_cmd::PolicyMode::Enforce,
         )
-        .expect("an unbounded read of an indexed source file needs visible guidance");
-        let guidance = "Pixel suggestion: repository read: use exec with pixel search-content or pixel pack-context <uid>. Original call proceeds.";
-        assert_eq!(response["systemMessage"], guidance);
+        .expect("enforce denies the unbounded read");
+        assert_eq!(denied["decision"], "block");
         assert_eq!(
-            response["hookSpecificOutput"]["additionalContext"],
-            guidance
+            denied["reason"],
+            "pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"
         );
-        assert!(
-            response["hookSpecificOutput"]
-                .get("permissionDecision")
-                .is_none(),
-            "advisory must not deny or auto-allow the original read"
-        );
-        assert!(response.get("decision").is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn cursor_advises_with_flat_additional_context_without_blocking() {
+    fn cursor_reads_get_no_suggestion_unless_enforced() {
         let (root, source) = indexed_large_source("cursor-advisory-read");
         // The real cursor-agent 2026.10 payload: camelCase event name,
         // `cwd: ""`, repository in `workspace_roots`.
@@ -5737,20 +5660,22 @@ mod tests {
             "cwd": "",
             "workspace_roots": [root],
         });
-
-        let response = policy_response(
+        assert_eq!(
+            policy_response(
+                Provider::Cursor,
+                &payload,
+                crate::config_cmd::PolicyMode::Advisory,
+            ),
+            None
+        );
+        let denied = policy_response(
             Provider::Cursor,
             &payload,
-            crate::config_cmd::PolicyMode::Advisory,
+            crate::config_cmd::PolicyMode::Enforce,
         )
-        .expect("advisory mode still injects guidance for Cursor");
-        let context = response["additional_context"]
-            .as_str()
-            .expect("Cursor contract is flat additional_context");
-        assert!(context.contains("Pixel suggestion:"), "{context}");
-        assert!(context.contains("Original call proceeds"), "{context}");
-        assert!(response.get("permission").is_none());
-        assert!(response.get("hookSpecificOutput").is_none());
+        .expect("enforce denies through Cursor's flat permission contract");
+        assert_eq!(denied["permission"], "deny");
+        assert!(denied.get("hookSpecificOutput").is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -6230,6 +6155,15 @@ mod tests {
             policy_mode(&payload),
             crate::config_cmd::PolicyMode::Enforce,
             "policy reads the workspace layer, not the global one"
+        );
+        // Antigravity's PreInvocation payload carries only `workspacePaths`:
+        // the repository's own `policy: enforce` decides there too.
+        let pre_invocation = serde_json::json!({"workspacePaths": [root]});
+        assert_eq!(policy_root(&pre_invocation), Some(root.clone()));
+        assert_eq!(
+            policy_mode(&pre_invocation),
+            crate::config_cmd::PolicyMode::Enforce,
+            "a pre-invocation reads the workspace layer"
         );
         // A non-empty payload cwd still wins, with no workspace_roots.
         let payload = serde_json::json!({"cwd": root.display().to_string()});
@@ -6730,6 +6664,14 @@ mod tests {
     fn real_repo(name: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("pixel-guard-seq-{}-{}", name, std::process::id()));
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!(
+                "could not clear stale Git fixture {}: {error}",
+                root.display()
+            ),
+        }
         std::fs::create_dir_all(&root).unwrap();
         std::process::Command::new("git")
             .arg("init")
@@ -6972,29 +6914,6 @@ mod tests {
             !composed_matches("(", "Bash"),
             "an invalid regex never matches"
         );
-    }
-
-    /// A foreign allow — nested under `hookSpecificOutput` or top-level — is
-    /// the only decision that yields to enforced Pixel policy. Denials, other
-    /// decisions and absent decisions never do.
-    #[test]
-    fn foreign_allow_recognizes_both_allow_spellings_only() {
-        use serde_json::json;
-        for value in [
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"},"permissionDecision":"allow"}),
-        ] {
-            assert!(foreign_allow(&value), "{value}");
-        }
-        for value in [
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"},"permissionDecision":"deny"}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"}}),
-            json!({}),
-        ] {
-            assert!(!foreign_allow(&value), "{value}");
-        }
     }
 
     /// A single `|` marks the NEXT segment as piped; `&&`, `||` and a lone
@@ -8484,12 +8403,7 @@ mod tests {
             "tool_input": {"command": "rg needle src"},
             "cwd": repo,
         });
-        for provider in [
-            Provider::Claude,
-            Provider::Codex,
-            Provider::Devin,
-            Provider::Zcode,
-        ] {
+        for provider in [Provider::Devin, Provider::Zcode] {
             assert_eq!(
                 provider_rewrite_with(provider, &payload, |tool| {
                     tool == crate::search_compat::SearchTool::Rg
@@ -8499,6 +8413,14 @@ mod tests {
             );
             assert!(
                 provider_rewrite_with(provider, &payload, |_| false).is_some(),
+                "{provider:?}"
+            );
+        }
+        // Claude and Codex retrieval stays native: never rewritten.
+        for provider in [Provider::Claude, Provider::Codex] {
+            assert_eq!(
+                provider_rewrite_with(provider, &payload, |_| false),
+                None,
                 "{provider:?}"
             );
         }

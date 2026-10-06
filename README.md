@@ -36,7 +36,7 @@ The animation illustrates a workflow; it is not a timed agent comparison.
 [Agent trials and their limits](https://pixel-cli.dev/benchmarks/#on-whole-agent-tasks) include a newer Opus trial with hooks that found no speed gain on one task.
 
 - **A local index of signatures and callers that your agent queries before it greps**: 94.5% less read volume (median) for outline questions using `pixel list-signatures` than whole-file reads on 8 large open-source files. [How we measure](https://pixel-cli.dev/benchmarks/#well-known-files)
-- **One install, zero commands to learn**: you keep prompting as usual. Works with Claude Code, Codex, Pi, Cursor, Copilot CLI, OpenCode, Devin and Antigravity.
+- **Native tools stay available**: Codex and Claude use an optional impact skill; Pi offers an explicit impact command. Other agent integrations retain their existing policies.
 - **No account. No API key. No telemetry.** Your code stays on your machine.
 - **13 languages, MIT**, macOS (Apple Silicon) and Linux, signed releases.
 
@@ -116,43 +116,40 @@ Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the
 whether `pixel doctor .` is green.
 ```
 
-If you are that agent: run the Install one-liner, tell the user it writes to their home configuration, then run `pixel install` (idempotent) and `pixel doctor . --json` — report every check that is not green, do not claim success otherwise. Restart the session afterwards: the protocol is injected at session start. Then use Pixel the way [`PIXEL.md`](PIXEL.md) describes.
+If you are that agent: run the Install one-liner, tell the user it writes to their home configuration, then run `pixel install` (idempotent) and `pixel doctor . --json` — report every check that is not green, do not claim success otherwise. Restart the session to load updated integrations. Codex and Claude keep native retrieval; their optional plugins expose the focused impact skill. Pi exposes `/pixel-impact <symbol>`. [Manual setup](docs/manual-setup.md) explains each surface.
 
 ## Now build this harness
 
-`pixel install` wired it: session start injects the contract, and a PreToolUse hook rewrites `grep`/`rg` into Pixel — fail-open for pipes, `-m/-w/-v`, >4 MiB, binary, git-ignored and unindexed paths. The LLM reasons and edits; Pixel does everything search and Git.
+Codex and Claude keep ordinary search native. Invoke the focused impact skill when a known symbol's callers or blast radius matter; Pi provides `/pixel-impact <symbol>`. The bounded query uses an existing fresh graph and falls back without rebuilding it. Task lifecycle controls remain independent. Automatic skill selection is an arena experiment, not the shipped default.
 
 **Ask about the code** — "find callers of X", "explain this flow":
 
 ```mermaid
 flowchart TD
-    U["🧑 USER · “find callers of X / explain flow”"] --> S["SESSION START · hook injects the contract<br/>PreToolUse: grep/rg → pixel search-content"]
-    S --> L["🤖 LLM agent<br/>decides WHAT to find, not HOW"]
-    L --> P["PIXEL CLI · deterministic, ~ms<br/>pixel search-content -F “ident”<br/>pixel find-code “concept”<br/>pixel find-symbol “name”<br/>pixel who-calls uid<br/>pixel pack-context uid<br/>pixel dig-history --phrase “…”"]
-    P --> E{"epistemics?"}
-    E -->|complete| A["cite and answer"]
-    E -->|capped| N["narrow the query"] --> P
-    E -->|unresolved| M["pixel search-meaning"]
-    M --> A
-    A --> F["stderr · 🟩 round-trips · tokens saved"]
-    classDef llm fill:#ffe3e3,stroke:#d64545,color:#8a1f1f
-    classDef det fill:#e6f4ea,stroke:#2ea043,color:#14522a
-    class L llm
-    class S,P,M det
+    U["USER · callers or impact of a known symbol"] --> L["Agent · explicit impact skill or Pi command"]
+    L --> P["pixel impact SYMBOL --no-refresh"]
+    P --> E{"Useful existing graph?"}
+    E -->|yes| A["Inspect cited source and verify caller coverage"]
+    E -->|missing, stale, slow or unhelpful| N["Continue with native search"]
+    N --> A
+    A --> F["Answer with evidence and coverage limits"]
 ```
 
 **Implement a feature** — "implement feature":
 
 ```mermaid
 flowchart TD
-    U["🧑 USER · “implement feature”"] --> P0["0 · SCOPE, before edits<br/>pixel scope-task “task”<br/>pixel plan “task”"]
-    P0 --> P1["1 · KNOW BEFORE YOU TOUCH<br/>pixel impact “symbol”<br/>pixel what-changed"]
-    P1 --> C["🤖 pixel classify “which model + effort for this task?”"]
-    C --> P2["2 · EDIT LOOP · your tools, typecheck, test"]
+    U["🧑 USER · “implement feature”"] --> P0["Understand the task and inspect existing changes"]
+    P0 --> K{"Need impact facts for a known symbol?"}
+    K -->|explicit choice| P1["pixel impact SYMBOL --no-refresh"]
+    K -->|no| N["Native search and source inspection"]
+    P1 --> E{"Useful, fresh facts?"}
+    E -->|yes| V["Verify cited source and coverage limits"]
+    E -->|missing, stale or unhelpful| N
+    V --> P2["Edit with your tools, typecheck and test"]
+    N --> P2
     P2 -->|broke it| RB["pixel plan-rollback “problem”"] --> P2
-    P2 -->|green| C2["🤖 pixel classify “should I rebuild?”"]
-    C2 -->|yes| RD[“rebuild, then continue”] --> P3
-    C2 -->|no| P3[“3 · REVIEW<br/>pixel review-changes<br/>pixel repo-state”]
+    P2 -->|green| P3[“Review changes and repository state”]
     P3 --> G0[“pixel review-gate”]
     G0 -->|findings| FX[“fix them”] --> G0
     G0 -->|clean| P4[“4 · COMMIT, when asked<br/>pixel commit --files a.ts --files b.ts -m “msg” --request-id “id”<br/>pixel commit-and-push --files f -m “msg” origin branch --request-id “id””]
@@ -160,12 +157,10 @@ flowchart TD
     P4 --> P5["5 · CLEANUP and BRANCHES<br/>pixel scope-task --clear<br/>pixel new-branch “name” --request-id “id”<br/>pixel fetch origin<br/>pixel sync-branch<br/>pixel fast-forward --expected-head head --target-oid oid --request-id “id”"]
     P5 --> F["stderr · 🟩 round-trips · tokens saved"]
     classDef llm fill:#ffe3e3,stroke:#d64545,color:#8a1f1f
-    classDef cls fill:#ffe8cc,stroke:#e8590c,color:#8a3e10
     classDef det fill:#e6f4ea,stroke:#2ea043,color:#14522a
     classDef stop fill:#fff3cd,stroke:#b8860b,color:#6b4e00
     class P2,FX llm
-    class C,C2 cls
-    class P0,P1,P3,P4,P5,RB,RD,G0 det
+    class P0,P1,P3,P4,P5,RB,G0,N,V det
     class X stop
 ```
 

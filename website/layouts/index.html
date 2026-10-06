@@ -169,7 +169,7 @@
       </figure>
       {{/* `missed` restates what every Pixel run's answer named and the packet did not: the honest limit of a starting list, from the same runs. */}}
       {{ $missed := slice }}{{ range $s.missed }}{{ $missed = $missed | append (printf "<code>%s</code>" .) }}{{ end }}
-      <p class="board__note" data-reveal>The list Pixel handed over in the recording above, {{ (time $s.recorded).Format "2 Jan 2006" }}. Starting points, not a full change map: all {{ $s.runs }} agents with Pixel also named {{ delimit $missed ", " " and " | safeHTML }}, which it left out. You typed nothing: <code>pixel install</code> wires the hook that asks. <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md#the-scoping-board">Raw runs</a></p>
+      <p class="board__note" data-reveal>The list Pixel handed over in the recording above, {{ (time $s.recorded).Format "2 Jan 2006" }}. Starting points, not a full change map: all {{ $s.runs }} agents with Pixel also named {{ delimit $missed ", " " and " | safeHTML }}, which it left out. You typed nothing: the hooks Pixel 0.6.1's <code>pixel install</code> wrote asked; this release wires none by default. <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md#the-scoping-board">Raw runs</a></p>
     </section>
 
     {{/* ---------- toolbox: what the agent can ask beyond outlines ---------- */}}
@@ -245,13 +245,14 @@
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Compatibility</span></p>
       <header class="section__head" data-reveal>
         <h2 id="agents-title">Plugs into the agent <span class="glow">you already use.</span></h2>
-        <p>Three ways in, depending on what the agent lets a tool change. Each one names what Pixel writes, or what you run.</p>
+        <p>Three ways in, depending on what the agent lets a tool change, and agents that keep only their native tools. Each one names what Pixel writes, or what you run.</p>
       </header>
-      {{/* The three ways in, from each agent's `wiring` in data/agents.toml (the same split /for/ uses): install is what `pixel install` writes, plugin is the agent's own mechanism, rules is a file copied by hand. Each tile names what Pixel writes for it, or what the visitor runs: the first `global` path (and how many more), the first command of `plugin`, or the `rules` file. Each opens its /for/<slug>/ page. */}}
+      {{/* The three ways in, from each agent's `wiring` in data/agents.toml (the same split /for/ uses): install is what `pixel install` writes, plugin is the agent's own mechanism, rules is a file copied by hand, none is an agent Pixel leaves on its native tools. Each tile names what Pixel writes for it, or what the visitor runs: the first `global` path (and how many more), the first command of `plugin`, the `rules` file, or nothing. Each opens its /for/<slug>/ page. */}}
       {{ $ways := slice
         (dict "wiring" "install" "title" "Wired by pixel install" "text" "The install writes the agent's own settings. Nothing else to do.")
         (dict "wiring" "plugin" "title" "Through its plugin" "text" "One command in the agent: its plugin system loads Pixel.")
         (dict "wiring" "rules" "title" "A rules file you copy" "text" "The agent reads rules from the repository: copy Pixel's file there.")
+        (dict "wiring" "none" "title" "Native tools only" "text" "Nothing to wire: pixel install only removes what an earlier release wrote, and the agent searches with its own tools.")
       }}
       <div class="ways" data-reveal="stagger">
         {{ range $ways }}
@@ -261,7 +262,7 @@
           <p>{{ .text }}</p>
           <ul class="ways__list">
             {{ range where $agents "wiring" $w }}
-            <li><a class="ways__item" href="{{ printf "for/%s/" .slug | relURL }}">{{ (resources.Get (printf "logos/%s.svg" .logo)).Content | safeHTML }}<span class="ways__name">{{ .name }}</span><span class="ways__what">{{ if eq $w "install" }}<code>{{ index .global 0 }}</code>{{ with sub (len .global) 1 }} +{{ . }}{{ end }}{{ else if eq $w "plugin" }}<code>{{ strings.Trim (index (findRE "`[^`]+`" .plugin 1) 0) "`" }}</code>{{ else }}<code>{{ .rules }}</code>{{ end }}</span></a></li>
+            <li><a class="ways__item" href="{{ printf "for/%s/" .slug | relURL }}">{{ (resources.Get (printf "logos/%s.svg" .logo)).Content | safeHTML }}<span class="ways__name">{{ .name }}</span><span class="ways__what">{{ if eq $w "install" }}<code>{{ index .global 0 }}</code>{{ with sub (len .global) 1 }} +{{ . }}{{ end }}{{ else if eq $w "plugin" }}<code>{{ strings.Trim (index (findRE "`[^`]+`" .plugin 1) 0) "`" }}</code>{{ else if eq $w "rules" }}<code>{{ .rules }}</code>{{ else }}native tools{{ end }}</span></a></li>
             {{ end }}
           </ul>
         </section>

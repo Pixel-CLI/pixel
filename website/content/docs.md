@@ -57,7 +57,7 @@ The index, the code graph and the optional history data live in `.pixel/` at the
 
 ## What pixel install wires
 
-`pixel install` is global: run it once, from anywhere. It deploys the agent prompt to `~/.local/share/pixel/` (`agent-prompt.md`, plus the short `subagent-prompt.md` for sub-agents) and wires it into the agents it knows:
+`pixel install` is global: run it once, from anywhere. It deploys no agent prompt and no retrieval guard: every agent keeps its native search, and `pixel install` removes the prompts, guards and plugins earlier releases wrote. Claude Code and Codex keep task lifecycle hooks; Pi gets an explicit impact command:
 
 {{% agents-install %}}
 
@@ -67,24 +67,24 @@ At a terminal, `pixel install` opens with a short animation before its summary: 
 
 `pixel uninstall` removes everything `pixel install` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it (`mise uninstall pixel`, or the Homebrew equivalent).
 
-### Per-repository guards
+### Per-repository cleanup
 
-`pixel install --repo <path>` writes project-local enforcement only and skips every global step:
+`pixel install --repo <path>` updates project-local integration and skips global steps. It adds no guard:
 
-- `<repo>/.claude/settings.local.json`: the guard hook, in Claude Code's personal project settings (the shared `.claude/settings.json` never carries it); `<repo>/.claude/pixel-rtk-hooks.json` keeps an `rtk hook claude` group the guard takes over
-- `<repo>/.codex/config.toml`: the same `developer_instructions` key as the global install
-- `<repo>/.codex/hooks.json`: the guard hook, with `<repo>/.codex/pixel-composed-guard-backup.json` holding the hooks it replays; left alone when Git tracks `.codex/hooks.json`
-- `<repo>/.devin/config.local.json`: the guard hook for Devin
-- `<repo>/.pi/extensions/pixel-guard.ts`: Pi's guard extension, loaded once Pi trusts the project
-- `<repo>/AGENTS.md`: a portable, managed Pixel-first retrieval block; surrounding instructions are preserved and native retrieval is never blocked
+- `<repo>/.claude/settings.local.json` and `.claude/settings.json`: removes owned retrieval guards and restores RTK hook groups from `<repo>/.claude/pixel-rtk-hooks.json`, preserving foreign hooks and independent task controls
+- `<repo>/.codex/config.toml`: removes retired Pixel `developer_instructions` while preserving foreign text
+- `<repo>/.codex/hooks.json`: removes owned retrieval registrations and restores adopted hooks from `<repo>/.codex/pixel-composed-guard-backup.json` when the managed snapshot still matches; preserves user changes and leaves Git-tracked hook files alone
+- `<repo>/AGENTS.md`: removes the retired managed Pixel-first block; surrounding instructions are preserved
 
 Machine-specific artifacts that name this machine's `pixel` binary are listed in the clone's `.git/info/exclude`, so a `git add -A` cannot publish them. `.codex/config.toml` and the root `AGENTS.md` are portable and do not name the local binary.
 
-The Pi extension registers a structured `pixel` tool and provides advisory retrieval guidance by default. The root `AGENTS.md` block tells agents to attempt Pixel before native retrieval and explicitly allows native fallback; it does not produce denial messages. Run `pixel config policy enforce` to opt into supported retrieval gates or `pixel config policy off` to disable classification; `PIXEL_POLICY=enforce` or `PIXEL_POLICY=off` overrides the setting for one environment. Shell compositions and unsupported syntax retain native behavior. [Pi policy and exceptions](https://github.com/Pixel-CLI/pixel/blob/main/docs/pi-harness.md) describe the Pi boundary. `pixel doctor <repo>` reports the global wiring and the per-repository artifacts as green, stale or missing.
+It also removes two files earlier releases wrote, which it no longer writes: Pixel's Devin guard in `.devin/config.local.json` (other entries stay) and the Pi project extension `.pi/extensions/pixel-guard.ts`.
+
+Retrieval stays native under the default `advisory` policy: Pixel's guard hooks answer nothing, and only `pixel config policy enforce` lets a guard you wire by hand steer an agent. Claude Code and Codex stay native under every setting. [Pi integration](https://github.com/Pixel-CLI/pixel/blob/main/docs/pi-harness.md) describes the `/pixel-impact` package. `pixel doctor <repo>` checks global and project artifacts.
 
 ## Updating
 
-Upgrading replaces the binary only. The agent prompt and the per-agent config keys belong to you, not to the package manager, so they keep the old release's text until you refresh them.
+Upgrading replaces the binary only. The per-agent config keys belong to you, not to the package manager, so they keep the old release's text until you refresh them.
 
 | Installed with | Upgrade the binary |
 | --- | --- |
@@ -103,7 +103,7 @@ pixel doctor . --fix   # runs each repair a flagged check names, then re-checks
 
 ## Plugins
 
-Each agent CLI below can load Pixel's protocol through its own plugin mechanism, or for the last row a rules file you copy, with no `pixel install` step. The `pixel` binary still has to be installed: the plugin never installs it. When the binary is missing or too old for the commands the protocol names, the plugin injects a one-paragraph notice instead of the protocol.
+Codex and Claude plugins provide an explicit impact skill without automatic retrieval hooks. Pi's package provides `/pixel-impact <symbol>`. The binary must be installed separately. These focused integrations make one bounded query against an existing fresh graph; missing binaries, unsupported versions or stale indexes fall back to native tools. Other agent packages retain their existing protocol integration.
 
 | Tool | Install |
 | --- | --- |
@@ -120,18 +120,18 @@ Any other agent: paste [`PIXEL.md`](https://github.com/Pixel-CLI/pixel/blob/main
 
 ## The workflow
 
-The agent prompt walks every change through the same path:
+Codex and Claude use native search and editing by default. Choose Pixel commands when their facts help with a specific task:
 
 ```bash
-pixel scope-task "<task>"        # first call on multi-file work: P0/P1/P2 targets
-pixel find-code "<phrase>"       # before any free-text search for a name
-pixel impact "<symbol>"          # before editing any symbol: its blast radius
-pixel what-changed               # before an edit batch: what already differs
+pixel scope-task "<task>"        # optional task scope and candidate targets
+pixel find-code "<phrase>"       # optional lookup by behavior
+pixel impact "<symbol>" --no-refresh # explicit impact query using an existing fresh graph
+pixel what-changed               # inspect what already differs
 pixel review-changes             # the working tree, structured
 pixel commit-and-push --files <f1> --files <f2> -m "msg" --request-id "id" origin HEAD
 ```
 
-Two rules hold throughout. `pixel impact` runs before any edit, because editing blind is how callers you never saw break. And the agent never commits or pushes unless asked: every write takes a `--request-id`, which makes it crash-safe and idempotent.
+An impact query is optional and requires a known symbol. Inspect its cited source and continue with native tools when the graph is unavailable, stale, ambiguous or unhelpful. The agent commits or pushes only when asked; commit operations use a `--request-id` for crash-safe, idempotent execution.
 
 {{< workflow-jobs >}}
 

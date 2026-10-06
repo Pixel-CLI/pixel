@@ -50,14 +50,6 @@ pub(crate) const DEVIN_PIXEL_GUIDANCE: &str = concat!(
     "If Pixel or the index is unavailable, continue normally with native tools; never block the task."
 );
 
-const CODEX_PIXEL_GUIDANCE: &str = concat!(
-    "Pixel-first retrieval (non-blocking): for this repository prompt, run a Pixel retrieval command before answering from memory. ",
-    "Use `pixel search-content -F '<identifier>'` for a known name, or `pixel find-code '<concept>'` for behavior-described code. ",
-    "Do not answer from memory, a generic web search, or a native repository read before that retrieval attempt. ",
-    "When Pixel serves a path with a line, read only that region (`sed -n '<line>,+40p' <path>`), not the whole file. ",
-    "If Pixel or its index is unavailable, say so and continue with the best available evidence; never block the task."
-);
-
 const CLAUDE_PIXEL_GUIDANCE: &str = concat!(
     "Pixel-first retrieval (non-blocking): this is a pixel-indexed repository, so before a native search or file read to find code, ",
     "run `pixel search-content -F '<identifier>'` for a known name or `pixel find-code '<concept>'` for behavior. ",
@@ -106,6 +98,11 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     if !task_target_lookup_eligible(&payload.prompt) {
         std::process::exit(0);
     }
+    // Retired Codex registrations are silent. Retrieval is available through
+    // explicit capabilities and never requires per-prompt classification.
+    if matches!(provider, Some(crate::guard::Provider::Codex)) {
+        std::process::exit(0);
+    }
 
     let cwd = payload
         .cwd
@@ -115,11 +112,6 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     let root = crate::discover_root(&cwd).ok();
-    let task_context =
-        crate::config_cmd::feature_enabled(root.as_deref(), "task_context", "PIXEL_TASK_CONTEXT");
-    let task_boundary =
-        crate::config_cmd::feature_enabled(root.as_deref(), "task_boundary", "PIXEL_TASK_BOUNDARY");
-
     let event_name = payload
         .hook_event_name
         .as_deref()
@@ -135,6 +127,19 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
             .join(pixel_index::index::SHARD_FILE)
             .is_file()
     });
+    // Retrieval steering is opt-in (`pixel config policy enforce`): by
+    // default the hook adds no Pixel guidance, route or retrieval packet,
+    // and only the task-boundary note remains.
+    let steers =
+        crate::config_cmd::policy(root.as_deref()) == crate::config_cmd::PolicyMode::Enforce;
+    let task_context = steers
+        && crate::config_cmd::feature_enabled(
+            root.as_deref(),
+            "task_context",
+            "PIXEL_TASK_CONTEXT",
+        );
+    let task_boundary =
+        crate::config_cmd::feature_enabled(root.as_deref(), "task_boundary", "PIXEL_TASK_BOUNDARY");
     // Retrieval guidance and the route ride only a prompt that asks about code
     // or about Pixel itself; on a git request or a pasted thread they are
     // noise the model learns to skip, together with every later route.
@@ -142,12 +147,12 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     let asks = pixel_note.is_some() || request.is_some();
     // The opt-outs silence the task notes, not the Pixel-first guidance:
     // with both features disabled the guidance still rides an indexed
-    // repository's prompt on Codex and on a real Claude host.
+    // repository's prompt on Devin and on an explicitly wired Claude host.
     if prompt_features_disabled(task_context, task_boundary) {
-        let guidance = if matches!(provider, Some(crate::guard::Provider::Devin)) && indexed {
+        let guidance = if !steers {
+            ""
+        } else if matches!(provider, Some(crate::guard::Provider::Devin)) && indexed {
             DEVIN_PIXEL_GUIDANCE
-        } else if matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
-            CODEX_PIXEL_GUIDANCE
         } else if claude_host && indexed {
             CLAUDE_PIXEL_GUIDANCE
         } else {
@@ -217,26 +222,18 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // A prompt that asks about the Pixel tool itself carries the operation it
     // names as the first guidance line, so the agent consults the CLI instead
     // of answering about Pixel from memory.
-    if asks && matches!(provider, Some(crate::guard::Provider::Devin)) {
+    if steers && asks && matches!(provider, Some(crate::guard::Provider::Devin)) {
         context = render_devin_context(&context, pixel_note.as_deref());
     }
-    // Codex reads no SessionStart prompt of its own for this contract, so
-    // every prompt in an *indexed* repository carries the Pixel-first
-    // guidance. A discovered root without a shard is not indexed: the same
-    // commands there would build a full index instead of answering (the
-    // sub-agent prompt carries the same rule), so the guidance stays quiet.
-    if asks && matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
-        context = render_codex_context(&context, pixel_note.as_deref());
-    }
-    // Claude Code reads no per-turn mandate of its own for this contract, so a
-    // real Claude host in an *indexed* repository carries the Pixel-first
-    // guidance like Devin and Codex do. The hosting gate keeps an imported
+    // Codex has already returned. An explicitly wired Claude hook in an
+    // indexed repository carries guidance like Devin does; standard Claude
+    // installs do not register this retrieval hook. The hosting gate keeps an imported
     // Claude config (Devin reading `~/.claude/settings.json` verbatim) from
     // prepending a second guidance over Devin's own.
-    if asks && claude_host && indexed {
+    if steers && asks && claude_host && indexed {
         context = render_claude_context(&context, pixel_note.as_deref());
     }
-    if indexed {
+    if steers && indexed {
         context = append_route(&context, request.as_deref());
     }
     if !context.is_empty() {
@@ -376,15 +373,6 @@ fn prepend_note(note: Option<&str>, guidance: &str) -> String {
 
 fn render_devin_context(context: &str, pixel_note: Option<&str>) -> String {
     let guidance = prepend_note(pixel_note, DEVIN_PIXEL_GUIDANCE);
-    if context.is_empty() {
-        guidance
-    } else {
-        format!("{guidance}\n\n{context}")
-    }
-}
-
-fn render_codex_context(context: &str, pixel_note: Option<&str>) -> String {
-    let guidance = prepend_note(pixel_note, CODEX_PIXEL_GUIDANCE);
     if context.is_empty() {
         guidance
     } else {
@@ -1039,27 +1027,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_context_requires_pixel_evidence_on_every_repository_prompt() {
-        let context = render_codex_context("task targets", None);
-        assert!(context.starts_with("Pixel-first retrieval"));
-        assert!(context.contains("for this repository prompt"));
-        assert!(context.contains("Do not answer from memory, a generic web search"));
-        assert!(
-            context.contains("read only that region"),
-            "a served path:line ends the retrieval; no whole-file read after it"
-        );
-        assert!(
-            context.contains("never block the task"),
-            "the guidance fails open, like Devin's"
-        );
-        assert!(context.ends_with("task targets"));
-        assert_eq!(
-            render_codex_context("", None),
-            CODEX_PIXEL_GUIDANCE.to_string()
-        );
-    }
-
-    #[test]
     fn claude_context_requires_pixel_first_retrieval_on_every_indexed_prompt() {
         let context = render_claude_context("task targets", None);
         assert!(context.starts_with("Pixel-first retrieval"));
@@ -1076,7 +1043,7 @@ mod tests {
         );
         assert!(
             context.contains("never block the task"),
-            "the guidance fails open, like Devin's and Codex's"
+            "the guidance fails open, like Devin's"
         );
         assert!(context.ends_with("task targets"));
         assert_eq!(
@@ -1091,7 +1058,6 @@ mod tests {
             crate::pixel_question::pixel_question_note("how do i use pixel find-code").unwrap();
         for context in [
             render_devin_context("task targets", Some(&note)),
-            render_codex_context("task targets", Some(&note)),
             render_claude_context("task targets", Some(&note)),
         ] {
             assert!(context.starts_with("[PIXEL:TASK_CONTEXT]"), "{context}");
@@ -1102,15 +1068,6 @@ mod tests {
             );
             assert!(context.ends_with("task targets"), "{context}");
         }
-    }
-
-    #[test]
-    fn an_unrelated_prompt_keeps_the_generic_guidance_without_a_pixel_note() {
-        let note = crate::pixel_question::pixel_question_note("fix the login bug");
-        assert_eq!(note, None);
-        let context = render_codex_context("task targets", None);
-        assert!(context.starts_with("Pixel-first retrieval"), "{context}");
-        assert!(!context.contains("[PIXEL:TASK_CONTEXT]"), "{context}");
     }
 
     #[test]

@@ -32,9 +32,10 @@
 # Retrieval policy for coding agents: what Pixel does when an agent reaches
 # for native search instead of Pixel (default: advisory).
 # Environment override: PIXEL_POLICY
-#   advisory (default): suggest Pixel and keep native tools available.
-#   enforce: deny supported native retrieval in Codex, Antigravity, Devin and
-#     Pi. Compositions, unsupported syntax and unindexed trees stay native.
+#   advisory (default): native tools stay untouched; no rewrite or suggestion.
+#   enforce: a guard hook you wired by hand (`pixel install` registers none)
+#     rewrites or denies supported native retrieval; Codex and Claude stay
+#     native. Compositions, unsupported syntax and unindexed trees stay native.
 #   off: no policy decisions and no rewrites. Quote it (a bare `off` is a
 #     YAML boolean): policy: "off"
 # PIXEL_TARGETS_GUARD=0 (also false or off) remains an opt-out.

@@ -247,7 +247,7 @@ jobs:
           # The contract tests' own inputs: their scripts, the fixtures and
           # shells they exercise, the workflows verify-action-pins parses,
           # the fragments test-prepare validates, prepare.sh under the
-          # release skill, and the pi extension test-pi-policy.mjs imports.
+          # release skill, and the pi extension test-pi-impact.mjs imports.
           cat > scripts.re <<'EOF'
           ^scripts/
           ^\.githooks/
@@ -554,9 +554,9 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
-      - name: Pi extension policy and event contracts
+      - name: Pi impact command contract
         if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: bun scripts/test-pi-policy.mjs
+        run: bun scripts/test-pi-impact.mjs
 
   # Clippy and the reduced feature lanes, beside the Test job instead of
   # after it: they read no test result and took 35 s of its critical path

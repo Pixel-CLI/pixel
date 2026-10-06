@@ -1,0 +1,17 @@
+{
+  "id": "g2-api-research",
+  "suite": "generic",
+  "task_class": "concept",
+  "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+  "mode": "answer",
+  "max_turns": 30,
+  "prompt": "Trace the POST handler for the company-research API endpoint end to end: what does it validate, what library function does it call, and what does that function do?",
+  "must": [
+    {"pattern": "api/research/route\\.ts|app/api/research", "points": 3, "why": "the route file"},
+    {"pattern": "companyName", "points": 2, "why": "the validated field"},
+    {"pattern": "researchCompany", "points": 3, "why": "the library function"},
+    {"pattern": "lib/research", "points": 2, "why": "where the function lives"},
+    {"pattern": "400|500", "points": 2, "why": "error statuses"}
+  ],
+  "never": []
+}

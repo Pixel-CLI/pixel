@@ -65,6 +65,19 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 /// `meta` key under which the build-time freshness signature is stored.
 pub const FRESHNESS_KEY: &str = "freshness";
 
+/// `meta` key holding the wall-clock time, in nanoseconds since the Unix
+/// epoch, at which the last full build started reading the tree. Every row
+/// that build wrote holds bytes read after that instant, so a file whose
+/// mtime is older still has them unless its mtime was restored by hand; see
+/// [`freshness_signature_trusting_stat`]. Incremental updates leave it as
+/// it is: an older start only makes that reader re-hash more files.
+pub const BUILD_STARTED_KEY: &str = "build_started_ns";
+
+/// How far before [`BUILD_STARTED_KEY`] a file's mtime must be for
+/// [`freshness_signature_trusting_stat`] to reuse its stored hash: a margin
+/// for a filesystem clock behind the system one.
+const BUILD_STARTED_MARGIN: Duration = Duration::from_secs(2);
+
 /// The value an incremental update stores under [`FRESHNESS_KEY`] when it
 /// committed rows it could not sign. It is not a hexadecimal string, so it
 /// never equals a tree's signature: `is_fresh` says stale and `tree_delta`
@@ -474,6 +487,9 @@ fn build_graph_with(
     let t0 = Instant::now();
     let mut phases = BuildPhases::default();
 
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
     let inputs = collect_files(root);
     let snapshot_signature = input_signature(&inputs);
     phases.collect_ms = millis(t0.elapsed());
@@ -560,6 +576,7 @@ fn build_graph_with(
     // graph unsigned, and an unsigned graph is refused rather than read, so
     // no evaluation can see a cap that belongs to a half-written build.
     store.meta_set(GRAPH_FILE_CAP_KEY, &graph_file_cap_value(graph_file_cap()))?;
+    store.meta_set(BUILD_STARTED_KEY, &started.to_string())?;
     store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
     store.commit_write()?;
 
@@ -743,11 +760,16 @@ fn store_batch(
 /// result is sorted by path afterwards, so it is byte-identical to a serial
 /// pass: the signature built over it never depends on thread scheduling.
 fn tree_hashes(root: &Path) -> Vec<(String, u64)> {
+    hash_candidates(source_candidates(root))
+}
+
+/// The supported source files under `root` as `(rel path, path)`, in walk
+/// order: the input set of every tree signature.
+fn source_candidates(root: &Path) -> Vec<(String, std::path::PathBuf)> {
     // Must mirror `collect_files`'s walk policy exactly — both go through
     // `pixel_index::index::policy_walk` — or the freshness signature would
     // disagree with the set of files the graph was actually built from.
-    let walker = pixel_index::index::policy_walk(root);
-    let candidates: Vec<(String, std::path::PathBuf)> = walker
+    pixel_index::index::policy_walk(root)
         .flatten()
         .filter_map(|entry| {
             let is_file = entry.file_type().is_some_and(|t| t.is_file());
@@ -758,8 +780,7 @@ fn tree_hashes(root: &Path) -> Vec<(String, u64)> {
             is_graph_candidate(&rel).then_some(())?;
             Some((rel, entry.into_path()))
         })
-        .collect();
-    hash_candidates(candidates)
+        .collect()
 }
 
 /// Read and hash `candidates` in parallel, dropping the ones
@@ -816,19 +837,7 @@ type HashedFile = (String, u64, (i64, i64, u64), bool);
 /// exists to exploit. Entries for vanished/binary/oversized files are
 /// dropped, so the memo can never resurrect a file the walk would exclude.
 fn tree_hashes_cached(root: &Path, cache: &mut TreeHashCache) -> Vec<(String, u64)> {
-    let walker = pixel_index::index::policy_walk(root);
-    let candidates: Vec<(String, std::path::PathBuf)> = walker
-        .flatten()
-        .filter_map(|entry| {
-            let is_file = entry.file_type().is_some_and(|t| t.is_file());
-            if !is_file {
-                return None;
-            }
-            let rel = rel_path(root, entry.path())?;
-            is_graph_candidate(&rel).then_some(())?;
-            Some((rel, entry.into_path()))
-        })
-        .collect();
+    let candidates = source_candidates(root);
     let previous = std::mem::take(&mut cache.seen);
     let previous = &previous;
     let hashed: Vec<HashedFile> = candidates
@@ -886,6 +895,59 @@ fn signature_of(entries: &[(String, u64)]) -> String {
 /// indexed).
 pub fn freshness_signature(root: &Path) -> String {
     signature_of(&tree_hashes(root))
+}
+
+/// [`freshness_signature`] for a one-shot reader of `store` that cannot keep
+/// a [`TreeHashCache`]: a file whose mtime predates the last full build's
+/// start ([`BUILD_STARTED_KEY`], less a clock margin) and that the store
+/// holds reuses its stored `blob_oid` instead of being read and hashed.
+/// Every other file is hashed, and a store without the key (built before
+/// it existed) gets the full content signature.
+///
+/// The trade is the one [`TreeHashCache`] documents, made across processes:
+/// an edit that also restores an mtime older than the build is invisible.
+/// It suits a read whose answers are checked against source anyway, never
+/// a decision to skip a rebuild.
+///
+/// # Errors
+///
+/// The store's metadata or file rows cannot be read.
+pub fn freshness_signature_trusting_stat(
+    root: &Path,
+    store: &GraphStore,
+) -> Result<String, BoxErr> {
+    let Some(started) = store
+        .meta_get(BUILD_STARTED_KEY)?
+        .and_then(|value| value.parse::<u128>().ok())
+    else {
+        return Ok(freshness_signature(root));
+    };
+    let trusted_before = started.saturating_sub(BUILD_STARTED_MARGIN.as_nanos());
+    let stored: HashMap<String, u64> = store
+        .files()?
+        .into_iter()
+        .filter_map(|row| Some((row.path, u64::from_str_radix(&row.blob_oid, 16).ok()?)))
+        .collect();
+    let candidates = source_candidates(root);
+    let mut entries: Vec<(String, u64)> = candidates
+        .into_par_iter()
+        .filter_map(|(rel, path)| {
+            let meta = std::fs::metadata(&path).ok()?;
+            let mtime = i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec());
+            if let Some(&hash) = stored.get(rel.as_str())
+                && u128::try_from(mtime).is_ok_and(|mtime| mtime < trusted_before)
+            {
+                return Some((rel, hash));
+            }
+            let content = read_source_file(&path)?;
+            if is_binary(&content) {
+                return None;
+            }
+            Some((rel, xxh3_64(&content)))
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(signature_of(&entries))
 }
 
 /// What separates the working tree from the graph at `db_path`.
@@ -2492,6 +2554,75 @@ mod tests {
     /// even when mtime is restored. The old stat-only signature (path+size+mtime)
     /// could be fooled by `touch -t` or `cp` + `touch -r`. The content-hash
     /// signature catches this.
+    #[test]
+    fn stat_trusting_signature_should_reuse_stored_hashes_only_for_files_older_than_the_build() {
+        let root = tmpdir("fresh-stat");
+        let body_a = "export function alpha() { return 1 }\n";
+        let body_b = "export function alpha() { return 2 }\n";
+        std::fs::write(root.join("a.ts"), body_a).unwrap();
+        std::fs::write(root.join("b.ts"), "export function beta() {}\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let stored = store.meta_get(FRESHNESS_KEY).unwrap().unwrap();
+        assert!(store.meta_get(BUILD_STARTED_KEY).unwrap().is_some());
+
+        // Nothing moved: the signature matches without reading a.ts again.
+        assert_eq!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            stored
+        );
+
+        // An edit after the build has a newer mtime and is hashed.
+        std::fs::write(root.join("a.ts"), body_b).unwrap();
+        assert_ne!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            stored
+        );
+
+        // An mtime restored to before the build reuses the stored hash: the
+        // documented trade, which the full content signature does not make.
+        let old = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("a.ts"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            stored
+        );
+        assert_ne!(freshness_signature(&root), stored);
+
+        // A file the store does not hold is always hashed, whatever its mtime.
+        std::fs::write(root.join("c.ts"), "export function gamma() {}\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("c.ts"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_ne!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            stored
+        );
+        std::fs::remove_file(root.join("c.ts")).unwrap();
+
+        // Without a usable start time every file is hashed.
+        store.meta_set(BUILD_STARTED_KEY, "unknown").unwrap();
+        assert_eq!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            freshness_signature(&root)
+        );
+        assert_ne!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            stored
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn freshness_detects_equal_size_content_change() {
         let root = tmpdir("fresh-content");

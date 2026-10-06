@@ -1,0 +1,27 @@
+
+--- pixel complete; report follows ---
+# Codex / Pixel A/B report
+
+| Arm | Exit | Wall | Pixel retrieval c
+ommands | Last answer |
+| --- | ---: | ---: | ---: | --- |
+| Raw Codex | 0 | 39s | 0 | [raw-answer
+.md](raw-answer.md) |
+| Codex + Pixel | 0 | 56s | 0 | [pixel-
+answer.md](pixel-answer.md) |
+
+- Base: `908b77ef2e08607f08011dd639a733
+af681bee17`
+- Prompt SHA-256: `342ad51636e49e1d05c4
+104327162835ad36f5f1235ab2b95bc3b4ef463
+3f381`
+- Candidate Pixel: `/Users/livio/Docume
+nts/pixel/target/dev-release/pixel`
+- Artifacts: `/Users/livio/Documents/pi
+xel/target/codex-pixel-ab/run-u81muj`
+
+Pixel retrieval commands are a transcri
+pt indicator, not a quality score. Read
+the two answers and diffs before treati
+ng one run as evidence of a benefit.
+➜  pixel git:(908b77e)

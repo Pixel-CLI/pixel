@@ -18,4 +18,4 @@ A code index answers those questions directly. `pixel list-signatures` gives a f
 
 ## Use both
 
-Keep grep for strings and a code index for structure. The agent prompt `pixel install` deploys says which `pixel` command replaces which search or read, and when the native tool is still the right one.
+Keep grep for strings and a code index for structure. Pixel's bundled agent prompt, which you can copy into an agent's instructions, says which `pixel` command replaces which search or read, and when the native tool is still the right one.

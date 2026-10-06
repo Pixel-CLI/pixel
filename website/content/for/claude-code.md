@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Claude Code"
-description: "What pixel install writes into Claude Code's settings, the per-repository guard, the plugin alternative, how to check the wiring and how to remove it."
+description: "What pixel install writes into Claude Code's settings, the per-repository cleanup, the plugin alternative, how to check the wiring and how to remove it."
 agent: "claude-code"
 ---
 

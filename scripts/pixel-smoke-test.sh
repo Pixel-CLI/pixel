@@ -18,9 +18,11 @@
 #
 # The guard hook never blocks (see crates/pixel/src/guard.rs): destructive or
 # substitutable git commands get an ADVISORY (exit 0, JSON note with a pixel
-# alternative), a grep/rg on one file gets a transparent REWRITE (exit 0,
-# `updatedInput` pointing at `pixel search-like-rg`), and everything else
-# passes through silently. Those three shapes are what this test asserts.
+# alternative), Claude and Devin grep/rg calls on one file get a transparent
+# REWRITE (exit 0, `updatedInput` pointing at `pixel search-like-rg`), and
+# everything else passes through silently. Codex uses native task-event hooks;
+# its shell calls pass through without Pixel rewriting them. Those shapes are
+# what this test asserts.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -120,7 +122,7 @@ guard "$(payload bash command "$RESET")";           expect_advisory "Codex bash 
 guard "$(payload apply_patch file_path "$SRC")";    expect_proceeds "Codex apply_patch"
 guard "$(payload glob pattern "*.rs")";             expect_proceeds "Codex glob"
 OUT=$(payload shell command "$GREP" | "$PIXEL" run-hook guard --provider codex 2>/dev/null); CODE=$?
-expect_rewrite "Codex --provider codex shell grep on one file"
+expect_silent "Codex shell grep passes through without Pixel rewrite"
 
 echo "=== 3c. Guard hook — Gemini tool names ==="
 guard "$(payload run_shell_command command "$RESET")"; expect_advisory "Gemini run_shell_command reset --hard" "pixel plan-rollback"
@@ -158,7 +160,7 @@ for c in d["checks"]:
 sys.exit(0 if d["ok"] else 1)' && ok "doctor: ok" || no "doctor" "not ok (non-green checks listed above; PIXEL_SHELL=<shell> if only install.legacy-wrappers is red)"
 
 echo "=== 9. Install surface (what \`pixel install\` deploys, read through doctor) ==="
-for id in install.agent-prompt install.subagent-prompt install.pi-prompt install.legacy-wrappers install.codex-config rule.parity rule.scenarios; do
+for id in install.agent-prompt install.subagent-prompt install.pi-prompt install.pi-impact install.legacy-wrappers install.codex-config rule.parity rule.scenarios; do
     st=$(json_field "$DOC" "next(c['status'] for c in d['checks'] if c['id']=='$id')")
     [ "$st" = green ] && ok "doctor $id green" || no "doctor $id" "status '${st:-missing}'"
 done

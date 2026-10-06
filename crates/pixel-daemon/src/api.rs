@@ -68,6 +68,12 @@ const TARGETS_FACTS_ALGORITHM_VERSION: u32 = 1;
 
 /// `context` and `uses`: edges returned per direction before elision.
 const EDGE_LIMIT: usize = 20;
+/// `impact`: traversal depth when the caller names none, on the daemon path
+/// and `pixel impact --no-refresh` alike.
+pub const IMPACT_DEFAULT_DEPTH: u32 = 3;
+/// `impact`: items listed per depth. 3 depths × 20 = 60 items at ~300 bytes
+/// each is about 18 KB; the counts stay exact, only the list is capped.
+const IMPACT_LIMIT_PER_DEPTH: usize = 20;
 // `context` budget shape: item count and source bytes, per target and per
 // neighbour snippet.
 const MAX_CONTEXT_ITEMS: usize = 41;
@@ -2047,7 +2053,12 @@ impl Service {
             Resolved::One(s) => s,
             Resolved::Many(v) => return candidates_value(store, &v),
         };
-        let mut out = bridge::impact(store, &sym.uid, direction, depth.unwrap_or(3))?;
+        let mut out = bridge::impact(
+            store,
+            &sym.uid,
+            direction,
+            depth.unwrap_or(IMPACT_DEFAULT_DEPTH),
+        )?;
         merge_build_info(&mut out, built);
         Ok(out)
     }
@@ -3924,6 +3935,32 @@ fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, Str
     }
 }
 
+/// `impact` on a graph the caller already opened and checked, answered as
+/// the daemon's `op_impact` answers it: the same name resolution and
+/// `{candidates, hint}` reply on an ambiguous name, the same default depth
+/// and per-depth limit. `pixel impact --no-refresh` reads through it.
+///
+/// # Errors
+///
+/// No symbol matches, or the graph cannot be read.
+pub fn impact_on_graph(
+    store: &GraphStore,
+    uid_or_name: &str,
+    direction: &str,
+    depth: Option<u32>,
+) -> Result<Value, String> {
+    let sym = match resolve_symbol(store, uid_or_name)? {
+        Resolved::One(s) => s,
+        Resolved::Many(v) => return candidates_value(store, &v),
+    };
+    bridge::impact(
+        store,
+        &sym.uid,
+        direction,
+        depth.unwrap_or(IMPACT_DEFAULT_DEPTH),
+    )
+}
+
 fn candidates_value(store: &GraphStore, syms: &[SymbolRow]) -> Result<Value, String> {
     let files = file_map(store)?;
     Ok(json!({
@@ -4403,14 +4440,11 @@ mod bridge {
         } else {
             Direction::Upstream
         };
-        // limit_per_depth=20: 3 depths × 20 = 60 max items in the report.
-        // Each ImpactItem carries uid/name/path/tier/processes — at ~300
-        // bytes each, 60 items ≈ 18KB. The previous 50-per-depth (150
-        // total) could hit ~75KB+ with process lists, which is more than
-        // an agent needs from an impact scan. The counts are always exact
-        // (they count ALL edges, not just the listed ones); only the
-        // detailed item list is capped.
-        impact(store, uid, dir, depth, 20).map(to_val).map_err(es)
+        // The previous 50-per-depth (150 total) could hit ~75KB+ with
+        // process lists, more than an agent needs from an impact scan.
+        impact(store, uid, dir, depth, super::IMPACT_LIMIT_PER_DEPTH)
+            .map(to_val)
+            .map_err(es)
     }
 
     pub fn trace(store: &GraphStore, from_uid: &str, to_uid: &str) -> Result<Value, String> {

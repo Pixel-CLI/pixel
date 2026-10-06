@@ -912,16 +912,22 @@ fn claim_mismatch_should_match_files_and_whole_directories() {
 
 /// The agent pages tell a reader which files `pixel install` puts in their
 /// home. Run the real command into an empty one, with the config directories
-/// its conditional steps look for (OpenCode's, Antigravity's), and hold the
-/// data to exactly what landed: a file the install starts writing, stops
-/// writing or moves fails here until `website/data/agents.toml` says so.
+/// its Pi step and cleanup steps look for (OpenCode's, Devin's, Antigravity's,
+/// Pi's), and hold the data to exactly what landed: a file the install starts
+/// writing, stops writing or moves fails here until `website/data/agents.toml`
+/// says so.
 #[test]
 fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
-    // Written only when `agy` is present and registers the plugin.
-    const CONDITIONAL: &[&str] = &[".gemini/config/import_manifest.json"];
+    // Written only when Codex has a retired Pixel block to remove.
+    const CONDITIONAL: &[&str] = &[".codex/config.toml"];
 
     let home = crate::support::Scratch::for_test("docs-drift", "agents-global");
-    for dir in [".config/opencode", ".config/devin", ".gemini/config"] {
+    for dir in [
+        ".config/opencode",
+        ".config/devin",
+        ".gemini/config",
+        ".pi/agent",
+    ] {
         std::fs::create_dir_all(home.join(dir)).unwrap();
     }
     let out = crate::support::pixel_command()
@@ -963,8 +969,18 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
 /// every one of them but the conditional ones, and nothing outside them.
 #[test]
 fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
-    // Written only when the guard takes over an `rtk hook claude` group.
-    const CONDITIONAL: &[&str] = &[".claude/pixel-rtk-hooks.json"];
+    // These appear only when legacy hook backups exist, retired Pixel
+    // guidance is migrated out of an existing project file, or a retired
+    // Pixel callback is removed from an existing hook file: native cleanup
+    // never creates an empty one.
+    const CONDITIONAL: &[&str] = &[
+        ".claude/pixel-rtk-hooks.json",
+        ".claude/settings.local.json",
+        ".codex/config.toml",
+        ".codex/hooks.json",
+        ".codex/pixel-composed-guard-backup.json",
+        "AGENTS.md",
+    ];
     let data = agents_data();
     let mut claimed = agents_field(&data, "repo");
     claimed.extend(string_list(data.get("repo_shared")));
@@ -1007,6 +1023,56 @@ fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
         missing.is_empty(),
         "`pixel install --repo` did not write files agents.toml lists: {missing:?} (wrote {written:?})"
     );
+}
+
+/// Repo inventory includes portable files that are rewritten only while
+/// removing a retired Pixel block; migration must preserve surrounding text.
+#[test]
+fn repo_install_should_preserve_and_rewrite_documented_migration_files() {
+    let root = crate::support::Scratch::for_test("docs-drift", "agents-repo-migration");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(repo.join(".codex")).unwrap();
+    let codex_path = repo.join(".codex/config.toml");
+    let codex_instructions = format!(
+        "Keep this Codex instruction.\n{}\nRetired Pixel instructions.\n{}\nKeep this too.\n",
+        pixel_install::config::MANAGED_BEGIN,
+        pixel_install::config::MANAGED_END,
+    );
+    std::fs::write(
+        &codex_path,
+        format!(
+            "developer_instructions = '''\n{codex_instructions}'''\n\n[other]\nvalue = \"preserve\"\n"
+        ),
+    )
+    .unwrap();
+    let agents_path = repo.join("AGENTS.md");
+    std::fs::write(
+        &agents_path,
+        "Keep this project instruction.\n\n<!-- pixel:warp-retrieval:begin -->\nRetired Pixel-first instructions.\n<!-- pixel:warp-retrieval:end -->\n\nKeep this too.\n",
+    )
+    .unwrap();
+
+    let out = crate::support::pixel_command()
+        .args(["install", "--json", "--repo"])
+        .arg(&repo)
+        .env("HOME", root.join("home"))
+        .env_remove("CODEX_HOME")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "pixel install --repo: {out:?}");
+
+    let codex = std::fs::read_to_string(&codex_path).unwrap();
+    let codex: toml_edit::DocumentMut = codex.parse().unwrap();
+    let instructions = codex["developer_instructions"].as_str().unwrap();
+    assert!(instructions.contains("Keep this Codex instruction."));
+    assert!(instructions.contains("Keep this too."));
+    assert!(!instructions.contains(pixel_install::config::MANAGED_BEGIN));
+    assert_eq!(codex["other"]["value"].as_str(), Some("preserve"));
+
+    let agents = std::fs::read_to_string(&agents_path).unwrap();
+    assert!(agents.contains("Keep this project instruction."));
+    assert!(agents.contains("Keep this too."));
+    assert!(!agents.contains("pixel:warp-retrieval:"));
 }
 
 /// `static/llms.txt` is a static file, so it cannot build its links from
@@ -1115,7 +1181,6 @@ fn agents_data_checks_should_be_exactly_the_agent_checks_of_doctor() {
     // Checks on Pixel's own files, which no single agent owns.
     const NOT_AN_AGENT: &[&str] = &[
         "install.agent-prompt",
-        "install.subagent-prompt",
         "install.rtk-backup",
         "install.legacy-wrappers",
     ];

@@ -21,10 +21,18 @@
     ".": "./.opencode/plugins/pixel.mjs",
     "./plugin": "./.opencode/plugins/pixel.mjs"
   },
+  "pi": {
+    "extensions": ["./pi/extensions/pixel-impact.ts"],
+    "skills": [],
+    "prompts": [],
+    "themes": []
+  },
   "files": [
     "PIXEL.md",
     "PIXEL-SUBAGENT.md",
     "skills/",
+    "claude-skills/",
+    "pi/",
     "hooks/",
     ".opencode/",
     ".agents/plugins/",
