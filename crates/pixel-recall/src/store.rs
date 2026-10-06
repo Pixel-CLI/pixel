@@ -709,6 +709,70 @@ fn migrate(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{IntentSource, Role};
+    use crate::testutil::{add_session, add_session_with_intents};
+
+    #[test]
+    fn total_turns_and_turns_for_indexing_should_read_the_stored_turns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        assert_eq!(store.total_turns().unwrap(), 0);
+        add_session(
+            &mut store,
+            "claude",
+            "aaaa1111",
+            &[
+                (Role::User, "one"),
+                (Role::Assistant, "two"),
+                (Role::User, "three"),
+            ],
+        );
+        assert_eq!(store.total_turns().unwrap(), 3);
+        assert_eq!(
+            store.turns_for_indexing(1, 1).unwrap(),
+            vec![(2, "two".to_string())]
+        );
+        assert_eq!(
+            store.turns_for_indexing(0, 10).unwrap(),
+            vec![
+                (1, "one".to_string()),
+                (2, "two".to_string()),
+                (3, "three".to_string())
+            ]
+        );
+        assert!(store.turns_for_indexing(3, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mark_policy_skips_should_count_tool_and_injected_turns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        add_session_with_intents(
+            &mut store,
+            "claude",
+            "aaaa1111",
+            &[
+                (Role::User, Some(IntentSource::Human), "keep"),
+                (Role::User, Some(IntentSource::Orchestrator), "injected"),
+                (Role::Tool, None, "tool output"),
+                (Role::Assistant, None, "answer"),
+            ],
+        );
+        assert_eq!(store.mark_policy_skips().unwrap(), 2);
+        assert_eq!(store.embed_backlog().unwrap(), 2);
+        assert_eq!(store.mark_policy_skips().unwrap(), 0);
+    }
+
+    #[test]
+    fn drop_orphan_chunks_should_delete_chunks_past_the_persisted_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        add_session(&mut store, "claude", "aaaa1111", &[(Role::User, "one")]);
+        let ids = store.insert_chunks(1, &[(0, 1), (1, 2), (2, 3)]).unwrap();
+        assert_eq!(store.drop_orphan_chunks(ids[2]).unwrap(), 0);
+        assert_eq!(store.drop_orphan_chunks(ids[0]).unwrap(), 2);
+        assert_eq!(store.chunk_turns(&ids).unwrap().len(), 1);
+    }
 
     /// The ingest state is what makes the next pass incremental: a write
     /// that does not land re-ingests every unit from scratch.

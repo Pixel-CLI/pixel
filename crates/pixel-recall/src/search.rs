@@ -580,6 +580,53 @@ mod tests {
         assert_eq!(codex.hits[0].source_session_id, "bbbb2222");
     }
 
+    /// `offset` skips that many matches before the page starts: the second
+    /// page of one hit is the second-newest match.
+    #[test]
+    fn search_offset_should_skip_the_first_matches() {
+        let (_tmp, store, segments) = corpus();
+        let f = SearchFilters::default();
+        let all = search(&store, &segments, "needle", false, &f, 0, 10).unwrap();
+        let second = search(&store, &segments, "needle", false, &f, 1, 1).unwrap();
+        assert_eq!(second.hits.len(), 1);
+        assert_eq!(second.hits[0].turn_id, all.hits[1].turn_id);
+        let past = search(&store, &segments, "needle", false, &f, 2, 10).unwrap();
+        assert_eq!(past.hits.len(), 1);
+        assert_eq!(past.hits[0].turn_id, all.hits[2].turn_id);
+    }
+
+    #[test]
+    fn candidate_count_should_count_trigram_candidates_and_none_without_literals() {
+        let (_tmp, _store, segments) = corpus();
+        assert_eq!(candidate_count(&segments, "needle"), Some(3));
+        assert_eq!(candidate_count(&segments, "haystack"), Some(1));
+        assert_eq!(candidate_count(&segments, "."), None);
+    }
+
+    #[test]
+    fn count_matches_should_count_every_matching_turn_and_its_sessions() {
+        let (_tmp, store, segments) = corpus();
+        let (turns, sessions) = count_matches(
+            &store,
+            &segments,
+            "needle",
+            false,
+            &SearchFilters::default(),
+        )
+        .unwrap();
+        assert_eq!(turns, 3);
+        let ids: HashSet<i64> = store
+            .connection()
+            .prepare("SELECT id FROM sessions")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(sessions, ids);
+        assert_eq!(sessions.len(), 2);
+    }
+
     /// A pattern without required literals scans the corpus in ts order and
     /// stops early only when the page fills up.
     #[test]

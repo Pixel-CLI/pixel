@@ -147,9 +147,7 @@ impl SourceAdapter for Adapter {
             _ => 0,
         };
         let mut file = File::open(&unit.path)?;
-        if start > 0 {
-            file.seek(SeekFrom::Start(start))?;
-        }
+        file.seek(SeekFrom::Start(start))?;
         let mut reader = BufReader::new(file);
 
         let stem = unit
