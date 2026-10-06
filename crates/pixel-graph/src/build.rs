@@ -1000,13 +1000,15 @@ pub fn apply_tree_delta(root: &Path, db_path: &Path, delta: &TreeDelta) -> Resul
         |store, _batch| {
             let walked: HashMap<String, String> = store.walked_files()?.into_iter().collect();
             for (rel, hash) in &delta.changed {
-                // A changed file that extraction dropped keeps no row but its
-                // walked hash; one that vanished has neither, its stable state.
+                // A changed file the store keeps no row for still has its walked
+                // hash; one with neither vanished after the delta was taken, so
+                // the delta's signature no longer describes the tree.
+                let expected = format!("{hash:016x}");
                 let stored = store
                     .file_by_path(rel)?
                     .map(|f| f.blob_oid)
                     .or_else(|| walked.get(rel).cloned());
-                if stored.is_some_and(|oid| oid != format!("{hash:016x}")) {
+                if stored.as_deref() != Some(expected.as_str()) {
                     drifted = Some(rel.clone());
                     return Ok(None);
                 }
