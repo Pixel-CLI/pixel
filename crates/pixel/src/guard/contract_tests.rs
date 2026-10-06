@@ -1766,18 +1766,11 @@ fn branch_delete_is_denied_only_when_forced() {
     );
 }
 
-/// A scratch git repository with an empty `.pixel/`, so the reconcile
-/// marker can be written into it.
+/// A scratch repository directory with an empty `.pixel/`, so the reconcile
+/// marker can be written into it. No `git init`: the escape hatch reads only
+/// the marker, and spawning git outside `pixel-git` breaks its boundary test.
 fn rebase_repo(name: &str) -> PathBuf {
     let root = scratch(name);
-    let out = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&root)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git init: {out:?}");
     std::fs::create_dir_all(root.join(".pixel")).unwrap();
     root
 }
