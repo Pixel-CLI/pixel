@@ -1,0 +1,1 @@
+**graph:** Resolve Ruby constant receivers to their class methods, constructors and instance methods using lexical scope. Recognize job and mailer dispatch as probable edges, preserve these decisions during incremental updates, and avoid linking unknown constants to unrelated same-name methods.

@@ -354,6 +354,14 @@ envelope talks to the daemon socket directly.
   graph.db on first use`, or `rebuilt graph.db: <reason>` (the file on disk
   is `graph.v2.db`). Call edges carry a resolution tier, and
   analyses report a lower bound when same-name call sites stay unresolved.
+- Ruby constant receivers are resolved in `pixel-graph/src/resolve/ruby.rs`
+  against class/module scopes, preserving the difference between nested
+  declarations and `class A::B`. Unique class and constructor targets are
+  exact; job and mailer conventions are probable. Incremental updates replay
+  Ruby receiver edges because a new constant or factory override can change
+  the target without redefining the called method. Stored receiver text
+  normalizes AST-confirmed `Foo.new(args)` and `Job.set(args)` to `Foo.new`
+  and `Job.set`; the written callee remains separate from the resolved target.
 - The `graph` op rebuilds from scratch by default (`rebuild-graph`,
   `prepare-repo --rebuild-graph`). With `"if_stale": true` (a request field
   that defaults to `false` and is sent only when set, so an older daemon

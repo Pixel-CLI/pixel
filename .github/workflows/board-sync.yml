@@ -3,11 +3,14 @@
 
 name: Board sync
 
-# The Status field of the tracking task on project 3 follows the PR carrying
-# `Task <number>` (`.agents/rules/project-task.md`): In Progress when the PR
-# opens, Done when it merges, Todo when it closes unmerged. It lives apart
-# from ci.yml: docs-only pull requests still sync work, so ci.yml's path
-# filter must not gate it.
+# The Status field of each issue a pull request closes on project 3 follows
+# that PR (`.agents/rules/project-task.md`): In Progress while it is open,
+# Done when it merges, Todo when it closes unmerged. The issues are the
+# ones GitHub itself links through a closing keyword (`Closes #<n>`) or the
+# Development sidebar (`closingIssuesReferences`), so the line that makes
+# GitHub close the issue on merge is the only one the board reads. It lives
+# apart from ci.yml: docs-only pull requests still sync work, so ci.yml's
+# path filter must not gate it.
 #
 # `GITHUB_TOKEN` cannot write Projects v2; the job degrades gracefully when
 # PROJECTS_TOKEN (a fine-grained or classic token with `project: write` on
@@ -15,11 +18,11 @@ name: Board sync
 #
 # `pull_request_target` (not `pull_request`) so fork PRs still reach the
 # repository secrets. This job is metadata-only: it never checks out the
-# PR's code, only reads the PR body and runs `gh` against the project.
+# PR's code and never reads its body, only the links GitHub derived from it.
 
 on:
   pull_request_target:
-    types: [opened, reopened, closed]
+    types: [opened, reopened, edited, closed]
 
 # The job reads the PR from the event payload and writes the board with
 # PROJECTS_TOKEN: `GITHUB_TOKEN` is never used, so it gets no scope at all.
@@ -28,108 +31,109 @@ on:
 # Token-Permissions).
 permissions: {}
 
+# Queued, not cancelled: an `edited` event right after a merge must not
+# cancel the run that sets Done (the edit itself syncs nothing on a closed
+# PR, and the queue keeps the latest pending event).
 concurrency:
   group: board-sync-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   sync:
     # A standard GitHub-hosted runner: this job never checks out the PR's
-    # code (one gh api call against the project), so pull_request_target
+    # code (a few gh api calls against the PR and the project), so pull_request_target
     # stays safe, and there is no self-hosted runner to keep healthy.
     runs-on: ubuntu-latest
     steps:
       - name: Sync project 3 status with the PR lifecycle
         env:
           PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
-          PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_STATE: ${{ github.event.pull_request.state }}
           PR_MERGED: ${{ github.event.pull_request.merged }}
           PR_ACTION: ${{ github.event.action }}
-          PR_REPO_URL: ${{ github.event.pull_request.base.repo.html_url }}
+          REPO_OWNER: ${{ github.event.repository.owner.login }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
           if [ -z "$PROJECTS_TOKEN" ]; then
             echo "PROJECTS_TOKEN is not set; board status not synced for PR ${PR_NUMBER}"
             exit 0
           fi
           python3 - <<'PY'
-          import json, os, re, subprocess
+          import json, os, subprocess, time
 
-          body = os.environ["PR_BODY"] or ""
+          PROJECT_ID = "PVT_kwHOAGnAQs4BlIxX"
+          STATUS_FIELD_ID = "PVTSSF_lAHOAGnAQs4BlIxXzhj2yRU"
           action = os.environ["PR_ACTION"]
           merged = os.environ["PR_MERGED"] == "true"
-          token = os.environ["PROJECTS_TOKEN"]
+          number = os.environ["PR_NUMBER"]
 
-          # A body opens on `Task <number>` or declares `no task: <reason>`
-          # (project-task.md); anything else has nothing to sync.
-          m = re.match(r"\s*Task (\d+)\b", body)
-          if not m:
-            print("no Task line found; nothing to sync")
+          # `edited` covers a `Closes #<n>` added after the PR opened; an
+          # edit to a PR that is already closed changes nothing.
+          if action == "closed":
+            option, note = ("98236657", "Done") if merged else ("f75ad846", "Todo")
+          elif os.environ["PR_STATE"] == "open":
+            option, note = "47fc9ee4", "In Progress"
           else:
-            number = int(m.group(1))
-            if action == "opened" or action == "reopened":
-              option, note = "47fc9ee4", "In Progress"
-            elif merged:
-              option, note = "98236657", "Done"
-            else:
-              option, note = "f75ad846", "Todo"
+            print(f"PR {number} is closed; an edit has nothing to sync")
+            raise SystemExit(0)
 
-            def gh(*args):
-              env = dict(os.environ, GH_TOKEN=token)
-              result = subprocess.run(["gh", *args], capture_output=True,
-                                      text=True, env=env)
-              if result.returncode != 0:
-                print(result.stderr.strip())
-                raise SystemExit(f"gh {' '.join(args)} failed")
-              return result.stdout
+          def gh(*args):
+            env = dict(os.environ, GH_TOKEN=os.environ["PROJECTS_TOKEN"])
+            result = subprocess.run(["gh", *args], capture_output=True,
+                                    text=True, env=env)
+            if result.returncode != 0:
+              print(result.stderr.strip())
+              raise SystemExit(f"gh {' '.join(args)} failed")
+            return result.stdout
 
-            # GraphQL pagination: `first` is capped at 100 per page, so one
-            # big `item-list` call dies. Walk the pages instead. The query
-            # returns issues only, and the URL check keeps a same-numbered
-            # item from another repository out of reach.
-            found = None
-            cursor = None
-            while True:
-              query = (
-                'query($owner:String!, $n:Int!, $cursor:String) {'
-                ' user(login: $owner) { projectV2(number: $n) {'
-                ' items(first:100, after:$cursor) {'
-                ' pageInfo { hasNextPage endCursor }'
-                ' nodes { id content {'
-                ' ... on Issue { number url } } } } } } }')
-              args = ["api", "graphql", "-f", f"query={query}",
-                      "-f", "owner=LivioGama", "-F", "n=3"]
-              if cursor:
-                args += ["-f", f"cursor={cursor}"]
-              items = json.loads(
-                  gh(*args))["data"]["user"]["projectV2"]["items"]
-              for entry in items["nodes"]:
-                content = entry.get("content", {})
-                if (content.get("number") == number
-                    and content.get("url", "").startswith(
-                        os.environ["PR_REPO_URL"])
-                ):
-                  found = entry["id"]
-                  break
-              if found is not None or not items["pageInfo"]["hasNextPage"]:
-                break
-              cursor = items["pageInfo"]["endCursor"]
-            if found is None:
-              print(f"issue {number} is not on the board; nothing to sync")
-            else:
-              # The raw mutation, not `gh project item-edit`: that wrapper
-              # validates token scopes locally (read:org, read:discussion)
-              # before the operation, which `project: write` alone serves;
-              # `gh api` skips the preflight and the API only needs the
-              # scopes the project itself requires.
-              mutation = (
-                  'mutation { updateProjectV2ItemFieldValue(input: {'
-                  ' projectId: "PVT_kwHOAGnAQs4BlIxX",'
-                  ' itemId: "%s",'
-                  ' fieldId: "PVTSSF_lAHOAGnAQs4BlIxXzhj2yRU",'
-                  ' value: { singleSelectOptionId: "%s" } })'
-                  ' { projectV2Item { id } } }' % (found, option))
-              gh("api", "graphql", "-f", "query=" + mutation)
-              print(f"PR {os.environ['PR_NUMBER']} ({action}, "
-                    f"merged={merged}): task {number} set to {note}")
+          # Each closing issue with the project items it already has; the
+          # project id keeps an item on another board out of reach.
+          query = (
+              'query($owner:String!, $name:String!, $pr:Int!) {'
+              ' repository(owner:$owner, name:$name) {'
+              ' pullRequest(number:$pr) {'
+              ' closingIssuesReferences(first:20) { nodes { number'
+              ' projectItems(first:20) { nodes { id project { id } } }'
+              ' } } } } }')
+
+          def closing_issues():
+            data = json.loads(gh(
+                "api", "graphql", "-f", f"query={query}",
+                "-f", f"owner={os.environ['REPO_OWNER']}",
+                "-f", f"name={os.environ['REPO_NAME']}",
+                "-F", f"pr={number}"))
+            pr = data["data"]["repository"]["pullRequest"]
+            return pr["closingIssuesReferences"]["nodes"]
+
+          issues = closing_issues()
+          # GitHub links a closing keyword shortly after the body is saved:
+          # a PR opened a moment ago may not list its issue yet.
+          if not issues and action != "closed":
+            time.sleep(15)
+            issues = closing_issues()
+          if not issues:
+            print(f"PR {number} closes no issue; nothing to sync")
+            raise SystemExit(0)
+
+          for issue in issues:
+            items = [item["id"] for item in issue["projectItems"]["nodes"]
+                     if item["project"]["id"] == PROJECT_ID]
+            if not items:
+              print(f"issue {issue['number']} is not on the board; nothing to sync")
+              continue
+            # The raw mutation, not `gh project item-edit`: that wrapper
+            # validates token scopes locally (read:org, read:discussion)
+            # before the operation, which `project: write` alone serves;
+            # `gh api` skips the preflight and the API only needs the
+            # scopes the project itself requires.
+            mutation = (
+                'mutation { updateProjectV2ItemFieldValue(input: {'
+                ' projectId: "%s", itemId: "%s", fieldId: "%s",'
+                ' value: { singleSelectOptionId: "%s" } })'
+                ' { projectV2Item { id } } }'
+                % (PROJECT_ID, items[0], STATUS_FIELD_ID, option))
+            gh("api", "graphql", "-f", "query=" + mutation)
+            print(f"PR {number} ({action}, merged={merged}): "
+                  f"issue {issue['number']} set to {note}")
           PY

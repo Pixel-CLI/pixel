@@ -19,7 +19,6 @@
 //! (`prompt_intent`). The workers share a 750ms deadline; one slow worker does
 //! not discard useful context from the others.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -96,10 +95,9 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // Suppress stderr panics in hook mode so unexpected edge cases cleanly exit 0.
     std::panic::set_hook(Box::new(|_| {}));
 
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
+    let Some(input) = crate::hook_input::read_hook_payload() else {
         std::process::exit(0);
-    }
+    };
     let Ok(payload) = serde_json::from_str::<PromptSubmitPayload>(&input) else {
         std::process::exit(0);
     };
@@ -1077,13 +1075,13 @@ mod tests {
         // A backticked identifier starts with exact search and runs one
         // task-aware find-code fallback on empty (identifier-route wording).
         assert!(context.contains(
-            "rtk pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
+            "pixel search-content -F 'Foo::bar' --fallback-query 'Trace callers of `Foo::bar`' --no-daemon"
         ));
         assert!(
             context.contains("runs the task-aware find-code fallback once in the same command")
         );
         assert!(context.contains("maximum 40-line window"));
-        assert!(context.contains("rtk rg -m 5 -n -F -- 'Foo::bar' ."));
+        assert!(context.contains("rg -m 5 -n -F -- 'Foo::bar' ."));
         assert!(context.contains("[/PIXEL:EXECUTION_ROUTE]"));
     }
 
@@ -1117,7 +1115,7 @@ mod tests {
             "<pasted_content id=\"1\">\nthread\n</pasted_content id=\"1\">\nWhy does the parser panic?",
         );
         assert!(
-            context.contains("rtk pixel find-code 'Why does the parser panic?'"),
+            context.contains("pixel find-code 'Why does the parser panic?'"),
             "{context}"
         );
         assert!(!context.contains("thread"), "{context}");
@@ -1127,10 +1125,10 @@ mod tests {
     fn behavior_route_wording_uses_find_code_first_then_an_alternate_query() {
         let context = append_execution_route("", "Trace protected search metrics");
         assert!(context.starts_with("[PIXEL:EXECUTION_ROUTE]"));
-        assert!(context.contains("rtk pixel find-code 'Trace protected search metrics'"));
+        assert!(context.contains("pixel find-code 'Trace protected search metrics'"));
         assert!(context.contains("If it returns no usable or relevant result, run exactly once"));
         assert!(context.contains(
-            "rtk pixel find-code 'Trace protected search metrics implementation and callers'"
+            "pixel find-code 'Trace protected search metrics implementation and callers'"
         ));
         assert!(context.contains("maximum 40-line window"));
     }
