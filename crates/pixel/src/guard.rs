@@ -4431,7 +4431,7 @@ fn bash_deny_lines(cmd: &str, idx_root: Option<&Path>) -> Option<Vec<String>> {
     if !cmd.contains("git") {
         return None;
     }
-    for (sub, args) in git_invocations(cmd) {
+    for GitInvocation { sub, args, .. } in git_invocations(cmd) {
         if let Some(lines) = destructive_git_deny(&sub, &args, root) {
             return Some(lines);
         }
@@ -4446,7 +4446,7 @@ fn bash_deny_lines(cmd: &str, idx_root: Option<&Path>) -> Option<Vec<String>> {
 /// ordinary tokens that simply never match a destructive flag), and to
 /// separators inside quoted arguments (a multi-line `--message "…git add…"`
 /// never opens a phantom `git` segment).
-fn git_invocations(cmd: &str) -> Vec<(String, Vec<String>)> {
+fn git_invocations(cmd: &str) -> Vec<GitInvocation> {
     let mut out = Vec::new();
     for tokens in tokenize_segments(cmd) {
         let Some(git_pos) = tokens.iter().position(|t| t == "git") else {
@@ -4454,9 +4454,18 @@ fn git_invocations(cmd: &str) -> Vec<(String, Vec<String>)> {
         };
         let mut rest = tokens[git_pos + 1..].iter();
         let mut sub = None;
+        let mut c_dir: Option<PathBuf> = None;
         while let Some(t) = rest.next() {
-            if t == "-C" || t == "-c" {
-                let _ = rest.next(); // skip the global flag's value
+            if t == "-C" {
+                // Repeated `-C` compose as git does: `-C a -C b` is `a/b`,
+                // and an absolute later value replaces the earlier ones.
+                if let Some(dir) = rest.next() {
+                    c_dir = Some(c_dir.map_or_else(|| PathBuf::from(dir), |d| d.join(dir)));
+                }
+                continue;
+            }
+            if t == "-c" {
+                let _ = rest.next(); // skip the config value
                 continue;
             }
             if t.starts_with('-') {
@@ -4466,10 +4475,26 @@ fn git_invocations(cmd: &str) -> Vec<(String, Vec<String>)> {
             break;
         }
         if let Some(sub) = sub {
-            out.push((sub, rest.cloned().collect()));
+            out.push(GitInvocation {
+                sub,
+                args: rest.cloned().collect(),
+                c_dir,
+            });
         }
     }
     out
+}
+
+/// One `git <sub> <args…>` found by `git_invocations`.
+#[derive(Debug, PartialEq, Eq)]
+struct GitInvocation {
+    /// The subcommand (`rebase`, `reset`, …).
+    sub: String,
+    /// The tokens after the subcommand.
+    args: Vec<String>,
+    /// The directory the global `-C` flags name, composed in order and still
+    /// unresolved: relative to the directory git starts in.
+    c_dir: Option<PathBuf>,
 }
 
 /// True for a combined short-flag cluster containing `c` (e.g. `-fd`
@@ -4661,13 +4686,17 @@ fn git_mutation_substitute_lines(
     if !cmd.contains("git") {
         return None;
     }
-    for (sub, args) in git_invocations(cmd) {
+    for GitInvocation { sub, args, c_dir } in git_invocations(cmd) {
         if let Some(lines) = git_substitute_deny(&sub, &args, root) {
             // Check if a cd target or git -C path has a reconcile conflict
             // state file — if so, allow the rebase as an escape hatch.
             if sub == "rebase" {
-                let alt_root =
-                    extract_cd_target(cmd, cwd).or_else(|| extract_git_c_path(&args, cwd));
+                let cd_target = extract_cd_target(cmd, cwd);
+                let alt_root = match c_dir {
+                    // `-C` starts from wherever the `cd` left git.
+                    Some(dir) => resolve_dir(&dir, cd_target.as_deref().unwrap_or(cwd)),
+                    None => cd_target,
+                };
                 if let Some(alt) = alt_root
                     && alt != root
                     && reconcile_conflict_pending(&alt)
@@ -4694,26 +4723,13 @@ fn extract_cd_target(cmd: &str, cwd: &Path) -> Option<PathBuf> {
     if path.is_empty() {
         return None;
     }
-    let p = Path::new(path);
-    let resolved = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
-    };
-    resolved.canonicalize().ok().filter(|p| p.is_dir())
+    resolve_dir(Path::new(path), cwd)
 }
 
-/// Extract the path from `git -C <path>` args, resolved against cwd.
-fn extract_git_c_path(args: &[String], cwd: &Path) -> Option<PathBuf> {
-    let c_idx = args.iter().position(|a| a == "-C")?;
-    let path = args.get(c_idx + 1)?;
-    let p = Path::new(path);
-    let resolved = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
-    };
-    resolved.canonicalize().ok().filter(|p| p.is_dir())
+/// Resolve `dir` against `cwd` (an absolute `dir` stands alone) and
+/// canonicalize it. None when it is not an existing directory.
+fn resolve_dir(dir: &Path, cwd: &Path) -> Option<PathBuf> {
+    cwd.join(dir).canonicalize().ok().filter(|p| p.is_dir())
 }
 
 /// Per-invocation SUBSTITUTE verdict for `git <sub> <args>`.
