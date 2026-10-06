@@ -129,7 +129,11 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    preserving that owner during incremental resolution.
 /// 19: Ruby constant receivers resolve against lexical owners, including
 ///    constructors and probable Rails dispatch; factory receivers are normalized.
-pub const EXTRACTOR_VERSION: &str = "19";
+/// 20: Ruby `attr_*`, `alias_method`/`alias`, `delegate` and `scope` declare
+///    methods of their owner (and are no longer calls of it), an alias or
+///    delegator references its own owner's target, and an assignment through
+///    a receiver calls the writer (`self.name = v` → `name=`).
+pub const EXTRACTOR_VERSION: &str = "20";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -3557,6 +3561,12 @@ mod tests {
             "app/svc.rb",
             "class Svc\n  def target\n    1\n  end\n  def bare\n    target\n  end\n  \
              def chained\n    @ids ||= target.to_set\n  end\nend\n",
+        ),
+        (
+            "app/account.rb",
+            "class Account\n  attr_accessor :name\n  alias_method :label, :name\n  \
+             delegate :email, to: :owner, prefix: true\n  def owner; end\n  \
+             def rename\n    self.name = label\n  end\nend\n",
         ),
     ];
 

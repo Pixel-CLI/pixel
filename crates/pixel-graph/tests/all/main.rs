@@ -16,5 +16,6 @@ mod resolve_receiver_shadowing;
 mod ruby_bare_calls;
 mod ruby_callbacks;
 mod ruby_constant_receivers;
+mod ruby_generated_methods;
 mod scoped_symbol_lookup;
 mod unresolved_diagnostic;

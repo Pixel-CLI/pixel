@@ -17,6 +17,7 @@ use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Tree};
 use crate::store::SymbolKind;
 
 pub(crate) mod ruby_callbacks;
+pub(crate) mod ruby_generated;
 
 #[derive(Debug, Clone)]
 pub struct RawSymbol {
@@ -332,6 +333,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         stack: Vec::new(),
         in_trait_impl: false,
         use_scopes: std::collections::HashMap::new(),
+        generated: Vec::new(),
     };
     let root = tree.root_node();
     match lang {
@@ -347,6 +349,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         // than absent.
         _ => walk_generic(&mut w, root, 0),
     }
+    ruby_generated::drop_overridden(&mut w);
     let mut fx = FileExtraction {
         lang,
         symbols: w.symbols,
@@ -376,7 +379,13 @@ fn assign_enclosing(fx: &mut FileExtraction) {
     for call in &mut fx.calls {
         call.enclosing_index = best(call.site_line);
     }
-    for r#ref in &mut fx.references {
+    // A reference placed by its extractor keeps its symbol: the methods one
+    // `delegate :a, :b` generates share a line, and each forwards on its own.
+    for r#ref in fx
+        .references
+        .iter_mut()
+        .filter(|r| r.enclosing_index.is_none())
+    {
         r#ref.enclosing_index = best(r#ref.site_line);
     }
 }
@@ -398,6 +407,9 @@ struct Walker<'a> {
     /// Rust `use` scopes already computed, by scope node id: every `use` of a
     /// file's top level shares one walk of the file.
     use_scopes: std::collections::HashMap<usize, Vec<(u32, u32)>>,
+    /// Indices in `symbols` of the Ruby methods a declaration generated
+    /// (`attr_reader`, `delegate`, ...), for `ruby_generated::drop_overridden`.
+    generated: Vec<usize>,
 }
 
 impl<'a> Walker<'a> {
@@ -2066,6 +2078,12 @@ impl RubyLocals {
         false
     }
 
+    /// The qualification of a `def` written in the innermost frame's body:
+    /// what a declaration there (`attr_reader`) generates.
+    fn current_defs(&self) -> RubyDefs {
+        self.frames.last().map_or(RubyDefs::Instance, |f| f.defs)
+    }
+
     /// The qualification of a `def` whose own frame is the innermost one:
     /// the frame around it decides.
     fn enclosing_defs(&self) -> RubyDefs {
@@ -2152,41 +2170,7 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
                 w.push_symbol(name, q, SymbolKind::Method, node);
             }
         }
-        "call" => {
-            let mut callee_name: Option<String> = None;
-            if let Some(name) = field_text(w, node, "method") {
-                let recv = ruby_receiver(w, node);
-                callee_name = Some(name.clone());
-                // `module_function()` and `public()` set the mode as the
-                // bare words do; with arguments they only touch the methods
-                // they name.
-                if recv.is_none()
-                    && node
-                        .child_by_field_name("arguments")
-                        .is_none_or(|args| args.named_child_count() == 0)
-                {
-                    locals.visibility(&name);
-                }
-                if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
-                    if let Some(spec) = ruby_first_string_argument(w, node) {
-                        w.push_import(spec, Vec::new());
-                    }
-                } else {
-                    // Covers paren-less Rails DSL (`has_many :spots`,
-                    // `before_action :auth`) and receiver calls (`user.save`).
-                    w.push_call(name, recv, node);
-                }
-            }
-            // After extracting the callee, check arguments for identifier
-            // references (callbacks / handlers passed as args). Skip require
-            // methods — their string args are imports, not references.
-            if !matches!(callee_name.as_deref(), Some(n) if RUBY_REQUIRE_METHODS.contains(&n)) {
-                if let Some(method) = callee_name.as_deref() {
-                    ruby_callbacks::walk_symbol_arguments(w, node, method);
-                }
-                walk_call_arguments(w, node, callee_name);
-            }
-        }
+        "call" => walk_ruby_call(w, locals, node),
         // A name read without receiver or parentheses (`target`, or the
         // receiver of `target.to_set`) calls the method unless a local of
         // that name is in scope; tree-sitter cannot tell the two apart.
@@ -2201,6 +2185,7 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             }
             RubyIdent::Name => {}
         },
+        "alias" => ruby_generated::walk_alias_keyword(w, node, locals.current_defs()),
         // `in {target:}` binds `target` although no identifier is written.
         "keyword_pattern" if node.child_by_field_name("value").is_none() => {
             if let Some(key) = field_text(w, node, "key") {
@@ -2230,6 +2215,76 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
     if pushed {
         w.stack.pop();
     }
+}
+
+/// A Ruby `call` node: an import, a generated-method declaration or a call,
+/// and the method symbols its arguments name. Kept out of [`walk_ruby`] so
+/// the recursive walker's stack frame stays small: the depth cap must be
+/// reachable on a test thread's stack.
+#[inline(never)]
+fn walk_ruby_call(w: &mut Walker, locals: &mut RubyLocals, node: Node) {
+    let mut callee_name: Option<String> = None;
+    if let Some(name) = field_text(w, node, "method") {
+        let recv = ruby_receiver(w, node);
+        callee_name = Some(name.clone());
+        // `module_function()` and `public()` set the mode as the
+        // bare words do; with arguments they only touch the methods
+        // they name.
+        if recv.is_none()
+            && node
+                .child_by_field_name("arguments")
+                .is_none_or(|args| args.named_child_count() == 0)
+        {
+            locals.visibility(&name);
+        }
+        if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
+            if let Some(spec) = ruby_first_string_argument(w, node) {
+                w.push_import(spec, Vec::new());
+            }
+        } else {
+            // A declaration that generated methods defines them; it is not
+            // a call of the class body.
+            let declared = recv.is_none()
+                && ruby_generated::walk_declaration(w, node, &name, locals.current_defs());
+            // Covers paren-less Rails DSL (`has_many :spots`,
+            // `before_action :auth`) and receiver calls (`user.save`).
+            // An assignment to `recv.name` calls the writer `name=`;
+            // `recv.name += 1` reads with `name` and writes with `name=`.
+            match ruby_assigned_through(node) {
+                _ if declared => {}
+                Some("assignment") => w.push_call(format!("{name}="), recv, node),
+                Some(_) => {
+                    w.push_call(format!("{name}="), recv.clone(), node);
+                    w.push_call(name, recv, node);
+                }
+                None => w.push_call(name, recv, node),
+            }
+        }
+    }
+    // After extracting the callee, check arguments for identifier
+    // references (callbacks / handlers passed as args). Skip require
+    // methods — their string args are imports, not references.
+    if !matches!(callee_name.as_deref(), Some(n) if RUBY_REQUIRE_METHODS.contains(&n)) {
+        if let Some(method) = callee_name.as_deref() {
+            ruby_callbacks::walk_symbol_arguments(w, node, method);
+        }
+        walk_call_arguments(w, node, callee_name);
+    }
+}
+
+/// The kind of the assignment whose target `call` is (`self.name = v` is an
+/// `assignment`, `self.count += 1` an `operator_assignment`), or `None` when
+/// the call is not the left side of one. Only a call with a receiver can be:
+/// a bare `name = v` assigns a local.
+fn ruby_assigned_through(call: Node) -> Option<&'static str> {
+    let parent = call.parent()?;
+    let kind = match parent.kind() {
+        "assignment" => "assignment",
+        "operator_assignment" => "operator_assignment",
+        _ => return None,
+    };
+    (parent.child_by_field_name("left")? == call && call.child_by_field_name("receiver").is_some())
+        .then_some(kind)
 }
 
 /// Preserve receiver text except AST-confirmed constant factories/configurators.
