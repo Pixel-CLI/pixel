@@ -11,8 +11,15 @@ use crate::sandbox::{self, RunOutcome};
 use crate::{Result, now_ms, snapshot};
 
 /// Bind declared child toolchains to observed executable bytes as well.
+///
+/// The whole `check` (id, argv, cwd, timeout, required) is the identity's
+/// subject, as receipts recorded before the sandbox extraction expect.
 pub fn contract_check_identity(check: &Check, contract: &TaskContract) -> Result<String> {
-    sandbox::execution(&check.argv, &contract.toolchain).map(|execution| execution.identity)
+    execution(check, contract).map(|execution| execution.identity().to_owned())
+}
+
+fn execution(check: &Check, contract: &TaskContract) -> Result<sandbox::Execution> {
+    sandbox::execution(&check.argv, check, &contract.toolchain)
 }
 
 /// Runs only contract checks; callers cannot submit a successful receipt.
@@ -29,7 +36,7 @@ pub(crate) fn verify_with_lease(
         let source_marker = snapshot::mutation_marker(workspace.path(), snapshot)?;
         let started_ms = now_ms();
         let started = Instant::now();
-        let execution = sandbox::execution(&check.argv, &contract.toolchain)?;
+        let execution = execution(check, contract)?;
         let run = execution.run_confined(
             workspace.path(),
             &workspace.path().join(&check.cwd),
@@ -39,7 +46,7 @@ pub(crate) fn verify_with_lease(
         let intact = snapshot::unchanged(workspace.path(), snapshot, contract)?
             && snapshot::mutation_marker(workspace.path(), snapshot)? == source_marker;
         let identity_current = contract_check_identity(check, contract)
-            .is_ok_and(|identity| identity == execution.identity);
+            .is_ok_and(|identity| identity == execution.identity());
         let (outcome, exit_code) = match run.outcome {
             RunOutcome::Completed => (
                 if run.exit_code == Some(0) {
@@ -65,7 +72,7 @@ pub(crate) fn verify_with_lease(
             check_id: check.id.clone(),
             source_id: snapshot.content_id.clone(),
             contract_id: contract.id()?,
-            check_digest: execution.identity,
+            check_digest: execution.identity().to_owned(),
             outcome,
             exit_code,
             started_ms,
@@ -163,6 +170,31 @@ mod tests {
             receipts[0].diagnostic.as_deref(),
             Some("check execution environment changed during verification")
         );
+    }
+
+    #[test]
+    fn contract_identity_binds_the_whole_check_not_only_its_argv() {
+        // Receipts recorded before the sandbox extraction digested the whole
+        // check; an argv-only identity would mark every one `Unavailable`.
+        let configured = contract();
+        let base = check("true");
+        let identity = contract_check_identity(&base, &configured).unwrap();
+        let argv_only = sandbox::execution(&base.argv, &base.argv, &configured.toolchain).unwrap();
+        assert_ne!(identity, argv_only.identity());
+        let mut renamed = base.clone();
+        renamed.id = "other".into();
+        let mut moved = base.clone();
+        moved.cwd = "sub".into();
+        let mut slower = base.clone();
+        slower.timeout_ms += 1;
+        let mut optional = base;
+        optional.required = false;
+        for changed in [renamed, moved, slower, optional] {
+            assert_ne!(
+                contract_check_identity(&changed, &configured).unwrap(),
+                identity
+            );
+        }
     }
 
     #[test]

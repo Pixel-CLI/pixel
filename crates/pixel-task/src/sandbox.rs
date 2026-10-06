@@ -81,12 +81,15 @@ pub fn check_recovery(path: &Path) -> Result<()> {
 ///
 /// Only constructible through [`execution`], which guarantees a non-empty
 /// argv, so confined runs always have a program to execute.
+///
+/// The fields are read-only: what runs and the identity that names it are
+/// fixed together by [`execution`], so a caller cannot change one alone.
 #[derive(Debug)]
 pub struct Execution {
     argv: Vec<String>,
-    pub binary: PathBuf,
-    pub environment: BTreeMap<OsString, OsString>,
-    pub identity: String,
+    binary: PathBuf,
+    environment: BTreeMap<OsString, OsString>,
+    identity: String,
 }
 
 /// How a confined run ended.
@@ -112,6 +115,21 @@ pub struct RunOutput {
 }
 
 impl Execution {
+    /// The canonical path of the resolved `argv[0]`.
+    pub fn binary(&self) -> &Path {
+        &self.binary
+    }
+
+    /// The sanitized environment the child starts with.
+    pub fn environment(&self) -> &BTreeMap<OsString, OsString> {
+        &self.environment
+    }
+
+    /// The digest binding the subject, binary, environment and toolchain.
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
     /// Run this command once inside `root`, waiting at most `timeout`.
     ///
     /// `cwd` must resolve to a directory inside `root`. The child runs in its
@@ -229,24 +247,27 @@ fn before_deadline(now: Instant, deadline: Instant) -> bool {
 
 /// Resolve `argv[0]` against PATH and bind toolchain digests.
 ///
-/// The identity digests the command, the resolved binary bytes, the sanitized
-/// environment, and the toolchain — never the caller's bookkeeping metadata —
-/// so the same command under the same environment binds one identity.
+/// The identity digests `subject`, the resolved binary bytes, the sanitized
+/// environment, and the toolchain, so the same subject under the same
+/// environment binds one identity. `subject` is what the caller's records
+/// name: task verification passes the whole [`crate::model::Check`], whose
+/// digest is the `check_digest` persisted in every receipt, so its
+/// serialization must not change; a caller with nothing else passes `argv`.
 ///
 /// # Errors
 ///
 /// An empty argv, an unresolvable program, an unreadable binary or toolchain
 /// file, or a toolchain digest mismatch.
-pub fn execution(argv: &[String], toolchain: &BTreeMap<String, String>) -> Result<Execution> {
+pub fn execution<S: Serialize + ?Sized>(
+    argv: &[String],
+    subject: &S,
+    toolchain: &BTreeMap<String, String>,
+) -> Result<Execution> {
     let program = argv
         .first()
         .ok_or_else(|| Error::Invalid("empty check command".into()))?;
     let binary = executable(program)?;
     let environment = sanitize(std::env::vars_os().collect());
-    let environment_bytes: Vec<_> = environment
-        .iter()
-        .map(|(name, value)| (name.as_bytes(), value.as_bytes()))
-        .collect();
     let mut observed_toolchain = Vec::with_capacity(toolchain.len());
     for (program, expected) in toolchain {
         let path = executable(program)?;
@@ -258,22 +279,47 @@ pub fn execution(argv: &[String], toolchain: &BTreeMap<String, String>) -> Resul
         }
         observed_toolchain.push((program, path.display().to_string(), observed));
     }
-    let identity = digest(&(
-        argv,
-        binary.display().to_string(),
-        hex::encode(Sha256::digest(fs::read(&binary)?)),
-        digest(&environment_bytes)?,
-        // The actual private output directory changes per run; its semantic
-        // location is fixed and never points at the live checkout.
-        ("CARGO_TARGET_DIR", "<captured-workspace>/target"),
-        observed_toolchain,
-    ))?;
+    let identity = identity(
+        subject,
+        &binary,
+        &hex::encode(Sha256::digest(fs::read(&binary)?)),
+        &environment,
+        &observed_toolchain,
+    )?;
     Ok(Execution {
         argv: argv.to_vec(),
         binary,
         environment,
         identity,
     })
+}
+
+/// The digest persisted as a receipt's `check_digest`.
+///
+/// Its input shape is a stored contract: a receipt recorded by one release is
+/// compared with the value the next release computes, and any change to what
+/// is serialized here turns every recorded receipt `Unavailable`.
+fn identity<S: Serialize + ?Sized>(
+    subject: &S,
+    binary: &Path,
+    binary_sha256: &str,
+    environment: &BTreeMap<OsString, OsString>,
+    observed_toolchain: &[(&String, String, String)],
+) -> Result<String> {
+    let environment_bytes: Vec<_> = environment
+        .iter()
+        .map(|(name, value)| (name.as_bytes(), value.as_bytes()))
+        .collect();
+    digest(&(
+        subject,
+        binary.display().to_string(),
+        binary_sha256,
+        digest(&environment_bytes)?,
+        // The actual private output directory changes per run; its semantic
+        // location is fixed and never points at the live checkout.
+        ("CARGO_TARGET_DIR", "<captured-workspace>/target"),
+        observed_toolchain,
+    ))
 }
 
 fn sanitize(mut environment: BTreeMap<OsString, OsString>) -> BTreeMap<OsString, OsString> {
@@ -380,7 +426,7 @@ mod tests {
 
     fn run(argv: &[&str], root: &Path, cwd: &Path, timeout_ms: u64) -> RunOutput {
         let argv: Vec<String> = argv.iter().map(ToString::to_string).collect();
-        let execution = execution(&argv, &BTreeMap::new()).unwrap();
+        let execution = execution(&argv, &argv, &BTreeMap::new()).unwrap();
         execution
             .run_confined(root, cwd, Duration::from_millis(timeout_ms), None)
             .unwrap()
@@ -506,15 +552,17 @@ mod tests {
             .map(ToString::to_string)
             .collect();
         let no_tools = BTreeMap::new();
-        let first = execution(&argv, &no_tools).unwrap();
-        let second = execution(&argv, &no_tools).unwrap();
+        let first = execution(&argv, &argv, &no_tools).unwrap();
+        let second = execution(&argv, &argv, &no_tools).unwrap();
         assert_eq!(first.identity, second.identity);
 
         let mut different = argv.clone();
         different[2] = "false".into();
         assert_ne!(
             first.identity,
-            execution(&different, &no_tools).unwrap().identity
+            execution(&different, &different, &no_tools)
+                .unwrap()
+                .identity
         );
 
         let tools = tempfile::tempdir().unwrap();
@@ -525,7 +573,7 @@ mod tests {
             tool.display().to_string(),
             hex::encode(Sha256::digest(b"original")),
         );
-        let bound = execution(&argv, &toolchain).unwrap();
+        let bound = execution(&argv, &argv, &toolchain).unwrap();
         assert_ne!(first.identity, bound.identity);
 
         toolchain.insert(
@@ -533,9 +581,61 @@ mod tests {
             hex::encode(Sha256::digest(b"other")),
         );
         assert!(matches!(
-            execution(&argv, &toolchain),
+            execution(&argv, &argv, &toolchain),
             Err(Error::Blocked(_))
         ));
+    }
+
+    #[test]
+    fn identity_input_shape_matches_the_receipts_main_recorded() {
+        // Expected value computed by main's runner (b3551ad) on these inputs:
+        // `digest(&(check, binary, binary_sha256, digest(env), target, toolchain))`.
+        // A change here turns every recorded receipt `Unavailable` on upgrade.
+        let check = crate::model::Check {
+            id: "build".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
+            cwd: "crates".into(),
+            timeout_ms: 1000,
+            required: false,
+        };
+        let mut environment: BTreeMap<OsString, OsString> = BTreeMap::new();
+        environment.insert("PATH".into(), "/usr/bin".into());
+        environment.insert("PIXEL_VERIFICATION".into(), "1".into());
+        let program = String::from("cc");
+        let observed_toolchain = [(&program, "/usr/bin/cc".to_string(), "1".repeat(64))];
+        assert_eq!(
+            identity(
+                &check,
+                Path::new("/bin/sh"),
+                &"0".repeat(64),
+                &environment,
+                &observed_toolchain,
+            )
+            .unwrap(),
+            "92b5b1fec7592dc6db6d028d4072f01e88bd945ab9093d746f095b2a3583fc91"
+        );
+    }
+
+    #[test]
+    fn execution_accessors_expose_what_runs_and_its_identity() {
+        let argv: Vec<String> = ["/bin/sh", "-c", "true"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let execution = execution(&argv, &argv, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            execution.binary(),
+            Path::new("/bin/sh").canonicalize().unwrap()
+        );
+        assert_eq!(
+            execution
+                .environment()
+                .get(OsStr::new("PIXEL_VERIFICATION"))
+                .map(OsString::as_os_str),
+            Some(OsStr::new("1"))
+        );
+        assert_eq!(execution.identity(), execution.identity.as_str());
+        assert_eq!(execution.identity().len(), 64);
     }
 
     #[test]
@@ -563,32 +663,60 @@ mod tests {
         assert_eq!(output.exit_code, Some(3));
     }
 
+    /// True once `pid` no longer names a running process. A killed child
+    /// whose parent died is reparented and reaped asynchronously; until
+    /// then it is a zombie, which `kill(pid, 0)` still reports as present.
+    fn gone(pid: i32) -> bool {
+        // SAFETY: signal zero only probes the pid; it delivers nothing.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.starts_with('Z'))
+        })
+    }
+
     #[test]
     fn run_confined_times_out_and_kills_the_process_group() {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("pid");
-        let script = format!("echo $$ > \"{}\"; sleep 10", marker.display());
+        // The leader outlives the deadline by seconds and leaves a descendant
+        // in its group that outlives the test: only a group kill at the
+        // deadline ends both before the bound below.
+        let script = format!(
+            "sleep 30 >/dev/null 2>&1 & echo $! > \"{}\"; sleep 3",
+            marker.display()
+        );
         let argv: Vec<String> = ["/bin/sh", "-c", &script]
             .iter()
             .map(ToString::to_string)
             .collect();
-        let execution = execution(&argv, &BTreeMap::new()).unwrap();
+        let execution = execution(&argv, &argv, &BTreeMap::new()).unwrap();
+        let started = Instant::now();
         let output = execution
             .run_confined(root.path(), root.path(), Duration::from_millis(100), None)
             .unwrap();
-        assert_eq!(output.outcome, RunOutcome::TimedOut);
-        assert_eq!(output.exit_code, None);
-        let pid: i32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
-        // SAFETY: signal zero only probes the recorded group leader, and the
-        // cleanup below addresses that same pid if it somehow survived.
-        let alive = unsafe { libc::kill(pid, 0) } == 0;
-        if alive {
-            // SAFETY: cleanup targets this test's own recorded child only.
+        let returned = started.elapsed();
+        let descendant: i32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        let probe_deadline = Instant::now() + Duration::from_secs(2);
+        while !gone(descendant) && Instant::now() < probe_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let survived = !gone(descendant);
+        if survived {
+            // SAFETY: cleanup targets this test's own recorded descendant only.
             unsafe {
-                libc::kill(pid, libc::SIGKILL);
+                libc::kill(descendant, libc::SIGKILL);
             }
         }
-        assert!(!alive, "timed-out group leader survived the kill");
+        assert_eq!(output.outcome, RunOutcome::TimedOut);
+        assert_eq!(output.exit_code, None);
+        assert!(!survived, "a descendant of the timed-out group survived");
+        assert!(
+            returned < Duration::from_secs(2),
+            "timed-out run returned after {returned:?}: the group was not killed at the deadline"
+        );
     }
 
     #[test]
@@ -613,7 +741,7 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect();
-        let execution = execution(&argv, &BTreeMap::new()).unwrap();
+        let execution = execution(&argv, &argv, &BTreeMap::new()).unwrap();
         assert!(matches!(
             execution.run_confined(
                 root.path(),
@@ -636,7 +764,7 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect();
-        let execution = execution(&argv, &BTreeMap::new()).unwrap();
+        let execution = execution(&argv, &argv, &BTreeMap::new()).unwrap();
         fs::remove_file(&binary).unwrap();
         let lease_path = root.path().join("lease.json");
         assert!(
@@ -662,7 +790,7 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect();
-        let execution = execution(&argv, &BTreeMap::new()).unwrap();
+        let execution = execution(&argv, &argv, &BTreeMap::new()).unwrap();
         assert!(matches!(
             execution.run_confined(
                 root.path(),
