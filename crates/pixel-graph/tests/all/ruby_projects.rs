@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use pixel_graph::GraphStore;
-use pixel_graph::build::{build_graph, update_file};
+use pixel_graph::build::{apply_tree_delta, build_graph, tree_delta, update_file};
 use pixel_graph::extract::{extract_file, lang_of, lang_of_file};
 
 const GEMFILE: &str = "source \"https://rubygems.org\"
@@ -293,6 +293,39 @@ fn ruby_requires_should_follow_manifest_edits_incrementally() {
             "{importer}"
         );
     }
+}
+
+#[test]
+fn a_lockfile_edit_should_make_the_graph_stale_and_its_delta_re_resolve() {
+    let root = tempfile::tempdir().unwrap();
+    for (rel, body) in TREE {
+        write(root.path(), rel, body);
+    }
+    let db = root.path().join("graph.db");
+    build_graph(root.path(), &db).unwrap();
+    assert!(tree_delta(root.path(), &db).unwrap().unwrap().fresh);
+    // No watcher saw this edit: only the freshness walk can. Without `thor`
+    // in the lockfile, `require "thor"` reaches the local `lib/thor.rb`.
+    let without_thor: String = LOCK
+        .lines()
+        .filter(|line| !line.contains("thor"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    write(root.path(), "Gemfile.lock", &without_thor);
+    let delta = tree_delta(root.path(), &db).unwrap().unwrap();
+    assert!(!delta.fresh, "the lockfile is a freshness input");
+    // A hashed file the store never keeps (this lockfile, the shell
+    // binstub `bin/dev`) is listed whenever the tree drifted.
+    let changed: Vec<&str> = delta.changed.iter().map(|(rel, _)| rel.as_str()).collect();
+    assert_eq!(changed, ["Gemfile.lock", "bin/dev"]);
+    apply_tree_delta(root.path(), &db, &delta).unwrap();
+    let mut want = order_imports(true);
+    want[1] = row("thor", Some("lib/thor.rb"));
+    assert_eq!(imports(&db, "app/models/order.rb"), want);
+    assert!(tree_delta(root.path(), &db).unwrap().unwrap().fresh);
+    // The lockfile is hashed, never stored as a source file.
+    let store = GraphStore::open(&db).unwrap();
+    assert!(store.file_by_path("Gemfile.lock").unwrap().is_none());
 }
 
 #[test]

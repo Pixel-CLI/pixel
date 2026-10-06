@@ -397,8 +397,10 @@ envelope talks to the daemon socket directly.
   a sibling project. `require_relative` is relative to the requiring file.
   The manifests are read as literals from disk at each build and update; an
   update touching a Ruby file or manifest re-resolves every Ruby import. A
-  `Gemfile.lock` is not a graph file, so an edit to it alone takes effect
-  at the next update that touches a Ruby file.
+  `Gemfile.lock` is never stored as a graph file, but the graph walks hash
+  it into the freshness signature (`is_graph_candidate`), so an edit to it
+  alone makes the graph stale and the delta that applies it re-resolves
+  every Ruby import.
 - The `graph` op rebuilds from scratch by default (`rebuild-graph`,
   `prepare-repo --rebuild-graph`). With `"if_stale": true` (a request field
   that defaults to `false` and is sent only when set, so an older daemon
