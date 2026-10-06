@@ -3759,6 +3759,30 @@ fn context_hook_stays_silent_when_global_pixel_lifecycle_is_installed() {
     );
 }
 
+/// `pixel install` registers no SubagentStart context hook, so a global
+/// SessionStart hook must not silence the plugin's sub-agent prompt.
+#[cfg(unix)]
+#[test]
+fn context_hook_keeps_the_subagent_prompt_beside_global_lifecycle_hooks() {
+    let root = plugin_root("PROTOCOL", "SUB", Some(0));
+    let claude_dir = root.path().join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"command":"'/usr/local/bin/pixel' run-hook session-start --provider claude"}]}]}}"#,
+    )
+    .unwrap();
+    let out = run_context_hook(root.path(), "SubagentStart");
+    assert_eq!(
+        out["hookSpecificOutput"]["hookEventName"], "SubagentStart",
+        "{out}"
+    );
+    assert_eq!(
+        out["hookSpecificOutput"]["additionalContext"], "SUB",
+        "{out}"
+    );
+}
+
 /// Without a usable binary the protocol is a list of failing commands: the
 /// hook says why it was not loaded instead, and never tells the agent to
 /// fetch an installer.
@@ -5396,11 +5420,11 @@ fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged
     assert_eq!(after.status, CheckStatus::Green, "{after:?}");
 }
 
-#[test]
+/// A home with `pixel install` run and the Pixel plugin `pixel@local`
+/// installed in Claude (recorded in `installed_plugins.json`), but enabled
+/// nowhere yet.
 #[cfg(unix)]
-fn doctor_should_warn_when_claude_plugin_and_global_hooks_both_own_prompt() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
+fn home_with_global_hooks_and_installed_plugin(home: &Path) -> std::path::PathBuf {
     let exe = fake_pixel_exe(home);
     install(&InstallOptions {
         home: Some(home.to_path_buf()),
@@ -5409,26 +5433,109 @@ fn doctor_should_warn_when_claude_plugin_and_global_hooks_both_own_prompt() {
         ..Default::default()
     })
     .unwrap();
-    let path = home.join(".claude/settings.json");
-    let mut settings = read_json(&path);
-    settings["enabledPlugins"] = serde_json::json!({"pixel@local": true});
-    fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+    let plugins = home.join(".claude/plugins");
+    fs::create_dir_all(&plugins).unwrap();
+    fs::write(
+        plugins.join("installed_plugins.json"),
+        r#"{"version":2,"plugins":{"pixel@local":[{"scope":"user"}]}}"#,
+    )
+    .unwrap();
+    exe
+}
+
+/// Set `enabledPlugins` in the Claude settings file at `path`, keeping the
+/// rest of it.
+fn enable_plugins(path: &Path, plugins: serde_json::Value) {
+    let mut settings = if path.is_file() {
+        read_json(path)
+    } else {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        serde_json::json!({})
+    };
+    settings["enabledPlugins"] = plugins;
+    fs::write(path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+}
+
+#[cfg(unix)]
+fn claude_hooks_check(
+    home: &Path,
+    exe: std::path::PathBuf,
+    repo: Option<&Path>,
+) -> pixel_install::doctor::DoctorCheck {
     let report = doctor(&DoctorOptions {
         home: Some(home.to_path_buf()),
         executable_path: Some(exe),
         shell: Some(TEST_SHELL.into()),
+        repo_root: repo.map(Path::to_path_buf),
         only: vec!["install.claude-hooks".into()],
         ..Default::default()
     })
     .unwrap();
-    let finding = check(&report, "install.claude-hooks");
+    check(&report, "install.claude-hooks").clone()
+}
+
+#[test]
+#[cfg(unix)]
+fn doctor_should_warn_when_claude_plugin_and_global_hooks_both_own_prompt() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = home_with_global_hooks_and_installed_plugin(home);
+    let settings = home.join(".claude/settings.json");
+    enable_plugins(&settings, serde_json::json!({"pixel@local": true}));
+    let finding = claude_hooks_check(home, exe, None);
     assert_eq!(finding.status, CheckStatus::Yellow, "{finding:?}");
     assert!(
         finding
             .summary
-            .contains("plugin and global lifecycle hooks"),
+            .contains("plugin `pixel@local` and global lifecycle hooks"),
         "{finding:?}"
     );
+    assert!(
+        finding.summary.contains(&settings.display().to_string()),
+        "the warning names the file that enables the plugin: {finding:?}"
+    );
+    // `pixel install` rewrites the global hooks and leaves the plugin
+    // enabled: offering it as the repair would never converge.
+    assert_eq!(finding.fix, None, "{finding:?}");
+}
+
+/// The overlap follows the plugin state Claude applies in the repository:
+/// project settings enable it, local settings override them, and a plugin
+/// Claude has not installed runs nothing.
+#[test]
+#[cfg(unix)]
+fn doctor_should_judge_the_plugin_state_claude_applies_in_the_repo() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    let exe = home_with_global_hooks_and_installed_plugin(&home);
+    let project = repo.join(".claude/settings.json");
+    let local = repo.join(".claude/settings.local.json");
+
+    // Enabled by the project only.
+    enable_plugins(&project, serde_json::json!({"pixel@local": true}));
+    let finding = claude_hooks_check(&home, exe.clone(), Some(&repo));
+    assert_eq!(finding.status, CheckStatus::Yellow, "{finding:?}");
+    assert!(
+        finding.summary.contains(&project.display().to_string()),
+        "{finding:?}"
+    );
+    // Without the repository, the home alone enables nothing.
+    let finding = claude_hooks_check(&home, exe.clone(), None);
+    assert_eq!(finding.status, CheckStatus::Green, "{finding:?}");
+
+    // Local settings disable what the project enabled.
+    enable_plugins(&local, serde_json::json!({"pixel@local": false}));
+    let finding = claude_hooks_check(&home, exe.clone(), Some(&repo));
+    assert_eq!(finding.status, CheckStatus::Green, "{finding:?}");
+
+    // Enabled, but not a plugin Claude has installed.
+    fs::remove_file(&local).unwrap();
+    enable_plugins(&project, serde_json::json!({"pixel@elsewhere": true}));
+    let finding = claude_hooks_check(&home, exe, Some(&repo));
+    assert_eq!(finding.status, CheckStatus::Green, "{finding:?}");
 }
 
 /// After a global `pixel-dev install` every hook is present and registered

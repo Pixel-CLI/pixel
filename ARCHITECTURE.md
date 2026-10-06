@@ -460,8 +460,10 @@ each agent through its own extension point:
   at `tool_call` time.
 - **OpenCode** (`~/.config/opencode`: the guard plugin `pixel.js`, auto-loaded
   from `plugins/` and calling `pixel run-hook guard --provider opencode`),
-  **Antigravity** (`~/.gemini/config`: plugin, config entry and
-  `run-hook guard --provider antigravity` hook) and **zcode**
+  **Antigravity** (`~/.gemini/config`: the plugin, which carries the
+  `run-hook guard --provider antigravity` hook, and its config entry; the
+  global `pixel-guard` an older install wrote in `hooks.json` is removed, a
+  user-defined one under that name kept) and **zcode**
   (`~/.zcode/cli/config.json`: `run-hook guard --provider zcode`): only when
   that agent's configuration already exists.
 

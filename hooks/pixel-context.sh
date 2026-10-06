@@ -28,12 +28,15 @@ esac
 cat >/dev/null 2>&1 || :   # drain stdin; never block the harness
 [ -f "$FILE" ] || exit 0   # missing context file → stay silent
 
-# `pixel install` owns lifecycle context when its global SessionStart hook is
+# `pixel install` owns session context when its global SessionStart hook is
 # present. A plugin may still be enabled beside it, but must not inject the
 # same protocol a second time. The plugin remains the owner when installed
-# alone, without a global Pixel lifecycle hook.
+# alone, and of SubagentStart always: `pixel install` registers no
+# SubagentStart context hook, so suppressing it would leave sub-agents
+# without the protocol.
 GLOBAL_SETTINGS="${HOME:-}/.claude/settings.json"
-if [ -f "$GLOBAL_SETTINGS" ] \
+if [ "$EVENT" = SessionStart ] \
+  && [ -f "$GLOBAL_SETTINGS" ] \
   && grep -Eq 'run-hook session-start[^"[:space:]]* --provider claude' "$GLOBAL_SETTINGS"; then
   exit 0
 fi

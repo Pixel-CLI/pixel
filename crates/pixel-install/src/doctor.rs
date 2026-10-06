@@ -473,9 +473,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     // agent prompt itself. Verify the whole lifecycle contract: matchers,
     // commands and the executable this binary's install would write, not
     // just a `pixel` substring.
-    runner.check_status(
+    runner.record(
         "install.claude-hooks",
-        || -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+        || -> std::result::Result<(CheckStatus, DoctorCheckDetail, Remedy), String> {
             let path = home.join(".claude/settings.json");
             if !path.is_file() {
                 return Err(format!(
@@ -575,20 +575,38 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     stacked.join(", ")
                 ));
             }
-            if claude_plugin_enabled(&value) {
+            // `pixel install` cannot repair this: it rewrites the global
+            // hooks and leaves the plugin enabled. The user picks the one
+            // registration to keep, so the remedy is manual and names both.
+            let plugins = claude_pixel_plugins_loaded(&home, options.repo_root.as_deref());
+            if let Some((plugin, enabled_in)) = plugins.first() {
                 return Ok((
                     CheckStatus::Yellow,
                     DoctorCheckDetail {
-                        summary: "Claude Pixel plugin and global lifecycle hooks are both enabled; the global hooks own prompt injection".into(),
-                        detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                        summary: format!(
+                            "Claude Pixel plugin `{plugin}` and global lifecycle hooks are both enabled; the global hooks own prompt injection — disable the plugin (`/plugin` in Claude Code, or set enabledPlugins.\"{plugin}\" to false in {}) or remove the global hooks with `pixel uninstall`",
+                            enabled_in.display()
+                        ),
+                        detail: Some(serde_json::json!({
+                            "path": path.display().to_string(),
+                            "plugins": plugins
+                                .iter()
+                                .map(|(name, file)| serde_json::json!({
+                                    "name": name,
+                                    "enabled_in": file.display().to_string(),
+                                }))
+                                .collect::<Vec<_>>(),
+                        })),
                     },
+                    Remedy::Manual,
                 ));
             }
-            Ok(claude_hooks_owner_check(
+            let (status, detail) = claude_hooks_owner_check(
                 &path,
                 &exe,
                 &crate::routing::pixel_hooks_running_other_binaries(&value, &exe),
-            ))
+            );
+            Ok((status, detail, Remedy::Catalogue))
         },
     );
 
@@ -1433,17 +1451,57 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     })
 }
 
-/// Whether Claude's settings enable Pixel as a plugin beside global hooks.
-fn claude_plugin_enabled(value: &serde_json::Value) -> bool {
-    value
-        .get("enabledPlugins")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|plugins| {
-            plugins.iter().any(|(name, enabled)| {
-                (name == "pixel" || name.starts_with("pixel@"))
-                    && enabled == &serde_json::Value::Bool(true)
-            })
-        })
+/// Whether `name` is a Pixel Claude plugin id (`pixel`, or `pixel@<marketplace>`).
+fn is_pixel_plugin(name: &str) -> bool {
+    name == "pixel" || name.starts_with("pixel@")
+}
+
+/// The Pixel plugins Claude loads for a session in `repo`, each with the
+/// settings file whose `enabledPlugins` decided it.
+///
+/// Claude merges `enabledPlugins` per plugin, a later scope overriding an
+/// earlier one: `~/.claude/settings.json`, then the project's
+/// `.claude/settings.json`, then its `.claude/settings.local.json`. A plugin
+/// enabled there loads only once installed, which Claude records in
+/// `~/.claude/plugins/installed_plugins.json`; a declared plugin missing from
+/// it runs nothing and overlaps with nothing. An unreadable file declares
+/// nothing: the check that owns it reports it.
+fn claude_pixel_plugins_loaded(home: &Path, repo: Option<&Path>) -> Vec<(String, PathBuf)> {
+    let read = |path: &Path| -> Option<serde_json::Value> {
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    };
+    let mut files = vec![home.join(crate::routing::CLAUDE_SHARED_SETTINGS)];
+    if let Some(repo) = repo {
+        files.push(repo.join(crate::routing::CLAUDE_SHARED_SETTINGS));
+        files.push(repo.join(crate::routing::CLAUDE_LOCAL_SETTINGS));
+    }
+    let mut decided: std::collections::BTreeMap<String, (bool, PathBuf)> =
+        std::collections::BTreeMap::new();
+    for file in files {
+        let Some(plugins) = read(&file)
+            .and_then(|value| value.get("enabledPlugins").cloned())
+            .and_then(|plugins| plugins.as_object().cloned())
+        else {
+            continue;
+        };
+        for (name, enabled) in plugins {
+            if is_pixel_plugin(&name) {
+                decided.insert(
+                    name,
+                    (enabled == serde_json::Value::Bool(true), file.clone()),
+                );
+            }
+        }
+    }
+    let installed = read(&home.join(".claude/plugins/installed_plugins.json"))
+        .and_then(|value| value.get("plugins").cloned())
+        .and_then(|plugins| plugins.as_object().cloned())
+        .unwrap_or_default();
+    decided
+        .into_iter()
+        .filter(|(name, (enabled, _))| *enabled && installed.contains_key(name))
+        .map(|(name, (_, file))| (name, file))
+        .collect()
 }
 
 /// Registration and stored trust are distinct from actual hook observations.
