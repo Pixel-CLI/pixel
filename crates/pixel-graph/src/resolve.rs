@@ -12,7 +12,8 @@
 //! Receiver honesty: a call with a real receiver expression (`x.parse()`,
 //! `SymbolKind::parse`) can never be `Exact` from name-only resolution — the
 //! receiver's type is not tracked, so linking it to a same-name function/
-//! method would be a guess. Such calls are capped at `Probable`. Calls whose
+//! method would be a guess. Name-only matches are capped at `Probable`; Ruby
+//! constant receivers can prove a unique owner through lexical lookup. Calls whose
 //! receiver is `self`/`Self`/`this` (or absent) keep the normal tier, since
 //! those resolve against the enclosing type's own methods.
 //!
@@ -50,15 +51,21 @@
 //! candidate carries the source name (`use a::push as leased;` →
 //! `leased()` calls `push`), so T1 looks the local name up and matches
 //! candidates on the source; the source name alone is not in scope there.
+//!
+//! Ruby constant receivers use lexical class/module scopes instead of name tiers.
+//! Their unique methods are Exact; Rails dispatch conventions remain Probable.
 
 use std::collections::{HashMap, HashSet};
 
 use rusqlite::params;
 
+use crate::extract::ruby_callbacks::{ReferenceKind, reference_kind};
 use crate::store::{
     EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, SymbolKind, Tier, decode_bindings,
     decode_scope,
 };
+
+mod ruby;
 
 #[derive(Debug, Default, Clone)]
 pub struct ResolveStats {
@@ -164,6 +171,9 @@ fn scope_width(scope: &[(u32, u32)], site_line: Option<u32>) -> u32 {
 pub struct ResolveIndex {
     by_name: HashMap<String, Vec<Candidate>>,
     ruby_files: HashSet<i64>,
+    ruby_constants: ruby::Index,
+    /// Class/module symbols supply the owner of a Ruby class-body reference.
+    containers: HashSet<i64>,
     /// symbol_id → qualified name, for the type-qualified receiver tiebreak
     /// (`pixel_git::GitRunner` + `new` ↔ `GitRunner::new`). Kept beside the
     /// `Copy` candidate rows so the tier code stays copy-based.
@@ -224,6 +234,7 @@ impl ResolveIndex {
         };
         let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::new();
         let mut qualified_of: HashMap<i64, String> = HashMap::new();
+        let mut containers = HashSet::new();
         {
             let mut stmt = conn.prepare(
                 "SELECT name, file_id, id, kind, start_line, trait_impl, qualified FROM symbols",
@@ -243,6 +254,9 @@ impl ResolveIndex {
             })?;
             for row in rows {
                 let (name, cand, qualified) = row?;
+                if matches!(cand.kind, SymbolKind::Class | SymbolKind::Module) {
+                    containers.insert(cand.symbol_id);
+                }
                 qualified_of.insert(cand.symbol_id, qualified);
                 if callable(cand.kind) {
                     by_name.entry(name).or_default().push(cand);
@@ -285,6 +299,8 @@ impl ResolveIndex {
         Ok(Self {
             by_name,
             ruby_files,
+            ruby_constants: ruby::Index::build(store)?,
+            containers,
             qualified_of,
             import_bindings,
             rust_modules,
@@ -390,13 +406,20 @@ impl ResolveIndex {
     /// another file keep the shadow veto.
     ///
     /// Without a site line, only the imports in scope in the whole file count
-    /// for T1; [`Self::decide_at`] places the call.
+    /// for T1; [`Self::decide_at`] places the call. Without the calling
+    /// symbol either, a Ruby call on `self` (bare or written) to a name
+    /// defined in its file and elsewhere cannot be matched to the caller's
+    /// class and stays `Unresolved`; the resolver paths pass the caller.
+    /// Passed method symbols also need their receiving DSL: use
+    /// [`Self::decide_reference`] for reference rows, never this call API.
+    /// A relative Ruby constant needs a site line to establish lexical scope;
+    /// only an absolute (`::Foo`) constant can resolve without that input.
     pub fn decide(&self, caller_file_id: i64, name: &str, receiver: Option<&str>) -> Decision {
         self.decide_from(caller_file_id, None, name, receiver, None)
     }
 
-    /// [`Self::decide`] for a call on `site_line`, which T1 checks against
-    /// the lines where each import's names are in scope.
+    /// [`Self::decide`] for a call on `site_line`, locating import bindings
+    /// and Ruby lexical class/module scopes.
     pub fn decide_at(
         &self,
         caller_file_id: i64,
@@ -405,6 +428,63 @@ impl ResolveIndex {
         site_line: u32,
     ) -> Decision {
         self.decide_from(caller_file_id, None, name, receiver, Some(site_line))
+    }
+
+    /// Resolve a passed method using its enclosing owner and receiving DSL.
+    ///
+    /// Rails symbol callbacks name instance methods of the declaring class/module.
+    /// Literal `send` on self uses the enclosing method's kind, or the class method
+    /// from a class body. An unrelated class never supplies a fallback, and reopened
+    /// definitions remain unresolved because their load order is unknown.
+    /// Both initial references and stored references replay this rule; ordinary
+    /// identifier arguments retain the name/import lookup of [`Self::decide_at`].
+    pub fn decide_reference(
+        &self,
+        file_id: i64,
+        caller_id: Option<i64>,
+        name: &str,
+        arg_of: Option<&str>,
+        site_line: u32,
+    ) -> Decision {
+        let Some(kind) = self.ruby_reference_kind(file_id, arg_of) else {
+            return self.decide_at(file_id, name, None, site_line);
+        };
+        let target = caller_id.and_then(|caller| {
+            let qualified = self.qualified_of.get(&caller)?;
+            let (owner, separator) = if self.containers.contains(&caller) {
+                (
+                    qualified.as_str(),
+                    if kind == ReferenceKind::Callback {
+                        '#'
+                    } else {
+                        '.'
+                    },
+                )
+            } else if kind == ReferenceKind::Send {
+                ruby_owner(qualified)?
+            } else {
+                return None;
+            };
+            let mut candidates = self.by_name.get(name)?.iter().filter(|candidate| {
+                self.ruby_files.contains(&candidate.file_id)
+                    && self
+                        .qualified_of
+                        .get(&candidate.symbol_id)
+                        .and_then(|q| ruby_owner(q))
+                        == Some((owner, separator))
+            });
+            let first = candidates.next()?;
+            candidates.next().is_none().then_some(first.symbol_id)
+        });
+        target.map_or(Decision::Unresolved, Decision::Probable)
+    }
+
+    fn ruby_reference_kind(&self, file_id: i64, arg_of: Option<&str>) -> Option<ReferenceKind> {
+        if self.ruby_files.contains(&file_id) {
+            arg_of.and_then(reference_kind)
+        } else {
+            None
+        }
     }
 
     fn decide_from(
@@ -417,11 +497,21 @@ impl ResolveIndex {
     ) -> Decision {
         let (receiver, method_call) = split_method_receiver(receiver);
         if self.ruby_files.contains(&caller_file_id)
+            && let Some(receiver) = receiver
+            && let Some(decision) =
+                self.ruby_constants
+                    .decide(caller_file_id, receiver, name, site_line)
+        {
+            return decision;
+        }
+        if self.ruby_files.contains(&caller_file_id)
             && self.ambiguous_local_name(caller_file_id, name)
         {
             match receiver.map(str::trim) {
-                None => return Decision::Unresolved,
-                Some("self") => {
+                // Ruby sends a call without receiver to `self`, so a bare
+                // `access_logs(...)` names the caller's own method as surely
+                // as `self.access_logs(...)` does.
+                None | Some("self") => {
                     return caller_symbol_id
                         .and_then(|id| self.ruby_self_target(caller_file_id, id, name))
                         .map_or(Decision::Unresolved, Decision::Exact);
@@ -479,6 +569,11 @@ impl ResolveIndex {
                     .any(|candidate| candidate.file_id != caller_file_id))
     }
 
+    /// The caller's own method `name`: a candidate of the caller's class and
+    /// kind (`#` instance, `.` class) in the caller's file. `None` when that
+    /// file has none, or when another file defines the same owner's method
+    /// too: a class reopened elsewhere can redefine it, and the definition
+    /// Ruby keeps is whichever loads last, which the graph cannot tell.
     fn ruby_self_target(
         &self,
         caller_file_id: i64,
@@ -486,12 +581,11 @@ impl ResolveIndex {
         name: &str,
     ) -> Option<i64> {
         let caller_owner = ruby_owner(self.qualified_of.get(&caller_symbol_id)?)?;
-        let matches: Vec<Candidate> = self
+        let same_owner: Vec<Candidate> = self
             .by_name
             .get(name)?
             .iter()
             .copied()
-            .filter(|candidate| candidate.file_id == caller_file_id)
             .filter(|candidate| {
                 self.qualified_of
                     .get(&candidate.symbol_id)
@@ -499,7 +593,13 @@ impl ResolveIndex {
                     == Some(caller_owner)
             })
             .collect();
-        best(&matches)
+        if same_owner
+            .iter()
+            .any(|candidate| candidate.file_id != caller_file_id)
+        {
+            return None;
+        }
+        best(&same_owner)
     }
 
     /// The candidate a receiver names: the method of the type it ends with
@@ -899,7 +999,13 @@ pub fn resolve_references(
     let mut stats = ResolveStats::default();
     for fr in pending {
         for r#ref in &fr.references {
-            if !idx.names_a_symbol(fr.file_id, &r#ref.name, Some(r#ref.site_line)) {
+            // A known Ruby method-symbol reference must survive even before its
+            // definition is indexed; resolve_all can attach a later reopened file.
+            if idx
+                .ruby_reference_kind(fr.file_id, r#ref.arg_of.as_deref())
+                .is_none()
+                && !idx.names_a_symbol(fr.file_id, &r#ref.name, Some(r#ref.site_line))
+            {
                 continue;
             }
             let Some(src_id) = r#ref.enclosing_symbol_id else {
@@ -915,10 +1021,13 @@ pub fn resolve_references(
                 stats.unresolved += 1;
                 continue;
             };
-            // References resolve against the same T0/T1/T2 index. A real
-            // receiver is irrelevant here (the arg is an identifier, not a
-            // method call), so pass `None`.
-            match idx.decide_at(fr.file_id, &r#ref.name, None, r#ref.site_line) {
+            match idx.decide_reference(
+                fr.file_id,
+                Some(src_id),
+                &r#ref.name,
+                r#ref.arg_of.as_deref(),
+                r#ref.site_line,
+            ) {
                 Decision::Exact(dst) | Decision::Probable(dst) => {
                     store.insert_edge(&EdgeRow {
                         src_id,
@@ -948,54 +1057,233 @@ pub fn resolve_references(
     Ok(stats)
 }
 
-/// Re-attempt resolution of every stored `unresolved_calls` row against the
-/// current index. Rows that resolve become edges and are deleted; the rest
-/// stay (keeping the epistemic envelope honest). Used after incremental
-/// updates so callers into a rebuilt file re-link. The stored `receiver` is
-/// replayed so the receiver downgrade stays consistent across re-resolutions.
-pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
-    struct Row {
-        id: i64,
-        file_id: i64,
-        name: String,
-        enclosing: i64,
-        site_line: u32,
-        receiver: Option<String>,
-        kind: String,
+/// What an incremental batch changed that a stored decision can read, so
+/// that [`resolve_affected`] and [`reconsider_resolved_calls`] re-decide only
+/// the rows and edges whose answer can differ. A decision on a row (file,
+/// name, receiver, caller) reads:
+///
+/// - the candidates of its name (`by_name`, their qualified names, kinds and
+///   files) — `names` holds every symbol name a batch file defined before
+///   **or** after the change: a definition that disappears can make an
+///   ambiguous name unique, one that appears can make a unique one ambiguous;
+/// - its own file's imports, scopes and caller symbols, and an aliased
+///   import's source name, which differs from the name the call wrote —
+///   `files` holds the batch's files and the files importing one of them;
+/// - for a Ruby constant receiver, the class/module constants its segments
+///   name, and the owner's methods the Ruby rules read (`Foo.new` reads
+///   `Foo.new` and `Foo#initialize`, `perform_later` reads `#perform`) —
+///   `constants` holds the last segment of the batch's classes and modules.
+///   A method's owner is the class or module whose body declares it in the
+///   same file, and the receiver that resolves to that owner ends with that
+///   segment, so a changed `#initialize` or `#perform` retries the receiver
+///   rows through its class. A `def Foo.bar` outside `Foo`'s body has no
+///   owner in its qualified name, so `ruby::Index` never reads it.
+///
+/// `replayed` holds the names of the rows the update itself moved back to
+/// `unresolved_calls` (a demoted incoming edge, a reconsidered one): under
+/// an alias the name the call wrote is not the target's.
+///
+/// Over-inclusion only costs time (an unchanged input gives the same
+/// decision); omission leaves a stale row, which
+/// `an_incremental_update_should_store_what_a_full_build_stores` rules out.
+#[derive(Debug, Default)]
+pub struct Affected {
+    pub names: HashSet<String>,
+    pub files: HashSet<i64>,
+    pub constants: HashSet<String>,
+    pub replayed: HashSet<String>,
+}
+
+impl Affected {
+    /// Record the definitions a batch changed. `before` and `after` list the
+    /// batch files' definitions as a decision reads them — path, name,
+    /// qualified name, kind, trait impl — and only those present a different
+    /// number of times on each side count: a file rewritten with the same
+    /// definitions changes no candidate set, so no decision outside it. Its
+    /// new symbol ids and lines are the demotion's concern (`write_rows`
+    /// moves every incoming edge back and records it in `replayed`).
+    pub fn record_changed_definitions(&mut self, before: &[Definition], after: &[Definition]) {
+        let mut count: HashMap<&Definition, i64> = HashMap::new();
+        for definition in before {
+            *count.entry(definition).or_default() -= 1;
+        }
+        for definition in after {
+            *count.entry(definition).or_default() += 1;
+        }
+        for (definition, n) in count {
+            if n != 0 {
+                self.record_definition(definition);
+            }
+        }
     }
 
-    let idx = ResolveIndex::build(store)?;
-    let rows: Vec<Row> = {
-        let mut stmt = store.conn().prepare(
-            "SELECT u.id, u.file_id, u.name, u.enclosing_symbol_id, u.site_line, u.receiver, u.kind
-               FROM unresolved_calls u
-               JOIN symbols s ON s.id = u.enclosing_symbol_id
-              WHERE u.enclosing_symbol_id IS NOT NULL",
-        )?;
-        let mapped = stmt.query_map([], |r| {
-            Ok(Row {
-                id: r.get(0)?,
-                file_id: r.get(1)?,
-                name: r.get(2)?,
-                enclosing: r.get(3)?,
-                site_line: r.get(4)?,
-                receiver: r.get(5)?,
-                kind: r
-                    .get::<_, Option<String>>(6)?
-                    .unwrap_or_else(|| "calls".to_string()),
-            })
-        })?;
-        mapped.collect::<Result<_, _>>()?
+    /// A changed definition: its name, and the constant a Ruby receiver
+    /// reaches it through. A class or module counts by its last segment
+    /// (`class A::C::B` is named as written, while the receiver it shadows,
+    /// `B.run` inside `A::C`, only spells `B`); a method by its owner's
+    /// (`Widget#initialize` is what `Widget.new` reads).
+    fn record_definition(&mut self, definition: &Definition) {
+        let Definition {
+            name,
+            qualified,
+            kind,
+            ..
+        } = definition;
+        self.names.insert(name.clone());
+        let constant = if matches!(kind.as_str(), "class" | "module") {
+            Some(name.as_str())
+        } else {
+            ruby_owner(qualified).map(|(owner, _)| owner)
+        };
+        if let Some(constant) = constant {
+            let segment = constant.rsplit("::").next().unwrap_or(constant);
+            self.constants.insert(segment.to_string());
+        }
+    }
+
+    /// The call names whose decision can read a changed name: the batch's
+    /// definitions and the rows the update moved back.
+    fn call_names(&self) -> HashSet<&str> {
+        self.names
+            .iter()
+            .chain(&self.replayed)
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// True iff a call on `receiver` can resolve differently: one of its
+    /// constant segments is a changed class or module (`Gamma::Delta`,
+    /// `Widget.new`), compared whole, never as a prefix.
+    fn reads_receiver(&self, receiver: &str) -> bool {
+        receiver
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|segment| self.constants.contains(segment))
+    }
+}
+
+/// One definition as [`Affected::record_changed_definitions`] compares it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Definition {
+    pub path: String,
+    pub name: String,
+    pub qualified: String,
+    pub kind: String,
+    pub trait_impl: bool,
+}
+
+struct RetryRow {
+    id: i64,
+    file_id: i64,
+    name: String,
+    enclosing: i64,
+    site_line: u32,
+    receiver: Option<String>,
+    kind: String,
+}
+
+const RETRY_COLUMNS: &str =
+    "SELECT u.id, u.file_id, u.name, u.enclosing_symbol_id, u.site_line, u.receiver, u.kind
+       FROM unresolved_calls u
+       JOIN symbols s ON s.id = u.enclosing_symbol_id
+      WHERE u.enclosing_symbol_id IS NOT NULL";
+
+fn retry_rows(
+    store: &GraphStore,
+    filter: &str,
+    param: Option<&dyn rusqlite::ToSql>,
+) -> Result<Vec<RetryRow>, StoreError> {
+    let mut stmt = store
+        .conn()
+        .prepare_cached(&format!("{RETRY_COLUMNS}{filter}"))?;
+    let map = |r: &rusqlite::Row<'_>| {
+        Ok(RetryRow {
+            id: r.get(0)?,
+            file_id: r.get(1)?,
+            name: r.get(2)?,
+            enclosing: r.get(3)?,
+            site_line: r.get(4)?,
+            receiver: r.get(5)?,
+            kind: r
+                .get::<_, Option<String>>(6)?
+                .unwrap_or_else(|| "calls".to_string()),
+        })
     };
+    let rows = match param {
+        Some(p) => stmt.query_map([p], map)?.collect::<Result<_, _>>()?,
+        None => stmt.query_map([], map)?.collect::<Result<_, _>>()?,
+    };
+    Ok(rows)
+}
+
+/// Re-attempt resolution of every stored `unresolved_calls` row against the
+/// current index. Rows that resolve become edges and are deleted; the rest
+/// stay (keeping the epistemic envelope honest). The stored `receiver` is
+/// replayed so the receiver downgrade stays consistent across
+/// re-resolutions. An incremental update calls [`resolve_affected`], which
+/// retries only the rows its batch can have changed; this full retry is
+/// the reference that one is held equal to.
+pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
+    let rows = retry_rows(store, "", None)?;
+    retry(store, rows)
+}
+
+/// [`resolve_all`] restricted to the rows whose decision reads something
+/// `affected` changed (see [`Affected`]): rows named by a changed name, rows
+/// of an affected file, and receiver rows naming a changed constant. Each
+/// selection goes through an index except the receiver scan, which runs only
+/// when the batch changed a class or a module.
+pub fn resolve_affected(
+    store: &mut GraphStore,
+    affected: &Affected,
+) -> Result<ResolveStats, StoreError> {
+    let mut rows: HashMap<i64, RetryRow> = HashMap::new();
+    for name in affected.call_names() {
+        for row in retry_rows(store, " AND u.name = ?1", Some(&name))? {
+            rows.insert(row.id, row);
+        }
+    }
+    for file in &affected.files {
+        for row in retry_rows(store, " AND u.file_id = ?1", Some(file))? {
+            rows.insert(row.id, row);
+        }
+    }
+    if !affected.constants.is_empty() {
+        for row in retry_rows(store, " AND u.receiver IS NOT NULL", None)? {
+            if row
+                .receiver
+                .as_deref()
+                .is_some_and(|r| affected.reads_receiver(r))
+            {
+                rows.insert(row.id, row);
+            }
+        }
+    }
+    let mut rows: Vec<RetryRow> = rows.into_values().collect();
+    rows.sort_by_key(|row| row.id);
+    retry(store, rows)
+}
+
+fn retry(store: &mut GraphStore, rows: Vec<RetryRow>) -> Result<ResolveStats, StoreError> {
+    let idx = ResolveIndex::build(store)?;
     let mut stats = ResolveStats::default();
     for row in &rows {
-        let decision = idx.decide_from(
-            row.file_id,
-            Some(row.enclosing),
-            &row.name,
-            row.receiver.as_deref(),
-            Some(row.site_line),
-        );
+        let decision = if row.kind == "references" {
+            idx.decide_reference(
+                row.file_id,
+                Some(row.enclosing),
+                &row.name,
+                row.receiver.as_deref(),
+                row.site_line,
+            )
+        } else {
+            idx.decide_from(
+                row.file_id,
+                Some(row.enclosing),
+                &row.name,
+                row.receiver.as_deref(),
+                Some(row.site_line),
+            )
+        };
         let (dst, tier) = match decision {
             Decision::Exact(d) => (d, Tier::Exact),
             Decision::Probable(d) => (d, Tier::Probable),
@@ -1037,15 +1325,18 @@ pub fn resolve_all(store: &mut GraphStore) -> Result<ResolveStats, StoreError> {
     Ok(stats)
 }
 
-/// Reconsider resolved calls whose target names were defined by a changed
-/// file. Adding a same-name definition can make a previously unique target
-/// ambiguous; unrelated call edges remain untouched.
-/// Both `Calls` and `References` edges are reconsidered — a reference to a
-/// previously-unique `handler` is just as stale when a second definition
-/// appears.
+/// Reconsider resolved calls whose target names a changed definition
+/// carries ([`Affected::record_changed_definitions`]). Adding a same-name definition can make a previously unique target
+/// ambiguous. A Ruby receiver call is also replayed when it reads what the
+/// batch changed ([`Affected`]): a new constant can shadow its owner, and a
+/// new `Foo.new` can take its dispatch, without redefining the callee's
+/// name. Both `Calls` and `References` edges are reconsidered — a
+/// reference to a previously-unique `handler` is just as stale when a second
+/// definition appears. The names of the rows it moves back are recorded in
+/// `affected.replayed` for [`resolve_affected`].
 pub fn reconsider_resolved_calls(
     store: &mut GraphStore,
-    changed_names: &HashSet<String>,
+    affected: &mut Affected,
 ) -> Result<(), StoreError> {
     struct ResolvedCall {
         file_id: i64,
@@ -1056,7 +1347,45 @@ pub fn reconsider_resolved_calls(
         kind: String,
     }
     let mut calls = Vec::new();
-    for name in changed_names {
+    let mut replay: Vec<i64> = Vec::new();
+    // An edge whose target's name changed is the loop below's; a Ruby
+    // receiver edge also reads its owner's constant, which no name carries.
+    if !affected.constants.is_empty() {
+        let mut stmt = store.conn().prepare(
+            "SELECT e.id, src.file_id, COALESCE(e.callee, dst.name), e.src_id,
+                    e.site_line, e.receiver, e.kind
+               FROM edges e JOIN symbols src ON src.id=e.src_id
+               JOIN symbols dst ON dst.id=e.dst_id JOIN files f ON f.id=src.file_id
+              WHERE f.lang='ruby' AND e.kind='calls' AND e.receiver IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                ResolvedCall {
+                    file_id: row.get(1)?,
+                    name: row.get(2)?,
+                    enclosing: row.get(3)?,
+                    site_line: row.get(4)?,
+                    receiver: row.get(5)?,
+                    kind: row.get(6)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (id, call) = row?;
+            let receiver = call.receiver.as_deref().unwrap_or_default();
+            if affected.reads_receiver(receiver) {
+                replay.push(id);
+                calls.push(call);
+            }
+        }
+    }
+    for id in replay {
+        store
+            .conn()
+            .exec_cached("DELETE FROM edges WHERE id = ?1", params![id])?;
+    }
+    for name in &affected.names {
         let found: Vec<ResolvedCall> = {
             let mut stmt = store.conn().prepare(
                 "SELECT src.file_id, COALESCE(e.callee, dst.name), e.src_id, e.site_line, e.receiver, e.kind
@@ -1086,6 +1415,7 @@ pub fn reconsider_resolved_calls(
         )?;
     }
     for call in calls {
+        affected.replayed.insert(call.name.clone());
         store.insert_unresolved_call(
             call.file_id,
             &call.name,
@@ -1103,6 +1433,83 @@ mod tests {
     use super::*;
     use crate::extract::ImportBinding;
     use crate::store::GraphStore;
+
+    #[test]
+    fn ruby_callback_references_should_resolve_only_the_declaring_owners_instance_method() {
+        for (owner, target, rival, expected) in [
+            ("Record", "Record#check", "Other#check", true),
+            ("Record", "Other#check", "Third#check", false),
+            ("Record", "Record.check", "Other#check", false),
+            ("Rules", "Rules#check", "Other#check", true),
+            ("Record", "Record#check", "Record#check", false),
+        ] {
+            let mut store = GraphStore::open_in_memory().unwrap();
+            let local = store.replace_file("record.rb", "local", "ruby").unwrap();
+            let remote = store.replace_file("other.rb", "remote", "ruby").unwrap();
+            let caller = store
+                .insert_symbol(local, "owner", owner, owner, SymbolKind::Class, 1, 10, "")
+                .unwrap();
+            let target_id = store
+                .insert_symbol(
+                    local,
+                    "target",
+                    "check",
+                    target,
+                    SymbolKind::Method,
+                    5,
+                    6,
+                    "",
+                )
+                .unwrap();
+            let rival_id = store
+                .insert_symbol(
+                    remote,
+                    "rival",
+                    "check",
+                    rival,
+                    SymbolKind::Method,
+                    1,
+                    2,
+                    "",
+                )
+                .unwrap();
+            let pending = [FileReferences {
+                file_id: local,
+                references: vec![PendingReference {
+                    name: "check".into(),
+                    enclosing_symbol_id: Some(caller),
+                    site_line: 2,
+                    arg_of: Some("validate".into()),
+                }],
+            }];
+            let stats = resolve_references(&store, &pending).unwrap();
+            let idx = ResolveIndex::build(&store).unwrap();
+            assert_eq!(
+                idx.decide_reference(local, None, "check", Some("validate"), 2),
+                Decision::Unresolved
+            );
+            assert_eq!(
+                idx.decide_reference(local, Some(target_id), "check", Some("validate"), 2),
+                Decision::Unresolved,
+                "callbacks require a declaring class/module, not a method caller"
+            );
+            assert_eq!(
+                stats.probable,
+                u64::from(expected),
+                "{owner} -> {target}, rival {rival}"
+            );
+            assert_eq!(stats.unresolved, u64::from(!expected));
+            assert_eq!(store.edges_to(rival_id, None).unwrap().len(), 0);
+            let edges = store.edges_to(target_id, None).unwrap();
+            assert_eq!(edges.len(), usize::from(expected));
+            if expected {
+                assert_eq!(
+                    (edges[0].src_id, edges[0].kind, edges[0].tier),
+                    (caller, EdgeKind::References, Tier::Probable)
+                );
+            }
+        }
+    }
 
     /// Two Rust files that both define `f`: the caller's own `src/local.rs`
     /// and the `src/remote.rs` a qualified `other_crate::f()` names. `g` is
@@ -1494,6 +1901,167 @@ mod tests {
             ),
             Decision::Unresolved
         );
+    }
+
+    /// Ruby sends a call without receiver to `self`: `access_logs(...)` in
+    /// `App#run` reaches `App#access_logs` even when another class elsewhere
+    /// defines the name, and only for a caller of that class and kind.
+    #[test]
+    fn ruby_bare_call_should_resolve_to_the_callers_own_method_like_a_self_call() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store
+            .replace_file("app/services/app.rb", "oid-local", "ruby")
+            .unwrap();
+        let remote = store
+            .replace_file("app/controllers/other.rb", "oid-remote", "ruby")
+            .unwrap();
+        let caller = store
+            .insert_symbol(
+                local,
+                "app#App#run#method",
+                "run",
+                "App#run",
+                SymbolKind::Method,
+                1,
+                3,
+                "run",
+            )
+            .unwrap();
+        let class_method_caller = store
+            .insert_symbol(
+                local,
+                "app#App.build#method",
+                "build",
+                "App.build",
+                SymbolKind::Method,
+                5,
+                7,
+                "build",
+            )
+            .unwrap();
+        let unrelated_caller = store
+            .insert_symbol(
+                local,
+                "app#Admin#run#method",
+                "run",
+                "Admin#run",
+                SymbolKind::Method,
+                9,
+                11,
+                "run",
+            )
+            .unwrap();
+        let local_target = store
+            .insert_symbol(
+                local,
+                "app#App#access_logs#method",
+                "access_logs",
+                "App#access_logs",
+                SymbolKind::Method,
+                13,
+                15,
+                "access_logs",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                remote,
+                "other#Other#access_logs#method",
+                "access_logs",
+                "Other#access_logs",
+                SymbolKind::Method,
+                1,
+                3,
+                "access_logs",
+            )
+            .unwrap();
+        let idx = ResolveIndex::build(&store).unwrap();
+
+        assert_eq!(
+            idx.decide_from(local, Some(caller), "access_logs", None, Some(2)),
+            Decision::Exact(local_target),
+            "a bare call names the caller's own instance method"
+        );
+        assert_eq!(
+            idx.decide_from(
+                local,
+                Some(class_method_caller),
+                "access_logs",
+                None,
+                Some(6)
+            ),
+            Decision::Unresolved,
+            "self in a class method is the class, which has no `access_logs`"
+        );
+        assert_eq!(
+            idx.decide_from(local, Some(unrelated_caller), "access_logs", None, Some(10)),
+            Decision::Unresolved,
+            "another class of the same file does not define it"
+        );
+        assert_eq!(
+            idx.decide(local, "access_logs", None),
+            Decision::Unresolved,
+            "without the calling symbol the owner cannot be checked"
+        );
+    }
+
+    /// A class reopened in another file that defines the same method again
+    /// leaves the override to load order: neither a bare call nor
+    /// `self.name` gets an Exact edge to the caller's file's definition.
+    #[test]
+    fn ruby_self_call_should_stay_unresolved_when_a_reopened_class_redefines_it() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let local = store
+            .replace_file("app/models/app.rb", "oid-local", "ruby")
+            .unwrap();
+        let reopened = store
+            .replace_file("config/initializers/app_patch.rb", "oid-patch", "ruby")
+            .unwrap();
+        let caller = store
+            .insert_symbol(
+                local,
+                "app#App#run#method",
+                "run",
+                "App#run",
+                SymbolKind::Method,
+                1,
+                3,
+                "run",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                local,
+                "app#App#access_logs#method",
+                "access_logs",
+                "App#access_logs",
+                SymbolKind::Method,
+                5,
+                7,
+                "access_logs",
+            )
+            .unwrap();
+        store
+            .insert_symbol(
+                reopened,
+                "patch#App#access_logs#method",
+                "access_logs",
+                "App#access_logs",
+                SymbolKind::Method,
+                1,
+                3,
+                "access_logs",
+            )
+            .unwrap();
+        let idx = ResolveIndex::build(&store).unwrap();
+
+        for receiver in [None, Some("self")] {
+            assert_eq!(
+                idx.decide_from(local, Some(caller), "access_logs", receiver, Some(2)),
+                Decision::Unresolved,
+                "receiver {receiver:?}: the reopened class may override the local definition"
+            );
+        }
     }
 
     #[test]
@@ -1977,5 +2545,177 @@ mod tests {
         assert_eq!(scope_width(&scope, Some(1)), 0);
         assert_eq!(scope_width(&[], Some(5)), u32::MAX);
         assert_eq!(scope_width(&scope, None), u32::MAX);
+    }
+
+    /// `resolve_affected` retries the rows whose decision reads what the
+    /// batch changed, and only those: that is what keeps an incremental
+    /// update's cost with its batch instead of the whole table (Task 833).
+    /// No row here can resolve, so `unresolved` counts the rows retried.
+    #[test]
+    fn resolve_affected_should_retry_only_the_rows_reading_a_changed_input() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let file = store.replace_file("app/caller.rb", "oid", "ruby").unwrap();
+        let other = store.replace_file("app/other.rb", "oid2", "ruby").unwrap();
+        let caller = store
+            .insert_symbol(file, "go", "go", "Caller#go", SymbolKind::Method, 1, 9, "")
+            .unwrap();
+        let elsewhere = store
+            .insert_symbol(
+                other,
+                "run",
+                "run",
+                "Other#run",
+                SymbolKind::Method,
+                1,
+                3,
+                "",
+            )
+            .unwrap();
+        for (name, receiver) in [
+            ("alpha", None),
+            ("beta", Some("Gamma::Delta")),
+            ("new", Some("Widget")),
+            ("step", Some("Widget.new")),
+            ("perform_later", Some("Job")),
+            ("perform_now", Some("Job.set")),
+        ] {
+            store
+                .insert_unresolved_call(file, name, Some(caller), 2, receiver, "calls")
+                .unwrap();
+        }
+        store
+            .insert_unresolved_call(other, "zeta", Some(elsewhere), 2, None, "calls")
+            .unwrap();
+        let retried = |store: &mut GraphStore, affected: Affected| {
+            resolve_affected(store, &affected).unwrap().unresolved
+        };
+        let names = |names: &[&str]| Affected {
+            names: names.iter().map(|n| (*n).to_string()).collect(),
+            ..Affected::default()
+        };
+        assert_eq!(retried(&mut store, Affected::default()), 0);
+        assert_eq!(
+            retried(&mut store, names(&["alpha"])),
+            1,
+            "the row's own name"
+        );
+        assert_eq!(
+            retried(&mut store, names(&["perform"])),
+            0,
+            "`Job.perform_later` reads `Job#perform` through its class, not the name"
+        );
+        let def = |path: &str, name: &str, qualified: &str, kind: &str| Definition {
+            path: path.into(),
+            name: name.into(),
+            qualified: qualified.into(),
+            kind: kind.into(),
+            trait_impl: false,
+        };
+        let mut job = Affected::default();
+        job.record_changed_definitions(
+            &[],
+            &[def("app/job.rb", "perform", "Job#perform", "method")],
+        );
+        assert_eq!(
+            retried(&mut store, job),
+            2,
+            "a new `Job#perform` retries both job dispatches through `Job`"
+        );
+        let mut nested = Affected::default();
+        nested
+            .record_changed_definitions(&[def("app/w.rb", "A::Widget", "A::Widget", "class")], &[]);
+        assert_eq!(
+            retried(&mut store, nested),
+            2,
+            "`class A::Widget` is reached through `Widget`: `Widget.new`, `Widget.new.step`"
+        );
+        for (constant, expected) in [("Delta", 1), ("Gamma", 1), ("Gam", 0), ("Widget", 2)] {
+            let affected = Affected {
+                constants: HashSet::from([constant.to_string()]),
+                ..Affected::default()
+            };
+            assert_eq!(
+                retried(&mut store, affected),
+                expected,
+                "constant {constant}"
+            );
+        }
+        let replayed = Affected {
+            replayed: HashSet::from(["zeta".to_string()]),
+            ..Affected::default()
+        };
+        assert_eq!(
+            retried(&mut store, replayed),
+            1,
+            "a row the update moved back"
+        );
+        let files = Affected {
+            files: HashSet::from([file]),
+            ..Affected::default()
+        };
+        assert_eq!(
+            retried(&mut store, files),
+            6,
+            "every row of an affected file"
+        );
+        assert_eq!(resolve_all(&mut store).unwrap().unresolved, 7);
+    }
+
+    /// Only a definition that changed can change a decision elsewhere: a
+    /// file rewritten with the same definitions must leave every other row
+    /// and edge alone, or each edit of a file defining `initialize` or
+    /// `call` re-decides every call to those names in the repository.
+    #[test]
+    fn affected_should_record_only_the_definitions_a_batch_changed() {
+        let def = |path: &str, name: &str, qualified: &str, kind: &str, trait_impl| Definition {
+            path: path.into(),
+            name: name.into(),
+            qualified: qualified.into(),
+            kind: kind.into(),
+            trait_impl,
+        };
+        let same = [
+            def("a.rb", "W", "W", "class", false),
+            def("a.rb", "initialize", "W#initialize", "method", false),
+        ];
+        let recorded = |before: &[Definition], after: &[Definition]| {
+            let mut affected = Affected::default();
+            affected.record_changed_definitions(before, after);
+            let mut names: Vec<String> = affected.names.into_iter().collect();
+            let mut constants: Vec<String> = affected.constants.into_iter().collect();
+            names.sort();
+            constants.sort();
+            (names, constants)
+        };
+        let none = (Vec::<String>::new(), Vec::<String>::new());
+        assert_eq!(recorded(&same, &same), none, "same definitions, new body");
+        let moved = [def("b.rb", "W", "W", "class", false), same[1].clone()];
+        assert_eq!(
+            recorded(&same, &moved),
+            (vec!["W".into()], vec!["W".into()]),
+            "a definition in another file is another candidate"
+        );
+        let twice = [same[0].clone(), same[1].clone(), same[1].clone()];
+        assert_eq!(
+            recorded(&same, &twice),
+            (vec!["initialize".into()], vec!["W".into()]),
+            "a second same-owner definition makes the name ambiguous; the method counts through its owner"
+        );
+        let rust = [def("x.rs", "fmt", "W::fmt", "method", false)];
+        let as_trait = [def("x.rs", "fmt", "W::fmt", "method", true)];
+        assert_eq!(
+            recorded(&rust, &as_trait),
+            (vec!["fmt".into()], Vec::new()),
+            "a trait impl is no inherent method; a Rust path has no Ruby owner"
+        );
+        assert_eq!(
+            recorded(&[def("m.rb", "B", "A::C::B", "class", false)], &[]),
+            (vec!["B".into()], vec!["B".into()]),
+        );
+        assert_eq!(
+            recorded(&[], &[def("m.rb", "A::C::B", "A::C::B", "module", false)]),
+            (vec!["A::C::B".into()], vec!["B".into()]),
+            "a constant counts by the segment a receiver spells"
+        );
     }
 }

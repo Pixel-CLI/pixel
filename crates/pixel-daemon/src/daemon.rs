@@ -1101,6 +1101,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The daemon socket is the only untrusted-to-Pixel channel on the
+    /// machine: anything that can connect can ask for the repository's facts.
+    /// `run_corpus_with` narrows it to 0600 *after* `bind`, which is the
+    /// window a test has to read back — `bind` creates the node with the
+    /// process umask, so the mode is only ever proven by stat-ing the file
+    /// the daemon actually left behind.
+    ///
+    /// The assertion is the exact mode, not "no group/other bits": a socket
+    /// left at 0400 satisfies a `mode & 0o077 == 0` check while denying the
+    /// owner the access the socket needs, so the mask alone would pass a mode
+    /// that is not the required 0600. Deleting the `set_permissions` call
+    /// leaves the umask's mode and fails this test.
+    #[cfg(unix)]
+    #[test]
+    fn the_daemon_socket_should_be_0600_after_bind() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch_root("socket-mode");
+        let sock = socket_path(&root);
+        let served = root.clone();
+        let daemon = std::thread::spawn(move || run_corpus(StubCorpus(served)));
+        wait_until("socket to answer", Duration::from_secs(10), || ping(&sock));
+
+        let mode = std::fs::metadata(&sock)
+            .expect("stat the bound socket")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the daemon socket must be 0600 once bound, so no other local \
+             account can reach the repository's facts through it"
+        );
+
+        let _response = shutdown(&sock).expect("shutdown request must receive a response");
+        wait_until("daemon to exit", Duration::from_secs(10), || {
+            daemon.is_finished()
+        });
+        daemon.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The accept thread hands each connection to the loop's channel and
     /// stops when told to: the daemon's own wake-up connection ends it, so
     /// `run_corpus` returns without a thread still blocked in `accept`.

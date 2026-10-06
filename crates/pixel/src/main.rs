@@ -47,6 +47,7 @@ mod decide_remote;
 mod evaluate_cmd;
 mod execution_brief;
 mod guard;
+mod hook_input;
 mod index_cmd;
 mod install_intro;
 mod operation_metrics;

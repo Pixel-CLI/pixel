@@ -1642,6 +1642,55 @@ mod routing_tests {
         ));
     }
 
+    /// A side build's repo install interrupted after its backup write leaves
+    /// the config in the managed spelling and the backup in `pixel-dev`'s. The
+    /// next managed install must bring the backup back to the config's
+    /// spelling, or uninstall reads the two as a user change and keeps the
+    /// user's original PreToolUse locked in the backup.
+    #[test]
+    fn project_composed_guard_uninstall_restores_after_a_side_build_left_its_backup_spelling() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join("Documents/project/.codex");
+        let path = codex.join("hooks.json");
+        let sidecar = codex.join(routing::CODEX_COMPOSED_BACKUP);
+        let managed = home.path().join("bin/pixel");
+        let original =
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-guard"}]}]);
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":original.clone()}}),
+            false,
+        )
+        .unwrap();
+        routing::install_project_codex_at(home.path(), &path, &managed, false).unwrap();
+        let managed_config = fs::read(&path).unwrap();
+        routing::install_project_codex_at(
+            home.path(),
+            &path,
+            &home.path().join("bin/pixel-dev"),
+            false,
+        )
+        .unwrap();
+        fs::write(&path, managed_config).unwrap();
+
+        routing::install_project_codex_at(home.path(), &path, &managed, false).unwrap();
+
+        let installed = install::read_settings(&path).unwrap();
+        let stored = install::read_settings(&sidecar).unwrap();
+        assert_eq!(
+            stored["managed_pre_tool_use"],
+            installed["hooks"]["PreToolUse"]
+        );
+        assert_eq!(stored["pre_tool_use"], original);
+        let step = remove_project_codex_hooks(home.path(), &managed, false).unwrap();
+        assert_eq!(step.status, CheckStatus::Green);
+        assert_eq!(
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
+            original
+        );
+        assert!(!sidecar.exists());
+    }
+
     #[test]
     fn project_composed_guard_uninstall_restores_exact_snapshot() {
         let home = tempfile::tempdir().unwrap();

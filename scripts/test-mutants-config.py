@@ -142,12 +142,7 @@ class MutantsConfigContract(unittest.TestCase):
 
 
 #: Every file that runs `cargo mutants` (not only lists them).
-LANES = [
-    ".github/workflows/mutants.yml",
-    ".github/workflows/mutants-nightly.yml",
-    "scripts/mutants-preflight.sh",
-    "scripts/gates.sh",
-]
+LANES = [".github/workflows/mutants.yml"]
 
 #: Arguments that change which mutants compile, which tests judge them or
 #: when one times out. A lane that passes one alone runs another program
@@ -236,7 +231,7 @@ class OneProgramForEveryLane(unittest.TestCase):
         self.assertRegex(text, r'(?m)^additional_cargo_args = \["--locked"\]$')
         # After --all-targets the bare `--` hands the rest to the test
         # binary: libtest --fail-fast, which needs the nightly pin the
-        # lanes install (scripts/mutants-toolchain.sh; the workflows'
+        # CI installs (the workflow's
         # shard toolchains). The splice itself is pinned by the scratch
         # proof recorded in .cargo/mutants.toml's own comments.
         self.assertRegex(
@@ -318,17 +313,9 @@ class OneProgramForEveryLane(unittest.TestCase):
     def test_a_listing_is_not_a_run(self):
         self.assertEqual(cargo_mutants_runs('cargo mutants --list --in-diff "$d" > out\ncargo mutants --version\n'), [])
 
-    def test_the_local_lanes_check_the_pinned_version_before_running(self):
-        for lane in ("scripts/mutants-preflight.sh", "scripts/gates.sh"):
-            text = (REPO / lane).read_text()
-            with self.subTest(lane=lane):
-                check = text.find("mutants-version-check.sh")
-                self.assertNotEqual(check, -1)
-                self.assertLess(check, text.find("cargo mutants -", check) if "cargo mutants -" in text[check:] else len(text))
-
     def test_every_job_pins_the_same_cargo_mutants(self):
         pins = set()
-        for workflow in (".github/workflows/mutants.yml", ".github/workflows/mutants-nightly.yml"):
+        for workflow in (".github/workflows/mutants.yml",):
             pins |= set(re.findall(r"tool: cargo-mutants@(\S+)", (REPO / workflow).read_text()))
         self.assertEqual(len(pins), 1, pins)
 

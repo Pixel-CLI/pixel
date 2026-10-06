@@ -189,9 +189,9 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         "version": env!("CARGO_PKG_VERSION"),
         "managedBy": "pixel"
     });
-    let skill_content = format!(
-        "---\nname: pixel\ndescription: >-\n  Deterministic code retrieval: indexed search, concept resolve, impact\n  analysis, caller/callee tracing, task targets, plan generation, and git\n  history archaeology via the `pixel` CLI.\n---\n\n{AGENT_PROMPT_ASSET}"
-    );
+    // Antigravity loads both rules and skills into a session. The rule owns
+    // Pixel's full protocol; duplicating it in the skill doubles the prompt.
+    let skill_content = "---\nname: pixel\ndescription: >-\n  Pixel's retrieval protocol is provided by the installed rules/AGENTS.md.\n---\n";
     let guard_cmd = format!("'{}' run-hook guard --provider antigravity", exe.display());
     let metrics_cmd = format!(
         "'{}' run-hook metrics --provider antigravity",
@@ -240,7 +240,7 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         fs::create_dir_all(p_dir.join("skills/pixel"))?;
         fs::write(p_dir.join("plugin.json"), &manifest_text)?;
         fs::write(p_dir.join("rules/AGENTS.md"), AGENT_PROMPT_ASSET)?;
-        fs::write(p_dir.join("skills/pixel/SKILL.md"), &skill_content)?;
+        fs::write(p_dir.join("skills/pixel/SKILL.md"), skill_content)?;
         fs::write(p_dir.join("hooks.json"), &hooks_text)?;
     }
     // `agy plugin install` requires `.agent-config/{plugin,install}` files in
@@ -314,79 +314,128 @@ pub fn enable_plugin_in_config(home: &Path, dry_run: bool) -> Result<InstallStep
     })
 }
 
-/// Add or update pixel-guard in `~/.gemini/config/hooks.json`.
-pub fn install_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let h_path = hooks_path(home);
-    let guard_cmd = format!("'{}' run-hook guard --provider antigravity", exe.display());
-    let metrics_cmd = format!(
-        "'{}' run-hook metrics --provider antigravity",
-        exe.display()
-    );
-
-    if dry_run {
-        return Ok(InstallStep {
-            id: "install.antigravity-hooks".into(),
-            status: CheckStatus::Green,
-            summary: format!("would configure pixel-guard in {}", h_path.display()),
-            detail: None,
-        });
+/// The handler commands of a global `hooks.json` entry, by event:
+/// `PreToolUse` and `PostToolUse` hold matcher groups of handlers,
+/// `PreInvocation` holds handlers directly. `None` when the entry has a key
+/// other than those and `enabled`, or a handler without a command: a shape
+/// pixel never wrote.
+fn global_entry_commands(entry: &Value) -> Option<Vec<(&str, &str)>> {
+    let mut commands = Vec::new();
+    for (event, value) in entry.as_object()? {
+        let handlers: Vec<&Value> = match event.as_str() {
+            "enabled" => continue,
+            "PreInvocation" => value.as_array()?.iter().collect(),
+            "PreToolUse" | "PostToolUse" => value
+                .as_array()?
+                .iter()
+                .map(|group| group.get("hooks").and_then(Value::as_array))
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect(),
+            _ => return None,
+        };
+        for handler in handlers {
+            commands.push((event.as_str(), handler.get("command")?.as_str()?));
+        }
     }
+    Some(commands)
+}
 
-    let mut root_val = read_json_object(&h_path)?;
-
-    let root_map =
-        root_val
-            .as_object_mut()
-            .ok_or_else(|| crate::InstallError::InvalidSettings {
-                path: h_path.clone(),
-                reason: "hooks.json root is not an object".into(),
-            })?;
-
-    let pixel_guard_spec = json!({
-        "enabled": true,
-        "PreToolUse": [
-            {
-                "matcher": PRE_TOOL_MATCHER,
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": guard_cmd,
-                        "timeout": 10
-                    }
-                ]
-            }
-        ],
-        "PreInvocation": [
-            {
-                "type": "command",
-                "command": guard_cmd,
-                "timeout": 10
-            }
-        ],
-        "PostToolUse": [
-            {
-                "matcher": "*",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": metrics_cmd,
-                        "timeout": 10
-                    }
-                ]
-            }
-        ]
-    });
-
-    root_map.insert("pixel-guard".into(), pixel_guard_spec);
-
-    fs::write(&h_path, serde_json::to_string_pretty(&root_val)? + "\n")?;
-
-    Ok(InstallStep {
-        id: "install.antigravity-hooks".into(),
-        status: CheckStatus::Green,
-        summary: "configured pixel-guard in hooks.json".into(),
-        detail: Some(format!("path={}", h_path.display())),
+/// Whether `entry` is the global `pixel-guard` pixel registered before its
+/// Antigravity plugin owned the guard: every handler is a pixel executable's
+/// Antigravity `guard` or `metrics` hook. A user's own hook under the same
+/// name is anything else, and is left alone.
+fn is_retired_global_guard(entry: &Value, exe: &Path) -> bool {
+    global_entry_commands(entry).is_some_and(|commands| {
+        !commands.is_empty()
+            && commands.iter().all(|(_, command)| {
+                matches!(
+                    crate::routing::pixel_run_hook_verb(command, exe),
+                    Some("guard --provider antigravity" | "metrics --provider antigravity")
+                )
+            })
     })
+}
+
+/// Whether a global `hooks.json` entry would run Pixel's Antigravity guard
+/// beside the plugin's: enabled, with a guard handler under `PreToolUse` or
+/// `PreInvocation` (Antigravity runs the two events independently).
+fn runs_global_guard(entry: &Value) -> bool {
+    entry.get("enabled") != Some(&Value::Bool(false))
+        && global_entry_commands(entry).is_some_and(|commands| {
+            commands.iter().any(|(event, command)| {
+                matches!(*event, "PreToolUse" | "PreInvocation")
+                    && command.contains("run-hook guard --provider antigravity")
+            })
+        })
+}
+
+/// Remove the retired global guard now owned by Pixel's Antigravity plugin.
+///
+/// Only the entry pixel registered is removed ([`is_retired_global_guard`]);
+/// a `pixel-guard` a user wrote is kept, and reported yellow when it still
+/// runs Pixel's guard beside the plugin. The file is read and validated in a
+/// dry run too, so a dry run fails where the real run would.
+pub fn remove_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let h_path = hooks_path(home);
+    let step = |status, summary: String| InstallStep {
+        id: "install.antigravity-hooks".into(),
+        status,
+        summary,
+        detail: Some(format!("path={}", h_path.display())),
+    };
+    if !h_path.is_file() {
+        return Ok(step(
+            CheckStatus::Green,
+            "no retired Antigravity global guard found".into(),
+        ));
+    }
+    let mut root_val = read_json_object(&h_path)?;
+    let root = root_val
+        .as_object_mut()
+        .ok_or_else(|| crate::InstallError::InvalidSettings {
+            path: h_path.clone(),
+            reason: "hooks.json root is not an object".into(),
+        })?;
+    match root.get("pixel-guard") {
+        None => {
+            return Ok(step(
+                CheckStatus::Green,
+                "no retired Antigravity global guard found".into(),
+            ));
+        }
+        Some(entry) if !is_retired_global_guard(entry, exe) => {
+            let (status, note) = if runs_global_guard(entry) {
+                (
+                    CheckStatus::Yellow,
+                    "; it still runs Pixel's guard beside the plugin, remove it by hand",
+                )
+            } else {
+                (CheckStatus::Green, "")
+            };
+            return Ok(step(
+                status,
+                format!(
+                    "kept the user-defined pixel-guard in {}: it is not the entry pixel registered{note}",
+                    h_path.display()
+                ),
+            ));
+        }
+        Some(_) => {}
+    }
+    if dry_run {
+        return Ok(step(
+            CheckStatus::Green,
+            format!("would remove retired pixel-guard from {}", h_path.display()),
+        ));
+    }
+    root.remove("pixel-guard");
+    fs::write(&h_path, serde_json::to_string_pretty(&root_val)? + "\n")?;
+    Ok(step(
+        CheckStatus::Green,
+        "removed retired pixel-guard from global hooks.json".into(),
+    ))
 }
 
 fn pre_invocation_hook_installed(path: &Path, expected_command: &str) -> bool {
@@ -471,30 +520,29 @@ pub fn check_antigravity_install(
         missing.push("Antigravity CLI Pixel plugin registration");
     }
 
-    let hooks_installed = if h_path.is_file() {
-        fs::read_to_string(&h_path).ok().and_then(|text| {
-            let v: Value = serde_json::from_str(&text).ok()?;
-            let guard = v.get("pixel-guard")?;
-            let pre_tool = guard.get("PreToolUse")?.as_array()?;
-            let first_group = pre_tool.first()?;
-            let cmd = first_group
-                .get("hooks")?
-                .as_array()?
-                .first()?
-                .get("command")?
-                .as_str()?;
-            Some(cmd.contains("run-hook guard --provider antigravity"))
-        }) == Some(true)
-    } else {
-        false
-    };
-    if !hooks_installed {
-        missing.push("hooks.json (pixel-guard configured)");
+    let global_guard = fs::read_to_string(&h_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|v| v.get("pixel-guard").cloned())
+        .filter(runs_global_guard);
+    if let Some(entry) = global_guard {
+        // `pixel install` removes only the entry it registered; a user's
+        // edit of it is theirs to take out.
+        let remedy = if is_retired_global_guard(&entry, exe) {
+            "run `pixel install`".to_owned()
+        } else {
+            format!(
+                "remove the Pixel guard from the user-defined `pixel-guard` in {} by hand",
+                h_path.display()
+            )
+        };
+        return Err(format!(
+            "Antigravity integration duplicates pixel-guard in global hooks.json and the plugin — {remedy}"
+        ));
     }
 
     let guard_command = format!("'{}' run-hook guard --provider antigravity", exe.display());
     for (path, label) in [
-        (h_path.clone(), "hooks.json (PreInvocation configured)"),
         (
             p_dir.join("hooks.json"),
             "IDE hooks.json (PreInvocation configured)",
@@ -686,11 +734,13 @@ mod tests {
         assert_eq!(config["keep"], "config");
         assert_eq!(config["plugins"]["other"]["enabled"], true);
 
-        // Install hooks
-        let step3 = install_global_hooks(home, &exe, false).unwrap();
+        // A current install removes the retired global registration: the
+        // plugin owns the one guard for both IDE and CLI.
+        let step3 = remove_global_hooks(home, &exe, false).unwrap();
         assert_eq!(step3.status, CheckStatus::Green);
         let hooks: Value = serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
         assert_eq!(hooks["other-hook"]["enabled"], true);
+        assert!(hooks.get("pixel-guard").is_none());
 
         // Doctor check should now succeed
         let (summary, detail) = check_antigravity_install(home, &exe).unwrap();
@@ -699,7 +749,6 @@ mod tests {
 
         let expected_command = "'/usr/local/bin/pixel' run-hook guard --provider antigravity";
         for (path, missing_hook) in [
-            (hooks_path(home), "hooks.json (PreInvocation configured)"),
             (
                 plugin_dir(home).join("hooks.json"),
                 "IDE hooks.json (PreInvocation configured)",
@@ -786,8 +835,130 @@ mod tests {
         let invalid_hooks = b"{bad hooks";
         fs::write(hooks_path(home), invalid_hooks).unwrap();
         let exe = PathBuf::from("/usr/local/bin/pixel");
-        assert!(install_global_hooks(home, &exe, false).is_err());
+        // A dry run reads the file too: it must fail where the real run does.
+        assert!(remove_global_hooks(home, &exe, true).is_err());
+        assert!(remove_global_hooks(home, &exe, false).is_err());
         assert_eq!(fs::read(hooks_path(home)).unwrap(), invalid_hooks);
+    }
+
+    /// The global `pixel-guard` an install before the plugin wrote: guard on
+    /// both pre-events, metrics after each tool.
+    fn retired_global_guard(exe: &str) -> Value {
+        let guard = format!("'{exe}' run-hook guard --provider antigravity");
+        let metrics = format!("'{exe}' run-hook metrics --provider antigravity");
+        json!({
+            "enabled": true,
+            "PreToolUse": [{"matcher": PRE_TOOL_MATCHER,
+                "hooks": [{"type": "command", "command": guard, "timeout": 10}]}],
+            "PreInvocation": [{"type": "command", "command": guard, "timeout": 10}],
+            "PostToolUse": [{"matcher": "*",
+                "hooks": [{"type": "command", "command": metrics, "timeout": 10}]}]
+        })
+    }
+
+    #[test]
+    fn remove_global_hooks_should_remove_only_the_guard_pixel_registered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        fs::create_dir_all(antigravity_config_dir(home)).unwrap();
+        let exe = PathBuf::from("/usr/local/bin/pixel");
+        // Written by a release at another path: still pixel's own entry.
+        let planted = json!({
+            "pixel-guard": retired_global_guard("/opt/homebrew/bin/pixel"),
+            "other-hook": {"enabled": true}
+        });
+        let text = serde_json::to_string_pretty(&planted).unwrap();
+        fs::write(hooks_path(home), &text).unwrap();
+
+        let dry = remove_global_hooks(home, &exe, true).unwrap();
+        assert_eq!(dry.status, CheckStatus::Green);
+        assert!(
+            dry.summary.starts_with("would remove retired pixel-guard"),
+            "{}",
+            dry.summary
+        );
+        assert_eq!(fs::read_to_string(hooks_path(home)).unwrap(), text);
+
+        let step = remove_global_hooks(home, &exe, false).unwrap();
+        assert_eq!(step.status, CheckStatus::Green);
+        assert_eq!(
+            step.summary,
+            "removed retired pixel-guard from global hooks.json"
+        );
+        let hooks: Value = serde_json::from_slice(&fs::read(hooks_path(home)).unwrap()).unwrap();
+        assert_eq!(hooks, json!({"other-hook": {"enabled": true}}));
+    }
+
+    #[test]
+    fn remove_global_hooks_should_keep_a_user_defined_pixel_guard() {
+        let exe = PathBuf::from("/usr/local/bin/pixel");
+        let mut with_user_hook = retired_global_guard("/usr/local/bin/pixel");
+        with_user_hook["PreInvocation"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "command", "command": "user-audit", "timeout": 10}));
+        for (case, entry, status) in [
+            (
+                "a user's own command",
+                json!({"enabled": true, "PreInvocation":
+                    [{"type": "command", "command": "user-audit", "timeout": 10}]}),
+                CheckStatus::Green,
+            ),
+            (
+                "pixel's guard with a user hook added",
+                with_user_hook,
+                CheckStatus::Yellow,
+            ),
+            (
+                "another program's run-hook guard",
+                retired_global_guard("/usr/local/bin/notpixel"),
+                CheckStatus::Yellow,
+            ),
+            (
+                "a key pixel never wrote",
+                json!({"enabled": true, "Stop": []}),
+                CheckStatus::Green,
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = tmp.path();
+            fs::create_dir_all(antigravity_config_dir(home)).unwrap();
+            let text = serde_json::to_string_pretty(&json!({"pixel-guard": entry})).unwrap();
+            fs::write(hooks_path(home), &text).unwrap();
+            for dry_run in [true, false] {
+                let step = remove_global_hooks(home, &exe, dry_run).unwrap();
+                assert_eq!(step.status, status, "{case}: {}", step.summary);
+                assert!(
+                    step.summary
+                        .starts_with("kept the user-defined pixel-guard"),
+                    "{case}: {}",
+                    step.summary
+                );
+                assert_eq!(
+                    fs::read_to_string(hooks_path(home)).unwrap(),
+                    text,
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn global_guard_is_detected_on_either_pre_event() {
+        let guard = json!({"type": "command",
+            "command": "'/usr/local/bin/pixel' run-hook guard --provider antigravity"});
+        let pre_invocation_only = json!({"enabled": true, "PreInvocation": [guard.clone()]});
+        assert!(runs_global_guard(&pre_invocation_only));
+        // Not first in its group, behind a user's own handler.
+        let pre_tool_second = json!({"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "user-audit"}, guard.clone()]}]});
+        assert!(runs_global_guard(&pre_tool_second));
+        let disabled = json!({"enabled": false, "PreInvocation": [guard.clone()]});
+        assert!(!runs_global_guard(&disabled));
+        let metrics_only = json!({"PostToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command",
+             "command": "'/usr/local/bin/pixel' run-hook metrics --provider antigravity"}]}]});
+        assert!(!runs_global_guard(&metrics_only));
     }
 
     #[test]

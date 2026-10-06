@@ -9,20 +9,19 @@ then `target/release/pixel`. Install a build that matches the tree with
 pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
 ```
 
-(never `cp` into `~/.local/bin` by hand; see CONTRIBUTING.md "Local install loop").
+(never `cp` into `~/.local/bin` by hand; see CONTRIBUTING.md "Optional local install verification").
 
 ## Gates and contracts (CI runs these)
 
 | Script | Run | What |
 | --- | --- | --- |
-| `gates.sh` | `scripts/gates.sh [--force] [--mutants]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
+| `gates.sh` | `scripts/gates.sh [--force]` | fmt, clippy, nextest/test with laptop-safe defaults; exits 0 without compiling when nothing Rust-affecting changed |
+| `test-codeql-policy.py` | `python3 scripts/test-codeql-policy.py` | three real PR scans; Rust only after merge, nightly or manually; trusted cache writes |
+| `coverage-nightly.py` | called by Coverage CI | skip instrumentation only after a successful scheduled measurement of the same main SHA |
+| `test-coverage-nightly.py` | `python3 scripts/test-coverage-nightly.py` | unchanged main, failures and scheduled-only coverage |
+| `test-pre-push.sh` | `sh scripts/test-pre-push.sh` | publication starts no local validation or fetch |
 | `test-gates.py` | `python3 scripts/test-gates.py` | contract of `gates.sh` (stub cargo in a throwaway repo) |
-| `mutants-preflight.sh` | `scripts/mutants-preflight.sh --check\|--ack\|--run [regex]` | local mutation-list review and optional throwaway-worktree campaign; the tracked hook uses the remote gate instead |
-| `test-mutants-preflight.sh` | `sh scripts/test-mutants-preflight.sh` | contract of the mutation exposure pre-push gate (stub cargo, disposable repo) |
-| `mutants-remote-gate.sh` | `scripts/mutants-remote-gate.sh` | tracked pre-push entry point; bundles the exact committed diff and base for the gate host's mutation campaign (`PIXEL_MUTANTS_GATE_HOST`, default the ssh alias `pixel-gate`) |
 | `mutants-gate.py` | `python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt` | the `Mutants` plan/report script; sizes the shard matrix and deals each shard a runner from the `PIXEL_MUTANTS_SHARD_RUNNERS` pool (JSON array of `runs-on` values, round-robin; GitHub-hosted when unset) |
-| `mutants-gate-host.sh` | `pixel-mutants-gate <base-oid> <head-oid>` | remote pre-push gate endpoint; pins the campaign to the client's bundled base and head |
-| `test-mutants-gate-host.sh` | `sh scripts/test-mutants-gate-host.sh` | contract that the remote gate host keeps the bundled base through to mutation preflight |
 | `test-prepare.py` | `python3 scripts/test-prepare.py` | contract of `.agents/skills/release/prepare.sh`'s pull request listing (stub gh/cargo, disposable repo, needs `jq`) |
 | `test-install.py` | `python3 scripts/test-install.py` | contract of `install.sh` (fake curl/uname, local tarball) |
 | `test-clean.py` | `python3 scripts/test-clean.py` | contract of `clean.sh`, mostly what it must *not* remove (disposable repo with a second worktree) |
@@ -59,7 +58,7 @@ corpus and `~/.local/state/pixel` are never touched by any of them.
 | --- | --- | --- |
 | `pr-swarm.sh` | `scripts/pr-swarm.sh reconcile [--wait N\|--no-wait] [--dry-run] \| status \| up <PR> [--worktree] \| down <PR> [--force] \| watch \| hook-session-start` | one rmux pane per open-PR worktree, each a `claude -n pr-<N>-<slug>` session sitting in that PR's tree; `reconcile` diffs the open PRs against panes titled `PR#<N>` and creates, retitles or tears down (`status` is read-only). Wired to SessionStart by `.claude/settings.json`; rails in `.agents/rules/pr-swarm.md` |
 
-## Smoke and audits (after `pixel self-update`, before a PR that touches the CLI, hooks or install)
+## Optional local smoke and audits
 
 | Script | Run | What |
 | --- | --- | --- |
@@ -95,3 +94,5 @@ installed) through `--append-system-prompt-file`, exactly as the `claude`
 shell wrapper written by `pixel install` does. The scripts call `claude` by
 path, so a fish/zsh wrapper function never applies to them; without the
 flag the "with pixel" arm would run without pixel's instructions.
+
+`mutants-nightly-range.py` selects the cumulative main diff from completed campaign checkpoint metadata and writes a checkpoint only for fully judged outcomes. `test-mutants-nightly-range.py` tests replay, no-change skips, and checkpoint integrity.

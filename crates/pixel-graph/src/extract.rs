@@ -16,6 +16,8 @@ use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Tree};
 
 use crate::store::SymbolKind;
 
+pub(crate) mod ruby_callbacks;
+
 #[derive(Debug, Clone)]
 pub struct RawSymbol {
     pub name: String,
@@ -1983,12 +1985,63 @@ fn ruby_scope_of(kind: &str) -> Option<RubyScope> {
 /// otherwise the bare name is a method call.
 #[derive(Debug, Default)]
 struct RubyLocals {
-    frames: Vec<(RubyScope, Vec<String>)>,
+    frames: Vec<RubyFrame>,
+}
+
+/// One open Ruby scope: the locals it binds and how a `def` in its body is
+/// qualified.
+#[derive(Debug)]
+struct RubyFrame {
+    scope: RubyScope,
+    names: Vec<String>,
+    defs: RubyDefs,
+    /// The frame is a `module` body, where a bare `module_function` applies.
+    module: bool,
+    /// `self` is an instance here (a `def` body, or a block inside one), not
+    /// the class or module being defined.
+    instance_self: bool,
+}
+
+/// What a `def name` written in a frame's body defines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RubyDefs {
+    /// An instance method, `Klass#name`.
+    Instance,
+    /// A method of the class or module object itself, `Klass.name`: the body
+    /// of `class << self`, or a module after a bare `module_function`, which
+    /// Ruby applies to every following `def` until a `public`, `private` or
+    /// `protected`. The private instance copy `module_function` also makes is
+    /// not recorded: only an `include` of the module reaches it.
+    /// <https://docs.ruby-lang.org/en/master/Module.html#method-i-module_function>
+    Singleton,
 }
 
 impl RubyLocals {
-    fn open(&mut self, scope: RubyScope) {
-        self.frames.push((scope, Vec::new()));
+    /// Open the frame of a node of `kind`. A block keeps the enclosing
+    /// frame's `def` qualification and `self`, as a `def` in a block defines
+    /// a method of the enclosing class.
+    fn open(&mut self, scope: RubyScope, kind: &str, value_is_self: bool) {
+        let enclosing = self.frames.last();
+        let enclosing_defs = enclosing.map_or(RubyDefs::Instance, |f| f.defs);
+        let enclosing_instance = enclosing.is_some_and(|f| f.instance_self);
+        let (defs, instance_self) = match kind {
+            "block" | "do_block" | "lambda" => (enclosing_defs, enclosing_instance),
+            "method" => (RubyDefs::Instance, true),
+            // `class << self` names the class or module only where `self` is
+            // one: in a `def` body it is an instance, whose own singleton the
+            // graph cannot name, so its methods keep instance qualification.
+            "singleton_class" if value_is_self && !enclosing_instance => {
+                (RubyDefs::Singleton, false)
+            }
+            _ => (RubyDefs::Instance, false),
+        };
+        self.frames.push(RubyFrame {
+            scope,
+            names: Vec::new(),
+            defs,
+            module: kind == "module",
+            instance_self,
+        });
     }
 
     fn close(&mut self) {
@@ -1996,21 +2049,44 @@ impl RubyLocals {
     }
 
     fn bind(&mut self, name: String) {
-        if let Some((_, names)) = self.frames.last_mut() {
-            names.push(name);
+        if let Some(frame) = self.frames.last_mut() {
+            frame.names.push(name);
         }
     }
 
     fn is_local(&self, name: &str) -> bool {
-        for (scope, names) in self.frames.iter().rev() {
-            if names.iter().any(|known| known == name) {
+        for frame in self.frames.iter().rev() {
+            if frame.names.iter().any(|known| known == name) {
                 return true;
             }
-            if *scope == RubyScope::Gate {
+            if frame.scope == RubyScope::Gate {
                 return false;
             }
         }
         false
+    }
+
+    /// The qualification of a `def` whose own frame is the innermost one:
+    /// the frame around it decides.
+    fn enclosing_defs(&self) -> RubyDefs {
+        self.frames
+            .len()
+            .checked_sub(2)
+            .map_or(RubyDefs::Instance, |i| self.frames[i].defs)
+    }
+
+    /// A bare visibility word written directly in a `module` body:
+    /// `module_function` makes the following `def`s module functions, and
+    /// `public`/`private`/`protected` end that mode.
+    fn visibility(&mut self, word: &str) {
+        let Some(frame) = self.frames.last_mut().filter(|f| f.module) else {
+            return;
+        };
+        match word {
+            "module_function" => frame.defs = RubyDefs::Singleton,
+            "public" | "private" | "protected" => frame.defs = RubyDefs::Instance,
+            _ => {}
+        }
     }
 }
 
@@ -2021,7 +2097,10 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
     let mut pushed = false;
     let scope = ruby_scope_of(node.kind());
     if let Some(scope) = scope {
-        locals.open(scope);
+        let value_is_self = node
+            .child_by_field_name("value")
+            .is_some_and(|value| value.kind() == "self");
+        locals.open(scope, node.kind(), value_is_self);
     }
     match node.kind() {
         "module" => {
@@ -2047,10 +2126,15 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
                 let (kind, q) = if w.stack.is_empty() {
                     (SymbolKind::Function, name.clone())
                 } else {
-                    // Ruby convention: `Klass#instance_method`.
+                    // Ruby convention: `Klass#instance_method`, and
+                    // `Klass.class_method` for a singleton frame.
+                    let separator = match locals.enclosing_defs() {
+                        RubyDefs::Instance => '#',
+                        RubyDefs::Singleton => '.',
+                    };
                     (
                         SymbolKind::Method,
-                        format!("{}#{}", w.stack.join("::"), name),
+                        format!("{}{separator}{name}", w.stack.join("::")),
                     )
                 };
                 w.push_symbol(name, q, kind, node);
@@ -2071,8 +2155,18 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
         "call" => {
             let mut callee_name: Option<String> = None;
             if let Some(name) = field_text(w, node, "method") {
-                let recv = field_text(w, node, "receiver");
+                let recv = ruby_receiver(w, node);
                 callee_name = Some(name.clone());
+                // `module_function()` and `public()` set the mode as the
+                // bare words do; with arguments they only touch the methods
+                // they name.
+                if recv.is_none()
+                    && node
+                        .child_by_field_name("arguments")
+                        .is_none_or(|args| args.named_child_count() == 0)
+                {
+                    locals.visibility(&name);
+                }
                 if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
                     if let Some(spec) = ruby_first_string_argument(w, node) {
                         w.push_import(spec, Vec::new());
@@ -2087,6 +2181,9 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             // references (callbacks / handlers passed as args). Skip require
             // methods — their string args are imports, not references.
             if !matches!(callee_name.as_deref(), Some(n) if RUBY_REQUIRE_METHODS.contains(&n)) {
+                if let Some(method) = callee_name.as_deref() {
+                    ruby_callbacks::walk_symbol_arguments(w, node, method);
+                }
                 walk_call_arguments(w, node, callee_name);
             }
         }
@@ -2098,6 +2195,7 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             RubyIdent::Expr => {
                 let name = w.text(node);
                 if !locals.is_local(&name) {
+                    locals.visibility(&name);
                     w.push_call(name, None, node);
                 }
             }
@@ -2132,6 +2230,22 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
     if pushed {
         w.stack.pop();
     }
+}
+
+/// Preserve receiver text except AST-confirmed constant factories/configurators.
+/// Arguments cannot change which constant `Foo.new(args)` or `Job.set(args)`
+/// names; keeping `Foo.new` / `Job.set` also survives stored-call replay.
+fn ruby_receiver(w: &Walker, call: Node) -> Option<String> {
+    let receiver = call.child_by_field_name("receiver")?;
+    if receiver.kind() == "call"
+        && let Some(method) = field_text(w, receiver, "method")
+        && matches!(method.as_str(), "new" | "set")
+        && let Some(owner) = receiver.child_by_field_name("receiver")
+        && matches!(owner.kind(), "constant" | "scope_resolution")
+    {
+        return Some(format!("{}.{method}", w.text(owner)));
+    }
+    Some(w.text(receiver))
 }
 
 /// Literal text of the first `string` argument of a Ruby `call`, or `None`
@@ -2846,6 +2960,103 @@ namespace MyApp.Services {
         assert_eq!(greet_in_interface.name, "Greet");
     }
 
+    /// `class << self` and a bare `module_function` define methods of the
+    /// class or module object (`Klass.name`); the mode ends where Ruby ends
+    /// it, and never leaks out of a `def` body or into `class << other`.
+    #[test]
+    fn ruby_singleton_defs_should_be_qualified_as_class_methods() {
+        let source = br"
+class User
+  def self.direct; end
+  class << self
+    def importable; end
+    private
+    def hidden; end
+    [1].each do
+      def in_block; end
+    end
+  end
+  def after; end
+  class << other
+    def elsewhere; end
+  end
+end
+
+module Util
+  def before; end
+  module_function
+  def slug(s); end
+  def with_private_inside
+    private
+  end
+  def still_function; end
+  public
+  def back_to_instance; end
+end
+
+module Plain
+  def helper
+    module_function
+  end
+  def instance_too; end
+end
+
+class Widget
+  def build
+    class << self
+      def per_instance; end
+    end
+  end
+  def self.setup
+    class << self
+      def meta; end
+    end
+  end
+end
+
+module Parens
+  module_function()
+  def a; end
+  private :a
+  def b; end
+  public()
+  def c; end
+end
+";
+        let extraction = extract_file("lib/user.rb", source).unwrap();
+        let methods: Vec<&str> = extraction
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .map(|s| s.qualified.as_str())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "User.direct",
+                "User.importable",
+                "User.hidden",
+                "User.in_block",
+                "User#after",
+                "User#elsewhere",
+                "Util#before",
+                "Util.slug",
+                "Util.with_private_inside",
+                "Util.still_function",
+                "Util#back_to_instance",
+                "Plain#helper",
+                "Plain#instance_too",
+                "Widget#build",
+                "Widget#per_instance",
+                "Widget.setup",
+                "Widget.meta",
+                "Parens.a",
+                "Parens.b",
+                "Parens#c",
+            ]
+        );
+    }
+
     #[test]
     fn ruby_extracts_rails_symbols_calls_and_imports() {
         let source = br#"
@@ -3467,6 +3678,101 @@ export function wire(emitter: any) {
     fn reference_names(path: &str, source: &[u8]) -> Vec<String> {
         let extraction = extract_file(path, source).unwrap();
         extraction.references.into_iter().map(|r| r.name).collect()
+    }
+
+    #[test]
+    fn ruby_callbacks_should_reference_methods_but_not_option_values_or_foreign_receivers() {
+        let source = b"class Record\n  before_action :load, :authorize, only: :show\n  validate :check, if: :ready?, unless: :blocked?\n  after_commit :sync, on: :create\n  foo.before_action :foreign\n  self.before_action :explicit\n  before_action()\n  scope :active, -> { true }\nend\n";
+        let fx = extract_file("record.rb", source).unwrap();
+        assert_eq!(
+            fx.references
+                .iter()
+                .map(|r| (
+                    r.name.as_str(),
+                    r.arg_of.as_deref(),
+                    r.site_line,
+                    r.enclosing_index
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("load", Some("before_action"), 2, Some(0)),
+                ("authorize", Some("before_action"), 2, Some(0)),
+                ("check", Some("validate"), 3, Some(0)),
+                ("ready?", Some("validate"), 3, Some(0)),
+                ("blocked?", Some("validate"), 3, Some(0)),
+                ("sync", Some("after_commit"), 4, Some(0)),
+            ],
+            "only method symbols in supported callback declarations are references"
+        );
+    }
+
+    #[test]
+    fn ruby_callbacks_should_cover_the_documented_dsl_and_only_class_or_module_bodies() {
+        let methods = [
+            "before_action",
+            "after_action",
+            "around_action",
+            "prepend_before_action",
+            "prepend_after_action",
+            "prepend_around_action",
+            "append_before_action",
+            "append_after_action",
+            "append_around_action",
+            "skip_before_action",
+            "skip_after_action",
+            "skip_around_action",
+            "validate",
+            "before_validation",
+            "after_validation",
+            "before_save",
+            "around_save",
+            "after_save",
+            "before_create",
+            "around_create",
+            "after_create",
+            "before_update",
+            "around_update",
+            "after_update",
+            "before_destroy",
+            "around_destroy",
+            "after_destroy",
+            "after_initialize",
+            "after_find",
+            "after_touch",
+            "before_commit",
+            "after_commit",
+            "after_rollback",
+            "after_create_commit",
+            "after_update_commit",
+            "after_destroy_commit",
+            "after_save_commit",
+            "helper_method",
+            "before_enqueue",
+            "around_enqueue",
+            "after_enqueue",
+            "before_perform",
+            "around_perform",
+            "after_perform",
+        ];
+        for method in methods {
+            let source = format!(
+                "{method} :top\nmodule Rules\n  {method} :check\nend\nclass Record\n  def run\n    {method} :inside\n  end\n  def self.configure\n    {method} :singleton_method\n  end\n  class << self\n    {method} :singleton\n  end\nend\n"
+            );
+            assert_eq!(
+                reference_names("record.rb", source.as_bytes()),
+                ["check"],
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn ruby_send_should_reference_only_the_first_literal_symbol_on_self() {
+        let source = b"class Record\n  def run\n    send(:check, :data)\n    self.public_send(:ready?, :other)\n    object.send(:foreign)\n    Record.send(:constant)\n    send(name, :dynamic)\n    send()\n    send(\"string\")\n  end\n  class << self\n    send(:unknown_owner)\n    def singleton_run\n      send(:class_target)\n    end\n  end\nend\nsend(:top_level)\n";
+        assert_eq!(
+            reference_names("record.rb", source),
+            ["check", "ready?", "name", "class_target"]
+        );
     }
 
     /// A member argument names a function only on a self receiver:

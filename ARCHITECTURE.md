@@ -354,6 +354,14 @@ envelope talks to the daemon socket directly.
   graph.db on first use`, or `rebuilt graph.db: <reason>` (the file on disk
   is `graph.v2.db`). Call edges carry a resolution tier, and
   analyses report a lower bound when same-name call sites stay unresolved.
+- Ruby constant receivers are resolved in `pixel-graph/src/resolve/ruby.rs`
+  against class/module scopes, preserving the difference between nested
+  declarations and `class A::B`. Unique class and constructor targets are
+  exact; job and mailer conventions are probable. Incremental updates replay
+  Ruby receiver edges because a new constant or factory override can change
+  the target without redefining the called method. Stored receiver text
+  normalizes AST-confirmed `Foo.new(args)` and `Job.set(args)` to `Foo.new`
+  and `Job.set`; the written callee remains separate from the resolved target.
 - The `graph` op rebuilds from scratch by default (`rebuild-graph`,
   `prepare-repo --rebuild-graph`). With `"if_stale": true` (a request field
   that defaults to `false` and is sent only when set, so an older daemon
@@ -456,8 +464,10 @@ each agent through its own extension point:
   loading them into context.
 - **OpenCode** (`~/.config/opencode`: the guard plugin `pixel.js`, auto-loaded
   from `plugins/` and calling `pixel run-hook guard --provider opencode`),
-  **Antigravity** (`~/.gemini/config`: plugin, config entry and
-  `run-hook guard --provider antigravity` hook) and **zcode**
+  **Antigravity** (`~/.gemini/config`: the plugin, which carries the
+  `run-hook guard --provider antigravity` hook, and its config entry; the
+  global `pixel-guard` an older install wrote in `hooks.json` is removed, a
+  user-defined one under that name kept) and **zcode**
   (`~/.zcode/cli/config.json`: `run-hook guard --provider zcode`): only when
   that agent's configuration already exists.
 
@@ -664,10 +674,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     (`.config/nextest.toml`: one process per test, retry once but fail on
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
-    contract scripts (installer, gate runner, pre-push baseline, mutation
-    pre-push and remote host, release prepare, Homebrew formula and Linux
+    contract scripts (installer, gate runner, pre-push no-op,
+    release prepare, Homebrew formula and Linux
     bottles, release SBOM, homebrew-core formula,
-    nightly mutants, mutants
+    nightly diff checkpoints, coverage selection, mutants
     config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
     reproducible release build environment, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
@@ -680,14 +690,19 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     **Dependency policy** (`cargo deny`, then
     `scripts/check-advisory-ignores.py`: `osv-scanner.toml`, which Scorecard
     reads, accepts the same advisories as `deny.toml`).
-- Other workflows: `mutants.yml` (the `Mutants in diff` gate on every pull
-  request touching `crates/`, sharded over the `PIXEL_MUTANTS_SHARD_RUNNERS`
-  runner pool — a JSON array of `runs-on` values the plan job deals
-  round-robin per shard through `scripts/mutants-gate.py`, GitHub-hosted
-  `ubuntu-26.04` when the variable is unset or empty, so capacity moves
-  with a variable edit and no shard queues behind one busy self-hosted
-  host), `mutants-nightly.yml` (a whole-tree
-  rotation), `cross-build.yml` (the three release lanes),
+- Other workflows: `mutants.yml` (01:17 UTC on `main`, only the cumulative
+  diff since the latest completed campaign; no pull-request trigger).
+  `scripts/mutants-nightly-range.py` selects a checkpoint from trusted
+  completed main-run artifact metadata and refuses API/history failures.
+  A checkpoint is uploaded after every listed mutant has a recognized
+  outcome; survivors keep the run red, while missing outcomes and disk-full
+  failures leave the prior checkpoint. Unchanged main starts no Rust jobs.
+  The existing plan/shards/report share `.cargo/mutants.toml` and distribute
+  shards over `PIXEL_MUTANTS_SHARD_RUNNERS` (GitHub-hosted `ubuntu-26.04`
+  by default). Only scheduled CI executes mutations; there is no manual,
+  local or pull-request campaign. The pre-push hook is a no-op; local validation is optional.
+  Other lanes include
+  `cross-build.yml` (the three release lanes),
   `reproducible-build.yml` (the `x86_64-unknown-linux-musl` release binary
   built twice from two checkouts at different paths, no cache, failing
   unless the two sha256 match; on pull requests touching the build
@@ -714,16 +729,31 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   (OpenSSF Scorecard on every push to `main` and weekly: publishes the score
   to `api.scorecard.dev` and the findings to code scanning) and `codeql.yml`
   (CodeQL on every pull request into `main`, every push to `main` and
-  weekly: Rust, the workflows, Python and JavaScript/TypeScript, all with
-  `build-mode: none`, results to code scanning and the `CodeQL` check) and
+  nightly at 05:41 UTC: workflows, Python and JavaScript/TypeScript always
+  scan; Rust runs only after merge, nightly or via manual dispatch. To scan
+  a sensitive branch before merge, dispatch the workflow on that branch;
+  inspect its run and code-scanning results before merging. Rust findings
+  are post-merge feedback and must be triaged before the next release.
+  Scans use `build-mode: none` and default security queries, preserving
+  eligibility for incremental analysis in supported languages. The existing
+  CodeQL merge-protection rule remains enabled for PR analyses. The three
+  `Analyze (actions)`, `Analyze (python)` and `Analyze (javascript-typescript)`
+  jobs are required checks from GitHub Actions in the main ruleset. GitHub's
+  aggregate CodeQL check can be neutral because main has a Rust configuration
+  absent on PRs; the required jobs still enforce completion of the PR scans.
+  A dedicated Rust extraction cache is keyed by runner, compiler,
+  manifests/lockfiles and workflow. Manual branch scans may restore it;
+  only successful main analyses save it) and
   `fuzz.yml` (`cargo deny` on the `fuzz/` workspace with the root
   `deny.toml`, then every cargo-fuzz target on nightly: 60 s each on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
   root `Cargo.toml` or `deny.toml`, 600 s weekly and on demand, 120 s when
   `release.yml` calls it on a `v*` tag, crash reproducers uploaded) and `coverage.yml` (the Test job's nextest suite
-  under `cargo llvm-cov`, doctests aside, on every push to `main`, on a pull
-  request touching `crates/`, the manifests or the nextest profile, and on
-  demand: line, region and function totals and one row per crate in the job
+  under `cargo llvm-cov`, doctests aside, at 02:47 UTC on main only.
+  `scripts/coverage-nightly.py` skips both expensive jobs when the latest
+  successful scheduled run already measured this SHA; failed or cancelled
+  measurements are retried. Read-only Actions access supplies run metadata.
+  Reports contain line, region and function totals and one row per crate in the job
   summary, the report as the `coverage-summary` artifact; it fails on a red
   test or on line coverage under 90%, the OpenSSF gold bar; its `branches`
   job runs the same suite on a dated nightly under `cargo llvm-cov
@@ -738,15 +768,12 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   inside the file, `enclosing_index` inside `symbols`); `search_plan` checks
   that `pixel_index::plan::plan_pattern` never drops a document the
   verifier's `grep_regex` matcher matches, for both gram extractors.
-- Local agent validation uses targeted checks during editing and the full
-  gates once a reviewable unit is ready (CONTRIBUTING.md, "Agent validation
-  workflow"). Background gates validate an unchanged checkout or a committed
-  worktree snapshot with its own build output; results identify the SHA.
-- Once an implementation unit is finished, the project rule in `AGENTS.md`
-  applies: rebuild, reinstall the binary atomically, re-index, reinstall
-  hooks, and run `pixel doctor`. Intermediate edits do not trigger this
-  loop; a check that exercises new installed behavior needs it first, and
-  later changes to the binary or installed rules require it again.
+- Local compilation, tests, lint, review and installation are optional
+  diagnostic tools. Publish the candidate promptly; CI must validate its
+  current head before merge (CONTRIBUTING.md, "Agent validation workflow").
+  A chosen background local check uses an unchanged snapshot and records its
+  SHA. Rebuild, reinstall, index and doctor are only needed for a chosen
+  installed-path diagnosis or explicitly requested local deployment.
 
 ## Release gate
 
