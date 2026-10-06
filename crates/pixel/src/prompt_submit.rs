@@ -19,7 +19,6 @@
 //! (`prompt_intent`). The workers share a 750ms deadline; one slow worker does
 //! not discard useful context from the others.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
