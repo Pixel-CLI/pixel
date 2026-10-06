@@ -209,7 +209,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             &home, &exe, dry_run,
         )?);
         steps.push(crate::antigravity::enable_plugin_in_config(&home, dry_run)?);
-        steps.push(crate::antigravity::install_global_hooks(
+        steps.push(crate::antigravity::remove_global_hooks(
             &home, &exe, dry_run,
         )?);
     }

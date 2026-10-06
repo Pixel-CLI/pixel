@@ -188,6 +188,23 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
         .map(|(_, verb)| verb)
 }
 
+/// The verb after `run-hook` in `command` when its executable is one of
+/// pixel's (the names [`pixel_hook_verb`] accepts), whatever the verb: a
+/// caller owning verbs that table does not list, such as Antigravity's
+/// `guard --provider antigravity`, compares the verb itself.
+pub(crate) fn pixel_run_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a str> {
+    let own = exe.file_name().map(|n| n.to_string_lossy());
+    command
+        .rsplit_once(" run-hook ")
+        .filter(|(executable, _)| {
+            executable_name(executable).is_some_and(|name| {
+                config::PIXEL_EXECUTABLES.contains(&name.as_str())
+                    || own.as_deref() == Some(name.as_str())
+            })
+        })
+        .map(|(_, verb)| verb)
+}
+
 /// Recognize our executable commands and legacy script names, not arbitrary
 /// commands merely containing a lifecycle verb. See [`pixel_hook_verb`] for
 /// which executables count as pixel's.
