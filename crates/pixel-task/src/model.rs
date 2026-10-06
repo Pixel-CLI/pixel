@@ -9,6 +9,7 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::structural::StructuralResult;
 use crate::{Error, Result, digest};
 
 pub const SCHEMA_VERSION: u8 = 2;
@@ -29,9 +30,40 @@ fn cwd() -> String {
     ".".into()
 }
 
+/// How a check produces its verdict. `Argv` runs a command in the captured
+/// source workspace; the structural kinds are pure functions over graph/diff
+/// facts the verify caller gathers, and never touch the workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheckKind {
+    Argv,
+    DiffInScope,
+    GraphResolves,
+    TestsTouched,
+}
+
+fn check_kind_argv() -> CheckKind {
+    CheckKind::Argv
+}
+
+impl CheckKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CheckKind::Argv => "argv",
+            CheckKind::DiffInScope => "diff-in-scope",
+            CheckKind::GraphResolves => "graph-resolves",
+            CheckKind::TestsTouched => "tests-touched",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Check {
     pub id: String,
+    #[serde(default = "check_kind_argv")]
+    pub kind: CheckKind,
+    /// Command line for `Argv` checks; empty for structural kinds.
+    #[serde(default)]
     pub argv: Vec<String>,
     #[serde(default = "cwd")]
     pub cwd: String,
@@ -109,11 +141,9 @@ impl TaskContract {
         for check in &self.checks {
             valid_id(&check.id)?;
             if !checks.insert(&check.id)
-                || check.argv.is_empty()
-                || check.argv[0].is_empty()
-                || check.argv.iter().any(|arg| arg.contains('\0'))
                 || check.timeout_ms == 0
                 || check.timeout_ms > 86_400_000
+                || !valid_check_kind(check)
             {
                 return Err(Error::Invalid(format!(
                     "invalid or duplicate check {}",
@@ -217,6 +247,21 @@ impl TaskContract {
                 .toolchain
                 .iter()
                 .all(|(program, identity)| self.toolchain.get(program) == Some(identity))
+    }
+}
+
+/// `Argv` checks carry a non-empty command line; structural kinds carry
+/// none — a check is exactly one kind, never a blend.
+fn valid_check_kind(check: &Check) -> bool {
+    match check.kind {
+        CheckKind::Argv => {
+            !check.argv.is_empty()
+                && !check.argv[0].is_empty()
+                && check.argv.iter().all(|arg| !arg.contains('\0'))
+        }
+        CheckKind::DiffInScope | CheckKind::GraphResolves | CheckKind::TestsTouched => {
+            check.argv.is_empty()
+        }
     }
 }
 
@@ -371,6 +416,10 @@ pub struct VerificationReceipt {
     pub stderr_bytes: u64,
     pub execution_root: String,
     pub diagnostic: Option<String>,
+    /// Structural verdict (witnesses, `complete | capped`) for non-argv
+    /// check kinds; `None` for `Argv` checks.
+    #[serde(default)]
+    pub structural: Option<StructuralResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +532,53 @@ mod tests {
         let mut changed = value.clone();
         changed.objective.push('!');
         assert_ne!(value.id().unwrap(), changed.id().unwrap());
+    }
+
+    #[test]
+    fn check_kind_defaults_to_argv_and_structural_kinds_carry_no_argv() {
+        // A contract written before kinds existed still parses as argv.
+        let value: Check = serde_json::from_value(json!({"id":"check","argv":["true"]})).unwrap();
+        assert_eq!(value.kind, CheckKind::Argv);
+        for kind in [
+            CheckKind::DiffInScope,
+            CheckKind::GraphResolves,
+            CheckKind::TestsTouched,
+        ] {
+            let parsed: Check =
+                serde_json::from_value(json!({"id":"check","kind":kind.as_str()})).unwrap();
+            assert_eq!(parsed.kind, kind);
+            assert!(parsed.argv.is_empty());
+            let mut with_check = contract();
+            with_check.checks = vec![parsed];
+            assert!(with_check.validate().is_ok(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn structural_checks_reject_argv_and_argv_checks_still_require_it() {
+        for kind in [
+            CheckKind::DiffInScope,
+            CheckKind::GraphResolves,
+            CheckKind::TestsTouched,
+        ] {
+            let mut value = contract();
+            value.checks[0].kind = kind;
+            value.checks[0].argv = vec!["true".into()];
+            assert!(value.validate().is_err(), "{kind:?} must reject argv");
+        }
+        let mut value = contract();
+        value.checks[0].argv.clear();
+        assert!(value.validate().is_err(), "argv kind still requires argv");
+    }
+
+    #[test]
+    fn check_kind_is_part_of_the_contract_identity() {
+        let prior = contract();
+        let mut next = prior.clone();
+        next.checks[0].kind = CheckKind::TestsTouched;
+        next.checks[0].argv.clear();
+        assert!(!next.preserves(&prior), "a kind change is not free");
+        assert_ne!(prior.id().unwrap(), next.id().unwrap());
     }
 
     #[test]

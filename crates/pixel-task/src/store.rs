@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::model::*;
+use crate::structural::StructuralContext;
 use crate::{Error, Result, digest, now_ms, policy, runner, sandbox, snapshot};
 
 /// Journal bounds fail explicitly; truncation never grants completion.
@@ -533,7 +534,10 @@ impl Store {
         let source = snapshot::capture(&self.root, &task.contract, gate == Gate::Finish)?;
         let mut evaluated = task.clone();
         for check in &task.contract.checks {
-            let identity = runner::contract_check_identity(check, &task.contract).ok();
+            let identity = match check.kind {
+                CheckKind::Argv => runner::contract_check_identity(check, &task.contract).ok(),
+                _ => Some(runner::structural_check_identity(check).unwrap_or_default()),
+            };
             for receipt in evaluated
                 .receipts
                 .iter_mut()
@@ -548,6 +552,19 @@ impl Store {
     }
 
     pub fn verify(&self, task_id: &str, check_ids: &[String], request_id: &str) -> Result<Task> {
+        self.verify_with_context(task_id, check_ids, request_id, None)
+    }
+
+    /// Verify with the structural facts the caller gathered (`diff-in-scope`,
+    /// `graph-resolves`, `tests-touched`); `None` leaves every structural
+    /// check `Unavailable`.
+    pub fn verify_with_context(
+        &self,
+        task_id: &str,
+        check_ids: &[String],
+        request_id: &str,
+        context: Option<&StructuralContext>,
+    ) -> Result<Task> {
         valid_id(request_id)?;
         let input_id = digest(&("verify", check_ids))?;
         let (task, checks, run_id) = {
@@ -619,8 +636,14 @@ impl Store {
             .as_ref()
             .expect("verification admission captures source");
         let lease = self.directory(task_id)?.join(format!("run-{run_id}.json"));
-        let result =
-            runner::verify_with_lease(source, &task.contract, &checks, &run_id, Some(&lease));
+        let result = runner::verify_with_lease(
+            source,
+            &task.contract,
+            &checks,
+            &run_id,
+            Some(&lease),
+            context,
+        );
         let _lock = self.lock(task_id)?;
         let commits = self.read_commits(task_id)?;
         let mut current = self.hydrate(
@@ -650,13 +673,19 @@ impl Store {
             Err(error) => {
                 let message = error.to_string();
                 for check in &checks {
+                    let check_digest = match check.kind {
+                        CheckKind::Argv => {
+                            runner::contract_check_identity(check, &task.contract)
+                                .unwrap_or_default()
+                        }
+                        _ => runner::structural_check_identity(check).unwrap_or_default(),
+                    };
                     current.receipts.push(VerificationReceipt {
                         run_id: run_id.clone(),
                         check_id: check.id.clone(),
                         source_id: source.content_id.clone(),
                         contract_id: task.contract.id()?,
-                        check_digest: runner::contract_check_identity(check, &task.contract)
-                            .unwrap_or_default(),
+                        check_digest,
                         outcome: CheckOutcome::Unavailable,
                         exit_code: None,
                         started_ms: task.updated_ms,
@@ -668,6 +697,7 @@ impl Store {
                         stderr_bytes: 0,
                         execution_root: String::new(),
                         diagnostic: Some(message.clone()),
+                        structural: None,
                     });
                 }
                 json!({"error":message,"outcome":"unavailable"})

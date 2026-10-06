@@ -210,9 +210,17 @@ pub(crate) fn run(command: TaskCmd) -> Result<(), String> {
             output(&task, args.json)
         }
         TaskCmd::Verify { task: args, checks } => {
-            let (_, store, task) = open(&args)?;
+            let (root, store, task) = open(&args)?;
+            let selected: Vec<_> = task
+                .contract
+                .checks
+                .iter()
+                .filter(|check| checks.is_empty() || checks.contains(&check.id))
+                .cloned()
+                .collect();
+            let context = crate::task_verify::gather(&root, &selected).map_err(error)?;
             let task = store
-                .verify(&task.task_id, &checks, &request_for(&args))
+                .verify_with_context(&task.task_id, &checks, &request_for(&args), Some(&context))
                 .map_err(error)?;
             let failed = task
                 .receipts

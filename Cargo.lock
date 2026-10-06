@@ -2054,6 +2054,7 @@ dependencies = [
  "pixel-task",
  "pixel-ultraflow",
  "regex",
+ "rusqlite",
  "serde",
  "serde-saphyr",
  "serde_json",

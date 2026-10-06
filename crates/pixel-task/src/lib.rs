@@ -11,11 +11,13 @@ pub mod runner;
 pub mod sandbox;
 pub mod snapshot;
 pub mod store;
+pub mod structural;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use model::*;
 pub use store::Store;
+pub use structural::{CallEdge, StructuralContext, StructuralResult, TestPathConventions};
 
 /// Errors never become successful or absent task evidence.
 #[derive(Debug, thiserror::Error)]
