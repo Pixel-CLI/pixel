@@ -173,7 +173,10 @@ impl Projects {
                     external.remove(&alias);
                 }
             }
-            load_roots.dedup();
+            // A root listed twice (`gemspec path: "."`, two path gems on one
+            // directory) is one root: keep its first place.
+            let mut listed = HashSet::new();
+            load_roots.retain(|root| listed.insert(root.clone()));
             projects.push(Project {
                 root: dir.clone(),
                 load_roots,
@@ -533,6 +536,43 @@ end
         assert_eq!(
             require_names("net-http"),
             ["net-http", "net/http", "net_http"]
+        );
+    }
+
+    #[test]
+    fn a_load_root_listed_twice_should_not_make_a_require_ambiguous() {
+        let files: Vec<String> = [
+            "Gemfile",
+            "app.gemspec",
+            "lib/foo.rb",
+            "ext/bar.rb",
+            "app/a.rb",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let read = |rel: &str| -> Option<Vec<u8>> {
+            match rel {
+                "Gemfile" => Some(b"gemspec path: \".\"\n".to_vec()),
+                "app.gemspec" => Some(
+                    b"Gem::Specification.new do |s|\n  s.require_paths = [\"lib\", \"ext\"]\nend\n"
+                        .to_vec(),
+                ),
+                _ => None,
+            }
+        };
+        let projects = Projects::build(&files, read);
+        assert_eq!(
+            projects.project_of("app/a.rb").unwrap().load_roots,
+            ["lib", "ext"]
+        );
+        assert_eq!(
+            projects.resolve("foo", "app/a.rb").as_deref(),
+            Some("lib/foo.rb")
+        );
+        assert_eq!(
+            projects.resolve("bar", "app/a.rb").as_deref(),
+            Some("ext/bar.rb")
         );
     }
 
