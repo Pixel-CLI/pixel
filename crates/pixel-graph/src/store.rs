@@ -641,12 +641,14 @@ impl GraphStore {
             )?;
             tx.last_insert_rowid()
         };
+        tx.exec_cached("DELETE FROM walked_files WHERE path = ?1", params![path])?;
         tx.commit()?;
         Ok(id)
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<()> {
         let tx = self.conn.savepoint()?;
+        tx.exec_cached("DELETE FROM walked_files WHERE path = ?1", params![path])?;
         if let Some(id) = tx
             .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
                 r.get::<_, i64>(0)
@@ -889,6 +891,33 @@ impl GraphStore {
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Record that the graph walks hash `path` under `blob_oid` but keep no
+    /// source row for it (see the `walked_files` table). Replaces any earlier
+    /// record; [`Self::replace_file`] and [`Self::remove_file`] drop it.
+    pub fn record_walked_file(&self, path: &str, blob_oid: &str) -> Result<()> {
+        self.conn.exec_cached(
+            "INSERT INTO walked_files (path, blob_oid) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET blob_oid = excluded.blob_oid",
+            params![path, blob_oid],
+        )?;
+        Ok(())
+    }
+
+    /// Drop every `walked_files` record: a full build rewrites them all.
+    pub fn clear_walked_files(&self) -> Result<()> {
+        self.conn.exec_cached("DELETE FROM walked_files", [])?;
+        Ok(())
+    }
+
+    /// `(path, blob_oid)` of every walked file the store keeps no row for.
+    pub fn walked_files(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT path, blob_oid FROM walked_files ORDER BY path")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Store one declared Ruby ancestor of `file_id` (see `RawMixin`).
@@ -1798,6 +1827,14 @@ CREATE TABLE IF NOT EXISTS ruby_mixins (
   site_line INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ruby_mixins_file ON ruby_mixins(file_id);
+-- Files the graph walks hash into the freshness signature but keep no
+-- `files` row for: a `Gemfile.lock`, a binstub that is not Ruby, a generated
+-- blob, a file the parser rejected. Their content hash lets the freshness
+-- checks tell an unchanged one from an edit.
+CREATE TABLE IF NOT EXISTS walked_files (
+  path TEXT PRIMARY KEY,
+  blob_oid TEXT NOT NULL
+);
 ";
 
 /// Idempotent schema migrations for graphs created before a column existed.
