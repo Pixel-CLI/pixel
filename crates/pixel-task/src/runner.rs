@@ -36,15 +36,15 @@ fn execution(check: &Check, contract: &TaskContract) -> Result<sandbox::Executio
 /// The verdict of a structural check under `context`, or `None` when the
 /// facts it needs are unavailable — which reports `Unavailable`, never a
 /// silent pass.
-fn structural_verdict(kind: CheckKind, context: Option<&StructuralContext>) -> Option<StructuralResult> {
+fn structural_verdict(
+    kind: CheckKind,
+    context: Option<&StructuralContext>,
+) -> Option<StructuralResult> {
     let context = context?;
     match kind {
         CheckKind::DiffInScope => {
             let manifest = context.manifest_paths.as_ref()?;
-            Some(structural::diff_in_scope(
-                &context.diff_paths,
-                manifest,
-            ))
+            Some(structural::diff_in_scope(&context.diff_paths, manifest))
         }
         CheckKind::GraphResolves => {
             let before = context.graph_before.as_ref()?;
@@ -190,8 +190,8 @@ pub(crate) fn verify_with_lease(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{contract, repo};
     use crate::CallEdge;
+    use crate::test_support::{contract, repo};
     use sha2::Digest;
     use std::fs;
 
@@ -386,7 +386,10 @@ mod tests {
         let structural = receipts[0].structural.as_ref().expect("structural result");
         assert!(!structural.passed);
         assert!(structural.complete);
-        assert_eq!(structural.witnesses, vec!["out of scope: docs/b.md".to_string()]);
+        assert_eq!(
+            structural.witnesses,
+            vec!["out of scope: docs/b.md".to_string()]
+        );
     }
 
     #[test]

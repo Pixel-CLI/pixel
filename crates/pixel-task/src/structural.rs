@@ -124,7 +124,10 @@ impl TestPathConventions {
             return true;
         }
         path.split('/').any(|seg| {
-            seg == "tests" || seg == "test" || seg == "__tests__" || self.extra_segments.iter().any(|extra| extra == seg)
+            seg == "tests"
+                || seg == "test"
+                || seg == "__tests__"
+                || self.extra_segments.iter().any(|extra| extra == seg)
         }) || self
             .extra_markers
             .iter()
@@ -214,12 +217,17 @@ pub fn graph_resolves(before: &[CallEdge], after: &[CallEdge]) -> StructuralResu
 /// `tests-touched`: a non-test source change with zero test-file changes is
 /// a finding. Witness: each changed non-test path. A clean tree, or a diff
 /// that touches at least one test path, has no finding.
-pub fn tests_touched(changed_paths: &[String], conventions: &TestPathConventions) -> StructuralResult {
+pub fn tests_touched(
+    changed_paths: &[String],
+    conventions: &TestPathConventions,
+) -> StructuralResult {
     let non_test: Vec<&String> = changed_paths
         .iter()
         .filter(|path| !conventions.is_test_path(path))
         .collect();
-    let test_changed = changed_paths.iter().any(|path| conventions.is_test_path(path));
+    let test_changed = changed_paths
+        .iter()
+        .any(|path| conventions.is_test_path(path));
     let finding = !non_test.is_empty() && !test_changed;
     let mut witnesses: Vec<String> = if finding {
         non_test
@@ -284,7 +292,11 @@ mod tests {
     #[test]
     fn diff_in_scope_names_each_out_of_scope_path_as_witness() {
         let result = diff_in_scope(
-            &["src/a.rs".into(), "docs/readme.md".into(), "scripts/x.sh".into()],
+            &[
+                "src/a.rs".into(),
+                "docs/readme.md".into(),
+                "scripts/x.sh".into(),
+            ],
             &["src/a.rs".into()],
         );
         assert!(!result.passed);

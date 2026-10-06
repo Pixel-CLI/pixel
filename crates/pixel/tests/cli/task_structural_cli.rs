@@ -97,12 +97,18 @@ fn begin_with(root: &Path, checks: Value) -> String {
 }
 
 fn prepare(root: &Path, id: &str) {
-    let prepared = good(root, &["task", "prepare", id, "--request-id", "prepare", "--json"]);
+    let prepared = good(
+        root,
+        &["task", "prepare", id, "--request-id", "prepare", "--json"],
+    );
     assert_eq!(prepared["phase"], "prepared");
 }
 
 fn verify(root: &Path, id: &str) -> Value {
-    good_or_failure(root, &["task", "verify", id, "--request-id", "verify", "--json"])
+    good_or_failure(
+        root,
+        &["task", "verify", id, "--request-id", "verify", "--json"],
+    )
 }
 
 fn receipt<'a>(verified: &'a Value, check_id: &str) -> &'a Value {
@@ -124,7 +130,7 @@ fn write_manifest(root: &Path, paths: &[&str]) {
         "tasks": [{
             "id": "test-task",
             "task": "fix source",
-            "created_unix": 9999999999_u64,
+            "created_unix": 9_999_999_999_u64,
             "head_oid": Value::Null,
             "limit": 20,
             "targets": targets,
@@ -146,10 +152,12 @@ fn diff_in_scope_reports_unavailable_without_a_targets_manifest() {
     let verified = verify(&root, &id);
     let entry = receipt(&verified, "diff-scope");
     assert_eq!(entry["outcome"], "unavailable");
-    assert!(entry["diagnostic"]
-        .as_str()
-        .unwrap()
-        .contains("did not gather"));
+    assert!(
+        entry["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("did not gather")
+    );
 }
 
 #[test]
@@ -182,10 +190,7 @@ fn diff_in_scope_fails_with_each_out_of_scope_path_as_witness() {
     let structural = &entry["structural"];
     assert_eq!(structural["passed"], false);
     assert_eq!(structural["complete"], true);
-    assert_eq!(
-        structural["witnesses"],
-        json!(["out of scope: extra.txt"])
-    );
+    assert_eq!(structural["witnesses"], json!(["out of scope: extra.txt"]));
 }
 
 #[test]
@@ -226,10 +231,12 @@ fn graph_resolves_reports_unavailable_without_a_graph() {
     let verified = verify(&root, &id);
     let entry = receipt(&verified, "graph");
     assert_eq!(entry["outcome"], "unavailable");
-    assert!(entry["diagnostic"]
-        .as_str()
-        .unwrap()
-        .contains("did not gather"));
+    assert!(
+        entry["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("did not gather")
+    );
 }
 
 #[test]
@@ -243,9 +250,7 @@ fn graph_resolves_passes_when_reextraction_drops_no_edge() {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    let graph_db = root
-        .join(".pixel")
-        .join("graph.v2.db");
+    let graph_db = root.join(".pixel").join("graph.v2.db");
     assert!(
         graph_db.exists(),
         "graph db not found at {graph_db:?} after rebuild-graph"

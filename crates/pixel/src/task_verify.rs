@@ -25,7 +25,9 @@ pub(crate) fn diff_paths(root: &Path) -> Result<Vec<String>, String> {
         vec!["diff", "--name-only", "HEAD"],
         vec!["ls-files", "--others", "--exclude-standard"],
     ] {
-        let out = git.run(&args).map_err(|error| format!("git {args:?}: {error}"))?;
+        let out = git
+            .run(&args)
+            .map_err(|error| format!("git {args:?}: {error}"))?;
         paths.extend(
             String::from_utf8_lossy(&out)
                 .lines()
@@ -80,10 +82,7 @@ fn collect_target_paths(value: Option<&serde_json::Value>, out: &mut Vec<String>
 /// Resolved `calls` edges touching `changed` files, as endpoint-labelled
 /// edges. Re-extraction only rewrites edges that touch a changed file, so
 /// this is exactly the set of edges that could have become unresolved.
-fn snapshot_edges(
-    store: &GraphStore,
-    changed: &[String],
-) -> Result<Vec<CallEdge>, String> {
+fn snapshot_edges(store: &GraphStore, changed: &[String]) -> Result<Vec<CallEdge>, String> {
     if changed.is_empty() {
         return Ok(Vec::new());
     }
@@ -166,7 +165,10 @@ fn graph_facts(root: &Path, changed: &[String]) -> Option<(Vec<CallEdge>, Vec<Ca
 /// Gather the structural facts the selected checks need. Only the kinds
 /// present in `checks` are gathered: the graph is re-extracted only for a
 /// `graph-resolves` check.
-pub(crate) fn gather(root: &Path, checks: &[pixel_task::Check]) -> Result<StructuralContext, String> {
+pub(crate) fn gather(
+    root: &Path,
+    checks: &[pixel_task::Check],
+) -> Result<StructuralContext, String> {
     let needs_diff = checks
         .iter()
         .any(|check| matches!(check.kind, CheckKind::DiffInScope | CheckKind::TestsTouched));
@@ -181,7 +183,11 @@ pub(crate) fn gather(root: &Path, checks: &[pixel_task::Check]) -> Result<Struct
     } else {
         Vec::new()
     };
-    let manifest_paths = if needs_manifest { manifest_paths(root) } else { None };
+    let manifest_paths = if needs_manifest {
+        manifest_paths(root)
+    } else {
+        None
+    };
     let (graph_before, graph_after) = if needs_graph {
         match graph_facts(root, &diff_paths) {
             Some((before, after)) => (Some(before), Some(after)),

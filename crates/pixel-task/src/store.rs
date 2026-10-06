@@ -674,10 +674,8 @@ impl Store {
                 let message = error.to_string();
                 for check in &checks {
                     let check_digest = match check.kind {
-                        CheckKind::Argv => {
-                            runner::contract_check_identity(check, &task.contract)
-                                .unwrap_or_default()
-                        }
+                        CheckKind::Argv => runner::contract_check_identity(check, &task.contract)
+                            .unwrap_or_default(),
                         _ => runner::structural_check_identity(check).unwrap_or_default(),
                     };
                     current.receipts.push(VerificationReceipt {
