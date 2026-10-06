@@ -362,3 +362,38 @@ end
         ]
     );
 }
+
+#[test]
+fn delegate_options_written_as_shorthand_should_not_stop_generation() {
+    // Ruby 3.1 `key:` shorthand passes the local variable `key`: a valueless
+    // `allow_nil:` is still an option, a valueless `to:` a dynamic target and
+    // a valueless `prefix:` a dynamic prefix.
+    let source = "class Box
+  delegate(:width, to: :frame, allow_nil:)
+  delegate(:height, to:)
+  delegate(:depth, to: :frame, prefix:)
+end
+";
+    let fx = extract_file("app/models/box.rb", source.as_bytes()).unwrap();
+    let methods: Vec<&str> = fx
+        .symbols
+        .iter()
+        .filter(|s| s.kind == pixel_graph::SymbolKind::Method)
+        .map(|s| s.qualified.as_str())
+        .collect();
+    assert_eq!(methods, ["Box#width", "Box#height"]);
+    let forwards: Vec<(String, Option<String>)> = fx
+        .references
+        .iter()
+        .map(|r| {
+            (
+                r.name.clone(),
+                r.enclosing_index.map(|i| fx.symbols[i].qualified.clone()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        forwards,
+        [("frame".to_string(), Some("Box#width".to_string()))]
+    );
+}

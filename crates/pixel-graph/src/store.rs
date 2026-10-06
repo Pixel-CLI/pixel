@@ -628,6 +628,7 @@ impl GraphStore {
             )?;
             tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
+            tx.exec_cached("DELETE FROM ruby_mixins WHERE file_id = ?1", params![id])?;
             tx.exec_cached(
                 "UPDATE files SET blob_oid = ?2, lang = ?3 WHERE id = ?1",
                 params![id, blob_oid, lang],
@@ -670,6 +671,7 @@ impl GraphStore {
             )?;
             tx.exec_cached("DELETE FROM concepts WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM jsx_elements WHERE file_id = ?1", params![id])?;
+            tx.exec_cached("DELETE FROM ruby_mixins WHERE file_id = ?1", params![id])?;
             tx.exec_cached("DELETE FROM files WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
@@ -887,6 +889,39 @@ impl GraphStore {
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Store one declared Ruby ancestor of `file_id` (see `RawMixin`).
+    pub fn insert_ruby_mixin(&self, file_id: i64, mixin: &crate::extract::RawMixin) -> Result<()> {
+        self.conn.exec_cached(
+            "INSERT INTO ruby_mixins (file_id, owner, kind, target, site_line)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                file_id,
+                mixin.owner,
+                mixin.kind,
+                mixin.target,
+                mixin.site_line
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The Ruby ancestors `file_id` declares, in source order.
+    pub fn ruby_mixins_in_file(&self, file_id: i64) -> Result<Vec<crate::extract::RawMixin>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT owner, kind, target, site_line FROM ruby_mixins
+              WHERE file_id = ?1 ORDER BY site_line, id",
+        )?;
+        let rows = stmt.query_map(params![file_id], |r| {
+            Ok(crate::extract::RawMixin {
+                owner: r.get(0)?,
+                kind: r.get(1)?,
+                target: r.get(2)?,
+                site_line: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     // --- concept write path (Engine 1) ---
@@ -1751,6 +1786,18 @@ CREATE TABLE IF NOT EXISTS jsx_elements (
 );
 CREATE INDEX IF NOT EXISTS idx_jsx_elements_file_handler ON jsx_elements(file_id, has_handler);
 CREATE INDEX IF NOT EXISTS idx_jsx_elements_tag ON jsx_elements(tag);
+-- Ruby ancestors as declared: `class C < B`, `include M`, `prepend M`,
+-- `extend M` (kind, `included:` prefixed inside a concern's `included` block),
+-- the constant as written (NULL when not a literal constant) and its line.
+CREATE TABLE IF NOT EXISTS ruby_mixins (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  owner TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  target TEXT,
+  site_line INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ruby_mixins_file ON ruby_mixins(file_id);
 ";
 
 /// Idempotent schema migrations for graphs created before a column existed.

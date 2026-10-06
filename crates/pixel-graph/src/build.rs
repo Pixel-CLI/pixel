@@ -17,7 +17,7 @@ use pixel_index::indexset::millis;
 use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::extract::{FileExtraction, extract_file, lang_of};
+use crate::extract::{FileExtraction, RawMixin, extract_file, lang_of};
 use crate::imports::resolve_import;
 use crate::resolve::{
     Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference,
@@ -136,7 +136,13 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    methods of their owner (and are no longer calls of it), an alias or
 ///    delegator references its own owner's target, and an assignment through
 ///    a receiver calls the writer (`self.name = v` → `name=`).
-pub const EXTRACTOR_VERSION: &str = "21";
+/// 22: Ruby superclass/`include`/`prepend`/`extend` declarations are stored
+///    (`ruby_mixins`), a concern's `class_methods` block defines its
+///    `ClassMethods` module, and calls on `self` follow Ruby's ancestor
+///    lookup order; an instance call no longer reaches a class method. A
+///    `delegate` option written as Ruby 3.1 shorthand (`allow_nil:`) no
+///    longer stops the declaration from generating its methods.
+pub const EXTRACTOR_VERSION: &str = "22";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -600,6 +606,9 @@ fn store_batch(
         let concept_clock = Instant::now();
         insert_concepts(store, file_id, &e.rel, &e.content, &ids, &lines)?;
         concepts += concept_clock.elapsed();
+        for mixin in &e.fx.mixins {
+            store.insert_ruby_mixin(file_id, mixin)?;
+        }
         // Plan pass: persist JSX elements for dead-interactive queries.
         for jsx in &e.fx.jsx_elements {
             store.insert_jsx_element(
@@ -1161,6 +1170,8 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     let mut affected = Affected::default();
     let mut before: Vec<Definition> = Vec::new();
     let mut after: Vec<Definition> = Vec::new();
+    let mut mixins_before: Vec<(String, usize, RawMixin)> = Vec::new();
+    let mut mixins_after: Vec<(String, usize, RawMixin)> = Vec::new();
     let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
 
     let mut extracted: Vec<Extracted> = Vec::with_capacity(files.len());
@@ -1174,6 +1185,13 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         if let Some(old) = store.file_by_path(rel)? {
             let old_syms = store.symbols_in_file(old.id)?;
             before.extend(stored_definitions(store, old.id, rel)?);
+            mixins_before.extend(
+                store
+                    .ruby_mixins_in_file(old.id)?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mixin)| (rel.to_string(), i, mixin)),
+            );
             affected.files.insert(old.id);
             for import in store.imports_to_file(old.id)? {
                 affected.files.insert(import.file_id);
@@ -1236,6 +1254,12 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             continue;
         };
 
+        mixins_after.extend(
+            fx.mixins
+                .iter()
+                .enumerate()
+                .map(|(i, mixin)| (rel.to_string(), i, mixin.clone())),
+        );
         after.extend(fx.symbols.iter().map(|s| Definition {
             path: rel.to_string(),
             name: s.name.clone(),
@@ -1265,6 +1289,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     let added_any = extracted.iter().any(|e| !known_before.contains(&e.rel));
     let stored = store_batch(store, extracted, &all_paths)?;
     affected.record_changed_definitions(&before, &after);
+    affected.record_changed_mixins(store, &mixins_before, &mixins_after)?;
     // A file new to the graph gets its id here; its importers are any file
     // whose import already resolved to it, and the dangling ones below.
     for &(rel, _) in files {
@@ -3571,6 +3596,21 @@ mod tests {
              delegate :email, to: :owner, prefix: true\n  def owner; end\n  \
              def rename\n    self.name = label\n  end\nend\n",
         ),
+        (
+            "app/concerns/tracked.rb",
+            "module Tracked\n  extend ActiveSupport::Concern\n  included do\n    include Audited\n  \
+             end\n  class_methods do\n    def since; end\n  end\n  def track; end\nend\n",
+        ),
+        (
+            "app/concerns/audited.rb",
+            "module Audited\n  def audit; end\nend\n",
+        ),
+        (
+            "app/order.rb",
+            "class Order < Base\n  include Tracked\n  def run\n    track\n    audit\n  end\n  \
+             def self.report\n    since\n  end\nend\n",
+        ),
+        ("app/base.rb", "class Base\n  def audit; end\nend\n"),
     ];
 
     fn write_tree(root: &Path, files: &[(&str, &str)]) {
@@ -3606,6 +3646,11 @@ mod tests {
                 "edges",
                 "SELECT a.uid, b.uid, e.kind, e.tier, e.site_line, e.receiver, e.callee FROM edges e \
                  LEFT JOIN symbols a ON a.id = e.src_id LEFT JOIN symbols b ON b.id = e.dst_id",
+            ),
+            (
+                "ruby_mixins",
+                "SELECT f.path, m.owner, m.kind, m.target, m.site_line FROM ruby_mixins m \
+                 LEFT JOIN files f ON f.id = m.file_id",
             ),
             (
                 "unresolved_calls",
@@ -3691,6 +3736,28 @@ mod tests {
             )),
             "`schema.plugin(helper)` must give a references edge in the reference ({edges:#?})"
         );
+        for (src, dst) in [
+            (
+                "app/order.rb#Order#run",
+                "app/concerns/tracked.rb#Tracked#track",
+            ),
+            (
+                "app/order.rb#Order#run",
+                "app/concerns/audited.rb#Audited#audit",
+            ),
+            (
+                "app/order.rb#Order.report",
+                "app/concerns/tracked.rb#Tracked::ClassMethods#since",
+            ),
+        ] {
+            let prefix = format!(
+                "Text(\"{src}#method\") | Text(\"{dst}#method\") | Text(\"calls\") | Text(\"probable\")"
+            );
+            assert!(
+                edges.iter().any(|e| e.starts_with(&prefix)),
+                "the Ruby ancestor chain must give {src} -> {dst} ({edges:#?})"
+            );
+        }
 
         let all: Vec<(&str, bool)> = EQUIVALENCE_TREE
             .iter()
@@ -3757,7 +3824,12 @@ mod tests {
         (
             "app/caller.rb",
             "class Caller\n  def go\n    MailJob.perform_later(1)\n    Widget.new(1)\n    \
-             Widget.build\n    shared\n  end\nend\n",
+             Widget.build\n    shared\n    assist\n  end\nend\n",
+        ),
+        ("app/mixin.rb", "module Mixin\n  def assist; end\nend\n"),
+        (
+            "app/other_mixin.rb",
+            "module OtherMixin\n  def assist; end\nend\n",
         ),
         ("app/alpha.rb", "class Alpha\n  def shared; end\nend\n"),
         ("app/beta.rb", "class Beta\n  def shared; end\nend\n"),
@@ -3836,6 +3908,14 @@ mod tests {
                 "Text(\"app/caller.rb#Caller#go#method\") | Text(\"app/alpha.rb#Alpha#shared#method\")",
             ),
             (
+                "ancestor declared in a reopening",
+                &[(
+                    "app/caller_ext.rb",
+                    Some("class Caller\n  include Mixin\nend\n"),
+                )],
+                "Text(\"app/caller.rb#Caller#go#method\") | Text(\"app/mixin.rb#Mixin#assist#method\")",
+            ),
+            (
                 "aliased source defined",
                 &[(
                     "web/b.ts",
@@ -3880,11 +3960,20 @@ mod tests {
                 "{label}: the full build must link {edge} ({edges:#?})"
             );
         }
-        // Back to the first tree: every edge above becomes a row again.
+        // Back to the first tree: every edge above becomes a row again, and
+        // a file a step added is removed.
         write_tree(&dir, RETRY_TREE);
+        let first: HashSet<&str> = RETRY_TREE.iter().map(|(rel, _)| *rel).collect();
         let batch: Vec<(&str, bool)> = steps
             .iter()
-            .flat_map(|(_, changes, _)| changes.iter().map(|(rel, _)| (*rel, false)))
+            .flat_map(|(_, changes, _)| changes.iter().map(|(rel, _)| *rel))
+            .map(|rel| {
+                let added = !first.contains(rel);
+                if added {
+                    let _ = std::fs::remove_file(dir.join(rel));
+                }
+                (rel, added)
+            })
             .collect();
         update_files(&dir, &db, &batch).unwrap();
         check("revert", &RETRY_TREE.iter().copied().collect());
