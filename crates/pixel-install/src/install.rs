@@ -52,6 +52,10 @@ pub struct InstallReport {
     pub dry_run: bool,
     pub steps: Vec<InstallStep>,
     pub summary: InstallSummary,
+    /// Human-readable next steps shown after a successful install so a new
+    /// user knows what to do next. `None` when the install failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_steps: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +157,15 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let red = steps.iter().filter(|s| s.status == CheckStatus::Red).count();
     let ok = red == 0;
 
+    let next_steps = if ok {
+        Some(vec![
+            "Run `pixel prepare-repo` in your repo to index it and start the daemon.".into(),
+            "Run `pixel doctor` to verify everything is green.".into(),
+        ])
+    } else {
+        None
+    };
+
     Ok(InstallReport {
         version: "v1".into(),
         ok,
@@ -161,6 +174,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         dry_run,
         steps,
         summary: InstallSummary { green, yellow, red },
+        next_steps,
     })
 }
 
@@ -1536,4 +1550,69 @@ pub fn migrate(repo_root: &Path) -> Result<MigrateReport> {
         old_state_removed,
         new_state_rebuilt,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_report_has_next_steps_on_success() {
+        // A successful install report must include next-step guidance so a
+        // new user knows what to do after `pixel install`.
+        let report = InstallReport {
+            version: "v1".into(),
+            ok: true,
+            executable_path: "/usr/bin/pixel".into(),
+            home: "/home/test".into(),
+            dry_run: false,
+            steps: vec![],
+            summary: InstallSummary { green: 1, yellow: 0, red: 0 },
+            next_steps: Some(vec![
+                "Run `pixel prepare-repo` in your repo to index it and start the daemon.".into(),
+                "Run `pixel doctor` to verify everything is green.".into(),
+            ]),
+        };
+        let steps = report.next_steps.expect("next_steps must be Some on success");
+        assert_eq!(steps.len(), 2);
+        assert!(steps[0].contains("prepare-repo"));
+        assert!(steps[1].contains("doctor"));
+    }
+
+    #[test]
+    fn install_report_has_no_next_steps_on_failure() {
+        // A failed install report must NOT include next-step guidance —
+        // the user needs to fix the failure first.
+        let report = InstallReport {
+            version: "v1".into(),
+            ok: false,
+            executable_path: "/usr/bin/pixel".into(),
+            home: "/home/test".into(),
+            dry_run: false,
+            steps: vec![],
+            summary: InstallSummary { green: 0, yellow: 0, red: 1 },
+            next_steps: None,
+        };
+        assert!(report.next_steps.is_none(), "next_steps must be None on failure");
+    }
+
+    #[test]
+    fn install_report_serializes_next_steps() {
+        // The next_steps field must serialize to JSON so the CLI can
+        // print it after a successful install.
+        let report = InstallReport {
+            version: "v1".into(),
+            ok: true,
+            executable_path: "/usr/bin/pixel".into(),
+            home: "/home/test".into(),
+            dry_run: false,
+            steps: vec![],
+            summary: InstallSummary { green: 1, yellow: 0, red: 0 },
+            next_steps: Some(vec!["step 1".into(), "step 2".into()]),
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        let steps = json.get("next_steps").expect("next_steps must serialize");
+        assert!(steps.is_array());
+        assert_eq!(steps.as_array().unwrap().len(), 2);
+    }
 }

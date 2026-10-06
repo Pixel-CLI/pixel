@@ -2838,7 +2838,16 @@ fn run_command(command: Command) -> Result<(), String> {
                 &pixel_install::install::InstallOptions::default(),
             )
             .map_err(|e| e.to_string())?;
-            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
+            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)?;
+            if !json {
+                if let Some(ref steps) = report.next_steps {
+                    eprintln!("\nNext steps:");
+                    for (i, step) in steps.iter().enumerate() {
+                        eprintln!("  {}. {}", i + 1, step);
+                    }
+                }
+            }
+            Ok(())
         }
         Command::Upgrade { build, install_path, restart_daemon, repo } => {
             let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
@@ -2900,7 +2909,13 @@ fn run_command(command: Command) -> Result<(), String> {
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
-            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)
+            print_data(&serde_json::to_value(&report).map_err(|e| e.to_string())?, json)?;
+            if !json {
+                if let Some(ref hint) = report.first_run_hint {
+                    eprintln!("\n{hint}");
+                }
+            }
+            Ok(())
         }
         Command::Migrate { path, json } => {
             let root = discover_root(&path)?;

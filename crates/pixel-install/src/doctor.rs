@@ -53,6 +53,11 @@ pub struct DoctorReport {
     pub home: String,
     pub checks: Vec<DoctorCheck>,
     pub summary: DoctorSummary,
+    /// Human-readable hint shown when the repo hasn't been indexed yet,
+    /// explaining that the red checks are expected for a fresh install.
+    /// `None` when the repo is already indexed or no repo_root was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_run_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -819,6 +824,22 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     let red = checks.iter().filter(|c| c.status == CheckStatus::Red).count();
     let ok = red == 0;
 
+    // Detect a fresh install: the repo hasn't been indexed yet, so the
+    // index/graph/facts checks are red. Show a helpful hint instead of
+    // letting the user think something is broken.
+    let first_run_hint = if options.repo_root.is_some() {
+        let has_index = checks.iter().any(|c| c.id == "index.freshness" && c.status == CheckStatus::Green);
+        let has_graph = checks.iter().any(|c| c.id == "graph.freshness" && c.status == CheckStatus::Green);
+        let has_facts = checks.iter().any(|c| c.id == "facts.freshness" && c.status == CheckStatus::Green);
+        if !has_index && !has_graph && !has_facts {
+            Some("This repo hasn't been indexed yet — run `pixel prepare-repo` to index it and start the daemon. The red checks above are expected for a fresh install.".into())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Ok(DoctorReport {
         version: "v1".into(),
         ok,
@@ -826,6 +847,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         home: home.display().to_string(),
         checks,
         summary: DoctorSummary { green, yellow, red },
+        first_run_hint,
     })
 }
 
@@ -1130,6 +1152,7 @@ pub use pixel_daemon::daemon::socket_path as daemon_socket_path;
 mod tests {
     use super::facts_dead_reason;
     use super::{extract_rule_commands, normalize_rule_command, scenario_mismatches};
+    use super::{DoctorReport, DoctorSummary};
 
     // -- rule-vs-binary parity: extraction + normalization ------------------
 
@@ -1289,6 +1312,78 @@ git clone https://example.com/repo.git
             reason.as_deref().unwrap_or("").contains("poisoned"),
             "indexed commits with zero grams must be flagged poisoned, got {reason:?}"
         );
+    }
+
+    #[test]
+    fn doctor_report_has_first_run_hint_when_repo_not_indexed() {
+        // When the repo hasn't been indexed yet, the doctor report must
+        // include a first-run hint explaining that the red checks are
+        // expected for a fresh install.
+        let report = DoctorReport {
+            version: "v1".into(),
+            ok: false,
+            executable_path: "/usr/bin/pixel".into(),
+            home: "/home/test".into(),
+            checks: vec![],
+            summary: DoctorSummary { green: 0, yellow: 0, red: 3 },
+            first_run_hint: Some(
+                "This repo hasn't been indexed yet — run `pixel prepare-repo` to index it and start the daemon. The red checks above are expected for a fresh install.".into(),
+            ),
+        };
+        let hint = report.first_run_hint.expect("first_run_hint must be Some when repo not indexed");
+        assert!(hint.contains("prepare-repo"));
+        assert!(hint.contains("fresh install"));
+    }
+
+    #[test]
+    fn doctor_report_has_no_first_run_hint_when_repo_indexed() {
+        // When the repo is already indexed, the doctor report must NOT
+        // include a first-run hint.
+        let report = DoctorReport {
+            version: "v1".into(),
+            ok: true,
+            executable_path: "/usr/bin/pixel".into(),
+            home: "/home/test".into(),
+            checks: vec![],
+            summary: DoctorSummary { green: 3, yellow: 0, red: 0 },
+            first_run_hint: None,
+        };
+        assert!(report.first_run_hint.is_none(), "first_run_hint must be None when repo indexed");
+    }
+
+    #[test]
+    fn doctor_report_serializes_first_run_hint() {
+        // The first_run_hint field must serialize to JSON so the CLI can
+        // print it after a doctor run on a fresh install.
+        let report = DoctorReport {
+            version: "v1".into(),
+            ok: false,
+            executable_path: "/usr/bin/pixel".into(),
+            home: "/home/test".into(),
+            checks: vec![],
+            summary: DoctorSummary { green: 0, yellow: 0, red: 3 },
+            first_run_hint: Some("hint text".into()),
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        let hint = json.get("first_run_hint").expect("first_run_hint must serialize");
+        assert!(hint.is_string());
+        assert_eq!(hint.as_str().unwrap(), "hint text");
+    }
+
+    #[test]
+    fn doctor_report_omits_first_run_hint_when_none() {
+        // When first_run_hint is None, it must be omitted from JSON output.
+        let report = DoctorReport {
+            version: "v1".into(),
+            ok: true,
+            executable_path: "/usr/bin/pixel".into(),
+            home: "/home/test".into(),
+            checks: vec![],
+            summary: DoctorSummary { green: 3, yellow: 0, red: 0 },
+            first_run_hint: None,
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("first_run_hint").is_none(), "first_run_hint must be omitted when None");
     }
 
     #[test]
