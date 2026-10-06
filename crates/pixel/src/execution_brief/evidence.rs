@@ -176,6 +176,29 @@ impl Evidence for Live {
         };
         caller_hits(&data)
     }
+
+    fn line_at(&self, path: &str, line: u64, deadline: Instant) -> Result<String, String> {
+        if Instant::now() >= deadline {
+            return Err("out of time".to_string());
+        }
+        let text = std::fs::read_to_string(self.root.join(path)).map_err(|e| e.to_string())?;
+        // One line is the smallest read that answers "what is it": a header
+        // like `export const X = defineMultiStyleConfig(` carries the
+        // right-hand side on the line the index recorded.
+        let line = text
+            .lines()
+            .nth(line.saturating_sub(1) as usize)
+            .ok_or_else(|| "line out of range".to_string())?
+            .trim();
+        if line.is_empty() {
+            return Err("empty line".to_string());
+        }
+        let mut head: String = line.chars().take(140).collect();
+        if line.chars().count() > 140 {
+            head.push('…');
+        }
+        Ok(head)
+    }
 }
 
 /// A connection to the repository's daemon socket whose reads and writes give

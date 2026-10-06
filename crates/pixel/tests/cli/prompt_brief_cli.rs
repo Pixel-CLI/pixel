@@ -134,7 +134,7 @@ fn rename_prompt_should_carry_files_definition_and_callers_in_the_hook_context()
             [
                 "[PIXEL:BRIEF]",
                 "anchors: handleError, reportError, packages/ui/handleError.ts",
-                "defined: function handleError packages/ui/handleError.ts:1-3",
+                "defined: function handleError packages/ui/handleError.ts:1-3 — export function handleError(e: Error): string {",
                 "files: apps/web/page.tsx:1 packages/ui/handleError.ts:1",
                 "callers (impact d1): apps/web/page.tsx -> Page:2; apps/web/page.tsx -> Other:5",
                 "excluded (generated): data/out.json",
@@ -152,7 +152,7 @@ fn literal_lookup_should_skip_impact_and_report_medium_confidence() {
     let root = indexed("lookup");
     let output = hook(&root, "claude", "where is `handleError` defined?", &[]);
     let text = context(&output);
-    assert!(text.contains("\ndefined: function handleError packages/ui/handleError.ts:1-3\n"));
+    assert!(text.contains("\ndefined: function handleError packages/ui/handleError.ts:1-3 — export function handleError"));
     assert!(!text.contains("callers (impact"), "{text}");
     assert!(text.contains("\nconfidence: medium | ops: 2/4\n"), "{text}");
 }

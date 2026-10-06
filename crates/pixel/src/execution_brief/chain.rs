@@ -129,6 +129,14 @@ pub(crate) trait Evidence {
     fn symbols(&self, name: &str, deadline: Instant) -> Result<Vec<SymbolHit>, String>;
     /// Direct callers (impact depth 1) of a uid, or of a bare name.
     fn callers(&self, target: &str, deadline: Instant) -> Result<Vec<CallerHit>, String>;
+    /// One source line at `path:line` — "what it is" for a declaration
+    /// (`export const CustomMenu = defineMultiStyleConfig(...)`, not just a
+    /// file name). A plain line read, not an index operation; fakes that do
+    /// not model source may leave it unsupported.
+    fn line_at(&self, path: &str, line: u64, _deadline: Instant) -> Result<String, String> {
+        let _ = (path, line);
+        Err("source read unsupported".to_string())
+    }
 }
 
 /// Where the brief is allowed to run.
@@ -369,6 +377,11 @@ pub(crate) struct Brief {
     anchors: Vec<String>,
     files: Vec<FileHit>,
     defined: Vec<SymbolHit>,
+    /// First source line of the picked definition, when it was read.
+    def_head: Option<String>,
+    /// `path:line — source` for the most likely definition site when no
+    /// symbol resolved (`export const` bindings the graph does not index).
+    likely_def: Option<String>,
     callers: Vec<CallerHit>,
     excluded: Vec<String>,
     unresolved: Vec<String>,
@@ -490,6 +503,40 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
                     .unresolved
                     .push(format!("find-symbol {name}: {reason}"));
             }),
+        }
+    }
+    // "what it is" for the picked definition: one bounded line read, free of
+    // the index-operation budget. A failure only means the line stays absent.
+    let target = edit(state, |brief| brief.defined.first().cloned());
+    if let Some(hit) = target
+        && let Ok(head) = evidence.line_at(&hit.path, hit.start_line, deadline)
+    {
+        edit(state, |brief| brief.def_head = Some(head));
+    }
+    // The graph may not resolve a binding (`export const X = f(...)`); when no
+    // symbol resolved, the file hit whose stem matches the anchor is the most
+    // likely definition site — quote its line so the answer names what it is.
+    if edit(state, |brief| brief.defined.is_empty()) {
+        let candidate = edit(state, |brief| {
+            plan.anchors.symbol_name().and_then(|name| {
+                brief
+                    .files
+                    .iter()
+                    .find(|hit| {
+                        Path::new(&hit.path)
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .is_some_and(|stem| stem.eq_ignore_ascii_case(&name))
+                    })
+                    .map(|hit| (hit.path.clone(), hit.line))
+            })
+        });
+        if let Some((path, line)) = candidate
+            && let Ok(head) = evidence.line_at(&path, line, deadline)
+        {
+            edit(state, |brief| {
+                brief.likely_def = Some(format!("{}:{} — {}", path, line, head));
+            });
         }
     }
     edit(state, |brief| brief.finished = true);
@@ -639,21 +686,31 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
     }
     if let Some(line) = list_line(
         "defined",
-        brief.defined.iter().map(|hit| {
-            format!(
+        brief.defined.iter().enumerate().map(|(index, hit)| {
+            let mut entry = format!(
                 "{} {} {}:{}-{}",
                 clean(&hit.kind),
                 clean(&hit.name),
                 clean(&hit.path),
                 hit.start_line,
                 hit.end_line
-            )
+            );
+            if index == 0
+                && let Some(head) = &brief.def_head
+            {
+                entry.push_str(" — ");
+                entry.push_str(&clean(head));
+            }
+            entry
         }),
         shown.defined,
         "; ",
         false,
     ) {
         lines.push(line);
+    }
+    if let Some(likely) = &brief.likely_def {
+        lines.push(format!("likely definition: {}", clean(likely)));
     }
     if let Some(line) = list_line(
         "files",
@@ -1346,6 +1403,8 @@ mod tests {
             anchors: vec!["handleError".into(), "src/handleError.ts".into()],
             files: vec![hit("apps/web/page.tsx", 4), hit("apps/web/other.tsx", 9)],
             defined: vec![symbol("src/handleError.ts", "handleError")],
+            def_head: Some("export function handleError(e: Error): string {".into()),
+            likely_def: None,
             callers: vec![caller("apps/web/page.tsx", "Page", 12)],
             excluded: vec!["data/out.json".into()],
             unresolved: vec!["find-symbol handleError: 2 candidates, took first".into()],
@@ -1365,7 +1424,7 @@ mod tests {
             [
                 "[PIXEL:BRIEF]",
                 "anchors: handleError, src/handleError.ts",
-                "defined: function handleError src/handleError.ts:3-9",
+                "defined: function handleError src/handleError.ts:3-9 — export function handleError(e: Error): string {",
                 "files: apps/web/page.tsx:4 apps/web/other.tsx:9",
                 "callers (impact d1): apps/web/page.tsx -> Page:12",
                 "excluded (generated): data/out.json",
