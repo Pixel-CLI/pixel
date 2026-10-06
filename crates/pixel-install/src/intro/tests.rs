@@ -607,7 +607,9 @@ fn no_frame_makes_a_total_or_speed_claim() {
             !text.contains('×'),
             "at {t:.2}s the frame carries ×:\n{text}"
         );
-        // no duration claim: a number of seconds or milliseconds
+        // no duration claim: a number of seconds or milliseconds, whether
+        // the unit is a separate word ("5 s", "500 ms") or glued to the
+        // number ("5s", "500ms")
         let words: Vec<&str> = lower.split(|ch: char| !ch.is_alphanumeric()).collect();
         for pair in words.windows(2) {
             let (unit, next) = (pair[0], pair[1]);
@@ -617,6 +619,17 @@ fn no_frame_makes_a_total_or_speed_claim() {
                     && (next == "ms" || next == "s" || next == "seconds")),
                 "at {t:.2}s the frame claims a duration: {unit} {next}:\n{text}"
             );
+        }
+        for word in &words {
+            let num = word.strip_suffix("ms").or_else(|| word.strip_suffix("s"));
+            if let Some(num) = num {
+                assert!(
+                    !(word.len() > 1
+                        && !num.is_empty()
+                        && num.chars().all(|ch| ch.is_ascii_digit())),
+                    "at {t:.2}s the frame claims a duration: {word}:\n{text}"
+                );
+            }
         }
         t += 0.05;
     }
