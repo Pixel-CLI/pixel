@@ -564,6 +564,64 @@ fn particles_follow_the_terminal_size() {
     assert_eq!(resized, Intro::new().frame(120, 30, t));
 }
 
+// ── the issue's claims ──────────────────────────────────────────────────────
+
+/// The intro lasts about thirteen seconds, as the issue specifies: the acts
+/// follow each other on one clock, none of them zero-length.
+#[test]
+fn it_last_about_thirteen_seconds() {
+    assert!((13.0..14.0).contains(&END), "END = {END}");
+    let bounds = [S1_END, A_END, B_END, C_END, S3_END, END];
+    assert!(
+        bounds.windows(2).all(|w| w[0] < w[1]),
+        "the acts must follow each other: {bounds:?}"
+    );
+}
+
+/// The recorded medians support no total or speed claim on this task
+/// (`docs/motion/README.md`): no frame of the intro carries one. The line
+/// counts a call returned are recorded data, not a total; a word is matched
+/// on its own, so `performs` is not `ms`.
+#[test]
+fn no_frame_makes_a_total_or_speed_claim() {
+    const CLAIMS: [&str; 9] = [
+        "total", "totals", "token", "tokens", "saved", "faster", "fastest", "speed", "speedup",
+    ];
+    let mut intro = Intro::new();
+    let mut t = 0.0;
+    while t <= END {
+        let frame = intro.frame(COLS, ROWS, t).expect("fits");
+        let text = screen(&frame);
+        let lower = text.to_lowercase();
+        for claim in CLAIMS {
+            assert!(
+                !lower
+                    .split(|ch: char| !ch.is_alphanumeric())
+                    .any(|word| word == claim),
+                "at {t:.2}s the frame claims {claim:?}:\n{text}"
+            );
+        }
+        // `%` is a ramp glyph: the glitch breaks text into it by design. `×`
+        // is how a speed claim writes its factor, and no ramp glyph is it.
+        assert!(
+            !text.contains('×'),
+            "at {t:.2}s the frame carries ×:\n{text}"
+        );
+        // no duration claim: a number of seconds or milliseconds
+        let words: Vec<&str> = lower.split(|ch: char| !ch.is_alphanumeric()).collect();
+        for pair in words.windows(2) {
+            let (unit, next) = (pair[0], pair[1]);
+            assert!(
+                !(!unit.is_empty()
+                    && unit.chars().all(|ch| ch.is_ascii_digit())
+                    && (next == "ms" || next == "s" || next == "seconds")),
+                "at {t:.2}s the frame claims a duration: {unit} {next}:\n{text}"
+            );
+        }
+        t += 0.05;
+    }
+}
+
 // ── terminal bytes ──────────────────────────────────────────────────────────
 
 const SYNC_OPEN: &str = "\x1b[?2026h";
