@@ -2944,6 +2944,11 @@ fn write_regions_manifest(root: &Path, task: &str, data: &Value) -> Result<(), S
     if report.is_null() {
         return Err("the daemon returned no regions manifest".to_string());
     }
+    // A regions generation failure arrives as {"error": "..."} — reject it
+    // rather than publishing a manifest with null regions/conflicts/layers.
+    if let Some(err) = report.get("error").and_then(Value::as_str) {
+        return Err(format!("regions generation failed: {err}"));
+    }
     let created_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -5033,15 +5038,22 @@ fn run_command(
                     None => path,
                 };
                 let root = discover_root(&clear_path)?;
-                let manifest_path = root
-                    .join(pixel_index::index::SHARD_DIR)
-                    .join("targets.json");
+                let shard_dir = root.join(pixel_index::index::SHARD_DIR);
+                let manifest_path = shard_dir.join("targets.json");
+                let regions_path = shard_dir.join("regions.json");
                 if manifest_path.exists() {
                     std::fs::remove_file(&manifest_path)
                         .map_err(|e| format!("remove {}: {e}", manifest_path.display()))?;
                     println!("targets manifest cleared");
                 } else {
                     println!("no active targets manifest");
+                }
+                // The regions manifest is single-task evidence — clear it
+                // alongside targets.json so a stale task's regions never
+                // outlives its enforcement manifest.
+                if regions_path.exists() {
+                    std::fs::remove_file(&regions_path)
+                        .map_err(|e| format!("remove {}: {e}", regions_path.display()))?;
                 }
                 return Ok(());
             }
@@ -5083,8 +5095,18 @@ fn run_command(
             // Issue #814: the regions manifest rides beside targets.json.
             // --no-manifest and --read-only suppress it with the enforcement
             // manifest; the JSON output still carries the regions either way.
+            // A new targets.json without --regions removes any stale
+            // regions.json so the two files stay coherent.
             if regions && !no_manifest && !read_only {
                 write_regions_manifest(&root, &task, &data)?;
+            } else if !no_manifest && !read_only {
+                let regions_path = root
+                    .join(pixel_index::index::SHARD_DIR)
+                    .join("regions.json");
+                if regions_path.exists() {
+                    std::fs::remove_file(&regions_path)
+                        .map_err(|e| format!("remove stale {}: {e}", regions_path.display()))?;
+                }
             }
             if read_only {
                 print_data(&data, true)?;

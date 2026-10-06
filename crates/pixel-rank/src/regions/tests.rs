@@ -546,6 +546,27 @@ fn unknown_line_range_forces_lower_bound_and_names_the_count() {
 }
 
 #[test]
+fn range_unknown_covers_inverted_and_single_line_ranges() {
+    // Inverted range (end < start, non-zero end): unknown.
+    let inputs = mk_inputs(
+        vec![region("a.rs#alpha#function", "alpha", "a.rs", 5, 3)],
+        vec![],
+        vec![],
+    );
+    let report = compute_regions(inputs);
+    assert!(report.lower_bound, "inverted range must be unknown");
+
+    // Single-line range (start == end): known.
+    let inputs = mk_inputs(
+        vec![region("a.rs#alpha#function", "alpha", "a.rs", 3, 3)],
+        vec![],
+        vec![],
+    );
+    let report = compute_regions(inputs);
+    assert!(!report.lower_bound, "single-line range must be known");
+}
+
+#[test]
 fn caller_caps_ride_the_envelope() {
     let mut inputs = mk_inputs(
         vec![region("a.rs#alpha#function", "alpha", "a.rs", 1, 9)],

@@ -309,6 +309,36 @@ fn regions_shared_files_carry_the_importer_witness() {
 }
 
 #[test]
+fn regions_shared_file_outside_p0_is_detected() {
+    // A file imported by two region files but not itself P0 must still
+    // appear in shared_files — the import edges from region files to
+    // non-P0 files are retained for this purpose.
+    let dir = fixture("extshared");
+    let data = run_regions(&dir, "fix `login_user` and `start_session` auth flow", true);
+    let m = manifest(&data);
+    let shared = m["shared_files"].as_array().unwrap();
+
+    // types.rs is imported by both login.rs and session.rs but is not P0.
+    let types = shared
+        .iter()
+        .find(|s| s["file"].as_str().unwrap() == "src/auth/types.rs")
+        .expect("types.rs (non-P0, imported by 2 region files) must be shared");
+    let importers: Vec<&str> = types["imported_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        importers,
+        vec!["src/auth/login.rs", "src/auth/session.rs"],
+        "the importers are the witness that the file is shared"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn regions_is_deterministic() {
     let dir = fixture("det");
     let a = run_regions(&dir, "fix `login_user` and `start_session` auth flow", true);

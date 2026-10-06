@@ -504,3 +504,68 @@ fn regions_is_deterministic() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn regions_clear_removes_regions_json() {
+    let dir = fixture("clear");
+    // Write both manifests.
+    let out = gitpixel(
+        &dir,
+        &[
+            "scope-task",
+            "fix `login_user` and `start_session` auth flow",
+            ".",
+            "--regions",
+            "--json",
+        ],
+    );
+    assert!(out.status.success());
+    assert!(dir.join(".pixel/targets.json").exists());
+    assert!(dir.join(".pixel/regions.json").exists());
+
+    // --clear removes both.
+    let out = gitpixel(&dir, &["scope-task", "--clear", "."]);
+    assert!(out.status.success());
+    assert!(!dir.join(".pixel/targets.json").exists());
+    assert!(
+        !dir.join(".pixel/regions.json").exists(),
+        "--clear must remove regions.json"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn regions_removed_when_new_targets_without_regions() {
+    let dir = fixture("stale");
+    // Write both manifests.
+    let out = gitpixel(
+        &dir,
+        &[
+            "scope-task",
+            "fix `login_user` and `start_session` auth flow",
+            ".",
+            "--regions",
+            "--json",
+        ],
+    );
+    assert!(out.status.success());
+    assert!(dir.join(".pixel/regions.json").exists());
+
+    // A new targets.json without --regions removes the stale regions.json.
+    let out = gitpixel(
+        &dir,
+        &[
+            "scope-task",
+            "fix `login_user` and `start_session` auth flow",
+            ".",
+            "--json",
+        ],
+    );
+    assert!(out.status.success());
+    assert!(dir.join(".pixel/targets.json").exists());
+    assert!(
+        !dir.join(".pixel/regions.json").exists(),
+        "stale regions.json must be removed when writing targets without --regions"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

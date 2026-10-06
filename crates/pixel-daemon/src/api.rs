@@ -43,7 +43,9 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// (`cap_hits`), which the CLI reads instead of matching the cap sentences.
 /// 13: `search` takes `globs` and `types` and filters candidate files
 /// itself; an older daemon would ignore them and answer unfiltered.
-pub const PROTOCOL_VERSION: u64 = 13;
+/// 14: `targets` takes `regions` and attaches the symbol-level regions
+/// manifest; an older daemon would ignore the flag and answer without it.
+pub const PROTOCOL_VERSION: u64 = 14;
 
 /// Rows a `search` returns when the request names no `limit`.
 pub const SEARCH_DEFAULT_ROWS: usize = 100;
@@ -1845,7 +1847,10 @@ impl Service {
             }
         }
 
-        // Import edges between region files, both directions.
+        // Import edges: region-to-region (both directions) and
+        // region-to-external (imports_from only, so shared-file detection
+        // finds files imported by multiple region files even when the
+        // imported file is not itself P0).
         let mut file_rows: Vec<(i64, String)> = Vec::new();
         for target in report.targets.iter().filter(|t| t.tier == "P0") {
             if let Ok(Some(f)) = store.file_by_path(&target.path) {
@@ -1858,13 +1863,24 @@ impl Service {
         let mut import_edges: Vec<ImportEdge> = Vec::new();
         for (file_id, path) in &file_rows {
             for imp in store.imports_from(*file_id).map_err(|e| e.to_string())? {
-                if let Some(resolved) = imp.resolved_file_id
-                    && file_id_set.contains(&resolved)
-                {
-                    import_edges.push(ImportEdge {
-                        importer: path.clone(),
-                        imported: file_id_to_path[&resolved].to_string(),
-                    });
+                if let Some(resolved) = imp.resolved_file_id {
+                    if file_id_set.contains(&resolved) {
+                        // Region-to-region: both files are P0.
+                        import_edges.push(ImportEdge {
+                            importer: path.clone(),
+                            imported: file_id_to_path[&resolved].to_string(),
+                        });
+                    } else {
+                        // Region-to-external: the imported file is not P0,
+                        // but a second region file importing it makes it
+                        // shared. Resolve its path for the witness.
+                        if let Ok(Some(f)) = store.file_by_id(resolved) {
+                            import_edges.push(ImportEdge {
+                                importer: path.clone(),
+                                imported: f.path,
+                            });
+                        }
+                    }
                 }
             }
             for imp in store.imports_to_file(*file_id).map_err(|e| e.to_string())? {
