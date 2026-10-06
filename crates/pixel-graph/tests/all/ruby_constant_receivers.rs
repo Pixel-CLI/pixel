@@ -355,3 +355,42 @@ fn ruby_constants_should_resolve_a_late_required_file_and_preserve_rename_spelli
         );
     }
 }
+
+/// An update re-decides only what its batch can change, so its cost follows
+/// the batch, not the graph: a file defining no constant, method or
+/// dispatch name a receiver call reads leaves every such edge where it was.
+/// Replaying them all on each update cost seconds on a large Ruby
+/// repository (Task 833). Row ids cannot show it (SQLite hands a deleted
+/// tail's ids out again), so a trigger records every edge the update deletes.
+#[test]
+fn an_unrelated_update_should_leave_constant_receiver_edges_in_place() {
+    let root = fixture(CALLER, TARGETS);
+    let db = root.path().join(".pixel/graph.db");
+    assert_eq!(calls(root.path()).len(), 6);
+    GraphStore::open(&db)
+        .unwrap()
+        .conn()
+        .execute_batch(
+            "CREATE TABLE deleted_edges (callee TEXT);
+             CREATE TRIGGER record_deleted_edge AFTER DELETE ON edges
+             BEGIN INSERT INTO deleted_edges VALUES (old.callee); END;",
+        )
+        .unwrap();
+    fs::write(
+        root.path().join("unrelated.rb"),
+        "class Other\n  def unrelated; end\nend\n",
+    )
+    .unwrap();
+    update_file(root.path(), &db, "unrelated.rb").unwrap();
+    let store = GraphStore::open(&db).unwrap();
+    let deleted: Vec<String> = store
+        .conn()
+        .prepare("SELECT callee FROM deleted_edges")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(deleted, Vec::<String>::new());
+    assert_eq!(calls(root.path()).len(), 6);
+}

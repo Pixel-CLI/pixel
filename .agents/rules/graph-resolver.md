@@ -22,7 +22,12 @@ each link the change touches:
 4. **Every resolution path**, not only the first one:
    - `resolve_calls` (full build and changed files),
    - `resolve_references` and its `names_a_symbol` prefilter,
-   - `resolve_all` (retries stored `unresolved_calls` rows),
+   - `resolve_affected` (an incremental update retries the stored
+     `unresolved_calls` rows whose inputs its batch changed; `resolve_all`
+     retries them all and is the reference). A new input a decision reads
+     goes into `Affected` too, or the update keeps the row the build would
+     resolve: `an_incremental_update_should_retry_every_row_whose_inputs_changed`
+     holds one step per input,
    - `reconsider_resolved_calls` (a changed definition re-decides edges),
    - the incoming-edge demotion in `write_rows` (a rewritten target file),
    - the dangling-import re-resolution in `write_rows` (a file added after
