@@ -142,11 +142,15 @@ pub struct Conflict {
 
 /// One merge-order layer: regions whose callees (within the region set) are
 /// all in earlier layers. Merge layer 0 first so every caller merges against
-/// the already-merged callee it calls.
+/// the already-merged callee it calls. The witness names the structural fact
+/// behind the ordering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Layer {
     pub layer: usize,
     pub regions: Vec<String>,
+    /// Structural witness for the ordering: the call edges (or mutual
+    /// recursion) that place these regions in this layer.
+    pub witness: String,
 }
 
 /// A file imported by more than one region's file, with the importers as the
@@ -215,9 +219,10 @@ pub fn compute_regions(inputs: RegionsInputs) -> RegionsReport {
     // when the caller's caps fired, when same-name call sites are unresolved,
     // or when any region's line range is unknown. Every such fact is named.
     let mut caps = inputs.caps.clone();
-    // The graph-unavailable cap is only meaningful when there are regions:
-    // with no regions there is no pair whose disjointness is unprovable.
-    if !inputs.graph_available && !regions.is_empty() {
+    // The graph-unavailable cap fires whenever the graph is missing, even
+    // with no regions: the absence of structural evidence is itself a fact
+    // the envelope must record.
+    if !inputs.graph_available {
         caps.push(
             "code graph unavailable — no structural claim is provable; every pair of regions \
              conflicts"
@@ -314,6 +319,7 @@ fn assign_layers(regions: &[Region], inputs: &RegionsInputs) -> Vec<Layer> {
         return vec![Layer {
             layer: 0,
             regions: regions.iter().map(|r| r.uid.clone()).collect(),
+            witness: "graph unavailable — no ordering evidence".to_string(),
         }];
     }
 
@@ -364,7 +370,16 @@ fn assign_layers(regions: &[Region], inputs: &RegionsInputs) -> Vec<Layer> {
         .into_iter()
         .map(|(layer, mut regions)| {
             regions.sort();
-            Layer { layer, regions }
+            let witness = if layer == 0 {
+                "no outgoing call edges to other region components".to_string()
+            } else {
+                format!("longest call-edge path to sink = {layer}")
+            };
+            Layer {
+                layer,
+                regions,
+                witness,
+            }
         })
         .collect()
 }

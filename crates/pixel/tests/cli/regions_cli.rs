@@ -45,16 +45,16 @@ fn fixture(tag: &str) -> Scratch {
     std::fs::create_dir_all(dir.join("src/util")).unwrap();
     std::fs::write(
         dir.join("src/auth/login.rs"),
-        "use crate::auth::types::AuthConfig;\n\npub fn login_user(name: &str) -> bool {\n    !name.is_empty()\n}\n\npub fn logout_user(name: &str) -> bool {\n    !name.is_empty()\n}\n",
+        "use crate::types::AuthConfig;\n\npub fn login_user(name: &str) -> bool {\n    !name.is_empty()\n}\n\npub fn logout_user(name: &str) -> bool {\n    !name.is_empty()\n}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("src/auth/session.rs"),
-        "use crate::auth::login::login_user;\nuse crate::auth::types::AuthConfig;\n\npub fn start_session(name: &str) -> bool {\n    login_user(name)\n}\n",
+        "use crate::auth::login::login_user;\nuse crate::types::AuthConfig;\n\npub fn start_session(name: &str) -> bool {\n    login_user(name)\n}\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("src/auth/types.rs"),
+        dir.join("src/types.rs"),
         "pub struct AuthConfig {\n    pub ttl_secs: u64,\n}\n",
     )
     .unwrap();

@@ -430,6 +430,7 @@ fn graph_unavailable_collapses_layers_to_zero() {
         vec![Layer {
             layer: 0,
             regions: vec!["a.rs#alpha#function".into(), "b.rs#beta#function".into()],
+            witness: "graph unavailable — no ordering evidence".to_string(),
         }],
         "no graph means no ordering evidence: one layer, and every pair conflicts"
     );
@@ -693,5 +694,13 @@ fn empty_input_gives_empty_manifest() {
     assert!(report.conflicts.is_empty());
     assert!(report.layers.is_empty());
     assert!(report.shared_files.is_empty());
-    assert!(!report.lower_bound, "no regions, no claims, no caps");
+    // graph_available defaults to false, so the graph-unavailable cap
+    // fires even with no regions — the absence of structural evidence is
+    // itself a fact the envelope must record.
+    assert!(report.lower_bound, "graph unavailable cap must fire");
+    assert!(
+        report.caps.iter().any(|c| c.contains("graph unavailable")),
+        "graph unavailable cap must be present: {:?}",
+        report.caps
+    );
 }

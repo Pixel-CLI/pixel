@@ -40,7 +40,7 @@ fn fixture(tag: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(dir.join("src/util")).unwrap();
     std::fs::write(
         dir.join("src/auth/login.rs"),
-        "use crate::auth::types::AuthConfig;\n\n\
+        "use crate::types::AuthConfig;\n\n\
          pub fn login_user(name: &str, _cfg: &AuthConfig) -> bool {\n    \
          !name.is_empty()\n}\n\n\
          pub fn logout_user(name: &str) -> bool {\n    name.is_empty()\n}\n",
@@ -49,13 +49,15 @@ fn fixture(tag: &str) -> std::path::PathBuf {
     std::fs::write(
         dir.join("src/auth/session.rs"),
         "use crate::auth::login::login_user;\n\
-         use crate::auth::types::AuthConfig;\n\n\
+         use crate::types::AuthConfig;\n\n\
          pub fn start_session(name: &str, cfg: &AuthConfig) -> bool {\n    \
          login_user(name, cfg)\n}\n",
     )
     .unwrap();
+    // Shared file outside the auth path — not P0, but imported by two
+    // region files.
     std::fs::write(
-        dir.join("src/auth/types.rs"),
+        dir.join("src/types.rs"),
         "pub struct AuthConfig {\n    pub timeout: u64,\n}\n",
     )
     .unwrap();
@@ -270,6 +272,15 @@ fn regions_merge_order_puts_callees_first() {
     assert_eq!(nums, sorted, "layers ascend in order");
     assert_eq!(nums[0], 0, "layers start at 0");
 
+    // Every layer carries a structural witness for its ordering.
+    for l in layers {
+        assert!(
+            l["witness"].as_str().is_some(),
+            "layer {} must carry a witness",
+            l["layer"].as_u64().unwrap()
+        );
+    }
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -280,10 +291,11 @@ fn regions_shared_files_carry_the_importer_witness() {
     let m = manifest(&data);
     let shared = m["shared_files"].as_array().unwrap();
 
-    // types.rs is imported by both login.rs and session.rs.
+    // types.rs is outside the auth path and not P0 — it is imported by both
+    // login.rs and session.rs, so it must be declared shared.
     let types = shared
         .iter()
-        .find(|s| s["file"].as_str().unwrap() == "src/auth/types.rs")
+        .find(|s| s["file"].as_str().unwrap() == "src/types.rs")
         .expect("types.rs must be declared shared");
     let importers: Vec<&str> = types["imported_by"]
         .as_array()
@@ -315,13 +327,25 @@ fn regions_shared_file_outside_p0_is_detected() {
     // non-P0 files are retained for this purpose.
     let dir = fixture("extshared");
     let data = run_regions(&dir, "fix `login_user` and `start_session` auth flow", true);
+
+    // Assert types.rs is NOT in the P0 target set — this test exercises
+    // the non-P0 import branch.
+    let targets = data["targets"].as_array().unwrap();
+    assert!(
+        !targets
+            .iter()
+            .any(|t| t["path"].as_str().unwrap() == "src/types.rs"
+                && t["tier"].as_str() == Some("P0")),
+        "types.rs must not be P0 for this test"
+    );
+
     let m = manifest(&data);
     let shared = m["shared_files"].as_array().unwrap();
 
     // types.rs is imported by both login.rs and session.rs but is not P0.
     let types = shared
         .iter()
-        .find(|s| s["file"].as_str().unwrap() == "src/auth/types.rs")
+        .find(|s| s["file"].as_str().unwrap() == "src/types.rs")
         .expect("types.rs (non-P0, imported by 2 region files) must be shared");
     let importers: Vec<&str> = types["imported_by"]
         .as_array()
