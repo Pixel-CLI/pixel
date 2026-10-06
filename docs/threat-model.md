@@ -21,6 +21,7 @@ Statuses used below:
 - **Partial**: a control exists but leaves a named gap.
 - **Accepted**: no control, by design or because the trust boundary is
   elsewhere; the residual risk is stated.
+- **Withdrawn**: the mechanism the scenario needs no longer exists.
 
 ## 1. Scope and assets
 
@@ -97,27 +98,17 @@ rebuilds and `shutdown`. The CLI starts a daemon on demand
 
 ### 3.3 Installed hooks (B2, B3, B5)
 
-`pixel run-hook <entry>` reads one JSON payload from the agent host on stdin
-(ARCHITECTURE.md, hook table). The payload's `cwd`, `tool_input` and session
-fields are agent-controlled. Entry points:
+`pixel run-hook task-event` reads one JSON payload from the agent host on
+stdin (ARCHITECTURE.md, hook table). The payload's `cwd`, `tool_input` and
+session fields are agent-controlled. `task-event` is the only hook `pixel
+install` registers: it gates edits and completion for a task contract and, on
+`prompt-submit`, returns the bounded `[PIXEL:BRIEF]` evidence block. It never
+executes `tool_input.command` and never rewrites or approves a command.
 
-- `guard` can rewrite native search and read commands into Pixel commands
-  for supported providers. Codex and Claude preserve native retrieval commands
-  even under the shared enforce policy. Their standard installation registers
-  no automatic retrieval prompt or metrics callback.
-  `search_compat::shell_argv` accepts a small grammar only (it refuses `$`,
-  backticks, `\`, newlines, and unquoted operators, globs and `~`), every
-  rewritten word is re-quoted with `search_compat::shell_quote`, and an
-  unsupported command stays native. For Devin and zcode `PermissionRequest`
-  events, `guard::retrieval_permission_response` approves a closed set of
-  read-only Pixel commands without asking the user.
-- The legacy/manual `composed-guard` replays a sealed copy of a repository's pre-existing Codex
-  `PreToolUse` hooks (`.codex/pixel-composed-guard-backup.json`) through
-  `/bin/sh -c` (`guard::run_foreign_command`, 2 s `COMPOSED_TIMEOUT`). Standard
-  installation restores the original registrations and removes this wrapper.
-- `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use` and
-  `metrics` add text to the model's context.
-- `task-event` gates edits and completion for a task contract.
+The verbs earlier releases registered (`guard`, `composed-guard`,
+`session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`,
+`metrics`) still parse, exit 0 and print nothing, so a registration an old
+install left behind can neither block a host nor add text to its context.
 
 ### 3.4 Repository content: walking, parsing, indexing (B1)
 
@@ -386,56 +377,38 @@ boundary it crosses.
 
 ### T10. A crafted hook payload abuses a hook (T, E, B2)
 
-- **Scenario**: the agent (or text injected into it) shapes the
-  `tool_input.command` or `cwd` of a hook payload so that the guard's
-  rewrite executes something else, or reads outside the repository.
-- **Mitigation**: the hook never executes `tool_input.command`; the rewrite
-  grammar and quoting (3.3); rewritten paths must be regular files inside the
-  discovered root, outside `.git` and `.pixel`, and not credential-shaped;
-  `tool_input.env` disables the rewrite; `guard`, `prompt-submit`,
-  `post-tool-use`, `metrics` and `task-event` read their payload through one
-  bounded reader, `hook_input::read_bounded`, capped at `MAX_HOOK_INPUT`
-  (1 MiB), so an over-cap payload is refused after `cap + 1` bytes instead of
-  being allocated in full; `composed-guard` keeps its own
-  `COMPOSED_MAX_INPUT` and `post-compaction` its smaller `MANIFEST_MAX_BYTES`
-  (64 KiB, which also bounds the manifest file it reads back); over-cap
-  `task-event` input emits its unavailable response, which denies `PreToolUse`
-  on an enforced session; the other hooks take their existing fail-open exit 0
-  and leave the native tool untouched; `pixel install` registers a 10 s
-  timeout (`HOOK_TIMEOUT`).
+- **Scenario**: the agent (or text injected into it) shapes the `cwd`,
+  `session_id` or `tool_input` of a `task-event` payload so that the hook
+  executes something else, binds another session's task, or reads outside the
+  repository.
+- **Mitigation**: the hook never executes `tool_input.command`; it reads its
+  payload through one bounded reader, `hook_input::read_bounded`, capped at
+  `MAX_HOOK_INPUT` (1 MiB), so an over-cap payload is refused after `cap + 1`
+  bytes instead of being allocated in full; over-cap `task-event` input emits
+  its unavailable response, which denies `PreToolUse` on an enforced session;
+  the task binds by worktree, provider and session (ARCHITECTURE.md, Agent
+  integration); `pixel install` registers a 10 s timeout (`HOOK_TIMEOUT`).
 - **Status**: Mitigated.
-- **Residual**: the cap bounds allocation, not the wait — a host that writes
+- **Residual**: the cap bounds allocation, not the wait: a host that writes
   fewer than `MAX_HOOK_INPUT + 1` bytes and holds the pipe open still stalls
-  the hook until the host's `HOOK_TIMEOUT` (10 s) ends it; the native fallback
-  after a rewrite re-checks the file in Pixel's emulation but not in the
-  native `rg`/`grep` it falls back to.
+  the hook until the host's `HOOK_TIMEOUT` (10 s) ends it.
 
-### T11. A hook grants a permission it should not (E, B2)
+### T11. Withdrawn
 
-- **Scenario**: a command chain is approved without the user's prompt because
-  the permission parser and the shell disagree on what it does.
-- **Mitigation**: `retrieval_permission_response` approves only standalone
-  read-only Pixel retrievals (`pixel_spec`'s closed subcommand and flag
-  lists), bounded `sed -n 'A,Bp'` reads and stdin-only sinks
-  (`is_stdin_sink`); `split_safe_command_chain` refuses `\`, newlines and
-  lone `&`; `strip_safe_redirects` keeps only `2>/dev/null` and `2>&1`;
-  `word_stays_in_repo` keeps every path inside the root and outside `.git`
-  and `.pixel`; `credential_shaped` refuses secret-looking paths; nothing is
-  approved when the repository contains `$HOME` (`repo_holds_home`). Tests:
-  the `permission_*` tests in `crates/pixel/src/guard.rs`.
-- **Status**: Partial.
-- **Residual**: a bare `pixel` (and `rtk`) is resolved through the agent's
-  `PATH`: a `PATH` that includes a repository-relative directory (a
-  direnv-managed `./bin`) lets the repository supply the approved `pixel`.
+The hook that approved Pixel retrievals without a prompt no longer exists, and
+its verb answers nothing, so a stale registration approves nothing. The id
+stays so references to the later threats hold.
 
 ### T12. Prompt injection through Pixel's output (T, B3)
 
 - **Scenario**: a repository plants instructions in code, comments, commit
   messages, symbol names or file names; Pixel quotes them to the agent, which
   follows them.
-- **Mitigation**: no install delivers Pixel output to an agent unasked: no
-  prompt is deployed and the guard hooks answer nothing outside
-  `pixel config policy enforce`. The bundled prompt a user copies by hand
+- **Mitigation**: the one thing an install delivers to an agent unasked is
+  the `[PIXEL:BRIEF]` block of `task-event` on `prompt-submit`: it quotes file
+  paths, symbol names and a definition from the repository as evidence, capped
+  at 2 KiB, with a 750 ms deadline, off with `PIXEL_BRIEF=0`. No prompt is
+  deployed. The bundled prompt a user copies by hand
   states that Pixel output is data, not instructions
   (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
   skill and Pi command label graph output as repository data, not
@@ -443,35 +416,22 @@ boundary it crosses.
   verifies extractor and source signatures (re-hashing only files whose mtime
   is not older than the last full build), and bounds the query to 1500 ms and
   the serialized result to 32 KiB. Its graph completeness claim remains open.
-  Other providers' hook packets still carry repository strings as JSON values
-  (`[PIXEL:TASK_CONTEXT]` in `prompt_submit.rs`, the dependants list of
-  `post-tool-use`) and label them; output is capped.
 - **Status**: Accepted: a retrieval tool has to return repository text.
 - **Residual**: the defence is the model's; Pixel cannot sanitise meaning.
   Anything that follows from a successful injection is bounded by the
-  agent's own permissions, which T1 and T11 can widen.
+  agent's own permissions, which T1 can widen.
 
-### T13. Foreign Codex hooks composed into the guard (E, B5)
+### T13. Withdrawn
 
-- **Scenario**: a legacy installation replaced a repository's Codex
-  `PreToolUse` hooks with its own `composed-guard`, which replays them.
-- **Mitigation**: current installation restores the original registrations
-  only when the private backup and managed hook still match their owned
-  contract, preserving changed configurations for manual resolution. It skips
-  tracked `.codex/hooks.json` (`repo_git::is_tracked`) and project paths that
-  alias the global hook file. Duplicate project task hooks are removed only
-  when the enabled global suite covers their events and each current definition
-  has matching Codex approval; missing or stale approval preserves them. Pixel
-  reads approval state but does not grant trust during installation. For explicitly retained
-  legacy wrappers, `guard::load_composed_backup`
-  refuses a symlink, a file over 1 MiB, a mode wider than 0600, an unknown
-  version or provider, and any command that calls Pixel's own hooks
-  (`invokes_pixel_hook`). Tests: `composed_*` in `guard.rs` and
-  `crates/pixel/tests/cli/guard_deny.rs`.
-- **Status**: Partial.
-- **Residual**: for a retained legacy wrapper, Codex's review hashes the command line
-  of Pixel's composed guard, not the commands in the backup it replays, so
-  approving the guard approves what it composes.
+Pixel no longer composes a repository's Codex `PreToolUse` hooks behind its own
+wrapper. `pixel install --repo` restores the original registrations from the
+private backup of an earlier release only while the backup and the managed
+hook still match their owned contract, skips tracked `.codex/hooks.json` and
+paths that alias the global hook file, and removes duplicate project task
+hooks only when the enabled global suite covers their events and Codex has
+approved each current definition (T14). A leftover `composed-guard`
+registration answers nothing. The id stays so references to the later threats
+hold.
 
 ### T14. `pixel install` damages or weakens agent configurations (T, I, B5)
 
@@ -644,8 +604,9 @@ boundary it crosses.
 | Status | Threats |
 | --- | --- |
 | Mitigated | T4, T10, T16, T17 |
-| Partial | T2, T3, T5, T6, T8, T11, T13, T14, T15, T19, T20, T21, T22 |
+| Partial | T2, T3, T5, T6, T8, T14, T15, T19, T20, T21, T22 |
 | Accepted | T1, T7, T9, T12, T18, T23, T24 |
+| Withdrawn | T11, T13 |
 
 ## 5. Critical paths and how they are tested
 
@@ -655,8 +616,7 @@ boundary it crosses.
 | Protocol skew | `classify_ping`, `PROTOCOL_VERSION` | `op_name_matches_serde_tag`, `session_capabilities_track_every_real_op` (`pixel-proto`) |
 | Planted history database | `FactsStore::needs_rebuild`, `_pixel_marker` | `open_should_wipe_a_planted_history_database` (both refusals: no marker, foreign `created_by`; asserts the planted tables are gone and the marker is Pixel's); `concurrent_open_on_poisoned_db_never_ioerrors` covers the rebuild path |
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
-| Guard rewrite and permission | `search_compat::shell_argv`, `shell_quote`, `retrieval_permission_response` | `shell_parser_is_conservative_and_keeps_quoted_words`, the `permission_*` tests in `guard.rs`, `crates/pixel/tests/cli/guard_deny.rs` and `guard_enforce.rs` |
-| Composed foreign hooks | `load_composed_backup`, `run_foreign_command` | `composed_backup_replays_foreign_hooks_and_refuses_pixel_under_either_verb`, `composed_codex_*` in `guard_deny.rs` |
+| Hook payload cap | `hook_input::read_bounded` | the `read_bounded` tests in `hook_input.rs` |
 | Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask` (`main.rs`) |
 | Keys over clear text | `sends_in_clear_text` | `a_key_never_leaves_the_machine_over_cleartext_http`, `only_plain_http_to_another_host_counts_as_clear_text` |
 | Untrusted shard files | `Shard::open` | `malformed_shard_rejected_gracefully`, `corrupt_posting_cannot_escape_section_or_overflow_delta` (`shard.rs`) |

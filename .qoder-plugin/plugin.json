@@ -10,6 +10,5 @@
   "repository": "https://github.com/Pixel-CLI/pixel",
   "license": "MIT",
   "keywords": ["code-graph", "impact-analysis", "retrieval", "tree-sitter", "productivity"],
-  "skills": "./skills/",
   "rules": "./.qoder/rules/"
 }

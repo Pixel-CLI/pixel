@@ -9,14 +9,13 @@
 //! an unset layer defaults to on. `--metrics=off` and `PIXEL_METRICS=0`
 //! still veto a single invocation above every file layer.
 //!
-//! The `policy` key says what a Pixel guard hook does when a coding agent
-//! reaches for native retrieval: `advisory` (the default) and `off` leave
-//! every native call untouched, with no rewrite, suggestion or approval;
-//! `enforce` rewrites or denies supported native retrieval, and only on a
-//! host whose guard hook the user wired by hand, since `pixel install`
-//! registers none. Codex and Claude retrieval stays native in every mode.
-//! `PIXEL_POLICY` overrides it for one environment, and the legacy
-//! `PIXEL_TARGETS_GUARD=0` kill switch still forces `off`.
+//! The `policy` key is the retired guard's switch. No hook reads it any more:
+//! the guard and its rewrite or deny of native retrieval are gone, and
+//! `pixel install` registers only the task-event hook. The key stays readable
+//! and writable so an existing configuration file keeps validating, and
+//! `pixel config` still reports it. `PIXEL_POLICY` overrides it for one
+//! environment and the legacy `PIXEL_TARGETS_GUARD=0` kill switch still reads
+//! as `off`, both for that report only.
 //!
 //! YAML files live under `.pixel/` in the repository and home directory.
 //! Legacy JSON remains readable until install/edit creates the YAML equivalent.
@@ -67,18 +66,16 @@ fn feature_resolution(root: Option<&Path>, key: &str, env: &str) -> (bool, Strin
     (value.unwrap_or(true), source)
 }
 
-/// What the guard does when a coding agent reaches for native retrieval
-/// instead of Pixel. The three values are the YAML setting, the `--json`
+/// The retired guard's setting, kept so existing configuration still parses.
+/// Nothing acts on it. The three values are the YAML setting, the `--json`
 /// value, and the `pixel config policy` argument.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 pub enum PolicyMode {
-    /// Keep every native tool call: no rewrite, suggestion or approval (the default).
+    /// The default.
     Advisory,
-    /// Rewrite or deny supported native retrieval through a guard hook wired
-    /// by hand (`pixel install` registers none); Codex, Claude and
-    /// unsupported shapes stay native.
+    /// Accepted for configurations written by older releases; no hook reads it.
     Enforce,
-    /// No policy decisions and no rewrites.
+    /// The legacy off switch; no hook reads it.
     Off,
 }
 
@@ -203,11 +200,6 @@ fn policy_resolution(root: Option<&Path>) -> PolicyResolution {
         source: PolicySource::Default,
         file: None,
     }
-}
-
-/// Effective retrieval policy for `root`, for the guard and the Pi extension.
-pub fn policy(root: Option<&Path>) -> PolicyMode {
-    policy_resolution(root).mode
 }
 
 pub fn ensure_template(root: Option<&Path>) -> Result<PathBuf, String> {
@@ -726,11 +718,11 @@ fn setup_with_keys(
         ),
         (
             "task_context",
-            "Suggest relevant code when an agent receives a prompt (enforce policy only)?",
+            "Suggest relevant code when an agent receives a prompt (retired: no hook reads this)?",
         ),
         (
             "task_boundary",
-            "Detect task changes in agent prompts (hand-wired prompt hook only)?",
+            "Detect task changes in agent prompts (retired: no hook reads this)?",
         ),
     ] {
         let current = doc.get(key).and_then(Value::as_bool).unwrap_or(true);
@@ -742,7 +734,7 @@ fn setup_with_keys(
     let Some(enforce) = ask_bool(
         input,
         output,
-        "Enforce Pixel retrieval through hand-wired guard hooks (rewrite or deny native search)?",
+        "Enforce Pixel retrieval policy (retired: no hook reads this)?",
         doc.get("policy").and_then(Value::as_str) == Some(PolicyMode::Enforce.as_str()),
         keys,
         color,
@@ -1280,9 +1272,9 @@ fn run_metrics_with(
     }
 }
 
-/// Printed when `enforce` is set: the hosts it cannot reach, so a success
-/// message is never read as enforcement everywhere.
-const ENFORCE_SCOPE_NOTE: &str = "note: enforce acts only through a `pixel run-hook guard` you wire into an agent yourself; `pixel install` registers none, and Codex and Claude keep native retrieval under every policy";
+/// Printed when `enforce` is set, so a success message is never read as
+/// enforcement: the guard that acted on it was retired.
+const ENFORCE_SCOPE_NOTE: &str = "note: no hook reads the policy any more; `pixel run-hook guard` is retired, so enforce changes no agent's native retrieval";
 
 /// `pixel config policy [advisory|enforce|off] [--global] [--json]`: without
 /// a value, report the effective policy and the layer that set it; with one,
@@ -2567,10 +2559,10 @@ mod tests {
         assert_eq!(default.overview_label(), "default");
 
         // A value the layer cannot read is not a policy: it falls through
-        // instead of failing a hook.
+        // to the next layer.
         write(&global_path, "policy: loudly\n");
         write(&repo_path, "policy: null\n");
-        assert_eq!(policy(Some(&repo)), PolicyMode::Advisory);
+        assert_eq!(policy_resolution(Some(&repo)).mode, PolicyMode::Advisory);
 
         // Quoted like every YAML string: a bare `off` is a YAML boolean.
         write(&global_path, "policy: \"off\"\n");
@@ -2579,7 +2571,11 @@ mod tests {
         assert_eq!(global.source_name(), "global");
         assert_eq!(global.layer(), format!("global {}", global_path.display()));
         assert_eq!(global.overview_label(), global_path.display().to_string());
-        assert_eq!(policy(None), PolicyMode::Off, "no repo handle reads global");
+        assert_eq!(
+            policy_resolution(None).mode,
+            PolicyMode::Off,
+            "no repo handle reads global"
+        );
 
         write(&repo_path, "policy: enforce\n");
         let repo_layer = policy_resolution(Some(&repo));

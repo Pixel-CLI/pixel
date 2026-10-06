@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! Exact, deliberately narrow native-search compatibility for hook routing.
+//! Exact, deliberately narrow native-search compatibility behind
+//! `pixel search-like-rg`, which a user or a shell alias points at in place of
+//! `rg` or `grep`.
 //! Unsupported inputs execute the original search; ordinary `pixel search`
 //! keeps its richer, bounded interface. Never emit a partial native result.
 //!
@@ -13,11 +15,9 @@
 //! shell tool runs commands with a pipe on stdin that nothing writes to, so
 //! native `rg` blocks there until the call times out. The emulation never
 //! reads stdin: it always answers the current-directory search, which is
-//! what `rg` does with `/dev/null` on stdin. A hook
-//! sees only the command text, not the stdin it will run with, and
-//! [`shell_argv`] refuses pipes and redirections, so `echo x | rg needle`
-//! is never rewritten. When the emulation falls back, [`run`] executes the
-//! original `rg` with the inherited stdin, native behaviour included.
+//! what `rg` does with `/dev/null` on stdin. When the emulation falls back,
+//! [`run`] executes the original `rg` with the inherited stdin, native
+//! behaviour included.
 
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
@@ -143,231 +143,8 @@ pub fn parse_args(tool: SearchTool, args: &[String]) -> Option<SearchArgs> {
     }
 }
 
-/// A small shell grammar, not a permissive shell approximation. Quotes are
-/// accepted; expansions, escapes, operators and unquoted globs are not.
-pub fn shell_argv(command: &str) -> Option<Vec<String>> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    let mut started = false;
-    for c in command.chars() {
-        if matches!(c, '\n' | '\r' | '\0' | '\\' | '$' | '`') {
-            return None;
-        }
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => current.push(c),
-            None if matches!(c, '\'' | '"') => {
-                quote = Some(c);
-                started = true;
-            }
-            None if matches!(
-                c,
-                ';' | '|'
-                    | '&'
-                    | '<'
-                    | '>'
-                    | '('
-                    | ')'
-                    | '*'
-                    | '?'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '~'
-                    | '#'
-            ) =>
-            {
-                return None;
-            }
-            None if matches!(c, ' ' | '\t') => {
-                if started {
-                    args.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            None if c.is_whitespace() => return None,
-            None => {
-                current.push(c);
-                started = true;
-            }
-        }
-    }
-    if quote.is_some() {
-        return None;
-    }
-    if started {
-        args.push(current);
-    }
-    Some(args)
-}
-
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-/// Eligibility is repeated at execution time. The hook checks only shape
-/// and an in-repository file/directory path, never starts/builds an index.
-pub fn rewrite(command: &str, cwd: &Path) -> Option<String> {
-    rewrite_with(command, cwd, native_configuration)
-}
-
-/// Rewrite the bounded discovery commands supported by Devin's exec hook.
-pub fn rewrite_retrieval(command: &str, cwd: &Path) -> Option<String> {
-    rewrite_retrieval_with(command, cwd, native_configuration)
-}
-
-pub(crate) fn rewrite_retrieval_with(
-    command: &str,
-    cwd: &Path,
-    native_configuration: impl Fn(SearchTool) -> bool,
-) -> Option<String> {
-    let mut argv = shell_argv(command)?;
-    let wrapped_with_rtk = argv.first().is_some_and(|program| program == "rtk");
-    if wrapped_with_rtk {
-        if !matches!(
-            argv.get(1).map(String::as_str),
-            Some("grep" | "rg" | "cat" | "ls" | "find")
-        ) {
-            return None;
-        }
-        argv.remove(0);
-    }
-    let normalized_command = wrapped_with_rtk.then(|| {
-        argv.iter()
-            .map(|argument| shell_quote(argument))
-            .collect::<Vec<_>>()
-            .join(" ")
-    });
-    let command = normalized_command.as_deref().unwrap_or(command);
-    match argv.first()?.as_str() {
-        "cat" => rewrite_cat(&argv[1..], cwd),
-        "ls" => {
-            let path = match argv.get(1..) {
-                Some([]) => ".",
-                Some([path]) if !path.starts_with('-') => path,
-                Some([_flag]) if matches!(argv[1].as_str(), "-a" | "-l" | "-la" | "-al") => ".",
-                Some([_flag, path])
-                    if matches!(argv[1].as_str(), "-a" | "-l" | "-la" | "-al")
-                        && !path.starts_with('-') =>
-                {
-                    path
-                }
-                _ => return None,
-            };
-            rewrite_listing(path, cwd, None)
-        }
-        "find" => rewrite_find(&argv[1..], cwd),
-        _ => rewrite_with(command, cwd, native_configuration),
-    }
-}
-
-/// Route a small, literal `cat <file>` read through the indexed line reader.
-/// Larger or non-text files remain native; the Devin policy can then block
-/// unsupported retrieval with a Pixel-specific explanation.
-fn rewrite_cat(args: &[String], cwd: &Path) -> Option<String> {
-    let [path] = args else {
-        return None;
-    };
-    let (_, absolute, _) = checked_path(path, cwd)?;
-    let source = std::fs::read_to_string(absolute).ok()?;
-    if source.lines().count() > 200 {
-        return None;
-    }
-    Some(format!(
-        "pixel search-content --limit 200 '.*' {}",
-        shell_quote(path)
-    ))
-}
-
-/// Map a repository path listing to the files the Pixel index can retrieve.
-fn rewrite_listing(path: &str, cwd: &Path, glob: Option<&str>) -> Option<String> {
-    let directory = checked_dir(path, cwd)?.1;
-    if dir_entries(SearchTool::Rg, &directory, DIR_EMULATION_MAX_FILES)
-        .ok()?
-        .iter()
-        .any(|entry| credential_path(entry))
-    {
-        return None;
-    }
-    let glob = glob.map(|pattern| format!(" --glob {}", shell_quote(pattern)));
-    Some(format!(
-        "pixel search-content --files-with-matches{} '.*' {}",
-        glob.unwrap_or_default(),
-        shell_quote(path)
-    ))
-}
-
-fn rewrite_find(args: &[String], cwd: &Path) -> Option<String> {
-    let (path, glob) = match args {
-        [path] => (path.as_str(), None),
-        [path, kind, file_type] if kind == "-type" && file_type == "f" => (path.as_str(), None),
-        [path, name, glob] if name == "-name" => (path.as_str(), Some(glob.as_str())),
-        [path, kind, file_type, name, glob]
-            if kind == "-type" && file_type == "f" && name == "-name" =>
-        {
-            (path.as_str(), Some(glob.as_str()))
-        }
-        _ => return None,
-    };
-    rewrite_listing(path, cwd, glob)
-}
-
-/// `rewrite` with the tool-configuration probe as a parameter, so a test
-/// states the environment it assumes instead of inheriting the developer's
-/// (an exported `RIPGREP_CONFIG_PATH` turned every `rg` case native).
-pub(crate) fn rewrite_with(
-    command: &str,
-    cwd: &Path,
-    native_configuration: impl Fn(SearchTool) -> bool,
-) -> Option<String> {
-    let argv = shell_argv(command)?;
-    let tool = match argv.first()?.as_str() {
-        "rg" => SearchTool::Rg,
-        "grep" => SearchTool::Grep,
-        _ => return None,
-    };
-    if native_configuration(tool) {
-        return None;
-    }
-    let parsed = parse_args(tool, &argv[1..])?;
-    let dir = match parsed.path.as_deref() {
-        Some(raw) if checked_path(raw, cwd).is_some() => None,
-        // Bare `grep dir` reports "Is a directory" and must stay native;
-        // only `rg` and `grep -r` have directory semantics to emulate.
-        Some(raw) if tool == SearchTool::Rg || parsed.recursive => Some(checked_dir(raw, cwd)?.1),
-        Some(_) => return None,
-        // Implicit cwd search: `rg` only, inside an indexed repo. A
-        // no-operand `grep -r` names files `./a` on BSD and `a` on GNU, so
-        // no single emulation matches it. Canonicalize so `checked_dir`
-        // resolves an absolute directory even for a relative or symlinked
-        // `cwd`.
-        None if tool == SearchTool::Rg => {
-            Some(checked_dir(cwd.canonicalize().ok()?.to_str()?, cwd)?.1)
-        }
-        None => return None,
-    };
-    // A rewrite can auto-authorize the command, so the credential boundary
-    // is enforced on every entry the native tool would open, not just the
-    // named directory. Names only — content stays for the execution side.
-    if let Some(dir) = dir
-        && dir_entries(tool, &dir, DIR_EMULATION_MAX_FILES)
-            .ok()
-            .map(|paths| paths.iter().any(|path| credential_path(path)))
-            != Some(false)
-    {
-        return None;
-    }
-    Some(format!(
-        "pixel search-like-rg {} -- {}",
-        tool.name(),
-        argv[1..]
-            .iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" ")
-    ))
 }
 
 fn checked_path(raw: &str, cwd: &Path) -> Option<(PathBuf, PathBuf, String)> {
@@ -433,7 +210,7 @@ fn credential_path(path: &Path) -> bool {
 /// longer match the literal-search emulation, so the command stays native.
 /// Only that tool's own configuration counts. `RIPGREP_CONFIG_PATH` changes
 /// nothing about `grep` and `GREP_OPTIONS` nothing about `rg`; a developer
-/// with an rg config would otherwise never get a `grep` rewrite.
+/// with an rg config would otherwise never get a `grep` emulation.
 pub(crate) fn native_configuration(tool: SearchTool) -> bool {
     let variable = match tool {
         SearchTool::Rg => "RIPGREP_CONFIG_PATH",
@@ -533,7 +310,7 @@ fn file_output(
 /// everything recursively and follows no symlink below the argument.
 /// Most files a directory emulation reads, refreshes and re-stats. Past it
 /// the native tool is faster than proving every file current, and the
-/// PreToolUse hook's own walk must stay inside the hook timeout.
+/// walk must stay cheap.
 const DIR_EMULATION_MAX_FILES: usize = 2_000;
 
 /// Most bytes a directory emulation reads before handing the search back.
@@ -614,7 +391,8 @@ fn dir_output(
     let raw = args.path.as_deref();
     let (root, dir, dir_rel) = match raw {
         Some(raw) => checked_dir(raw, cwd),
-        // See `rewrite`: a no-operand `grep -r` prints platform-specific names.
+        // A no-operand `grep -r` prints platform-specific names: `./a` on BSD,
+        // `a` on GNU, so no single emulation matches it.
         None if tool == SearchTool::Grep => return Err("implicit-grep-cwd"),
         None => checked_dir(
             cwd.canonicalize()
@@ -791,13 +569,6 @@ mod tests {
         raw.iter().map(ToString::to_string).collect()
     }
 
-    /// `rewrite` as a shell with neither `RIPGREP_CONFIG_PATH` nor
-    /// `GREP_OPTIONS` sees it, whatever the developer running the suite
-    /// exports.
-    fn rewrite_unconfigured(command: &str, cwd: &Path) -> Option<String> {
-        rewrite_retrieval_with(command, cwd, |_| false)
-    }
-
     struct Repo(PathBuf);
 
     impl Repo {
@@ -906,164 +677,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_parser_is_conservative_and_keeps_quoted_words() {
-        assert_eq!(
-            shell_argv("grep -F 'foo bar' 'a file.rs'"),
-            Some(args(&["grep", "-F", "foo bar", "a file.rs"]))
-        );
-        assert_eq!(
-            shell_argv("grep -F needle '#file'"),
-            Some(args(&["grep", "-F", "needle", "#file"]))
-        );
-        for command in [
-            "rg x a | wc -l",
-            "rg x a > out",
-            "rg $PATTERN a",
-            "rg x *.rs",
-            "rg 'unterminated",
-            "rg x a && touch b",
-            "grep -F needle #file",
-            "grep needle\u{a0} a.rs",
-        ] {
-            assert!(shell_argv(command).is_none(), "{command}");
-        }
-    }
-
-    #[test]
-    fn rewrite_accepts_file_directory_and_implicit_cwd_searches() {
-        let repo = Repo::new();
-        for command in [
-            ("rg -n needle src/a.rs", "rg"),
-            ("grep -n needle src/a.rs", "grep"),
-            ("rg -n needle src", "rg"),
-            ("rg needle src/", "rg"),
-            ("rg needle .", "rg"),
-            ("rg needle", "rg"),
-            ("grep -rn needle src", "grep"),
-            ("grep -r needle .", "grep"),
-            ("grep -rn needle src/a.rs", "grep"),
-        ] {
-            let rewritten = rewrite_unconfigured(command.0, &repo.0)
-                .unwrap_or_else(|| panic!("{} must rewrite", command.0));
-            assert!(
-                rewritten.starts_with(&format!("pixel search-like-rg {} --", command.1)),
-                "{}: {rewritten}",
-                command.0
-            );
-        }
-    }
-
-    #[test]
-    fn retrieval_commands_should_route_bounded_reads_and_file_lists_through_pixel() {
-        let repo = Repo::new();
-        assert_eq!(
-            rewrite_unconfigured("cat src/a.rs", &repo.0).as_deref(),
-            Some("pixel search-content --limit 200 '.*' 'src/a.rs'")
-        );
-        assert_eq!(
-            rewrite_unconfigured("ls src", &repo.0).as_deref(),
-            Some("pixel search-content --files-with-matches '.*' 'src'")
-        );
-        assert_eq!(
-            rewrite_unconfigured("ls -la src", &repo.0).as_deref(),
-            Some("pixel search-content --files-with-matches '.*' 'src'")
-        );
-        assert_eq!(
-            rewrite_unconfigured("find src -type f -name '*.rs'", &repo.0).as_deref(),
-            Some("pixel search-content --files-with-matches --glob '*.rs' '.*' 'src'")
-        );
-        assert_eq!(
-            rewrite_unconfigured("grep -r needle src", &repo.0).as_deref(),
-            Some("pixel search-like-rg grep -- '-r' 'needle' 'src'")
-        );
-        assert_eq!(
-            rewrite_unconfigured("rtk grep -r needle src", &repo.0).as_deref(),
-            Some("pixel search-like-rg grep -- '-r' 'needle' 'src'")
-        );
-        assert_eq!(
-            rewrite_unconfigured("rtk cat src/a.rs", &repo.0).as_deref(),
-            Some("pixel search-content --limit 200 '.*' 'src/a.rs'")
-        );
-        assert_eq!(
-            rewrite_unconfigured("rtk ls src", &repo.0).as_deref(),
-            Some("pixel search-content --files-with-matches '.*' 'src'")
-        );
-        assert_eq!(
-            rewrite_unconfigured("rtk find src -type f -name '*.rs'", &repo.0).as_deref(),
-            Some("pixel search-content --files-with-matches --glob '*.rs' '.*' 'src'")
-        );
-        assert_eq!(rewrite_unconfigured("rtk git status", &repo.0), None);
-    }
-
-    #[test]
-    fn retrieval_rewrites_should_decline_unbounded_or_ambiguous_inputs() {
-        let repo = Repo::new();
-        let long_file = repo.0.join("src/long.rs");
-        std::fs::write(&long_file, "line\n".repeat(201)).unwrap();
-        for command in [
-            "cat src/a.rs src/sub/b.rs",
-            "cat -n src/a.rs",
-            "cat src/long.rs",
-            "ls -la src extra",
-            "find src -exec cat {} \\;",
-        ] {
-            assert!(
-                rewrite_unconfigured(command, &repo.0).is_none(),
-                "{command}"
-            );
-        }
-    }
-
-    #[test]
-    fn rewrite_keeps_unsupported_or_out_of_scope_searches_native() {
-        let repo = Repo::new();
-        for command in [
-            "grep -n needle src",         // bare grep on a dir errors natively
-            "grep needle",                // stdin
-            "grep -rn needle",            // `./a` on BSD, `a` on GNU
-            "rg -l needle src",           // unsupported flag
-            "rg -n needle src | wc -l",   // pipeline
-            "rg needle missing",          // nonexistent path
-            "rg needle ../outside",       // outside the indexed root
-            "rg needle .pixel",           // index internals
-            "grep -rn needle .env",       // credential-shaped file
-            "env LC_ALL=C rg needle src", // wrapper command
-        ] {
-            assert!(
-                rewrite_unconfigured(command, &repo.0).is_none(),
-                "{command}"
-            );
-        }
-        // A credential-shaped entry inside the searched tree blocks the
-        // rewrite: auto-authorization must not widen to secrets.
-        std::fs::write(repo.0.join("src/tls.key"), b"needle\n").unwrap();
-        assert!(rewrite_unconfigured("rg needle src", &repo.0).is_none());
-        // cwd outside any indexed repo never rewrites implicitly.
-        let bare =
-            std::env::temp_dir().join(format!("pixel-search-compat-bare-{}", std::process::id()));
-        std::fs::create_dir_all(&bare).unwrap();
-        let bare = bare.canonicalize().unwrap();
-        assert!(rewrite_unconfigured("rg needle", &bare).is_none());
-        let _ = std::fs::remove_dir_all(&bare);
-    }
-
-    /// A configured tool keeps its own command native (its output may no
-    /// longer match the emulation), and only its own: an rg config must not
-    /// cost `grep` its rewrite.
-    #[test]
-    fn only_the_configured_tool_stays_native() {
-        let repo = Repo::new();
-        let rg_configured = |tool| tool == SearchTool::Rg;
-        assert!(rewrite_with("rg -n needle src/a.rs", &repo.0, rg_configured).is_none());
-        let grep = rewrite_with("grep -n needle src/a.rs", &repo.0, rg_configured)
-            .expect("an rg config leaves grep rewritable");
-        assert!(grep.starts_with("pixel search-like-rg grep --"), "{grep}");
-        let grep_configured = |tool| tool == SearchTool::Grep;
-        assert!(rewrite_with("grep -n needle src/a.rs", &repo.0, grep_configured).is_none());
-        assert!(rewrite_with("rg -n needle src/a.rs", &repo.0, grep_configured).is_some());
-    }
-
-    #[test]
     fn a_walk_past_the_file_budget_hands_the_search_back() {
         let repo = Repo::new();
         let src = repo.0.join("src");
@@ -1102,91 +715,5 @@ mod tests {
         );
         // rg skips hidden directories natively, so its walk is unaffected.
         assert!(dir_entries(SearchTool::Rg, &repo.0, DIR_EMULATION_MAX_FILES).is_ok());
-    }
-
-    /// `ls` rewrites only the shapes it understands: bare, one operand that
-    /// is not a flag, and the common flag forms optionally followed by a
-    /// path. Everything else stays native.
-    #[test]
-    fn rewrite_ls_accepts_only_the_bounded_forms() {
-        let repo = Repo::new();
-        for command in [
-            "ls",
-            "ls src",
-            "ls -a",
-            "ls -l",
-            "ls -la",
-            "ls -al",
-            "ls -a src",
-            "ls -l src",
-        ] {
-            let rewritten = rewrite_unconfigured(command, &repo.0);
-            assert!(
-                rewritten.is_some_and(|r| r.starts_with("pixel search-content")),
-                "{command}"
-            );
-        }
-        // A flag outside the accepted set is not a path nor a listing.
-        for command in [
-            "ls -h",
-            "ls -x src",
-            "ls -a -h",
-            "ls src sub",
-            "ls src -a sub",
-        ] {
-            assert_eq!(rewrite_unconfigured(command, &repo.0), None, "{command}");
-        }
-    }
-
-    /// `find` maps to a listing only for the literal forms: a path alone,
-    /// `-type f`, `-name <glob>`, or both in that order.
-    #[test]
-    fn rewrite_find_accepts_only_the_literal_forms() {
-        let repo = Repo::new();
-        for command in [
-            "find src",
-            "find src -type f",
-            "find src -name '*.rs'",
-            "find src -type f -name '*.rs'",
-        ] {
-            let rewritten = rewrite_unconfigured(command, &repo.0);
-            assert!(
-                rewritten.is_some_and(|r| r.starts_with("pixel search-content")),
-                "{command}"
-            );
-        }
-        for command in [
-            "find",
-            "find src -type d",
-            "find src -type",
-            "find src -x f",
-            "find src -notype f",
-            "find src -name",
-            "find src -nom '*.rs'",
-            "find src -type d -name '*.rs'",
-            "find src -type f -nom '*.rs'",
-            "find src -x f -name '*.rs'",
-            "find src -name '*.rs' -type f",
-            "find src -name '*.rs' -type x",
-            "find src -type f -name '*.rs' extra",
-        ] {
-            assert_eq!(rewrite_unconfigured(command, &repo.0), None, "{command}");
-        }
-    }
-
-    /// `cat` hands the read to the indexed reader only below the line cap:
-    /// exactly 200 lines still fits, 201 is a page the agent should page.
-    #[test]
-    fn rewrite_cat_stays_within_the_line_budget() {
-        let repo = Repo::new();
-        let fits = repo.0.join("fits.rs");
-        let page = repo.0.join("page.rs");
-        std::fs::write(&fits, "l\n".repeat(200)).unwrap();
-        std::fs::write(&page, "l\n".repeat(201)).unwrap();
-        assert_eq!(
-            rewrite_unconfigured("cat fits.rs", &repo.0).as_deref(),
-            Some("pixel search-content --limit 200 '.*' 'fits.rs'")
-        );
-        assert_eq!(rewrite_unconfigured("cat page.rs", &repo.0), None);
     }
 }

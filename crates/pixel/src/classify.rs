@@ -1122,8 +1122,8 @@ fn stored_remote_model_when_unset(
     crate::config_cmd::classify_remote_model()
 }
 
-/// The Ollaya engine config for one classify call. `--if-warm` gets the
-/// prompt hook's short whole-request cap: its warm check is a TCP connect
+/// The Ollaya engine config for one classify call. `--if-warm` gets a short
+/// whole-request cap: its warm check is a TCP connect
 /// only, so a daemon that accepts while it is still loading the model would
 /// otherwise hold the command for the 120 s default instead of leaving the
 /// documented exit 1.

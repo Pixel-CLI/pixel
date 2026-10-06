@@ -3627,9 +3627,9 @@ fn wrappers_step(report: &InstallReport) -> &pixel_install::install::InstallStep
         .expect("shell-wrappers step")
 }
 
-/// Plugin-manifest skill files come from the curated impact-skill asset;
-/// other generated rule surfaces still come from `assets/pixel-agent-prompt.md`.
-/// Keep both sets synchronized through the generator.
+/// Generated rule surfaces come from `assets/pixel-agent-prompt.md` and the
+/// Pi extension from `assets/pi-impact.ts`. Keep them synchronized through
+/// the generator.
 #[test]
 fn plugin_assets_are_in_sync() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3651,51 +3651,38 @@ fn plugin_assets_are_in_sync() {
 }
 
 #[test]
-fn plugin_skill_is_focused_explicit_and_replaces_the_broad_skill() {
+fn plugin_manifests_ship_no_skill_and_no_hook() {
     let repo = repo_root();
     let read =
         |rel: &str| fs::read_to_string(repo.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
-    let claude: serde_json::Value =
-        serde_json::from_str(&read(".claude-plugin/plugin.json")).unwrap();
-    let codex: serde_json::Value =
-        serde_json::from_str(&read(".codex-plugin/plugin.json")).unwrap();
-    assert_eq!(codex["skills"], "./skills/");
-    assert_eq!(claude["skills"], "./claude-skills/");
-    assert!(
-        codex.get("hooks").is_none(),
-        "Codex registers a retrieval hook"
-    );
-    assert!(
-        claude.get("hooks").is_none(),
-        "Claude registers a retrieval hook"
-    );
-
-    let codex_skill = read("skills/pixel-impact/SKILL.md");
-    assert!(codex_skill.contains("name: pixel-impact"));
-    assert!(codex_skill.contains("blast radius"));
-    assert!(!codex_skill.contains("disable-model-invocation"));
-    assert!(!codex_skill.contains("pixel build-index"));
-    let claude_skill = read("claude-skills/pixel-impact/SKILL.md");
-    assert!(claude_skill.contains("disable-model-invocation: true"));
-    assert_eq!(
-        claude_skill.replacen("disable-model-invocation: true\n", "", 1),
-        codex_skill,
-        "provider-specific copies must share one curated skill body"
-    );
-    let codex_policy = read("skills/pixel-impact/agents/openai.yaml");
-    assert!(codex_policy.contains("allow_implicit_invocation: false"));
+    for rel in [
+        ".claude-plugin/plugin.json",
+        ".codex-plugin/plugin.json",
+        ".qoder-plugin/plugin.json",
+    ] {
+        let manifest: serde_json::Value = serde_json::from_str(&read(rel)).unwrap();
+        assert!(manifest.get("skills").is_none(), "{rel} registers a skill");
+        assert!(manifest.get("hooks").is_none(), "{rel} registers a hook");
+        assert!(
+            !manifest.to_string().contains("pixel-impact"),
+            "{rel} still advertises the retired pixel-impact skill"
+        );
+    }
 
     let openclaw = read(".openclaw/skills/pixel/SKILL.md");
     assert!(openclaw.contains("name: pixel\n"));
     assert!(openclaw.ends_with(include_str!("../assets/pixel-agent-prompt.md")));
     for retired in [
         "skills/pixel/SKILL.md",
+        "skills/pixel-impact/SKILL.md",
+        "claude-skills/pixel-impact/SKILL.md",
+        "assets/plugin-skills/pixel-impact/SKILL.md",
         ".agents/skills/pixel/SKILL.md",
         ".agents/skills/pixel-impact/SKILL.md",
     ] {
         assert!(
             !repo.join(retired).exists(),
-            "retired broad skill remains: {retired}"
+            "retired skill remains: {retired}"
         );
     }
 }
@@ -3754,188 +3741,9 @@ fn repo_root() -> std::path::PathBuf {
         .unwrap()
 }
 
-/// A plugin root in a temp dir: the real hook script, the given context
-/// files, and a `bin/` holding a fake `pixel` whose `repo-state --help`
-/// exits with `repo_state_exit` (no `pixel` at all when `None`).
-#[cfg(unix)]
-fn plugin_root(context: &str, subagent: &str, repo_state_exit: Option<i32>) -> TempDir {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = TempDir::new().unwrap();
-    fs::create_dir_all(dir.path().join("hooks")).unwrap();
-    fs::create_dir_all(dir.path().join("bin")).unwrap();
-    fs::copy(
-        repo_root().join("hooks/pixel-context.sh"),
-        dir.path().join("hooks/pixel-context.sh"),
-    )
-    .unwrap();
-    fs::write(dir.path().join("PIXEL.md"), context).unwrap();
-    fs::write(dir.path().join("PIXEL-SUBAGENT.md"), subagent).unwrap();
-    if let Some(code) = repo_state_exit {
-        let exe = dir.path().join("bin/pixel");
-        fs::write(
-            &exe,
-            format!(
-                "#!/bin/sh\n[ \"$1\" = --version ] && echo 'pixel 0.1.0' && exit 0\n[ \"$1\" = repo-state ] && exit {code}\nexit 0\n"
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    dir
-}
-
-/// Run the hook as a harness does (stdin JSON, one event argument) with a
-/// PATH of the fake `bin/` plus the system tools, and parse its one line.
-#[cfg(unix)]
-fn run_context_hook(root: &std::path::Path, event: &str) -> serde_json::Value {
-    use std::io::Write;
-    let mut child = std::process::Command::new("/bin/sh")
-        .arg(root.join("hooks/pixel-context.sh"))
-        .arg(event)
-        .env("HOME", root)
-        .env(
-            "PATH",
-            format!("{}:/usr/bin:/bin", root.join("bin").display()),
-        )
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"{\"hook_event_name\":\"SessionStart\"}")
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "{out:?}");
-    let text = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(text.lines().count(), 1, "one JSON line: {text}");
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
-}
-
-/// The protocol reaches the model byte for byte, whatever it contains:
-/// quotes, backslashes, tabs and non-ASCII survive the JSON encoding, and a
-/// sub-agent gets the short sub-agent prompt, not the 18 KB one.
-#[cfg(unix)]
-#[test]
-fn context_hook_injects_the_prompt_for_its_event_verbatim() {
-    let context = "# Pixel \u{1F7E9}\n\n| `grep \"x\"` | `pixel search-content \"x\"` |\n\tpath\\to\\file\r\nend";
-    let root = plugin_root(context, "sub-agent prompt\n", Some(0));
-
-    let session = run_context_hook(root.path(), "SessionStart");
-    assert_eq!(
-        session["hookSpecificOutput"]["hookEventName"],
-        "SessionStart"
-    );
-    assert_eq!(session["hookSpecificOutput"]["additionalContext"], context);
-
-    let subagent = run_context_hook(root.path(), "SubagentStart");
-    assert_eq!(
-        subagent["hookSpecificOutput"]["hookEventName"],
-        "SubagentStart"
-    );
-    assert_eq!(
-        subagent["hookSpecificOutput"]["additionalContext"],
-        "sub-agent prompt"
-    );
-
-    let unknown = run_context_hook(root.path(), "Weird\"Event");
-    assert_eq!(
-        unknown["hookSpecificOutput"]["hookEventName"], "SessionStart",
-        "the event name in the JSON is never taken from the argument verbatim"
-    );
-}
-
-/// A plugin is useful alone, but a global `pixel install` lifecycle hook owns
-/// the same prompt when both paths are present.
-#[cfg(unix)]
-#[test]
-fn context_hook_stays_silent_when_global_pixel_lifecycle_is_installed() {
-    let root = plugin_root("PROTOCOL", "SUB", Some(0));
-    let claude_dir = root.path().join(".claude");
-    fs::create_dir_all(&claude_dir).unwrap();
-    fs::write(
-        claude_dir.join("settings.json"),
-        r#"{"hooks":{"SessionStart":[{"hooks":[{"command":"'/usr/local/bin/pixel' run-hook session-start --provider claude"}]}]}}"#,
-    )
-    .unwrap();
-    let out = std::process::Command::new("/bin/sh")
-        .arg(root.path().join("hooks/pixel-context.sh"))
-        .arg("SessionStart")
-        .env("HOME", root.path())
-        .env(
-            "PATH",
-            format!("{}:/usr/bin:/bin", root.path().join("bin").display()),
-        )
-        .stdin(std::process::Stdio::piped())
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{out:?}");
-    assert!(
-        out.stdout.is_empty(),
-        "plugin must defer to global hooks: {out:?}"
-    );
-}
-
-/// `pixel install` registers no SubagentStart context hook, so a global
-/// SessionStart hook must not silence the plugin's sub-agent prompt.
-#[cfg(unix)]
-#[test]
-fn context_hook_keeps_the_subagent_prompt_beside_global_lifecycle_hooks() {
-    let root = plugin_root("PROTOCOL", "SUB", Some(0));
-    let claude_dir = root.path().join(".claude");
-    fs::create_dir_all(&claude_dir).unwrap();
-    fs::write(
-        claude_dir.join("settings.json"),
-        r#"{"hooks":{"SessionStart":[{"hooks":[{"command":"'/usr/local/bin/pixel' run-hook session-start --provider claude"}]}]}}"#,
-    )
-    .unwrap();
-    let out = run_context_hook(root.path(), "SubagentStart");
-    assert_eq!(
-        out["hookSpecificOutput"]["hookEventName"], "SubagentStart",
-        "{out}"
-    );
-    assert_eq!(
-        out["hookSpecificOutput"]["additionalContext"], "SUB",
-        "{out}"
-    );
-}
-
-/// Without a usable binary the protocol is a list of failing commands: the
-/// hook says why it was not loaded instead, and never tells the agent to
-/// fetch an installer.
-#[cfg(unix)]
-#[test]
-fn context_hook_replaces_the_protocol_with_a_notice_when_pixel_cannot_run_it() {
-    let missing = plugin_root("PROTOCOL", "SUB", None);
-    let notice = run_context_hook(missing.path(), "SessionStart");
-    let text = notice["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(text.contains("`pixel` binary is not on PATH"), "{text}");
-    assert!(!text.contains("PROTOCOL"), "{text}");
-    assert!(!text.contains("curl"), "{text}");
-
-    let outdated = plugin_root("PROTOCOL", "SUB", Some(2));
-    let notice = run_context_hook(outdated.path(), "SubagentStart");
-    let text = notice["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(
-        text.contains("installed pixel 0.1.0 does not accept"),
-        "{text}"
-    );
-    assert!(!text.contains("SUB"), "{text}");
-    assert_eq!(
-        notice["hookSpecificOutput"]["hookEventName"],
-        "SubagentStart"
-    );
-}
-
 /// Every manifest parses and every path it hands a harness exists in the
-/// repository: a renamed hook script or a moved skills directory breaks the
-/// plugin silently at install time, never in a build.
+/// repository: a moved rules directory breaks the plugin silently at install
+/// time, never in a build.
 #[test]
 fn plugin_manifests_parse_and_point_at_files_that_exist() {
     let repo = repo_root();
@@ -3985,8 +3793,8 @@ fn plugin_manifests_parse_and_point_at_files_that_exist() {
     assert!(
         package_files
             .iter()
-            .any(|entry| entry.as_str() == Some("claude-skills/")),
-        "npm package must include the Claude-specific explicit-only skill copy"
+            .any(|entry| entry.as_str() == Some("pi/")),
+        "npm package must include the distributed Pi command"
     );
     for entry in package_files {
         exists("package.json", entry.as_str().unwrap());
@@ -3995,31 +3803,6 @@ fn plugin_manifests_parse_and_point_at_files_that_exist() {
         exists("opencode.json", entry.as_str().unwrap());
     }
 
-    let hooks = json("hooks/plugin-hooks.json");
-    let mut commands = 0;
-    for (event, matchers) in hooks["hooks"].as_object().unwrap() {
-        for matcher in matchers.as_array().unwrap() {
-            for hook in matcher["hooks"].as_array().unwrap() {
-                let command = hook["command"].as_str().unwrap();
-                commands += 1;
-                assert!(
-                    command.starts_with(
-                        "\"${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/hooks/pixel-context.sh\""
-                    ),
-                    "{event}: the script must resolve from the plugin root Claude Code and Codex set: {command}"
-                );
-                assert!(
-                    command.ends_with(&format!(" {event}")),
-                    "{event}: {command}"
-                );
-            }
-        }
-    }
-    assert_eq!(commands, 2, "SessionStart and SubagentStart");
-    exists("hooks/plugin-hooks.json", "hooks/pixel-context.sh");
-
-    // The legacy hook file remains available only to users who opt into it;
-    // the default Codex and Claude manifests above deliberately do not load it.
     // A root `plugin.json` wins over the tool directories: Copilot CLI reads
     // it before `.claude-plugin/plugin.json`, and Codex's Agent Plugins loader
     // then ignores hooks declared in `.codex-plugin/plugin.json`
@@ -5496,124 +5279,6 @@ fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged
     );
     let after = doctor_hooks();
     assert_eq!(after.status, CheckStatus::Green, "{after:?}");
-}
-
-/// A home with `pixel install` run and the Pixel plugin `pixel@local`
-/// installed in Claude (recorded in `installed_plugins.json`), but enabled
-/// nowhere yet.
-#[cfg(unix)]
-fn home_with_global_hooks_and_installed_plugin(home: &Path) -> std::path::PathBuf {
-    let exe = fake_pixel_exe(home);
-    install(&InstallOptions {
-        home: Some(home.to_path_buf()),
-        executable_path: Some(exe.clone()),
-        shell: Some(TEST_SHELL.into()),
-        ..Default::default()
-    })
-    .unwrap();
-    let plugins = home.join(".claude/plugins");
-    fs::create_dir_all(&plugins).unwrap();
-    fs::write(
-        plugins.join("installed_plugins.json"),
-        r#"{"version":2,"plugins":{"pixel@local":[{"scope":"user"}]}}"#,
-    )
-    .unwrap();
-    exe
-}
-
-/// Set `enabledPlugins` in the Claude settings file at `path`, keeping the
-/// rest of it.
-fn enable_plugins(path: &Path, plugins: serde_json::Value) {
-    let mut settings = if path.is_file() {
-        read_json(path)
-    } else {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        serde_json::json!({})
-    };
-    settings["enabledPlugins"] = plugins;
-    fs::write(path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
-}
-
-#[cfg(unix)]
-fn claude_hooks_check(
-    home: &Path,
-    exe: std::path::PathBuf,
-    repo: Option<&Path>,
-) -> pixel_install::doctor::DoctorCheck {
-    let report = doctor(&DoctorOptions {
-        home: Some(home.to_path_buf()),
-        executable_path: Some(exe),
-        shell: Some(TEST_SHELL.into()),
-        repo_root: repo.map(Path::to_path_buf),
-        only: vec!["install.claude-hooks".into()],
-        ..Default::default()
-    })
-    .unwrap();
-    check(&report, "install.claude-hooks").clone()
-}
-
-#[test]
-#[cfg(unix)]
-fn doctor_should_warn_when_claude_plugin_and_global_hooks_both_own_prompt() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path();
-    let exe = home_with_global_hooks_and_installed_plugin(home);
-    let settings = home.join(".claude/settings.json");
-    enable_plugins(&settings, serde_json::json!({"pixel@local": true}));
-    let finding = claude_hooks_check(home, exe, None);
-    assert_eq!(finding.status, CheckStatus::Yellow, "{finding:?}");
-    assert!(
-        finding
-            .summary
-            .contains("plugin `pixel@local` and global lifecycle hooks"),
-        "{finding:?}"
-    );
-    assert!(
-        finding.summary.contains(&settings.display().to_string()),
-        "the warning names the file that enables the plugin: {finding:?}"
-    );
-    // `pixel install` rewrites the global hooks and leaves the plugin
-    // enabled: offering it as the repair would never converge.
-    assert_eq!(finding.fix, None, "{finding:?}");
-}
-
-/// The overlap follows the plugin state Claude applies in the repository:
-/// project settings enable it, local settings override them, and a plugin
-/// Claude has not installed runs nothing.
-#[test]
-#[cfg(unix)]
-fn doctor_should_judge_the_plugin_state_claude_applies_in_the_repo() {
-    let dir = TempDir::new().unwrap();
-    let home = dir.path().join("home");
-    let repo = dir.path().join("repo");
-    fs::create_dir_all(&home).unwrap();
-    fs::create_dir_all(&repo).unwrap();
-    let exe = home_with_global_hooks_and_installed_plugin(&home);
-    let project = repo.join(".claude/settings.json");
-    let local = repo.join(".claude/settings.local.json");
-
-    // Enabled by the project only.
-    enable_plugins(&project, serde_json::json!({"pixel@local": true}));
-    let finding = claude_hooks_check(&home, exe.clone(), Some(&repo));
-    assert_eq!(finding.status, CheckStatus::Yellow, "{finding:?}");
-    assert!(
-        finding.summary.contains(&project.display().to_string()),
-        "{finding:?}"
-    );
-    // Without the repository, the home alone enables nothing.
-    let finding = claude_hooks_check(&home, exe.clone(), None);
-    assert_eq!(finding.status, CheckStatus::Green, "{finding:?}");
-
-    // Local settings disable what the project enabled.
-    enable_plugins(&local, serde_json::json!({"pixel@local": false}));
-    let finding = claude_hooks_check(&home, exe.clone(), Some(&repo));
-    assert_eq!(finding.status, CheckStatus::Green, "{finding:?}");
-
-    // Enabled, but not a plugin Claude has installed.
-    fs::remove_file(&local).unwrap();
-    enable_plugins(&project, serde_json::json!({"pixel@elsewhere": true}));
-    let finding = claude_hooks_check(&home, exe, Some(&repo));
-    assert_eq!(finding.status, CheckStatus::Green, "{finding:?}");
 }
 
 /// After a global `pixel-dev install` every hook is present and registered

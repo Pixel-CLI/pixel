@@ -50,11 +50,11 @@ slug = "claude-code"
 name = "Claude Code"
 logo = "claude"
 wiring = "install"
-lede = "`pixel install` preserves task lifecycle hooks while removing automatic retrieval prompts and advice. The optional plugin exposes a focused impact skill; ordinary searches remain native."
+lede = "`pixel install` preserves task lifecycle hooks while removing automatic retrieval prompts and advice. Each code prompt gets a bounded evidence brief; ordinary searches remain native. The optional plugin ships no skill or hook."
 global = ["~/.claude/settings.json"]
 wires = "task lifecycle hooks in `~/.claude/settings.json`; retired Pixel retrieval hooks are removed and foreign hooks are preserved"
 repo = [".claude/settings.local.json", ".claude/pixel-rtk-hooks.json"]
-plugin = "`/plugin marketplace add Pixel-CLI/pixel`, then `/plugin install pixel@pixel`: an explicit impact skill without automatic retrieval hooks"
+plugin = "`/plugin marketplace add Pixel-CLI/pixel`, then `/plugin install pixel@pixel`: ships no skill or hook; `pixel install` wires the per-prompt brief"
 checks = ["install.claude-hooks", "repo.claude-hooks"]
 
 [[agent]]
@@ -62,7 +62,7 @@ slug = "codex"
 name = "Codex"
 logo = "codex"
 wiring = "install"
-lede = "`pixel install` removes retired Pixel prompt and metrics hooks while retaining task lifecycle controls. The optional plugin exposes an explicit impact skill; ordinary searches remain native."
+lede = "`pixel install` removes retired Pixel prompt and metrics hooks while retaining task lifecycle controls. Each code prompt gets a bounded evidence brief; ordinary searches remain native. The optional plugin ships no skill or hook."
 global = ["~/.codex/config.toml", "~/.codex/hooks.json"]
 when = "in `$CODEX_HOME` instead of `~/.codex` when that variable is set"
 wires = "task lifecycle hooks in `hooks.json`; removes Pixel's retired `developer_instructions` block while preserving foreign instructions"

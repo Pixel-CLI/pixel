@@ -103,7 +103,7 @@ pixel doctor . --fix   # runs each repair a flagged check names, then re-checks
 
 ## Plugins
 
-Codex and Claude plugins provide an explicit impact skill without automatic retrieval hooks. Pi's package provides `/pixel-impact <symbol>`. The binary must be installed separately. These focused integrations make one bounded query against an existing fresh graph; missing binaries, unsupported versions or stale indexes fall back to native tools. Other agent packages retain their existing protocol integration.
+The Codex and Claude plugins ship no skill and no retrieval hooks; the per-prompt evidence brief comes from `pixel install`. Pi's package provides `/pixel-impact <symbol>`. The binary must be installed separately. The Pi command makes one bounded query against an existing fresh graph; missing binaries, unsupported versions or stale indexes fall back to native tools. Other agent packages retain their existing protocol integration.
 
 | Tool | Install |
 | --- | --- |
