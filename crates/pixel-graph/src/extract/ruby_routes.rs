@@ -163,10 +163,10 @@ impl RouteWalker<'_> {
         String::from_utf8_lossy(&self.src[node.byte_range()]).into_owned()
     }
 
-    /// A literal string or symbol without interpolation.
+    /// A literal string or symbol (`:a`, `:"a"`) without interpolation.
     fn literal(&self, node: Node) -> Option<String> {
         match node.kind() {
-            "string" => {
+            "string" | "delimited_symbol" => {
                 let mut out = String::new();
                 let mut cursor = node.walk();
                 for part in node.children(&mut cursor) {
@@ -767,6 +767,18 @@ end
                 "POST /search search#query (SearchController#query)",
                 "MOUNT /sidekiq mount Sidekiq::Web",
                 "MOUNT /blog mount Blog::Engine",
+            ]
+        );
+    }
+
+    #[test]
+    fn quoted_symbols_should_read_like_plain_ones() {
+        let source = "Rails.application.routes.draw do\n  resources :\"orders\", only: [:\"show\"]\n  get :\"ping\", to: \"health#ping\"\n  get :\"x#{y}\", to: \"a#b\"\nend\n";
+        assert_eq!(
+            table(source),
+            [
+                "GET /orders/:id orders#show (OrdersController#show)",
+                "GET /ping health#ping (HealthController#ping)",
             ]
         );
     }

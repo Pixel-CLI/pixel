@@ -95,9 +95,10 @@ pub struct ConceptMatch {
     pub kind: ConceptKind,
     pub raw: String,
     pub norm: String,
-    /// What the concept's extractor recorded beside its text: a route's
-    /// handler (`admin/orders#create (Admin::OrdersController#create)`).
-    /// Omitted when empty.
+    /// What the concept's extractor recorded beside its text: for a Rails
+    /// route its handler (`admin/orders#create
+    /// (Admin::OrdersController#create)`), for other kinds their own label
+    /// (`component`, `key`, an HTTP route's text). Omitted when empty.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub detail: String,
     /// Owner symbol name (smallest enclosing symbol), if any.

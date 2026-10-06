@@ -335,6 +335,43 @@ fn route_edges_should_follow_controller_edits_incrementally() {
     write(root.path(), path, ADMIN_ORDERS);
     update_file(root.path(), &db, path).unwrap();
     assert_routes(&db);
+
+    // The inherited `index` follows the controller's ancestors: another
+    // superclass takes it away, an own definition takes its place.
+    let base_index = action(
+        "app/controllers/admin/base_controller.rb",
+        "Admin::BaseController#index",
+    );
+    write(
+        root.path(),
+        path,
+        &ADMIN_ORDERS.replace("< BaseController", "< ApplicationController"),
+    );
+    update_file(root.path(), &db, path).unwrap();
+    {
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(referenced_by(&store, &base_index), []);
+    }
+    write(
+        root.path(),
+        path,
+        &ADMIN_ORDERS.replace(
+            "    def create\n",
+            "    def index\n    end\n    def create\n",
+        ),
+    );
+    update_file(root.path(), &db, path).unwrap();
+    {
+        let store = GraphStore::open(&db).unwrap();
+        assert_eq!(referenced_by(&store, &base_index), []);
+        assert_eq!(
+            referenced_by(&store, &action(path, "Admin::OrdersController#index")),
+            [("config/routes.rb".to_string(), 3)]
+        );
+    }
+    write(root.path(), path, ADMIN_ORDERS);
+    update_file(root.path(), &db, path).unwrap();
+    assert_routes(&db);
     write(root.path(), "config/routes.rb", &format!("{ROUTES}\n"));
     update_file(root.path(), &db, "config/routes.rb").unwrap();
     assert_routes(&db);

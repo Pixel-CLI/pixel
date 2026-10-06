@@ -263,4 +263,13 @@ fn a_find_code_match_line_shows_a_route_handler_only_when_recorded() {
         resolve_match_line(&plain),
         "src/a.ts:7 (string, score: 0.50) hello world again\n"
     );
+    // Another kind's detail is bookkeeping, never printed as a handler.
+    let component = json!({
+        "path": "src/b.tsx", "start_line": 2, "kind": "component", "score": 0.9,
+        "raw": "Button", "detail": "component",
+    });
+    assert_eq!(
+        resolve_match_line(&component),
+        "src/b.tsx:2 (component, score: 0.90) Button\n"
+    );
 }

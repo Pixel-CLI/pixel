@@ -95,11 +95,11 @@ fn in_class_body(node: Node) -> bool {
         .is_some_and(|n| n.kind() == "class")
 }
 
-/// A literal symbol or string.
+/// A literal symbol (`:a`, `:"a"`) or string without interpolation.
 fn symbol(w: &Walker, node: Node) -> Option<String> {
     let text = match node.kind() {
         "simple_symbol" => w.text(node).get(1..)?.to_string(),
-        "string" => {
+        "string" | "delimited_symbol" => {
             let mut out = String::new();
             for part in each_child(node) {
                 match part.kind() {
@@ -113,4 +113,30 @@ fn symbol(w: &Walker, node: Node) -> Option<String> {
         _ => return None,
     };
     (!text.is_empty()).then_some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::extract::extract_file;
+
+    #[test]
+    fn associations_should_record_their_class_path_from_plain_and_quoted_names() {
+        let source = "class Order\n  has_many :\"line_items\"\n  belongs_to :customer\n  has_one :invoice, class_name: :\"Billing::Invoice\"\n  has_many :\"x#{y}\"\n  def build\n    has_many :nested\n  end\nend\nmodule Concern\n  has_many :in_module\nend\n";
+        let fx = extract_file("app/models/order.rb", source.as_bytes()).unwrap();
+        let refs: Vec<(String, Option<String>)> = fx
+            .references
+            .into_iter()
+            .map(|r| (r.name, r.arg_of))
+            .collect();
+        let row = |name: &str, arg: &str| (name.to_string(), Some(arg.to_string()));
+        assert_eq!(
+            refs,
+            [
+                row("LineItem", ":association has_many LineItem"),
+                row("Customer", ":association belongs_to Customer"),
+                row("Invoice", ":association has_one Billing::Invoice"),
+            ],
+            "interpolated names, method bodies and modules reference nothing"
+        );
+    }
 }

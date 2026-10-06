@@ -3282,11 +3282,13 @@ fn resolve_match_line(m: &Value) -> String {
         .or_else(|| m.get("norm"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    match m
+    // Other kinds keep their own bookkeeping in `detail` (`component`,
+    // `key`, the route text again): only a route's handler is news.
+    let handler = m
         .get("detail")
         .and_then(Value::as_str)
-        .filter(|d| !d.is_empty())
-    {
+        .filter(|d| kind == "route" && !d.is_empty());
+    match handler {
         Some(detail) => {
             format!("{path}:{start_line} ({kind}, score: {score:.2}) {raw} → {detail}\n")
         }
