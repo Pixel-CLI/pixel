@@ -391,7 +391,9 @@ impl RouteWalker<'_> {
         }
     }
 
-    /// `to: "c#a"`, or `controller:` with `action:`, from the options.
+    /// `to: "c#a"`, or `controller:` with `action:`, from the options. An
+    /// `action:` alone names an action of the enclosing `controller` block,
+    /// else of the resource's controller (absolute, already namespaced).
     fn target(&self, args: Option<Node>, scope: &Scope) -> Option<String> {
         if let Some(to) = self.option(args, "to") {
             return self.literal(to);
@@ -399,7 +401,12 @@ impl RouteWalker<'_> {
         let action = self.option_literal(args, "action")??;
         let controller = match self.option_literal(args, "controller") {
             Some(c) => c?,
-            None => scope.controller.clone()?,
+            None => scope.controller.clone().or_else(|| {
+                scope
+                    .resource
+                    .as_ref()
+                    .map(|(resource, _)| format!("/{}", resource.controller))
+            })?,
         };
         Some(format!("{controller}#{action}"))
     }
@@ -433,12 +440,16 @@ impl RouteWalker<'_> {
             let target = self.target(args, scope).or_else(|| {
                 // No target: in a resource scope the name is an action of
                 // the resource's controller; elsewhere `get "a/b"` is
-                // `a#b`, and `get :x` in a `controller` block is `#x`.
+                // `a#b`, and `get :x` in a `controller` block is `#x`. A
+                // dynamic segment (`:id`, `*path`, `(.:format)`) names no
+                // action: Rails raises for a missing `:action` there.
                 let bare = segment.trim_start_matches('/');
-                if let Some((resource, _)) = &scope.resource {
-                    Some(format!("/{}#{bare}", resource.controller))
+                if bare.contains([':', '*', '(']) {
+                    None
+                } else if let Some((resource, _)) = &scope.resource {
+                    (!bare.contains('/')).then(|| format!("/{}#{bare}", resource.controller))
                 } else if let Some(controller) = &scope.controller {
-                    Some(format!("{controller}#{bare}"))
+                    (!bare.contains('/')).then(|| format!("{controller}#{bare}"))
                 } else {
                     bare.rsplit_once('/').map(|(c, a)| format!("{c}#{a}"))
                 }
@@ -754,6 +765,7 @@ mod tests {
         post :refund
       end
       get :export, on: :collection
+      get "preview", action: :show_preview, on: :member
       resources :line_items, only: :destroy
     end
     resource :profile, except: [:new, :create, :destroy]
@@ -784,6 +796,7 @@ end
                 "POST /admin/orders admin/orders#create (Admin::OrdersController#create)",
                 "POST /admin/orders/:id/refund admin/orders#refund (Admin::OrdersController#refund)",
                 "GET /admin/orders/export admin/orders#export (Admin::OrdersController#export)",
+                "GET /admin/orders/:id/preview admin/orders#show_preview (Admin::OrdersController#show_preview)",
                 "DELETE /admin/orders/:order_id/line_items/:id admin/line_items#destroy (Admin::LineItemsController#destroy)",
                 "GET /admin/profile/edit admin/profiles#edit (Admin::ProfilesController#edit)",
                 "GET /admin/profile admin/profiles#show (Admin::ProfilesController#show)",
@@ -848,6 +861,16 @@ end
   end
   draw :admin
   mount engine, at: "/x"
+  get "orders/:id"
+  get "files/*path"
+  get "feed(.:format)"
+  controller :pages do
+    get "orders/:id"
+    get "a/b"
+  end
+  resources :photos, only: [] do
+    get "nested/path"
+  end
 end
 "#;
         assert_eq!(table(source), Vec::<String>::new());
