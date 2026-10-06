@@ -115,9 +115,12 @@ pixel impact 'knownSymbol' --no-refresh --depth 2 --json --metrics off
 
 Use depth 1 when only direct callers are needed. `--no-refresh` checks the existing
 graph and source signature, limits the query to 1500 ms and the serialized
-result to 32 KiB, and does not start a daemon or refresh indexes. Missing,
-stale, incompatible or ambiguous data produces an error so the caller can
-continue with native tools. It cannot be combined with `--workspace`.
+result to 32 KiB, and does not start a daemon or refresh indexes. Only files
+changed since the last full graph build are re-hashed, so an edit that also
+restores an older mtime is not detected. Missing, stale or incompatible data
+produces an error so the caller can continue with native tools; an ambiguous
+name returns the matching `candidates` with their uids, as the daemon path
+does. It cannot be combined with `--workspace`.
 Older binaries that lack this flag should be treated as unavailable for
 this capability, not repaired during an ordinary task.
 

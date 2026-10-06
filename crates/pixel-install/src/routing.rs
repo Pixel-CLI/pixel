@@ -227,55 +227,38 @@ fn task_hook_verb(verb: &str) -> bool {
             || matches!(*event, "tool-failure" | "interrupt" | "model-response" | "user-bash"))
 }
 
+/// Whether repo-local native cleanup ([`HookScope::NativeCleanup`]) removes
+/// the Pixel hook `verb`: every callback except a task-event lifecycle hook,
+/// whichever provider that hook names. Doctor's repo checks read the same
+/// predicate, so a hook install keeps is never reported as retired.
+pub(crate) fn native_cleanup_retires(verb: &str) -> bool {
+    !task_hook_verb(verb)
+}
+
 fn codex_task_hook_verb(verb: &str) -> bool {
     let words: Vec<_> = verb.split_whitespace().collect();
     matches!(words.as_slice(), ["task-event", "--provider", "codex", "--event", event]
         if TASK_HOOK_EVENTS.iter().any(|(_, name)| name == event) || *event == "interrupt")
 }
 
-fn codex_hooks_are_enabled(config_path: &Path) -> bool {
-    let config = match std::fs::read_to_string(config_path) {
-        Ok(config) => config,
-        Err(_) => return false,
-    };
-    let Ok(config) = config.parse::<toml_edit::DocumentMut>() else {
-        return false;
-    };
-    let Some(features) = config.get("features") else {
-        return true;
-    };
-    let Some(features) = features.as_table_like() else {
-        return false;
-    };
-    let Some(enabled) = features
-        .get("hooks")
-        .or_else(|| features.get("codex_hooks"))
-    else {
-        return true;
-    };
-    enabled.as_bool().unwrap_or(false)
+/// `path` with its longest existing prefix canonicalized and the components
+/// that do not exist yet re-appended, so a file about to be created resolves
+/// through the same symlinks as its existing directory; `None` when no
+/// prefix exists or the existing one cannot be canonicalized.
+fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    while !existing.exists() {
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+    let mut resolved = existing.canonicalize().ok()?;
+    resolved.extend(missing.into_iter().rev());
+    Some(resolved)
 }
 
 fn paths_resolve_to_same_file(left: &Path, right: &Path) -> bool {
-    let resolve = |path: &Path| {
-        let mut unresolved = path.to_path_buf();
-        let mut suffix = Vec::new();
-        loop {
-            if let Ok(canonical) = unresolved.canonicalize() {
-                return suffix
-                    .into_iter()
-                    .rev()
-                    .fold(canonical, |resolved, component| resolved.join(component));
-            }
-            let Some(component) = unresolved.file_name() else {
-                return path.to_path_buf();
-            };
-            suffix.push(component.to_os_string());
-            if !unresolved.pop() {
-                return path.to_path_buf();
-            }
-        }
-    };
+    let resolve = |path: &Path| resolve_existing_prefix(path).unwrap_or_else(|| path.to_path_buf());
     resolve(left) == resolve(right)
 }
 
@@ -836,7 +819,7 @@ fn configure_scoped(
     ) {
         remove_matching_hooks(hooks, |command| {
             pixel_hook_verb(command, exe).is_some_and(|verb| {
-                !task_hook_verb(verb)
+                native_cleanup_retires(verb)
                     || scope == HookScope::NativeCleanupWithGlobalCodexTasks
                         && codex_task_hook_verb(verb)
             })
@@ -996,23 +979,8 @@ pub(crate) fn composed_backup_path(config_path: &Path) -> Result<PathBuf, String
     let parent = config_path
         .parent()
         .ok_or_else(|| "Codex hook configuration has no parent directory".to_owned())?;
-    let mut missing = Vec::new();
-    let mut existing = parent;
-    while !existing.exists() {
-        let name = existing
-            .file_name()
-            .ok_or_else(|| "Codex hook configuration parent cannot be resolved".to_owned())?;
-        missing.push(name.to_os_string());
-        existing = existing
-            .parent()
-            .ok_or_else(|| "Codex hook configuration parent cannot be resolved".to_owned())?;
-    }
-    let mut resolved = existing
-        .canonicalize()
-        .map_err(|error| format!("cannot resolve Codex hook configuration parent: {error}"))?;
-    for component in missing.iter().rev() {
-        resolved.push(component);
-    }
+    let resolved = resolve_existing_prefix(parent)
+        .ok_or_else(|| "Codex hook configuration parent cannot be resolved".to_owned())?;
     Ok(resolved.join(CODEX_COMPOSED_BACKUP))
 }
 
@@ -1123,21 +1091,20 @@ pub(crate) fn install_project_codex_at(
         crate::uninstall::ComposedGuardRestore::Restored
         | crate::uninstall::ComposedGuardRestore::NotManaged => {}
     }
-    let global_codex_tasks_registered = global_hooks_path.parent().is_some_and(|codex_home| {
-        codex_hooks_are_enabled(&codex_home.join(crate::codex_config::CODEX_CONFIG_FILE))
-    }) && install::read_settings(global_hooks_path)
-        .ok()
-        .is_some_and(|settings| {
-            task_hooks_registered(&settings, Provider::Codex, exe)
-                && global_hooks_path.parent().is_some_and(|codex_home| {
-                    crate::codex_config::task_hook_suite_is_enabled_and_trusted(
-                        codex_home,
-                        global_hooks_path,
-                        &settings,
-                        exe,
-                    )
-                })
-        });
+    let global_codex_tasks_registered =
+        install::read_settings(global_hooks_path)
+            .ok()
+            .is_some_and(|settings| {
+                task_hooks_registered(&settings, Provider::Codex, exe)
+                    && global_hooks_path.parent().is_some_and(|codex_home| {
+                        crate::codex_config::task_hook_suite_is_enabled_and_trusted(
+                            codex_home,
+                            global_hooks_path,
+                            &settings,
+                            exe,
+                        )
+                    })
+            });
     install_at_scoped(
         home,
         path,
@@ -1260,6 +1227,7 @@ pub(crate) fn install_at_scoped(
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
     let mut value = install::read_settings(path)?;
+    let original = value.clone();
     let saved = if provider == Provider::Claude {
         load_rtk_backup(backup_root)?
     } else {
@@ -1270,12 +1238,32 @@ pub(crate) fn install_at_scoped(
             path: path.into(),
             reason,
         })?;
+    // Cleanup registers nothing: an absent or already-clean file stays as it
+    // was instead of becoming (or being rewritten as) an empty hooks object.
+    let cleanup_only = matches!(
+        scope,
+        HookScope::NativeCleanup | HookScope::NativeCleanupWithGlobalCodexTasks
+    );
+    if cleanup_only
+        && original.get("hooks").is_none()
+        && value
+            .get("hooks")
+            .and_then(Value::as_object)
+            .is_some_and(Map::is_empty)
+        && let Some(root) = value.as_object_mut()
+    {
+        root.remove("hooks");
+    }
     // Persist only the adopted fragment, never restore a whole settings file
     // over later user edits. Save before changing its active registration.
     if !adopted.is_empty() {
         install::write_settings(&backup_root.join(RTK_BACKUP), &json!(adopted), dry_run)?;
     }
-    let backup = install::write_settings(path, &value, dry_run)?;
+    let backup = if cleanup_only && value == original {
+        None
+    } else {
+        install::write_settings(path, &value, dry_run)?
+    };
     // Nothing delegates to the backup any more: RTK is back in the settings
     // or was dropped by the user. Retire it after the settings are written,
     // unless the other file that reads it still delegates.
@@ -2555,6 +2543,54 @@ mod tests {
         assert_eq!(
             install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
             json!([original[0].clone(), original[1].clone(), changed])
+        );
+    }
+
+    #[test]
+    fn project_cleanup_should_not_create_or_rewrite_settings_it_leaves_unchanged() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let exe = Path::new("/tmp/pixel");
+        let global_hooks = Provider::Codex.path(home.path());
+        let project_hooks = repo.join(".codex/hooks.json");
+        let claude_local = repo.join(CLAUDE_LOCAL_SETTINGS);
+
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        install_project_claude_at(&repo, home.path(), exe, false).unwrap();
+        assert!(
+            !repo.join(".codex").exists(),
+            "cleanup must not create .codex/"
+        );
+        assert!(
+            !claude_local.exists(),
+            "cleanup must not create {claude_local:?}"
+        );
+
+        // A clean file in the user's own formatting keeps its exact bytes.
+        let clean = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"audit-stop"}]}]}}"#;
+        fs::create_dir_all(project_hooks.parent().unwrap()).unwrap();
+        fs::write(&project_hooks, clean).unwrap();
+        fs::create_dir_all(claude_local.parent().unwrap()).unwrap();
+        fs::write(&claude_local, r#"{"model":"opus"}"#).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        install_project_claude_at(&repo, home.path(), exe, false).unwrap();
+        assert_eq!(fs::read_to_string(&project_hooks).unwrap(), clean);
+        assert_eq!(
+            fs::read_to_string(&claude_local).unwrap(),
+            r#"{"model":"opus"}"#
+        );
+
+        // A retired callback is still removed, and foreign hooks kept.
+        let retired = json!({"hooks": {"Stop": [
+            hook_group(format!("{} run-hook metrics --provider codex", quoted_executable(exe)), None),
+            hook_group("audit-stop".into(), None),
+        ]}});
+        install::write_settings(&project_hooks, &retired, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            json!([hook_group("audit-stop".into(), None)])
         );
     }
 

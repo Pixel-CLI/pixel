@@ -577,17 +577,20 @@ fn hook_state_entry<'a>(
     group_index: usize,
     handler_index: usize,
 ) -> Option<&'a Item> {
-    let source_path = hooks_path.to_string_lossy();
     let label = hook_event_label(event)?;
+    let suffix = format!(":{label}:{group_index}:{handler_index}");
+    // Codex records the key under the path it resolved (a symlinked
+    // `CODEX_HOME`, `/var` -> `/private/var`), so compare canonical paths.
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let file = canonical(hooks_path);
     doc.get("hooks")?
         .as_table_like()?
         .get(HOOK_STATE_TABLE)?
         .as_table_like()?
         .iter()
         .find_map(|(key, entry)| {
-            let suffix = format!(":{label}:{group_index}:{handler_index}");
-            let source = key.strip_suffix(&suffix)?;
-            (source == source_path).then_some(entry)
+            let source = Path::new(key.strip_suffix(&suffix)?);
+            (source == hooks_path || canonical(source) == file).then_some(entry)
         })
 }
 
@@ -683,6 +686,20 @@ pub(crate) fn task_hook_suite_is_enabled_and_trusted(
             return false;
         };
         if profiles.iter().next().is_some() {
+            return false;
+        }
+    }
+    // `[features] hooks = false` (or the older `codex_hooks` spelling) turns
+    // every hook off; an unreadable value does too.
+    if let Some(features) = doc.get("features") {
+        let Some(features) = features.as_table_like() else {
+            return false;
+        };
+        if let Some(enabled) = features
+            .get("hooks")
+            .or_else(|| features.get("codex_hooks"))
+            && enabled.as_bool() != Some(true)
+        {
             return false;
         }
     }
@@ -843,6 +860,32 @@ pub(crate) fn check_developer_instructions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_state_entry_should_match_a_key_recorded_under_the_canonical_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real-codex");
+        std::fs::create_dir_all(&real).unwrap();
+        let linked = temp.path().join("linked-codex");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        std::fs::write(real.join("hooks.json"), "{}").unwrap();
+        let recorded = real.canonicalize().unwrap().join("hooks.json");
+        let doc: DocumentMut = format!(
+            "[hooks.state.\"{}:stop:1:0\"]\ntrusted_hash = \"sha256:x\"\n",
+            recorded.display()
+        )
+        .parse()
+        .unwrap();
+
+        let through_link = linked.join("hooks.json");
+        assert!(super::hook_state_entry(&doc, &through_link, "Stop", 1, 0).is_some());
+        assert!(super::hook_state_entry(&doc, &recorded, "Stop", 1, 0).is_some());
+        assert!(super::hook_state_entry(&doc, &through_link, "Stop", 0, 0).is_none());
+        assert!(super::hook_state_entry(&doc, &through_link, "SessionEnd", 1, 0).is_none());
+        let other = temp.path().join("other/hooks.json");
+        assert!(super::hook_state_entry(&doc, &other, "Stop", 1, 0).is_none());
+    }
 
     /// A `hooks.state` key spells the event the way Codex does
     /// (`hook_event_key_label`); a wrong or missing label reads every

@@ -83,12 +83,14 @@ fn impact_read_existing_graph_preserves_depth_direction_and_epistemics() {
     assert_eq!(direct["epistemics"]["lower_bound"], true);
     assert_eq!(
         direct["epistemics"]["basis"],
-        "existing graph; source signature checked"
+        "existing graph; source signature checked (files older than the build by mtime)"
     );
+    // The same default depth as the daemon path of `pixel impact`.
+    assert_eq!(pixel_daemon::api::IMPACT_DEFAULT_DEPTH, 3);
     let default_depth = success(&query(&dir, "leaf", &[]));
     assert_eq!(
         default_depth["counts_by_depth"],
-        serde_json::json!([1, 1, 0])
+        serde_json::json!([1, 1, 1])
     );
     let full = success(&query(
         &dir,
@@ -196,15 +198,15 @@ fn impact_read_detects_added_deleted_and_equal_length_changed_source() {
 }
 
 #[test]
-fn impact_read_rejects_missing_and_ambiguous_symbols_but_accepts_uid() {
+fn impact_read_answers_missing_and_ambiguous_symbols_as_the_daemon_does() {
     let dir = fixture("ambiguous", true);
     rejected(
         &query(&dir, "missing", &[]),
-        "symbol is missing or ambiguous",
+        "no symbol named \"missing\"; run `pixel find-symbol missing`",
     );
     rejected(
         &query(&dir, "src/example.ts#missing#function", &[]),
-        "symbol is absent",
+        "no symbol with uid",
     );
     std::fs::write(
         dir.join("src/other.ts"),
@@ -212,7 +214,19 @@ fn impact_read_rejects_missing_and_ambiguous_symbols_but_accepts_uid() {
     )
     .unwrap();
     build(&dir);
-    rejected(&query(&dir, "leaf", &[]), "symbol is missing or ambiguous");
+    let ambiguous = success(&query(&dir, "leaf", &[]));
+    assert_eq!(ambiguous["hint"], "ambiguous name; re-call with uid");
+    let mut uids: Vec<_> = ambiguous["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| candidate["uid"].as_str().unwrap().to_owned())
+        .collect();
+    uids.sort();
+    assert_eq!(
+        uids,
+        ["src/example.ts#leaf#function", "src/other.ts#leaf#function"]
+    );
     let explicit = success(&query(&dir, "src/example.ts#leaf#function", &[]));
     assert_eq!(explicit["target"], "src/example.ts#leaf#function");
 }

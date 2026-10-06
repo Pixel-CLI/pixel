@@ -5413,11 +5413,7 @@ fn run_command(
                 DirectionArg::Downstream => "downstream",
             };
             if no_refresh {
-                let direction = match direction {
-                    DirectionArg::Upstream => pixel_graph::impact::Direction::Upstream,
-                    DirectionArg::Downstream => pixel_graph::impact::Direction::Downstream,
-                };
-                let data = impact_read::query(path, uid_or_name, direction, depth.unwrap_or(2))?;
+                let data = impact_read::query(path, uid_or_name, dir, depth)?;
                 finish_graph_cmd(data, json, |_| None)?;
                 return Ok(());
             }

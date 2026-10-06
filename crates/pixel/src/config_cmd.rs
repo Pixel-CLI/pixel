@@ -11,8 +11,10 @@
 //!
 //! The `policy` key says what the guard does when a coding agent reaches for
 //! native retrieval instead of Pixel: `advisory` (suggest, never deny, the
-//! default), `enforce` (deny supported native retrieval in Codex,
-//! Antigravity, Devin and Pi), or `off` (no decisions, no rewrites).
+//! default), `enforce` (deny supported native retrieval in Antigravity,
+//! Devin and the other guard-routed hosts, and in Pi only when
+//! `PIXEL_PI_RETRIEVAL=1`), or `off` (no decisions, no rewrites). Codex and
+//! Claude retrieval stays native in every mode.
 //! `PIXEL_POLICY` overrides it for one environment, and the legacy
 //! `PIXEL_TARGETS_GUARD=0` kill switch still forces `off`.
 //!
@@ -68,8 +70,9 @@ fn feature_resolution(root: Option<&Path>, key: &str, env: &str) -> (bool, Strin
 pub enum PolicyMode {
     /// Suggest Pixel and keep every native tool call (the default).
     Advisory,
-    /// Deny supported native retrieval on Codex, Antigravity, Devin and Pi;
-    /// unsupported shapes stay native.
+    /// Deny supported native retrieval on Antigravity, Devin and the other
+    /// guard-routed hosts, and on Pi with `PIXEL_PI_RETRIEVAL=1`; Codex,
+    /// Claude and unsupported shapes stay native.
     Enforce,
     /// No policy decisions and no rewrites.
     Off,
@@ -719,9 +722,12 @@ fn setup_with_keys(
         ),
         (
             "task_context",
-            "Suggest relevant code when an agent receives a prompt?",
+            "Suggest relevant code when an agent receives a prompt (not Claude or Codex)?",
         ),
-        ("task_boundary", "Detect task changes in agent prompts?"),
+        (
+            "task_boundary",
+            "Detect task changes in agent prompts (not Claude or Codex)?",
+        ),
     ] {
         let current = doc.get(key).and_then(Value::as_bool).unwrap_or(true);
         let Some(value) = ask_bool(input, output, label, current, keys, color)? else {
@@ -732,7 +738,7 @@ fn setup_with_keys(
     let Some(enforce) = ask_bool(
         input,
         output,
-        "Enforce Pixel retrieval in coding agents (deny native search)?",
+        "Enforce Pixel retrieval where supported (deny native search; never Claude or Codex)?",
         doc.get("policy").and_then(Value::as_str) == Some(PolicyMode::Enforce.as_str()),
         keys,
         color,
@@ -1225,6 +1231,10 @@ fn run_metrics_with(
     }
 }
 
+/// Printed when `enforce` is set: the hosts it cannot reach, so a success
+/// message is never read as enforcement everywhere.
+const ENFORCE_SCOPE_NOTE: &str = "note: Codex and Claude keep native retrieval under every policy; Pi enforces only when started with PIXEL_PI_RETRIEVAL=1";
+
 /// `pixel config policy [advisory|enforce|off] [--global] [--json]`: without
 /// a value, report the effective policy and the layer that set it; with one,
 /// persist it to the chosen layer. `--json` is the Pi extension's
@@ -1272,6 +1282,9 @@ pub fn run_policy(
                 doc["policy"] = Value::String(mode.as_str().to_string());
             })?;
             println!("policy: {} — wrote {}", mode.as_str(), target.display());
+            if mode == PolicyMode::Enforce {
+                println!("{ENFORCE_SCOPE_NOTE}");
+            }
             Ok(())
         }
     }
