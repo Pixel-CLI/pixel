@@ -112,7 +112,7 @@ Classify is cheap enough to sit on a harness's decision boundaries:
 - **Guards**: gate tool calls in a `PreToolUse`-style hook — classify the
   command or file path as `safe` / `review` / `block` before allowing it.
 - **File triage without context burn**: when pi is the harness, the
-  `pixel-classify-files` extension (`pixel install` offers it once classify
+  `pixel-classify-files` Pi package (`pixel install` offers it once classify
   is configured) registers `ask_pixel_file_bool/choice/score`,
   `ask_pixel_files`, and `pick_pixel_file` — the file's text never enters
   the agent's context, only typed verdicts do. If those tools are present

@@ -466,6 +466,23 @@ mod tests {
     use crate::testutil::two_commit_repo;
 
     #[test]
+    fn recency_score_should_scale_the_id_to_a_thousandth() {
+        assert!((recency_score(5, 10) - 5e-4).abs() < 1e-12);
+        assert!((recency_score(10, 10) - 1e-3).abs() < 1e-12);
+        assert!(recency_score(3, 0).abs() < f64::EPSILON);
+        assert!(recency_score(3, -1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn max_commit_id_should_be_the_newest_row_id() {
+        let (dir, _, _) = two_commit_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        assert_eq!(max_commit_id(&store), 0);
+        ingest_within(&mut store);
+        assert_eq!(max_commit_id(&store), 2);
+    }
+
+    #[test]
     fn sanitize_query_keeps_quoted_phrases_whole_and_drops_one_char_terms() {
         assert_eq!(
             sanitize_query(r#"fix "rate limit" x ab retry_once, y"#),

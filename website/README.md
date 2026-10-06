@@ -214,7 +214,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   wiring changes. Its "What pixel install wires" table is the
   `agents-install` shortcode, from `data/agents.toml`.
 - `data/agents.toml`: the agents the site names, in the home's order, and
-  what Pixel does for each: `wiring` (`install`, `plugin` or `rules`), the
+  what Pixel does for each: `wiring` (`install`, `plugin`, `rules` or `none`), the
   files `pixel install` and `pixel install --repo` write, the plugin command
   or rules file, the `pixel doctor` checks. The hero, the Compatibility
   grid, the `/docs/` wiring table and the `/for/` section all read it.
@@ -228,7 +228,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   naming its `agent` and the `{{% agent-setup %}}` shortcode
   (`layouts/shortcodes/agent-setup.html`), which writes the setup sections
   from the data: install, what `pixel install` writes, the plugin or rules
-  file, the per-repository guard, the check, the removal.
+  file, the per-repository cleanup, the check, the removal.
   `layouts/for/single.html` adds the breadcrumb (visible and as
   `BreadcrumbList` JSON-LD) and the other agents; `layouts/for/list.html`
   groups `/for/` by wiring, and the build fails on an agent with no page or

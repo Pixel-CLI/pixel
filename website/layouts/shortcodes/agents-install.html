@@ -1,5 +1,5 @@
-{{- /* The "What pixel install wires" table of /docs/: every data/agents.toml entry `pixel install` writes files for, with its `wires` line. Markdown, rendered by render-table.html. */ -}}
-| Agent | How the prompt reaches it |
+{{- /* The "What pixel install wires" table of /docs/: every data/agents.toml entry `pixel install` writes files for, with its `wires` line; agents it only cleans up after are on their /for/ pages. Markdown, rendered by render-table.html. */ -}}
+| Agent | What it writes |
 | --- | --- |
 {{ range where hugo.Data.agents.agent "wiring" "install" -}}
 | {{ .name }} | {{ .wires }} |

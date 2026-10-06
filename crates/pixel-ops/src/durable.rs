@@ -133,11 +133,20 @@ pub fn sha256_hex(input: &str) -> String {
 
 /// State root directory for pixel operations.
 /// `$XDG_STATE_HOME/pixel` or `~/.local/state/pixel`.
+#[cfg_attr(test, mutants::skip)] // one-line adapter over the env; `state_root_from` is tested
 pub fn state_root() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+    state_root_from(
+        std::env::var("XDG_STATE_HOME").ok(),
+        std::env::var("HOME").ok(),
+    )
+}
+
+/// `state_root` for given `XDG_STATE_HOME` and `HOME` values.
+fn state_root_from(xdg_state_home: Option<String>, home: Option<String>) -> PathBuf {
+    if let Some(xdg) = xdg_state_home {
         PathBuf::from(xdg).join("pixel")
     } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let home = home.unwrap_or_else(|| ".".to_string());
         PathBuf::from(home).join(".local/state/pixel")
     }
 }
@@ -146,6 +155,22 @@ pub fn state_root() -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn state_root_from_should_prefer_xdg_then_home_then_cwd() {
+        assert_eq!(
+            state_root_from(Some("/x".into()), Some("/h".into())),
+            PathBuf::from("/x/pixel")
+        );
+        assert_eq!(
+            state_root_from(None, Some("/h".into())),
+            PathBuf::from("/h/.local/state/pixel")
+        );
+        assert_eq!(
+            state_root_from(None, None),
+            PathBuf::from("./.local/state/pixel")
+        );
+    }
 
     #[test]
     fn write_durably_overwrites_existing() {

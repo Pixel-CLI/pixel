@@ -42,4 +42,17 @@ mod tests {
         assert_eq!(fused[0].0, 7);
         assert_eq!(fused[1].0, 8);
     }
+
+    /// Each channel adds `weight / (RRF_K + rank + 1)`; lexical weighs twice.
+    #[test]
+    fn fuse_should_sum_weighted_reciprocal_ranks() {
+        let fused = fuse(&[5], &[5, 6]);
+        assert_eq!(fused.len(), 2);
+        assert_eq!(fused[0].0, 5);
+        assert!((fused[0].1 - 3.0 / 61.0).abs() < 1e-7, "{fused:?}");
+        assert_eq!(fused[1].0, 6);
+        assert!((fused[1].1 - 1.0 / 62.0).abs() < 1e-7, "{fused:?}");
+        let lexical_second = fuse(&[1, 2], &[]);
+        assert!((lexical_second[1].1 - 2.0 / 62.0).abs() < 1e-7);
+    }
 }

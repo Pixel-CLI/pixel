@@ -757,4 +757,43 @@ mod tests {
         // The external hub never surfaces as candidate or as a bonus.
         assert!(!signals.fan_in.contains_key("src/hot_lib.rs"));
     }
+
+    fn session_event(ts_ms: i64, kind: SessionEventKind, path: &str) -> SessionEvent {
+        SessionEvent {
+            ts_ms,
+            kind,
+            path: path.to_string(),
+            detail: None,
+        }
+    }
+
+    /// The window is inclusive at both ends (age 0 and age == window) and
+    /// excludes future and older events.
+    #[test]
+    fn session_window_keeps_both_bounds_and_drops_future_and_stale_events() {
+        let now = 1_000_000;
+        let window = 600_000;
+        let events = vec![
+            session_event(now, SessionEventKind::Read, "now.rs"),
+            session_event(now - window, SessionEventKind::Edit, "edge.rs"),
+            session_event(now - 120_000, SessionEventKind::Read, "two.rs"),
+            session_event(now + 1, SessionEventKind::Read, "future.rs"),
+            session_event(now - window - 1, SessionEventKind::Read, "stale.rs"),
+        ];
+        let scores = session_score(&events, now, 30.0, window);
+        let mut keys: Vec<&str> = scores.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["edge.rs", "now.rs", "two.rs"]);
+        assert!((scores["now.rs"] - 1.0).abs() < 1e-12);
+        assert!((scores["edge.rs"] - 2.0 * (-10.0f64 / 30.0).exp()).abs() < 1e-12);
+
+        assert_eq!(
+            session_reasons(&events, now, window),
+            vec![
+                "read now.rs 0m ago".to_string(),
+                "read two.rs 2m ago".to_string(),
+                "edited edge.rs 10m ago".to_string(),
+            ]
+        );
+    }
 }

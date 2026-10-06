@@ -25,8 +25,13 @@ fn run(home: &Path, args: &[&str]) -> serde_json::Value {
 fn wrappers_only_removes_one_block_and_keeps_the_rest_installed() {
     let home = Scratch::for_test("uninstall-cli", "wrappers-only");
     run(&home, &["install", "--shell", "zsh", "--json"]);
-    let prompt = home.join(".local/share/pixel/agent-prompt.md");
-    assert!(prompt.is_file(), "fixture: install wrote the prompt");
+    // The Claude task hooks stand for the rest of the install.
+    let settings = home.join(".claude/settings.json");
+    let installed = std::fs::read_to_string(&settings).expect("fixture: install wrote settings");
+    assert!(
+        installed.contains("run-hook task-event --provider claude --event session-start"),
+        "fixture: install registered the Claude task hooks: {installed}"
+    );
     // `install` no longer writes a wrapper (the prompt travels through the
     // lifecycle hooks); the block `--wrappers-only` exists for is the residue
     // of an older install, so the fixture writes one after installing.
@@ -49,9 +54,10 @@ fn wrappers_only_removes_one_block_and_keeps_the_rest_installed() {
         "export KEEP=1\n",
         "the zsh block is gone and the user's own lines stay"
     );
-    assert!(
-        prompt.is_file(),
-        "the prompt survives a wrappers-only uninstall"
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        installed,
+        "the Claude hooks survive a wrappers-only uninstall"
     );
 
     // Without the flag the same command is the full uninstall. It names the
@@ -69,7 +75,46 @@ fn wrappers_only_removes_one_block_and_keeps_the_rest_installed() {
         ],
     );
     assert!(full["steps"].as_array().unwrap().len() > 1, "{full}");
-    assert!(!prompt.exists(), "a full uninstall removes the prompt");
+    let left: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(
+        left,
+        serde_json::json!({}),
+        "a full uninstall removes the Claude hooks"
+    );
+}
+
+/// `--shell` reaches the install: the retired wrapper is taken out of the
+/// profile of the shell the flag names, whatever the account's login shell.
+#[test]
+fn install_cleans_the_profile_of_the_shell_it_is_given() {
+    let home = Scratch::for_test("uninstall-cli", "install-shell");
+    let block = "export KEEP=1\n# >>> pixel-managed >>>\nclaude() { command claude \"$@\"; }\n# <<< pixel-managed <<<\n";
+    std::fs::write(home.join(".zshrc"), block).unwrap();
+    run(&home, &["install", "--shell", "zsh", "--json"]);
+    assert_eq!(
+        std::fs::read_to_string(home.join(".zshrc")).unwrap(),
+        "export KEEP=1\n"
+    );
+}
+
+/// `--repo` reaches the uninstall: the run is scoped to that repository.
+#[test]
+fn uninstall_repo_reports_the_repository_it_was_given() {
+    let home = Scratch::for_test("uninstall-cli", "uninstall-repo");
+    let repo = home.join("project");
+    std::fs::create_dir_all(&repo).unwrap();
+    let report = run(
+        &home,
+        &[
+            "uninstall",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert_eq!(report["home"], repo.display().to_string(), "{report}");
 }
 
 /// Executing a binary this test just copied can fail with ETXTBSY while a

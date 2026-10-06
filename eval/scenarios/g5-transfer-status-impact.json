@@ -1,0 +1,24 @@
+{
+  "id": "g5-transfer-status-impact",
+  "prompt": "Before implementing a policy change, assess the current transfer boundary: every transfer to Ghost must require Notion status Ready to Publish, whether initiated from the web API or CLI. Trace every direct caller of transferPageToGhost, identify which caller currently checks status and which bypasses it, and recommend the narrowest shared function to enforce the invariant. Include the current Ghost create/update branches and repository-relative paths. Do not modify files or call external services.",
+  "must": [
+    {"pattern": "apps/notion-to-ghost/src/app/api/transfer/route.ts", "points": 2},
+    {"pattern": "apps/notion-to-ghost/cli.js", "points": 2},
+    {"pattern": "apps/notion-to-ghost/src/lib/integration.ts", "points": 2},
+    {"pattern": "transferPageToGhost", "points": 2},
+    {"pattern": "Ready to Publish", "points": 2},
+    {"pattern": "findPostsByTitle", "points": 2},
+    {"pattern": "createDraft", "points": 2},
+    {"pattern": "updatePost", "points": 2}
+  ],
+  "never": [],
+  "semantic_review": {
+    "human_review_required": true,
+    "criteria": [
+      "Names both direct callers and does not claim the CLI currently enforces Ready to Publish.",
+      "Identifies transferPageToGhost as the shared enforcement boundary and notes that it must retrieve/check status itself.",
+      "Describes existing-post update versus new-draft creation without confusing the Ghost API methods.",
+      "Citations are repository-relative and grounded in the checked-out source."
+    ]
+  }
+}

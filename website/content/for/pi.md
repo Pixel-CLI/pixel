@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Pi"
-description: "What pixel install writes into Pi's APPEND_SYSTEM.md, the per-repository guard extension, the Pi package alternative, how to check the wiring and how to remove it."
+description: "Pi's explicit /pixel-impact command as a Pi package, removal of the retired system-prompt block and project extension, how to check it and how to remove it."
 agent: "pi"
 ---
 

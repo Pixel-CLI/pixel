@@ -10,11 +10,12 @@
   {{ $agents := hugo.Data.agents.agent }}
   {{ $groups := slice
     (dict "wiring" "install" "title" "Wired by pixel install" "text" "One `pixel install` writes each agent's own configuration, and `pixel doctor` checks it.")
-    (dict "wiring" "plugin" "title" "Through the agent's plugins" "text" "`pixel install` does not touch these agents: their own plugin or extension mechanism loads Pixel's protocol.")
+    (dict "wiring" "plugin" "title" "Through the agent's plugins" "text" "`pixel install` wires nothing for these agents: their own plugin or extension mechanism loads Pixel's protocol.")
     (dict "wiring" "rules" "title" "Through a rules file" "text" "`pixel install` does not touch these agents: copy the rule the repository ships into your project.")
+    (dict "wiring" "none" "title" "Native tools only" "text" "These agents keep their own search: `pixel install` writes nothing for them and only removes what an earlier release wrote.")
   }}
   {{ range $agents }}
-    {{ if not (in (slice "install" "plugin" "rules") .wiring) }}{{ errorf "data/agents.toml: %s has wiring %q, which /for/ has no group for" .name .wiring }}{{ end }}
+    {{ if not (in (slice "install" "plugin" "rules" "none") .wiring) }}{{ errorf "data/agents.toml: %s has wiring %q, which /for/ has no group for" .name .wiring }}{{ end }}
     {{ if not (site.GetPage (printf "/for/%s" .slug)) }}{{ errorf "data/agents.toml: %s has no page content/for/%s.md" .name .slug }}{{ end }}
   {{ end }}
 

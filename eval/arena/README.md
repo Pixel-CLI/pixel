@@ -1,46 +1,182 @@
-# eval/arena — head-to-head: raw codex vs retrieval tools vs Pixel
+# Codex retrieval arena
 
-Seven dockerized arms on identical footing (same repo snapshot, codex version,
-auth, sandbox, prompts): `raw` (no tool), `semble`, `graft`, `stacklit`,
-`gitnexus`, `gortex`, `pixel`. Each tool is installed and wired to codex per
-its own docs (MCP registration or instruction channel). Measures answer
-quality (the shared scenario rubrics), token consumption (codex usage events),
-token saving vs raw, and wall time; `rank.py` orders arms by quality then
-tokens.
+Seven containerized arms compare retrieval tools against native Codex: `raw`,
+`semble`, `graft`, `stacklit`, `gitnexus`, `gortex`, and `pixel`. Each arm uses
+its own writable repository snapshot; each repetition gets a fresh snapshot.
+Authentication is mounted at runtime, never baked into an image.
+
+Build the shared base before the first run:
 
 ```bash
-docker build -f eval/arena/Dockerfile.base -t pixel-arena-base:latest eval/arena
-REPO_SNAPSHOT=/path/to/pixel-clone bash eval/arena.sh                 # all arms, all tasks
-REPO_SNAPSHOT=... bash eval/arena.sh --tasks "s3-rename-impact"       # one task, all arms parallel
+rtk docker build -f eval/arena/Dockerfile.base -t pixel-arena-base:latest eval/arena
 ```
 
-One container per arm runs all tasks (prep once — indexing, MCP wiring —
-then the scored runs); arms launch in parallel. Per-arm rw snapshots keep one
-tool's index artifacts out of another's repo. Model: `CODEX_MODEL`
-(default `gpt-6-luna`) at `CODEX_EFFORT` (default `high`). Auth is mounted at
-runtime, never baked.
+## Tiny paired loops
 
-## First round — task s3 (rename impact), gpt-6-luna @ high, n1 per arm
+Start with one scenario, one repetition and two arms. Use a new output directory
+for every run so an earlier failure or a different candidate cannot enter its
+comparison.
 
-| rank | arm | score | tokens | time | saving vs raw |
-| --- | --- | --- | --- | --- | --- |
-| 1 | graft | 11/12 | 104,395 | 39s | −24,132 (−30%) |
-| 1 | **pixel** | **11/12** | **114,962** | **29s** | −34,699 (−43%) |
-| 3 | gitnexus | 10/12 | 286,794 | 53s | +206,531 (+257%) |
-| 4 | stacklit | 7/12 | 80,868 | 22s | +605 (+1%) |
-| 5 | raw | 3/12 | 80,263 | 26s | — |
-| 5 | semble | 3/12 | 80,225 | 33s | +38 (+0%) |
-| — | gortex | no data | — | — | daemon never registered the repo (track-before-ready hang) |
+```bash
+REPO_SNAPSHOT=/path/to/foreign/repository \
+PIXEL_SRC=local \
+CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium \
+rtk bash eval/arena.sh --arms "raw pixel" --tasks "g1-locale-routing" \
+  --reps 1 --assert-context-parity \
+  --results-dir eval/arena-results/g1-candidate-01
+```
 
-Raw's own n1 variance is large (the same task scored 11/12 in an earlier
-probe) — rankings at n1 are indicative, not conclusive; n≥3 per arm is the
-follow-up before any verdict. Semble's flat-vs-raw result is expected: its
-lazy indexing only helps when the agent calls it, and codex needed to be told
-its MCP tools existed (fair-wiring question per tool — see below).
+`REPO_SNAPSHOT` supplies the repository being investigated. Local Pixel source
+comes from the repository containing this script, or `PIXEL_SRC_DIR` when set.
+Use the same repository revision, model, effort and scenario for both arms.
+The `g*` scenarios target the foreign example application; the `s*`
+scenarios target Pixel itself. A scenario's expected paths must exist in the
+chosen repository.
 
-Known first-round integration findings: gortex's `track` ran before its
-daemon accepted registrations (hang — now fixed with a registration poll);
-semble's lazy index only helps if the agent calls its MCP tools, which raw
-codex had no reason to discover — the fair-wiring question per tool is
-queued. Stacklit's derived map lands in `/root/.codex/AGENTS.md`, which
-codex reads, so its 7/12 already includes that channel.
+To reuse a particular candidate, set `PIXEL_IMAGE_SOURCE=existing` and
+`PIXEL_ARENA_IMAGE=sha256:<image-id>`. The runner resolves every selected image
+once, checks the actual container image before starting it, and saves that
+receipt beside the results. It also refuses comparisons across different Codex
+versions. Local builds cache Cargo's registry, Git dependencies, and build
+artifacts; the first build still needs to populate those caches. Git builds use
+the resolved commit as Cargo's actual `--rev`.
+The runner bind-mounts its current entrypoint, context manifest, hook auditor,
+and skill staging helper
+into each container, including when reusing a pinned image; harness-only edits
+do not require an image rebuild. `harness-source.json` records SHA-256 values
+and container paths for the runner files used in that run.
+
+Graph experiments use `--prepare-pixel-graph`; the saved setup receipt separates
+index preparation from model time. Retrieval routing stays native by default,
+including when a graph is prepared. A fresh Codex home may leave installed
+hooks untrusted: static context parity alone cannot establish hook delivery.
+`--assert-context-parity` additionally expects no Pixel calls and is intended
+for generic-question abstention controls.
+
+### Explicit reviewed-hook experiment
+
+The default run keeps Pixel retrieval routing native and does not bypass Codex
+hook trust. For a disposable raw/Pixel pair that intentionally exercises
+Pixel's Codex prompt hook, add `--review-pixel-hooks`. This flag only audits and
+records delivery; it does not enable experimental caller facts. Both containers
+must finish the audit before either model starts: raw must have no hooks; Pixel
+must have exactly the 11 known Pixel Codex commands under
+`/root/.codex/hooks.json`; project/global foreign hooks and plugin hook
+declarations stop the pair. Only after both audits pass does the runner apply
+the same Codex hook-trust bypass to both arms. It does not change host hook
+trust. The Pixel prompt-hook wrapper records its validated `UserPromptSubmit`
+response, emitted context status and hook stderr in
+`pixel-hook-<rep>.jsonl`; task stderr is retained as
+`<arm>-<task>-<rep>.stderr`. Neither receipt stores prompt input or auth. A
+receipt proves only that context text was returned and forwarded by the hook;
+it does not prove the model used it. Reviewed-hook mode is limited to one task
+per run so the receipt corresponds to the selected scenario; the harness marks
+the Pixel result failed if that task produces no valid hook response.
+
+### Skill-only pilot
+
+Use a packaged Codex skill whose `agents/openai.yaml` explicitly sets
+`allow_implicit_invocation: false`. The disposable Pixel snapshot gets a copy
+with that policy enabled; the packaged source is never edited. Raw and Pixel
+use the same pinned Pixel image and graph preparation, but neither runs
+`pixel install` or installs retrieval hooks. Only Pixel receives the candidate
+skill. The runner captures discovered skills, skill and policy hashes, hook
+configuration fingerprints, static instructions, and setup time, then checks
+that the candidate skill is the only context difference and that no Pixel
+instruction/hook text remains in either arm.
+
+The candidate must be supplied by the packaging lane after its install/image
+is ready. The arena does not build or install a skill package itself:
+
+```bash
+REPO_SNAPSHOT=/path/to/foreign/repository \
+PIXEL_IMAGE_SOURCE=existing PIXEL_ARENA_IMAGE=sha256:<pinned-image-id> \
+CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium \
+rtk bash eval/arena.sh --arms "raw pixel" --tasks "g5-transfer-status-impact" \
+  --reps 1 --skill-candidate-dir /path/to/packaged/pixel-impact \
+  --results-dir eval/arena-results/g5-skill-pilot-01
+```
+
+This mode is diagnostic, not a general no-regression guarantee. Skill
+discovery is recorded separately from explicit skill-file reads and Pixel CLI
+calls. Absence of a file-read event does not prove the model did not load the
+skill, and a CLI call does not by itself establish usefulness. Review semantic
+correctness and task-specific edit/consumer completeness separately from the
+required-pattern score. Use a fresh output directory for each candidate.
+
+### Claude skill-only diagnostic
+
+`eval/claude_skill_pair.py` runs a one-repetition raw/skill pair after a
+no-model preflight. It uses the same foreign-repository snapshot and g5
+scenario, with `sonnet` / `medium` by default. It resolves `claude` and `pixel`
+from `PATH` unless explicit binary paths are supplied; a missing executable
+fails with a clear message. On macOS it reads raw Keychain JSON for the current
+account and uses only its `claudeAiOauth` object. Without a configured scope it
+selects Claude's unscoped login; `--auth-config-dir`, or the existing
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` / `CLAUDE_CONFIG_DIR` scope, selects that
+profile's entry without falling back to another profile. This default OAuth
+mode never imports user settings, skills, hooks, plugins, or MCP configuration. An optional
+`--credentials-file` takes precedence over the
+config directory's `.credentials.json` and must have mode `0600`. Only that
+OAuth object is copied into each private, temporary arm config; credentials are
+never written to results. Exact access/refresh token values and their JSON-
+escaped forms are redacted from Claude stdout/stderr before parsing or saving;
+this is exact-value filtering, not general secret detection. The preflight
+refuses an expired refresh token.
+
+```bash
+PAIR_ARGS=(--repo /path/to/architech-t --scenario eval/scenarios/g5-transfer-status-impact.json \
+  --skill claude-skills/pixel-impact/SKILL.md --results-dir eval/arena-results/claude-g5-r1)
+python3 eval/claude_skill_pair.py preflight "${PAIR_ARGS[@]}"
+python3 eval/claude_skill_pair.py run "${PAIR_ARGS[@]}"
+```
+
+Run the second command only after reviewing a successful preflight. OAuth mode
+requires a usable existing OAuth login. A failed or missing arm remains a failed
+pair, with unavailable token fields recorded as unknown.
+
+For an existing Claude gateway connection, explicitly add
+`--auth-mode configured-gateway --gateway-settings /path/to/settings.json` to
+both commands. This mode reads only the supported authentication, endpoint,
+header and model-selection environment fields; other settings, hooks, skills,
+plugins and MCP configuration remain excluded. Both arms receive the same
+in-memory connection settings in otherwise isolated environments. Preflight
+records the settings file's path and file identity; changing the file requires
+a fresh preflight. Private values and their hashes are excluded from receipts. Record this as a separate
+gateway experiment, without pooling it with another provider or model.
+
+`claude auth status` alone is insufficient: host settings can supply a different
+endpoint, token, or model while an isolated OAuth comparison has no usable
+credential. Preflight checks configuration without making a model request;
+only the actual pair establishes whether the connection works. Claude's reported
+model identity must agree between arms, but does not attest which model an
+external gateway runs internally.
+
+The snapshot check permits writes to Pixel's regular accounting files,
+`.pixel/actions.jsonl` and `.pixel/calls.json`. It still detects source edits,
+graph changes, unexpected sidecars and changes to those files' types.
+Before each arm, the prepared source snapshot, Pixel binary, graph and recorded
+query output must still match preflight. Validation time is recorded separately
+from model runtime. Both arms receive the same narrow
+`Bash(pixel impact * --no-refresh *)` permission allowance.
+
+The old `--codex-caller-facts` route is retired and rejected. Historical runs
+remain in their original result directories and must be interpreted with
+their recorded source/image identities.
+
+The hook allowlist intentionally matches the current Pixel Codex installer.
+If its command set or event names change, update the allowlist and tests before
+using this reviewed-hook mode.
+
+Inspect the transcripts as well as the rank table. A required-pattern score
+measures answer coverage, not semantic correctness. Token totals include
+reported input and generated tokens; cached input is part of input and must not
+be counted twice. Unknown usage is unknown, not zero. Failure counts belong
+beside completed-pair measurements; a transcript containing an answer does not
+by itself explain a nonzero container exit.
+
+Keep the first loop diagnostic. A single pair can expose a forced extra lookup
+or an incorrect answer, but cannot establish a general speedup. Confirm useful
+changes on another generic question and on the structural question meant to
+benefit. Preserve the source identity, image identity, complete logs and exit
+statuses with each result. Change one input between candidate comparisons.

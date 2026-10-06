@@ -309,6 +309,16 @@ pub(crate) fn oc_parse(
 mod tests {
     use super::*;
 
+    #[test]
+    fn with_db_should_discover_exactly_that_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("oc.db");
+        std::fs::write(&db, b"x").unwrap();
+        let units = Adapter::with_db(db.clone()).discover().unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].path, db);
+    }
+
     fn fixture(path: &Path) {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(

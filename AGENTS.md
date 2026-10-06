@@ -127,6 +127,3 @@ Both commands target the account's login shell (from the user database, not `$SH
 
 Rebuild, install, index and doctor are optional unless local deployment was
 explicitly requested. Documentation and workflow work does not require them.
-<!-- pixel:warp-retrieval:begin -->
-This repository has a Pixel index (`.pixel/`). Retrieval starts with Pixel: `pixel search-content -F '<identifier>'` for exact identifiers, `pixel find-code '<concept>'` for behavior-described code, and `pixel impact '<symbol>'` before renames — a native grep/rg over indexed code is a missed retrieval; native tools stay available for everything Pixel does not cover, and two fruitless pixel calls mean switch to grep.
-<!-- pixel:warp-retrieval:end -->

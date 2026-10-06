@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 //! `pixel run-hook guard` — provider-aware, exact-subset search routing.
-//! Explicit providers preserve unsupported calls silently. The policy is
-//! advisory by default; `pixel config policy enforce` (or PIXEL_POLICY=enforce)
-//! opts into known retrieval denials, `off` disables Pixel policy. Without a
-//! provider, legacy task-scoping guidance remains.
+//! Codex and Claude calls remain native in every retrieval policy mode.
+//! Other explicit providers preserve unsupported calls silently. Their policy
+//! is advisory by default; `pixel config policy enforce` (or
+//! PIXEL_POLICY=enforce) opts into supported retrieval denials, and `off`
+//! disables Pixel policy. Without a provider, legacy task-scoping guidance remains.
 //!
 //! Legacy advisory contract (without `--provider`):
 //! 1. SCOPING (ADVISORY) — while `<repo>/.pixel/targets.json` is active
@@ -41,15 +42,13 @@
 //! literal-file subset; they do not substitute enriched Pixel output.
 //! Uncovered execution shapes retain their original command and native permissions.
 //!
-//! Claude and Devin preserve their native permission flow. Codex and Antigravity
-//! enforce recognized repository discovery only under the enforce policy.
+//! Devin preserves its native permission flow. Antigravity enforces recognized
+//! repository discovery only under the enforce policy.
 //! Bounded direct reads (<=200 lines), external paths, shell filters, execution
 //! and unknown syntax stay native. Enforcement requires an indexed repository
 //! at or above the effective tool workdir; unindexed trees are never denied.
-//! Claude advisories exit 0 with a JSON note
-//! (systemMessage + additionalContext), no permissionDecision, and transparent
-//! read-only rewrites use `updatedInput`. Codex requires an explicit `allow`
-//! for the user-approved literal-file rewrite subset only.
+//! Explicit Claude RTK delegation and Codex composed foreign-hook decisions
+//! remain available independently of Pixel's retired retrieval policy.
 //! Fails open (exit 0) on any parse error or unexpected shape — a guard
 //! that crashes or wedges the session is worse than a guard that misses a
 //! case.
@@ -313,7 +312,7 @@ pub enum Provider {
     Copilot,
 }
 
-const MANIFEST_MAX_AGE_SECS: u64 = 24 * 3600;
+const MANIFEST_MAX_AGE_SECS: u64 = 86_400; // 24 h
 const ORIENTATION_ANY: &[&str] = &["CLAUDE.md", "AGENTS.md", "README.md"];
 const ORIENTATION_ROOT: &[&str] = &[
     "package.json",
@@ -526,7 +525,7 @@ struct Manifest {
 }
 
 /// Provider adapters only change the command field. Timeouts, cwd, metadata
-/// and future provider arguments survive untouched. Codex requires allow
+/// and future provider arguments survive untouched. ZCode requires allow
 /// alongside updatedInput; that authorization is restricted to this exact
 /// read-only compatibility subset, never applied to fallback calls.
 fn rewrite_json(provider: Provider, updated_input: Value) -> Value {
@@ -534,7 +533,7 @@ fn rewrite_json(provider: Provider, updated_input: Value) -> Value {
         "hookEventName": "PreToolUse",
         "updatedInput": updated_input,
     });
-    if matches!(provider, Provider::Codex | Provider::Zcode) {
+    if provider == Provider::Zcode {
         output["permissionDecision"] = Value::String("allow".into());
         output["permissionDecisionReason"] =
             Value::String("Pixel compatibility routing: single-file literal read only.".into());
@@ -569,11 +568,8 @@ fn provider_rewrite_with(
     }
     let tool = payload.get("tool_name")?.as_str()?;
     let shell = match provider {
-        Provider::Claude => tool == "Bash",
-        Provider::Codex => matches!(
-            tool,
-            "Bash" | "shell" | "unified_exec" | "local_shell" | "exec_command"
-        ),
+        // Native retrieval: `policy_response` never routes these here.
+        Provider::Claude | Provider::Codex => return None,
         Provider::Devin => tool == "exec" || tool == "Bash",
         Provider::Zcode => tool == "Bash" || tool == "exec",
         // OpenCode names the same tools as Claude but lowercases them.
@@ -717,13 +713,12 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
         .filter(|cwd| !cwd.is_empty())
         .map(PathBuf::from)
         // Cursor sends `cwd: ""` on Shell calls and puts the repo in
-        // `workspace_roots` instead (observed on cursor-agent 2026.10.01).
+        // `workspace_roots` instead (observed on cursor-agent 2026.10.01);
+        // Antigravity's PreInvocation payload names only `workspacePaths`.
         .or_else(|| {
-            payload
-                .get("workspace_roots")
-                .and_then(Value::as_array)
-                .and_then(|roots| roots.first())
-                .and_then(Value::as_str)
+            ["workspace_roots", "workspacePaths"]
+                .into_iter()
+                .find_map(|key| payload.get(key)?.as_array()?.first()?.as_str())
                 .map(PathBuf::from)
         })
         .or_else(|| std::env::current_dir().ok())?;
@@ -737,13 +732,13 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
     )
 }
 
-/// Recognized retrieval gets guidance, or an opt-in denial on Codex/Antigravity.
-/// Unsupported capabilities remain the host's responsibility.
+/// Recognized retrieval is governed for providers whose hooks own that policy.
+/// Codex and unsupported capabilities remain the host's responsibility.
 fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
-    // Claude keeps its native permission flow (and its RTK delegate). Devin
-    // has a documented PreToolUse block contract, so its retrieval calls are
-    // subject to policy like Codex and Antigravity.
-    if provider == Provider::Claude {
+    // Claude and Codex keep their native permission flow (and Claude its RTK
+    // delegate). Devin has a documented PreToolUse block contract, so its
+    // retrieval calls are subject to policy alongside Antigravity.
+    if matches!(provider, Provider::Claude | Provider::Codex) {
         return None;
     }
     let payload = &if provider == Provider::Opencode {
@@ -1234,7 +1229,7 @@ fn enforce_leaf(
     }
 }
 
-/// Codex and Antigravity have different documented denial envelopes.
+/// Providers have different documented denial envelopes.
 fn enforce_deny(provider: Provider, reason: &str) -> Value {
     let reason = format!("pixel policy: {reason}");
     match provider {
@@ -1276,7 +1271,15 @@ fn policy_response(
     payload: &Value,
     mode: crate::config_cmd::PolicyMode,
 ) -> Option<Value> {
-    if mode == PolicyMode::Off {
+    // Native retrieval remains under the host's permissions. Task contracts
+    // and foreign hook decisions are evaluated through their own paths.
+    if matches!(provider, Provider::Codex | Provider::Claude) {
+        return None;
+    }
+    // Steering is opt-in: under the default advisory policy, and under
+    // `off`, every host keeps its native retrieval — no rewrite, suggestion
+    // or retrieval approval.
+    if mode != PolicyMode::Enforce {
         return None;
     }
     if matches!(provider, Provider::Devin | Provider::Zcode)
@@ -1288,26 +1291,7 @@ fn policy_response(
         return Some(response);
     }
     let reason = enforce_reason(provider, payload)?;
-    match mode {
-        PolicyMode::Enforce => Some(enforce_deny(provider, &reason)),
-        // Codex and Devin both document `additionalContext` on PreToolUse;
-        // Claude and Antigravity do not (no response leaves their own
-        // permissions authoritative).
-        PolicyMode::Advisory if matches!(provider, Provider::Codex | Provider::Devin) => {
-            Some(advisory_json(&format!(
-                "Pixel suggestion: {reason}. Original call proceeds."
-            )))
-        }
-        // Cursor's preToolUse injects `additional_context` (documented on
-        // the deny path, accepted on pass-through); its own permissions
-        // stay authoritative — advisory only.
-        PolicyMode::Advisory if provider == Provider::Cursor => Some(serde_json::json!({
-            "additional_context": format!(
-                "Pixel suggestion: {reason}. Original call proceeds."
-            )
-        })),
-        _ => None,
-    }
+    Some(enforce_deny(provider, &reason))
 }
 
 /// Approve only standalone Pixel retrieval commands in supported permission hooks.
@@ -1979,7 +1963,10 @@ fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
     let Ok(payload) = serde_json::from_str::<Value>(raw) else {
         std::process::exit(0);
     };
+    // The pre-invocation search steers the model before it picks a tool, so
+    // it runs only under the opt-in enforce policy, like every rewrite.
     if provider == Provider::Antigravity
+        && policy_mode(&payload) == PolicyMode::Enforce
         && let Some(response) = antigravity_pre_invocation(&payload)
     {
         print!("{response}");
@@ -1992,54 +1979,6 @@ fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
     }
     if delegate_rtk && provider == Provider::Claude {
         delegate_rtk_hook(raw);
-    }
-    // Claude's native Read/Grep tools reach the hook through the widened
-    // PreToolUse matcher installed by `routing::shell_matcher`; Claude keeps
-    // its own permission flow (no deny, no input rewrite — `policy_response`
-    // is silent for these tools), but the advisory tier the provider-less
-    // legacy path already emits is reproduced here. Glob is intentionally
-    // absent from the matcher; `non_shell_advisory` mirrors that decision.
-    if provider == Provider::Claude {
-        let event = payload
-            .get("hook_event_name")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if is_guard_event(&payload, event) {
-            let tool = payload
-                .get("tool_name")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let tool_input_value = payload.get("tool_input").cloned().unwrap_or(Value::Null);
-            if let Some(tool_input) = tool_input_value.as_object() {
-                let cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
-                    || std::env::current_dir().unwrap_or_default(),
-                    PathBuf::from,
-                );
-                let raw_path = tool_input
-                    .get("file_path")
-                    .or_else(|| tool_input.get("path"))
-                    .or_else(|| tool_input.get("AbsolutePath"))
-                    .or_else(|| tool_input.get("TargetFile"))
-                    .or_else(|| tool_input.get("target_file"))
-                    .or_else(|| tool_input.get("filePath"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let anchor = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
-                let idx_root = find_up(&anchor, ".pixel");
-                let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
-                let (manifest, manifest_expired) =
-                    manifest_pair(manifest_root.as_deref().map(load_manifest_state));
-                non_shell_advisory(
-                    tool,
-                    tool_input,
-                    &cwd,
-                    raw_path,
-                    idx_root.as_deref(),
-                    manifest.as_ref(),
-                    manifest_expired,
-                );
-            }
-        }
     }
     // Ordinary commands receive no new context or permission override.
     std::process::exit(0);
@@ -2442,15 +2381,6 @@ fn has_foreign_mutation(value: &Value) -> bool {
         || value.get("permissionDecision").is_some()
 }
 
-fn foreign_allow(value: &Value) -> bool {
-    value
-        .get("hookSpecificOutput")
-        .and_then(|specific| specific.get("permissionDecision"))
-        .and_then(Value::as_str)
-        == Some("allow")
-        || value.get("permissionDecision").and_then(Value::as_str) == Some("allow")
-}
-
 fn foreign_denial(value: &Value) -> bool {
     value
         .get("hookSpecificOutput")
@@ -2480,21 +2410,22 @@ fn compose_context(mut response: Value, contexts: &[String]) -> Value {
     response
 }
 
+/// The hook payload when it is readable, non-empty and at most `cap` bytes;
+/// anything else is a fail-open native execution.
+fn read_composed_payload(reader: impl Read, cap: usize) -> Option<Vec<u8>> {
+    let mut raw = Vec::new();
+    reader.take((cap + 1) as u64).read_to_end(&mut raw).ok()?;
+    (!raw.is_empty() && raw.len() <= cap).then_some(raw)
+}
+
 /// Execute the install-time snapshot of Codex foreign PreToolUse commands,
 /// then apply Pixel's transparent literal-read rewrite only when no foreign
 /// handler returned a denial or input/permission mutation. Every failure is a
 /// fail-open native execution with no Pixel rewrite.
 pub fn run_composed_codex(backup: &Path) -> ! {
-    let mut raw = Vec::new();
-    if std::io::stdin()
-        .take((COMPOSED_MAX_INPUT + 1) as u64)
-        .read_to_end(&mut raw)
-        .is_err()
-        || raw.is_empty()
-        || raw.len() > COMPOSED_MAX_INPUT
-    {
+    let Some(raw) = read_composed_payload(std::io::stdin(), COMPOSED_MAX_INPUT) else {
         std::process::exit(0);
-    }
+    };
     let Ok(payload) = serde_json::from_slice::<Value>(&raw) else {
         std::process::exit(0);
     };
@@ -2558,28 +2489,17 @@ pub fn run_composed_codex(backup: &Path) -> ! {
         }
     }
     if let Some(foreign) = terminal_foreign {
-        // A foreign allow is not authority over Pixel's own policy: under
-        // PIXEL_POLICY=enforce a recognized retrieval call still denies.
-        // Foreign denials and input mutations keep their precedence.
-        if foreign_allow(&foreign)
-            && policy_mode(&payload) == PolicyMode::Enforce
-            && let Some(reason) = enforce_reason(Provider::Codex, &payload)
-        {
-            print!("{}", enforce_deny(Provider::Codex, &reason));
-            std::process::exit(0);
-        }
-        // Never place a Pixel rewrite after foreign authority. Returning this
-        // valid response preserves foreign authority.
+        // Never place a Pixel rewrite or retrieval denial after foreign
+        // authority. Returning this valid response preserves foreign
+        // denials and input mutations.
         print!("{foreign}");
         std::process::exit(0);
     }
     if incomplete_foreign {
         std::process::exit(0);
     }
-    if let Some(response) = policy_response(Provider::Codex, &payload, policy_mode(&payload)) {
-        print!("{}", compose_context(response, &contexts));
-        std::process::exit(0);
-    }
+    // Pixel adds no retrieval policy of its own to Codex: only the foreign
+    // hooks' combined context remains.
     if !contexts.is_empty() {
         print!("{}", compose_context(advisory_json(""), &contexts));
     }
@@ -2664,6 +2584,7 @@ fn delegate_rtk_hook(raw: &str) -> ! {
 /// Entry point for `pixel run-hook guard`. Reads the PreToolUse hook payload
 /// from stdin. Never returns an `Err` that would surface as exit 1 — every
 /// failure path is a deliberate exit 0 (allow, optionally with advice).
+#[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; decoding is `guard_request`, dispatch and precedence `guard_outcome`, the edit verdict `edit_advice`
 pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     if env_flag_off("PIXEL_TARGETS_GUARD") {
         std::process::exit(0);
@@ -2675,37 +2596,227 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     if let Some(provider) = provider {
         run_provider_guard(provider, delegate_rtk, &input);
     }
-    let Ok(payload) = serde_json::from_str::<Value>(&input) else {
+    let Some(request) = guard_request(&input, policy_mode, || {
+        std::env::current_dir().unwrap_or_default()
+    }) else {
         std::process::exit(0);
     };
-    if !payload.is_object() {
-        std::process::exit(0);
-    }
-    if policy_mode(&payload) == PolicyMode::Off {
-        std::process::exit(0);
-    }
+    let GuardRequest {
+        tool,
+        cwd,
+        tool_input,
+        raw_path,
+        route,
+        ..
+    } = &request;
+    let (tool, cwd, raw_path) = (tool.as_str(), cwd.as_path(), raw_path.as_str());
+    let anchor = resolve(raw_path, cwd).unwrap_or_else(|| canonical(cwd));
 
+    let idx_root = find_up(&anchor, ".pixel");
+
+    // POST-TOOL-USE blast-radius: after an Edit/Write/apply_patch, deliver
+    // the dependants of what was just edited without being asked (P0·3).
+    // This is the only one of the nine tracks that turns an *ignored doctrine rule*
+    // into a *delivered fact*: the PreToolUse doctrine says "run pixel impact
+    // before editing a symbol", butthe bench shows agents don't. Here the
+    // dependants arrive after the edit, unsolicited.
+    let idx = idx_root.as_deref();
+    let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
+    let load_manifest = || manifest_pair(manifest_root.as_deref().map(load_manifest_state));
+    let probes = ShellProbes {
+        deny: &|cmd| bash_deny_lines(cmd, idx),
+        substitute: &|cmd| git_mutation_substitute_lines(cmd, idx, cwd),
+        transcript: &transcript_store_hit,
+        rewrite: &|original| crate::search_compat::rewrite(original, cwd),
+    };
+    match guard_outcome(&request, idx.is_some(), &probes) {
+        GuardOutcome::BlastRadius => {
+            post_tool_use_blast_radius(&anchor, idx, tool);
+            std::process::exit(0);
+        }
+        GuardOutcome::Advise(lines) => advise(&lines),
+        GuardOutcome::Rewrite(updated) => {
+            print!("{}", rewrite_json(Provider::Claude, updated));
+            std::process::exit(0);
+        }
+        GuardOutcome::ShellAdvisories(cmd) => {
+            let (manifest, _) = load_manifest();
+            check_bash_advisories(&cmd, cwd, idx, manifest.as_ref());
+            std::process::exit(0);
+        }
+        GuardOutcome::Tool => {}
+    }
+    let (manifest, manifest_expired) = load_manifest();
+
+    match route {
+        GuardRoute::Read => {
+            non_shell_advisory(
+                tool,
+                tool_input,
+                cwd,
+                raw_path,
+                idx_root.as_deref(),
+                manifest.as_ref(),
+                manifest_expired,
+            );
+        }
+        GuardRoute::Edit => {
+            let Some(p) = resolve(raw_path, cwd) else {
+                std::process::exit(0);
+            };
+            let exists = p.is_file();
+            let advice = edit_advice(
+                exists,
+                manifest.as_ref().map(|m| allowed(&p, m)),
+                idx_root.as_deref().map(|root| is_exempt(&p, root)),
+            );
+            match (advice, &manifest, &idx_root) {
+                (EditAdvice::OutOfScope, Some(m), _) => scoping_advisory(&p, m),
+                // MANDATE ADVISORY — indexed repo, no active manifest: suggest
+                // `pixel scope-task` before edits to existing files, but proceed.
+                (EditAdvice::Unscoped, _, Some(root)) => {
+                    if manifest_expired {
+                        expired_manifest_advisory(root);
+                    }
+                    if env_flag_off("PIXEL_GUARD_EDIT") {
+                        mandate_advisory(&p, root);
+                    } else {
+                        edit_guard_advisory(&p, root);
+                    }
+                }
+                // Unindexed directory: suggest indexing so pixel's scoped
+                // retrieval works. Advisory only — the edit proceeds.
+                // Pixel works in ANY directory, not just git repos — the
+                // index is a `.pixel/` dir, independent of `.git/`.
+                (EditAdvice::SuggestIndex, _, _) => {
+                    if let Some(git_root) = find_up(&anchor, ".git") {
+                        suggest_index_advisory(&git_root, true);
+                    } else {
+                        // Non-git directory: still suggest indexing.
+                        suggest_index_advisory(&canonical(cwd), false);
+                    }
+                }
+                _ => {}
+            }
+        }
+        GuardRoute::Shell(_) | GuardRoute::Other => {}
+    }
+    std::process::exit(0);
+}
+
+/// The I/O-backed lookups the shell branch of [`guard_outcome`] consults.
+struct ShellProbes<'a> {
+    /// Destructive-git advisory lines ([`bash_deny_lines`]).
+    deny: &'a dyn Fn(&str) -> Option<Vec<String>>,
+    /// Git-substitute advisory lines ([`git_mutation_substitute_lines`]).
+    substitute: &'a dyn Fn(&str) -> Option<Vec<String>>,
+    /// The transcript store a command reads ([`transcript_store_hit`]).
+    transcript: &'a dyn Fn(&str) -> Option<&'static str>,
+    /// The read-only pixel rewrite of a command string.
+    rewrite: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// What the guard does with a decoded request.
+#[derive(Debug, Clone, PartialEq)]
+enum GuardOutcome {
+    /// PostToolUse: deliver the edited file's blast radius.
+    BlastRadius,
+    /// Print these advisory lines and allow.
+    Advise(Vec<String>),
+    /// Replace the tool input with this one (a transparent rewrite).
+    Rewrite(Value),
+    /// No safety advisory and no rewrite: run the scoping advisories on this command.
+    ShellAdvisories(String),
+    /// A non-shell tool: continue with the read/edit branches.
+    Tool,
+}
+
+/// The guard's dispatch for a decoded request. Precedence on a shell call:
+/// the safety tier (destructive git, git substitute, transcript store) first,
+/// so a read-only rewrite never hides a mutation warning; then the rewrite,
+/// only in an indexed repo and only for a string `command`; then the
+/// scoping advisories.
+fn guard_outcome(req: &GuardRequest, indexed: bool, probes: &ShellProbes<'_>) -> GuardOutcome {
+    if req.post_tool_use {
+        return GuardOutcome::BlastRadius;
+    }
+    let GuardRoute::Shell(cmd) = &req.route else {
+        return GuardOutcome::Tool;
+    };
+    if let Some(lines) = (probes.deny)(cmd) {
+        return GuardOutcome::Advise(non_blocking_advisory_lines(&lines));
+    }
+    if let Some(lines) = (probes.substitute)(cmd) {
+        return GuardOutcome::Advise(non_blocking_advisory_lines(&lines));
+    }
+    if let Some(store) = (probes.transcript)(cmd) {
+        return GuardOutcome::Advise(transcript_archaeology_advisory_lines(store));
+    }
+    if indexed
+        && let Some(original) = req.tool_input.get("command").and_then(Value::as_str)
+        && let Some(rewritten) = (probes.rewrite)(original)
+    {
+        let mut updated = Value::Object(req.tool_input.clone());
+        updated["command"] = Value::String(rewritten);
+        return GuardOutcome::Rewrite(updated);
+    }
+    GuardOutcome::ShellAdvisories(cmd.clone())
+}
+
+/// Which branch of the guard a tool call takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GuardRoute {
+    /// A shell tool, with its command text.
+    Shell(String),
+    /// A read/search tool.
+    Read,
+    /// An edit/write tool.
+    Edit,
+    /// Any other tool: allowed silently.
+    Other,
+}
+
+/// A hook payload the guard acts on, decoded from stdin.
+#[derive(Debug, Clone, PartialEq)]
+struct GuardRequest {
+    /// The event is a PostToolUse (blast-radius delivery).
+    post_tool_use: bool,
+    tool: String,
+    cwd: PathBuf,
+    tool_input: serde_json::Map<String, Value>,
+    raw_path: String,
+    route: GuardRoute,
+}
+
+/// Decode a guard hook payload. `None` means allow silently (exit 0):
+/// invalid JSON, a non-object, policy `off`, a non-guard event, or a
+/// non-object `tool_input`. `policy` and `current_dir` are the I/O seams.
+fn guard_request(
+    input: &str,
+    policy: impl FnOnce(&Value) -> PolicyMode,
+    current_dir: impl FnOnce() -> PathBuf,
+) -> Option<GuardRequest> {
+    let payload = serde_json::from_str::<Value>(input).ok()?;
+    if !payload.is_object() || policy(&payload) == PolicyMode::Off {
+        return None;
+    }
     let event = payload
         .get("hook_event_name")
         .and_then(Value::as_str)
         .unwrap_or("");
     if !is_guard_event(&payload, event) {
-        std::process::exit(0);
+        return None;
     }
-
     let tool = payload
         .get("tool_name")
         .and_then(Value::as_str)
-        .unwrap_or("");
-    let cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
-        || std::env::current_dir().unwrap_or_default(),
-        PathBuf::from,
-    );
-    let tool_input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
-    let Some(tool_input) = tool_input.as_object() else {
-        std::process::exit(0);
-    };
-
+        .unwrap_or("")
+        .to_string();
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map_or_else(current_dir, PathBuf::from);
+    let tool_input = payload.get("tool_input")?.as_object()?.clone();
     let raw_path = tool_input
         .get("file_path")
         .or_else(|| tool_input.get("path"))
@@ -2716,36 +2827,9 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         .or_else(|| tool_input.get("target_file"))
         .or_else(|| tool_input.get("filePath"))
         .and_then(Value::as_str)
-        .unwrap_or("");
-    let anchor = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
-
-    let idx_root = find_up(&anchor, ".pixel");
-
-    // POST-TOOL-USE blast-radius: after an Edit/Write/apply_patch, deliver
-    // the dependants of what was just edited without being asked (P0·3).
-    // This is the only one of the nine tracks that turns an *ignored doctrine rule*
-    // into a *delivered fact*: the PreToolUse doctrine says "run pixel impact
-    // before editing a symbol", butthe bench shows agents don't. Here the
-    // dependants arrive after the edit, unsolicited.
-    if event.eq_ignore_ascii_case("posttooluse") {
-        post_tool_use_blast_radius(&anchor, idx_root.as_deref(), tool);
-        std::process::exit(0);
-    }
-
-    let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
-    let (manifest, manifest_expired) =
-        manifest_pair(manifest_root.as_deref().map(load_manifest_state));
-
-    if tool == "Bash" || tool == "exec" || tool == "bash" || tool == "run_shell_command"
-        || tool == "execute" || tool == "Shell"
-        // Antigravity's bash tool
-        || tool == "run_command"
-        // Codex's real shell tools. `shell` and `unified_exec` are the names
-        // Codex 0.146.1 actually emits; without them a Codex session runs
-        // `grep`/`rg`/`find` completely unguarded. `local_shell` is the
-        // OpenAI Responses API tool type for the same capability.
-        || tool == "shell" || tool == "unified_exec" || tool == "local_shell"
-    {
+        .unwrap_or("")
+        .to_string();
+    let route = if is_shell_tool(&tool) {
         let cmd_value = tool_input
             .get("command")
             // Antigravity: run_command uses "CommandLine"
@@ -2757,108 +2841,81 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
             .cloned()
             .unwrap_or(Value::Null);
         // Codex passes argv as an array; everyone else passes a string.
-        let cmd_owned = command_text(&cmd_value);
-        let cmd = cmd_owned.as_str();
-        // SAFETY TIER FIRST: destructive git + git substitute + transcript store
-        // advisories. These run before rewrite attempts so a safe read-only
-        // rewrite never hides a more important mutation warning.
-        if let Some(lines) = bash_deny_lines(cmd, idx_root.as_deref()) {
-            advise(&non_blocking_advisory_lines(&lines));
+        GuardRoute::Shell(command_text(&cmd_value))
+    } else {
+        match tool.as_str() {
+            "Read" | "Grep"
+            | "read" | "grep" | "find_file_by_name" | "notebook_read"
+            | "read_file" | "search" | "find" | "ls"
+            // Antigravity: view_file (read), grep_search (grep), find_by_name (find), list_dir (ls)
+            | "view_file" | "grep_search" | "find_by_name" | "list_dir"
+            // Cursor composer: file_search
+            | "file_search" => GuardRoute::Read,
+            "Edit" | "MultiEdit" | "NotebookEdit" | "Write"
+            | "edit" | "write" | "notebook_edit"
+            | "apply_patch" | "write_file"
+            // Antigravity: replace_file_content (edit), write_to_file (write), edit_file (edit)
+            | "replace_file_content" | "write_to_file" | "edit_file" => GuardRoute::Edit,
+            _ => GuardRoute::Other,
         }
-        if let Some(lines) = git_mutation_substitute_lines(cmd, idx_root.as_deref(), &cwd) {
-            advise(&non_blocking_advisory_lines(&lines));
-        }
-        if let Some(store) = transcript_store_hit(cmd) {
-            advise(&transcript_archaeology_advisory_lines(store));
-        }
-        // REWRITE TIER: try transparent bash → pixel squash-branch BEFORE any advisory.
-        // Advisories (scoping, transcript) call advise() which exits, precluding
-        // the rewrite. By checking rewrite first, we ensure the rewrite takes
-        // priority over the advisory — the rewrite IS the resolution.
-        if idx_root.is_some()
-            && let Some(original) = tool_input.get("command").and_then(Value::as_str)
-            && let Some(rewritten) = crate::search_compat::rewrite(original, &cwd)
-        {
-            // Read-only search rewrites are semantically equivalent, so
-            // transparently replace the input and let the normal tool
-            // permission flow continue.
-            let mut updated = Value::Object(tool_input.clone());
-            updated["command"] = Value::String(rewritten);
-            print!("{}", rewrite_json(Provider::Claude, updated));
-            std::process::exit(0);
-        }
+    };
+    Some(GuardRequest {
+        post_tool_use: event.eq_ignore_ascii_case("posttooluse"),
+        tool,
+        cwd,
+        tool_input,
+        raw_path,
+        route,
+    })
+}
 
-        // ADVISORY TIER (only if no rewrite applied): scoping advisory
-        check_bash_advisories(cmd, &cwd, idx_root.as_deref(), manifest.as_ref());
-        std::process::exit(0);
-    }
+/// The shell-running tools of every supported harness: Claude's `Bash`,
+/// Antigravity's `run_command`, and Codex's real shell tools. `shell` and
+/// `unified_exec` are the names Codex 0.146.1 actually emits; without them a
+/// Codex session runs `grep`/`rg`/`find` completely unguarded. `local_shell`
+/// is the OpenAI Responses API tool type for the same capability.
+fn is_shell_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "Bash"
+            | "exec"
+            | "bash"
+            | "run_shell_command"
+            | "execute"
+            | "Shell"
+            | "run_command"
+            | "shell"
+            | "unified_exec"
+            | "local_shell"
+    )
+}
 
-    match tool {
-        "Read" | "Grep"
-        | "read" | "grep" | "find_file_by_name" | "notebook_read"
-        | "read_file" | "search" | "find" | "ls"
-        // Antigravity: view_file (read), grep_search (grep), find_by_name (find), list_dir (ls)
-        | "view_file" | "grep_search" | "find_by_name" | "list_dir"
-        // Cursor composer: file_search
-        | "file_search" => {
-            non_shell_advisory(
-                tool,
-                tool_input,
-                &cwd,
-                raw_path,
-                idx_root.as_deref(),
-                manifest.as_ref(),
-                manifest_expired,
-            );
-        }
-        "Edit" | "MultiEdit" | "NotebookEdit" | "Write"
-        | "edit" | "write" | "notebook_edit"
-        | "apply_patch" | "write_file"
-        // Antigravity: replace_file_content (edit), write_to_file (write), edit_file (edit)
-        | "replace_file_content" | "write_to_file" | "edit_file" => {
-            let Some(p) = resolve(raw_path, &cwd) else {
-                std::process::exit(0);
-            };
-            let exists = p.is_file();
-            // write_to_file / Write / write / write_file create new files — always allowed
-            if (tool == "Write" || tool == "write" || tool == "write_file" || tool == "write_to_file") && !exists {
-                std::process::exit(0); // creating a new file is always allowed
-            }
-            if let Some(m) = &manifest {
-                if exists && !allowed(&p, m) {
-                    scoping_advisory(&p, m);
-                }
-                std::process::exit(0);
-            }
-            // MANDATE ADVISORY — indexed repo, no active manifest: suggest
-            // `pixel scope-task` before edits to existing files, but proceed.
-            if let Some(root) = &idx_root {
-                if exists && !is_exempt(&p, root) {
-                    if manifest_expired {
-                        expired_manifest_advisory(root);
-                    }
-                    if env_flag_off("PIXEL_GUARD_EDIT") {
-                        mandate_advisory(&p, root);
-                    } else {
-                        edit_guard_advisory(&p, root);
-                    }
-                }
-            } else if exists {
-                // Unindexed directory: suggest indexing so pixel's scoped
-                // retrieval works. Advisory only — the edit proceeds.
-                // Pixel works in ANY directory, not just git repos — the
-                // index is a `.pixel/` dir, independent of `.git/`.
-                if let Some(git_root) = find_up(&anchor, ".git") {
-                    suggest_index_advisory(&git_root, true);
-                } else {
-                    // Non-git directory: still suggest indexing.
-                    suggest_index_advisory(&canonical(&cwd), false);
-                }
-            }
-        }
-        _ => {}
+/// What the guard says about an edit, before any advisory is printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditAdvice {
+    Proceed,
+    /// An active manifest does not scope the existing file.
+    OutOfScope,
+    /// An indexed repository with no active manifest, on a non-exempt file.
+    Unscoped,
+    /// An existing file outside any index.
+    SuggestIndex,
+}
+
+/// The edit decision: `in_scope` is the active manifest's verdict on the
+/// path (`None` without a manifest), `exempt` the index's (`None` outside an
+/// index). Only an existing file draws an advisory: creating a new file
+/// (`Write`, `write_file`, `write_to_file`) is always allowed.
+fn edit_advice(exists: bool, in_scope: Option<bool>, exempt: Option<bool>) -> EditAdvice {
+    if !exists {
+        return EditAdvice::Proceed;
     }
-    std::process::exit(0);
+    match (in_scope, exempt) {
+        (Some(false), _) => EditAdvice::OutOfScope,
+        (Some(true), _) | (None, Some(true)) => EditAdvice::Proceed,
+        (None, Some(false)) => EditAdvice::Unscoped,
+        (None, None) => EditAdvice::SuggestIndex,
+    }
 }
 
 /// Accept Claude Code's/Codex's/Devin's/zcode's `PreToolUse`, Gemini's
@@ -3020,6 +3077,17 @@ fn post_tool_use_blast_radius(abs: &Path, idx_root: Option<&Path>, tool: &str) {
     }
 }
 
+/// Dependent paths the post-edit note lists at most.
+const PATH_LIMIT: i64 = 8;
+/// Characters of one listed path before it is shortened.
+const PATH_CHARS: usize = 120;
+
+/// Whether the listed dependants are fewer than the graph holds: more files
+/// than [`PATH_LIMIT`], or a path shortened past [`PATH_CHARS`].
+fn snapshot_paths_capped(files: i64, paths: &[String]) -> bool {
+    files > PATH_LIMIT || paths.iter().any(|path| path.chars().count() > PATH_CHARS)
+}
+
 /// Read the existing graph in one transaction; never refresh or read source in
 /// the post-edit path. Counts concern indexed references, not proven breakages.
 fn post_edit_snapshot_note(
@@ -3027,8 +3095,6 @@ fn post_edit_snapshot_note(
     file_id: i64,
     rel: &str,
 ) -> Option<String> {
-    const PATH_LIMIT: i64 = 8;
-    const PATH_CHARS: usize = 120;
     let tx = store.conn_mut().transaction().ok()?;
     let (symbols, cross_file, same_file, files, unresolved): (i64, i64, i64, i64, i64) = tx
         .query_row(
@@ -3069,13 +3135,12 @@ fn post_edit_snapshot_note(
     let rows = paths
         .query_map([file_id, PATH_LIMIT], |row| row.get::<_, String>(0))
         .ok()?;
-    let mut paths_capped = files > PATH_LIMIT;
+    let dependants = rows.collect::<Result<Vec<String>, _>>().ok()?;
+    let paths_capped = snapshot_paths_capped(files, &dependants);
     let mut rendered_paths = Vec::new();
-    for path in rows {
-        let path = path.ok()?;
-        paths_capped |= path.chars().count() > PATH_CHARS;
+    for path in &dependants {
         // Quote control characters and newlines: repository names are data.
-        rendered_paths.push(serde_json::to_string(&short_task(&path, PATH_CHARS)).ok()?);
+        rendered_paths.push(serde_json::to_string(&short_task(path, PATH_CHARS)).ok()?);
     }
     let paths = if rendered_paths.is_empty() {
         "none indexed".to_string()
@@ -4035,31 +4100,50 @@ fn suggest_index_advisory(dir: &Path, is_git: bool) -> ! {
 /// in run() so that rewrites take priority over advisories. This contains
 /// the scoping advisory plus advisories for common grep/search bypass patterns
 /// (sed, awk, perl, python, find, ls, cat).
+#[cfg_attr(test, mutants::skip)] // prints and exits through `advise`; the decision is `bash_advisory`
 fn check_bash_advisories(
     cmd: &str,
     cwd: &Path,
     idx_root: Option<&Path>,
     manifest: Option<&Manifest>,
 ) {
-    // Strip leading `cd X &&` before pattern matching — the same stripping
-    // that try_rewrite_bash does. strip_cd_prefix returns (effective_cwd, effective_cmd).
-    let (effective_cwd, effective_cmd) = strip_cd_prefix(cmd, cwd);
-    // Skip complex commands — heredocs, command substitution are left alone.
-    if effective_cmd.contains("<<") || effective_cmd.contains("$(") || effective_cmd.contains('`') {
-        return;
+    match (bash_advisory(cmd, cwd, idx_root, manifest), manifest) {
+        (Some(BashAdvisory::Bypass(lines)), _) => advise(&non_blocking_advisory_lines(&lines)),
+        (Some(BashAdvisory::OutOfScope(file)), Some(m)) => scoping_advisory(&file, m),
+        _ => {}
     }
-    // Bypass-pattern advisories for indexed repos
+}
+
+/// The advisory a Bash command draws, if any.
+#[derive(Debug, PartialEq, Eq)]
+enum BashAdvisory {
+    /// A search bypass in an indexed repository: the advisory lines.
+    Bypass(Vec<String>),
+    /// A single file read outside the active manifest.
+    OutOfScope(PathBuf),
+}
+
+/// Decide [`check_bash_advisories`]: a leading `cd X &&` is stripped first,
+/// the way `try_rewrite_bash` does; heredocs and command substitution are
+/// left alone; a bypass advisory wins over the manifest scoping.
+fn bash_advisory(
+    cmd: &str,
+    cwd: &Path,
+    idx_root: Option<&Path>,
+    manifest: Option<&Manifest>,
+) -> Option<BashAdvisory> {
+    let (effective_cwd, effective_cmd) = strip_cd_prefix(cmd, cwd);
+    if effective_cmd.contains("<<") || effective_cmd.contains("$(") || effective_cmd.contains('`') {
+        return None;
+    }
     if let Some(root) = idx_root
         && let Some(lines) = bypass_advisory_lines(effective_cmd, &effective_cwd, root)
     {
-        advise(&non_blocking_advisory_lines(&lines));
+        return Some(BashAdvisory::Bypass(lines));
     }
-    if let Some(m) = manifest
-        && let Some(first_file) = single_reader_target(effective_cmd, &effective_cwd)
-        && !allowed(&first_file, m)
-    {
-        scoping_advisory(&first_file, m);
-    }
+    let m = manifest?;
+    let first_file = single_reader_target(effective_cmd, &effective_cwd)?;
+    (!allowed(&first_file, m)).then_some(BashAdvisory::OutOfScope(first_file))
 }
 
 /// Advisory messages for common grep/search bypass patterns that should use pixel
@@ -4266,7 +4350,7 @@ fn bash_deny_lines(cmd: &str, idx_root: Option<&Path>) -> Option<Vec<String>> {
     if !cmd.contains("git") {
         return None;
     }
-    for (sub, args) in git_invocations(cmd) {
+    for GitInvocation { sub, args, .. } in git_invocations(cmd) {
         if let Some(lines) = destructive_git_deny(&sub, &args, root) {
             return Some(lines);
         }
@@ -4281,7 +4365,7 @@ fn bash_deny_lines(cmd: &str, idx_root: Option<&Path>) -> Option<Vec<String>> {
 /// ordinary tokens that simply never match a destructive flag), and to
 /// separators inside quoted arguments (a multi-line `--message "…git add…"`
 /// never opens a phantom `git` segment).
-fn git_invocations(cmd: &str) -> Vec<(String, Vec<String>)> {
+fn git_invocations(cmd: &str) -> Vec<GitInvocation> {
     let mut out = Vec::new();
     for tokens in tokenize_segments(cmd) {
         let Some(git_pos) = tokens.iter().position(|t| t == "git") else {
@@ -4289,9 +4373,18 @@ fn git_invocations(cmd: &str) -> Vec<(String, Vec<String>)> {
         };
         let mut rest = tokens[git_pos + 1..].iter();
         let mut sub = None;
+        let mut c_dir: Option<PathBuf> = None;
         while let Some(t) = rest.next() {
-            if t == "-C" || t == "-c" {
-                let _ = rest.next(); // skip the global flag's value
+            if t == "-C" {
+                // Repeated `-C` compose as git does: `-C a -C b` is `a/b`,
+                // and an absolute later value replaces the earlier ones.
+                if let Some(dir) = rest.next() {
+                    c_dir = Some(c_dir.map_or_else(|| PathBuf::from(dir), |d| d.join(dir)));
+                }
+                continue;
+            }
+            if t == "-c" {
+                let _ = rest.next(); // skip the config value
                 continue;
             }
             if t.starts_with('-') {
@@ -4301,10 +4394,26 @@ fn git_invocations(cmd: &str) -> Vec<(String, Vec<String>)> {
             break;
         }
         if let Some(sub) = sub {
-            out.push((sub, rest.cloned().collect()));
+            out.push(GitInvocation {
+                sub,
+                args: rest.cloned().collect(),
+                c_dir,
+            });
         }
     }
     out
+}
+
+/// One `git <sub> <args…>` found by `git_invocations`.
+#[derive(Debug, PartialEq, Eq)]
+struct GitInvocation {
+    /// The subcommand (`rebase`, `reset`, …).
+    sub: String,
+    /// The tokens after the subcommand.
+    args: Vec<String>,
+    /// The directory the global `-C` flags name, composed in order and still
+    /// unresolved: relative to the directory git starts in.
+    c_dir: Option<PathBuf>,
 }
 
 /// True for a combined short-flag cluster containing `c` (e.g. `-fd`
@@ -4496,13 +4605,17 @@ fn git_mutation_substitute_lines(
     if !cmd.contains("git") {
         return None;
     }
-    for (sub, args) in git_invocations(cmd) {
+    for GitInvocation { sub, args, c_dir } in git_invocations(cmd) {
         if let Some(lines) = git_substitute_deny(&sub, &args, root) {
             // Check if a cd target or git -C path has a reconcile conflict
             // state file — if so, allow the rebase as an escape hatch.
             if sub == "rebase" {
-                let alt_root =
-                    extract_cd_target(cmd, cwd).or_else(|| extract_git_c_path(&args, cwd));
+                let cd_target = extract_cd_target(cmd, cwd);
+                let alt_root = match c_dir {
+                    // `-C` starts from wherever the `cd` left git.
+                    Some(dir) => resolve_dir(&dir, cd_target.as_deref().unwrap_or(cwd)),
+                    None => cd_target,
+                };
                 if let Some(alt) = alt_root
                     && alt != root
                     && reconcile_conflict_pending(&alt)
@@ -4529,26 +4642,13 @@ fn extract_cd_target(cmd: &str, cwd: &Path) -> Option<PathBuf> {
     if path.is_empty() {
         return None;
     }
-    let p = Path::new(path);
-    let resolved = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
-    };
-    resolved.canonicalize().ok().filter(|p| p.is_dir())
+    resolve_dir(Path::new(path), cwd)
 }
 
-/// Extract the path from `git -C <path>` args, resolved against cwd.
-fn extract_git_c_path(args: &[String], cwd: &Path) -> Option<PathBuf> {
-    let c_idx = args.iter().position(|a| a == "-C")?;
-    let path = args.get(c_idx + 1)?;
-    let p = Path::new(path);
-    let resolved = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
-    };
-    resolved.canonicalize().ok().filter(|p| p.is_dir())
+/// Resolve `dir` against `cwd` (an absolute `dir` stands alone) and
+/// canonicalize it. None when it is not an existing directory.
+fn resolve_dir(dir: &Path, cwd: &Path) -> Option<PathBuf> {
+    cwd.join(dir).canonicalize().ok().filter(|p| p.is_dir())
 }
 
 /// Per-invocation SUBSTITUTE verdict for `git <sub> <args>`.
@@ -5266,6 +5366,144 @@ fn search_can_replace(pattern: &str, flags: &[String], root: &str) -> Option<Str
 mod tests {
     use super::*;
 
+    fn decode(input: &str) -> Option<GuardRequest> {
+        guard_request(
+            input,
+            |_| PolicyMode::Advisory,
+            || PathBuf::from("/fallback"),
+        )
+    }
+
+    #[test]
+    fn guard_request_allows_silently_what_it_cannot_act_on() {
+        assert_eq!(decode("not json"), None);
+        assert_eq!(decode("[1]"), None);
+        assert_eq!(
+            decode(r#"{"hook_event_name":"Stop","tool_name":"Bash","tool_input":{}}"#),
+            None
+        );
+        assert_eq!(
+            decode(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":"x"}"#),
+            None
+        );
+        assert_eq!(
+            decode(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#),
+            None
+        );
+        let off = guard_request(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}"#,
+            |_| PolicyMode::Off,
+            PathBuf::new,
+        );
+        assert_eq!(off, None);
+    }
+
+    fn shell_req(tool_input: &str) -> GuardRequest {
+        decode(&format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{tool_input}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn outcome(req: &GuardRequest, indexed: bool, hits: [bool; 4]) -> GuardOutcome {
+        let probes = ShellProbes {
+            deny: &|c| hits[0].then(|| vec![format!("deny {c}")]),
+            substitute: &|c| hits[1].then(|| vec![format!("sub {c}")]),
+            transcript: &|_| hits[2].then_some("store"),
+            rewrite: &|c| hits[3].then(|| format!("pixel {c}")),
+        };
+        guard_outcome(req, indexed, &probes)
+    }
+
+    #[test]
+    fn guard_outcome_delivers_blast_radius_after_an_edit() {
+        let req = decode(
+            r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(outcome(&req, true, [true; 4]), GuardOutcome::BlastRadius);
+        let read = decode(r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{}}"#)
+            .unwrap();
+        assert_eq!(outcome(&read, true, [true; 4]), GuardOutcome::Tool);
+    }
+
+    #[test]
+    fn guard_outcome_puts_safety_before_rewrite_before_advisories() {
+        let req = shell_req(r#"{"command":"rg x"}"#);
+        let deny = non_blocking_advisory_lines(&["deny rg x".to_string()]);
+        let sub = non_blocking_advisory_lines(&["sub rg x".to_string()]);
+        assert_eq!(outcome(&req, true, [true; 4]), GuardOutcome::Advise(deny));
+        assert_eq!(
+            outcome(&req, true, [false, true, true, true]),
+            GuardOutcome::Advise(sub)
+        );
+        assert_eq!(
+            outcome(&req, true, [false, false, true, true]),
+            GuardOutcome::Advise(transcript_archaeology_advisory_lines("store"))
+        );
+        assert_eq!(
+            outcome(&req, true, [false, false, false, true]),
+            GuardOutcome::Rewrite(serde_json::json!({"command": "pixel rg x"}))
+        );
+        let advisories = GuardOutcome::ShellAdvisories("rg x".to_string());
+        assert_eq!(outcome(&req, true, [false; 4]), advisories);
+        // No index: no rewrite even when one exists.
+        assert_eq!(
+            outcome(&req, false, [false, false, false, true]),
+            advisories
+        );
+        // Only a string `command` is rewritten: an argv array is not.
+        let argv = shell_req(r#"{"command":["rg","x"]}"#);
+        assert_eq!(
+            outcome(&argv, true, [false, false, false, true]),
+            GuardOutcome::ShellAdvisories(command_text(&serde_json::json!(["rg", "x"])))
+        );
+    }
+
+    #[test]
+    fn guard_request_routes_each_tool_family() {
+        let shell = decode(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"/w","tool_input":{"command":"rg x ."}}"#,
+        )
+        .unwrap();
+        assert_eq!(shell.route, GuardRoute::Shell("rg x .".to_string()));
+        assert_eq!(shell.cwd, PathBuf::from("/w"));
+        assert_eq!(shell.tool, "Bash");
+        assert!(!shell.post_tool_use);
+
+        let codex = decode(r#"{"hook_event_name":"PreToolUse","tool_name":"unified_exec","tool_input":{"input":["grep","-n","x"]}}"#).unwrap();
+        assert_eq!(
+            codex.route,
+            GuardRoute::Shell(command_text(&serde_json::json!(["grep", "-n", "x"])))
+        );
+        assert_eq!(codex.cwd, PathBuf::from("/fallback"));
+
+        let read =
+            decode(r#"{"tool_name":"view_file","tool_input":{"AbsolutePath":"/a.rs"}}"#).unwrap();
+        assert_eq!(
+            (read.route, read.raw_path.as_str()),
+            (GuardRoute::Read, "/a.rs")
+        );
+
+        let edit = decode(
+            r#"{"hook_event_name":"postToolUse","tool_name":"Edit","tool_input":{"file_path":"/b.rs","path":"/c.rs"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (edit.route, edit.raw_path.as_str()),
+            (GuardRoute::Edit, "/b.rs")
+        );
+        assert!(edit.post_tool_use);
+
+        let other =
+            decode(r#"{"hook_event_name":"PreToolUse","tool_name":"WebFetch","tool_input":{}}"#)
+                .unwrap();
+        assert_eq!(
+            (other.route, other.raw_path.as_str()),
+            (GuardRoute::Other, "")
+        );
+    }
+
     /// Create a unique scratch dir (with a `src/` subdir) acting as the
     /// indexed repo root for path-validation tests. Returns the
     /// canonicalized root so `starts_with` comparisons are stable on
@@ -5373,8 +5611,11 @@ mod tests {
         (root, source)
     }
 
+    /// Steering is opt-in: under the default advisory policy and under
+    /// `off`, an unbounded read stays native with no suggestion; only
+    /// `enforce` turns it into a denial naming the Pixel route.
     #[test]
-    fn devin_advises_for_unbounded_large_repository_reads_without_blocking() {
+    fn devin_large_repository_reads_are_left_alone_unless_enforced() {
         let (root, source) = indexed_large_source("devin-large-read");
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
@@ -5382,32 +5623,33 @@ mod tests {
             "tool_input": {"file_path": source},
             "cwd": root,
         });
-
-        let response = policy_response(
+        for mode in [
+            crate::config_cmd::PolicyMode::Advisory,
+            crate::config_cmd::PolicyMode::Off,
+        ] {
+            assert_eq!(
+                policy_response(Provider::Devin, &payload, mode),
+                None,
+                "{mode:?}"
+            );
+        }
+        let denied = policy_response(
             Provider::Devin,
             &payload,
-            crate::config_cmd::PolicyMode::Advisory,
+            crate::config_cmd::PolicyMode::Enforce,
         )
-        .expect("an unbounded read of an indexed source file needs visible guidance");
-        let guidance = "Pixel suggestion: repository read: use exec with pixel search-content or pixel pack-context <uid>. Original call proceeds.";
-        assert_eq!(response["systemMessage"], guidance);
+        .expect("enforce denies the unbounded read");
+        assert_eq!(denied["decision"], "block");
         assert_eq!(
-            response["hookSpecificOutput"]["additionalContext"],
-            guidance
+            denied["reason"],
+            "pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"
         );
-        assert!(
-            response["hookSpecificOutput"]
-                .get("permissionDecision")
-                .is_none(),
-            "advisory must not deny or auto-allow the original read"
-        );
-        assert!(response.get("decision").is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn cursor_advises_with_flat_additional_context_without_blocking() {
+    fn cursor_reads_get_no_suggestion_unless_enforced() {
         let (root, source) = indexed_large_source("cursor-advisory-read");
         // The real cursor-agent 2026.10 payload: camelCase event name,
         // `cwd: ""`, repository in `workspace_roots`.
@@ -5418,20 +5660,22 @@ mod tests {
             "cwd": "",
             "workspace_roots": [root],
         });
-
-        let response = policy_response(
+        assert_eq!(
+            policy_response(
+                Provider::Cursor,
+                &payload,
+                crate::config_cmd::PolicyMode::Advisory,
+            ),
+            None
+        );
+        let denied = policy_response(
             Provider::Cursor,
             &payload,
-            crate::config_cmd::PolicyMode::Advisory,
+            crate::config_cmd::PolicyMode::Enforce,
         )
-        .expect("advisory mode still injects guidance for Cursor");
-        let context = response["additional_context"]
-            .as_str()
-            .expect("Cursor contract is flat additional_context");
-        assert!(context.contains("Pixel suggestion:"), "{context}");
-        assert!(context.contains("Original call proceeds"), "{context}");
-        assert!(response.get("permission").is_none());
-        assert!(response.get("hookSpecificOutput").is_none());
+        .expect("enforce denies through Cursor's flat permission contract");
+        assert_eq!(denied["permission"], "deny");
+        assert!(denied.get("hookSpecificOutput").is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5911,6 +6155,15 @@ mod tests {
             policy_mode(&payload),
             crate::config_cmd::PolicyMode::Enforce,
             "policy reads the workspace layer, not the global one"
+        );
+        // Antigravity's PreInvocation payload carries only `workspacePaths`:
+        // the repository's own `policy: enforce` decides there too.
+        let pre_invocation = serde_json::json!({"workspacePaths": [root]});
+        assert_eq!(policy_root(&pre_invocation), Some(root.clone()));
+        assert_eq!(
+            policy_mode(&pre_invocation),
+            crate::config_cmd::PolicyMode::Enforce,
+            "a pre-invocation reads the workspace layer"
         );
         // A non-empty payload cwd still wins, with no workspace_roots.
         let payload = serde_json::json!({"cwd": root.display().to_string()});
@@ -6411,6 +6664,14 @@ mod tests {
     fn real_repo(name: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("pixel-guard-seq-{}-{}", name, std::process::id()));
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!(
+                "could not clear stale Git fixture {}: {error}",
+                root.display()
+            ),
+        }
         std::fs::create_dir_all(&root).unwrap();
         std::process::Command::new("git")
             .arg("init")
@@ -6653,29 +6914,6 @@ mod tests {
             !composed_matches("(", "Bash"),
             "an invalid regex never matches"
         );
-    }
-
-    /// A foreign allow — nested under `hookSpecificOutput` or top-level — is
-    /// the only decision that yields to enforced Pixel policy. Denials, other
-    /// decisions and absent decisions never do.
-    #[test]
-    fn foreign_allow_recognizes_both_allow_spellings_only() {
-        use serde_json::json;
-        for value in [
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"},"permissionDecision":"allow"}),
-        ] {
-            assert!(foreign_allow(&value), "{value}");
-        }
-        for value in [
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"},"permissionDecision":"deny"}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}),
-            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"}}),
-            json!({}),
-        ] {
-            assert!(!foreign_allow(&value), "{value}");
-        }
     }
 
     /// A single `|` marks the NEXT segment as piped; `&&`, `||` and a lone
@@ -8165,12 +8403,7 @@ mod tests {
             "tool_input": {"command": "rg needle src"},
             "cwd": repo,
         });
-        for provider in [
-            Provider::Claude,
-            Provider::Codex,
-            Provider::Devin,
-            Provider::Zcode,
-        ] {
+        for provider in [Provider::Devin, Provider::Zcode] {
             assert_eq!(
                 provider_rewrite_with(provider, &payload, |tool| {
                     tool == crate::search_compat::SearchTool::Rg
@@ -8180,6 +8413,14 @@ mod tests {
             );
             assert!(
                 provider_rewrite_with(provider, &payload, |_| false).is_some(),
+                "{provider:?}"
+            );
+        }
+        // Claude and Codex retrieval stays native: never rewritten.
+        for provider in [Provider::Claude, Provider::Codex] {
+            assert_eq!(
+                provider_rewrite_with(provider, &payload, |_| false),
+                None,
                 "{provider:?}"
             );
         }

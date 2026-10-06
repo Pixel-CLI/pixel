@@ -50,7 +50,7 @@ New installs use the script; re-running the same `curl … | sh` line updates an
 - [Why Rust](https://pixel-cli.dev/why-rust/): architecture decision, build-time tradeoffs, exploratory language audit limitations, and possible boundaries for other languages; not a language benchmark
 
 - [Documentation](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/website/content/docs.md): install channels, what `pixel install` wires per agent, per-repository guards, updating, plugins, the workflow, commands by job, reading the answers, token savings
-- [Manual setup](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/manual-setup.md): wiring the prompt by hand into an agent `pixel install` does not cover (Cursor, Copilot…)
+- [Manual setup](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/manual-setup.md): wiring the prompt by hand into an agent: `pixel install` deploys no prompt
 - [Renamed commands](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/docs/renamed-commands.md): old command names and their verb-first replacements, accepted as aliases until 1.0
 - [Architecture](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/ARCHITECTURE.md): crates, the command surface table (every subcommand in one line), on-disk state, the daemon, agent integration
 
@@ -59,14 +59,14 @@ New installs use the script; re-running the same `curl … | sh` line updates an
 One page per agent: what `pixel install` writes for it and where, the plugin or rules file where it writes nothing, the `pixel doctor` check and the removal. These are HTML pages; the facts behind them are in [agents.toml](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/website/data/agents.toml), which a test holds to what `pixel install` really writes.
 
 - [For your agent](https://pixel-cli.dev/for/): every agent, grouped by how Pixel reaches it
-- [Claude Code](https://pixel-cli.dev/for/claude-code/): `pixel install` (lifecycle hooks in `~/.claude/settings.json`), a per-repository guard, or the plugin
-- [Codex](https://pixel-cli.dev/for/codex/): `pixel install` (`developer_instructions` in `~/.codex/config.toml`), a per-repository guard, or the plugin
-- [Pi](https://pixel-cli.dev/for/pi/): `pixel install` (`~/.pi/agent/APPEND_SYSTEM.md`), a per-repository guard extension, or the Pi package
-- [Cursor](https://pixel-cli.dev/for/cursor/): not touched by `pixel install`; a rules file copied into the project
-- [Copilot CLI](https://pixel-cli.dev/for/copilot-cli/): not touched by `pixel install`; a plugin
-- [OpenCode](https://pixel-cli.dev/for/opencode/): `pixel install` (its global `AGENTS.md`)
-- [Devin](https://pixel-cli.dev/for/devin/): a plugin, and a per-repository guard from `pixel install --repo`
-- [Antigravity](https://pixel-cli.dev/for/antigravity/): `pixel install` (a Pixel plugin and guard hooks under `~/.gemini/config/`)
+- [Claude Code](https://pixel-cli.dev/for/claude-code/): `pixel install` (task lifecycle hooks in `~/.claude/settings.json`; retired retrieval hooks removed), or the plugin
+- [Codex](https://pixel-cli.dev/for/codex/): `pixel install` (task lifecycle hooks in `~/.codex/hooks.json`; retired `developer_instructions` removed), or the plugin
+- [Pi](https://pixel-cli.dev/for/pi/): `pixel install` (the explicit `/pixel-impact` command as a Pi package declared in `~/.pi/agent/settings.json`), or the npm Pi package
+- [Cursor](https://pixel-cli.dev/for/cursor/): nothing written by `pixel install`; a rules file copied into the project
+- [Copilot CLI](https://pixel-cli.dev/for/copilot-cli/): nothing written by `pixel install`; a plugin
+- [OpenCode](https://pixel-cli.dev/for/opencode/): native tools; `pixel install` only removes what earlier releases wrote
+- [Devin](https://pixel-cli.dev/for/devin/): a plugin; `pixel install` only removes the hooks earlier releases wrote
+- [Antigravity](https://pixel-cli.dev/for/antigravity/): native tools; `pixel install` only removes the plugin and hooks earlier releases wrote
 
 ## Answers
 

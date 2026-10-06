@@ -5,10 +5,8 @@
 //! harness has fired the hooks; doctor reports that boundary separately.
 
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
+    fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Map, Value, json};
@@ -31,6 +29,7 @@ pub(crate) const DEVIN_LEGACY_HOOKS: &str = ".devin/hooks.json";
 /// guard.  It deliberately lives next to the project hook config so a runtime
 /// never has to discover or execute the currently mutable hook configuration.
 pub(crate) const CODEX_COMPOSED_BACKUP: &str = "pixel-composed-guard-backup.json";
+#[cfg(test)]
 const CODEX_COMPOSED_BACKUP_VERSION: u64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,13 +60,9 @@ impl Provider {
         if self == Self::Devin { "exec" } else { "Bash" }
     }
 
-    /// Claude Code's `Read` and `Grep` tools cannot be transparently rewired
-    /// into a Bash call: the hook contract cannot change a tool type, so the
-    /// Claude arm emits an advisory through `non_shell_advisory` instead.
-    /// `Glob` is deliberately omitted — its docs in `guard.rs` explain that
-    /// path enumeration alone is not a problem worth blocking; the actual
-    /// `Read`/`Edit` of any result is itself guarded. Codex and Devin
-    /// already widen the matcher for their own tool-name conventions.
+    /// Matchers for legacy routing configurations and the remaining Devin
+    /// integration. Native-default Claude and Codex install paths never add
+    /// these retrieval guards.
     fn shell_matcher(self) -> &'static str {
         match self {
             Self::Codex => "Bash|shell|unified_exec|local_shell",
@@ -175,6 +170,7 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
                 "post-compaction --provider claude",
                 "post-tool-use",
                 "post-tool-use --provider claude",
+                "metrics --provider codex",
                 "metrics --provider claude",
                 "metrics --provider devin",
                 "metrics --provider cursor",
@@ -229,6 +225,41 @@ fn task_hook_verb(verb: &str) -> bool {
     matches!(words.as_slice(), ["task-event", "--provider", "claude" | "codex" | "pi", "--event", event]
         if TASK_HOOK_EVENTS.iter().any(|(_, name)| name == event)
             || matches!(*event, "tool-failure" | "interrupt" | "model-response" | "user-bash"))
+}
+
+/// Whether repo-local native cleanup ([`HookScope::NativeCleanup`]) removes
+/// the Pixel hook `verb`: every callback except a task-event lifecycle hook,
+/// whichever provider that hook names. Doctor's repo checks read the same
+/// predicate, so a hook install keeps is never reported as retired.
+pub(crate) fn native_cleanup_retires(verb: &str) -> bool {
+    !task_hook_verb(verb)
+}
+
+fn codex_task_hook_verb(verb: &str) -> bool {
+    let words: Vec<_> = verb.split_whitespace().collect();
+    matches!(words.as_slice(), ["task-event", "--provider", "codex", "--event", event]
+        if TASK_HOOK_EVENTS.iter().any(|(_, name)| name == event) || *event == "interrupt")
+}
+
+/// `path` with its longest existing prefix canonicalized and the components
+/// that do not exist yet re-appended, so a file about to be created resolves
+/// through the same symlinks as its existing directory; `None` when no
+/// prefix exists or the existing one cannot be canonicalized.
+fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    while !existing.exists() {
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+    let mut resolved = existing.canonicalize().ok()?;
+    resolved.extend(missing.into_iter().rev());
+    Some(resolved)
+}
+
+fn paths_resolve_to_same_file(left: &Path, right: &Path) -> bool {
+    let resolve = |path: &Path| resolve_existing_prefix(path).unwrap_or_else(|| path.to_path_buf());
+    resolve(left) == resolve(right)
 }
 
 /// Replace only Pixel task registrations, preserving foreign hooks and trust.
@@ -302,16 +333,20 @@ pub(crate) fn task_hooks_registered(value: &Value, provider: Provider, exe: &Pat
                 .and_then(Value::as_array)
                 .is_some_and(|groups| {
                     groups.iter().any(|group| {
-                        group
-                            .get("matcher")
-                            .and_then(Value::as_str)
-                            .is_none_or(|matcher| matches!(matcher, "" | "*" | ".*"))
+                        (group.get("matcher").is_none()
+                            || group
+                                .get("matcher")
+                                .and_then(Value::as_str)
+                                .is_some_and(|matcher| matches!(matcher, "" | "*" | ".*")))
                             && group
                                 .get("hooks")
                                 .and_then(Value::as_array)
                                 .is_some_and(|inner| {
                                     inner.iter().any(|hook| {
-                                        hook.get("async").and_then(Value::as_bool) != Some(true)
+                                        hook.get("type").and_then(Value::as_str) == Some("command")
+                                            && (hook.get("async").is_none()
+                                                || hook.get("async").and_then(Value::as_bool)
+                                                    == Some(false))
                                             && hook
                                                 .get("command")
                                                 .and_then(Value::as_str)
@@ -332,7 +367,7 @@ pub(crate) fn remove_pixel_hooks(hooks: &mut Map<String, Value>, exe: &Path) {
 }
 
 /// Remove matching commands without disturbing foreign hooks or group metadata.
-fn remove_matching_hooks(hooks: &mut Map<String, Value>, remove: impl Fn(&str) -> bool) {
+pub(crate) fn remove_matching_hooks(hooks: &mut Map<String, Value>, remove: impl Fn(&str) -> bool) {
     hooks.retain(|_, groups| {
         let Some(groups) = groups.as_array_mut() else {
             return true;
@@ -389,13 +424,10 @@ fn anchored_literal(name: &str) -> Option<&str> {
 fn shell_overlap(group: &Value, provider: Provider) -> bool {
     let matcher = group.get("matcher").and_then(Value::as_str).unwrap_or("");
     let names: Vec<&str> = matcher.split('|').collect();
-    let matches_shell = names.iter().copied().any(|name| match provider {
-        Provider::Codex => matches!(name, "Bash" | "shell" | "unified_exec" | "local_shell"),
-        _ => name == provider.shell(),
-    });
-    if matches_shell || matches!(matcher, "" | "*" | ".*") {
-        return true;
-    }
+    // A plain shell tool name, `""`, `*` or `.*` is no anchored literal and
+    // no known non-shell name, so the last rule below reports it as an
+    // overlap.
+    //
     // A matcher made solely of anchored literal tool-name prefixes is provably
     // disjoint when none can match a current shell tool. This matters for
     // project-local Codex hooks: they shadow global hooks even when they only
@@ -571,23 +603,6 @@ fn metrics_relay_group(exe: &Path, provider: Provider) -> Value {
     )
 }
 
-/// Whether `value` registers Pixel's metrics relay for `provider` under
-/// PostToolUse with that provider's shell matcher.
-pub(crate) fn has_pixel_metrics_relay(value: &Value, provider: Provider, exe: &Path) -> bool {
-    let verb = format!("run-hook metrics --provider {}", provider.name());
-    value
-        .get("hooks")
-        .and_then(|hooks| hooks.get("PostToolUse"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|group| group.get("matcher").and_then(Value::as_str) == Some(provider.shell()))
-        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-        .flatten()
-        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
-        .any(|command| is_pixel_hook(command, exe) && command.contains(&verb))
-}
-
 fn hook_group(command: String, matcher: Option<&str>) -> Value {
     let mut group =
         json!({"hooks":[{"type":"command","command":command,"timeout":config::HOOK_TIMEOUT}]});
@@ -675,25 +690,35 @@ fn delegates_rtk(path: &Path, exe: &Path) -> bool {
     })
 }
 
-/// Which events a provider install may register. The doctrine reaches every
-/// Claude process through the lifecycle hooks in the user-level settings
-/// (`~/.claude/settings.json`), while enforcement stays repo-local
-/// (`<repo>/.claude/settings.json`); neither file should carry the other's
-/// half.
+/// Separate native task events, legacy retrieval callbacks, and cleanup-only
+/// migrations so retiring retrieval never retires independent task gates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HookScope {
     /// Lifecycle + PreToolUse shell routing (the historical full install).
+    #[cfg(test)]
     All,
     /// SessionStart/UserPromptSubmit/PostToolUse/compaction only — no
-    /// PreToolUse. Used for the global Claude install.
+    /// PreToolUse. No install writes it any more: hosts keep their native
+    /// retrieval; kept for the migration fixtures that recreate it.
+    #[cfg(test)]
     LifecycleOnly,
-    /// PreToolUse guard only — no lifecycle events. Used for repo-local
-    /// enforcement (`<repo>/.claude/settings.json`).
+    /// Task-event lifecycle only. Used for native-default global Claude and
+    /// installs; retrieval prompts and metrics stay out.
+    TaskEventsOnly,
+    /// PreToolUse guard only — no lifecycle events. Retained for Devin's
+    /// repo-local routing and legacy migration fixtures.
     GuardOnly,
+    /// Remove Pixel retrieval callbacks and restore any adopted RTK
+    /// registration, without registering replacement callbacks.
+    NativeCleanup,
+    /// As [`NativeCleanup`], and remove project Codex task callbacks because
+    /// the complete matching task-event suite is already registered globally.
+    NativeCleanupWithGlobalCodexTasks,
 }
 
 /// Apply the pure configuration transform and return (routing enabled, RTK
 /// fragments adopted). Unknown overlapping hooks remain untouched.
+#[cfg(test)]
 fn configure(
     value: &mut Value,
     provider: Provider,
@@ -770,7 +795,20 @@ fn configure_scoped(
     if delegated && saved.is_empty() {
         return Err("RTK delegate backup missing; refusing to lose its registration".into());
     }
-    remove_pixel_hooks(hooks, exe);
+    if matches!(
+        scope,
+        HookScope::NativeCleanup | HookScope::NativeCleanupWithGlobalCodexTasks
+    ) {
+        remove_matching_hooks(hooks, |command| {
+            pixel_hook_verb(command, exe).is_some_and(|verb| {
+                native_cleanup_retires(verb)
+                    || scope == HookScope::NativeCleanupWithGlobalCodexTasks
+                        && codex_task_hook_verb(verb)
+            })
+        });
+    } else {
+        remove_pixel_hooks(hooks, exe);
+    }
     if delegated {
         // The delegate guard that ran RTK is gone: put RTK back where it was,
         // whatever the scope. Without a delegate the backup is only a record
@@ -780,7 +818,10 @@ fn configure_scoped(
     }
     let mut enabled = true;
     let mut adopted = Vec::new();
-    if scope != HookScope::LifecycleOnly {
+    let installs_guard = scope == HookScope::GuardOnly;
+    #[cfg(test)]
+    let installs_guard = installs_guard || scope == HookScope::All;
+    if installs_guard {
         let pre = hooks
             .entry("PreToolUse")
             .or_insert_with(|| json!([]))
@@ -822,6 +863,16 @@ fn configure_scoped(
     if scope == HookScope::GuardOnly {
         return Ok((enabled, adopted));
     }
+    if scope == HookScope::TaskEventsOnly {
+        merge_task_hooks(hooks, provider, exe)?;
+        return Ok((enabled, adopted));
+    }
+    if matches!(
+        scope,
+        HookScope::NativeCleanup | HookScope::NativeCleanupWithGlobalCodexTasks
+    ) {
+        return Ok((enabled, adopted));
+    }
     for (event, verb, matcher) in [
         (
             "PostToolUse",
@@ -854,7 +905,7 @@ fn configure_scoped(
         }
         // Codex's prompt-submit guidance is the global install's
         // (`install_metrics_hook` owns every `$CODEX_HOME/hooks.json` entry):
-        // Codex merges the project file over the global one, so a repo-local
+        // Codex combines matching global and project hooks, so a repo-local
         // copy would deliver the same guidance twice per prompt in every
         // installed repository — the same doubled-relay shape Devin avoids.
         if provider == Provider::Codex && verb == "prompt-submit" {
@@ -895,16 +946,27 @@ pub(crate) fn install_provider(
     provider: Provider,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
-    install_at(home, &provider.path(home), exe, provider, dry_run)
+    install_at_scoped(
+        home,
+        &provider.path(home),
+        exe,
+        provider,
+        HookScope::All,
+        &[],
+        dry_run,
+    )
 }
 
-fn composed_backup_path(config_path: &Path) -> Result<PathBuf, String> {
-    config_path
+pub(crate) fn composed_backup_path(config_path: &Path) -> Result<PathBuf, String> {
+    let parent = config_path
         .parent()
-        .map(|parent| parent.join(CODEX_COMPOSED_BACKUP))
-        .ok_or_else(|| "Codex hook configuration has no parent directory".into())
+        .ok_or_else(|| "Codex hook configuration has no parent directory".to_owned())?;
+    let resolved = resolve_existing_prefix(parent)
+        .ok_or_else(|| "Codex hook configuration parent cannot be resolved".to_owned())?;
+    Ok(resolved.join(CODEX_COMPOSED_BACKUP))
 }
 
+#[cfg(test)]
 fn composed_codex_group(exe: &Path, backup: &Path) -> Value {
     hook_group(
         format!(
@@ -916,35 +978,7 @@ fn composed_codex_group(exe: &Path, backup: &Path) -> Value {
     )
 }
 
-/// Whether one Codex PreToolUse group is this installer's own composed-guard
-/// entry written by *either* of Pixel's executables — `pixel` or `pixel-dev`,
-/// at any install path — rather than the exact spelling this install would
-/// write today.
-///
-/// The hand-back case: `pixel-dev install --repo .` writes a group naming
-/// `pixel-dev`, and the managed `pixel install --repo .` must be able to take
-/// that install back instead of reading Pixel's own binary as a user edit and
-/// leaving `doctor` permanently red.
-///
-/// This stays deliberately narrow, because the refusal it replaces is a
-/// security boundary: it must admit only the exact managed shape under another
-/// Pixel executable name, and refuse everything else. So it requires
-/// [`pixel_hook_verb`] to recognise the command (which admits only an
-/// executable named `pixel`/`pixel-dev`, or this install's own `exe`), then
-/// requires the whole group to equal [`composed_codex_group`] rebuilt from
-/// that executable and *this* install's backup: the executable path is the
-/// only thing allowed to differ. A second hook in the group, a matcher, a
-/// changed timeout, or a group pointing at another repo's backup is a user or
-/// foreign edit, not a stale spelling.
-fn is_managed_composed_group(group: &Value, exe: &Path, backup: &Path) -> bool {
-    group["hooks"][0]["command"]
-        .as_str()
-        .filter(|command| pixel_hook_verb(command, exe).is_some())
-        .and_then(|command| command.rsplit_once(" run-hook "))
-        .and_then(|(executable, _)| unquoted_executable(executable))
-        .is_some_and(|written| *group == composed_codex_group(&written, backup))
-}
-
+#[cfg(test)]
 fn composed_backup(groups: Vec<Value>, managed_pre_tool_use: Value) -> Value {
     json!({
         "version": CODEX_COMPOSED_BACKUP_VERSION,
@@ -954,42 +988,22 @@ fn composed_backup(groups: Vec<Value>, managed_pre_tool_use: Value) -> Value {
     })
 }
 
-fn read_composed_backup(path: &Path) -> crate::Result<Value> {
-    let value: Value = serde_json::from_str(&fs::read_to_string(path)?)?;
-    let valid_header = value.get("version").and_then(Value::as_u64)
-        == Some(CODEX_COMPOSED_BACKUP_VERSION)
-        && value.get("provider").and_then(Value::as_str) == Some("codex");
-    let groups = value.get("pre_tool_use").and_then(Value::as_array);
-    let managed = value.get("managed_pre_tool_use").and_then(Value::as_array);
-    if !valid_header || groups.is_none() || managed.is_none() {
-        return Err(InstallError::InvalidSettings {
-            path: path.into(),
-            reason: "unrecognized composed Codex backup; refusing to execute or overwrite it"
-                .into(),
-        });
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
-            return Err(InstallError::InvalidSettings {
-                path: path.into(),
-                reason: "composed Codex backup must be mode 0600".into(),
-            });
-        }
-    }
-    Ok(value)
-}
-
 /// Persist the immutable runtime input before installing the command that can
 /// consume it. `persist` is an atomic same-directory rename; write mode is
 /// tightened before the file becomes visible.
+#[cfg(test)]
 fn write_composed_backup(
     path: &Path,
     groups: &[Value],
     managed_pre_tool_use: Value,
     dry_run: bool,
 ) -> crate::Result<()> {
+    use std::{
+        fs::OpenOptions,
+        io::{self, Write},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     if dry_run {
         return Ok(());
     }
@@ -1028,253 +1042,67 @@ fn write_composed_backup(
     Ok(())
 }
 
-/// Adopt every existing project-local Codex PreToolUse group behind a single
-/// deterministic Pixel entrypoint. Reinstalls only accept the exact managed
-/// shape: a user edit to PreToolUse is a hard refusal, never a silent snapshot
-/// refresh that could grant Pixel authority over a newly added command.
+/// Retire project-local Codex retrieval callbacks and preserve existing task
+/// hooks without duplicating the global task suite. If an older install wrapped PreToolUse, restore its exact snapshot
+/// before removing the callback.
 pub(crate) fn install_project_codex_at(
-    _home: &Path,
+    home: &Path,
+    global_hooks_path: &Path,
     path: &Path,
     exe: &Path,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
-    let backup_path =
-        composed_backup_path(path).map_err(|reason| InstallError::InvalidSettings {
-            path: path.into(),
-            reason,
-        })?;
-    let mut value = install::read_settings(path)?;
-    let expected_group = composed_codex_group(exe, &backup_path);
-    let backup_exists = backup_path.is_file();
-    let legacy_group = composed_codex_group(
-        &exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf()),
-        &backup_path,
-    );
-    let mut migrate_executable_spelling = false;
-    let mut stored_pre_tool_use = None;
-
-    let settings_file_exists = path.is_file();
-    if backup_exists {
-        // Validate before changing the config. This also proves the runtime
-        // input was created by this installer and remains private.
-        let stored = read_composed_backup(&backup_path)?;
-        stored_pre_tool_use = stored["pre_tool_use"].as_array().cloned();
-        if settings_file_exists {
-            let existing = value
-                .get("hooks")
-                .and_then(Value::as_object)
-                .and_then(|hooks| hooks.get("PreToolUse"))
-                .and_then(Value::as_array)
-                .ok_or_else(|| InstallError::InvalidSettings {
-                    path: path.into(),
-                    reason: "composed Codex install lost its PreToolUse group; refusing to overwrite user changes".into(),
-                })?;
-            // Pixel's own composed group, in any spelling pixel may have
-            // written: today's, this executable's canonicalised path
-            // (`legacy_group`), or another Pixel executable name at any path,
-            // which is how a side build (`pixel-dev install --repo .`) hands
-            // the repo install back to the managed `pixel`. Exactly one
-            // group: a config that gained a second group is still a refusal,
-            // never a silent overwrite of the user's addition.
-            let is_own = |groups: &[Value]| match groups {
-                [group] => {
-                    *group == legacy_group || is_managed_composed_group(group, exe, &backup_path)
-                }
-                _ => false,
-            };
-            if !is_own(existing) {
-                return Err(InstallError::InvalidSettings {
-                    path: path.into(),
-                    reason: "composed Codex PreToolUse diverged from its managed contract; refusing to overwrite user changes".into(),
-                });
-            }
-            let stored_managed = stored["managed_pre_tool_use"]
-                .as_array()
-                .map_or(&[][..], Vec::as_slice);
-            if !is_own(stored_managed) {
-                return Err(InstallError::InvalidSettings {
-                    path: backup_path.clone(),
-                    reason: "composed Codex backup managed contract diverged; refusing to execute or overwrite it".into(),
-                });
-            }
-            // Both files hold pixel's own entry, so both move to today's
-            // spelling in this pass: the config is always rewritten below,
-            // the backup whenever its record is not already today's. The
-            // spellings may disagree when a previous install stopped between
-            // its backup write and its config write; uninstall restores only
-            // when the backup's record equals the config, so leaving the
-            // backup behind would lock the user's original groups in it.
-            migrate_executable_spelling = stored_managed != [expected_group.clone()];
-        }
-    }
-
-    // `configure` owns lifecycle cleanup/installation. Capture the original
-    // PreToolUse groups *after* stale Pixel registrations are removed, then
-    // replace that event only with the composed guard.
-    let mut snapshot_source = value.clone();
-    if let Some(hooks) = snapshot_source
-        .get_mut("hooks")
-        .and_then(Value::as_object_mut)
-    {
-        remove_pixel_hooks(hooks, exe);
-    }
-    let snapshot = snapshot_source
-        .get("hooks")
-        .and_then(Value::as_object)
-        .and_then(|hooks| hooks.get("PreToolUse"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let saved = Vec::new();
-    configure(&mut value, Provider::Codex, exe, &saved).map_err(|reason| {
-        InstallError::InvalidSettings {
-            path: path.into(),
-            reason,
-        }
-    })?;
-    let hooks = value
-        .get_mut("hooks")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| InstallError::InvalidSettings {
-            path: path.into(),
-            reason: "hooks is not an object".into(),
-        })?;
-    hooks.insert("PreToolUse".into(), json!([expected_group.clone()]));
-
-    if !backup_exists || migrate_executable_spelling || !settings_file_exists {
-        // Sidecar first: config publication cannot expose a command that lacks
-        // its approved, atomically-written input.
-        write_composed_backup(
-            &backup_path,
-            stored_pre_tool_use.as_deref().unwrap_or(&snapshot),
-            json!([expected_group.clone()]),
-            dry_run,
-        )?;
-    }
-    let backup = install::write_settings(path, &value, dry_run)?;
-    Ok(install::InstallStep {
-        id: "hooks.codex".into(),
-        status: install::CheckStatus::Green,
-        summary: install::dry_run_summary(
-            dry_run,
-            "codex lifecycle + composed shell routing configured (live unverified)",
-        ),
-        detail: Some(install::with_backup_note(
-            format!(
-                "{} (composed backup={})",
-                path.display(),
-                backup_path.display()
-            ),
-            backup,
-        )),
-    })
-}
-
-#[cfg(test)]
-pub(crate) fn install_at(
-    home: &Path,
-    path: &Path,
-    exe: &Path,
-    provider: Provider,
-    dry_run: bool,
-) -> crate::Result<install::InstallStep> {
-    install_at_scoped(home, path, exe, provider, HookScope::All, &[], dry_run)
-}
-
-/// Install ZCode's user-level hooks only when its config already exists.
-/// ZCode ignores project-level hooks; preserve every unrelated config key and
-/// hook group, replacing only Pixel's own matching entries.
-pub(crate) fn install_zcode_at(
-    home: &Path,
-    exe: &Path,
-    dry_run: bool,
-) -> crate::Result<install::InstallStep> {
-    let path = home.join(config::ZCODE_CONFIG_FILE);
-    if !path.is_file() {
+    if paths_resolve_to_same_file(global_hooks_path, path) {
         return Ok(install::InstallStep {
-            id: "hooks.zcode".into(),
-            status: install::CheckStatus::Green,
-            summary: "no ZCode CLI config — skipped (live unverified)".into(),
-            detail: None,
+            id: "hooks.codex".into(),
+            status: install::CheckStatus::Yellow,
+            summary: install::dry_run_summary(
+                dry_run,
+                "codex project hooks not changed: project path resolves to the global hooks file",
+            ),
+            detail: Some(path.display().to_string()),
         });
     }
-    let mut value = install::read_settings(&path)?;
-    let hooks = value
-        .as_object_mut()
-        .ok_or_else(|| InstallError::InvalidSettings {
-            path: path.clone(),
-            reason: "expected a JSON object".into(),
-        })?
-        .entry("hooks")
-        .or_insert_with(|| json!({}));
-    let hooks = hooks
-        .as_object_mut()
-        .ok_or_else(|| InstallError::InvalidSettings {
-            path: path.clone(),
-            reason: "hooks must be an object".into(),
-        })?;
-    let enabled = hooks
-        .entry("enabled")
-        .or_insert(Value::Bool(true))
-        .as_bool()
-        == Some(true);
-    let events = hooks
-        .entry("events")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| InstallError::InvalidSettings {
-            path: path.clone(),
-            reason: "hooks.events must be an object".into(),
-        })?;
-    let command = format!("{} run-hook guard --provider zcode", quoted_executable(exe));
-    for (event, matcher) in [
-        ("PreToolUse", "Bash|exec"),
-        ("PermissionRequest", "Bash|exec"),
-    ] {
-        let groups = events
-            .entry(event)
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .ok_or_else(|| InstallError::InvalidSettings {
-                path: path.clone(),
-                reason: format!("hooks.events.{event} must be an array"),
-            })?;
-        groups.retain(|group| {
-            !group
-                .get("hooks")
-                .and_then(Value::as_array)
-                .is_some_and(|entries| {
-                    entries.iter().any(|entry| {
-                        entry.get("command").and_then(Value::as_str) == Some(command.as_str())
+    match crate::uninstall::restore_project_codex_composed_guard(path, dry_run)? {
+        crate::uninstall::ComposedGuardRestore::Conflict => {
+            return Err(InstallError::InvalidSettings {
+                path: path.into(),
+                reason: "composed Codex hooks or their private backup changed; preserving both for manual reconciliation".into(),
+            });
+        }
+        crate::uninstall::ComposedGuardRestore::Restored
+        | crate::uninstall::ComposedGuardRestore::NotManaged => {}
+    }
+    let global_codex_tasks_registered =
+        install::read_settings(global_hooks_path)
+            .ok()
+            .is_some_and(|settings| {
+                task_hooks_registered(&settings, Provider::Codex, exe)
+                    && global_hooks_path.parent().is_some_and(|codex_home| {
+                        crate::codex_config::task_hook_suite_is_enabled_and_trusted(
+                            codex_home,
+                            global_hooks_path,
+                            &settings,
+                            exe,
+                        )
                     })
-                })
-        });
-        groups.push(json!({
-            "matcher": matcher,
-            "hooks": [{"type":"command", "command": command, "timeout":10}]
-        }));
-    }
-    install::write_settings(&path, &value, dry_run)?;
-    Ok(install::InstallStep {
-        id: "hooks.zcode".into(),
-        status: if enabled {
-            install::CheckStatus::Green
+            });
+    install_at_scoped(
+        home,
+        path,
+        exe,
+        Provider::Codex,
+        if global_codex_tasks_registered {
+            HookScope::NativeCleanupWithGlobalCodexTasks
         } else {
-            install::CheckStatus::Yellow
+            HookScope::NativeCleanup
         },
-        summary: if enabled {
-            "ZCode Pixel rewrite and retrieval-only approval hooks configured (live unverified)"
-                .into()
-        } else {
-            "ZCode hooks remain disabled by the existing hooks.enabled=false setting".into()
-        },
-        detail: Some(path.display().to_string()),
-    })
+        &[],
+        dry_run,
+    )
 }
 
-/// Scoped install: lifecycle hooks only (global Claude doctrine delivery) or
-/// the PreToolUse guard only (repo-local Claude enforcement). Same merge and
-/// foreign-hook preservation rules as the full install.
+/// Apply the selected host profile while preserving foreign hook entries.
 ///
 /// `backup_root` is the directory whose `.claude/pixel-rtk-hooks.json` holds
 /// an adopted RTK group: `$HOME` for the global install, the repository for
@@ -1290,6 +1118,7 @@ pub(crate) fn install_at_scoped(
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
     let mut value = install::read_settings(path)?;
+    let original = value.clone();
     let saved = if provider == Provider::Claude {
         load_rtk_backup(backup_root)?
     } else {
@@ -1300,12 +1129,32 @@ pub(crate) fn install_at_scoped(
             path: path.into(),
             reason,
         })?;
+    // Cleanup registers nothing: an absent or already-clean file stays as it
+    // was instead of becoming (or being rewritten as) an empty hooks object.
+    let cleanup_only = matches!(
+        scope,
+        HookScope::NativeCleanup | HookScope::NativeCleanupWithGlobalCodexTasks
+    );
+    if cleanup_only
+        && original.get("hooks").is_none()
+        && value
+            .get("hooks")
+            .and_then(Value::as_object)
+            .is_some_and(Map::is_empty)
+        && let Some(root) = value.as_object_mut()
+    {
+        root.remove("hooks");
+    }
     // Persist only the adopted fragment, never restore a whole settings file
     // over later user edits. Save before changing its active registration.
     if !adopted.is_empty() {
         install::write_settings(&backup_root.join(RTK_BACKUP), &json!(adopted), dry_run)?;
     }
-    let backup = install::write_settings(path, &value, dry_run)?;
+    let backup = if cleanup_only && value == original {
+        None
+    } else {
+        install::write_settings(path, &value, dry_run)?
+    };
     // Nothing delegates to the backup any more: RTK is back in the settings
     // or was dropped by the user. Retire it after the settings are written,
     // unless the other file that reads it still delegates.
@@ -1317,12 +1166,25 @@ pub(crate) fn install_at_scoped(
         fs::remove_file(backup_root.join(RTK_BACKUP))?;
     }
     let summary_text = match scope {
+        #[cfg(test)]
         HookScope::LifecycleOnly => {
             format!(
                 "{} lifecycle hooks configured (live unverified)",
                 provider.name()
             )
         }
+        HookScope::TaskEventsOnly => format!(
+            "{} task-event hooks configured (live unverified)",
+            provider.name()
+        ),
+        HookScope::NativeCleanup => format!(
+            "{} native tools preserved; Pixel retrieval callbacks removed",
+            provider.name()
+        ),
+        HookScope::NativeCleanupWithGlobalCodexTasks => format!(
+            "{} native tools preserved; Pixel retrieval callbacks and redundant project task hooks removed",
+            provider.name()
+        ),
         HookScope::GuardOnly => format!(
             "{} guard {}",
             provider.name(),
@@ -1332,6 +1194,7 @@ pub(crate) fn install_at_scoped(
                 "not installed: unknown overlapping hook"
             }
         ),
+        #[cfg(test)]
         HookScope::All => format!(
             "{} lifecycle configured; shell routing {} (live unverified)",
             provider.name(),
@@ -1414,41 +1277,24 @@ pub(crate) fn remove_pre_tool_use_guard(
     Ok((left, true))
 }
 
-/// Repo-local Claude guard: `<repo>/.claude/settings.local.json`, never the
-/// team-shared `settings.json`, because the command names this machine's
-/// binary. A guard an earlier install left in `settings.json` is taken out
-/// first; whatever else that file registers on `PreToolUse` still runs in the
-/// same session and is checked for overlap. An adopted RTK group is backed up
-/// under the repository, not under `$HOME`.
+/// Remove the retired repo-local Claude retrieval guard, restoring any
+/// adopted RTK registration. Native Claude tools remain in control; task
+/// lifecycle hooks are installed globally by the normal install path.
 pub(crate) fn install_project_claude_at(
     repo: &Path,
-    home: &Path,
+    _home: &Path,
     exe: &Path,
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
     let shared = repo.join(CLAUDE_SHARED_SETTINGS);
-    let (mut inherited, migrated) = remove_pre_tool_use_guard(&shared, exe, dry_run)?;
-    let global_path = Provider::Claude.path(home);
-    // A repository at `$HOME` has the global file as its shared one, which
-    // was read above.
-    let (global, unreadable) = if same_file(&shared, &global_path) {
-        (Vec::new(), None)
-    } else {
-        global_pre_tool_use(&global_path)
-    };
-    let blocking = blocking_claude_groups(&global, exe);
-    let global_blockers = hook_commands(&blocking);
-    // A guard a full install of an older release left in the global file:
-    // the current global install takes it out.
-    let stale_global_guard = commands(&blocking).any(|command| is_pixel_hook(command, exe));
-    inherited.extend(global);
+    let (_, migrated) = remove_pre_tool_use_guard(&shared, exe, dry_run)?;
     let mut step = install_at_scoped(
         repo,
         &repo.join(CLAUDE_LOCAL_SETTINGS),
         exe,
         Provider::Claude,
-        HookScope::GuardOnly,
-        &inherited,
+        HookScope::NativeCleanup,
+        &[],
         dry_run,
     )?;
     if migrated {
@@ -1458,69 +1304,14 @@ pub(crate) fn install_project_claude_at(
             shared.display()
         ));
     }
-    if !global_blockers.is_empty() {
-        step.summary = install::dry_run_summary(
-            dry_run,
-            &format!(
-                "claude guard not installed: {} in {} also rewrites shell calls{}",
-                global_blockers.join(", "),
-                global_path.display(),
-                if stale_global_guard {
-                    " — run `pixel install` to take pixel's global guard out".to_string()
-                } else {
-                    held_back_guard_hint(repo)
-                }
-            ),
-        );
-    }
-    if let Some(warning) = unreadable {
-        step.status = install::CheckStatus::Yellow;
-        step.summary = format!("{}; {warning}", step.summary);
-    }
     Ok(step)
-}
-
-/// What a user can do about a hook of theirs that keeps the Claude guard out
-/// of `repo`. Pixel never stacks a second rewriter on the same Bash call, so
-/// the choice is theirs: a matcher naming only other tools coexists with the
-/// guard (see [`shell_overlap`]), or the hook stays and the session runs
-/// without the guard.
-pub(crate) fn held_back_guard_hint(repo: &Path) -> String {
-    format!(
-        " — narrow that hook's `matcher` to tools other than Bash (an explicit list such as `Edit|Write` runs beside the guard), then run `pixel install --repo {}`; or keep it and work without the guard",
-        quoted_executable(repo)
-    )
-}
-
-/// The `PreToolUse` groups of the user-level settings at `path`, which
-/// Claude Code merges into every project's session. Read only: a repo
-/// install never writes the global file. An unreadable file yields no group
-/// and the reason, so it cannot block the repo install on its own.
-pub(crate) fn global_pre_tool_use(path: &Path) -> (Vec<Value>, Option<String>) {
-    match install::read_settings(path) {
-        Ok(value) => (
-            value
-                .get("hooks")
-                .and_then(|hooks| hooks.get("PreToolUse"))
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
-            None,
-        ),
-        Err(e) => (
-            Vec::new(),
-            Some(format!(
-                "{} unreadable ({e}), its PreToolUse hooks were not checked",
-                path.display()
-            )),
-        ),
-    }
 }
 
 /// The groups that cannot run beside the Claude guard: shell rewriters,
 /// the exact RTK group included, since only the file that holds it can hand
 /// it to the guard.
-pub(crate) fn blocking_claude_groups(groups: &[Value], exe: &Path) -> Vec<Value> {
+#[cfg(test)]
+fn blocking_claude_groups(groups: &[Value], exe: &Path) -> Vec<Value> {
     groups
         .iter()
         .filter(|group| !coexists_with_guard(group, Provider::Claude, exe))
@@ -1537,22 +1328,6 @@ fn commands(groups: &[Value]) -> impl Iterator<Item = &str> {
         .filter_map(|hook| hook.get("command").and_then(Value::as_str))
 }
 
-/// Every hook command of `groups`, backticked, in order.
-pub(crate) fn hook_commands(groups: &[Value]) -> Vec<String> {
-    commands(groups)
-        .map(|command| format!("`{command}`"))
-        .collect()
-}
-
-/// Whether `a` and `b` name the same file, comparing canonical paths when
-/// both resolve.
-pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
-}
-
 /// Whether any hook command in a settings value (`{"hooks": {<event>: [...]}}`)
 /// is one of Pixel's: the evidence that Pixel was installed into that file.
 pub(crate) fn has_pixel_hook(value: &Value, exe: &Path) -> bool {
@@ -1563,10 +1338,7 @@ pub(crate) fn has_pixel_hook(value: &Value, exe: &Path) -> bool {
             events
                 .values()
                 .filter_map(Value::as_array)
-                .flatten()
-                .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-                .flatten()
-                .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+                .flat_map(|groups| commands(groups))
                 .any(|command| is_pixel_hook(command, exe))
         })
 }
@@ -1585,10 +1357,7 @@ pub(crate) fn stacked_pixel_hooks(value: &Value, exe: &Path) -> Vec<String> {
         for verb in groups
             .as_array()
             .into_iter()
-            .flatten()
-            .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-            .flatten()
-            .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+            .flat_map(|groups| commands(groups))
             .filter_map(|command| pixel_hook_verb(command, exe))
         {
             match counts.iter_mut().find(|(seen, _)| *seen == verb) {
@@ -1622,10 +1391,7 @@ pub(crate) fn pixel_hooks_running_other_binaries(value: &Value, exe: &Path) -> V
     for command in events
         .values()
         .filter_map(Value::as_array)
-        .flatten()
-        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-        .flatten()
-        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .flat_map(|groups| commands(groups))
         .filter(|command| is_pixel_hook(command, exe))
     {
         let Some(path) = command
@@ -1656,139 +1422,6 @@ pub(crate) fn has_pixel_guard(value: &Value, verb: &str, exe: &Path) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command").and_then(Value::as_str))
         .any(|command| is_pixel_hook(command, exe) && command.contains(verb))
-}
-
-/// Whether Devin's project config registers Pixel's non-blocking prompt context.
-pub(crate) fn has_pixel_prompt_context(value: &Value, exe: &Path) -> bool {
-    value
-        .get("hooks")
-        .and_then(|hooks| hooks.get("UserPromptSubmit"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-        .flatten()
-        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
-        .any(|command| {
-            is_pixel_hook(command, exe)
-                && command.contains("run-hook prompt-submit --provider devin")
-        })
-}
-
-/// Whether Devin's local config pre-approves Pixel retrieval via PermissionRequest.
-pub(crate) fn has_pixel_permission_approval(value: &Value, exe: &Path) -> bool {
-    value
-        .get("hooks")
-        .and_then(|hooks| hooks.get("PermissionRequest"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|group| group.get("matcher").and_then(Value::as_str) == Some("exec"))
-        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-        .flatten()
-        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
-        .any(|command| {
-            is_pixel_hook(command, exe) && command.contains("run-hook guard --provider devin")
-        })
-}
-
-/// Merge Pixel's silent exec rewrite, retrieval approval, and prompt context hooks into the
-/// repository's personal Devin config, `<repo>/.devin/config.local.json`
-/// (the command names this machine's binary, so not the shared
-/// `.devin/config.json`). Devin accepts multiple independent hook groups, so
-/// each Pixel group is appended after any foreign entries and a
-/// reinstall replaces only pixel's own group. A guard an earlier install
-/// wrote into `.devin/hooks.json`, a file Devin CLI does not read, is removed.
-pub(crate) fn install_project_devin_at(
-    repo: &Path,
-    exe: &Path,
-    dry_run: bool,
-) -> crate::Result<install::InstallStep> {
-    remove_pre_tool_use_guard(&repo.join(DEVIN_LEGACY_HOOKS), exe, dry_run)?;
-    let path = &repo.join(DEVIN_LOCAL_CONFIG);
-    let mut value = install::read_settings(path)?;
-    let root = value
-        .as_object_mut()
-        .ok_or_else(|| InstallError::InvalidSettings {
-            path: path.into(),
-            reason: "settings root is not an object".into(),
-        })?;
-    let hooks = root
-        .entry("hooks")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| InstallError::InvalidSettings {
-            path: path.into(),
-            reason: "hooks is not an object".into(),
-        })?;
-    let pixel_group = hook_group(
-        format!(
-            "{} run-hook guard --provider {}",
-            quoted_executable(exe),
-            Provider::Devin.name()
-        ),
-        Some(Provider::Devin.shell_matcher()),
-    );
-    let merged = config::merge_hook_entry(
-        hooks.get("PreToolUse"),
-        "run-hook guard --provider devin",
-        pixel_group,
-    );
-    let prompt_group = hook_group(
-        format!(
-            "{} run-hook prompt-submit --provider devin",
-            quoted_executable(exe)
-        ),
-        None,
-    );
-    let merged_prompt = config::merge_hook_entry(
-        hooks.get("UserPromptSubmit"),
-        "run-hook prompt-submit --provider devin",
-        prompt_group,
-    );
-    let permission_group = hook_group(
-        format!("{} run-hook guard --provider devin", quoted_executable(exe)),
-        Some("exec"),
-    );
-    let merged_permission = config::merge_hook_entry(
-        hooks.get("PermissionRequest"),
-        "run-hook guard --provider devin",
-        permission_group,
-    );
-    let merged_metrics = config::merge_hook_entry(
-        hooks.get("PostToolUse"),
-        "run-hook metrics --provider devin",
-        metrics_relay_group(exe, Provider::Devin),
-    );
-    let unchanged = hooks.get("PreToolUse") == Some(&merged)
-        && hooks.get("UserPromptSubmit") == Some(&merged_prompt)
-        && hooks.get("PermissionRequest") == Some(&merged_permission)
-        && hooks.get("PostToolUse") == Some(&merged_metrics);
-    let backup = if unchanged {
-        None
-    } else {
-        hooks.insert("PreToolUse".into(), merged);
-        hooks.insert("UserPromptSubmit".into(), merged_prompt);
-        hooks.insert("PermissionRequest".into(), merged_permission);
-        hooks.insert("PostToolUse".into(), merged_metrics);
-        install::write_settings(path, &value, dry_run)?
-    };
-    Ok(install::InstallStep {
-        id: "hooks.devin".into(),
-        status: install::CheckStatus::Green,
-        summary: install::dry_run_summary(
-            dry_run,
-            if unchanged {
-                "devin Pixel rewrite, no-prompt retrieval approval, and prompt-context hooks verified (live unverified)"
-            } else {
-                "devin Pixel rewrite, no-prompt retrieval approval, and prompt-context hooks configured (live unverified)"
-            },
-        ),
-        detail: Some(install::with_backup_note(
-            path.display().to_string(),
-            backup,
-        )),
-    })
 }
 
 #[cfg(test)]
@@ -2618,109 +2251,655 @@ mod tests {
     }
 
     #[test]
-    fn project_codex_composition_snapshots_guards_and_refuses_divergence() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn project_codex_default_should_keep_foreign_pretooluse_without_pixel_wrapper() {
         let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("Documents/guarded/.codex/hooks.json");
+        let path = home.path().join("repo/.codex/hooks.json");
         let original = json!([
             {"matcher":"Bash","hooks":[{"type":"command","command":"deny-unsafe-shell"}]},
             {"matcher":"*","hooks":[{"type":"command","command":"audit-all-tools"}]}
         ]);
         install::write_settings(
             &path,
-            &json!({"hooks":{"PreToolUse":original.clone()}, "keep":true}),
+            &json!({"hooks":{"PreToolUse":original.clone()}}),
             false,
         )
         .unwrap();
 
-        install_project_codex_at(home.path(), &path, Path::new("/tmp/pixel"), false).unwrap();
-        let installed = install::read_settings(&path).unwrap();
-        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
-        let stored = read_composed_backup(&sidecar).unwrap();
-        assert_eq!(stored["pre_tool_use"], original);
-        assert_eq!(
-            stored["managed_pre_tool_use"],
-            installed["hooks"]["PreToolUse"]
-        );
-        assert_eq!(
-            fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        let global_hooks = Provider::Codex.path(home.path());
+        install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &path,
+            Path::new("/tmp/pixel"),
+            false,
+        )
+        .unwrap();
+        let mut installed = install::read_settings(&path).unwrap();
+        assert_eq!(installed["hooks"]["PreToolUse"], original);
         assert!(
-            installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap()
-                .contains("hook composed-guard --provider codex --backup")
+            !installed
+                .to_string()
+                .contains("task-event --provider codex")
         );
+        assert!(!installed.to_string().contains("composed-guard"));
+        assert!(!path.parent().unwrap().join(CODEX_COMPOSED_BACKUP).exists());
 
-        // The exact managed state can be installed repeatedly without a new
-        // snapshot. Any later manual addition is deliberately a hard refusal.
-        install_project_codex_at(home.path(), &path, Path::new("/tmp/pixel"), false).unwrap();
-        let mut changed = install::read_settings(&path).unwrap();
-        changed["hooks"]["PreToolUse"].as_array_mut().unwrap().push(
-            json!({"matcher":"Bash","hooks":[{"type":"command","command":"later-user-guard"}]}),
-        );
-        install::write_settings(&path, &changed, false).unwrap();
-        assert!(
-            install_project_codex_at(home.path(), &path, Path::new("/tmp/pixel"), false).is_err()
-        );
+        let changed =
+            json!({"matcher":"Bash","hooks":[{"type":"command","command":"later-user-guard"}]});
+        installed["hooks"]["PreToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .push(changed.clone());
+        install::write_settings(&path, &installed, false).unwrap();
+        install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &path,
+            Path::new("/tmp/pixel"),
+            false,
+        )
+        .unwrap();
         assert_eq!(
-            read_composed_backup(&sidecar).unwrap()["pre_tool_use"],
-            original
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
+            json!([original[0].clone(), original[1].clone(), changed])
         );
     }
 
     #[test]
-    fn project_codex_composition_migrates_a_canonical_executable_to_its_symlink() {
+    fn project_cleanup_should_not_create_or_rewrite_settings_it_leaves_unchanged() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let exe = Path::new("/tmp/pixel");
+        let global_hooks = Provider::Codex.path(home.path());
+        let project_hooks = repo.join(".codex/hooks.json");
+        let claude_local = repo.join(CLAUDE_LOCAL_SETTINGS);
+
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        install_project_claude_at(&repo, home.path(), exe, false).unwrap();
+        assert!(
+            !repo.join(".codex").exists(),
+            "cleanup must not create .codex/"
+        );
+        assert!(
+            !claude_local.exists(),
+            "cleanup must not create {claude_local:?}"
+        );
+
+        // A clean file in the user's own formatting keeps its exact bytes.
+        let clean = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"audit-stop"}]}]}}"#;
+        fs::create_dir_all(project_hooks.parent().unwrap()).unwrap();
+        fs::write(&project_hooks, clean).unwrap();
+        fs::create_dir_all(claude_local.parent().unwrap()).unwrap();
+        fs::write(&claude_local, r#"{"model":"opus"}"#).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        install_project_claude_at(&repo, home.path(), exe, false).unwrap();
+        assert_eq!(fs::read_to_string(&project_hooks).unwrap(), clean);
+        assert_eq!(
+            fs::read_to_string(&claude_local).unwrap(),
+            r#"{"model":"opus"}"#
+        );
+
+        // A retired callback is still removed, and foreign hooks kept.
+        let retired = json!({"hooks": {"Stop": [
+            hook_group(format!("{} run-hook metrics --provider codex", quoted_executable(exe)), None),
+            hook_group("audit-stop".into(), None),
+        ]}});
+        install::write_settings(&project_hooks, &retired, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            json!([hook_group("audit-stop".into(), None)])
+        );
+    }
+
+    #[test]
+    fn project_codex_cleanup_should_remove_only_task_hooks_covered_by_the_global_suite() {
+        let home = tempfile::tempdir().unwrap();
+        let exe = Path::new("/tmp/pixel");
+        let global_hooks = Provider::Codex.path(home.path());
+        let project_hooks = home.path().join("repo/.codex/hooks.json");
+        let codex_task = hook_group(
+            format!(
+                "{} run-hook task-event --provider codex --event stop",
+                quoted_executable(exe)
+            ),
+            None,
+        );
+        let claude_task = hook_group(
+            format!(
+                "{} run-hook task-event --provider claude --event stop",
+                quoted_executable(exe)
+            ),
+            None,
+        );
+        let foreign_task = hook_group(
+            "other-pixel run-hook task-event --provider codex --event stop".into(),
+            None,
+        );
+        let foreign = hook_group("audit-stop".into(), None);
+        let mut original = json!({
+            "hooks": {
+                "Stop": [codex_task, claude_task.clone(), foreign_task.clone(), foreign.clone()]
+            }
+        });
+        for (event, name) in TASK_HOOK_EVENTS
+            .iter()
+            .copied()
+            .filter(|(event, _)| *event != "Stop")
+            .chain(std::iter::once(("Interrupt", "interrupt")))
+        {
+            original["hooks"][event] = json!([hook_group(
+                format!(
+                    "{} run-hook task-event --provider codex --event {name}",
+                    quoted_executable(exe)
+                ),
+                None,
+            )]);
+        }
+        // Codex has no PostToolUseFailure event; this Claude-specific verb
+        // must remain even though the full Codex suite is registered.
+        original["hooks"]["PostToolUseFailure"] = json!([hook_group(
+            format!(
+                "{} run-hook task-event --provider codex --event tool-failure",
+                quoted_executable(exe)
+            ),
+            None,
+        )]);
+        install::write_settings(&project_hooks, &original, false).unwrap();
+
+        // A project-only suite remains active when the global config is absent.
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"]
+        );
+
+        // A partial global set does not cover the project hook's execution.
+        install::write_settings(
+            &global_hooks,
+            &json!({"hooks": {"Stop": [
+                hook_group(
+                    format!("{} run-hook task-event --provider codex --event stop", quoted_executable(exe)),
+                    None,
+                )
+            ]}}),
+            false,
+        )
+        .unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"]
+        );
+
+        // Only the complete, matching global suite makes project Codex task
+        // callbacks redundant. Other providers and foreign commands survive.
+        let mut global = json!({"hooks": {}});
+        merge_task_hooks(
+            global["hooks"].as_object_mut().unwrap(),
+            Provider::Codex,
+            exe,
+        )
+        .unwrap();
+        install::write_settings(&global_hooks, &global, false).unwrap();
+
+        // A complete global suite without a current user review still does
+        // not cover project callbacks: Codex skips untrusted hooks.
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "unreviewed global hooks must not remove project task callbacks"
+        );
+
+        std::fs::create_dir(home.path().join(".codex/config.toml")).unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "an unreadable Codex config must preserve project task callbacks"
+        );
+        std::fs::remove_dir(home.path().join(".codex/config.toml")).unwrap();
+
+        let mut trust = String::new();
+        for (event, name) in TASK_HOOK_EVENTS
+            .iter()
+            .copied()
+            .chain(std::iter::once(("Interrupt", "interrupt")))
+        {
+            let group = &global["hooks"][event][0];
+            let hook = &group["hooks"][0];
+            let hash = crate::codex_config::codex_hook_hash(event, group, hook).unwrap();
+            let state_key = format!(
+                "{}:{}:0:0",
+                global_hooks.display(),
+                crate::codex_config::hook_event_label(event).unwrap()
+            );
+            assert_eq!(
+                hook["command"].as_str().unwrap().split("--event ").nth(1),
+                Some(name)
+            );
+            trust.push_str(&format!(
+                "[hooks.state.{state_key:?}]\nenabled = true\ntrusted_hash = {hash:?}\n\n"
+            ));
+        }
+        std::fs::write(home.path().join(".codex/config.toml"), &trust).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        let installed = install::read_settings(&project_hooks).unwrap();
+        assert_eq!(
+            installed["hooks"]["Stop"],
+            json!([claude_task, foreign_task, foreign])
+        );
+        for (event, _) in TASK_HOOK_EVENTS
+            .iter()
+            .copied()
+            .filter(|(event, _)| *event != "Stop")
+            .chain(std::iter::once(("Interrupt", "interrupt")))
+        {
+            assert!(
+                installed["hooks"].get(event).is_none(),
+                "redundant Codex task callback remained for {event}"
+            );
+        }
+        assert_eq!(
+            installed["hooks"]["PostToolUseFailure"], original["hooks"]["PostToolUseFailure"],
+            "unsupported Codex tool-failure callback must be preserved"
+        );
+
+        // A profile can override the hooks configuration and its trust state.
+        // Until Pixel resolves active profiles like Codex does, a trusted base
+        // suite is not sufficient reason to remove project-local callbacks.
+        std::fs::write(
+            home.path().join(".codex/config.toml"),
+            format!("{trust}\n[profiles.test.features]\nhooks = false\n"),
+        )
+        .unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "profile overrides must keep project task callbacks until they are resolved"
+        );
+
+        // A stale identity or disabled entry in the exact source key is not
+        // permission to remove the project's copy.
+        let stale = trust.replacen(
+            "enabled = true\ntrusted_hash = \"sha256:",
+            "enabled = true\ntrusted_hash = \"sha256:stale-",
+            1,
+        );
+        std::fs::write(home.path().join(".codex/config.toml"), stale).unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "a changed global hook hash must keep project task callbacks"
+        );
+        let disabled = trust.replacen("enabled = true", "enabled = false", 1);
+        std::fs::write(home.path().join(".codex/config.toml"), disabled).unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "a disabled global hook must keep project task callbacks"
+        );
+
+        // Malformed or ineligible global entries are not evidence that the
+        // global suite will run, so keep all project-local callbacks.
+        // Restore the complete reviewed suite first so each malformed field
+        // is the only reason the corresponding global entry is ineligible.
+        install::write_settings(&global_hooks, &global, false).unwrap();
+        std::fs::write(home.path().join(".codex/config.toml"), &trust).unwrap();
+        for (field, invalid_value) in [("type", json!("mcp_tool")), ("async", json!("false"))] {
+            let mut ineligible = global.clone();
+            ineligible["hooks"]["Stop"][0]["hooks"][0][field] = invalid_value;
+            install::write_settings(&global_hooks, &ineligible, false).unwrap();
+            install::write_settings(&project_hooks, &original, false).unwrap();
+            install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false)
+                .unwrap();
+            assert_eq!(
+                install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+                original["hooks"]["Stop"],
+                "ineligible global {field} must not remove project task hooks"
+            );
+        }
+        let mut ineligible = global.clone();
+        ineligible["hooks"]["Stop"][0]["matcher"] = json!(42);
+        install::write_settings(&global_hooks, &ineligible, false).unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "a malformed global matcher must not remove project task hooks"
+        );
+
+        // A registered suite does not cover project callbacks while Codex's
+        // feature switch disables hooks globally. Respect the deprecated
+        // alias as well as the current feature name.
+        // These checks must start from the pristine, fully approved global
+        // suite; otherwise a prior malformed matcher masks the feature gate.
+        install::write_settings(&global_hooks, &global, false).unwrap();
+        std::fs::write(home.path().join(".codex/config.toml"), &trust).unwrap();
+        for feature in ["hooks", "codex_hooks"] {
+            install::write_settings(&project_hooks, &original, false).unwrap();
+            std::fs::write(
+                home.path().join(".codex/config.toml"),
+                format!("[features]\n{feature} = false\n\n{trust}"),
+            )
+            .unwrap();
+            install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false)
+                .unwrap();
+            assert_eq!(
+                install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+                original["hooks"]["Stop"],
+                "project task hooks must survive when {feature} disables Codex hooks"
+            );
+        }
+        std::fs::write(
+            home.path().join(".codex/config.toml"),
+            format!("features = \"invalid\"\n\n{trust}"),
+        )
+        .unwrap();
+        install::write_settings(&project_hooks, &original, false).unwrap();
+        install_project_codex_at(home.path(), &global_hooks, &project_hooks, exe, false).unwrap();
+        assert_eq!(
+            install::read_settings(&project_hooks).unwrap()["hooks"]["Stop"],
+            original["hooks"]["Stop"],
+            "an invalid feature container must preserve project task callbacks"
+        );
+    }
+
+    #[test]
+    fn project_codex_install_should_unwrap_a_legacy_composed_guard() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let exe = Path::new("/tmp/pixel");
+        let sidecar = composed_backup_path(&path).unwrap();
+        let original = json!([
+            {"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-check"}]}
+        ]);
+        let managed = json!([composed_codex_group(exe, &sidecar)]);
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":managed.clone()}}),
+            false,
+        )
+        .unwrap();
+        write_composed_backup(&sidecar, original.as_array().unwrap(), managed, false).unwrap();
+
+        let global_hooks = Provider::Codex.path(home.path());
+        install_project_codex_at(home.path(), &global_hooks, &path, exe, false).unwrap();
+
+        let installed = install::read_settings(&path).unwrap();
+        assert_eq!(installed["hooks"]["PreToolUse"], original);
+        assert!(
+            !installed
+                .to_string()
+                .contains("task-event --provider codex")
+        );
+        assert!(!installed.to_string().contains("composed-guard"));
+        assert!(!sidecar.exists());
+    }
+
+    #[test]
+    fn project_codex_install_should_preserve_a_diverged_legacy_composition() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let exe = Path::new("/tmp/pixel");
+        let sidecar = composed_backup_path(&path).unwrap();
+        let original = json!([]);
+        let managed = json!([composed_codex_group(exe, &sidecar)]);
+        let mut changed = managed.clone();
+        changed
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"matcher":"Bash","hooks":[{"type":"command","command":"user-change"}]}));
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":changed.clone()}}),
+            false,
+        )
+        .unwrap();
+        write_composed_backup(&sidecar, original.as_array().unwrap(), managed, false).unwrap();
+
+        let global_hooks = Provider::Codex.path(home.path());
+        assert!(install_project_codex_at(home.path(), &global_hooks, &path, exe, false).is_err());
+        assert_eq!(
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
+            changed
+        );
+        assert!(sidecar.is_file(), "the recovery snapshot remains intact");
+    }
+
+    #[test]
+    fn project_codex_install_should_canonicalize_relative_config_aliases() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        let path = repo.join(".codex/hooks.json");
+        let alias = home.path().join("alias/../repo/.codex/hooks.json");
+        let original = json!([
+            {"matcher":"Bash","hooks":[{"type":"command","command":"user-shell-policy"}]}
+        ]);
+        fs::create_dir_all(home.path().join("alias")).unwrap();
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":original.clone()}}),
+            false,
+        )
+        .unwrap();
+
+        let global_hooks = Provider::Codex.path(home.path());
+        install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &path,
+            Path::new("/tmp/pixel"),
+            false,
+        )
+        .unwrap();
+        install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &alias,
+            Path::new("/tmp/pixel"),
+            false,
+        )
+        .unwrap();
+
+        let installed = install::read_settings(&path).unwrap();
+        assert_eq!(installed["hooks"]["PreToolUse"], original);
+        assert!(!installed.to_string().contains("composed-guard"));
+        assert!(!repo.join(".codex").join(CODEX_COMPOSED_BACKUP).exists());
+    }
+
+    #[test]
+    fn repo_equal_to_codex_home_must_not_rewrite_the_global_hook_file() {
+        let home = tempfile::tempdir().unwrap();
+        let global_hooks = Provider::Codex.path(home.path());
+        let exe = Path::new("/tmp/pixel");
+        let original = json!({
+            "hooks": {
+                "PreToolUse": [hook_group("foreign-security-check".into(), None)],
+                "Stop": [hook_group(
+                    format!("{} run-hook task-event --provider codex --event stop", quoted_executable(exe)),
+                    None,
+                )]
+            },
+            "user_setting": "keep"
+        });
+        install::write_settings(&global_hooks, &original, false).unwrap();
+        let original_bytes = std::fs::read(&global_hooks).unwrap();
+
+        let step = install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &home.path().join(".codex/./hooks.json"),
+            exe,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(step.status, install::CheckStatus::Yellow);
+        assert_eq!(std::fs::read(&global_hooks).unwrap(), original_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_codex_directory_alias_is_rejected_before_or_after_hooks_exist() {
         use std::os::unix::fs::symlink;
 
         let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("repo/.codex/hooks.json");
-        let real = home.path().join("store/pixel");
-        let stable = home.path().join("bin/pixel");
-        fs::create_dir_all(real.parent().unwrap()).unwrap();
-        fs::create_dir_all(stable.parent().unwrap()).unwrap();
-        fs::write(&real, "pixel").unwrap();
-        symlink(&real, &stable).unwrap();
+        let global_hooks = Provider::Codex.path(home.path());
+        let repo = home.path().join("repo");
+        let repo_codex = repo.join(".codex");
+        let exe = Path::new("/tmp/pixel");
+        std::fs::create_dir_all(global_hooks.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        symlink(global_hooks.parent().unwrap(), &repo_codex).unwrap();
+        let alias_hooks = repo_codex.join("hooks.json");
+
+        let absent =
+            install_project_codex_at(home.path(), &global_hooks, &alias_hooks, exe, false).unwrap();
+        assert_eq!(absent.status, install::CheckStatus::Yellow);
+        assert!(!global_hooks.exists());
+
+        let original = json!({"hooks":{"Stop":[hook_group("user-hook".into(), None)]}});
+        install::write_settings(&global_hooks, &original, false).unwrap();
+        let original_bytes = std::fs::read(&global_hooks).unwrap();
+        let present =
+            install_project_codex_at(home.path(), &global_hooks, &alias_hooks, exe, false).unwrap();
+        assert_eq!(present.status, install::CheckStatus::Yellow);
+        assert_eq!(std::fs::read(&global_hooks).unwrap(), original_bytes);
+    }
+
+    #[test]
+    fn project_claude_native_cleanup_should_preserve_foreign_hooks_and_restore_rtk() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        let local = repo.join(CLAUDE_LOCAL_SETTINGS);
+        let foreign = json!({
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "user-shell-policy"}]
+        });
+        let delegated = json!({
+            "matcher": "Bash|shell",
+            "hooks": [{
+                "type": "command",
+                "command": "'/p/pixel' run-hook guard --provider claude --delegate-rtk"
+            }]
+        });
+        let task_gate = json!({
+            "hooks": [{
+                "type": "command",
+                "command": "'/p/pixel' run-hook task-event --provider claude --event pre-tool-use"
+            }]
+        });
+        let task_stop = json!({
+            "hooks": [{
+                "type": "command",
+                "command": "'/p/pixel' run-hook task-event --provider claude --event stop"
+            }]
+        });
+        fs::create_dir_all(local.parent().unwrap()).unwrap();
+        fs::write(
+            &local,
+            serde_json::to_string(&json!({
+                "hooks": {
+                    "PreToolUse": [foreign.clone(), delegated, task_gate.clone()],
+                    "Stop": [task_stop.clone()]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            repo.join(RTK_BACKUP),
+            serde_json::to_string(&json!([rtk_group()])).unwrap(),
+        )
+        .unwrap();
+
+        let step =
+            install_project_claude_at(&repo, home.path(), Path::new("/p/pixel"), false).unwrap();
+
+        assert_eq!(step.status, install::CheckStatus::Green);
+        let installed = install::read_settings(&local).unwrap();
+        assert_eq!(
+            installed["hooks"]["PreToolUse"],
+            json!([foreign, task_gate, rtk_group()])
+        );
+        assert_eq!(installed["hooks"]["Stop"], json!([task_stop]));
+        assert!(
+            !installed
+                .to_string()
+                .contains("run-hook guard --provider claude")
+        );
+        assert!(!repo.join(RTK_BACKUP).exists());
+    }
+
+    /// Seed the legacy project guard format written by older Pixel versions.
+    /// New installs no longer compose a guard; upgrades must first restore this
+    /// exact private snapshot before native cleanup touches any task callbacks.
+    fn legacy_composed_codex_fixture(path: &Path, exe: &Path, original: &[Value]) -> PathBuf {
+        let sidecar = composed_backup_path(path).unwrap();
+        let managed = json!([composed_codex_group(exe, &sidecar)]);
         install::write_settings(
+            path,
+            &json!({"hooks":{"PreToolUse":managed.clone()},"user_setting":"keep"}),
+            false,
+        )
+        .unwrap();
+        write_composed_backup(&sidecar, original, managed, false).unwrap();
+        sidecar
+    }
+
+    fn remove_managed_snapshot_field(sidecar: &Path) {
+        let mut backup = install::read_settings(sidecar).unwrap();
+        backup
+            .as_object_mut()
+            .unwrap()
+            .remove("managed_pre_tool_use");
+        fs::write(sidecar, serde_json::to_vec(&backup).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn project_codex_upgrade_restores_legacy_snapshot_written_by_side_build() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let original = json!([
+            {"matcher":"Bash","hooks":[{"type":"command","command":"deny-unsafe-shell"}]}
+        ]);
+        let sidecar = legacy_composed_codex_fixture(
             &path,
-            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            &home.path().join("bin/pixel-dev"),
+            original.as_array().unwrap(),
+        );
+        let global_hooks = Provider::Codex.path(home.path());
+
+        install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &path,
+            &home.path().join("bin/pixel"),
             false,
         )
         .unwrap();
 
-        let canonical = real.canonicalize().unwrap();
-        install_project_codex_at(home.path(), &path, &canonical, false).unwrap();
-        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
-        install_project_codex_at(home.path(), &path, &stable, false).unwrap();
-
         let installed = install::read_settings(&path).unwrap();
-        let command = installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap();
-        assert!(
-            command.starts_with(&format!("'{}'", stable.display())),
-            "{command}"
-        );
-        assert_eq!(
-            read_composed_backup(&sidecar).unwrap()["managed_pre_tool_use"],
-            installed["hooks"]["PreToolUse"]
-        );
-        assert_eq!(
-            read_composed_backup(&sidecar).unwrap()["pre_tool_use"],
-            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}])
-        );
+        assert_eq!(installed["hooks"]["PreToolUse"], original);
+        assert_eq!(installed["user_setting"], "keep");
+        assert!(!installed.to_string().contains("composed-guard"));
+        assert!(!sidecar.exists());
     }
 
-    /// The legacy spelling is not only a canonical path: `self-update --dev`
-    /// can point `bin/pixel` at a versioned file whose *name* is not `pixel`.
-    /// Such an entry is recognised by its canonicalised path alone, and it too
-    /// must migrate the backup, or the next install reads the config and the
-    /// backup as disagreeing and refuses.
-    #[test]
     #[cfg(unix)]
-    fn project_codex_composition_migrates_a_symlink_whose_target_has_another_name() {
+    #[test]
+    fn project_codex_upgrade_restores_snapshot_for_symlink_to_versioned_binary() {
         use std::os::unix::fs::symlink;
 
         let home = tempfile::tempdir().unwrap();
@@ -2731,152 +2910,88 @@ mod tests {
         fs::create_dir_all(stable.parent().unwrap()).unwrap();
         fs::write(&real, "pixel").unwrap();
         symlink(&real, &stable).unwrap();
-        install::write_settings(
-            &path,
-            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
-            false,
-        )
-        .unwrap();
-
-        let canonical = real.canonicalize().unwrap();
-        install_project_codex_at(home.path(), &path, &canonical, false).unwrap();
-        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
-        install_project_codex_at(home.path(), &path, &stable, false).unwrap();
-
-        let installed = install::read_settings(&path).unwrap();
-        let command = installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap();
-        assert!(
-            command.starts_with(&format!("'{}'", stable.display())),
-            "{command}"
-        );
-        assert_eq!(
-            read_composed_backup(&sidecar).unwrap()["managed_pre_tool_use"],
-            installed["hooks"]["PreToolUse"]
-        );
-    }
-
-    /// A repo install written by a side build (`pixel-dev install --repo .`)
-    /// must be taken back by the managed `pixel install --repo .`: the entry is
-    /// pixel's own, only under the other executable name. Both the config and
-    /// the backup must move to the managed spelling in one pass, or the next
-    /// install would read them as disagreeing and refuse.
-    #[test]
-    fn project_codex_composition_hands_a_side_build_install_back_to_the_managed_pixel() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("repo/.codex/hooks.json");
-        let side = home.path().join("bin/pixel-dev");
-        let managed = home.path().join("bin/pixel");
         let original = json!([
-            {"matcher":"Bash","hooks":[{"type":"command","command":"deny-unsafe-shell"}]}
+            {"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-policy"}]}
         ]);
-        install::write_settings(
-            &path,
-            &json!({"hooks":{"PreToolUse":original.clone()}, "keep":true}),
-            false,
-        )
-        .unwrap();
+        let sidecar = legacy_composed_codex_fixture(&path, &real, original.as_array().unwrap());
 
-        install_project_codex_at(home.path(), &path, &side, false).unwrap();
-        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
-        let side_managed = install::read_settings(&path).unwrap()["hooks"]["PreToolUse"].clone();
-
-        install_project_codex_at(home.path(), &path, &managed, false).unwrap();
-
-        let installed = install::read_settings(&path).unwrap();
-        let command = installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap();
-        assert!(
-            command.starts_with(&format!("'{}'", managed.display())),
-            "{command}"
-        );
-        assert_ne!(installed["hooks"]["PreToolUse"], side_managed);
-        assert_eq!(installed["keep"], json!(true));
-        let stored = read_composed_backup(&sidecar).unwrap();
-        assert_eq!(stored["pre_tool_use"], original);
-        assert_eq!(
-            stored["managed_pre_tool_use"],
-            installed["hooks"]["PreToolUse"]
-        );
-    }
-
-    /// The hand-back admits exactly one group. A user group added beside the
-    /// side build's entry is still a refusal, never a silent overwrite.
-    #[test]
-    fn project_codex_composition_refuses_a_user_group_added_beside_a_side_build_entry() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("repo/.codex/hooks.json");
-        let original = json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]);
-        install::write_settings(
-            &path,
-            &json!({"hooks":{"PreToolUse":original.clone()}}),
-            false,
-        )
-        .unwrap();
         install_project_codex_at(
             home.path(),
+            &Provider::Codex.path(home.path()),
             &path,
-            &home.path().join("bin/pixel-dev"),
+            &stable,
             false,
         )
         .unwrap();
 
-        let mut changed = install::read_settings(&path).unwrap();
-        changed["hooks"]["PreToolUse"].as_array_mut().unwrap().push(
-            json!({"matcher":"Bash","hooks":[{"type":"command","command":"later-user-guard"}]}),
-        );
-        install::write_settings(&path, &changed, false).unwrap();
-
-        assert!(
-            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
-                .is_err()
-        );
         assert_eq!(
-            read_composed_backup(&path.parent().unwrap().join(CODEX_COMPOSED_BACKUP)).unwrap()["pre_tool_use"],
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
             original
         );
+        assert!(!sidecar.exists());
     }
 
-    /// Install a side build's composed group, apply `edit` to it, and assert
-    /// the managed `pixel` refuses the hand-back without touching either file.
-    fn assert_hand_back_refused_after(edit: impl FnOnce(&mut Value)) {
+    #[test]
+    fn project_codex_upgrade_restores_early_sidecar_without_managed_snapshot_field() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("repo/.codex/hooks.json");
-        install::write_settings(
-            &path,
-            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
-            false,
-        )
-        .unwrap();
-        install_project_codex_at(
-            home.path(),
+        let original = json!([
+            {"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-policy"}]}
+        ]);
+        let sidecar = legacy_composed_codex_fixture(
             &path,
             &home.path().join("bin/pixel-dev"),
+            original.as_array().unwrap(),
+        );
+        remove_managed_snapshot_field(&sidecar);
+
+        install_project_codex_at(
+            home.path(),
+            &Provider::Codex.path(home.path()),
+            &path,
+            &home.path().join("bin/pixel"),
             false,
         )
         .unwrap();
-        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
-        let mut changed = install::read_settings(&path).unwrap();
-        edit(&mut changed["hooks"]["PreToolUse"][0]);
-        install::write_settings(&path, &changed, false).unwrap();
+
+        assert_eq!(
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
+            original
+        );
+        assert!(!sidecar.exists());
+    }
+
+    fn assert_legacy_codex_conflict_preserves_both_files(edit: impl FnOnce(&mut Value)) {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let original =
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-policy"}]}]);
+        let sidecar = legacy_composed_codex_fixture(
+            &path,
+            &home.path().join("bin/pixel-dev"),
+            original.as_array().unwrap(),
+        );
+        let mut settings = install::read_settings(&path).unwrap();
+        edit(&mut settings["hooks"]["PreToolUse"][0]);
+        install::write_settings(&path, &settings, false).unwrap();
         let config_before = fs::read(&path).unwrap();
         let backup_before = fs::read(&sidecar).unwrap();
 
-        assert!(
-            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
-                .is_err()
+        let result = install_project_codex_at(
+            home.path(),
+            &Provider::Codex.path(home.path()),
+            &path,
+            &home.path().join("bin/pixel"),
+            false,
         );
+        assert!(result.is_err());
         assert_eq!(fs::read(&path).unwrap(), config_before);
         assert_eq!(fs::read(&sidecar).unwrap(), backup_before);
     }
 
-    /// A user hook added *inside* the side build's group is a user edit: the
-    /// hand-back admits pixel's group only exactly as pixel wrote it.
     #[test]
-    fn project_codex_composition_refuses_a_user_hook_added_inside_a_side_build_group() {
-        assert_hand_back_refused_after(|group| {
+    fn project_codex_upgrade_preserves_a_user_hook_added_to_legacy_guard() {
+        assert_legacy_codex_conflict_preserves_both_files(|group| {
             group["hooks"]
                 .as_array_mut()
                 .unwrap()
@@ -2884,79 +2999,117 @@ mod tests {
         });
     }
 
-    /// A matcher set on the side build's group changes what the composed guard
-    /// sees; that is a user edit, not a stale spelling.
     #[test]
-    fn project_codex_composition_refuses_a_matcher_set_on_a_side_build_group() {
-        assert_hand_back_refused_after(|group| group["matcher"] = json!("*"));
+    fn project_codex_upgrade_preserves_a_user_matcher_added_to_legacy_guard() {
+        assert_legacy_codex_conflict_preserves_both_files(|group| group["matcher"] = json!("*"));
     }
 
-    /// A changed timeout on the side build's entry is a user edit too.
     #[test]
-    fn project_codex_composition_refuses_a_changed_timeout_on_a_side_build_entry() {
-        assert_hand_back_refused_after(|group| group["hooks"][0]["timeout"] = json!(1));
+    fn project_codex_upgrade_preserves_a_user_timeout_change_to_legacy_guard() {
+        assert_legacy_codex_conflict_preserves_both_files(|group| {
+            group["hooks"][0]["timeout"] = json!(1);
+        });
     }
 
-    /// A foreign executable that merely spells the composed verb is not pixel's,
-    /// even with the exact backup argument.
     #[test]
-    fn project_codex_composition_refuses_a_foreign_executable_naming_the_composed_verb() {
+    fn project_codex_upgrade_preserves_interrupted_pixel_side_build_snapshot_mismatch() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("repo/.codex/hooks.json");
+        let original =
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-policy"}]}]);
         let side = home.path().join("bin/pixel-dev");
+        let sidecar = legacy_composed_codex_fixture(&path, &side, original.as_array().unwrap());
+
+        // Model an interrupted old installer: the config was switched to the
+        // managed executable, but the private snapshot still records pixel-dev.
+        let managed = json!([composed_codex_group(
+            &home.path().join("bin/pixel"),
+            &sidecar
+        )]);
+        let mut settings = install::read_settings(&path).unwrap();
+        settings["hooks"]["PreToolUse"] = managed;
+        install::write_settings(&path, &settings, false).unwrap();
+        let config_before = fs::read(&path).unwrap();
+        let backup_before = fs::read(&sidecar).unwrap();
+
+        let result = install_project_codex_at(
+            home.path(),
+            &Provider::Codex.path(home.path()),
+            &path,
+            &home.path().join("bin/pixel"),
+            false,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), config_before);
+        assert_eq!(fs::read(&sidecar).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn project_codex_upgrade_rejects_legacy_guard_from_foreign_executable() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let sidecar = composed_backup_path(&path).unwrap();
+        let original =
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-policy"}]}]);
+        let foreign = json!([hook_group(
+            format!(
+                "'/usr/bin/notpixel' run-hook composed-guard --provider codex --backup {}",
+                quoted_executable(&sidecar)
+            ),
+            None,
+        )]);
+        install::write_settings(&path, &json!({"hooks":{"PreToolUse":foreign}}), false).unwrap();
+        write_composed_backup(&sidecar, original.as_array().unwrap(), json!([]), false).unwrap();
+        remove_managed_snapshot_field(&sidecar);
+        let config_before = fs::read(&path).unwrap();
+        let backup_before = fs::read(&sidecar).unwrap();
+
+        let result = install_project_codex_at(
+            home.path(),
+            &Provider::Codex.path(home.path()),
+            &path,
+            Path::new("/tmp/pixel"),
+            false,
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), config_before);
+        assert_eq!(fs::read(&sidecar).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn project_codex_upgrade_rejects_legacy_guard_pointing_at_another_backup() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let sidecar = composed_backup_path(&path).unwrap();
+        let original =
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-policy"}]}]);
+        let foreign_backup = home.path().join("other-backup.json");
+        let managed = json!([composed_codex_group(
+            Path::new("/tmp/pixel"),
+            &foreign_backup
+        )]);
         install::write_settings(
             &path,
-            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            &json!({"hooks":{"PreToolUse":managed.clone()}}),
             false,
         )
         .unwrap();
-        install_project_codex_at(home.path(), &path, &side, false).unwrap();
+        write_composed_backup(&sidecar, original.as_array().unwrap(), json!([]), false).unwrap();
+        remove_managed_snapshot_field(&sidecar);
+        let config_before = fs::read(&path).unwrap();
+        let backup_before = fs::read(&sidecar).unwrap();
 
-        let mut changed = install::read_settings(&path).unwrap();
-        let command = changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .replace(&quoted_executable(&side), "'/usr/bin/notpixel'");
-        changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = json!(command);
-        install::write_settings(&path, &changed, false).unwrap();
-
-        assert!(
-            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
-                .is_err()
-        );
-    }
-
-    /// The composed entry must name *this* install's backup; one pointing at
-    /// another file is a foreign entry, not a stale spelling.
-    #[test]
-    fn project_codex_composition_refuses_a_composed_group_naming_another_backup() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("repo/.codex/hooks.json");
-        let side = home.path().join("bin/pixel-dev");
-        install::write_settings(
+        let result = install_project_codex_at(
+            home.path(),
+            &Provider::Codex.path(home.path()),
             &path,
-            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            Path::new("/tmp/pixel"),
             false,
-        )
-        .unwrap();
-        install_project_codex_at(home.path(), &path, &side, false).unwrap();
-        let backup = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
-
-        let mut changed = install::read_settings(&path).unwrap();
-        let command = changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .replace(
-                &quoted_executable(&backup),
-                &quoted_executable(&home.path().join("other-backup.json")),
-            );
-        changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = json!(command);
-        install::write_settings(&path, &changed, false).unwrap();
-
-        assert!(
-            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
-                .is_err()
         );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), config_before);
+        assert_eq!(fs::read(&sidecar).unwrap(), backup_before);
     }
 
     fn delegate_guard() -> Value {
@@ -3067,65 +3220,6 @@ mod tests {
         .unwrap();
     }
 
-    fn pixel_command(verb: &str) -> Value {
-        json!({"hooks": [{"type": "command", "command": format!("'/p/pixel' {verb}")}]})
-    }
-
-    #[test]
-    fn devin_context_and_approval_probes_need_pixels_own_command() {
-        let exe = Path::new("/p/pixel");
-        let prompt = json!({"hooks": {"UserPromptSubmit": [pixel_command("run-hook prompt-submit --provider devin")]}});
-        let approval = json!({"hooks": {"PermissionRequest": [{"matcher": "exec", "hooks": [
-            {"type": "command", "command": "'/p/pixel' run-hook guard --provider devin"}
-        ]}]}});
-        assert!(has_pixel_prompt_context(&prompt, exe));
-        assert!(has_pixel_permission_approval(&approval, exe));
-
-        for empty in [json!({}), json!({"hooks": {}})] {
-            assert!(!has_pixel_prompt_context(&empty, exe), "{empty}");
-            assert!(!has_pixel_permission_approval(&empty, exe), "{empty}");
-        }
-        // Another verb of Pixel's own binary is not the prompt context.
-        let guard_only = json!({"hooks": {"UserPromptSubmit": [pixel_command("run-hook guard --provider devin")]}});
-        assert!(!has_pixel_prompt_context(&guard_only, exe));
-        // A foreign command carrying the same words is not Pixel's hook.
-        let foreign_prompt = json!({"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "other run-hook prompt-submit --provider devin"}]}]}});
-        assert!(!has_pixel_prompt_context(&foreign_prompt, exe));
-        let foreign_approval = json!({"hooks": {"PermissionRequest": [{"matcher": "exec", "hooks": [{"type": "command", "command": "other run-hook guard --provider devin"}]}]}});
-        assert!(!has_pixel_permission_approval(&foreign_approval, exe));
-        // Only the exec matcher pre-approves a native shell call.
-        let read_matcher = json!({"hooks": {"PermissionRequest": [{"matcher": "read", "hooks": [{"type": "command", "command": "'/p/pixel' run-hook guard --provider devin"}]}]}});
-        assert!(!has_pixel_permission_approval(&read_matcher, exe));
-    }
-
-    #[test]
-    fn devin_install_verifies_only_an_untouched_triple_and_repairs_each_group() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        fs::create_dir_all(repo.join(".devin")).unwrap();
-        let config = repo.join(DEVIN_LOCAL_CONFIG);
-        let install = || install_project_devin_at(&repo, release(), false).unwrap();
-
-        assert!(install().summary.contains("configured"));
-        assert!(
-            install().summary.contains("verified"),
-            "an untouched reinstall verifies"
-        );
-        for event in ["PreToolUse", "UserPromptSubmit", "PermissionRequest"] {
-            let mut value: Value =
-                serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
-            value["hooks"].as_object_mut().unwrap().remove(event);
-            fs::write(&config, serde_json::to_string(&value).unwrap()).unwrap();
-            let step = install();
-            assert!(
-                step.summary.contains("configured"),
-                "{event} removed: {}",
-                step.summary
-            );
-            assert!(install().summary.contains("verified"), "{event} restored");
-        }
-    }
-
     #[test]
     fn orphan_rtk_backup_should_name_a_backup_no_guard_delegates_to() {
         let home = tempfile::tempdir().unwrap();
@@ -3160,80 +3254,39 @@ mod tests {
     }
 
     #[test]
-    fn zcode_install_adds_pixel_hooks_and_preserves_foreign_config() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join(config::ZCODE_CONFIG_FILE);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            serde_json::to_vec(&json!({
-                "custom": {"keep": true},
-                "hooks": {
-                    "enabled": true,
-                    "events": {
-                        "PreToolUse": [{"matcher":"Write", "hooks":[{"command":"foreign"}]}]
-                    }
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let exe = Path::new("/tmp/pixel-dev");
-        let first = install_zcode_at(home.path(), exe, false).unwrap();
-        assert_eq!(first.status, install::CheckStatus::Green);
-        let installed = install::read_settings(&path).unwrap();
-        assert_eq!(installed["custom"]["keep"], true);
-        assert_eq!(
-            installed["hooks"]["events"]["PreToolUse"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            installed["hooks"]["events"]["PermissionRequest"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-
-        install_zcode_at(home.path(), exe, false).unwrap();
-        let rerun = install::read_settings(&path).unwrap();
-        assert_eq!(
-            rerun["hooks"]["events"]["PreToolUse"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            rerun["hooks"]["events"]["PermissionRequest"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
+    fn shell_overlap_reads_anchored_literals_per_provider() {
+        let overlaps =
+            |matcher: &str, provider| shell_overlap(&json!({"matcher": matcher}), provider);
+        assert!(overlaps("^shell$", Provider::Codex));
+        assert!(overlaps("^unified_exec$|^apply_patch$", Provider::Codex));
+        assert!(!overlaps("^apply_patch$", Provider::Codex));
+        assert!(overlaps("^Bash$", Provider::Claude));
+        assert!(!overlaps("^Read$|^Edit", Provider::Claude));
+        assert!(!overlaps("^shell$", Provider::Claude));
+        // Not anchored literals: an unknown regex may reach the shell.
+        assert!(overlaps("Read.*", Provider::Claude));
+        assert!(overlaps("Bash", Provider::Claude));
+        assert!(overlaps("*", Provider::Claude));
+        assert!(!overlaps("Read|Grep", Provider::Claude));
     }
 
     #[test]
-    fn zcode_install_preserves_an_existing_disabled_hooks_setting() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join(config::ZCODE_CONFIG_FILE);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"hooks":{"enabled":false}}"#).unwrap();
-
-        let step = install_zcode_at(home.path(), Path::new("/tmp/pixel-dev"), false).unwrap();
-        assert_eq!(step.status, install::CheckStatus::Yellow);
-        let installed = install::read_settings(&path).unwrap();
-        assert_eq!(installed["hooks"]["enabled"], false);
-        assert_eq!(
-            installed["hooks"]["events"]["PreToolUse"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
+    fn passive_vibe_claude_bridge_requires_every_part_of_the_wrapper() {
+        let full = "/bin/sh -c '[ -x \"$HOME/.vibe-island/bin/vibe-island-bridge\" ] && \"$HOME/.vibe-island/bin/vibe-island-bridge\" --source claude; exit 0'";
+        let group =
+            |command: &str| json!({"matcher":"*","hooks":[{"type":"command","command": command}]});
+        assert!(passive_vibe_claude_bridge(&group(full), Provider::Claude));
+        assert!(!passive_vibe_claude_bridge(&group(full), Provider::Codex));
+        for broken in [
+            full.replace("vibe-island-bridge", "other-bridge"),
+            full.replace("--source claude", "--source codex"),
+            full.replace("] && ", "]; "),
+            full.replace("exit 0'", "exit 1'"),
+        ] {
+            assert!(
+                !passive_vibe_claude_bridge(&group(&broken), Provider::Claude),
+                "{broken}"
+            );
+        }
     }
 }

@@ -854,6 +854,58 @@ mod tests {
     }
 
     #[test]
+    fn long_flags_and_a_lone_dash_parse_as_their_tool_allows() {
+        let grep_r = parse_args(SearchTool::Grep, &args(&["--recursive", "needle"])).unwrap();
+        assert!(grep_r.recursive);
+        assert!(parse_args(SearchTool::Rg, &args(&["--recursive", "needle", "a"])).is_none());
+        let fixed = parse_args(
+            SearchTool::Grep,
+            &args(&["--fixed-strings", "foo.bar", "a.rs"]),
+        )
+        .unwrap();
+        assert_eq!(fixed.pattern, "foo.bar");
+        assert!(parse_args(SearchTool::Grep, &args(&["-", "needle", "a.rs"])).is_none());
+        assert!(parse_args(SearchTool::Rg, &args(&["-n"])).is_none());
+    }
+
+    #[test]
+    fn checked_dir_refuses_the_index_and_git_directories() {
+        let repo = Repo::new();
+        for dir in [".git/objects", ".pixel/shard"] {
+            std::fs::create_dir_all(repo.0.join(dir)).unwrap();
+        }
+        for raw in [".git", ".pixel", ".git/objects", ".pixel/shard"] {
+            assert!(checked_dir(raw, &repo.0).is_none(), "{raw}");
+        }
+        let (root, abs, relative) = checked_dir("src", &repo.0).unwrap();
+        assert_eq!(
+            (root, abs, relative),
+            (repo.0.clone(), repo.0.join("src"), "src".to_string())
+        );
+    }
+
+    #[test]
+    fn a_directory_search_past_the_byte_budget_hands_the_search_back() {
+        let repo = Repo::new();
+        let big = repo.0.join("src/big");
+        std::fs::create_dir_all(&big).unwrap();
+        let line = "filler line without the word\n".repeat(130_000); // ~3.8 MB
+        for n in 0..9 {
+            std::fs::write(big.join(format!("f{n}.txt")), &line).unwrap();
+        }
+        let parsed = parse_args(SearchTool::Grep, &args(&["-r", "needle", "src"])).unwrap();
+        assert_eq!(
+            dir_output(SearchTool::Grep, &parsed, &repo.0).err(),
+            Some("tree-too-large")
+        );
+        let plain = parse_args(SearchTool::Grep, &args(&["needle", "src"])).unwrap();
+        assert_eq!(
+            dir_output(SearchTool::Grep, &plain, &repo.0).err(),
+            Some("directory-without-recursive")
+        );
+    }
+
+    #[test]
     fn shell_parser_is_conservative_and_keeps_quoted_words() {
         assert_eq!(
             shell_argv("grep -F 'foo bar' 'a file.rs'"),

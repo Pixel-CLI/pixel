@@ -132,3 +132,40 @@ fn merge_caps_at_max_manifest_tasks() {
         "newest task must survive"
     );
 }
+
+#[test]
+fn an_overfull_manifest_on_disk_is_trimmed_back_to_the_cap() {
+    let now = 1_000_000u64;
+    let tasks: Vec<Value> = (0..MAX_MANIFEST_TASKS + 2)
+        .map(|i| task_entry(&format!("old {i}"), now + i as u64, "src/a.rs"))
+        .collect();
+    let text = serde_json::json!({"version": 2, "tasks": tasks}).to_string();
+    let v = merge_targets_manifest(
+        Some(&text),
+        task_entry("new", now + 100, "src/n.rs"),
+        now + 100,
+    );
+    let names: Vec<&str> = v["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["task"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), MAX_MANIFEST_TASKS);
+    assert_eq!(
+        names.first(),
+        Some(&"old 3"),
+        "the three oldest are evicted"
+    );
+    assert_eq!(names.last(), Some(&"new"));
+}
+
+#[test]
+fn a_line_range_is_one_based_and_ordered() {
+    assert_eq!(parse_line_range("3, 7"), Ok((3, 7)));
+    assert_eq!(parse_line_range("5,5"), Ok((5, 5)));
+    assert!(parse_line_range("0,4").is_err());
+    assert!(parse_line_range("7,3").is_err());
+    assert!(parse_line_range("7").is_err());
+    assert!(parse_line_range("a,3").is_err());
+}

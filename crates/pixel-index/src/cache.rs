@@ -417,6 +417,26 @@ mod tests {
         assert!(!cached_shard_path("rmoid", "trigram").unwrap().exists());
         let _ = fs::remove_dir_all(&work);
     }
+
+    #[test]
+    fn touch_mtime_moves_an_old_mtime_to_now() {
+        let path = std::env::temp_dir().join(format!("pixel-cache-touch-{}", std::process::id()));
+        fs::write(&path, b"x").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        touch_mtime(&path);
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(
+            modified > old + std::time::Duration::from_secs(86_400),
+            "{modified:?}"
+        );
+    }
 }
 
 #[cfg(test)]

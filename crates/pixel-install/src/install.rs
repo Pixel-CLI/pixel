@@ -71,23 +71,21 @@ pub struct InstallOptions {
     /// to remove, as a `$SHELL`-style value (`fish`, `/bin/bash`, …).
     /// Defaults to the account's login shell, then `$SHELL`.
     pub shell: Option<String>,
-    /// Deprecated and ignored: the retired shell wrapper needed a `claude
-    /// --version` probe to decide whether `--append-subagent-system-prompt-file`
-    /// was safe. The SessionStart hook injects the prompt now, so no Claude
-    /// probe happens.
+    /// Deprecated and ignored, retained for source compatibility. Install no
+    /// longer probes the Claude executable or its version.
     pub claude_executable: Option<PathBuf>,
     /// If true, compute and report every step's outcome exactly as a real
     /// run would, but perform no filesystem writes: no settings.json edits,
     /// no hook files, no agent-config rewrites, no backups, no directory
     /// creation. Safe to run against a real `$HOME` to preview an install.
     pub dry_run: bool,
-    /// Repository root to install project-local enforcement into
+    /// Repository root for native-hook cleanup and project task adapters
     /// (`pixel install --repo <path>`). When set, ONLY repo-local steps run:
-    /// `.codex/config.toml` + `.codex/hooks.json`, `.devin/config.local.json`,
-    /// `.claude/settings.local.json` (PreToolUse guard), and
-    /// `.pi/extensions/pixel-guard.ts`, and a portable Pixel-first block in
-    /// the repository's `AGENTS.md` ([`REPO_ARTIFACTS`]); a Pixel entry an
-    /// older release left in `.warp/.mcp.json` is removed — none of the global prompt/lifecycle-hook deploys.
+    /// retired retrieval callbacks are removed from Claude and Codex while
+    /// native hooks are preserved; Devin task hooks and the Pi project guard
+    /// are installed. Retired Pixel material is also removed from
+    /// `.codex/config.toml`, `AGENTS.md`, and `.warp/.mcp.json`. Global prompt
+    /// and lifecycle-hook installation is skipped.
     pub repo: Option<PathBuf>,
 }
 
@@ -98,8 +96,7 @@ pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 /// First executable file named `name` in the PATH-style list `path`.
-#[cfg(test)]
-fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+pub(crate) fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
     std::env::split_paths(path).find_map(|dir| {
         let candidate = dir.join(name);
         if !candidate.is_file() {
@@ -122,20 +119,14 @@ fn find_in_paths(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
 
 /// Run `pixel install`. Idempotent: safe to re-run.
 ///
-/// The install deploys the agent system prompt, registers the Claude
-/// lifecycle hooks in `~/.claude/settings.json` (the SessionStart hook
-/// injects that prompt into EVERY Claude process — the retired `claude()`
-/// shell wrapper only ever fired for human login shells and is removed),
-/// and sets up the Codex `developer_instructions` config key so every
-/// invocation includes the Pixel retrieval protocol —
-/// and, when OpenCode is present, a managed block in its global
-/// `~/.config/opencode/AGENTS.md`. Codex also gets the metrics relay:
-/// its exec layer already merges the invocation's stderr into the tool
-/// result it records and shows, so the relay's dedupe drops the duplicate
-/// and a PostToolUse entry only re-emits the 🟩 line for the rare host
-/// whose tool result drops or fails to surface the merged stderr. No
-/// managed blocks in the home-level CLAUDE.md/AGENTS.md files; PreToolUse
-/// enforcement is repo-local (`pixel install --repo`).
+/// Global install deploys the shared agent prompt, keeps task-lifecycle
+/// accounting hooks for configured hosts, and removes retired automatic
+/// retrieval registrations. It installs Pi's explicit impact command only
+/// when the standard `~/.pi/agent` configuration directory already exists;
+/// a machine without Pi is left untouched. Repo install preserves native task
+/// hooks while removing retired retrieval callbacks. The retired Claude
+/// `claude()` shell wrapper is removed because native task hooks now provide
+/// the lifecycle integration.
 pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let home = options
         .home
@@ -149,113 +140,99 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     let exe = stable_exe_path(executable_path);
 
     let dry_run = options.dry_run;
-    if let Some(repo) = &options.repo {
-        return install_project(repo, &home, &exe, dry_run);
-    }
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
+    if let Some(repo) = &options.repo {
+        return install_project(repo, &home, &codex_home, &exe, dry_run);
+    }
     let mut steps = vec![
-        deploy_agent_prompt(&home, dry_run)?,
-        // The doctrine reaches EVERY Claude process through the lifecycle
-        // hooks in ~/.claude/settings.json: SessionStart injects the agent
-        // prompt itself, so direct `claude` launches (cmux, agents, cron)
-        // get it without going through a shell function. No PreToolUse here —
-        // enforcement is repo-local (`pixel install --repo`).
+        // Prompts are no longer deployed for any host: retire earlier copies
+        // and the automatic block in Pi's APPEND_SYSTEM.md.
+        crate::uninstall::remove_agent_prompt(&home, dry_run)?,
+        crate::pi_global::install(
+            &crate::pi_global::PiPaths::resolve(&home, options.home.is_some()),
+            &exe,
+            options.home.is_none() && crate::pi_global::pi_on_path(),
+            dry_run,
+        )?,
+        // Keep task accounting and configured task gates available to every
+        // Claude session. Automatic retrieval guidance, post-edit advice and
+        // metrics are excluded from the native-default profile.
         crate::routing::install_at_scoped(
             &home,
             &crate::routing::Provider::Claude.path(&home),
             &exe,
             crate::routing::Provider::Claude,
-            crate::routing::HookScope::LifecycleOnly,
+            crate::routing::HookScope::TaskEventsOnly,
             &[],
             dry_run,
         )?,
         // The zsh `claude()` wrapper only ever fired for human login shells
         // and would now double-inject alongside SessionStart — strip it.
         remove_legacy_wrappers(&home, options.shell.as_deref(), dry_run)?,
-        crate::codex_config::install_developer_instructions(&codex_home, dry_run)?,
-        crate::codex_config::install_metrics_hook(&codex_home, &exe, dry_run)?,
+        crate::codex_config::remove_developer_instructions(&codex_home, dry_run)?,
+        crate::codex_config::install_task_hooks(&codex_home, &exe, dry_run)?,
     ];
+    // Every other host keeps its native retrieval: install writes no prompt,
+    // rewrite, approval or pre-invocation hook for it, and removes the ones
+    // an earlier release wrote. Each step runs only where that host's
+    // configuration exists, so a machine without it is left untouched.
     let opencode_dir = crate::opencode_config::opencode_config_dir(&home, options.home.is_some());
     if opencode_dir.is_dir() {
-        steps.push(crate::opencode_config::install_opencode(
+        steps.push(crate::opencode_config::remove_opencode(
             &opencode_dir,
             &home,
-            &exe,
             dry_run,
         )?);
     }
-    // Devin imports Claude's hooks (`read_config_from.claude`, on by
-    // default), so without its own lifecycle entries a Devin session's only
-    // Pixel guidance is the imported Claude text — measured at ~11 KB of
-    // Claude-specific doctrine per session. Its own protocol is the three
-    // lifecycle hooks with `--provider devin`; the guard and the metrics
-    // relay stay repo-scoped (`pixel install --repo`), like Claude's
-    // enforcement. Skipped when Devin has never run: creating a config for
-    // a tool that is not installed would be intrusive, and `doctor` judges
-    // what Pixel wrote.
     if home.join(crate::config::DEVIN_CONFIG_DIR).is_dir() {
-        steps.push(crate::routing::install_at_scoped(
-            &home,
-            &crate::routing::Provider::Devin.path(&home),
-            &exe,
-            crate::routing::Provider::Devin,
-            crate::routing::HookScope::LifecycleOnly,
-            &[],
-            dry_run,
-        )?);
+        steps.push(crate::uninstall::remove_devin_hooks(&home, &exe, dry_run)?);
     }
     if crate::antigravity::antigravity_config_dir(&home).is_dir() {
-        steps.push(crate::antigravity::deploy_plugin_assets(
-            &home, &exe, dry_run,
-        )?);
-        steps.push(crate::antigravity::enable_plugin_in_config(&home, dry_run)?);
-        steps.push(crate::antigravity::remove_global_hooks(
+        steps.push(crate::antigravity::remove_antigravity(
             &home, &exe, dry_run,
         )?);
     }
-    // Copilot CLI keeps user-level hooks in `~/.copilot/hooks/*.json`;
-    // pixel writes a dedicated `pixel.json` rather than merging into
-    // foreign hook files.
     if crate::copilot_config::copilot_hooks_dir(&home).is_some() {
-        steps.push(crate::copilot_config::install_copilot_hooks(
-            &home, &exe, dry_run,
-        )?);
+        steps.push(crate::copilot_config::remove_copilot_hooks(&home, dry_run)?);
     }
-    steps.push(crate::routing::install_zcode_at(&home, &exe, dry_run)?);
+    steps.push(crate::uninstall::remove_zcode_hooks(&home, dry_run)?);
     if home.join(".cursor").is_dir() {
-        steps.push(install_cursor_hooks(&home, &exe, dry_run)?);
+        steps.push(crate::uninstall::remove_cursor_hooks(&home, &exe, dry_run)?);
     }
 
-    let green = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Green)
-        .count();
-    let yellow = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Yellow)
-        .count();
-    let red = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Red)
-        .count();
-    let ok = red == 0;
+    Ok(install_report(&exe, &home, dry_run, steps))
+}
 
-    Ok(InstallReport {
+/// The report over finished install or uninstall `steps`: one count per
+/// status, and `ok` while no step is red. `home` is the home directory, or
+/// the repository for a `--repo` run.
+pub(crate) fn install_report(
+    executable: &Path,
+    home: &Path,
+    dry_run: bool,
+    steps: Vec<InstallStep>,
+) -> InstallReport {
+    let count = |status| steps.iter().filter(|s| s.status == status).count();
+    let summary = InstallSummary {
+        green: count(CheckStatus::Green),
+        yellow: count(CheckStatus::Yellow),
+        red: count(CheckStatus::Red),
+    };
+    InstallReport {
         version: "v1".into(),
-        ok,
-        executable_path: exe.display().to_string(),
+        ok: summary.red == 0,
+        executable_path: executable.display().to_string(),
         home: home.display().to_string(),
         dry_run,
         steps,
-        summary: InstallSummary { green, yellow, red },
-    })
+        summary,
+    }
 }
 
 /// Repo-local install (`pixel install --repo <path>`): project-scoped agent
 /// enforcement instead of the global prompt deploy. Writes:
-///   - `<repo>/.codex/config.toml` — the same `developer_instructions`
-///     managed block the global install writes (Codex merges a project-local
-///     config.toml over the global one);
+///   - `<repo>/.codex/config.toml` — any retired Pixel
+///     `developer_instructions` block is removed while user text is preserved;
 ///   - `<repo>/.codex/hooks.json` — the composed-guard PreToolUse group plus
 ///     its `pixel-composed-guard-backup.json` sidecar, which snapshots any
 ///     pre-existing project hooks so the composed runtime can replay them;
@@ -266,9 +243,9 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 ///     --provider claude` PreToolUse group merged alongside any foreign
 ///     entries (the personal project settings: the command names this
 ///     machine's binary, so the shared `settings.json` never carries it);
-///   - `<repo>/.pi/extensions/pixel-guard.ts` — pi's guard extension
-///     ([`crate::pi_project`]).
-///   - the Pixel-first managed block in `<repo>/AGENTS.md`
+///   - the retired Pi project extension `<repo>/.pi/extensions/pixel-guard.ts`
+///     is removed ([`crate::pi_project`]).
+///   - any retired Pixel-first managed block in `<repo>/AGENTS.md` is removed
 ///     ([`crate::pixel_first`]).
 ///
 /// It also removes the `pixel mcp` entry an older release wrote into
@@ -278,9 +255,21 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 /// ([`crate::repo_git`]). Codex has no personal project file, so a
 /// `.codex/hooks.json` the repository tracks is left alone: the composed
 /// guard would put this machine's path into a file every clone runs.
-fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Result<InstallReport> {
+fn install_project(
+    repo: &Path,
+    home: &Path,
+    codex_home: &Path,
+    exe: &Path,
+    dry_run: bool,
+) -> Result<InstallReport> {
     let codex_dir = repo.join(".codex");
     let codex_hooks = codex_dir.join(crate::codex_config::HOOKS_FILE);
+    // These two cleanup steps are independent of hook ownership. Run them
+    // before validating project hooks so a foreign hook conflict cannot leave
+    // the retired always-on Codex guidance in place.
+    let retired_codex_instructions =
+        crate::codex_config::remove_developer_instructions(&codex_dir, dry_run)?;
+    let retired_pixel_first_rules = crate::pixel_first::uninstall_rules(repo, dry_run)?;
     let codex_step = if crate::repo_git::is_tracked(repo, CODEX_PROJECT_HOOKS) {
         InstallStep {
             id: "hooks.codex".into(),
@@ -292,41 +281,26 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
             detail: Some(codex_hooks.display().to_string()),
         }
     } else {
-        crate::routing::install_project_codex_at(home, &codex_hooks, exe, dry_run)?
+        crate::routing::install_project_codex_at(
+            home,
+            &codex_home.join(crate::codex_config::HOOKS_FILE),
+            &codex_hooks,
+            exe,
+            dry_run,
+        )?
     };
     let steps = vec![
         crate::routing::install_project_claude_at(repo, home, exe, dry_run)?,
-        crate::codex_config::install_developer_instructions(&codex_dir, dry_run)?,
+        retired_codex_instructions,
         codex_step,
-        crate::routing::install_project_devin_at(repo, exe, dry_run)?,
-        crate::pi_project::install(repo, exe, dry_run)?,
+        crate::uninstall::remove_project_devin_hooks(repo, exe, dry_run)?,
+        crate::pi_project::remove(repo, dry_run)?,
         crate::warp::retire(repo, dry_run)?,
-        crate::pixel_first::install_rules(repo, dry_run)?,
+        retired_pixel_first_rules,
         exclude_project_artifacts(repo, dry_run)?,
     ];
 
-    let green = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Green)
-        .count();
-    let yellow = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Yellow)
-        .count();
-    let red = steps
-        .iter()
-        .filter(|s| s.status == CheckStatus::Red)
-        .count();
-
-    Ok(InstallReport {
-        version: "v1".into(),
-        ok: red == 0,
-        executable_path: exe.display().to_string(),
-        home: repo.display().to_string(),
-        dry_run,
-        steps,
-        summary: InstallSummary { green, yellow, red },
-    })
+    Ok(install_report(exe, repo, dry_run, steps))
 }
 
 /// The Codex project hook file, relative to the repository.
@@ -378,9 +352,10 @@ pub struct RepoArtifact {
     pub machine_local: bool,
 }
 
-/// Every file `pixel install --repo` may write. The per-project list in
-/// `website/content/docs.md` and the `--repo` help name exactly these paths,
-/// which `docs_drift::` checks.
+/// Every file `pixel install --repo` may write. This includes the two
+/// portable migration targets, which are rewritten only when they contain a
+/// retired Pixel block. The per-project list in `website/content/docs.md` and
+/// the `--repo` help name exactly these paths, which `docs_drift::` checks.
 pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
     RepoArtifact {
         path: crate::routing::CLAUDE_LOCAL_SETTINGS,
@@ -400,14 +375,6 @@ pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
     },
     RepoArtifact {
         path: ".codex/pixel-composed-guard-backup.json",
-        machine_local: true,
-    },
-    RepoArtifact {
-        path: crate::routing::DEVIN_LOCAL_CONFIG,
-        machine_local: true,
-    },
-    RepoArtifact {
-        path: crate::pi_project::EXTENSION,
         machine_local: true,
     },
     RepoArtifact {
@@ -451,9 +418,11 @@ fn exclude_project_artifacts(repo: &Path, dry_run: bool) -> Result<InstallStep> 
 pub(crate) const SUBAGENT_PROMPT_FILE: &str = "subagent-prompt.md";
 
 /// The agent prompt as bundled in the binary.
+#[cfg(test)]
 pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
 
 /// Pi keeps operational policy in its extension and exposes only this short rule.
+#[cfg(test)]
 pub(crate) const PI_PROMPT_ASSET: &str = "Use the pixel tool for repository retrieval and repository Git workflows. The extension injects task context and post-edit impact automatically. Policy is advisory by default; `pixel config policy enforce` (or PIXEL_POLICY=enforce) opts into supported retrieval checks, `pixel config policy off` disables them. A prior-pixel-call edit gate applies only while Pixel reports healthy — when Pixel health is unhealthy or unknown, edits stay allowed. Native compositions and unsupported capabilities remain available; a failed Pixel operation allows native tools.";
 
 const LEGACY_PI_PROMPT_BEGIN: &str = "# Pixel Retrieval Layer\n";
@@ -463,6 +432,7 @@ const LEGACY_PI_PROMPT_END_V0_2: &str =
     "All commands accept `[PATH]` (default: current directory).\n";
 
 /// The sub-agent prompt as bundled in the binary.
+#[cfg(test)]
 pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-subagent-prompt.md");
 
 /// Pi's system-prompt file, relative to home. Pi reads it automatically — no
@@ -470,90 +440,15 @@ pub(crate) const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-sub
 /// owns only the managed block inside it.
 pub(crate) const PI_PROMPT_REL: &str = ".pi/agent/APPEND_SYSTEM.md";
 
-/// The prompt files a `pixel install` deployed under `home` that no longer
-/// match the copies bundled in this binary, by file name. Claude's
-/// SessionStart hook and the sub-agent flag read these files as they are, so
-/// after an upgrade every agent keeps the old command map until the install
-/// is rerun. A file that was never deployed is not listed: an install that
-/// never happened is `pixel doctor`'s report, not an upgrade's.
-pub fn stale_prompts(home: &Path) -> Vec<&'static str> {
+/// The prompt files an earlier `pixel install` deployed under `home`, by file
+/// name. No install deploys them any more and the next one removes them; until
+/// then a hand-wired integration may still read one.
+pub fn retired_prompts(home: &Path) -> Vec<&'static str> {
     let dir = home.join(".local/share/pixel");
-    [
-        ("agent-prompt.md", AGENT_PROMPT_ASSET),
-        (SUBAGENT_PROMPT_FILE, SUBAGENT_PROMPT_ASSET),
-    ]
-    .into_iter()
-    .filter(|(name, asset)| {
-        fs::read_to_string(dir.join(name)).is_ok_and(|deployed| deployed != *asset)
-    })
-    .map(|(name, _)| name)
-    .collect()
-}
-
-/// Copy the bundled Pixel agent system prompt to `~/.local/share/pixel/agent-prompt.md`,
-/// the sub-agent prompt to `~/.local/share/pixel/subagent-prompt.md`, and the
-/// short Pixel rule into Pi's system-prompt file (pi reads it automatically).
-/// The prompt instructs agents to use `pixel search-content`/`pixel find-code`/`pixel impact`
-/// instead of `grep`/`rg` for code discovery in indexed repositories.
-fn deploy_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
-    let dest_dir = home.join(".local/share/pixel");
-    let dest = dest_dir.join("agent-prompt.md");
-    let subagent_dest = dest_dir.join(SUBAGENT_PROMPT_FILE);
-    let pi_dest = home.join(PI_PROMPT_REL);
-    if dry_run {
-        return Ok(InstallStep {
-            id: "agent-prompt".into(),
-            status: CheckStatus::Green,
-            summary: format!("would deploy agent-prompt.md and {SUBAGENT_PROMPT_FILE}"),
-            detail: Some(format!(
-                "dest={} subagent={} pi={}",
-                dest.display(),
-                subagent_dest.display(),
-                pi_dest.display()
-            )),
-        });
-    }
-    fs::create_dir_all(&dest_dir)?;
-    let needs_write = write_if_changed(&dest, AGENT_PROMPT_ASSET)?;
-    let subagent_written = write_if_changed(&subagent_dest, SUBAGENT_PROMPT_ASSET)?;
-    let pi_written = write_pi_prompt(&pi_dest)?;
-    Ok(InstallStep {
-        id: "agent-prompt".into(),
-        status: CheckStatus::Green,
-        summary: format!(
-            "{} agent-prompt.md, {} {SUBAGENT_PROMPT_FILE}{}",
-            if needs_write { "deployed" } else { "verified" },
-            if subagent_written {
-                "deployed"
-            } else {
-                "verified"
-            },
-            if pi_written {
-                ", updated Pi's APPEND_SYSTEM.md"
-            } else {
-                ""
-            }
-        ),
-        detail: Some(format!(
-            "path={} subagent={} pi={}",
-            dest.display(),
-            subagent_dest.display(),
-            pi_dest.display()
-        )),
-    })
-}
-
-/// Write `content` to `path` unless the file already holds exactly it.
-/// Returns whether a write happened.
-fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
-    let needs_write = match fs::read_to_string(path) {
-        Ok(existing) => existing != content,
-        Err(_) => true,
-    };
-    if needs_write {
-        fs::write(path, content)?;
-    }
-    Ok(needs_write)
+    ["agent-prompt.md", SUBAGENT_PROMPT_FILE]
+        .into_iter()
+        .filter(|name| dir.join(name).is_file())
+        .collect()
 }
 
 /// Put the bundled prompt inside the managed markers in Pi's system-prompt
@@ -562,6 +457,7 @@ fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
 /// outside the markers survives, and a failed write is an error rather than a
 /// silently green step (the prompts under `~/.local/share/pixel/` are pixel's
 /// own files; this one is not).
+#[cfg(test)]
 fn write_pi_prompt(path: &Path) -> Result<bool> {
     let existing = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -587,6 +483,7 @@ fn write_pi_prompt(path: &Path) -> Result<bool> {
 /// existing managed block are removed by their original boundaries; user
 /// text before and after survives. Anything else follows the Markdown
 /// agent-config rules ([`config::apply_managed_markers`]).
+#[cfg(test)]
 pub(crate) fn managed_pi_content(existing: &str, asset: &str) -> String {
     if !existing.contains(config::MANAGED_BEGIN) {
         let (cleaned, removed) = config::strip_stale_blocks(existing);
@@ -1103,73 +1000,6 @@ pub(crate) fn remove_shell_wrappers(
     })
 }
 
-/// Cursor's flat hook schema (`hooks.<event>` is a plain array of
-/// `{command, matcher?}`): the guard goes on `preToolUse` — Cursor's payload
-/// carries no `hook_event_name`, so the guard treats it as an implicit
-/// PreToolUse — and the metrics relay on `postToolUse`, which answers with
-/// the Cursor-native `additional_context` field.
-fn install_cursor_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
-    let path = home.join(crate::config::CURSOR_HOOKS_FILE);
-    // Validate the existing settings in both modes so a dry run honestly
-    // reports a red step when the file is unreadable or malformed; only the
-    // write (and backup/dir creation) is suppressed during a dry run.
-    let mut value = read_settings(&path)?;
-    let root = value
-        .as_object_mut()
-        .ok_or_else(|| crate::InstallError::InvalidSettings {
-            path: path.clone(),
-            reason: "hooks.json root is not an object".into(),
-        })?;
-    // Cursor documents `version` as required. A fresh install (read_settings
-    // returned `{}`) must carry it, and an existing value is preserved.
-    if root.get("version").is_none() {
-        root.insert("version".into(), serde_json::json!(1));
-    }
-    let hooks = root.entry("hooks").or_insert_with(|| serde_json::json!({}));
-    let hooks = hooks
-        .as_object_mut()
-        .ok_or_else(|| crate::InstallError::InvalidSettings {
-            path: path.clone(),
-            reason: "hooks is not an object".into(),
-        })?;
-    // Pixel owns the entry whose command runs through this executable; the
-    // marker is the executable itself, never the bare `run-hook guard` or
-    // `run-hook metrics` phrase, so an unrelated command that merely mentions
-    // either phrase is preserved (and replaced only if pixel really wrote it).
-    let exe_marker = crate::routing::quoted_executable(exe);
-    let guard = serde_json::json!({
-        "command": format!("{exe_marker} run-hook guard --provider cursor"),
-        "matcher": crate::config::GUARD_MATCHER,
-    });
-    let metrics = serde_json::json!({
-        "command": format!("{exe_marker} run-hook metrics --provider cursor"),
-    });
-    let pre = config::merge_flat_hook_entry(hooks.get("preToolUse"), &exe_marker, guard);
-    hooks.insert("preToolUse".into(), pre);
-    let post = config::merge_flat_hook_entry(hooks.get("postToolUse"), &exe_marker, metrics);
-    hooks.insert("postToolUse".into(), post);
-    let backup = write_settings(&path, &value, dry_run)?;
-    let summary = if dry_run {
-        format!(
-            "would configure pixel guard + metrics in {}",
-            path.display()
-        )
-    } else {
-        "configured pixel guard + metrics in Cursor hooks.json".into()
-    };
-    let detail = if dry_run {
-        None
-    } else {
-        Some(with_backup_note(format!("path={}", path.display()), backup))
-    };
-    Ok(InstallStep {
-        id: "hooks.cursor".into(),
-        status: CheckStatus::Green,
-        summary,
-        detail,
-    })
-}
-
 pub(crate) fn read_settings(path: &Path) -> Result<serde_json::Value> {
     match fs::read_to_string(path) {
         Ok(s) => Ok(serde_json::from_str(&s)?),
@@ -1322,6 +1152,62 @@ pub fn migrate(repo_root: &Path) -> Result<MigrateReport> {
 }
 
 #[cfg(test)]
+mod pi_prompt_io_tests {
+    use super::{CheckStatus, InstallOptions, PI_PROMPT_REL, install};
+    use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn install_should_leave_a_directory_at_the_pi_prompt_path_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let prompt_path = home.path().join(PI_PROMPT_REL);
+        fs::create_dir_all(&prompt_path).unwrap();
+        let sentinel = prompt_path.join("keep.txt");
+        fs::write(&sentinel, "user-owned Pi data").unwrap();
+
+        let report = install(&InstallOptions {
+            home: Some(home.path().to_path_buf()),
+            ..Default::default()
+        })
+        .expect("a directory where no Pixel prompt can be is not Pixel's to clean");
+
+        assert!(report.ok, "{report:?}");
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "user-owned Pi data");
+        assert!(prompt_path.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_should_skip_pi_prompt_cleanup_when_agent_parent_is_a_file() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_path = home.path().join(".pi/agent");
+        fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+        fs::write(&agent_path, "user-owned file").unwrap();
+
+        let report = install(&InstallOptions {
+            home: Some(home.path().to_path_buf()),
+            ..Default::default()
+        })
+        .expect("a non-directory Pi agent path contains no retired prompt to clean");
+
+        assert_eq!(fs::read_to_string(&agent_path).unwrap(), "user-owned file");
+        let pi_step = report
+            .steps
+            .iter()
+            .find(|step| step.id == "hooks.pi-impact")
+            .expect("Pi status is reported");
+        assert_eq!(pi_step.status, CheckStatus::Yellow);
+        assert!(pi_step.summary.contains("not a directory"));
+        assert!(
+            !home
+                .path()
+                .join(".pi/agent/extensions/pixel-impact.ts")
+                .exists()
+        );
+    }
+}
+
+#[cfg(test)]
 mod stale_prompt_tests {
     use super::*;
 
@@ -1332,30 +1218,21 @@ mod stale_prompt_tests {
     }
 
     #[test]
-    fn nothing_deployed_is_not_stale() {
+    fn nothing_deployed_is_not_retired() {
         let home = tempfile::tempdir().unwrap();
-        assert!(stale_prompts(home.path()).is_empty());
+        assert!(retired_prompts(home.path()).is_empty());
     }
 
+    /// Every deployed prompt is retired, whatever release wrote it, and each
+    /// file is named on its own.
     #[test]
-    fn prompts_matching_this_binary_are_not_stale() {
+    fn each_deployed_prompt_is_named() {
         let home = tempfile::tempdir().unwrap();
+        deploy(home.path(), SUBAGENT_PROMPT_FILE, SUBAGENT_PROMPT_ASSET);
+        assert_eq!(retired_prompts(home.path()), vec![SUBAGENT_PROMPT_FILE]);
         deploy(home.path(), "agent-prompt.md", AGENT_PROMPT_ASSET);
-        deploy(home.path(), SUBAGENT_PROMPT_FILE, SUBAGENT_PROMPT_ASSET);
-        assert!(stale_prompts(home.path()).is_empty());
-    }
-
-    /// An older release's prompt, the case an upgrade leaves behind: each
-    /// file is judged on its own, against its own bundled copy.
-    #[test]
-    fn a_prompt_from_another_release_is_named() {
-        let home = tempfile::tempdir().unwrap();
-        deploy(home.path(), "agent-prompt.md", "# Pixel, an older prompt\n");
-        deploy(home.path(), SUBAGENT_PROMPT_FILE, SUBAGENT_PROMPT_ASSET);
-        assert_eq!(stale_prompts(home.path()), vec!["agent-prompt.md"]);
-        deploy(home.path(), SUBAGENT_PROMPT_FILE, AGENT_PROMPT_ASSET);
         assert_eq!(
-            stale_prompts(home.path()),
+            retired_prompts(home.path()),
             vec!["agent-prompt.md", SUBAGENT_PROMPT_FILE]
         );
     }
@@ -1506,134 +1383,7 @@ mod shell_resolution_tests;
 mod shell_wrapper_strip_tests;
 
 #[cfg(test)]
-mod cursor_hooks_tests {
-    use super::{install_cursor_hooks, read_settings};
-
-    fn cursor_command(exe: &std::path::Path, verb: &str) -> String {
-        format!("{} run-hook {verb}", crate::routing::quoted_executable(exe))
-    }
-
-    fn commands_for(value: &serde_json::Value, event: &str) -> Vec<String> {
-        value["hooks"][event]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|entry| entry["command"].as_str())
-            .map(str::to_owned)
-            .collect()
-    }
-
-    #[test]
-    fn fresh_install_writes_version_and_both_flat_hook_commands() {
-        let home = tempfile::tempdir().unwrap();
-        let exe = std::path::Path::new("/opt/pixel");
-        let step = install_cursor_hooks(home.path(), exe, false).unwrap();
-        assert!(step.summary.contains("configured"), "{}", step.summary);
-
-        let path = home.path().join(crate::config::CURSOR_HOOKS_FILE);
-        let value = read_settings(&path).unwrap();
-        // Cursor documents `version` as required; a fresh install must carry it.
-        assert_eq!(value["version"], serde_json::json!(1));
-        let pre = commands_for(&value, "preToolUse");
-        assert_eq!(
-            pre,
-            vec![cursor_command(exe, "guard --provider cursor")],
-            "{pre:?}"
-        );
-        assert_eq!(
-            value["hooks"]["preToolUse"][0]["matcher"],
-            serde_json::json!(crate::config::GUARD_MATCHER)
-        );
-        let post = commands_for(&value, "postToolUse");
-        assert_eq!(
-            post,
-            vec![cursor_command(exe, "metrics --provider cursor")],
-            "{post:?}"
-        );
-    }
-
-    #[test]
-    fn reinstall_preserves_version_and_foreign_entries_without_duplication() {
-        let home = tempfile::tempdir().unwrap();
-        let exe = std::path::Path::new("/opt/pixel");
-        let path = home.path().join(crate::config::CURSOR_HOOKS_FILE);
-        // A pre-existing Cursor config: a non-1 version plus a foreign hook.
-        super::write_settings(
-            &path,
-            &serde_json::json!({
-                "version": 2,
-                "hooks": {
-                    "preToolUse": [{"command": "notify-send done"}]
-                }
-            }),
-            false,
-        )
-        .unwrap();
-
-        install_cursor_hooks(home.path(), exe, false).unwrap();
-        // Idempotence: a second install must not duplicate pixel's own entry.
-        install_cursor_hooks(home.path(), exe, false).unwrap();
-
-        let value = read_settings(&path).unwrap();
-        assert_eq!(value["version"], serde_json::json!(2));
-        let pre = commands_for(&value, "preToolUse");
-        assert_eq!(
-            pre,
-            vec![
-                "notify-send done".to_owned(),
-                cursor_command(exe, "guard --provider cursor"),
-            ],
-            "foreign preToolUse entries survive and pixel's stays singular: {pre:?}"
-        );
-    }
-
-    /// A foreign command that merely *mentions* `run-hook guard` (without
-    /// running through pixel's executable) must survive an install untouched,
-    /// while the actual pixel-owned entry is replaced and never duplicated.
-    #[test]
-    fn install_preserves_foreign_commands_that_mention_run_hook() {
-        let home = tempfile::tempdir().unwrap();
-        let exe = std::path::Path::new("/opt/pixel");
-        let path = home.path().join(crate::config::CURSOR_HOOKS_FILE);
-        super::write_settings(
-            &path,
-            &serde_json::json!({
-                "hooks": {
-                    "preToolUse": [
-                        {"command": "some-tool run-hook guard --for-everyone"},
-                        {"command": cursor_command(exe, "guard --provider cursor")}
-                    ]
-                }
-            }),
-            false,
-        )
-        .unwrap();
-
-        install_cursor_hooks(home.path(), exe, false).unwrap();
-        let value = read_settings(&path).unwrap();
-        let pre = commands_for(&value, "preToolUse");
-        assert_eq!(
-            pre,
-            vec![
-                "some-tool run-hook guard --for-everyone".to_owned(),
-                cursor_command(exe, "guard --provider cursor"),
-            ],
-            "a foreign command mentioning 'run-hook guard' survives; the \
-             pixel entry is replaced, not duplicated: {pre:?}"
-        );
-    }
-
-    #[test]
-    fn dry_run_reports_planned_changes_without_writing() {
-        let home = tempfile::tempdir().unwrap();
-        let exe = std::path::Path::new("/opt/pixel");
-        let step = install_cursor_hooks(home.path(), exe, true).unwrap();
-        assert!(step.summary.contains("would configure"), "{}", step.summary);
-        assert!(
-            !home.path().join(crate::config::CURSOR_HOOKS_FILE).exists(),
-            "dry-run must not create the hooks file"
-        );
-    }
+mod settings_write_tests {
 
     /// A settings path that is a symlink into a dotfiles manager must stay a
     /// symlink: the write updates the managed target, never replaces the link
@@ -1711,6 +1461,63 @@ mod cursor_hooks_tests {
             left.iter()
                 .any(|name| name.starts_with("hooks.json.pixel-bak.")),
             "the pre-image was backed up: {left:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    fn step(id: &str, status: CheckStatus) -> InstallStep {
+        InstallStep {
+            id: id.into(),
+            status,
+            summary: String::new(),
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn install_report_counts_each_status_and_fails_only_on_red() {
+        let passing = install_report(
+            Path::new("/bin/pixel"),
+            Path::new("/home/u"),
+            true,
+            vec![
+                step("a", CheckStatus::Green),
+                step("b", CheckStatus::Green),
+                step("c", CheckStatus::Yellow),
+            ],
+        );
+        assert!(passing.ok);
+        assert!(passing.dry_run);
+        assert_eq!(
+            (
+                passing.summary.green,
+                passing.summary.yellow,
+                passing.summary.red
+            ),
+            (2, 1, 0)
+        );
+        assert_eq!(passing.executable_path, "/bin/pixel");
+        assert_eq!(passing.home, "/home/u");
+        assert_eq!(passing.steps.len(), 3);
+
+        let failing = install_report(
+            Path::new("/bin/pixel"),
+            Path::new("/repo"),
+            false,
+            vec![step("a", CheckStatus::Red)],
+        );
+        assert!(!failing.ok);
+        assert_eq!(
+            (
+                failing.summary.green,
+                failing.summary.yellow,
+                failing.summary.red
+            ),
+            (0, 0, 1)
         );
     }
 }

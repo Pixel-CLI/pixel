@@ -24,19 +24,6 @@ use crate::install;
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
-/// The five mandatory scenarios the rule text and the SessionStart usage
-/// string must agree on. One name per scenario (the guard-verb that anchors
-/// it): targets (sniper scoping — mandatory first call, advisory fence),
-/// resolve (phrase → code), rescue (history recovery, includes excavate),
-/// reconcile (branch sync), impact (blast radius, includes changes).
-pub const MANDATORY_SCENARIOS: &[&str] = &[
-    "scope-task",
-    "find-code",
-    "plan-rollback",
-    "sync-branch",
-    "impact",
-];
-
 /// Per-check status for the doctor report, ordered from healthy to broken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,8 +72,8 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("binary.executable", None),
     entry("binary.shell-path", None),
     entry("install.agent-prompt", FIX_INSTALL),
-    entry("install.subagent-prompt", FIX_INSTALL),
     entry("install.pi-prompt", FIX_INSTALL),
+    entry("install.pi-impact", FIX_INSTALL),
     entry("install.codex-config", FIX_INSTALL),
     entry("install.codex-metrics-hook", FIX_INSTALL),
     // Only the user can review a hook (`/hooks` in Codex); the outcome says so.
@@ -98,8 +85,6 @@ pub const CHECKS: &[CheckSpec] = &[
     // The removal command names the orphaned file, so the outcome carries it.
     entry("install.rtk-backup", None),
     entry("install.legacy-wrappers", FIX_INSTALL),
-    entry("rule.parity", FIX_INSTALL),
-    entry("rule.scenarios", FIX_INSTALL),
     // The setup step is interactive and needs the user at a terminal, so
     // the check names it in the message but leaves `--fix` out of it.
     entry("web-search.provider", None),
@@ -236,14 +221,6 @@ pub struct DoctorOptions {
     /// expected (see `InstallOptions::claude_executable`). Defaults to the
     /// first `claude` on PATH.
     pub claude_executable: Option<PathBuf>,
-    /// Dry-run parser for one `pixel …` argv (including the leading
-    /// "pixel"), supplied by the CLI binary from its real clap definition.
-    /// When present, the `rule.parity` check parses every pixel command
-    /// line found in the installed rule text against it — documented
-    /// syntax the binary rejects goes red. When None (library callers
-    /// without access to the CLI parser), the parity check is skipped.
-    #[allow(clippy::type_complexity)]
-    pub syntax_validator: Option<fn(&[String]) -> std::result::Result<(), String>>,
     /// Check ids to run; empty runs every check. Ids come from [`CHECKS`].
     pub only: Vec<String>,
     /// Check ids to leave out.
@@ -330,55 +307,24 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     runner.check(
         "install.agent-prompt",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            let path = home.join(".local/share/pixel/agent-prompt.md");
-            if !path.is_file() {
-                return Err("agent-prompt.md not deployed — run `pixel install`".into());
-            }
-            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            // Byte equality with the bundled asset, like the sub-agent
-            // prompt: a deployed copy that still carries the headline
-            // sections but has diverged on the command map, the call shapes
-            // or the mutation warning teaches agents syntax this binary may
-            // no longer accept, and `rule.parity` does not cover it.
-            if content != install::AGENT_PROMPT_ASSET {
-                return Err("agent-prompt.md is stale — run `pixel install` to update".into());
-            }
-            Ok(DoctorCheckDetail {
-                summary: format!("agent-prompt.md deployed ({} bytes)", content.len()),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            })
-        },
-    );
-
-    runner.check(
-        "install.subagent-prompt",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            let path = home
-                .join(".local/share/pixel")
-                .join(install::SUBAGENT_PROMPT_FILE);
-            if !path.is_file() {
+            // No host reads a deployed Pixel prompt any more; copies an
+            // earlier release wrote are retired by `pixel install`.
+            let dir = home.join(".local/share/pixel");
+            let left: Vec<String> = ["agent-prompt.md", install::SUBAGENT_PROMPT_FILE]
+                .iter()
+                .map(|name| dir.join(name))
+                .filter(|path| path.is_file())
+                .map(|path| path.display().to_string())
+                .collect();
+            if !left.is_empty() {
                 return Err(format!(
-                    "{} not deployed — run `pixel install`",
-                    install::SUBAGENT_PROMPT_FILE
-                ));
-            }
-            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            // Byte equality with the bundled asset: the wrapper hands this
-            // file to every print-mode sub-agent, so a stale copy silently
-            // teaches them syntax this binary may no longer accept.
-            if content != install::SUBAGENT_PROMPT_ASSET {
-                return Err(format!(
-                    "{} is stale — run `pixel install` to update",
-                    install::SUBAGENT_PROMPT_FILE
+                    "retired Pixel prompt file(s) remain: {} — run `pixel install` to remove them",
+                    left.join(", ")
                 ));
             }
             Ok(DoctorCheckDetail {
-                summary: format!(
-                    "{} deployed ({} bytes)",
-                    install::SUBAGENT_PROMPT_FILE,
-                    content.len()
-                ),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                summary: "no Pixel prompt deployed; agents keep their own instructions".into(),
+                detail: Some(serde_json::json!({ "dir": dir.display().to_string() })),
             })
         },
     );
@@ -387,30 +333,54 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         "install.pi-prompt",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let path = home.join(install::PI_PROMPT_REL);
-            if !path.is_file() {
-                return Err(format!(
-                    "{} not deployed — run `pixel install`",
-                    path.display()
-                ));
-            }
-            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            // Check the same normalization as install, including historical
-            // prompt copies left outside a current managed block.
-            if content != install::managed_pi_content(&content, install::PI_PROMPT_ASSET) {
-                return Err(format!(
-                    "{} is stale — run `pixel install` to update",
-                    path.display()
-                ));
+            if path.is_file() {
+                let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                let cleaned =
+                    config::strip_managed_block(&install::strip_unmarked_pi_prompts(&content));
+                if content != cleaned {
+                    return Err(format!(
+                        "{} still contains Pixel's retired automatic prompt — run `pixel install`",
+                        path.display()
+                    ));
+                }
             }
             Ok(DoctorCheckDetail {
-                summary: format!(
-                    "APPEND_SYSTEM.md carries the agent prompt ({} bytes)",
-                    content.len()
-                ),
+                summary: format!("no Pixel automatic prompt in {}", path.display()),
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
             })
         },
     );
+    let pi_paths = crate::pi_global::PiPaths::resolve(&home, options.home.is_some());
+    runner.record("install.pi-impact", || {
+        let detail = Some(serde_json::json!({
+            "settings": pi_paths.settings.display().to_string(),
+            "package": pi_paths.package_dir.display().to_string(),
+        }));
+        let pi_installed = options.home.is_none() && crate::pi_global::pi_on_path();
+        let (status, summary, remedy) = match crate::pi_global::check(&pi_paths, &exe, pi_installed)
+        {
+            crate::pi_global::PiImpactState::NotInstalled => (
+                CheckStatus::Green,
+                "Pi is not installed; no explicit impact command expected".to_owned(),
+                Remedy::Catalogue,
+            ),
+            crate::pi_global::PiImpactState::Current => (
+                CheckStatus::Green,
+                format!(
+                    "explicit impact package declared in {}",
+                    pi_paths.settings.display()
+                ),
+                Remedy::Catalogue,
+            ),
+            crate::pi_global::PiImpactState::Manual(reason) => {
+                (CheckStatus::Yellow, reason, Remedy::Manual)
+            }
+            crate::pi_global::PiImpactState::NeedsInstall(reason) => {
+                return Err(format!("{reason}; run `pixel install`"));
+            }
+        };
+        Ok((status, DoctorCheckDetail { summary, detail }, remedy))
+    });
 
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
     runner.check(
@@ -426,7 +396,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     runner.check(
         "install.codex-metrics-hook",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            let (summary, detail) = crate::codex_config::check_metrics_hook(&codex_home)?;
+            let (summary, detail) = crate::codex_config::check_task_hooks(&codex_home, &exe)?;
             Ok(DoctorCheckDetail {
                 summary,
                 detail: Some(detail),
@@ -443,7 +413,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         || -> std::result::Result<DoctorCheckDetail, String> {
             let (summary, detail) = crate::opencode_config::check_opencode(
                 &crate::opencode_config::opencode_config_dir(&home, options.home.is_some()),
-                &exe,
             )?;
             Ok(DoctorCheckDetail {
                 summary,
@@ -484,75 +453,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 ));
             }
             let value = install::read_settings(&path).map_err(|e| e.to_string())?;
-            // A config without a hooks object (Devin's own settings only) is
-            // simply missing every hook, not a malformed install.
-            let hooks = value
-                .get("hooks")
-                .and_then(serde_json::Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            let has = |event: &str, verb: &str| {
-                hooks
-                    .get(event)
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|groups| {
-                        groups.iter().any(|group| {
-                            group
-                                .get("hooks")
-                                .and_then(serde_json::Value::as_array)
-                                .is_some_and(|inner| {
-                                    inner.iter().any(|hook| {
-                                        hook.get("command")
-                                            .and_then(serde_json::Value::as_str)
-                                            .is_some_and(|c| {
-                                                c.contains(&format!("run-hook {verb}"))
-                                                    && c.contains("pixel")
-                                            })
-                                    })
-                                })
-                        })
-                    })
-            };
-            // Claude runs post-compaction through SessionStart with matcher
-            // "compact" — verify the verb AND its matcher, not just presence.
-            let has_compact = hooks
-                .get("SessionStart")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|groups| {
-                    groups.iter().any(|group| {
-                        group.get("matcher").and_then(serde_json::Value::as_str) == Some("compact")
-                            && group
-                                .get("hooks")
-                                .and_then(serde_json::Value::as_array)
-                                .is_some_and(|inner| {
-                                    inner.iter().any(|hook| {
-                                        hook.get("command")
-                                            .and_then(serde_json::Value::as_str)
-                                            .is_some_and(|c| {
-                                                c.contains("run-hook post-compaction")
-                                                    && c.contains("pixel")
-                                            })
-                                    })
-                                })
-                    })
-                });
             let mut missing = Vec::new();
-            if !has("SessionStart", "session-start") {
-                missing.push("SessionStart→session-start");
-            }
-            if !has("UserPromptSubmit", "prompt-submit") {
-                missing.push("UserPromptSubmit→prompt-submit");
-            }
-            if !has_compact {
-                missing.push("SessionStart(compact)→post-compaction");
-            }
-            if !crate::routing::has_pixel_metrics_relay(
-                &value,
-                crate::routing::Provider::Claude,
-                &exe,
-            ) {
-                missing.push("PostToolUse(Bash)→metrics");
-            }
             if !crate::routing::task_hooks_registered(
                 &value,
                 crate::routing::Provider::Claude,
@@ -565,6 +466,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     "missing pixel lifecycle hooks in {}: {} — run `pixel install`",
                     path.display(),
                     missing.join(", ")
+                ));
+            }
+            if has_unexpected_pixel_hooks(&value, crate::routing::Provider::Claude, &exe) {
+                return Err(format!(
+                    "retired Pixel retrieval or metrics hooks remain in {}; run `pixel install`",
+                    path.display()
                 ));
             }
             let stacked = crate::routing::stacked_pixel_hooks(&value, &exe);
@@ -610,111 +517,16 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     );
 
-    // Devin's own lifecycle protocol. The global install registers it only
-    // when Devin has been used on this machine, and `doctor` judges what
-    // Pixel wrote: with no `~/.config/devin/` the check is green-absent, not
-    // red. A Devin CLI present but never run is a foreign state, not a
-    // broken install.
+    // Devin keeps its native retrieval: a Pixel hook left in its global
+    // config by an earlier release is red until `pixel install` removes it.
+    // With no `~/.config/devin/` the check is green-absent.
     runner.check(
         "install.devin-hooks",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            let dir = home.join(crate::config::DEVIN_CONFIG_DIR);
-            if !dir.is_dir() {
-                return Ok(DoctorCheckDetail {
-                    summary: "Devin not in use on this machine (no ~/.config/devin)".into(),
-                    detail: None,
-                });
-            }
-            let path = dir.join(crate::config::DEVIN_CONFIG_FILE);
-            if !path.is_file() {
-                return Err(format!(
-                    "{} not found while {} exists — run `pixel install`",
-                    path.display(),
-                    dir.display()
-                ));
-            }
-            let value = install::read_settings(&path).map_err(|e| e.to_string())?;
-            // A config without a hooks object (Devin's own settings only) is
-            // simply missing every hook, not a malformed install.
-            let hooks = value
-                .get("hooks")
-                .and_then(serde_json::Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            let has = |event: &str, verb: &str| {
-                hooks
-                    .get(event)
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|groups| {
-                        groups.iter().any(|group| {
-                            group
-                                .get("hooks")
-                                .and_then(serde_json::Value::as_array)
-                                .is_some_and(|inner| {
-                                    inner.iter().any(|hook| {
-                                        hook.get("command")
-                                            .and_then(serde_json::Value::as_str)
-                                            .is_some_and(|c| {
-                                                c.contains(&format!(
-                                                    "run-hook {verb} --provider devin"
-                                                )) && c.contains("pixel")
-                                            })
-                                    })
-                                })
-                        })
-                    })
-            };
-            let mut missing = Vec::new();
-            if !has("SessionStart", "session-start") {
-                missing.push("SessionStart→session-start");
-            }
-            if !has("UserPromptSubmit", "prompt-submit") {
-                missing.push("UserPromptSubmit→prompt-submit");
-            }
-            // Post-compaction reads the repo manifest; it carries no
-            // provider argument, unlike the other two.
-            if !hooks
-                .get("PostCompaction")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|groups| {
-                    groups.iter().any(|group| {
-                        group
-                            .get("hooks")
-                            .and_then(serde_json::Value::as_array)
-                            .is_some_and(|inner| {
-                                inner.iter().any(|hook| {
-                                    hook.get("command")
-                                        .and_then(serde_json::Value::as_str)
-                                        .is_some_and(|c| {
-                                            c.contains("run-hook post-compaction")
-                                                && c.contains("pixel")
-                                        })
-                                })
-                            })
-                    })
-                })
-            {
-                missing.push("PostCompaction→post-compaction");
-            }
-            if !missing.is_empty() {
-                return Err(format!(
-                    "missing pixel lifecycle hooks in {}: {} — run `pixel install`",
-                    path.display(),
-                    missing.join(", ")
-                ));
-            }
-            let stacked = crate::routing::stacked_pixel_hooks(&value, &exe);
-            if !stacked.is_empty() {
-                return Err(format!(
-                    "pixel hooks registered more than once in {}: {} — run `pixel install`",
-                    path.display(),
-                    stacked.join(", ")
-                ));
-            }
-            Ok(DoctorCheckDetail {
-                summary: format!("devin lifecycle hooks configured in {}", path.display()),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            })
+            let path = home
+                .join(crate::config::DEVIN_CONFIG_DIR)
+                .join(crate::config::DEVIN_CONFIG_FILE);
+            retired_pixel_hooks_check(&[path], &exe, "pixel install")
         },
     );
 
@@ -754,12 +566,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
             if !blocks.is_empty() {
                 return Err(format!(
-                    "stale pixel shell wrapper in {} — run `pixel install` to remove it (the SessionStart hook now injects the prompt; the wrapper double-injects)",
+                    "stale pixel shell wrapper in {} — run `pixel install` to remove its unsolicited prompt injection",
                     blocks.join(", ")
                 ));
             }
             Ok(DoctorCheckDetail {
-                summary: "no legacy shell wrappers — SessionStart hook injects the prompt".into(),
+                summary: "no legacy shell wrappers".into(),
                 detail: Some(serde_json::json!({ "profiles_checked": profiles
                     .iter()
                     .map(|p| p.display().to_string())
@@ -767,111 +579,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             })
         },
     );
-
-    // Rule-vs-binary parity: every `pixel …` command line documented in the
-    // INSTALLED rule text must dry-run parse against the binary's real clap
-    // definition. Drift between documented CLI syntax and the binary was the
-    // largest defect category found — this makes it a red doctor check
-    // instead of a silent lie agents follow into parse errors.
-    if let Some(validator) = options.syntax_validator {
-        let home_for_rule = home.clone();
-        // The prompt `pixel install` deploys always carries command lines, so
-        // a rule text without any is not something a reinstall repairs.
-        runner.record("rule.parity", move || {
-            let Some((source, rule_text)) = installed_rule_text(&home_for_rule) else {
-                return Ok((CheckStatus::Yellow, DoctorCheckDetail {
-                    summary: "no installed rule text found (agent-prompt.md not deployed, no managed block or rule file) — run `pixel install`; parity not checked".into(),
-                    detail: None,
-                }, Remedy::Catalogue));
-            };
-            let commands = extract_rule_commands(&rule_text);
-            if commands.is_empty() {
-                return Ok((CheckStatus::Yellow, DoctorCheckDetail {
-                    summary: format!(
-                        "installed rule text at {} contains no `pixel …` command lines — parity not checked",
-                        source.display()
-                    ),
-                    detail: None,
-                }, Remedy::Manual));
-            }
-            let mut parsed_ok = 0usize;
-            let mut unparsed: Vec<String> = Vec::new();
-            let mut failures: Vec<String> = Vec::new();
-            for line in &commands {
-                match normalize_rule_command(line) {
-                    None => unparsed.push(line.clone()),
-                    Some(argv) => match validator(&argv) {
-                        Ok(()) => parsed_ok += 1,
-                        Err(e) => failures.push(format!("`{line}` → {e}")),
-                    },
-                }
-            }
-            let detail = Some(serde_json::json!({
-                "source": source.display().to_string(),
-                "command_lines": commands.len(),
-                "parsed_ok": parsed_ok,
-                "unparsed": unparsed,
-                "failures": failures,
-            }));
-            if !failures.is_empty() {
-                return Err(format!(
-                    "{} documented command line(s) rejected by the CLI parser: {}",
-                    failures.len(),
-                    failures.join("; ")
-                ));
-            }
-            Ok((CheckStatus::Green, DoctorCheckDetail {
-                summary: format!(
-                    "{parsed_ok}/{} documented pixel command lines parse against the CLI ({} unparsed placeholder line(s) skipped)",
-                    commands.len(),
-                    unparsed.len()
-                ),
-                detail,
-            }, Remedy::Catalogue))
-        });
-    }
-
-    // Scenario-count consistency: the installed rule text and the
-    // SessionStart usage string must agree on the FIVE mandatory scenarios
-    // (targets/resolve/rescue/reconcile/impact). A scenario the rule
-    // mandates but the injected session never hears about — or vice versa —
-    // is exactly the drift class this doctor exists to catch.
-    {
-        let home_for_rule = home.clone();
-        runner.check_status("rule.scenarios", move || {
-            let Some((source, rule_text)) = installed_rule_text(&home_for_rule) else {
-                return Ok((
-                    CheckStatus::Yellow,
-                    DoctorCheckDetail {
-                        summary: "no installed rule text found (agent-prompt.md not deployed, no managed block or rule file) — run `pixel install`; scenario consistency not checked"
-                            .into(),
-                        detail: None,
-                    },
-                ));
-            };
-            let mismatches = scenario_mismatches(&rule_text, pixel_proto::op::SESSION_USAGE);
-            if !mismatches.is_empty() {
-                return Err(format!(
-                    "scenario drift between installed rule text ({}) and session usage string: {}",
-                    source.display(),
-                    mismatches.join("; ")
-                ));
-            }
-            Ok((
-                CheckStatus::Green,
-                DoctorCheckDetail {
-                    summary: format!(
-                        "rule text and session usage agree on all {} mandatory scenarios",
-                        MANDATORY_SCENARIOS.len()
-                    ),
-                    detail: Some(serde_json::json!({
-                        "scenarios": MANDATORY_SCENARIOS,
-                        "source": source.display().to_string(),
-                    })),
-                },
-            ))
-        });
-    }
 
     // Which web search provider the installed `pixel` resolves to, read
     // straight from the environment and the global config file — never
@@ -897,8 +604,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 return Ok((
                     CheckStatus::Green,
                     DoctorCheckDetail {
-                        summary: "no pixel block in .codex/config.toml — repo-local codex instructions not installed"
-                            .into(),
+                        summary: "no retired Pixel block in .codex/config.toml".into(),
                         detail: None,
                     },
                 ));
@@ -916,101 +622,75 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         runner.check_status("repo.codex-hooks", || {
             let hooks_path = root.join(".codex").join(crate::codex_config::HOOKS_FILE);
             let sidecar = root.join(".codex").join(crate::routing::CODEX_COMPOSED_BACKUP);
-            match (hooks_path.is_file(), sidecar.is_file()) {
-                (false, false) => Ok((
+            if sidecar.is_file() {
+                return Err(format!(
+                    "retired composed-guard backup {} remains — run `pixel install --repo` to restore native Codex hooks",
+                    sidecar.display()
+                ));
+            }
+            if !hooks_path.is_file() {
+                return Ok((
                     CheckStatus::Green,
                     DoctorCheckDetail {
-                        summary: "no .codex/hooks.json — repo-local composed guard not installed".into(),
+                        summary: "no .codex/hooks.json — no repo-local Pixel task hooks installed".into(),
                         detail: None,
                     },
-                )),
-                (true, false) => {
-                    let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
-                    if !crate::routing::has_pixel_hook(&value, &exe) {
-                        return Ok((
-                            CheckStatus::Green,
-                            DoctorCheckDetail {
-                                summary: "no pixel hook in .codex/hooks.json — repo-local composed guard not installed".into(),
-                                detail: None,
-                            },
-                        ));
-                    }
-                    Err(format!(
-                        "{} carries pixel hooks without their composed-guard backup {} — run `pixel install --repo`",
-                        hooks_path.display(),
-                        sidecar.display()
-                    ))
-                }
-                (false, true) => Err(format!(
-                    "composed-guard backup {} exists but {} is missing — run `pixel install --repo`",
-                    sidecar.display(),
-                    hooks_path.display()
-                )),
-                (true, true) => {
-                    let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
-                    let groups = value
-                        .get("hooks")
-                        .and_then(|h| h.get("PreToolUse"))
-                        .and_then(serde_json::Value::as_array);
-                    let managed = groups.is_some_and(|groups| {
-                        groups.len() == 1
-                            && groups[0]
-                                .get("hooks")
-                                .and_then(serde_json::Value::as_array)
-                                .is_some_and(|hooks| {
-                                    hooks.iter().any(|hook| {
-                                        hook.get("command")
-                                            .and_then(serde_json::Value::as_str)
-                                            .is_some_and(|c| {
-                                                c.contains(
-                                                    "run-hook composed-guard --provider codex --backup ",
-                                                )
-                                            })
-                                    })
-                                })
-                    });
-                    if !managed {
-                        return Err(format!(
-                            "PreToolUse in {} is not the managed composed-guard group — run `pixel install --repo`",
-                            hooks_path.display()
-                        ));
-                    }
-                    // Codex ignores a project-scoped `.codex/` layer unless
-                    // it trusts the project, so a byte-correct guard can sit
-                    // dormant. The install is right either way: the summary
-                    // carries the trust state instead of turning the check
-                    // yellow, which no non-interactive Codex command could
-                    // clear here.
-                    let trust = match crate::codex_config::project_trust(&codex_home, root) {
-                        Ok(crate::codex_config::ProjectTrust::Trusted) => {
-                            "codex trusts this project".to_string()
-                        }
-                        Ok(crate::codex_config::ProjectTrust::Untrusted)
-                        | Ok(crate::codex_config::ProjectTrust::Unspecified) => {
-                            "codex has not trusted this project — the guard will not load until it does"
-                                .to_string()
-                        }
-                        Err(e) => {
-                            format!("codex trust unknown ({e}) — the guard may not load")
-                        }
-                    };
-                    Ok((
-                        CheckStatus::Green,
-                        DoctorCheckDetail {
-                            summary: format!(
-                                "composed codex guard configured in {} (backup={}) — {trust}",
-                                hooks_path.display(),
-                                sidecar.display()
-                            ),
-                            detail: Some(serde_json::json!({
-                                "hooks": hooks_path.display().to_string(),
-                                "backup": sidecar.display().to_string(),
-                                "trust": trust,
-                            })),
-                        },
-                    ))
-                }
+                ));
             }
+            let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
+            if has_unexpected_repo_pixel_hooks(&value, &exe) {
+                return Err(format!(
+                    "{} still has a retired Pixel callback — run `pixel install --repo` to restore native Codex hooks",
+                    hooks_path.display()
+                ));
+            }
+            let task_hooks = crate::routing::task_hooks_registered(
+                &value,
+                crate::routing::Provider::Codex,
+                &exe,
+            );
+            let pixel_task_hooks_present = crate::routing::has_pixel_hook(&value, &exe);
+            let trust = task_hooks.then(|| {
+                match crate::codex_config::project_trust(&codex_home, root) {
+                    Ok(crate::codex_config::ProjectTrust::Trusted) => {
+                        "Codex trusts this project; task hooks are configured".to_owned()
+                    }
+                    Ok(crate::codex_config::ProjectTrust::Untrusted) => {
+                        "Codex has not trusted this project; task hooks may not load".to_owned()
+                    }
+                    Ok(crate::codex_config::ProjectTrust::Unspecified) => {
+                        "Codex project trust is unspecified; task hooks may not load".to_owned()
+                    }
+                    Err(error) => format!(
+                        "Codex project trust is unknown ({error}); task hooks may not load"
+                    ),
+                }
+            });
+            Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary: if let Some(trust) = &trust {
+                        format!("native Codex hooks preserved in {}; {trust}", hooks_path.display())
+                    } else {
+                        format!(
+                            "native Codex hooks preserved; {} in {}",
+                            if pixel_task_hooks_present {
+                                "partial Pixel task hooks preserved as configured"
+                            } else {
+                                "no Pixel task hooks installed"
+                            },
+                            hooks_path.display(),
+                        )
+                    },
+                    detail: Some(serde_json::json!({
+                        "hooks": hooks_path.display().to_string(),
+                        "task_hooks": task_hooks,
+                        "pixel_task_hooks_present": pixel_task_hooks_present,
+                        "native_pre_tool_use": true,
+                        "trust": trust,
+                    })),
+                },
+            ))
         });
 
         runner.check_status("repo.codex-hook-review", || {
@@ -1018,63 +698,18 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             codex_hook_review(&codex_home, &hooks_path, &exe)
         });
 
-        runner.check_status("repo.devin-hooks", || {
-            let path = root.join(crate::routing::DEVIN_LOCAL_CONFIG);
-            let value = if path.is_file() {
-                install::read_settings(&path).map_err(|e| e.to_string())?
-            } else {
-                serde_json::Value::Null
-            };
-            if !crate::routing::has_pixel_hook(&value, &exe) {
-                return Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: format!(
-                            "no pixel hook in {} — repo-local devin guard not installed",
-                            crate::routing::DEVIN_LOCAL_CONFIG
-                        ),
-                        detail: None,
-                    },
-                ));
-            }
-            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider devin", &exe) {
-                return Err(format!(
-                    "pixel hooks in {} but no pixel guard PreToolUse entry — run `pixel install --repo`",
-                    path.display()
-                ));
-            }
-            if !crate::routing::has_pixel_prompt_context(&value, &exe) {
-                return Err(format!(
-                    "Pixel Devin guard in {} has no non-blocking UserPromptSubmit context hook — run `pixel install --repo`",
-                    path.display()
-                ));
-            }
-            if !crate::routing::has_pixel_permission_approval(&value, &exe) {
-                return Err(format!(
-                    "Pixel Devin guard in {} has no narrow PermissionRequest approval hook — run `pixel install --repo`",
-                    path.display()
-                ));
-            }
-            if !crate::routing::has_pixel_metrics_relay(
-                &value,
-                crate::routing::Provider::Devin,
+        runner.check("repo.devin-hooks", || {
+            retired_pixel_hooks_check(
+                &[
+                    root.join(crate::routing::DEVIN_LOCAL_CONFIG),
+                    root.join(crate::routing::DEVIN_LEGACY_HOOKS),
+                ],
                 &exe,
-            ) {
-                return Err(format!(
-                    "Pixel Devin guard in {} has no PostToolUse metrics relay on exec — run `pixel install --repo`",
-                    path.display()
-                ));
-            }
-            Ok((
-                CheckStatus::Green,
-                DoctorCheckDetail {
-                    summary: format!(
-                        "devin Pixel rewrite, no-prompt retrieval approval, and prompt-context hooks registered in {}",
-                        path.display()
-                    ),
-                    detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-                },
-            ))
+                &format!(
+                    "pixel install --repo {}",
+                    crate::routing::quoted_executable(root)
+                ),
+            )
         });
 
         runner.check_status("repo.warp-mcp", || {
@@ -1118,18 +753,8 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                         detail: None,
                     },
                 )),
-                Some(true) => Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: format!(
-                            "Pixel-first retrieval rule configured in {}",
-                            path.display()
-                        ),
-                        detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-                    },
-                )),
-                Some(false) => Err(format!(
-                    "Pixel-first rule in {} is stale — run `pixel install --repo {}`",
+                Some(_) => Err(format!(
+                    "retired Pixel-first block remains in {} — run `pixel install --repo {}` to remove it",
                     path.display(),
                     crate::routing::quoted_executable(root)
                 )),
@@ -1144,27 +769,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 let value = install::read_settings(&shared).map_err(|e| e.to_string())?;
                 if crate::routing::has_pixel_guard(&value, "run-hook guard", &exe) {
                     return Err(format!(
-                        "pixel guard in the shared {} names this machine's binary — run `pixel install --repo` to move it to {}",
-                        shared.display(),
-                        crate::routing::CLAUDE_LOCAL_SETTINGS
+                        "retired Pixel guard in shared {} — run `pixel install --repo` to restore native Claude retrieval",
+                        shared.display()
                     ));
-                }
-            }
-            // Claude Code merges the shared and global settings into the
-            // same session: a shell rewriter there races the guard, and keeps
-            // `pixel install --repo` from adding one.
-            let global = crate::routing::Provider::Claude.path(&home);
-            let mut others = vec![&shared];
-            if !crate::routing::same_file(&shared, &global) {
-                others.push(&global);
-            }
-            let mut rivals = Vec::new();
-            for other in others {
-                let (groups, _) = crate::routing::global_pre_tool_use(other);
-                for command in
-                    crate::routing::hook_commands(&crate::routing::blocking_claude_groups(&groups, &exe))
-                {
-                    rivals.push(format!("{command} in {}", other.display()));
                 }
             }
             let path = root.join(crate::routing::CLAUDE_LOCAL_SETTINGS);
@@ -1174,58 +781,24 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 serde_json::Value::Null
             };
             let rtk_backup = root.join(crate::routing::RTK_BACKUP);
-            if !crate::routing::has_pixel_hook(&value, &exe) && !rtk_backup.is_file() {
-                // A repository `pixel install --repo` prepared (its Pixel-first
-                // rule is there) whose guard a hook of the user's held back:
-                // yellow, since the session runs unguarded, and no command,
-                // since only the user can choose between their hook and it.
-                let prepared = crate::pixel_first::check_rules(root)
-                    .map_err(|e| e.to_string())?
-                    .is_some();
-                if prepared && !rivals.is_empty() {
-                    return Ok((
-                        CheckStatus::Yellow,
-                        DoctorCheckDetail {
-                            summary: format!(
-                                "claude guard not installed: {} also rewrites shell calls{}",
-                                rivals.join(", "),
-                                crate::routing::held_back_guard_hint(root)
-                            ),
-                            detail: None,
-                        },
-                        Remedy::Manual,
-                    ));
-                }
-                return Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: format!(
-                            "no pixel hook in {} — repo-local claude guard not installed",
-                            crate::routing::CLAUDE_LOCAL_SETTINGS
-                        ),
-                        detail: None,
-                    },
-                    Remedy::Catalogue,
-                ));
-            }
-            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider claude", &exe) {
+            if has_unexpected_repo_pixel_hooks(&value, &exe) {
                 return Err(format!(
-                    "pixel install evidence (hook or {}) but no pixel guard PreToolUse entry in {} — run `pixel install --repo`",
-                    rtk_backup.display(),
+                    "retired Pixel callbacks remain in {}; run `pixel install --repo` to restore native Claude retrieval",
                     path.display()
                 ));
             }
-            if !rivals.is_empty() {
+            if rtk_backup.is_file() {
                 return Ok((
                     CheckStatus::Yellow,
                     DoctorCheckDetail {
                         summary: format!(
-                            "claude guard in {} runs beside another shell rewriter ({}) — run `pixel install --repo {}` to hold the guard back",
-                            path.display(),
-                            rivals.join(", "),
-                            crate::routing::quoted_executable(root)
+                            "stale Claude RTK backup {} remains; run `pixel install --repo` to complete native cleanup",
+                            rtk_backup.display()
                         ),
-                        detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                        detail: Some(serde_json::json!({
+                            "path": path.display().to_string(),
+                            "rtk_backup": rtk_backup.display().to_string(),
+                        })),
                     },
                     Remedy::Catalogue,
                 ));
@@ -1233,8 +806,11 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             Ok((
                 CheckStatus::Green,
                 DoctorCheckDetail {
-                    summary: format!("claude guard registered in {}", path.display()),
-                    detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                    summary: format!("native Claude hooks preserved in {}", path.display()),
+                    detail: Some(serde_json::json!({
+                        "path": path.display().to_string(),
+                        "pixel_callbacks": false,
+                    })),
                 },
                 Remedy::Catalogue,
             ))
@@ -1422,33 +998,32 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     let Runner {
         checks, skipped, ..
     } = runner;
-    let green = checks
-        .iter()
-        .filter(|c| c.status == CheckStatus::Green)
-        .count();
-    let yellow = checks
-        .iter()
-        .filter(|c| c.status == CheckStatus::Yellow)
-        .count();
-    let red = checks
-        .iter()
-        .filter(|c| c.status == CheckStatus::Red)
-        .count();
-    let ok = red == 0;
+    Ok(doctor_report(&exe, &home, checks, skipped))
+}
 
-    Ok(DoctorReport {
+/// The report over finished `checks`: one count per status, and `ok` while
+/// no check is red.
+fn doctor_report(
+    exe: &Path,
+    home: &Path,
+    checks: Vec<DoctorCheck>,
+    skipped: usize,
+) -> DoctorReport {
+    let count = |status| checks.iter().filter(|c| c.status == status).count();
+    let summary = DoctorSummary {
+        green: count(CheckStatus::Green),
+        yellow: count(CheckStatus::Yellow),
+        red: count(CheckStatus::Red),
+        skipped,
+    };
+    DoctorReport {
         version: "v1".into(),
-        ok,
+        ok: summary.red == 0,
         executable_path: exe.display().to_string(),
         home: home.display().to_string(),
         checks,
-        summary: DoctorSummary {
-            green,
-            yellow,
-            red,
-            skipped,
-        },
-    })
+        summary,
+    }
 }
 
 /// Whether `name` is a Pixel Claude plugin id (`pixel`, or `pixel@<marketplace>`).
@@ -1531,9 +1106,6 @@ fn task_hook_observations(root: &Path) -> std::result::Result<DoctorCheckDetail,
     })
 }
 
-/// `repo.pi-guard`: where the repository's pi guard stands. A guard left in
-/// `.pi/agent/` by an older release is yellow, since pi never loads it there;
-/// a foreign file at the guard's path fails the check.
 /// `install.codex-hook-review` / `repo.codex-hook-review`: Pixel's hooks in
 /// one Codex `hooks.json` that Codex skips until the user reviews them.
 fn codex_hook_review(
@@ -1556,52 +1128,60 @@ fn codex_hook_review(
     ))
 }
 
+/// Green while none of `paths` holds a Pixel hook; red, naming `fix`, when
+/// one an earlier release registered is still there. An absent or foreign
+/// file is green: doctor judges what Pixel wrote.
+fn retired_pixel_hooks_check(
+    paths: &[PathBuf],
+    exe: &Path,
+    fix: &str,
+) -> std::result::Result<DoctorCheckDetail, String> {
+    let mut left = Vec::new();
+    for path in paths.iter().filter(|path| path.is_file()) {
+        let value = install::read_settings(path).map_err(|e| e.to_string())?;
+        if crate::routing::has_pixel_hook(&value, exe) {
+            left.push(path.display().to_string());
+        }
+    }
+    if !left.is_empty() {
+        return Err(format!(
+            "retired Pixel hooks remain in {} — run `{fix}` to remove them",
+            left.join(", ")
+        ));
+    }
+    Ok(DoctorCheckDetail {
+        summary: "no Pixel hook; the agent keeps its native tools".into(),
+        detail: Some(serde_json::json!({
+            "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        })),
+    })
+}
+
+/// `repo.pi-guard`: red while a Pi guard extension Pixel wrote (at
+/// `.pi/extensions/` or, from releases up to 0.4.0, `.pi/agent/`) is still in
+/// the repository; a file there Pixel did not write is the user's.
 fn pi_guard_check(
     root: &Path,
     state: crate::pi_project::GuardState,
 ) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
     use crate::pi_project::GuardState;
-    Ok(match state {
-        GuardState::Absent => (
-            CheckStatus::Green,
-            DoctorCheckDetail {
-                summary: format!(
-                    "no {} — repo-local pi guard not installed",
-                    crate::pi_project::EXTENSION
-                ),
-                detail: None,
-            },
-        ),
-        GuardState::Installed(path) => (
-            CheckStatus::Green,
-            DoctorCheckDetail {
-                summary: format!(
-                    "pi guard extension installed at {} (loads once pi trusts the project)",
-                    path.display()
-                ),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            },
-        ),
-        GuardState::Foreign(path) => {
-            return Err(format!(
-                "{} is not a pixel-managed guard extension — move it aside, then run `pixel install --repo {}`",
-                path.display(),
-                crate::routing::quoted_executable(root)
+    let path = match state {
+        GuardState::Absent => {
+            return Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary: "no Pixel Pi project extension; Pi keeps its native tools".into(),
+                    detail: None,
+                },
             ));
         }
-        GuardState::Legacy(path) => (
-            CheckStatus::Yellow,
-            DoctorCheckDetail {
-                summary: format!(
-                    "pi guard at {}, which pi never loads in a project — run `pixel install --repo {}` to move it to {}",
-                    path.display(),
-                    crate::routing::quoted_executable(root),
-                    crate::pi_project::EXTENSION
-                ),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            },
-        ),
-    })
+        GuardState::Retired(path) | GuardState::Legacy(path) => path,
+    };
+    Err(format!(
+        "retired Pixel Pi project extension remains at {} — run `pixel install --repo {}` to remove it",
+        path.display(),
+        crate::routing::quoted_executable(root)
+    ))
 }
 /// The final verdict of `install.claude-hooks` once every hook is present
 /// and registered once: yellow when they run `others` rather than `exe`, the
@@ -1617,7 +1197,7 @@ fn claude_hooks_owner_check(
         return (
             CheckStatus::Green,
             DoctorCheckDetail {
-                summary: format!("claude lifecycle hooks configured in {}", path.display()),
+                summary: format!("claude task-event hooks configured in {}", path.display()),
                 detail: Some(serde_json::json!({ "path": path.display().to_string() })),
             },
         );
@@ -1627,7 +1207,7 @@ fn claude_hooks_owner_check(
         CheckStatus::Yellow,
         DoctorCheckDetail {
             summary: format!(
-                "claude lifecycle hooks in {} run {}, not this pixel ({}); every session uses that binary — run `pixel install` to point them here",
+                "claude task-event hooks in {} run {}, not this pixel ({}); every session uses that binary — run `pixel install` to point them here",
                 path.display(),
                 others.join(", "),
                 exe.display()
@@ -1667,6 +1247,57 @@ fn rtk_backup_check(orphan: Option<PathBuf>) -> (CheckStatus, DoctorCheckDetail,
             )
         }
     }
+}
+
+/// Whether a global settings file retains Pixel callbacks outside its own
+/// provider's task lifecycle: the global install rewrites every Pixel hook
+/// there, so any other one is retired.
+fn has_unexpected_pixel_hooks(
+    value: &serde_json::Value,
+    provider: crate::routing::Provider,
+    exe: &Path,
+) -> bool {
+    let expected_task_prefix = format!("task-event --provider {} --event ", provider.name());
+    has_retired_pixel_hooks(value, exe, |verb| !verb.starts_with(&expected_task_prefix))
+}
+
+/// Whether a repo-local settings file retains a Pixel callback that
+/// `pixel install --repo` removes; it keeps task-event hooks of every
+/// provider, so those are not reported.
+fn has_unexpected_repo_pixel_hooks(value: &serde_json::Value, exe: &Path) -> bool {
+    has_retired_pixel_hooks(value, exe, crate::routing::native_cleanup_retires)
+}
+
+/// Whether any Pixel hook in `value` has a verb `retired` matches.
+fn has_retired_pixel_hooks(
+    value: &serde_json::Value,
+    exe: &Path,
+    retired: impl Fn(&str) -> bool,
+) -> bool {
+    value
+        .get("hooks")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|events| {
+            events.values().any(|groups| {
+                groups.as_array().is_some_and(|groups| {
+                    groups.iter().any(|group| {
+                        group
+                            .get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|inner| {
+                                inner.iter().any(|hook| {
+                                    hook.get("command")
+                                        .and_then(serde_json::Value::as_str)
+                                        .and_then(|command| {
+                                            crate::routing::pixel_hook_verb(command, exe)
+                                        })
+                                        .is_some_and(&retired)
+                                })
+                            })
+                    })
+                })
+            })
+        })
 }
 
 #[derive(Debug)]
@@ -2487,39 +2118,6 @@ fn age_secs(mtime: SystemTime) -> u64 {
     now.saturating_sub(m)
 }
 
-/// Path of the prompt `pixel install` deploys and the shell wrappers inject
-/// (`--append-system-prompt-file`): the rule text agents actually read.
-fn deployed_agent_prompt(home: &Path) -> PathBuf {
-    home.join(".local/share/pixel/agent-prompt.md")
-}
-
-/// Locate the installed pixel rule text, in the order agents receive it:
-/// the deployed `~/.local/share/pixel/agent-prompt.md` (0.2.x installs write
-/// nothing else), else the managed block inside the first CLAUDE.md/AGENTS.md
-/// that carries one (installs before 0.2.0), else the canonical rule source
-/// at `~/.agent-config/rules/pixel.md`. Returns the source path and the text.
-fn installed_rule_text(home: &Path) -> Option<(PathBuf, String)> {
-    let prompt = deployed_agent_prompt(home);
-    if let Ok(text) = fs::read_to_string(&prompt) {
-        return Some((prompt, text));
-    }
-    for path in config::find_agent_configs(home) {
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Some(start) = content.find(config::MANAGED_BEGIN) {
-            let body = &content[start + config::MANAGED_BEGIN.len()..];
-            let block = match body.find(config::MANAGED_END) {
-                Some(end) => &body[..end],
-                None => body,
-            };
-            return Some((path, block.to_string()));
-        }
-    }
-    let rules = home.join(config::PIXEL_RULES_REL);
-    fs::read_to_string(&rules).ok().map(|text| (rules, text))
-}
-
 /// Extract every `pixel …` command line from the fenced code blocks of a
 /// rule document, and every backticked `` `pixel …` `` span of a table row.
 /// Trailing `# comments` are stripped from fenced lines and a table cell's
@@ -2640,9 +2238,9 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
         // Alternation outside placeholders: pick the first alternative
         // (`report|rebase-if-clean` → `report`, `--merge|--stash-first` →
         // `--merge`).
-        let token = match token.split('|').next() {
-            Some(first) if first.len() < token.len() => first.to_string(),
-            _ => token,
+        let token = match token.split_once('|') {
+            Some((first, _)) => first.to_string(),
+            None => token,
         };
         // Well-known placeholder spellings.
         let token = match token.as_str() {
@@ -2664,33 +2262,6 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
         return None;
     }
     Some(argv)
-}
-
-/// Compare the installed rule text and the session usage string on the
-/// mandatory scenarios. Returns one message per drift found (empty = agree).
-pub fn scenario_mismatches(rule_text: &str, session_usage: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for scenario in MANDATORY_SCENARIOS {
-        // A rule text deployed before the command rename names the scenario
-        // by its old name (`pixel targets`); that still runs, so it counts.
-        let in_rule = rule_text.contains(&format!("pixel {scenario}"))
-            || pixel_proto::commands::former_name(scenario)
-                .is_some_and(|old| rule_text.contains(&format!("pixel {old}")));
-        let in_usage = session_usage.contains(scenario);
-        match (in_rule, in_usage) {
-            (true, false) => out.push(format!(
-                "'{scenario}' is mandated by the rule text but missing from the session usage string"
-            )),
-            (false, true) => out.push(format!(
-                "'{scenario}' is in the session usage string but the rule text never mentions `pixel {scenario}`"
-            )),
-            (false, false) => out.push(format!(
-                "'{scenario}' is missing from BOTH the rule text and the session usage string"
-            )),
-            (true, true) => {}
-        }
-    }
-    out
 }
 
 /// One NDJSON retrieval round trip against a running daemon socket, checking
@@ -2742,14 +2313,13 @@ mod tests {
 
     use super::env_non_empty;
     use super::{
-        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary,
-        PLACEHOLDER_DUMMY, Remedy, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL,
-        age_secs, capped, catalogue_steps, claude_hooks_owner_check, extract_rule_commands,
-        fix_for, judge_repair, load_pixel_config, names_check, normalize_rule_command, one_line,
-        probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
-        rtk_backup_check, run_repair, scenario_mismatches, selected, shell_path_check, shell_word,
-        spec, split_home_repairs, validate_selection, web_search_provider_check_with,
-        web_search_provider_from,
+        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, PLACEHOLDER_DUMMY, Remedy,
+        Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs, capped, catalogue_steps,
+        claude_hooks_owner_check, extract_rule_commands, fix_for, judge_repair, load_pixel_config,
+        names_check, normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
+        render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair, selected,
+        shell_path_check, shell_word, spec, split_home_repairs, validate_selection,
+        web_search_provider_check_with, web_search_provider_from,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
@@ -2833,21 +2403,41 @@ mod tests {
     }
 
     fn report(checks: Vec<DoctorCheck>, skipped: usize) -> DoctorReport {
-        let count = |status| checks.iter().filter(|c| c.status == status).count();
-        let summary = DoctorSummary {
-            green: count(CheckStatus::Green),
-            yellow: count(CheckStatus::Yellow),
-            red: count(CheckStatus::Red),
-            skipped,
-        };
-        DoctorReport {
-            version: "v1".into(),
-            ok: summary.red == 0,
-            executable_path: "/bin/pixel".into(),
-            home: "/home".into(),
-            checks,
-            summary,
-        }
+        super::doctor_report(Path::new("/bin/pixel"), Path::new("/home"), checks, skipped)
+    }
+
+    #[test]
+    fn doctor_report_counts_each_status_and_fails_only_on_red() {
+        let passing = report(
+            vec![
+                finding("a", CheckStatus::Green, None, None),
+                finding("b", CheckStatus::Green, None, None),
+                finding("c", CheckStatus::Yellow, None, None),
+            ],
+            4,
+        );
+        assert!(passing.ok);
+        assert_eq!(
+            (
+                passing.summary.green,
+                passing.summary.yellow,
+                passing.summary.red,
+                passing.summary.skipped
+            ),
+            (2, 1, 0, 4)
+        );
+        assert_eq!(passing.executable_path, "/bin/pixel");
+        assert_eq!(passing.home, "/home");
+        let failing = report(vec![finding("a", CheckStatus::Red, None, None)], 0);
+        assert!(!failing.ok);
+        assert_eq!(
+            (
+                failing.summary.green,
+                failing.summary.yellow,
+                failing.summary.red
+            ),
+            (0, 0, 1)
+        );
     }
 
     fn ids(list: &[&str]) -> Vec<String> {
@@ -3002,14 +2592,14 @@ mod tests {
         assert_eq!(status, CheckStatus::Green);
         assert_eq!(
             detail.summary,
-            "claude lifecycle hooks configured in /h/.claude/settings.json"
+            "claude task-event hooks configured in /h/.claude/settings.json"
         );
         let (status, detail) =
             claude_hooks_owner_check(settings, release, std::slice::from_ref(&dev));
         assert_eq!(status, CheckStatus::Yellow);
         assert_eq!(
             detail.summary,
-            "claude lifecycle hooks in /h/.claude/settings.json run /h/.local/bin/pixel-dev, not this pixel (/h/.local/share/mise/installs/pixel/0.6.1/bin/pixel); every session uses that binary — run `pixel install` to point them here"
+            "claude task-event hooks in /h/.claude/settings.json run /h/.local/bin/pixel-dev, not this pixel (/h/.local/share/mise/installs/pixel/0.6.1/bin/pixel); every session uses that binary — run `pixel install` to point them here"
         );
         assert_eq!(
             detail.detail.unwrap()["running"],
@@ -4149,72 +3739,6 @@ Prose naming `pixel status` is not a table row.
     // -- scenario consistency ------------------------------------------------
 
     #[test]
-    fn scenario_agreement_is_empty_when_both_sides_name_all_five() {
-        let rule = "use pixel scope-task first, pixel find-code for phrases, \
-                    pixel plan-rollback for history, pixel sync-branch for sync, \
-                    pixel impact before edits";
-        assert!(
-            scenario_mismatches(rule, pixel_proto::op::SESSION_USAGE).is_empty(),
-            "all five scenarios present on both sides must produce zero mismatches"
-        );
-    }
-
-    #[test]
-    fn scenarios_named_by_their_pre_rename_names_still_agree() {
-        // Every install before the rename deployed this vocabulary.
-        let old_rule = "use pixel targets first, pixel resolve for phrases, \
-                        pixel rescue for history, pixel reconcile for sync, \
-                        pixel impact before edits";
-        assert!(
-            scenario_mismatches(old_rule, pixel_proto::op::SESSION_USAGE).is_empty(),
-            "old command names in the rule text must satisfy the scenarios"
-        );
-        let mixed =
-            "pixel scope-task, pixel resolve, pixel plan-rollback, pixel reconcile, pixel impact";
-        assert!(scenario_mismatches(mixed, pixel_proto::op::SESSION_USAGE).is_empty());
-        // A name that was never a scenario does not stand in for one.
-        let wrong = "pixel targets, pixel resolve, pixel rescue, pixel sync, pixel impact";
-        let drift = scenario_mismatches(wrong, pixel_proto::op::SESSION_USAGE);
-        assert_eq!(drift.len(), 1, "{drift:?}");
-        assert!(drift[0].contains("'sync-branch'"), "{drift:?}");
-    }
-
-    #[test]
-    fn scenario_drift_is_flagged_per_missing_side() {
-        let rule_without_impact =
-            "pixel scope-task, pixel find-code, pixel plan-rollback, pixel sync-branch";
-        let usage_without_impact =
-            "scope-task find-code plan-rollback sync-branch — four scenarios only";
-        // Rule lacks impact → usage-only drift message.
-        let drift = scenario_mismatches(rule_without_impact, pixel_proto::op::SESSION_USAGE);
-        assert_eq!(
-            drift.len(),
-            1,
-            "exactly the impact scenario drifts: {drift:?}"
-        );
-        assert!(drift[0].contains("impact"));
-        // Usage lacks impact while the rule mandates it → red-worthy drift.
-        let rule_full =
-            "pixel scope-task pixel find-code pixel plan-rollback pixel sync-branch pixel impact";
-        let drift = scenario_mismatches(rule_full, usage_without_impact);
-        assert_eq!(drift.len(), 1, "{drift:?}");
-        assert!(drift[0].contains("missing from the session usage string"));
-    }
-
-    #[test]
-    fn live_session_usage_and_live_rule_source_agree_when_rule_readable() {
-        // The real parity gate runs inside `pixel doctor` against the
-        // installed text; here we only pin that the SESSION_USAGE constant
-        // itself names every mandatory scenario.
-        for scenario in super::MANDATORY_SCENARIOS {
-            assert!(
-                pixel_proto::op::SESSION_USAGE.contains(scenario),
-                "SESSION_USAGE must name '{scenario}'"
-            );
-        }
-    }
-
-    #[test]
     fn poisoned_db_signature_is_red() {
         // The real-world poisoned DB: 11 commits marked indexed, 323 hunks all
         // stored with empty text.
@@ -4254,5 +3778,179 @@ Prose naming `pixel status` is not a table row.
         assert_eq!(size_mib(268_435_456), "256 MiB");
         assert_eq!(size_mib(3_145_727), "2 MiB");
         assert_eq!(size_mib(0), "0 MiB");
+    }
+
+    #[test]
+    fn pi_impact_doctor_should_judge_the_package_install_wrote() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = crate::pi_global::PiPaths::resolve(home.path(), true);
+        let old_exe = Path::new("/opt/old-pixel/pixel");
+        let current_exe = Path::new("/opt/current-pixel/pixel");
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        let check = |exe: &Path| {
+            let report = super::doctor(&super::DoctorOptions {
+                home: Some(home.path().to_path_buf()),
+                executable_path: Some(exe.to_path_buf()),
+                only: vec!["install.pi-impact".into()],
+                ..Default::default()
+            })
+            .unwrap();
+            report.checks.into_iter().next().unwrap()
+        };
+
+        let missing = check(current_exe);
+        assert_eq!(missing.status, CheckStatus::Red, "{missing:?}");
+        assert_eq!(missing.fix.as_deref(), Some("pixel install"));
+
+        crate::pi_global::install(&paths, old_exe, false, false).unwrap();
+        let stale = check(current_exe);
+        assert_eq!(stale.status, CheckStatus::Red, "{stale:?}");
+        assert!(
+            stale
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("different binary")),
+            "{stale:?}"
+        );
+
+        crate::pi_global::install(&paths, current_exe, false, false).unwrap();
+        let current = check(current_exe);
+        assert_eq!(current.status, CheckStatus::Green, "{current:?}");
+        assert_eq!(current.fix, None);
+
+        // A foreign file under the retired name is the user's: manual, kept.
+        let legacy = paths.agent_dir.join(crate::pi_global::LEGACY_EXTENSION);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "// user-owned extension\n").unwrap();
+        let foreign = check(current_exe);
+        assert_eq!(foreign.status, CheckStatus::Yellow, "{foreign:?}");
+        assert_eq!(foreign.fix, None, "doctor offers no repair it cannot make");
+        assert_eq!(
+            std::fs::read_to_string(&legacy).unwrap(),
+            "// user-owned extension\n"
+        );
+    }
+
+    #[test]
+    fn pi_impact_doctor_should_not_offer_install_for_unparsable_settings_or_a_file_agent_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = crate::pi_global::PiPaths::resolve(home.path(), true);
+        let check = || {
+            let report = super::doctor(&super::DoctorOptions {
+                home: Some(home.path().to_path_buf()),
+                executable_path: Some(PathBuf::from("/opt/pixel/pixel")),
+                only: vec!["install.pi-impact".into()],
+                ..Default::default()
+            })
+            .unwrap();
+            report.checks.into_iter().next().unwrap()
+        };
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        std::fs::write(&paths.settings, "{ not json").unwrap();
+        let unparsable = check();
+        assert_eq!(unparsable.status, CheckStatus::Yellow, "{unparsable:?}");
+        assert_eq!(unparsable.fix, None);
+
+        std::fs::remove_dir_all(&paths.agent_dir).unwrap();
+        std::fs::write(&paths.agent_dir, "user-owned file").unwrap();
+        let occupied = check();
+        assert_eq!(occupied.status, CheckStatus::Yellow, "{occupied:?}");
+        assert_eq!(occupied.fix, None);
+        assert!(occupied.summary.contains("not a directory"), "{occupied:?}");
+    }
+
+    #[test]
+    fn global_claude_doctor_should_reject_provider_qualified_automatic_hooks_only() {
+        let exe = Path::new("/opt/pixel/pixel");
+        let task_hooks = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{"hooks": [{"command": "/opt/pixel/pixel run-hook task-event --provider claude --event pre-tool-use"}]}],
+                "UserPromptSubmit": [{"hooks": [{"command": "/opt/pixel/pixel run-hook task-event --provider claude --event prompt-submit"}]}]
+            }
+        });
+        assert!(!super::has_unexpected_pixel_hooks(
+            &task_hooks,
+            crate::routing::Provider::Claude,
+            exe
+        ));
+
+        for verb in [
+            "session-start --provider claude",
+            "prompt-submit --provider claude",
+            "post-compaction --provider claude",
+            "post-tool-use --provider claude",
+            "metrics --provider claude",
+        ] {
+            let value = serde_json::json!({
+                "hooks": {"SessionStart": [{"hooks": [{"command": format!("/opt/pixel/pixel run-hook {verb}")}]}]}
+            });
+            assert!(
+                super::has_unexpected_pixel_hooks(&value, crate::routing::Provider::Claude, exe),
+                "doctor must reject {verb}"
+            );
+        }
+        let wrong_provider = serde_json::json!({
+            "hooks": {"PreToolUse": [{"hooks": [{"command": "/opt/pixel/pixel run-hook task-event --provider codex --event pre-tool-use"}]}]}
+        });
+        assert!(super::has_unexpected_pixel_hooks(
+            &wrong_provider,
+            crate::routing::Provider::Claude,
+            exe
+        ));
+    }
+
+    #[test]
+    fn repo_codex_doctor_should_accept_partial_task_hooks_preserved_by_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        let exe = Path::new("/opt/pixel/pixel");
+        let hooks_path = repo.join(".codex/hooks.json");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
+        let partial = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{"hooks": [{"type": "command", "command": "/opt/pixel/pixel run-hook task-event --provider codex --event session-start"}]}],
+                "PostToolUseFailure": [{"matcher": "*", "hooks": [{"type": "command", "command": "/opt/pixel/pixel run-hook task-event --provider codex --event tool-failure"}]}]
+            }
+        });
+        std::fs::write(&hooks_path, serde_json::to_vec_pretty(&partial).unwrap()).unwrap();
+
+        let install = crate::install::install(&crate::install::InstallOptions {
+            home: Some(home.clone()),
+            executable_path: Some(exe.to_path_buf()),
+            repo: Some(repo.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(install.ok, "{install:?}");
+        let after_install: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&hooks_path).unwrap()).unwrap();
+        assert_eq!(
+            after_install["hooks"]["SessionStart"], partial["hooks"]["SessionStart"],
+            "repo install deliberately preserves partial project task hooks"
+        );
+        assert_eq!(
+            after_install["hooks"]["PostToolUseFailure"], partial["hooks"]["PostToolUseFailure"],
+            "repo install preserves the unsupported extra Codex event too"
+        );
+
+        let options = super::DoctorOptions {
+            home: Some(home),
+            repo_root: Some(repo),
+            executable_path: Some(exe.to_path_buf()),
+            only: vec!["repo.codex-hooks".into()],
+            ..Default::default()
+        };
+        let report = super::doctor(&options).unwrap();
+        let check = &report.checks[0];
+        assert_eq!(check.status, CheckStatus::Green, "{check:?}");
+        assert_eq!(check.fix, None, "an accepted native state needs no repair");
+        assert!(check.summary.contains("partial Pixel task hooks preserved"));
+        assert_eq!(check.detail.as_ref().unwrap()["task_hooks"], false);
+        assert_eq!(
+            check.detail.as_ref().unwrap()["pixel_task_hooks_present"],
+            true
+        );
     }
 }

@@ -36,8 +36,9 @@ model providers, and the website under `website/`.
 | Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `actions.jsonl`, `config.yaml`, `tasks/`, `env-snapshots/` | what the agent reads as ground truth; `actions.jsonl` and `env-snapshots/` can hold secrets |
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
-| Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, `~/.pi/agent/APPEND_SYSTEM.md`, the optional classify helpers (`skills/pixel-classify/` under the agent config dirs, `~/.pi/agent/extensions/pixel-classify-files.ts`), OpenCode, Antigravity, zcode and Devin configs; per repository with `--repo`, `.claude/settings.local.json`, `.codex/`, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`, the managed block in `AGENTS.md` | a hook command runs with the user's privileges on every agent tool call |
+| Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
 | User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project), `.env` values edited by `pixel edit-env` | credential theft, billing abuse |
+| Benchmark credentials | OAuth storage or an explicitly selected Claude gateway settings file read by `eval/claude_skill_pair.py` | credentials must reach only the selected model connection and stay out of benchmark receipts |
 | Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
 | CI | `.github/workflows/*.yml`, the `PROJECTS_TOKEN` secret, the self-hosted runner named by the `PIXEL_RUNNER_LABELS` repository variable | a foothold in CI is a step towards the release chain |
 
@@ -100,16 +101,20 @@ rebuilds and `shutdown`. The CLI starts a daemon on demand
 (ARCHITECTURE.md, hook table). The payload's `cwd`, `tool_input` and session
 fields are agent-controlled. Entry points:
 
-- `guard` rewrites native search and read commands into Pixel commands.
+- `guard` can rewrite native search and read commands into Pixel commands
+  for supported providers. Codex and Claude preserve native retrieval commands
+  even under the shared enforce policy. Their standard installation registers
+  no automatic retrieval prompt or metrics callback.
   `search_compat::shell_argv` accepts a small grammar only (it refuses `$`,
   backticks, `\`, newlines, and unquoted operators, globs and `~`), every
   rewritten word is re-quoted with `search_compat::shell_quote`, and an
   unsupported command stays native. For Devin and zcode `PermissionRequest`
   events, `guard::retrieval_permission_response` approves a closed set of
   read-only Pixel commands without asking the user.
-- `composed-guard` replays a sealed copy of a repository's pre-existing Codex
+- The legacy/manual `composed-guard` replays a sealed copy of a repository's pre-existing Codex
   `PreToolUse` hooks (`.codex/pixel-composed-guard-backup.json`) through
-  `/bin/sh -c` (`guard::run_foreign_command`, 2 s `COMPOSED_TIMEOUT`).
+  `/bin/sh -c` (`guard::run_foreign_command`, 2 s `COMPOSED_TIMEOUT`). Standard
+  installation restores the original registrations and removes this wrapper.
 - `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use` and
   `metrics` add text to the model's context.
 - `task-event` gates edits and completion for a task contract.
@@ -219,6 +224,24 @@ normal tests and lint still validate the PR head before merge. Local checks,
 including pre-push validation and reinstalling, are optional diagnostics.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.
+
+### 3.11 Isolated Claude benchmark (B2, B6)
+
+`eval/claude_skill_pair.py` accepts either existing OAuth credentials or an
+explicitly selected gateway settings file. Gateway mode forwards only its
+allowlisted connection and model environment fields to both isolated arms;
+it does not load the file as agent settings or forward an API key. OAuth
+credentials use private temporary files. Receipts omit credential values and
+hashes. Before Claude output is parsed or saved, exact OAuth access and refresh
+token values (including their JSON-escaped forms) and known private gateway
+connection values are redacted from stdout and stderr. This is exact-value
+redaction, not general secret detection: transformed or otherwise unknown
+secret forms may remain. It prevents accidental recording of the known values,
+not access by the user's other processes or deliberate reads by an agent running
+as that user; the temporary config and output files are not an OS security
+sandbox.
+The selected endpoint receives the benchmark's source context. CLI-reported
+model names do not attest the gateway's underlying implementation.
 
 ## 4. Threats
 
@@ -410,11 +433,19 @@ boundary it crosses.
 - **Scenario**: a repository plants instructions in code, comments, commit
   messages, symbol names or file names; Pixel quotes them to the agent, which
   follows them.
-- **Mitigation**: the agent prompt states that Pixel output is data, not
-  instructions (`crates/pixel-install/assets/pixel-agent-prompt.md`,
-  `pixel-subagent-prompt.md`); hook packets carry repository strings as JSON
-  values (`[PIXEL:TASK_CONTEXT]` in `prompt_submit.rs`, the dependants list
-  of `post-tool-use`) and label them; output is capped.
+- **Mitigation**: no install delivers Pixel output to an agent unasked: no
+  prompt is deployed and the guard hooks answer nothing outside
+  `pixel config policy enforce`. The bundled prompt a user copies by hand
+  states that Pixel output is data, not instructions
+  (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
+  skill and Pi command label graph output as repository data, not
+  instructions. `impact --no-refresh` uses a read-only graph snapshot,
+  verifies extractor and source signatures (re-hashing only files whose mtime
+  is not older than the last full build), and bounds the query to 1500 ms and
+  the serialized result to 32 KiB. Its graph completeness claim remains open.
+  Other providers' hook packets still carry repository strings as JSON values
+  (`[PIXEL:TASK_CONTEXT]` in `prompt_submit.rs`, the dependants list of
+  `post-tool-use`) and label them; output is capped.
 - **Status**: Accepted: a retrieval tool has to return repository text.
 - **Residual**: the defence is the model's; Pixel cannot sanitise meaning.
   Anything that follows from a successful injection is bounded by the
@@ -422,16 +453,23 @@ boundary it crosses.
 
 ### T13. Foreign Codex hooks composed into the guard (E, B5)
 
-- **Scenario**: `pixel install --repo` replaces a repository's Codex
+- **Scenario**: a legacy installation replaced a repository's Codex
   `PreToolUse` hooks with its own `composed-guard`, which replays them.
-- **Mitigation**: the step is skipped when the repository tracks
-  `.codex/hooks.json` (`repo_git::is_tracked`); `guard::load_composed_backup`
+- **Mitigation**: current installation restores the original registrations
+  only when the private backup and managed hook still match their owned
+  contract, preserving changed configurations for manual resolution. It skips
+  tracked `.codex/hooks.json` (`repo_git::is_tracked`) and project paths that
+  alias the global hook file. Duplicate project task hooks are removed only
+  when the enabled global suite covers their events and each current definition
+  has matching Codex approval; missing or stale approval preserves them. Pixel
+  reads approval state but does not grant trust during installation. For explicitly retained
+  legacy wrappers, `guard::load_composed_backup`
   refuses a symlink, a file over 1 MiB, a mode wider than 0600, an unknown
   version or provider, and any command that calls Pixel's own hooks
   (`invokes_pixel_hook`). Tests: `composed_*` in `guard.rs` and
   `crates/pixel/tests/cli/guard_deny.rs`.
 - **Status**: Partial.
-- **Residual**: Codex's own review of project hooks hashes the command line
+- **Residual**: for a retained legacy wrapper, Codex's review hashes the command line
   of Pixel's composed guard, not the commands in the backup it replays, so
   approving the guard approves what it composes.
 
@@ -461,7 +499,9 @@ boundary it crosses.
   created 0700 (`durable::ensure_dir`).
 - **Status**: Partial.
 - **Residual**: the recall corpus and the error sink store transcripts and
-  argv unredacted; `edit-env` snapshots are plain copies of the `.env`;
+  argv unredacted (the sink keeps the whole output of every failed `sniper
+  run`, structured RSpec/RuboCop/Minitest runs included, for 7 days and
+  at most 200 outputs); `edit-env` snapshots are plain copies of the `.env`;
   `logged_args` masks only `config remote-key` values and `auth_url`, so a
   secret passed as `--var` to `pixel flow` or `--value` to `pixel edit-env`
   reaches `actions.jsonl` in clear (a 0600 file).

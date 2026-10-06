@@ -1,7 +1,7 @@
 {
   "name": "pixel",
   "version": "0.7.0",
-  "description": "Deterministic code retrieval layer: indexed search, concept resolve, impact analysis, task targets, plan generation, and git archaeology via the pixel CLI.",
+  "description": "Explicit Pixel skill for assessing callers and change impact of a known symbol.",
   "author": {
     "name": "Livio Gama",
     "url": "https://github.com/LivioGama"
@@ -10,6 +10,5 @@
   "repository": "https://github.com/Pixel-CLI/pixel",
   "license": "MIT",
   "keywords": ["code-graph", "impact-analysis", "retrieval", "tree-sitter", "productivity"],
-  "skills": "./skills/",
-  "hooks": "./hooks/plugin-hooks.json"
+  "skills": "./claude-skills/"
 }

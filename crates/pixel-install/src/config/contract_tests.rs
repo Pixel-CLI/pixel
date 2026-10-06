@@ -212,6 +212,15 @@ fn strip_stale_blocks_should_keep_lines_that_are_not_markdown_headers() {
     assert_eq!(out, text);
 }
 
+/// The header closing a stale section may open the next one: both go.
+#[test]
+fn strip_stale_blocks_should_remove_back_to_back_stale_sections() {
+    let (out, removed) =
+        strip_stale_blocks("intro\n## gitnexus\na\n## codebase-memory\nb\n## Kept\nc\n");
+    assert_eq!(removed, 2);
+    assert_eq!(out, "intro\n## Kept\nc\n");
+}
+
 /// A bare `#` line is a header (depth 1) and closes a stale section.
 #[test]
 fn strip_stale_blocks_should_treat_a_bare_hash_line_as_a_closing_header() {

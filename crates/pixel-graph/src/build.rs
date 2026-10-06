@@ -17,8 +17,10 @@ use pixel_index::indexset::millis;
 use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::extract::{FileExtraction, extract_file, lang_of};
-use crate::imports::resolve_import;
+use crate::extract::{
+    FileExtraction, RawMixin, extract_file, is_binstub_candidate, lang_of, lang_of_file,
+};
+use crate::imports::{resolve_import_in, ruby as ruby_projects};
 use crate::resolve::{
     Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference,
     reconsider_resolved_calls, resolve_affected, resolve_calls, resolve_references,
@@ -62,6 +64,19 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 /// `meta` key under which the build-time freshness signature is stored.
 pub const FRESHNESS_KEY: &str = "freshness";
+
+/// `meta` key holding the wall-clock time, in nanoseconds since the Unix
+/// epoch, at which the last full build started reading the tree. Every row
+/// that build wrote holds bytes read after that instant, so a file whose
+/// mtime is older still has them unless its mtime was restored by hand; see
+/// [`freshness_signature_trusting_stat`]. Incremental updates leave it as
+/// it is: an older start only makes that reader re-hash more files.
+pub const BUILD_STARTED_KEY: &str = "build_started_ns";
+
+/// How far before [`BUILD_STARTED_KEY`] a file's mtime must be for
+/// [`freshness_signature_trusting_stat`] to reuse its stored hash: a margin
+/// for a filesystem clock behind the system one.
+const BUILD_STARTED_MARGIN: Duration = Duration::from_secs(2);
 
 /// The value an incremental update stores under [`FRESHNESS_KEY`] when it
 /// committed rows it could not sign. It is not a hexadecimal string, so it
@@ -129,7 +144,27 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    preserving that owner during incremental resolution.
 /// 19: Ruby constant receivers resolve against lexical owners, including
 ///    constructors and probable Rails dispatch; factory receivers are normalized.
-pub const EXTRACTOR_VERSION: &str = "19";
+/// 20: `generic_import` takes the first string or identifier child only (the
+///    field lookup is gone) and every walker shares the `too_deep` depth
+///    guard; rebuild so no graph keeps rows from the older extractor.
+/// 21: Ruby `attr_*`, `alias_method`/`alias`, `delegate` and `scope` declare
+///    methods of their owner (and are no longer calls of it), an alias or
+///    delegator references its own owner's target, and an assignment through
+///    a receiver calls the writer (`self.name = v` → `name=`).
+/// 22: Ruby superclass/`include`/`prepend`/`extend` declarations are stored
+///    (`ruby_mixins`), a concern's `class_methods` block defines its
+///    `ClassMethods` module, and calls on `self` follow Ruby's ancestor
+///    lookup order; an instance call no longer reaches a class method. A
+///    `delegate` option written as Ruby 3.1 shorthand (`allow_nil:`) no
+///    longer stops the declaration from generating its methods.
+/// 23: `Gemfile`, `Rakefile`, `Guardfile`, `Capfile` and Ruby-shebang
+///    binstubs under `bin/`/`exe/` are Ruby files, and Ruby `require` /
+///    `require_relative` resolve to files inside their project's load roots
+///    (`imports.path` keeps `require_relative` as `./spec`).
+/// 24: Rails routes files yield `route` concepts with their handler and a
+///    `references` edge to the controller action (`:route` arg_of); Active
+///    Record associations reference their model class (`:association`).
+pub const EXTRACTOR_VERSION: &str = "24";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -313,7 +348,7 @@ pub enum Indexability {
 /// the file appeared, or dropped at the file cap), which is the caller's
 /// distinction to make.
 pub fn indexability(root: &Path, rel: &str) -> Indexability {
-    if lang_of(rel).is_none() {
+    if !is_graph_candidate(rel) {
         return Indexability::UnsupportedLanguage;
     }
     let path = root.join(rel);
@@ -335,10 +370,32 @@ pub fn indexability(root: &Path, rel: &str) -> Indexability {
     if is_binary(&content) {
         return Indexability::Binary;
     }
+    if lang_of_file(rel, &content).is_none() {
+        return Indexability::UnsupportedLanguage;
+    }
     if crate::extract::is_generated_blob(&content) {
         return Indexability::Generated;
     }
     Indexability::Indexable
+}
+
+/// True iff the graph walks read `rel`: a file of a supported language, a
+/// binstub whose shebang [`lang_of_file`] reads, or a `Gemfile.lock`. The
+/// build, the freshness walks and [`indexability`] all filter through it, so
+/// they see one file set; a binstub that is not Ruby is walked and hashed,
+/// then extraction drops it, as it drops a generated blob. A lockfile is
+/// never extracted either, but it decides which `require`s name an external
+/// gem, so it is hashed into the freshness signature: a lockfile edited
+/// while no watcher ran makes the graph stale, and the delta that applies it
+/// re-resolves every Ruby import.
+fn is_graph_candidate(rel: &str) -> bool {
+    lang_of(rel).is_some() || is_binstub_candidate(rel) || is_lockfile(rel)
+}
+
+/// `Gemfile.lock`, at the root or in any directory: the companion
+/// `ruby_projects::Projects` reads beside a Gemfile.
+fn is_lockfile(rel: &str) -> bool {
+    rel == "Gemfile.lock" || rel.ends_with("/Gemfile.lock")
 }
 
 /// Walk `root` collecting supported source files (skips .git, .pixel,
@@ -369,7 +426,7 @@ fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
         let Some(rel) = rel_path(root, entry.path()) else {
             continue;
         };
-        if lang_of(&rel).is_none() {
+        if !is_graph_candidate(&rel) {
             continue;
         }
         let Some(content) = read_source_file(entry.path()) else {
@@ -430,23 +487,38 @@ fn build_graph_with(
     let t0 = Instant::now();
     let mut phases = BuildPhases::default();
 
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
     let inputs = collect_files(root);
     let snapshot_signature = input_signature(&inputs);
     phases.collect_ms = millis(t0.elapsed());
     let clock = Instant::now();
-    let extracted: Vec<Extracted> = inputs
+    // A walked file extraction drops is hashed into the signature all the
+    // same, so its hash is kept beside the rows (`walked_files`).
+    let outcomes: Vec<Result<Extracted, (String, String)>> = inputs
         .into_par_iter()
-        .filter_map(|(rel, content)| {
-            let fx = extract_file(&rel, &content)?;
+        .map(|(rel, content)| {
             let blob_oid = content_oid(&content);
-            Some(Extracted {
-                rel,
-                blob_oid,
-                content,
-                fx,
-            })
+            match extract_file(&rel, &content) {
+                Some(fx) => Ok(Extracted {
+                    rel,
+                    blob_oid,
+                    content,
+                    fx,
+                }),
+                None => Err((rel, blob_oid)),
+            }
         })
         .collect();
+    let mut extracted: Vec<Extracted> = Vec::with_capacity(outcomes.len());
+    let mut dropped: Vec<(String, String)> = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Ok(file) => extracted.push(file),
+            Err(walked) => dropped.push(walked),
+        }
+    }
     phases.extract_ms = millis(clock.elapsed());
     let clock = Instant::now();
 
@@ -469,8 +541,13 @@ fn build_graph_with(
     for path in &stale {
         store.remove_file(path)?;
     }
+    store.clear_walked_files()?;
+    for (rel, blob_oid) in &dropped {
+        store.record_walked_file(rel, blob_oid)?;
+    }
 
-    let stored = store_batch(&mut store, extracted, &all_paths)?;
+    let projects = ruby_projects::Projects::load(root, &all_paths);
+    let stored = store_batch(&mut store, extracted, &all_paths, &projects)?;
     phases.store_ms = millis(stored.stored_at.duration_since(clock));
     phases.concepts_ms = millis(stored.concepts);
     phases.imports_ms = millis(stored.imports);
@@ -499,6 +576,7 @@ fn build_graph_with(
     // graph unsigned, and an unsigned graph is refused rather than read, so
     // no evaluation can see a cap that belongs to a half-written build.
     store.meta_set(GRAPH_FILE_CAP_KEY, &graph_file_cap_value(graph_file_cap()))?;
+    store.meta_set(BUILD_STARTED_KEY, &started.to_string())?;
     store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
     store.commit_write()?;
 
@@ -543,6 +621,7 @@ fn store_batch(
     store: &mut GraphStore,
     mut files: Vec<Extracted>,
     all_paths: &[String],
+    projects: &ruby_projects::Projects,
 ) -> Result<StoredBatch, BoxErr> {
     let mut concepts = Duration::ZERO;
     let mut stored_ids: Vec<(i64, Vec<i64>)> = Vec::with_capacity(files.len());
@@ -593,6 +672,9 @@ fn store_batch(
         let concept_clock = Instant::now();
         insert_concepts(store, file_id, &e.rel, &e.content, &ids, &lines)?;
         concepts += concept_clock.elapsed();
+        for mixin in &e.fx.mixins {
+            store.insert_ruby_mixin(file_id, mixin)?;
+        }
         // Plan pass: persist JSX elements for dead-interactive queries.
         for jsx in &e.fx.jsx_elements {
             store.insert_jsx_element(
@@ -617,7 +699,7 @@ fn store_batch(
     for (e, (file_id, symbol_ids)) in files.iter().zip(&stored_ids) {
         let file_id = *file_id;
         for imp in &e.fx.imports {
-            let resolved = resolve_import(&imp.path, &e.rel, all_paths)
+            let resolved = resolve_import_in(&imp.path, &e.rel, all_paths, projects)
                 .and_then(|p| path_to_id.get(&p).copied());
             store.insert_import_at(
                 file_id,
@@ -678,11 +760,16 @@ fn store_batch(
 /// result is sorted by path afterwards, so it is byte-identical to a serial
 /// pass: the signature built over it never depends on thread scheduling.
 fn tree_hashes(root: &Path) -> Vec<(String, u64)> {
+    hash_candidates(source_candidates(root))
+}
+
+/// The supported source files under `root` as `(rel path, path)`, in walk
+/// order: the input set of every tree signature.
+fn source_candidates(root: &Path) -> Vec<(String, std::path::PathBuf)> {
     // Must mirror `collect_files`'s walk policy exactly — both go through
     // `pixel_index::index::policy_walk` — or the freshness signature would
     // disagree with the set of files the graph was actually built from.
-    let walker = pixel_index::index::policy_walk(root);
-    let candidates: Vec<(String, std::path::PathBuf)> = walker
+    pixel_index::index::policy_walk(root)
         .flatten()
         .filter_map(|entry| {
             let is_file = entry.file_type().is_some_and(|t| t.is_file());
@@ -690,11 +777,10 @@ fn tree_hashes(root: &Path) -> Vec<(String, u64)> {
                 return None;
             }
             let rel = rel_path(root, entry.path())?;
-            lang_of(&rel)?;
+            is_graph_candidate(&rel).then_some(())?;
             Some((rel, entry.into_path()))
         })
-        .collect();
-    hash_candidates(candidates)
+        .collect()
 }
 
 /// Read and hash `candidates` in parallel, dropping the ones
@@ -751,19 +837,7 @@ type HashedFile = (String, u64, (i64, i64, u64), bool);
 /// exists to exploit. Entries for vanished/binary/oversized files are
 /// dropped, so the memo can never resurrect a file the walk would exclude.
 fn tree_hashes_cached(root: &Path, cache: &mut TreeHashCache) -> Vec<(String, u64)> {
-    let walker = pixel_index::index::policy_walk(root);
-    let candidates: Vec<(String, std::path::PathBuf)> = walker
-        .flatten()
-        .filter_map(|entry| {
-            let is_file = entry.file_type().is_some_and(|t| t.is_file());
-            if !is_file {
-                return None;
-            }
-            let rel = rel_path(root, entry.path())?;
-            lang_of(&rel)?;
-            Some((rel, entry.into_path()))
-        })
-        .collect();
+    let candidates = source_candidates(root);
     let previous = std::mem::take(&mut cache.seen);
     let previous = &previous;
     let hashed: Vec<HashedFile> = candidates
@@ -821,6 +895,59 @@ fn signature_of(entries: &[(String, u64)]) -> String {
 /// indexed).
 pub fn freshness_signature(root: &Path) -> String {
     signature_of(&tree_hashes(root))
+}
+
+/// [`freshness_signature`] for a one-shot reader of `store` that cannot keep
+/// a [`TreeHashCache`]: a file whose mtime predates the last full build's
+/// start ([`BUILD_STARTED_KEY`], less a clock margin) and that the store
+/// holds reuses its stored `blob_oid` instead of being read and hashed.
+/// Every other file is hashed, and a store without the key (built before
+/// it existed) gets the full content signature.
+///
+/// The trade is the one [`TreeHashCache`] documents, made across processes:
+/// an edit that also restores an mtime older than the build is invisible.
+/// It suits a read whose answers are checked against source anyway, never
+/// a decision to skip a rebuild.
+///
+/// # Errors
+///
+/// The store's metadata or file rows cannot be read.
+pub fn freshness_signature_trusting_stat(
+    root: &Path,
+    store: &GraphStore,
+) -> Result<String, BoxErr> {
+    let Some(started) = store
+        .meta_get(BUILD_STARTED_KEY)?
+        .and_then(|value| value.parse::<u128>().ok())
+    else {
+        return Ok(freshness_signature(root));
+    };
+    let trusted_before = started.saturating_sub(BUILD_STARTED_MARGIN.as_nanos());
+    let stored: HashMap<String, u64> = store
+        .files()?
+        .into_iter()
+        .filter_map(|row| Some((row.path, u64::from_str_radix(&row.blob_oid, 16).ok()?)))
+        .collect();
+    let candidates = source_candidates(root);
+    let mut entries: Vec<(String, u64)> = candidates
+        .into_par_iter()
+        .filter_map(|(rel, path)| {
+            let meta = std::fs::metadata(&path).ok()?;
+            let mtime = i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec());
+            if let Some(&hash) = stored.get(rel.as_str())
+                && u128::try_from(mtime).is_ok_and(|mtime| mtime < trusted_before)
+            {
+                return Some((rel, hash));
+            }
+            let content = read_source_file(&path)?;
+            if is_binary(&content) {
+                return None;
+            }
+            Some((rel, xxh3_64(&content)))
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(signature_of(&entries))
 }
 
 /// What separates the working tree from the graph at `db_path`.
@@ -881,17 +1008,14 @@ fn tree_delta_with(
     }
     let current = hashes(root);
     let signature = signature_of(&current);
-    let known: HashMap<String, String> = store
-        .files()?
-        .into_iter()
-        .map(|f| (f.path, f.blob_oid))
-        .collect();
+    let indexed_files = store.files()?.len();
+    let known = known_hashes(&store)?;
     if stored == signature {
         return Ok(Some(TreeDelta {
             fresh: true,
             changed: Vec::new(),
             removed: Vec::new(),
-            indexed_files: known.len(),
+            indexed_files,
             signature,
         }));
     }
@@ -911,7 +1035,7 @@ fn tree_delta_with(
         fresh: false,
         changed,
         removed,
-        indexed_files: known.len(),
+        indexed_files,
         signature,
     }))
 }
@@ -941,11 +1065,17 @@ pub fn apply_tree_delta(root: &Path, db_path: &Path, delta: &TreeDelta) -> Resul
         db_path,
         &files,
         |store, _batch| {
+            let walked: HashMap<String, String> = store.walked_files()?.into_iter().collect();
             for (rel, hash) in &delta.changed {
-                let stored = store.file_by_path(rel)?.map(|f| f.blob_oid);
-                // A changed file that extraction dropped (unparseable, vanished)
-                // has no row; that is its stable state, not a race.
-                if stored.is_some_and(|oid| oid != format!("{hash:016x}")) {
+                // A changed file the store keeps no row for still has its walked
+                // hash; one with neither vanished after the delta was taken, so
+                // the delta's signature no longer describes the tree.
+                let expected = format!("{hash:016x}");
+                let stored = store
+                    .file_by_path(rel)?
+                    .map(|f| f.blob_oid)
+                    .or_else(|| walked.get(rel).cloned());
+                if stored.as_deref() != Some(expected.as_str()) {
                     drifted = Some(rel.clone());
                     return Ok(None);
                 }
@@ -1029,15 +1159,24 @@ fn update_files_probed(
         files,
         |store, batch| {
             let walk = tree_hashes(root);
-            let known: HashMap<String, String> = store
-                .files()?
-                .into_iter()
-                .map(|f| (f.path, f.blob_oid))
-                .collect();
+            let known = known_hashes(store)?;
             Ok(rows_match_tree(&known, &walk, batch).then(|| signature_of(&walk)))
         },
         probe,
     )
+}
+
+/// Path to stored content hash of every file the graph walks account for:
+/// the source rows and the walked files extraction keeps no row for
+/// (`walked_files`). The freshness checks compare a walk against it.
+fn known_hashes(store: &GraphStore) -> Result<HashMap<String, String>, BoxErr> {
+    let mut known: HashMap<String, String> = store
+        .files()?
+        .into_iter()
+        .map(|f| (f.path, f.blob_oid))
+        .collect();
+    known.extend(store.walked_files()?);
+    Ok(known)
 }
 
 /// True iff the rows (`known`: path to stored content hash) describe exactly
@@ -1154,6 +1293,8 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
     let mut affected = Affected::default();
     let mut before: Vec<Definition> = Vec::new();
     let mut after: Vec<Definition> = Vec::new();
+    let mut mixins_before: Vec<(String, usize, RawMixin)> = Vec::new();
+    let mut mixins_after: Vec<(String, usize, RawMixin)> = Vec::new();
     let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
 
     let mut extracted: Vec<Extracted> = Vec::with_capacity(files.len());
@@ -1167,6 +1308,13 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         if let Some(old) = store.file_by_path(rel)? {
             let old_syms = store.symbols_in_file(old.id)?;
             before.extend(stored_definitions(store, old.id, rel)?);
+            mixins_before.extend(
+                store
+                    .ruby_mixins_in_file(old.id)?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mixin)| (rel.to_string(), i, mixin)),
+            );
             affected.files.insert(old.id);
             for import in store.imports_to_file(old.id)? {
                 affected.files.insert(import.file_id);
@@ -1226,9 +1374,20 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
 
         let Some(fx) = extract_file(rel, &content) else {
             store.remove_file(rel)?;
+            // The walks hash it as they hash the build's inputs (binaries
+            // excluded), so its hash is what the freshness checks compare.
+            if is_graph_candidate(rel) && !is_binary(&content) {
+                store.record_walked_file(rel, &content_oid(&content))?;
+            }
             continue;
         };
 
+        mixins_after.extend(
+            fx.mixins
+                .iter()
+                .enumerate()
+                .map(|(i, mixin)| (rel.to_string(), i, mixin.clone())),
+        );
         after.extend(fx.symbols.iter().map(|s| Definition {
             path: rel.to_string(),
             name: s.name.clone(),
@@ -1256,8 +1415,10 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             .map(|e| e.rel.clone()),
     );
     let added_any = extracted.iter().any(|e| !known_before.contains(&e.rel));
-    let stored = store_batch(store, extracted, &all_paths)?;
+    let projects = ruby_projects::Projects::load(root, &all_paths);
+    let stored = store_batch(store, extracted, &all_paths, &projects)?;
     affected.record_changed_definitions(&before, &after);
+    affected.record_changed_mixins(store, &mixins_before, &mixins_after)?;
     // A file new to the graph gets its id here; its importers are any file
     // whose import already resolved to it, and the dangling ones below.
     for &(rel, _) in files {
@@ -1286,7 +1447,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             rows.collect::<std::result::Result<_, _>>()?
         };
         for (import_id, importer_id, import_path, importer) in dangling {
-            if let Some(target) = resolve_import(&import_path, &importer, &all_paths)
+            if let Some(target) = resolve_import_in(&import_path, &importer, &all_paths, &projects)
                 .and_then(|p| path_to_id.get(&p).copied())
             {
                 affected.files.insert(importer_id);
@@ -1296,6 +1457,16 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
                 )?;
             }
         }
+    }
+
+    // A Ruby require resolves against the project's manifests and load
+    // roots, which any Ruby file or manifest of the batch can move: a path
+    // gem declared, a second file on another load root, a gem added to the
+    // Gemfile. Re-resolve every Ruby import, resolved or not.
+    if files.iter().any(|(rel, _)| {
+        ruby_projects::is_manifest(rel) || lang_of(rel) == Some("ruby") || is_binstub_candidate(rel)
+    }) {
+        re_resolve_ruby_imports(store, &all_paths, &projects, &mut affected)?;
     }
 
     if !stored.calls.is_empty() {
@@ -1319,6 +1490,42 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         "DELETE FROM process_steps; DELETE FROM processes;
          DELETE FROM cluster_members; DELETE FROM clusters;",
     )?;
+    Ok(())
+}
+
+/// Resolve every stored import of a Ruby file again against `projects`,
+/// updating the rows whose target moved and recording their importers in
+/// `affected`.
+fn re_resolve_ruby_imports(
+    store: &GraphStore,
+    all_paths: &[String],
+    projects: &ruby_projects::Projects,
+    affected: &mut Affected,
+) -> Result<(), BoxErr> {
+    let path_to_id: HashMap<String, i64> =
+        store.files()?.into_iter().map(|f| (f.path, f.id)).collect();
+    let rows: Vec<(i64, i64, String, String, Option<i64>)> = {
+        let mut stmt = store.conn().prepare(
+            "SELECT i.id, i.file_id, i.path, f.path, i.resolved_file_id FROM imports i
+               JOIN files f ON f.id = i.file_id
+              WHERE f.lang = 'ruby'",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    for (import_id, importer_id, import_path, importer, before) in rows {
+        let after = resolve_import_in(&import_path, &importer, all_paths, projects)
+            .and_then(|p| path_to_id.get(&p).copied());
+        if after != before {
+            affected.files.insert(importer_id);
+            store.conn().exec_cached(
+                "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
+                rusqlite::params![import_id, after],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -2347,6 +2554,75 @@ mod tests {
     /// even when mtime is restored. The old stat-only signature (path+size+mtime)
     /// could be fooled by `touch -t` or `cp` + `touch -r`. The content-hash
     /// signature catches this.
+    #[test]
+    fn stat_trusting_signature_should_reuse_stored_hashes_only_for_files_older_than_the_build() {
+        let root = tmpdir("fresh-stat");
+        let body_a = "export function alpha() { return 1 }\n";
+        let body_b = "export function alpha() { return 2 }\n";
+        std::fs::write(root.join("a.ts"), body_a).unwrap();
+        std::fs::write(root.join("b.ts"), "export function beta() {}\n").unwrap();
+        let db = root.join(".pixel").join("graph.db");
+        build_graph(&root, &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let stored = store.meta_get(FRESHNESS_KEY).unwrap().unwrap();
+        assert!(store.meta_get(BUILD_STARTED_KEY).unwrap().is_some());
+
+        // Nothing moved: the signature matches without reading a.ts again.
+        assert_eq!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            stored
+        );
+
+        // An edit after the build has a newer mtime and is hashed.
+        std::fs::write(root.join("a.ts"), body_b).unwrap();
+        assert_ne!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            stored
+        );
+
+        // An mtime restored to before the build reuses the stored hash: the
+        // documented trade, which the full content signature does not make.
+        let old = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("a.ts"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            stored
+        );
+        assert_ne!(freshness_signature(&root), stored);
+
+        // A file the store does not hold is always hashed, whatever its mtime.
+        std::fs::write(root.join("c.ts"), "export function gamma() {}\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("c.ts"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_ne!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            stored
+        );
+        std::fs::remove_file(root.join("c.ts")).unwrap();
+
+        // Without a usable start time every file is hashed.
+        store.meta_set(BUILD_STARTED_KEY, "unknown").unwrap();
+        assert_eq!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            freshness_signature(&root)
+        );
+        assert_ne!(
+            freshness_signature_trusting_stat(&root, &store).unwrap(),
+            stored
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn freshness_detects_equal_size_content_change() {
         let root = tmpdir("fresh-content");
@@ -3558,6 +3834,36 @@ mod tests {
             "class Svc\n  def target\n    1\n  end\n  def bare\n    target\n  end\n  \
              def chained\n    @ids ||= target.to_set\n  end\nend\n",
         ),
+        (
+            "app/account.rb",
+            "class Account\n  attr_accessor :name\n  alias_method :label, :name\n  \
+             delegate :email, to: :owner, prefix: true\n  def owner; end\n  \
+             def rename\n    self.name = label\n  end\nend\n",
+        ),
+        (
+            "app/concerns/tracked.rb",
+            "module Tracked\n  extend ActiveSupport::Concern\n  included do\n    include Audited\n  \
+             end\n  class_methods do\n    def since; end\n  end\n  def track; end\nend\n",
+        ),
+        (
+            "app/concerns/audited.rb",
+            "module Audited\n  def audit; end\nend\n",
+        ),
+        (
+            "app/order.rb",
+            "class Order < Base\n  include Tracked\n  def run\n    track\n    audit\n  end\n  \
+             def self.report\n    since\n  end\nend\n",
+        ),
+        ("app/base.rb", "class Base\n  def audit; end\nend\n"),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :orders, only: [:create]\nend\n",
+        ),
+        (
+            "app/controllers/orders_controller.rb",
+            "class OrdersController\n  def create; end\nend\n",
+        ),
+        ("app/line.rb", "class Line\n  belongs_to :order\nend\n"),
     ];
 
     fn write_tree(root: &Path, files: &[(&str, &str)]) {
@@ -3593,6 +3899,11 @@ mod tests {
                 "edges",
                 "SELECT a.uid, b.uid, e.kind, e.tier, e.site_line, e.receiver, e.callee FROM edges e \
                  LEFT JOIN symbols a ON a.id = e.src_id LEFT JOIN symbols b ON b.id = e.dst_id",
+            ),
+            (
+                "ruby_mixins",
+                "SELECT f.path, m.owner, m.kind, m.target, m.site_line FROM ruby_mixins m \
+                 LEFT JOIN files f ON f.id = m.file_id",
             ),
             (
                 "unresolved_calls",
@@ -3678,6 +3989,43 @@ mod tests {
             )),
             "`schema.plugin(helper)` must give a references edge in the reference ({edges:#?})"
         );
+        for (src, dst) in [
+            (
+                "app/order.rb#Order#run",
+                "app/concerns/tracked.rb#Tracked#track",
+            ),
+            (
+                "app/order.rb#Order#run",
+                "app/concerns/audited.rb#Audited#audit",
+            ),
+            (
+                "app/order.rb#Order.report",
+                "app/concerns/tracked.rb#Tracked::ClassMethods#since",
+            ),
+        ] {
+            let prefix = format!(
+                "Text(\"{src}#method\") | Text(\"{dst}#method\") | Text(\"calls\") | Text(\"probable\")"
+            );
+            assert!(
+                edges.iter().any(|e| e.starts_with(&prefix)),
+                "the Ruby ancestor chain must give {src} -> {dst} ({edges:#?})"
+            );
+        }
+        for (src, dst) in [
+            (
+                "config/routes.rb#config/routes.rb#script",
+                "app/controllers/orders_controller.rb#OrdersController#create#method",
+            ),
+            ("app/line.rb#Line#class", "app/order.rb#Order#class"),
+        ] {
+            let prefix = format!(
+                "Text(\"{src}\") | Text(\"{dst}\") | Text(\"references\") | Text(\"probable\")"
+            );
+            assert!(
+                edges.iter().any(|e| e.starts_with(&prefix)),
+                "a Rails route or association must give {src} -> {dst} ({edges:#?})"
+            );
+        }
 
         let all: Vec<(&str, bool)> = EQUIVALENCE_TREE
             .iter()
@@ -3744,7 +4092,12 @@ mod tests {
         (
             "app/caller.rb",
             "class Caller\n  def go\n    MailJob.perform_later(1)\n    Widget.new(1)\n    \
-             Widget.build\n    shared\n  end\nend\n",
+             Widget.build\n    shared\n    assist\n  end\nend\n",
+        ),
+        ("app/mixin.rb", "module Mixin\n  def assist; end\nend\n"),
+        (
+            "app/other_mixin.rb",
+            "module OtherMixin\n  def assist; end\nend\n",
         ),
         ("app/alpha.rb", "class Alpha\n  def shared; end\nend\n"),
         ("app/beta.rb", "class Beta\n  def shared; end\nend\n"),
@@ -3823,6 +4176,14 @@ mod tests {
                 "Text(\"app/caller.rb#Caller#go#method\") | Text(\"app/alpha.rb#Alpha#shared#method\")",
             ),
             (
+                "ancestor declared in a reopening",
+                &[(
+                    "app/caller_ext.rb",
+                    Some("class Caller\n  include Mixin\nend\n"),
+                )],
+                "Text(\"app/caller.rb#Caller#go#method\") | Text(\"app/mixin.rb#Mixin#assist#method\")",
+            ),
+            (
                 "aliased source defined",
                 &[(
                     "web/b.ts",
@@ -3867,11 +4228,20 @@ mod tests {
                 "{label}: the full build must link {edge} ({edges:#?})"
             );
         }
-        // Back to the first tree: every edge above becomes a row again.
+        // Back to the first tree: every edge above becomes a row again, and
+        // a file a step added is removed.
         write_tree(&dir, RETRY_TREE);
+        let first: HashSet<&str> = RETRY_TREE.iter().map(|(rel, _)| *rel).collect();
         let batch: Vec<(&str, bool)> = steps
             .iter()
-            .flat_map(|(_, changes, _)| changes.iter().map(|(rel, _)| (*rel, false)))
+            .flat_map(|(_, changes, _)| changes.iter().map(|(rel, _)| *rel))
+            .map(|rel| {
+                let added = !first.contains(rel);
+                if added {
+                    let _ = std::fs::remove_file(dir.join(rel));
+                }
+                (rel, added)
+            })
             .collect();
         update_files(&dir, &db, &batch).unwrap();
         check("revert", &RETRY_TREE.iter().copied().collect());

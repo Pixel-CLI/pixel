@@ -16,7 +16,13 @@ use tree_sitter::{Language, Node, ParseOptions, ParseState, Parser, Tree};
 
 use crate::store::SymbolKind;
 
+pub(crate) mod ruby_associations;
 pub(crate) mod ruby_callbacks;
+pub(crate) mod ruby_generated;
+pub(crate) mod ruby_mixins;
+pub mod ruby_routes;
+
+pub use ruby_mixins::RawMixin;
 
 #[derive(Debug, Clone)]
 pub struct RawSymbol {
@@ -127,11 +133,26 @@ pub struct FileExtraction {
     pub references: Vec<RawReference>,
     pub imports: Vec<RawImport>,
     pub jsx_elements: Vec<RawJsxElement>,
+    /// Ruby only: the superclass and modules each class or module declares.
+    pub mixins: Vec<RawMixin>,
 }
+
+/// Whether a walker at `depth` has passed the recursion cap: a node at
+/// exactly `MAX_DEPTH` is still visited.
+fn too_deep(depth: usize) -> bool {
+    depth > MAX_DEPTH
+}
+
+/// Ruby files known by their whole name: Bundler's `Gemfile` and the
+/// Ruby-DSL build files whose tools evaluate them as Ruby.
+pub const RUBY_FILE_NAMES: &[&str] = &["Gemfile", "Rakefile", "Guardfile", "Capfile"];
 
 /// Language tag for a repo-relative path, or `None` if unsupported.
 pub fn lang_of(path: &str) -> Option<&'static str> {
     let file = path.rsplit('/').next().unwrap_or(path);
+    if RUBY_FILE_NAMES.contains(&file) {
+        return Some("ruby");
+    }
     let ext = file.rsplit_once('.')?.1;
     match ext {
         "ts" | "mts" | "cts" => Some("ts"),
@@ -151,6 +172,48 @@ pub fn lang_of(path: &str) -> Option<&'static str> {
         "lua" => Some("lua"),
         _ => None,
     }
+}
+
+/// True iff `path` may be a Ruby executable whose language only its shebang
+/// tells: an extensionless file directly in a `bin/` or `exe/` directory
+/// (`bin/rails`, `exe/mygem`), the places Rails and Bundler put binstubs.
+/// The graph walks read it; [`lang_of_file`] decides from its first line.
+pub fn is_binstub_candidate(path: &str) -> bool {
+    let mut parts = path.rsplit('/');
+    let file = parts.next().unwrap_or(path);
+    !file.is_empty()
+        && !file.contains('.')
+        && matches!(parts.next(), Some("bin" | "exe"))
+        && lang_of(path).is_none()
+}
+
+/// True iff the first line of `content` is a Ruby shebang: an interpreter
+/// path ending in `ruby` (`#!/usr/bin/ruby`), or `env` naming `ruby`
+/// (`#!/usr/bin/env ruby`, `#!/usr/bin/env -S ruby -w`).
+pub fn has_ruby_shebang(content: &[u8]) -> bool {
+    let line = content.split(|b| *b == b'\n').next().unwrap_or_default();
+    let Some(rest) = line.strip_prefix(b"#!") else {
+        return false;
+    };
+    let line = String::from_utf8_lossy(rest);
+    let mut words = line.split_whitespace();
+    let Some(interpreter) = words.next() else {
+        return false;
+    };
+    let base = interpreter.rsplit('/').next().unwrap_or(interpreter);
+    if base == "env" {
+        words.find(|w| !w.starts_with('-')) == Some("ruby")
+    } else {
+        base == "ruby"
+    }
+}
+
+/// [`lang_of`], plus a binstub ([`is_binstub_candidate`]) whose content opens
+/// with a Ruby shebang. An extensionless executable is never Ruby by its
+/// place alone: `bin/dev` is often a shell script.
+pub fn lang_of_file(path: &str, content: &[u8]) -> Option<&'static str> {
+    lang_of(path)
+        .or_else(|| (is_binstub_candidate(path) && has_ruby_shebang(content)).then_some("ruby"))
 }
 
 /// Size floor for the generated-blob guard: below this, even a one-line file
@@ -247,7 +310,7 @@ pub(crate) fn parse_bounded(parser: &mut Parser, content: &[u8]) -> Option<Tree>
 /// Shared by extraction and the rename verifier, which re-parses a file to
 /// confirm each candidate identifier's role before rewriting it.
 pub fn parse_file(path_rel: &str, content: &[u8]) -> Option<tree_sitter::Tree> {
-    let lang = lang_of(path_rel)?;
+    let lang = lang_of_file(path_rel, content)?;
     if is_generated_blob(content) {
         return None;
     }
@@ -270,7 +333,7 @@ pub fn parse_file(path_rel: &str, content: &[u8]) -> Option<tree_sitter::Tree> {
 /// `update_files_unsigned` — the incremental path the daemon runs on every
 /// save — does not, so a committed bundle was re-parsed on each touch.
 pub fn extract_file(path_rel: &str, content: &[u8]) -> Option<FileExtraction> {
-    let lang = lang_of(path_rel)?;
+    let lang = lang_of_file(path_rel, content)?;
     if is_generated_blob(content) {
         return None;
     }
@@ -292,9 +355,35 @@ pub fn extract_file(path_rel: &str, content: &[u8]) -> Option<FileExtraction> {
             trait_impl: false,
             module_decl: false,
         });
+        if ruby_routes::is_routes_file(path_rel) {
+            push_route_references(&mut extraction, content);
+        }
         assign_enclosing(&mut extraction);
     }
     Some(extraction)
+}
+
+/// A Rails route's handler, referenced from the routes file: the action
+/// `name`, with the controller class in `arg_of` (`:route
+/// Admin::OrdersController`), resolved to that class's method only. One
+/// reference per declaration line and handler (`resources` declares several
+/// routes to one action, `update` twice).
+fn push_route_references(extraction: &mut FileExtraction, content: &[u8]) {
+    let mut seen = std::collections::HashSet::new();
+    for route in ruby_routes::routes(content) {
+        let (Some(action), Some(controller)) = (route.action.clone(), route.controller_constant())
+        else {
+            continue;
+        };
+        if seen.insert((route.line, controller.clone(), action.clone())) {
+            extraction.references.push(RawReference {
+                name: action,
+                enclosing_index: None,
+                site_line: route.line,
+                arg_of: Some(format!("{}{controller}", ruby_callbacks::ROUTE_REFERENCE)),
+            });
+        }
+    }
 }
 
 fn language_for(lang: &str) -> Option<Language> {
@@ -332,6 +421,8 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         stack: Vec::new(),
         in_trait_impl: false,
         use_scopes: std::collections::HashMap::new(),
+        generated: Vec::new(),
+        mixins: Vec::new(),
     };
     let root = tree.root_node();
     match lang {
@@ -347,6 +438,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         // than absent.
         _ => walk_generic(&mut w, root, 0),
     }
+    ruby_generated::drop_overridden(&mut w);
     let mut fx = FileExtraction {
         lang,
         symbols: w.symbols,
@@ -354,6 +446,7 @@ fn extract_inner(lang: &'static str, content: &[u8]) -> Option<FileExtraction> {
         references: w.references,
         imports: w.imports,
         jsx_elements: w.jsx_elements,
+        mixins: w.mixins,
     };
     assign_enclosing(&mut fx);
     Some(fx)
@@ -376,7 +469,13 @@ fn assign_enclosing(fx: &mut FileExtraction) {
     for call in &mut fx.calls {
         call.enclosing_index = best(call.site_line);
     }
-    for r#ref in &mut fx.references {
+    // A reference placed by its extractor keeps its symbol: the methods one
+    // `delegate :a, :b` generates share a line, and each forwards on its own.
+    for r#ref in fx
+        .references
+        .iter_mut()
+        .filter(|r| r.enclosing_index.is_none())
+    {
         r#ref.enclosing_index = best(r#ref.site_line);
     }
 }
@@ -398,6 +497,11 @@ struct Walker<'a> {
     /// Rust `use` scopes already computed, by scope node id: every `use` of a
     /// file's top level shares one walk of the file.
     use_scopes: std::collections::HashMap<usize, Vec<(u32, u32)>>,
+    /// Indices in `symbols` of the Ruby methods a declaration generated
+    /// (`attr_reader`, `delegate`, ...), for `ruby_generated::drop_overridden`.
+    generated: Vec<usize>,
+    /// Ruby ancestors declared so far (`ruby_mixins`).
+    mixins: Vec<RawMixin>,
 }
 
 impl<'a> Walker<'a> {
@@ -631,7 +735,7 @@ fn self_member_name(w: &Walker, member: Node) -> Option<String> {
 // --- TypeScript / TSX / JavaScript ---------------------------------------
 
 fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let mut pushed = false;
@@ -986,7 +1090,7 @@ fn jsx_text_content(w: &Walker, element: Node, opening: Node, tag: &str) -> Stri
 // --- Rust ----------------------------------------------------------------
 
 fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     if rust_is_test_container(w, node) {
@@ -1534,7 +1638,7 @@ fn rust_constructed_type(w: &Walker, value: Node) -> Option<String> {
 // --- Go ------------------------------------------------------------------
 
 fn walk_go(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     match node.kind() {
@@ -1621,7 +1725,7 @@ fn first_descendant_of_kind<'t>(n: Node<'t>, kind: &str) -> Option<Node<'t>> {
 // --- Java ----------------------------------------------------------------
 
 fn walk_java(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let mut pushed = false;
@@ -1702,7 +1806,7 @@ fn walk_java(w: &mut Walker, node: Node, depth: usize) {
 // --- Python --------------------------------------------------------------
 
 fn walk_python(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let mut pushed = false;
@@ -1784,7 +1888,7 @@ fn walk_python(w: &mut Walker, node: Node, depth: usize) {
 // --- C# -------------------------------------------------------------------
 
 fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let mut pushed = false;
@@ -2066,6 +2170,12 @@ impl RubyLocals {
         false
     }
 
+    /// The qualification of a `def` written in the innermost frame's body:
+    /// what a declaration there (`attr_reader`) generates.
+    fn current_defs(&self) -> RubyDefs {
+        self.frames.last().map_or(RubyDefs::Instance, |f| f.defs)
+    }
+
     /// The qualification of a `def` whose own frame is the innermost one:
     /// the frame around it decides.
     fn enclosing_defs(&self) -> RubyDefs {
@@ -2091,7 +2201,7 @@ impl RubyLocals {
 }
 
 fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIdent, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let mut pushed = false;
@@ -2119,6 +2229,7 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
                 w.push_symbol(name.clone(), q, SymbolKind::Class, node);
                 w.stack.push(name);
                 pushed = true;
+                ruby_mixins::walk_superclass(w, node);
             }
         }
         "method" => {
@@ -2153,38 +2264,14 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             }
         }
         "call" => {
-            let mut callee_name: Option<String> = None;
-            if let Some(name) = field_text(w, node, "method") {
-                let recv = ruby_receiver(w, node);
-                callee_name = Some(name.clone());
-                // `module_function()` and `public()` set the mode as the
-                // bare words do; with arguments they only touch the methods
-                // they name.
-                if recv.is_none()
-                    && node
-                        .child_by_field_name("arguments")
-                        .is_none_or(|args| args.named_child_count() == 0)
-                {
-                    locals.visibility(&name);
-                }
-                if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
-                    if let Some(spec) = ruby_first_string_argument(w, node) {
-                        w.push_import(spec, Vec::new());
-                    }
-                } else {
-                    // Covers paren-less Rails DSL (`has_many :spots`,
-                    // `before_action :auth`) and receiver calls (`user.save`).
-                    w.push_call(name, recv, node);
-                }
-            }
-            // After extracting the callee, check arguments for identifier
-            // references (callbacks / handlers passed as args). Skip require
-            // methods — their string args are imports, not references.
-            if !matches!(callee_name.as_deref(), Some(n) if RUBY_REQUIRE_METHODS.contains(&n)) {
-                if let Some(method) = callee_name.as_deref() {
-                    ruby_callbacks::walk_symbol_arguments(w, node, method);
-                }
-                walk_call_arguments(w, node, callee_name);
+            walk_ruby_call(w, locals, node);
+            // `class_methods do ... end` defines the concern's `ClassMethods`
+            // module, which the includer extends.
+            if !w.stack.is_empty() && ruby_mixins::is_class_methods_block(w, node) {
+                let q = w.qualify("ClassMethods", "::");
+                w.push_symbol("ClassMethods".to_string(), q, SymbolKind::Module, node);
+                w.stack.push("ClassMethods".to_string());
+                pushed = true;
             }
         }
         // A name read without receiver or parentheses (`target`, or the
@@ -2201,6 +2288,7 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
             }
             RubyIdent::Name => {}
         },
+        "alias" => ruby_generated::walk_alias_keyword(w, node, locals.current_defs()),
         // `in {target:}` binds `target` although no identifier is written.
         "keyword_pattern" if node.child_by_field_name("value").is_none() => {
             if let Some(key) = field_text(w, node, "key") {
@@ -2232,6 +2320,79 @@ fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIden
     }
 }
 
+/// A Ruby `call` node: an import, a generated-method declaration or a call,
+/// and the method symbols its arguments name. Kept out of [`walk_ruby`] so
+/// the recursive walker's stack frame stays small: the depth cap must be
+/// reachable on a test thread's stack.
+#[inline(never)]
+fn walk_ruby_call(w: &mut Walker, locals: &mut RubyLocals, node: Node) {
+    let mut callee_name: Option<String> = None;
+    if let Some(name) = field_text(w, node, "method") {
+        let recv = ruby_receiver(w, node);
+        callee_name = Some(name.clone());
+        // `module_function()` and `public()` set the mode as the
+        // bare words do; with arguments they only touch the methods
+        // they name.
+        if recv.is_none()
+            && node
+                .child_by_field_name("arguments")
+                .is_none_or(|args| args.named_child_count() == 0)
+        {
+            locals.visibility(&name);
+        }
+        ruby_mixins::walk_mixin_call(w, node, &name);
+        ruby_associations::walk_association(w, node, &name);
+        if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
+            if let Some(spec) = ruby_first_string_argument(w, node) {
+                let path = ruby_require_path(&name, &spec);
+                w.push_import_at(spec, path, Vec::new(), Vec::new());
+            }
+        } else {
+            // A declaration that generated methods defines them; it is not
+            // a call of the class body.
+            let declared = recv.is_none()
+                && ruby_generated::walk_declaration(w, node, &name, locals.current_defs());
+            // Covers paren-less Rails DSL (`has_many :spots`,
+            // `before_action :auth`) and receiver calls (`user.save`).
+            // An assignment to `recv.name` calls the writer `name=`;
+            // `recv.name += 1` reads with `name` and writes with `name=`.
+            match ruby_assigned_through(node) {
+                _ if declared => {}
+                Some("assignment") => w.push_call(format!("{name}="), recv, node),
+                Some(_) => {
+                    w.push_call(format!("{name}="), recv.clone(), node);
+                    w.push_call(name, recv, node);
+                }
+                None => w.push_call(name, recv, node),
+            }
+        }
+    }
+    // After extracting the callee, check arguments for identifier
+    // references (callbacks / handlers passed as args). Skip require
+    // methods — their string args are imports, not references.
+    if !matches!(callee_name.as_deref(), Some(n) if RUBY_REQUIRE_METHODS.contains(&n)) {
+        if let Some(method) = callee_name.as_deref() {
+            ruby_callbacks::walk_symbol_arguments(w, node, method);
+        }
+        walk_call_arguments(w, node, callee_name);
+    }
+}
+
+/// The kind of the assignment whose target `call` is (`self.name = v` is an
+/// `assignment`, `self.count += 1` an `operator_assignment`), or `None` when
+/// the call is not the left side of one. Only a call with a receiver can be:
+/// a bare `name = v` assigns a local.
+fn ruby_assigned_through(call: Node) -> Option<&'static str> {
+    let parent = call.parent()?;
+    let kind = match parent.kind() {
+        "assignment" => "assignment",
+        "operator_assignment" => "operator_assignment",
+        _ => return None,
+    };
+    (parent.child_by_field_name("left")? == call && call.child_by_field_name("receiver").is_some())
+        .then_some(kind)
+}
+
 /// Preserve receiver text except AST-confirmed constant factories/configurators.
 /// Arguments cannot change which constant `Foo.new(args)` or `Job.set(args)`
 /// names; keeping `Foo.new` / `Job.set` also survives stored-call replay.
@@ -2246,6 +2407,22 @@ fn ruby_receiver(w: &Walker, call: Node) -> Option<String> {
         return Some(format!("{}.{method}", w.text(owner)));
     }
     Some(w.text(receiver))
+}
+
+/// What `resolve_import` resolves for a Ruby load of `spec` through
+/// `method`: `require_relative` names a file relative to the requiring one,
+/// kept as an explicit `./`/`../` path; `require`, `require_dependency` and
+/// `load` search the load path, kept bare. A load path spec written as a
+/// relative or absolute path (`require "./x"`) is relative to the process's
+/// working directory, which the graph cannot know: it resolves to nothing.
+fn ruby_require_path(method: &str, spec: &str) -> String {
+    let explicit = spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/');
+    match (method, explicit) {
+        ("require_relative", false) => format!("./{spec}"),
+        ("require_relative", true) => spec.to_string(),
+        (_, false) => spec.to_string(),
+        (_, true) => String::new(),
+    }
 }
 
 /// Literal text of the first `string` argument of a Ruby `call`, or `None`
@@ -2293,7 +2470,7 @@ fn csharp_simple_name(w: &Walker, node: Node) -> String {
 // beats an absent one. Field names and node kinds degrade gracefully to `None`.
 
 fn walk_generic(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let kind = node.kind();
@@ -2542,19 +2719,10 @@ fn elixir_definition_head(w: &Walker, node: Node) -> bool {
         .is_some_and(|def| elixir_definer(w, def))
 }
 
-/// Best-effort import spec from import/use/require node kinds. Prefers source-like
-/// fields, then string/identifier children (php `require_expression`, kotlin
+/// Best-effort import spec from import/use/require node kinds: the first
+/// plain string or identifier child (php `require_expression`, kotlin
 /// `import_header`, swift `import_declaration`).
 fn generic_import(w: &mut Walker, node: Node) {
-    for field in ["source", "path", "module_name", "import_string", "name"] {
-        if let Some(src) = node.child_by_field_name(field) {
-            let spec = strip_quotes(&w.text(src));
-            if !spec.is_empty() {
-                w.push_import(spec, Vec::new());
-                return;
-            }
-        }
-    }
     for child in each_child(node) {
         match child.kind() {
             // PHP parses a double-quoted path as `encapsed_string`.
@@ -2757,6 +2925,7 @@ mod tests {
             imports: vec![],
             jsx_elements: vec![],
             references: vec![],
+            mixins: vec![],
         };
         assign_enclosing(&mut fx);
         let owners: Vec<Option<usize>> = fx.calls.iter().map(|c| c.enclosing_index).collect();

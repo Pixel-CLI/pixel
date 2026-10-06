@@ -60,8 +60,9 @@ const OLLAYA_ROOT: &str = ".local/share/pixel/ollaya";
 const CLASSIFY_SKILL: &str = include_str!("../../pixel-install/assets/pixel-classify-skill.md");
 /// The bundled pi extension: `ask_pixel_file_bool/choice/score`,
 /// `ask_pixel_files`, `pick_pixel_file` — file-level classify calls whose
-/// file text never enters the agent's context. pi auto-discovers it from
-/// `~/.pi/agent/extensions/` once installed.
+/// file text never enters the agent's context. It ships as Pixel's classify
+/// Pi package ([`pixel_install::ClassifyPiPackage`]), declared in Pi's
+/// settings like the impact package, never copied into Pi's `extensions/`.
 const PI_CLASSIFY_EXTENSION: &str = include_str!("../../pixel-install/assets/pi-classify-files.ts");
 /// The skills-dir name every harness copy of [`CLASSIFY_SKILL`] deploys to.
 const CLASSIFY_SKILL_NAME: &str = "pixel-classify";
@@ -290,37 +291,62 @@ where
     propose_helpers(stdin, stdout)
 }
 
-/// The files a "yes" to the helpers proposal writes: the `pixel-classify`
-/// skill into every configured harness's skills dir — the skill is
+/// What a "yes" to the helpers proposal writes: the `pixel-classify` skill
+/// into every configured harness's skills dir — the skill is
 /// harness-agnostic, not pi-only; [`pixel_install::config::SKILL_ROOTS`] is
-/// the single list of roots — and, when pi is set up, the
-/// `pixel-classify-files` extension into pi's global extensions dir.
-/// `.claude` is a target unconditionally (`pixel install` writes its hooks
-/// there before this step runs); the rest join only when configured.
-fn classify_helper_targets(home: &Path) -> Vec<(PathBuf, &'static str)> {
-    let skill_file = |root: &Path| {
-        (
+/// the single list of roots — and, when pi is set up, Pixel's classify Pi
+/// package with its `packages` entry. `.claude` is a target unconditionally
+/// (`pixel install` writes its hooks there before this step runs); the rest
+/// join only when configured.
+struct ClassifyHelpers {
+    skills: Vec<PathBuf>,
+    pi: Option<pixel_install::ClassifyPiPackage>,
+}
+
+impl ClassifyHelpers {
+    fn at(home: &Path, pi: Option<pixel_install::ClassifyPiPackage>) -> Self {
+        let skill_file = |root: &Path| {
             root.join("skills")
                 .join(CLASSIFY_SKILL_NAME)
-                .join("SKILL.md"),
-            CLASSIFY_SKILL,
-        )
-    };
-    let mut targets = vec![skill_file(&home.join(".claude"))];
-    for root in pixel_install::config::SKILL_ROOTS {
-        let dir = home.join(root);
-        if dir.is_dir() {
-            targets.push(skill_file(&dir));
+                .join("SKILL.md")
+        };
+        let mut skills = vec![skill_file(&home.join(".claude"))];
+        for root in pixel_install::config::SKILL_ROOTS {
+            let dir = home.join(root);
+            if dir.is_dir() {
+                skills.push(skill_file(&dir));
+            }
         }
+        Self { skills, pi }
     }
-    let pi_agent = home.join(".pi/agent");
-    if pi_agent.is_dir() {
-        targets.push((
-            pi_agent.join("extensions").join("pixel-classify-files.ts"),
-            PI_CLASSIFY_EXTENSION,
-        ));
+
+    fn is_current(&self) -> bool {
+        self.skills
+            .iter()
+            .all(|path| fs::read_to_string(path).is_ok_and(|existing| existing == CLASSIFY_SKILL))
+            && self
+                .pi
+                .as_ref()
+                .is_none_or(pixel_install::ClassifyPiPackage::is_current)
     }
-    targets
+
+    /// Every path the proposal names, in the order it writes them.
+    fn listed(&self) -> Vec<String> {
+        let mut listed: Vec<String> = self
+            .skills
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        if let Some(pi) = &self.pi {
+            listed.extend(
+                pi.files()
+                    .iter()
+                    .map(|(path, _)| path.display().to_string()),
+            );
+            listed.push(format!("{} (packages entry)", pi.settings().display()));
+        }
+        listed
+    }
 }
 
 /// Offer the classify helpers after a successful engine setup. The helpers
@@ -335,31 +361,31 @@ fn propose_classify_helpers(
         writeln!(stdout, "classify helpers: skipped — no HOME").map_err(|e| e.to_string())?;
         return Ok(());
     };
-    if let Err(error) = propose_classify_helpers_at(&home, stdin, stdout) {
+    let pi = pixel_install::ClassifyPiPackage::for_home(&home, PI_CLASSIFY_EXTENSION);
+    if let Err(error) = propose_classify_helpers_at(&ClassifyHelpers::at(&home, pi), stdin, stdout)
+    {
         writeln!(stdout, "classify helpers: skipped — {error}").map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-/// The helpers proposal against an explicit home: list what would land,
-/// ask, and on a yes write each target with the usual pixel backup of a
-/// differing existing file. A fully current set short-circuits to
-/// "already installed" without prompting, which keeps re-installs quiet.
+/// The helpers proposal for an explicit set of targets: list what would
+/// land, ask, and on a yes write each skill with the usual pixel backup of a
+/// differing existing file, then the Pi package. A fully current set
+/// short-circuits to "already installed" without prompting, which keeps
+/// re-installs quiet.
 fn propose_classify_helpers_at(
-    home: &Path,
+    helpers: &ClassifyHelpers,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
 ) -> Result<(), String> {
-    let targets = classify_helper_targets(home);
-    if targets
-        .iter()
-        .all(|(path, content)| fs::read_to_string(path).is_ok_and(|existing| existing == *content))
-    {
+    if helpers.is_current() {
         return writeln!(stdout, "classify helpers: already installed").map_err(|e| e.to_string());
     }
     writeln!(stdout, "Classify helpers:").map_err(|e| e.to_string())?;
-    for (path, _) in &targets {
-        writeln!(stdout, "  {}", path.display()).map_err(|e| e.to_string())?;
+    let listed = helpers.listed();
+    for path in &listed {
+        writeln!(stdout, "  {path}").map_err(|e| e.to_string())?;
     }
     write!(stdout, "Install them? [Y/n]> ").map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;
@@ -370,20 +396,23 @@ fn propose_classify_helpers_at(
     if !matches!(line.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes") {
         return writeln!(stdout, "classify helpers: skipped").map_err(|e| e.to_string());
     }
-    for (path, content) in &targets {
+    for path in &helpers.skills {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
         // A failed backup stops the overwrite: an edited helper is never
         // replaced without its copy.
-        pixel_install::config::backup_if_changing(path, content.as_bytes())
+        pixel_install::config::backup_if_changing(path, CLASSIFY_SKILL.as_bytes())
             .map_err(|e| format!("back up {}: {e}", path.display()))?;
-        fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
+        fs::write(path, CLASSIFY_SKILL).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    if let Some(pi) = &helpers.pi {
+        pi.install()?;
     }
     writeln!(
         stdout,
         "classify helpers: installed {} file(s)",
-        targets.len()
+        listed.len()
     )
     .map_err(|e| e.to_string())
 }
@@ -1496,29 +1525,38 @@ mod tests {
         assert!(String::from_utf8(output).unwrap().contains("skipped"));
     }
 
+    /// The helpers for a scratch home, with Pi's agent directory at its
+    /// default place whatever `$PI_CODING_AGENT_DIR` holds.
+    fn helpers_at(home: &Path) -> ClassifyHelpers {
+        ClassifyHelpers::at(
+            home,
+            pixel_install::ClassifyPiPackage::with_agent_dir(home, None, PI_CLASSIFY_EXTENSION),
+        )
+    }
+
     #[test]
-    fn classify_helpers_should_write_the_bundled_skill_and_extension_when_accepted() {
+    fn classify_helpers_should_write_the_bundled_skill_and_pi_package_when_accepted() {
         let home =
             std::env::temp_dir().join(format!("pixel-classify-helpers-{}", std::process::id()));
         fs::create_dir_all(home.join(".pi/agent")).unwrap();
+        fs::write(
+            home.join(".pi/agent/settings.json"),
+            r#"{"theme":"dark","packages":["npm:other"]}"#,
+        )
+        .unwrap();
         fs::create_dir_all(home.join(".codex")).unwrap();
         fs::create_dir_all(home.join(".cursor")).unwrap();
 
         let mut output = Vec::new();
         propose_classify_helpers_at(
-            &home,
+            &helpers_at(&home),
             &mut std::io::Cursor::new(b"y\n".to_vec()),
             &mut output,
         )
         .unwrap();
 
         let skill = home.join(".claude/skills/pixel-classify/SKILL.md");
-        let pi_ext = home.join(".pi/agent/extensions/pixel-classify-files.ts");
-        assert!(
-            fs::read_to_string(&skill)
-                .unwrap()
-                .contains("name: pixel-classify")
-        );
+        assert_eq!(fs::read_to_string(&skill).unwrap(), CLASSIFY_SKILL);
         assert!(home.join(".codex/skills/pixel-classify/SKILL.md").is_file());
         assert!(
             home.join(".cursor/skills/pixel-classify/SKILL.md")
@@ -1530,16 +1568,71 @@ mod tests {
         );
         // A harness root that does not exist is skipped, not created.
         assert!(!home.join(".devin").exists());
-        assert!(
-            fs::read_to_string(&pi_ext)
-                .unwrap()
-                .contains("ask_pixel_file_bool")
+        // The tools ship as Pixel's own Pi package, declared beside the
+        // user's packages; nothing lands in Pi's `extensions/`.
+        let package = home.join(pixel_install::CLASSIFY_PACKAGE_DIR);
+        assert_eq!(
+            fs::read_to_string(package.join("extensions/pixel-classify-files.ts")).unwrap(),
+            PI_CLASSIFY_EXTENSION
         );
+        let manifest: Value =
+            serde_json::from_str(&fs::read_to_string(package.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            manifest["pi"],
+            json!({"extensions": ["./extensions/pixel-classify-files.ts"]})
+        );
+        let settings: Value = serde_json::from_str(
+            &fs::read_to_string(home.join(".pi/agent/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings,
+            json!({"theme": "dark", "packages": ["npm:other", package.display().to_string()]})
+        );
+        assert!(!home.join(".pi/agent/extensions").exists());
         assert!(
             String::from_utf8(output)
                 .unwrap()
-                .contains("installed 5 file(s)")
+                .ends_with("classify helpers: installed 7 file(s)\n")
         );
+        // Everything current: a second proposal asks nothing.
+        let mut again = Vec::new();
+        propose_classify_helpers_at(
+            &helpers_at(&home),
+            &mut std::io::Cursor::new(Vec::new()),
+            &mut again,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(again).unwrap(),
+            "classify helpers: already installed\n"
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn classify_helpers_should_leave_unreadable_pi_settings_untouched() {
+        let home = std::env::temp_dir().join(format!(
+            "pixel-classify-helpers-bad-pi-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(home.join(".pi/agent")).unwrap();
+        fs::write(home.join(".pi/agent/settings.json"), "{ not json").unwrap();
+
+        let err = propose_classify_helpers_at(
+            &helpers_at(&home),
+            &mut std::io::Cursor::new(b"y\n".to_vec()),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("is not valid JSON"), "{err}");
+        assert_eq!(
+            fs::read_to_string(home.join(".pi/agent/settings.json")).unwrap(),
+            "{ not json"
+        );
+        assert!(!home.join(pixel_install::CLASSIFY_PACKAGE_DIR).exists());
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -1552,7 +1645,7 @@ mod tests {
 
         let mut output = Vec::new();
         propose_classify_helpers_at(
-            &home,
+            &helpers_at(&home),
             &mut std::io::Cursor::new(b"n\n".to_vec()),
             &mut output,
         )
@@ -1575,8 +1668,12 @@ mod tests {
         let mut output = Vec::new();
         // No stdin answer: reaching the prompt would read EOF as a yes and
         // rewrite — the short-circuit must come first.
-        propose_classify_helpers_at(&home, &mut std::io::Cursor::new(Vec::new()), &mut output)
-            .unwrap();
+        propose_classify_helpers_at(
+            &helpers_at(&home),
+            &mut std::io::Cursor::new(Vec::new()),
+            &mut output,
+        )
+        .unwrap();
 
         assert!(
             String::from_utf8(output)
@@ -1597,7 +1694,7 @@ mod tests {
         fs::write(&skill, "my edited copy").unwrap();
 
         propose_classify_helpers_at(
-            &home,
+            &helpers_at(&home),
             &mut std::io::Cursor::new(b"\n".to_vec()),
             &mut Vec::new(),
         )
@@ -1631,7 +1728,7 @@ mod tests {
         std::os::unix::fs::symlink(&skill, &skill).unwrap();
 
         let err = propose_classify_helpers_at(
-            &home,
+            &helpers_at(&home),
             &mut std::io::Cursor::new(b"\n".to_vec()),
             &mut Vec::new(),
         )

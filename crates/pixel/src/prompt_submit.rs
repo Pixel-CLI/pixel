@@ -34,7 +34,7 @@ const COMPLETION_LOOKBACK_SECS: i64 = 300;
 /// Number of recent assistant turns to use as context.
 const CONTEXT_TURNS: usize = 5;
 /// Maximum age of a session in recall.db to be considered active context (4 hours).
-const MAX_SESSION_AGE_MS: i64 = 4 * 3600 * 1000;
+const MAX_SESSION_AGE_MS: i64 = 14_400_000;
 /// Hard deadline for the entire hook — never block the user's prompt.
 const HOOK_DEADLINE: Duration = Duration::from_millis(750);
 const TASK_CONTEXT_BYTES: usize = 1024;
@@ -48,14 +48,6 @@ pub(crate) const DEVIN_PIXEL_GUIDANCE: &str = concat!(
     "When Pixel serves a path with a line, read only that region — read(path, offset=<line>, limit≈40) or exec sed -n '<line>,+40p' <path> — not the whole file. ",
     "Native retrieval remains available for bounded follow-up and unsupported or out-of-index files after the Pixel attempt. ",
     "If Pixel or the index is unavailable, continue normally with native tools; never block the task."
-);
-
-const CODEX_PIXEL_GUIDANCE: &str = concat!(
-    "Pixel-first retrieval (non-blocking): for this repository prompt, run a Pixel retrieval command before answering from memory. ",
-    "Use `pixel search-content -F '<identifier>'` for a known name, or `pixel find-code '<concept>'` for behavior-described code. ",
-    "Do not answer from memory, a generic web search, or a native repository read before that retrieval attempt. ",
-    "When Pixel serves a path with a line, read only that region (`sed -n '<line>,+40p' <path>`), not the whole file. ",
-    "If Pixel or its index is unavailable, say so and continue with the best available evidence; never block the task."
 );
 
 const CLAUDE_PIXEL_GUIDANCE: &str = concat!(
@@ -106,6 +98,11 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     if !task_target_lookup_eligible(&payload.prompt) {
         std::process::exit(0);
     }
+    // Retired Codex registrations are silent. Retrieval is available through
+    // explicit capabilities and never requires per-prompt classification.
+    if matches!(provider, Some(crate::guard::Provider::Codex)) {
+        std::process::exit(0);
+    }
 
     let cwd = payload
         .cwd
@@ -115,11 +112,6 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     let root = crate::discover_root(&cwd).ok();
-    let task_context =
-        crate::config_cmd::feature_enabled(root.as_deref(), "task_context", "PIXEL_TASK_CONTEXT");
-    let task_boundary =
-        crate::config_cmd::feature_enabled(root.as_deref(), "task_boundary", "PIXEL_TASK_BOUNDARY");
-
     let event_name = payload
         .hook_event_name
         .as_deref()
@@ -135,6 +127,19 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
             .join(pixel_index::index::SHARD_FILE)
             .is_file()
     });
+    // Retrieval steering is opt-in (`pixel config policy enforce`): by
+    // default the hook adds no Pixel guidance, route or retrieval packet,
+    // and only the task-boundary note remains.
+    let steers =
+        crate::config_cmd::policy(root.as_deref()) == crate::config_cmd::PolicyMode::Enforce;
+    let task_context = steers
+        && crate::config_cmd::feature_enabled(
+            root.as_deref(),
+            "task_context",
+            "PIXEL_TASK_CONTEXT",
+        );
+    let task_boundary =
+        crate::config_cmd::feature_enabled(root.as_deref(), "task_boundary", "PIXEL_TASK_BOUNDARY");
     // Retrieval guidance and the route ride only a prompt that asks about code
     // or about Pixel itself; on a git request or a pasted thread they are
     // noise the model learns to skip, together with every later route.
@@ -142,12 +147,12 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     let asks = pixel_note.is_some() || request.is_some();
     // The opt-outs silence the task notes, not the Pixel-first guidance:
     // with both features disabled the guidance still rides an indexed
-    // repository's prompt on Codex and on a real Claude host.
+    // repository's prompt on Devin and on an explicitly wired Claude host.
     if prompt_features_disabled(task_context, task_boundary) {
-        let guidance = if matches!(provider, Some(crate::guard::Provider::Devin)) && indexed {
+        let guidance = if !steers {
+            ""
+        } else if matches!(provider, Some(crate::guard::Provider::Devin)) && indexed {
             DEVIN_PIXEL_GUIDANCE
-        } else if matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
-            CODEX_PIXEL_GUIDANCE
         } else if claude_host && indexed {
             CLAUDE_PIXEL_GUIDANCE
         } else {
@@ -217,26 +222,18 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // A prompt that asks about the Pixel tool itself carries the operation it
     // names as the first guidance line, so the agent consults the CLI instead
     // of answering about Pixel from memory.
-    if asks && matches!(provider, Some(crate::guard::Provider::Devin)) {
+    if steers && asks && matches!(provider, Some(crate::guard::Provider::Devin)) {
         context = render_devin_context(&context, pixel_note.as_deref());
     }
-    // Codex reads no SessionStart prompt of its own for this contract, so
-    // every prompt in an *indexed* repository carries the Pixel-first
-    // guidance. A discovered root without a shard is not indexed: the same
-    // commands there would build a full index instead of answering (the
-    // sub-agent prompt carries the same rule), so the guidance stays quiet.
-    if asks && matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
-        context = render_codex_context(&context, pixel_note.as_deref());
-    }
-    // Claude Code reads no per-turn mandate of its own for this contract, so a
-    // real Claude host in an *indexed* repository carries the Pixel-first
-    // guidance like Devin and Codex do. The hosting gate keeps an imported
+    // Codex has already returned. An explicitly wired Claude hook in an
+    // indexed repository carries guidance like Devin does; standard Claude
+    // installs do not register this retrieval hook. The hosting gate keeps an imported
     // Claude config (Devin reading `~/.claude/settings.json` verbatim) from
     // prepending a second guidance over Devin's own.
-    if asks && claude_host && indexed {
+    if steers && asks && claude_host && indexed {
         context = render_claude_context(&context, pixel_note.as_deref());
     }
-    if indexed {
+    if steers && indexed {
         context = append_route(&context, request.as_deref());
     }
     if !context.is_empty() {
@@ -376,15 +373,6 @@ fn prepend_note(note: Option<&str>, guidance: &str) -> String {
 
 fn render_devin_context(context: &str, pixel_note: Option<&str>) -> String {
     let guidance = prepend_note(pixel_note, DEVIN_PIXEL_GUIDANCE);
-    if context.is_empty() {
-        guidance
-    } else {
-        format!("{guidance}\n\n{context}")
-    }
-}
-
-fn render_codex_context(context: &str, pixel_note: Option<&str>) -> String {
-    let guidance = prepend_note(pixel_note, CODEX_PIXEL_GUIDANCE);
     if context.is_empty() {
         guidance
     } else {
@@ -628,37 +616,52 @@ struct BoundaryEvent {
 /// Core detection logic: embed prompt + context, compute similarity, check
 /// completion signals. Returns `Some(BoundaryEvent)` if a task boundary is
 /// detected, `None` otherwise.
+#[cfg_attr(test, mutants::skip)] // wires the recall store, the action logs and the embedding model; the logic is `detect_boundary_with`
 fn detect_boundary(prompt: &str, cwd: &Path) -> Result<Option<BoundaryEvent>, String> {
+    detect_boundary_with(
+        prompt,
+        cwd,
+        || recent_context_and_summary(cwd, CONTEXT_TURNS),
+        || recent_completion_signal(cwd),
+        |texts| {
+            // download=false — fail fast if the model is not cached.
+            let mut embedder = pixel_recall::embed::open_default_embedder(false)?;
+            embedder.embed_batch(texts, pixel_recall::embed::EmbedKind::Query)
+        },
+    )
+}
+
+/// [`detect_boundary`] with its I/O given: the recent `(context, summary)`,
+/// the completion signal, and the embedding of `[prompt, context]`. Each is
+/// called lazily, in that order, and only when the previous step allows it.
+fn detect_boundary_with(
+    prompt: &str,
+    cwd: &Path,
+    context: impl FnOnce() -> (String, String),
+    completion: impl FnOnce() -> bool,
+    embed: impl FnOnce(&[&str]) -> Result<Vec<Vec<f32>>, String>,
+) -> Result<Option<BoundaryEvent>, String> {
     // 1. Get recent assistant turns from the recall corpus for this cwd.
     // Early exit before opening embedder if there is no prior context!
-    let (context_text, context_summary) = recent_context_and_summary(cwd, CONTEXT_TURNS);
+    let (context_text, context_summary) = context();
     if context_text.is_empty() {
         return Ok(None);
     }
 
     // 2. Check actions.jsonl for recent completion signals.
-    let completion = recent_completion_signal(cwd);
+    let completion = completion();
 
-    // 3. Open embedder (download=false — fail fast if model not cached).
-    let mut embedder = pixel_recall::embed::open_default_embedder(false)?;
-
-    // 4. Embed prompt and context.
+    // 3. Embed prompt and context.
     let prompt_text = embed_text_for_prompt(prompt, cwd);
     let texts = [prompt_text.as_str(), context_text.as_str()];
-    let vecs = embedder.embed_batch(&texts, pixel_recall::embed::EmbedKind::Query)?;
+    let vecs = embed(&texts)?;
     if vecs.len() != 2 {
         return Ok(None);
     }
     let similarity = cosine_similarity(&vecs[0], &vecs[1]);
 
     // 5. Decision logic.
-    let is_boundary = if similarity < SIMILARITY_THRESHOLD && completion {
-        true
-    } else {
-        similarity < WEAK_THRESHOLD
-    };
-
-    if !is_boundary {
+    if !is_task_boundary(similarity, completion) {
         return Ok(None);
     }
 
@@ -669,18 +672,38 @@ fn detect_boundary(prompt: &str, cwd: &Path) -> Result<Option<BoundaryEvent>, St
     }))
 }
 
+/// A low similarity after a completion signal, or a very low one without
+/// it, starts a new task.
+fn is_task_boundary(similarity: f32, completion: bool) -> bool {
+    if completion {
+        similarity < SIMILARITY_THRESHOLD
+    } else {
+        similarity < WEAK_THRESHOLD
+    }
+}
+
 /// Retrieve the last N assistant turns from the recall corpus for the given
 /// cwd, ensuring the session is within the recency cutoff and prioritizing the
 /// newest turns so Model2Vec's token budget does not truncate them away.
 /// Returns (embedding_text, context_summary).
+#[cfg_attr(test, mutants::skip)] // opens the user's recall store and reads the clock; the selection is `context_in_store`
 fn recent_context_and_summary(cwd: &Path, n: usize) -> (String, String) {
     let db_path = pixel_recall::db_path();
     let Ok(store) = pixel_recall::store::RecallStore::open(&db_path) else {
         return (String::new(), String::new());
     };
+    context_in_store(&store, cwd, pixel_actionlog::now_ms(), n)
+}
 
+/// [`recent_context_and_summary`] over an open store at `now_ms`: the newest
+/// session under `cwd` active within [`MAX_SESSION_AGE_MS`].
+fn context_in_store(
+    store: &pixel_recall::store::RecallStore,
+    cwd: &Path,
+    now_ms: i64,
+    n: usize,
+) -> (String, String) {
     let cwd_str = cwd.display().to_string();
-    let now_ms = pixel_actionlog::now_ms();
     let since_ms = now_ms.saturating_sub(MAX_SESSION_AGE_MS);
 
     // Find the most recent session matching this cwd within the recency window.
@@ -694,14 +717,22 @@ fn recent_context_and_summary(cwd: &Path, n: usize) -> (String, String) {
     let Ok(turns) = store.turns_for_session(session.id, None) else {
         return (String::new(), String::new());
     };
+    context_and_summary(turns.iter().map(|t| (t.role.as_str(), t.text.as_str())), n)
+}
 
+/// The embedding text (the last `n` assistant turns, newest first, 500
+/// characters each) and the summary (the newest turn's first 200 characters)
+/// of a session's `(role, text)` turns in chronological order.
+fn context_and_summary<'a>(
+    turns: impl DoubleEndedIterator<Item = (&'a str, &'a str)>,
+    n: usize,
+) -> (String, String) {
     // Extract the last N assistant turns, newest first.
     let assistant_texts: Vec<String> = turns
-        .iter()
         .rev()
-        .filter(|t| t.role == "assistant")
+        .filter(|(role, _)| *role == "assistant")
         .take(n)
-        .map(|t| t.text.chars().take(500).collect::<String>()) // Budget per turn
+        .map(|(_, text)| text.chars().take(500).collect::<String>()) // Budget per turn
         .collect();
 
     if assistant_texts.is_empty() {
@@ -727,15 +758,20 @@ fn embed_text_for_prompt(prompt: &str, cwd: &Path) -> String {
 /// Check `actions.jsonl` for recent completion signals (commits, publishes,
 /// pushes, ships) in the given cwd within the lookback window.
 /// Checks the repository root first, then falls back to global `~/.pixel/actions.jsonl`.
+#[cfg_attr(test, mutants::skip)] // reads HOME and the clock; the search is `completion_signal_in`
 fn recent_completion_signal(cwd: &Path) -> bool {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    completion_signal_in(cwd, Path::new(&home), pixel_actionlog::now_ms())
+}
+
+/// [`recent_completion_signal`] with the home directory and the clock given.
+fn completion_signal_in(cwd: &Path, home: &Path, now_ms: i64) -> bool {
     let mut log_paths = Vec::new();
     if let Ok(root) = crate::discover_root(cwd) {
         log_paths.push(pixel_actionlog::ActionLog::path_for_root(&root));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    log_paths.push(PathBuf::from(&home).join(".pixel").join("actions.jsonl"));
+    log_paths.push(home.join(".pixel").join("actions.jsonl"));
 
-    let now_ms = pixel_actionlog::now_ms();
     let cutoff = now_ms - (COMPLETION_LOOKBACK_SECS * 1000);
 
     for path in log_paths {
@@ -991,27 +1027,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_context_requires_pixel_evidence_on_every_repository_prompt() {
-        let context = render_codex_context("task targets", None);
-        assert!(context.starts_with("Pixel-first retrieval"));
-        assert!(context.contains("for this repository prompt"));
-        assert!(context.contains("Do not answer from memory, a generic web search"));
-        assert!(
-            context.contains("read only that region"),
-            "a served path:line ends the retrieval; no whole-file read after it"
-        );
-        assert!(
-            context.contains("never block the task"),
-            "the guidance fails open, like Devin's"
-        );
-        assert!(context.ends_with("task targets"));
-        assert_eq!(
-            render_codex_context("", None),
-            CODEX_PIXEL_GUIDANCE.to_string()
-        );
-    }
-
-    #[test]
     fn claude_context_requires_pixel_first_retrieval_on_every_indexed_prompt() {
         let context = render_claude_context("task targets", None);
         assert!(context.starts_with("Pixel-first retrieval"));
@@ -1028,7 +1043,7 @@ mod tests {
         );
         assert!(
             context.contains("never block the task"),
-            "the guidance fails open, like Devin's and Codex's"
+            "the guidance fails open, like Devin's"
         );
         assert!(context.ends_with("task targets"));
         assert_eq!(
@@ -1043,7 +1058,6 @@ mod tests {
             crate::pixel_question::pixel_question_note("how do i use pixel find-code").unwrap();
         for context in [
             render_devin_context("task targets", Some(&note)),
-            render_codex_context("task targets", Some(&note)),
             render_claude_context("task targets", Some(&note)),
         ] {
             assert!(context.starts_with("[PIXEL:TASK_CONTEXT]"), "{context}");
@@ -1054,15 +1068,6 @@ mod tests {
             );
             assert!(context.ends_with("task targets"), "{context}");
         }
-    }
-
-    #[test]
-    fn an_unrelated_prompt_keeps_the_generic_guidance_without_a_pixel_note() {
-        let note = crate::pixel_question::pixel_question_note("fix the login bug");
-        assert_eq!(note, None);
-        let context = render_codex_context("task targets", None);
-        assert!(context.starts_with("Pixel-first retrieval"), "{context}");
-        assert!(!context.contains("[PIXEL:TASK_CONTEXT]"), "{context}");
     }
 
     #[test]
@@ -1723,6 +1728,116 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn detect_boundary_with_stops_before_any_io_when_there_is_no_context() {
+        let out = detect_boundary_with(
+            "p",
+            Path::new("/r"),
+            || (String::new(), String::new()),
+            || panic!("completion read without context"),
+            |_| panic!("embedder opened without context"),
+        );
+        assert!(matches!(out, Ok(None)));
+    }
+
+    #[test]
+    fn detect_boundary_with_decides_from_the_embedding() {
+        let ctx = || ("ctx".to_string(), "sum".to_string());
+        let orthogonal = |texts: &[&str]| {
+            assert_eq!(texts, ["[prompt] [repo] user: p", "ctx"]);
+            Ok(vec![vec![1.0, 0.0], vec![0.0, 1.0]])
+        };
+        let event = detect_boundary_with("p", Path::new("/w/repo"), ctx, || true, orthogonal)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.similarity, 0.0);
+        assert!(event.completion_signal);
+        assert_eq!(event.context_summary, "sum");
+
+        let same = |_: &[&str]| Ok(vec![vec![1.0, 0.0], vec![1.0, 0.0]]);
+        assert!(matches!(
+            detect_boundary_with("p", Path::new("/r"), ctx, || false, same),
+            Ok(None)
+        ));
+        let short = |_: &[&str]| Ok(vec![vec![1.0, 0.0]]);
+        assert!(matches!(
+            detect_boundary_with("p", Path::new("/r"), ctx, || true, short),
+            Ok(None)
+        ));
+        let failed = |_: &[&str]| Err("no model".to_string());
+        assert!(matches!(
+            detect_boundary_with("p", Path::new("/r"), ctx, || true, failed),
+            Err(e) if e == "no model"
+        ));
+    }
+
+    #[test]
+    fn context_in_store_picks_the_newest_recent_session_under_cwd() {
+        use pixel_recall::model::{Role, TsSource, UnifiedSession, UnifiedTurn};
+        use pixel_recall::store::{IngestState, RecallStore};
+        let dir = scratch("ctx-store");
+        let mut store = RecallStore::open(&dir.join("recall.db")).unwrap();
+        let now = 100_000_000;
+        let mut add = |id: &str, cwd: &str, ts: i64, text: &str| {
+            let session = UnifiedSession {
+                agent: "claude",
+                source_session_id: id.to_string(),
+                source_path: id.to_string(),
+                cwd: Some(cwd.to_string()),
+                git_branch: None,
+                title: None,
+                ts_source: TsSource::Iso,
+                is_subagent: false,
+                parent_source_session_id: None,
+            };
+            let turn = |role, text: &str| UnifiedTurn {
+                role,
+                intent_source: None,
+                ts: Some(ts),
+                text: text.to_string(),
+                truncated: false,
+                source_byte_start: None,
+                source_byte_len: None,
+            };
+            let state = IngestState {
+                file_size: 0,
+                mtime_ms: 0,
+                bytes_ingested: 0,
+                cursor: None,
+            };
+            store
+                .replace_session(
+                    &session,
+                    &[turn(Role::User, "q"), turn(Role::Assistant, text)],
+                    id,
+                    &state,
+                )
+                .unwrap();
+        };
+        add("older", "/w/repo", now - 2_000, "older answer");
+        add("newest", "/w/repo", now - 1_000, "newest answer");
+        add("elsewhere", "/w/other", now, "other answer");
+        add(
+            "stale",
+            "/w/repo2",
+            now - MAX_SESSION_AGE_MS - 1,
+            "stale answer",
+        );
+        assert_eq!(
+            context_in_store(&store, Path::new("/w/repo"), now, 5),
+            ("newest answer".to_string(), "newest answer".to_string())
+        );
+        assert_eq!(
+            context_in_store(&store, Path::new("/w/repo2"), now, 5),
+            (String::new(), String::new())
+        );
+        assert_eq!(
+            context_in_store(&store, Path::new("/w/none"), now, 5),
+            (String::new(), String::new())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "pixel-prompt-submit-{tag}-{}-{}",
@@ -1836,6 +1951,69 @@ mod tests {
 
     /// Only the tail is read: a signal past the tail window is invisible, one
     /// inside it is found even in a log far larger than the window.
+    #[test]
+    fn the_boundary_threshold_depends_on_the_completion_signal() {
+        assert!(is_task_boundary(0.40, true));
+        assert!(!is_task_boundary(0.40, false));
+        assert!(is_task_boundary(0.30, false));
+        assert!(!is_task_boundary(SIMILARITY_THRESHOLD, true));
+        assert!(!is_task_boundary(WEAK_THRESHOLD, false));
+        assert!(!is_task_boundary(0.9, true));
+    }
+
+    #[test]
+    fn context_keeps_the_newest_assistant_turns_first() {
+        let long = "y".repeat(600);
+        let turns = [
+            ("assistant", "old"),
+            ("user", "question"),
+            ("assistant", "mid"),
+            ("assistant", long.as_str()),
+        ];
+        let (text, summary) = context_and_summary(turns.iter().copied(), 2);
+        assert_eq!(text, format!("{}\n---\nmid", "y".repeat(500)));
+        assert_eq!(summary, "y".repeat(200));
+        assert_eq!(
+            context_and_summary([("user", "q")].into_iter(), 5),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn the_prompt_is_embedded_with_its_repository_name() {
+        assert_eq!(
+            embed_text_for_prompt("fix it", Path::new("/work/pixel")),
+            "[prompt] [pixel] user: fix it"
+        );
+        assert_eq!(
+            embed_text_for_prompt("x", Path::new("/")),
+            "[prompt] [-] user: x"
+        );
+    }
+
+    #[test]
+    fn a_completion_in_the_home_log_within_the_lookback_is_a_signal() {
+        let home = scratch("completion-home");
+        let cwd = Path::new("/work/pixel-completion-fixture");
+        let now = 10_000_000;
+        assert!(!completion_signal_in(cwd, &home, now), "no log");
+        std::fs::create_dir_all(home.join(".pixel")).unwrap();
+        let recent = entry(
+            now - 1_000,
+            "publish",
+            "/work/pixel-completion-fixture",
+            "ok",
+        );
+        std::fs::write(home.join(".pixel/actions.jsonl"), format!("{recent}\n")).unwrap();
+        assert!(completion_signal_in(cwd, &home, now));
+        let stale_now = now + COMPLETION_LOOKBACK_SECS * 1000;
+        assert!(
+            !completion_signal_in(cwd, &home, stale_now),
+            "past the lookback"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn action_log_reads_only_its_tail() {
         let dir = scratch("action-log-tail");

@@ -48,6 +48,7 @@ mod evaluate_cmd;
 mod execution_brief;
 mod guard;
 mod hook_input;
+mod impact_read;
 mod index_cmd;
 mod install_intro;
 mod operation_metrics;
@@ -561,6 +562,9 @@ enum Command {
         workspace: bool,
         #[arg(long)]
         no_daemon: bool,
+        /// Read a fresh existing graph within 1500 ms; never start a daemon or refresh indexes.
+        #[arg(long, conflicts_with = "workspace")]
+        no_refresh: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1143,31 +1147,33 @@ enum Command {
     // -----------------------------------------------------------------
     // M5/M6 — install / doctor / migrate / hook
     // -----------------------------------------------------------------
-    /// Idempotently deploy the agent prompt, the Claude shell wrapper and the
-    /// Codex developer_instructions config key.
+    /// Idempotently deploy agent integrations while preserving native retrieval.
     Install {
         #[arg(long)]
         json: bool,
-        /// Shell to install the `claude` wrapper block for
-        /// (default: $SHELL). Pass e.g. `fish` when the invoking process
-        /// does not run under your login shell.
+        /// Shell whose profile is checked for the retired `claude()` wrapper
+        /// (default: account login shell, then $SHELL). Pass e.g. `fish`
+        /// to select the profile explicitly.
         #[arg(long)]
         shell: Option<String>,
         /// Install project-local integrations into this repository only,
-        /// skipping every global step: `.claude/settings.local.json` (Claude
-        /// guard; `.claude/pixel-rtk-hooks.json` keeps an RTK hook it takes
-        /// over), `.codex/config.toml`, `.codex/hooks.json` (composed guard,
-        /// skipped when git tracks it) + `.codex/pixel-composed-guard-backup.json`,
-        /// `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`,
-        /// and a Pixel-first retrieval block in the root `AGENTS.md`. The block
-        /// preserves surrounding instructions and never blocks native tools.
+        /// skipping every global step. Remove retired Claude and Codex
+        /// retrieval hooks, restore adopted RTK/foreign hooks from matching
+        /// backups, and preserve independent task controls. Tracked Codex
+        /// hooks are left alone. Remove the retired Devin guard and Pi project
+        /// extension, and retired Pixel retrieval blocks from AGENTS.md and
+        /// Codex config. Adds no guard. Foreign instructions and native tools
+        /// are preserved.
+        /// Files: `.claude/settings.local.json`, `.claude/pixel-rtk-hooks.json`,
+        /// `.codex/config.toml`, `.codex/hooks.json`,
+        /// `.codex/pixel-composed-guard-backup.json`, and `AGENTS.md`.
         /// Machine-specific files naming this binary go into `info/exclude`.
         #[arg(long)]
         repo: Option<PathBuf>,
     },
     /// Remove everything `pixel install` wrote: managed blocks from
     /// agent-config files, hook entries from all settings files, hook
-    /// scripts, the pi guard extension, the rule source file, and the
+    /// scripts, the Pi impact package, the rule source file, and the
     /// pixel binary itself. Idempotent: safe to re-run.
     Uninstall {
         #[arg(long)]
@@ -2295,7 +2301,15 @@ fn graph_build_notice(info: &Value) -> String {
 }
 
 fn write_stdout(text: &str) -> Result<(), String> {
-    match operation_metrics::Stdout(std::io::stdout().lock()).write_all(text.as_bytes()) {
+    write_text(
+        &mut operation_metrics::Stdout(std::io::stdout().lock()),
+        text,
+    )
+}
+
+/// Write `text` whole; a reader that closed its end is not a failure.
+fn write_text(out: &mut impl Write, text: &str) -> Result<(), String> {
+    match out.write_all(text.as_bytes()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(format!("write stdout: {error}")),
@@ -3289,6 +3303,33 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
     }
 }
 
+/// The first line `find-code` prints for one match: where, what kind and
+/// score, the matched text, and the handler a route concept records
+/// (`→ admin/orders#create (Admin::OrdersController#create)`).
+fn resolve_match_line(m: &Value) -> String {
+    let path = m.get("path").and_then(Value::as_str).unwrap_or("?");
+    let start_line = m.get("start_line").and_then(Value::as_u64).unwrap_or(0);
+    let kind = m.get("kind").and_then(Value::as_str).unwrap_or("");
+    let score = m.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+    let raw = m
+        .get("raw")
+        .or_else(|| m.get("norm"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    // Other kinds keep their own bookkeeping in `detail` (`component`,
+    // `key`, the route text again): only a route's handler is news.
+    let handler = m
+        .get("detail")
+        .and_then(Value::as_str)
+        .filter(|d| kind == "route" && !d.is_empty());
+    match handler {
+        Some(detail) => {
+            format!("{path}:{start_line} ({kind}, score: {score:.2}) {raw} → {detail}\n")
+        }
+        None => format!("{path}:{start_line} ({kind}, score: {score:.2}) {raw}\n"),
+    }
+}
+
 fn print_resolve_human(data: &Value) -> Result<(), String> {
     operation_metrics::observe(data);
     let Some(matches) = data.get("matches").and_then(Value::as_array) else {
@@ -3300,19 +3341,7 @@ fn print_resolve_human(data: &Value) -> Result<(), String> {
     }
     let mut output = String::new();
     for m in matches {
-        let path = m.get("path").and_then(Value::as_str).unwrap_or("?");
-        let start_line = m.get("start_line").and_then(Value::as_u64).unwrap_or(0);
-        let kind = m.get("kind").and_then(Value::as_str).unwrap_or("");
-        let score = m.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-        let raw = m
-            .get("raw")
-            .or_else(|| m.get("norm"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-
-        output.push_str(&format!(
-            "{path}:{start_line} ({kind}, score: {score:.2}) {raw}\n"
-        ));
+        output.push_str(&resolve_match_line(m));
         if let Some(notes) = m.get("notes").and_then(Value::as_array) {
             for n in notes {
                 output.push_str(&format!(
@@ -4543,20 +4572,19 @@ fn bounded_result_note(basis: &str, cap_hits: &[Value], truncation_warned: bool)
     (!rest.is_empty()).then(|| format!("{tier}; caps: {}", rest.join("; ")))
 }
 
-/// One stderr line naming the deployed prompts that differ from this
-/// binary's copies. Nothing outside `pixel doctor` said so, and every agent kept the
-/// old command map after an upgrade until someone reran the install.
+/// One stderr line naming the prompts an earlier `pixel install` deployed:
+/// this release deploys none, and nothing outside `pixel doctor` said so.
 fn stale_prompt_note(stale: &[&str]) -> Option<String> {
     if stale.is_empty() {
         return None;
     }
     let (verb, pronoun) = if stale.len() == 1 {
-        ("differs", "it")
+        ("is", "it")
     } else {
-        ("differ", "them")
+        ("are", "them")
     };
     Some(format!(
-        "note: {} deployed by `pixel install` {verb} from the copy in this pixel ({}); agents read the deployed one — run `pixel install` to update {pronoun}\n",
+        "note: {} deployed by an earlier `pixel install` {verb} retired in this pixel ({}) — run `pixel install` to remove {pronoun}\n",
         stale.join(" and "),
         env!("CARGO_PKG_VERSION")
     ))
@@ -4646,7 +4674,7 @@ fn run() -> Result<(), String> {
     if checks_deployed_prompts(&command_label, protected, developer_build)
         && let Some(home) = std::env::var_os("HOME")
         && let Some(note) =
-            stale_prompt_note(&pixel_install::install::stale_prompts(Path::new(&home)))
+            stale_prompt_note(&pixel_install::install::retired_prompts(Path::new(&home)))
     {
         eprint!("{note}");
     }
@@ -5416,6 +5444,7 @@ fn run_command(
             depth,
             workspace,
             no_daemon,
+            no_refresh,
             json,
         } => {
             if call_guard_check("impact", &format!("{uid_or_name} {}", path.display())) {
@@ -5425,6 +5454,11 @@ fn run_command(
                 DirectionArg::Upstream => "upstream",
                 DirectionArg::Downstream => "downstream",
             };
+            if no_refresh {
+                let data = impact_read::query(path, uid_or_name, dir, depth)?;
+                finish_graph_cmd(data, json, |_| None)?;
+                return Ok(());
+            }
             if workspace {
                 let results = workspace_cmd::fan_out(&path, &|| Request::Impact {
                     uid_or_name: uid_or_name.clone(),
@@ -6485,11 +6519,6 @@ fn run_command(
             let options = discover_root(&path).map(|root| pixel_install::doctor::DoctorOptions {
                 repo_root: Some(root),
                 shell,
-                // Hand the doctor this binary's REAL clap parser so the
-                // rule-vs-binary parity check dry-runs every `pixel …` line
-                // documented in the installed rule text against the actual
-                // CLI definition — documented-but-rejected syntax goes red.
-                syntax_validator: Some(validate_cli_syntax),
                 only,
                 skip,
                 ..Default::default()
@@ -6587,10 +6616,9 @@ fn run_command(
                 // `sync`) are not commands: `pixel update` is fast-forward,
                 // `pixel sync` is fetch.
                 let ops = session_commands();
-                // The usage doctrine is a shared constant beside the op
-                // registry (pixel-proto), so the injected text, the doctor's
-                // scenario-consistency check, and the rule file can never
-                // silently disagree on the five mandatory scenarios.
+                // The usage note is a shared constant beside the op registry
+                // (pixel-proto): it describes Pixel without directing the
+                // agent away from its native tools.
                 let mut pixel = serde_json::json!({
                     "capabilities": ops,
                     "protocol_version": PROTOCOL_VERSION,
@@ -7376,6 +7404,33 @@ fn render_locate(locate: &Value) -> String {
     out
 }
 
+/// How many trailing log entries `pixel log` reads. Over-fetch when
+/// filtering to errors so `limit` still means "the last N errors", not "the
+/// last N entries, some of which happen to be errors".
+fn log_fetch_count(limit: usize, errors_only: bool) -> usize {
+    if errors_only {
+        limit.max(1) * 20
+    } else {
+        limit.max(1)
+    }
+}
+
+/// The last `limit` of the tailed entries, errors only when asked.
+fn select_log_events(
+    mut events: Vec<pixel_actionlog::ActionEvent>,
+    limit: usize,
+    errors_only: bool,
+) -> Vec<pixel_actionlog::ActionEvent> {
+    if errors_only {
+        events.retain(|e| e.outcome == pixel_actionlog::Outcome::Error);
+    }
+    if events.len() > limit {
+        let start = events.len() - limit;
+        events.drain(0..start);
+    }
+    events
+}
+
 /// `pixel log` — the self-assessment surface over the async action log every
 /// pixel invocation writes to `<root>/.pixel/actions.jsonl`.
 fn run_log(
@@ -7400,22 +7455,9 @@ fn run_log(
             Err(e) => Err(format!("remove {}: {e}", log_path.display())),
         };
     }
-    // Over-fetch when filtering to errors so `limit` still means "the last
-    // N errors", not "the last N entries, some of which happen to be errors".
-    let fetch = if errors_only {
-        limit.max(1) * 20
-    } else {
-        limit.max(1)
-    };
-    let mut events = pixel_actionlog::tail(&log_path, fetch)
+    let tailed = pixel_actionlog::tail(&log_path, log_fetch_count(limit, errors_only))
         .map_err(|e| format!("read {}: {e}", log_path.display()))?;
-    if errors_only {
-        events.retain(|e| e.outcome == pixel_actionlog::Outcome::Error);
-    }
-    if events.len() > limit {
-        let start = events.len() - limit;
-        events.drain(0..start);
-    }
+    let events = select_log_events(tailed, limit, errors_only);
     if json {
         for e in &events {
             println!("{}", serde_json::to_string(e).map_err(|e| e.to_string())?);
@@ -7453,17 +7495,56 @@ fn run_log(
     Ok(())
 }
 
+/// Per-command aggregate of `pixel savings`: invocations, pool chars,
+/// snippet chars.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SavingsAgg {
+    count: u64,
+    pool: u64,
+    snippet: u64,
+}
+
+/// The events at or after `cutoff_ms` (all of them without a cutoff).
+fn savings_window(
+    events: &[pixel_actionlog::ActionEvent],
+    cutoff_ms: Option<i64>,
+) -> Vec<pixel_actionlog::ActionEvent> {
+    events
+        .iter()
+        .filter(|e| cutoff_ms.is_none_or(|c| e.ts_ms >= c))
+        .cloned()
+        .collect()
+}
+
+/// Pool and snippet chars per command, over the events that recorded both.
+fn savings_by_command(
+    events: &[pixel_actionlog::ActionEvent],
+) -> std::collections::BTreeMap<String, SavingsAgg> {
+    let mut by_cmd = std::collections::BTreeMap::<String, SavingsAgg>::new();
+    for e in events {
+        let (Some(snippet), Some(pool)) = (e.snippet_cap_chars, e.pool_chars) else {
+            continue; // not retrieval-shaped (or volumes not recorded)
+        };
+        let agg = by_cmd.entry(e.command.clone()).or_default();
+        agg.count += 1;
+        agg.pool = agg.pool.saturating_add(pool);
+        agg.snippet = agg.snippet.saturating_add(snippet);
+    }
+    by_cmd
+}
+
+/// The share of the pool the snippets did not return; 0 for an empty pool.
+fn savings_ratio(snippet: u64, pool: u64) -> f64 {
+    if pool > 0 {
+        1.0 - (snippet as f64 / pool as f64)
+    } else {
+        0.0
+    }
+}
+
 /// Preserve legacy snippet/pool reports, separately aggregate versioned
 /// invocation metrics. Old measurements are never silently reclassified as a workflow version.
 fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), String> {
-    use std::collections::BTreeMap;
-    /// Per-command aggregate: invocations, pool chars, snippet chars.
-    #[derive(Default)]
-    struct Agg {
-        count: u64,
-        pool: u64,
-        snippet: u64,
-    }
     let root = discover_root(path)?;
     let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
     // Over-fetch; savings is a lightweight aggregate read.
@@ -7476,46 +7557,19 @@ fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), 
                 .saturating_mul(3_600_000),
         )
     });
-    let filtered: Vec<_> = events
-        .iter()
-        .filter(|e| cutoff_ms.is_none_or(|c| e.ts_ms >= c))
-        .cloned()
-        .collect();
+    let filtered = savings_window(&events, cutoff_ms);
     let workflow_metrics = pixel_actionlog::summarize_metrics(&filtered);
-    // Aggregate per command: pool chars, snippet chars, count.
-    let mut by_cmd: BTreeMap<String, Agg> = BTreeMap::new();
-    for e in &events {
-        if let Some(c) = cutoff_ms
-            && e.ts_ms < c
-        {
-            continue;
-        }
-        let (Some(snippet), Some(pool)) = (e.snippet_cap_chars, e.pool_chars) else {
-            continue; // not retrieval-shaped (or volumes not recorded)
-        };
-        let agg = by_cmd.entry(e.command.clone()).or_default();
-        agg.count += 1;
-        agg.pool = agg.pool.saturating_add(pool);
-        agg.snippet = agg.snippet.saturating_add(snippet);
-    }
+    let by_cmd = savings_by_command(&filtered);
 
     let tot_pool: u64 = by_cmd.values().map(|a| a.pool).sum();
     let tot_snippet: u64 = by_cmd.values().map(|a| a.snippet).sum();
-    let overall = if tot_pool > 0 {
-        1.0 - (tot_snippet as f64 / tot_pool as f64)
-    } else {
-        0.0
-    };
+    let overall = savings_ratio(tot_snippet, tot_pool);
 
     if json {
         let rows: Vec<serde_json::Value> = by_cmd
             .iter()
             .map(|(cmd, a)| {
-                let ratio = if a.pool > 0 {
-                    1.0 - (a.snippet as f64 / a.pool as f64)
-                } else {
-                    0.0
-                };
+                let ratio = savings_ratio(a.snippet, a.pool);
                 serde_json::json!({
                     "command": cmd,
                     "calls": a.count,
@@ -7550,11 +7604,7 @@ fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), 
         "command", "calls", "pool_chars", "snippet_chars", "savings"
     );
     for (cmd, a) in &by_cmd {
-        let ratio = if a.pool > 0 {
-            1.0 - (a.snippet as f64 / a.pool as f64)
-        } else {
-            0.0
-        };
+        let ratio = savings_ratio(a.snippet, a.pool);
         println!(
             "{:<14} {:>5}  {:>12}  {:>14}  {:>6.1}%",
             cmd,
@@ -7705,6 +7755,9 @@ fn normalize_commit_message(raw: &str) -> Result<String, String> {
     Ok(text.to_string())
 }
 
+/// Dry-runs one `pixel …` argv against the real clap definition; the
+/// prompt-asset parity tests hold the bundled prompt's commands to it.
+#[cfg(test)]
 fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
     let args = args.to_vec();
     std::thread::Builder::new()
@@ -7721,6 +7774,7 @@ fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
 /// Clap's error paragraph on one line: the first line alone would say
 /// "the following required arguments were not provided:" without naming
 /// them, and the name is what a doctor report or a failing test needs.
+#[cfg(test)]
 fn parse_error_summary(rendered: &str) -> String {
     let summary = rendered
         .lines()
@@ -7740,6 +7794,7 @@ fn parse_error_summary(rendered: &str) -> String {
 /// shape parses only because the extra value fell into another slot, a
 /// defaulted `PATH` or a multi-value positional after a one-value flag.
 /// `None` when the argv has no sentinel or both values bound to one argument.
+#[cfg(test)]
 fn variadic_sentinel_misfit(args: &[String]) -> Option<String> {
     use pixel_install::doctor::VARIADIC_SENTINEL;
     let sentinel = args.iter().position(|a| a == VARIADIC_SENTINEL)?;
@@ -8955,15 +9010,15 @@ mod renamed_command_tests {
         assert_eq!(
             one,
             format!(
-                "note: agent-prompt.md deployed by `pixel install` differs from the copy in this pixel ({}); agents read the deployed one — run `pixel install` to update it\n",
+                "note: agent-prompt.md deployed by an earlier `pixel install` is retired in this pixel ({}) — run `pixel install` to remove it\n",
                 env!("CARGO_PKG_VERSION")
             )
         );
         let both = stale_prompt_note(&["agent-prompt.md", "subagent-prompt.md"]).unwrap();
         assert!(
             both.starts_with(
-                "note: agent-prompt.md and subagent-prompt.md deployed by `pixel install` differ from"
-            ) && both.ends_with("update them\n"),
+                "note: agent-prompt.md and subagent-prompt.md deployed by an earlier `pixel install` are retired"
+            ) && both.ends_with("remove them\n"),
             "{both}"
         );
         assert_eq!(both.lines().count(), 1, "{both}");

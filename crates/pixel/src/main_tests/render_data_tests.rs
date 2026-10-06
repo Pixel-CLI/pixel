@@ -243,3 +243,102 @@ fn compact_repo_state_drops_the_clean_list_and_keeps_the_count() {
     compact_repo_state(&mut bare);
     assert_eq!(bare, json!([]));
 }
+
+fn logged(command: &str, ts_ms: i64, error: bool) -> pixel_actionlog::ActionEvent {
+    let mut e = pixel_actionlog::ActionEvent::new(command, "");
+    e.ts_ms = ts_ms;
+    if error {
+        e.outcome = pixel_actionlog::Outcome::Error;
+    }
+    e
+}
+
+#[test]
+fn log_keeps_the_last_n_entries_or_the_last_n_errors() {
+    assert_eq!(log_fetch_count(2, true), 40);
+    assert_eq!(log_fetch_count(0, true), 20);
+    assert_eq!(log_fetch_count(3, false), 3);
+    assert_eq!(log_fetch_count(0, false), 1);
+    let events = vec![
+        logged("a", 1, true),
+        logged("b", 2, false),
+        logged("c", 3, true),
+        logged("d", 4, true),
+        logged("e", 5, false),
+    ];
+    let names =
+        |v: Vec<pixel_actionlog::ActionEvent>| v.into_iter().map(|e| e.command).collect::<Vec<_>>();
+    assert_eq!(
+        names(select_log_events(events.clone(), 2, true)),
+        ["c", "d"]
+    );
+    assert_eq!(
+        names(select_log_events(events.clone(), 2, false)),
+        ["d", "e"]
+    );
+    assert_eq!(
+        names(select_log_events(events.clone(), 3, true)),
+        ["a", "c", "d"]
+    );
+    assert_eq!(names(select_log_events(events, 9, false)).len(), 5);
+}
+
+#[test]
+fn savings_count_calls_within_the_window_and_rate_the_pool() {
+    let mut events = Vec::new();
+    for (ts, pool) in [(100, 1_000), (200, 400), (300, 600)] {
+        let mut e = logged("find-code", ts, false);
+        e.pool_chars = Some(pool);
+        e.snippet_cap_chars = Some(100);
+        events.push(e);
+    }
+    events.push(logged("status", 300, false));
+    let window = savings_window(&events, Some(200));
+    assert_eq!(
+        window.iter().map(|e| e.ts_ms).collect::<Vec<_>>(),
+        [200, 300, 300]
+    );
+    assert_eq!(savings_window(&events, None).len(), 4);
+    let by_cmd = savings_by_command(&window);
+    assert_eq!(by_cmd.len(), 1);
+    assert_eq!(
+        by_cmd["find-code"],
+        SavingsAgg {
+            count: 2,
+            pool: 1_000,
+            snippet: 200
+        }
+    );
+    assert!((savings_ratio(200, 1_000) - 0.8).abs() < 1e-9);
+    assert!(savings_ratio(5, 0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn a_find_code_match_line_shows_a_route_handler_only_when_recorded() {
+    let route = json!({
+        "path": "config/routes.rb", "start_line": 3, "kind": "route", "score": 1.0,
+        "raw": "POST /admin/orders",
+        "detail": "admin/orders#create (Admin::OrdersController#create)",
+    });
+    assert_eq!(
+        resolve_match_line(&route),
+        "config/routes.rb:3 (route, score: 1.00) POST /admin/orders → admin/orders#create (Admin::OrdersController#create)\n"
+    );
+    let plain = json!({
+        "path": "src/a.ts", "start_line": 7, "kind": "string", "score": 0.5,
+        "raw": "hello world again", "detail": "",
+    });
+    assert_eq!(
+        resolve_match_line(&plain),
+        "src/a.ts:7 (string, score: 0.50) hello world again\n"
+    );
+    // Another kind's detail is bookkeeping, never printed as a handler.
+    let component = json!({
+        "path": "src/b.tsx", "start_line": 2, "kind": "component", "score": 0.9,
+        "raw": "Button", "detail": "component",
+    });
+    assert_eq!(
+        resolve_match_line(&component),
+        "src/b.tsx:2 (component, score: 0.90) Button\n"
+    );
+}

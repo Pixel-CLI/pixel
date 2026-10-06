@@ -284,6 +284,7 @@ def load_result(path: Path, cli: str):
         events = events_of(path)
         texts, turns, usage_seen, turn_failed, stream_error = [], 0, False, False, False
         totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+        usage_complete = {key: True for key in totals}
         for ev in events:
             if ev.get("type") == "item.completed":
                 item = ev.get("item") or {}
@@ -297,8 +298,16 @@ def load_result(path: Path, cli: str):
                 usage = ev.get("usage")
                 if isinstance(usage, dict):
                     usage_seen = True
+                else:
                     for key in totals:
-                        totals[key] += usage.get(key) or 0
+                        usage_complete[key] = False
+                    continue
+                for key in totals:
+                    value = usage.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        totals[key] += value
+                    else:
+                        usage_complete[key] = False
             elif ev.get("type") == "turn.failed":
                 turn_failed = True
             elif ev.get("type") == "error":
@@ -309,10 +318,13 @@ def load_result(path: Path, cli: str):
         metrics = {"answered": bool(answer.strip()) and turns >= 1 and not turn_failed
                                and not stream_error,
                    "turns": turns or None,
-                   "input_tokens": totals["input_tokens"] if usage_seen else None,
-                   "gen_tokens": totals["output_tokens"] if usage_seen else None,
+                   "input_tokens": totals["input_tokens"]
+                   if usage_seen and usage_complete["input_tokens"] else None,
+                   "gen_tokens": totals["output_tokens"]
+                   if usage_seen and usage_complete["output_tokens"] else None,
                    # codex counts cached tokens inside input_tokens
-                   "cache_read_tokens": totals["cached_input_tokens"] if usage_seen else None,
+                   "cache_read_tokens": totals["cached_input_tokens"]
+                   if usage_seen and usage_complete["cached_input_tokens"] else None,
                    "cache_creation_tokens": None, "cost_usd": None,
                    "transcript_model": None,
                    **tool_metrics(codex_calls(events))}

@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Antigravity"
-description: "What pixel install deploys into Antigravity's config: the Pixel plugin, its activation and its guard hooks, how to check the wiring and how to remove it."
+description: "Antigravity keeps its native tools: what pixel install removes from its config, and how pixel doctor checks that nothing of Pixel's is left."
 agent: "antigravity"
 ---
 

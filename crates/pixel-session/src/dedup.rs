@@ -193,6 +193,14 @@ mod tests {
     }
 
     #[test]
+    fn normalize_replaces_hex_run_bounded_by_punctuation_only() {
+        assert_eq!(
+            normalize_message("id deadbeefcafe1234. key deadbeefcafe1234zz"),
+            "id <hex>. key deadbeefcafe1234zz"
+        );
+    }
+
+    #[test]
     fn normalize_collapses_whitespace() {
         assert_eq!(normalize_message("a   b\n c"), "a b c");
     }

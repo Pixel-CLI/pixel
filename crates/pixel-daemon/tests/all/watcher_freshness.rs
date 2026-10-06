@@ -129,6 +129,7 @@ struct GatedCorpus {
     service: Service,
     started: mpsc::Sender<()>,
     release: mpsc::Receiver<()>,
+    ready: mpsc::Sender<Result<(), String>>,
 }
 
 impl Corpus for GatedCorpus {
@@ -159,10 +160,12 @@ impl Corpus for GatedCorpus {
     // wrapper forwards the callback.
     fn watch_ready(&mut self) {
         self.service.watch_ready();
+        let _ = self.ready.send(Ok(()));
     }
 
     fn watcher_error(&mut self, error: &str) {
         self.service.watcher_error(error);
+        let _ = self.ready.send(Err(error.to_owned()));
     }
 }
 
@@ -172,6 +175,7 @@ fn a_file_changed_during_a_held_request_is_visible_to_the_next_request() {
     let sock = socket_path(&dir);
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let served = dir.clone();
     let daemon = std::thread::spawn(move || {
         // Built on the daemon's own thread: `Service` is not `Send` (it
@@ -181,8 +185,17 @@ fn a_file_changed_during_a_held_request_is_visible_to_the_next_request() {
             service,
             started: started_tx,
             release: release_rx,
+            ready: ready_tx,
         })
     });
+
+    // The daemon accepts requests before its watcher thread registers. Wait
+    // for registration so the write below is guaranteed to occur under watch.
+    match ready_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("watcher failed before becoming ready: {error}"),
+        Err(error) => panic!("watcher did not become ready: {error}"),
+    }
 
     // Warm the daemon's cached graph handle: the stale answer this test
     // rules out is the *warm* store, which `ensure_graph` would otherwise
