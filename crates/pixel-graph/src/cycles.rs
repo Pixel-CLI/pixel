@@ -505,8 +505,9 @@ pub fn enumerate(
             };
 
             if edge_ix < edges.len() {
-                // Push current state back with cached edges, then follow edge.
-                call_stack.push((node, edge_ix + 1, Some(edges.clone())));
+                // Read next before pushing the frame, then move edges into it.
+                let next = edges[edge_ix].dst_id;
+                call_stack.push((node, edge_ix + 1, Some(edges)));
 
                 // Check edge budget.
                 if coverage.edges_followed >= u64::from(req.budget.max_edges) {
@@ -514,9 +515,7 @@ pub fn enumerate(
                     break 'outer;
                 }
 
-                let edge = &edges[edge_ix];
                 coverage.edges_followed += 1;
-                let next = edge.dst_id;
 
                 if let std::collections::hash_map::Entry::Vacant(e) = index.entry(next) {
                     // Check node budget before admitting a new node.
