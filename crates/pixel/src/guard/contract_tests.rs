@@ -669,9 +669,17 @@ fn pixel_invocation_should_be_found_when_behind_launchers_paths_or_wrappers() {
     }
 }
 
+fn invocation(sub: &str, args: &[&str], c_dir: Option<&str>) -> GitInvocation {
+    GitInvocation {
+        sub: sub.to_string(),
+        args: strings(args),
+        c_dir: c_dir.map(PathBuf::from),
+    }
+}
+
 /// Every `git <sub>` of a compound command is found past the global flags
-/// that take a value (`-C`, `-c`) and those that do not; a bare `git` names
-/// no subcommand.
+/// that take a value (`-C`, `-c`) and those that do not, and keeps the `-C`
+/// directory it skipped; a bare `git` names no subcommand.
 #[test]
 fn git_invocations_should_skip_global_flags_when_finding_the_subcommand() {
     assert_eq!(
@@ -679,17 +687,37 @@ fn git_invocations_should_skip_global_flags_when_finding_the_subcommand() {
             "git -C /repo -c core.pager=cat --no-pager reset --hard; ls | git stash drop"
         ),
         vec![
-            ("reset".to_string(), strings(&["--hard"])),
-            ("stash".to_string(), strings(&["drop"])),
+            invocation("reset", &["--hard"], Some("/repo")),
+            invocation("stash", &["drop"], None),
         ]
+    );
+    assert_eq!(
+        git_invocations("git -c rebase.autosquash=false rebase main"),
+        vec![invocation("rebase", &["main"], None)],
+        "`-c` takes its value but names no directory"
     );
     assert_eq!(git_invocations("git"), vec![]);
     assert_eq!(git_invocations("git --no-pager"), vec![]);
+    assert_eq!(git_invocations("git -C"), vec![]);
     assert_eq!(
         git_invocations("echo git status"),
-        vec![("status".to_string(), vec![])]
+        vec![invocation("status", &[], None)]
     );
     assert_eq!(git_invocations("ls -la"), vec![]);
+}
+
+/// Repeated `-C` flags compose in order the way git reads them: a relative
+/// one goes under the previous, an absolute one starts over.
+#[test]
+fn git_invocations_should_compose_repeated_c_flags_like_git() {
+    assert_eq!(
+        git_invocations("git -C a -C b rebase main"),
+        vec![invocation("rebase", &["main"], Some("a/b"))]
+    );
+    assert_eq!(
+        git_invocations("git -C a -C /abs -c x=y -C c status"),
+        vec![invocation("status", &[], Some("/abs/c"))]
+    );
 }
 
 /// A short-flag cluster carries a letter only when it is a real cluster:
@@ -816,25 +844,20 @@ fn cd_and_git_c_targets_should_resolve_only_when_the_directory_exists() {
     assert_eq!(extract_cd_target("cd file && ls", &root), None);
 
     assert_eq!(
-        extract_git_c_path(&strings(&["-C", "other", "rebase"]), &root),
+        resolve_dir(Path::new("other"), &root),
         Some(root.join("other"))
     );
     assert_eq!(
-        extract_git_c_path(
-            &strings(&["-C", &root.join("sub dir").display().to_string()]),
-            Path::new("/")
-        ),
+        resolve_dir(&root.join("sub dir"), Path::new("/")),
         Some(root.join("sub dir"))
     );
-    assert_eq!(extract_git_c_path(&strings(&["-C"]), &root), None);
     assert_eq!(
-        extract_git_c_path(&strings(&["-C", "missing"]), &root),
-        None
+        resolve_dir(Path::new("other/../sub dir"), &root),
+        Some(root.join("sub dir")),
+        "the directory is canonicalized"
     );
-    assert_eq!(
-        extract_git_c_path(&strings(&["rebase", "main"]), &root),
-        None
-    );
+    assert_eq!(resolve_dir(Path::new("missing"), &root), None);
+    assert_eq!(resolve_dir(Path::new("file"), &root), None);
 }
 
 /// A conflict reported by `pixel sync-branch` is the one escape hatch for
@@ -1743,32 +1766,99 @@ fn branch_delete_is_denied_only_when_forced() {
     );
 }
 
-/// A raw `git rebase` passes only when the repository it is pointed at by
-/// `cd` has a reported reconcile conflict.
+/// A scratch git repository with an empty `.pixel/`, so the reconcile
+/// marker can be written into it.
+fn rebase_repo(name: &str) -> PathBuf {
+    let root = scratch(name);
+    let out = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git init: {out:?}");
+    std::fs::create_dir_all(root.join(".pixel")).unwrap();
+    root
+}
+
+/// A raw `git rebase` passes only when the repository it is pointed at, by
+/// `cd` or by `git -C`, has a reported reconcile conflict.
 #[test]
 fn rebase_escapes_the_substitute_only_into_a_reported_conflict() {
-    let root = scratch("rebase-escape-root");
-    std::fs::create_dir_all(root.join(".pixel")).unwrap();
-    let alt = scratch("rebase-escape-alt");
-    std::fs::create_dir_all(alt.join(".pixel")).unwrap();
-    // Only the `cd` route: `git_invocations` drops the `-C` value from the
-    // args it hands over, so `extract_git_c_path` never sees one here.
+    let root = rebase_repo("rebase-escape-root");
+    let alt = rebase_repo("rebase-escape-alt");
     let via_cd = format!("cd {} && git rebase main", alt.display());
-    assert!(
-        git_mutation_substitute_lines(&via_cd, Some(&root), &root).is_some(),
-        "`{via_cd}` with no conflict is substituted"
-    );
+    let via_c = format!("git -C {} rebase main", alt.display());
+    for cmd in [&via_cd, &via_c] {
+        assert!(
+            git_mutation_substitute_lines(cmd, Some(&root), &root).is_some(),
+            "`{cmd}` with no conflict is substituted"
+        );
+    }
     std::fs::write(alt.join(".pixel/reconcile-conflict.json"), "{}").unwrap();
-    assert_eq!(
-        git_mutation_substitute_lines(&via_cd, Some(&root), &root),
-        None,
-        "`{via_cd}` resolves a reported conflict"
-    );
+    for cmd in [&via_cd, &via_c] {
+        assert_eq!(
+            git_mutation_substitute_lines(cmd, Some(&root), &root),
+            None,
+            "`{cmd}` resolves a reported conflict"
+        );
+    }
     let add = format!("cd {} && git add src/lib.rs", alt.display());
     assert!(
         git_mutation_substitute_lines(&add, Some(&root), &root).is_some(),
         "only a rebase takes the conflict escape"
     );
+}
+
+/// The `-C` target of a rebase is resolved against the hook's cwd (or the
+/// `cd` before it) and canonicalized, through a `-c` flag; a clean, missing
+/// or same-as-root target is still substituted.
+#[test]
+fn rebase_escape_should_resolve_the_c_directory_like_git() {
+    let root = rebase_repo("rebase-c-root");
+    let parent = scratch("rebase-c-parent");
+    let alt = parent.join("alt");
+    std::fs::create_dir_all(alt.join(".pixel")).unwrap();
+    let clean = rebase_repo("rebase-c-clean");
+    std::fs::write(alt.join(".pixel/reconcile-conflict.json"), "{}").unwrap();
+
+    for (cmd, cwd) in [
+        ("git -C alt rebase main".to_string(), &parent),
+        ("git -C . -C alt rebase main".to_string(), &parent),
+        (
+            "git -c core.pager=cat -C alt/../alt rebase main".to_string(),
+            &parent,
+        ),
+        (
+            format!("cd {} && git -C alt rebase main", parent.display()),
+            &root,
+        ),
+        (
+            format!("git -C {} -C alt rebase main", parent.display()),
+            &root,
+        ),
+    ] {
+        assert_eq!(
+            git_mutation_substitute_lines(&cmd, Some(&root), cwd),
+            None,
+            "`{cmd}` in {} reaches the conflicted repository",
+            cwd.display()
+        );
+    }
+
+    for cmd in [
+        format!("git -C {} rebase main", clean.display()),
+        format!("git -C {} rebase main", root.display()),
+        "git -C missing rebase main".to_string(),
+        // Without the `cd`, `alt` is looked up under the root, not `parent`.
+        "git -C alt rebase main".to_string(),
+    ] {
+        assert!(
+            git_mutation_substitute_lines(&cmd, Some(&root), &root).is_some(),
+            "`{cmd}` is still substituted"
+        );
+    }
 }
 
 /// `git commit` flags map onto the substitute's fields, long and short.
