@@ -414,9 +414,8 @@ fn no_call_edges_puts_every_region_in_layer_zero() {
 }
 
 #[test]
-fn layer_witness_names_regions_and_call_edges() {
+fn layer_witness_should_name_regions_and_call_edges_when_ordered() {
     // a -> b -> c: layer 0 = {c}, layer 1 = {b}, layer 2 = {a}.
-    // The witness for layer 1 must name b and the call edge b -> c.
     let inputs = mk_inputs(
         vec![
             region("a.rs#alpha#function", "alpha", "a.rs", 1, 9),
@@ -431,32 +430,26 @@ fn layer_witness_names_regions_and_call_edges() {
     );
     let report = compute_regions(inputs);
 
-    // Layer 0: sink — names the region, no call edges.
-    let l0 = &report.layers[0];
-    assert_eq!(l0.layer, 0);
-    assert!(l0.witness.contains("c.rs#gamma#function"));
-    assert!(l0.witness.contains("sink"));
-
-    // Layer 1: names b and the call edge b -> c.
-    let l1 = &report.layers[1];
-    assert_eq!(l1.layer, 1);
-    assert!(l1.witness.contains("b.rs#beta#function"));
-    assert!(
-        l1.witness
-            .contains("b.rs#beta#function -> c.rs#gamma#function"),
-        "witness must name the call edge: {}",
-        l1.witness
-    );
-
-    // Layer 2: names a and the call edge a -> b.
-    let l2 = &report.layers[2];
-    assert_eq!(l2.layer, 2);
-    assert!(l2.witness.contains("a.rs#alpha#function"));
-    assert!(
-        l2.witness
-            .contains("a.rs#alpha#function -> b.rs#beta#function"),
-        "witness must name the call edge: {}",
-        l2.witness
+    assert_eq!(
+        report.layers,
+        vec![
+            Layer {
+                layer: 0,
+                regions: vec!["c.rs#gamma#function".into()],
+                witness: "sink layer — regions [c.rs#gamma#function] have no outgoing call edges to other region components".to_string(),
+            },
+            Layer {
+                layer: 1,
+                regions: vec!["b.rs#beta#function".into()],
+                witness: "layer 1 — regions [b.rs#beta#function]; call edges to lower layers: b.rs#beta#function -> c.rs#gamma#function".to_string(),
+            },
+            Layer {
+                layer: 2,
+                regions: vec!["a.rs#alpha#function".into()],
+                witness: "layer 2 — regions [a.rs#alpha#function]; call edges to lower layers: a.rs#alpha#function -> b.rs#beta#function".to_string(),
+            },
+        ],
+        "each layer's witness must exactly match its regions and call edges"
     );
 }
 

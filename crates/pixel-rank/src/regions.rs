@@ -405,8 +405,7 @@ fn assign_layers(regions: &[Region], inputs: &RegionsInputs) -> Vec<Layer> {
                     )
                 } else {
                     format!(
-                        "layer {layer} — regions [{region_list}]; call edges from later layers: \
-                         {}",
+                        "layer {layer} — regions [{region_list}]; call edges to lower layers: {}",
                         edges.join(", ")
                     )
                 }
