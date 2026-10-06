@@ -53,7 +53,7 @@ pixel doctor .        # optional: health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-The index, the code graph and the optional history data live in `.pixel/` at the repository root and never leave the machine, and there is no telemetry. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search`, the embedding model downloaded from Hugging Face on first use, and a once-a-day release check for a person at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) ([security model](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md)).
+The index, the code graph and the optional history data live in `.pixel/` at the repository root and stay on your machine, and there is no telemetry beyond an optional release check. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search`, the embedding model downloaded from Hugging Face on first use, and a once-a-day release check for a person at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) ([security model](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md)).
 
 ## What pixel install wires
 
@@ -131,7 +131,7 @@ pixel review-changes             # the working tree, structured
 pixel commit-and-push --files <f1> --files <f2> -m "msg" --request-id "id" origin HEAD
 ```
 
-An impact query is optional and requires a known symbol. Inspect its cited source and continue with native tools when the graph is unavailable, stale, ambiguous or unhelpful. The agent commits or pushes only when asked; commit operations use a `--request-id` for crash-safe, idempotent execution.
+An impact query is optional and requires a known symbol. Inspect its cited source and continue with native tools when the graph is unavailable, stale, ambiguous or unhelpful. The agent commits or pushes only when asked; commit operations use a `--request-id` for idempotent execution designed to be crash-safe.
 
 {{< workflow-jobs >}}
 

@@ -23,6 +23,6 @@ Pixel uses a CLI plus agent instructions and hooks. [Context overhead](/benchmar
 
 ## CTOs
 
-The index stays in `.pixel/`, with no account and no telemetry from the binary. [The security model](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md) names the downloads and optional network operations. Pixel is MIT licensed; [compatibility](/for/) lists the agents that can share the index.
+The index stays in `.pixel/`, with no account and no telemetry from the binary beyond an optional release check. [The security model](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md) names the downloads and optional network operations. Pixel is MIT licensed; [compatibility](/for/) lists the agents that can share the index.
 
 The [savings estimate](/savings/) applies file/outline volume rates to your own assumptions and input price. It does not predict a session’s invoice. Read the [method and losses](/benchmarks/) and [alternatives](/vs/) before deciding.

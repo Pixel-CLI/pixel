@@ -39,7 +39,7 @@
       <p class="hero__kind">Open-source CLI &middot; runs on your machine</p>
       {{/* Agents do not read every file whole: they grep, then read slices. The title names that search and the map Pixel gives instead; the lede says what the map is and that nobody learns a command. */}}
       <h1 class="hero__title hero__title--long"><span>Agents grep your code blind.</span> <span class="glow">Pixel hands them the map.</span></h1>
-      <p class="hero__lede"><strong>A local index of signatures and callers that your agent queries before it greps.</strong> One install, zero commands to learn: you keep prompting as usual.</p>
+      <p class="hero__lede"><strong>A local index of signatures and callers that your agent queries before it greps.</strong> One install, a handful of commands: you keep prompting as usual.</p>
       {{/* No install command here: the hero convinces, the Install chapter asks for the paste, with the script one click away. */}}
       <div class="hero__cta"><a class="button" href="#install">Try Pixel on your repo</a><a class="link hero__how" href="#how">See how it works</a></div>
       {{/* Every supported agent, named: several are not household names. Marks from assets/logos/ (the ids inside a mark get a prefix, since the Compatibility grid inlines the same SVG). */}}
@@ -50,7 +50,7 @@
         </ul>
       </div>
       {{/* Keep each claim true to the binary: no account, no key for anything an agent runs (`pixel classify` is off by default and uses the key the user configures), no telemetry (SECURITY.md). The code stays local; the network use the FAQ lists carries no source. Platforms: the targets release.yml builds. */}}
-      <p class="hero__claim"><strong>No account. No API key. No telemetry.</strong><br>Your code stays on your machine.</p>
+      <p class="hero__claim"><strong>No account. No API key. No telemetry beyond an optional release check.</strong><br>Your code stays on your machine.</p>
       <p class="hero__facts">
         <span>{{ len $langs }} languages</span>
         <span>{{ partial "icon.html" (dict "name" "scale" "size" 14) }}MIT</span>
@@ -369,7 +369,7 @@
         <p class="invite__text"><strong>Don't trust our numbers. Get yours.</strong> After a few agent sessions, <code>pixel token-savings</code> reports what Pixel's answers spared on your code. Post it, and with your permission we may quote you here.</p>
         <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
       </aside>
-      {{/* The proofs an evaluator checks before running the script, last on the page now that the closing is gone. Signed releases: release.yml attests every archive and install.sh with SLSA build provenance, verified with gh attestation verify (SECURITY.md, "Verifying a release"). No telemetry: SECURITY.md. The changelog: a changelog.d fragment per user-facing change, cut at each release (CONTRIBUTING.md). */}}
+      {{/* The proofs an evaluator checks before running the script, last on the page now that the closing is gone. Signed releases: release.yml attests every archive and install.sh with SLSA build provenance, verified with gh attestation verify (SECURITY.md, "Verifying a release"). No telemetry beyond an optional release check: SECURITY.md. The changelog: a changelog.d fragment per user-facing change, cut at each release (CONTRIBUTING.md). */}}
       <ul class="badges" data-reveal="stagger">
         <li>{{ partial "icon.html" (dict "name" "lock" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md#verifying-a-release" target="_blank" rel="noopener">Signed releases</a></li>
         <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">No telemetry</a></li>
