@@ -709,7 +709,7 @@ pub enum ReferenceCmd {
     Setup {
         /// Corpus IDs to set up.
         ids: Vec<String>,
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", last = true)]
         root: PathBuf,
     },
     /// Cold, read-only query over the registered reference corpora.
