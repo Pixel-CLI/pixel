@@ -268,7 +268,10 @@ mod tests {
         let v = serde_json::to_value(&hint).unwrap();
         assert_eq!(v["cause"]["cause"], serde_json::json!("invalid_input"));
         assert_eq!(v["cause"]["argument"], serde_json::json!("--limit"));
-        assert_eq!(v["cause"]["expected"], serde_json::json!("a positive integer"));
+        assert_eq!(
+            v["cause"]["expected"],
+            serde_json::json!("a positive integer")
+        );
     }
 
     #[test]
@@ -324,7 +327,13 @@ mod tests {
     fn snapshot_binding_carries_head_and_dirty_count() {
         let hint = hint();
         let v = serde_json::to_value(&hint).unwrap();
-        assert_eq!(v["continuation"]["snapshot"]["head"], serde_json::json!("abc123"));
-        assert_eq!(v["continuation"]["snapshot"]["dirty_count"], serde_json::json!(0));
+        assert_eq!(
+            v["continuation"]["snapshot"]["head"],
+            serde_json::json!("abc123")
+        );
+        assert_eq!(
+            v["continuation"]["snapshot"]["dirty_count"],
+            serde_json::json!(0)
+        );
     }
 }
