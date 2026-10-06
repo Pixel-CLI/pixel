@@ -434,7 +434,8 @@ impl ResolveIndex {
     ///
     /// Rails symbol callbacks name instance methods of the declaring class/module.
     /// Literal `send` on self uses the enclosing method's kind, or the class method
-    /// from a class body. An unrelated class never supplies a fallback, and reopened
+    /// from a class body. A generated alias or delegator (`alias_method`,
+    /// `delegate ... to:`) names a method of its own owner and kind. An unrelated class never supplies a fallback, and reopened
     /// definitions remain unresolved because their load order is unknown.
     /// Both initial references and stored references replay this rule; ordinary
     /// identifier arguments retain the name/import lookup of [`Self::decide_at`].
@@ -454,13 +455,13 @@ impl ResolveIndex {
             let (owner, separator) = if self.containers.contains(&caller) {
                 (
                     qualified.as_str(),
-                    if kind == ReferenceKind::Callback {
-                        '#'
-                    } else {
+                    if kind == ReferenceKind::Send {
                         '.'
+                    } else {
+                        '#'
                     },
                 )
-            } else if kind == ReferenceKind::Send {
+            } else if matches!(kind, ReferenceKind::Send | ReferenceKind::Alias) {
                 ruby_owner(qualified)?
             } else {
                 return None;

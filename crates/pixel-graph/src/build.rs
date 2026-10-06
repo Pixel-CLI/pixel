@@ -132,7 +132,11 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 20: `generic_import` takes the first string or identifier child only (the
 ///    field lookup is gone) and every walker shares the `too_deep` depth
 ///    guard; rebuild so no graph keeps rows from the older extractor.
-pub const EXTRACTOR_VERSION: &str = "20";
+/// 21: Ruby `attr_*`, `alias_method`/`alias`, `delegate` and `scope` declare
+///    methods of their owner (and are no longer calls of it), an alias or
+///    delegator references its own owner's target, and an assignment through
+///    a receiver calls the writer (`self.name = v` → `name=`).
+pub const EXTRACTOR_VERSION: &str = "21";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -3560,6 +3564,12 @@ mod tests {
             "app/svc.rb",
             "class Svc\n  def target\n    1\n  end\n  def bare\n    target\n  end\n  \
              def chained\n    @ids ||= target.to_set\n  end\nend\n",
+        ),
+        (
+            "app/account.rb",
+            "class Account\n  attr_accessor :name\n  alias_method :label, :name\n  \
+             delegate :email, to: :owner, prefix: true\n  def owner; end\n  \
+             def rename\n    self.name = label\n  end\nend\n",
         ),
     ];
 
