@@ -294,3 +294,22 @@ fn ruby_requires_should_follow_manifest_edits_incrementally() {
         );
     }
 }
+
+#[test]
+fn a_symlinked_lockfile_should_be_read_as_absent() {
+    let root = tempfile::tempdir().unwrap();
+    for (rel, body) in TREE {
+        write(root.path(), rel, body);
+    }
+    // The lockfile names `thor` as external; through a symlink it is not
+    // read, so `require "thor"` reaches the local `lib/thor.rb`.
+    let real = root.path().join("vendor/real.lock");
+    write(root.path(), "vendor/real.lock", LOCK);
+    fs::remove_file(root.path().join("Gemfile.lock")).unwrap();
+    std::os::unix::fs::symlink(&real, root.path().join("Gemfile.lock")).unwrap();
+    let db = root.path().join("graph.db");
+    build_graph(root.path(), &db).unwrap();
+    let mut want = order_imports(true);
+    want[1] = row("thor", Some("lib/thor.rb"));
+    assert_eq!(imports(&db, "app/models/order.rb"), want);
+}
