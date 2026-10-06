@@ -400,7 +400,11 @@ envelope talks to the daemon socket directly.
   `Gemfile.lock` is never stored as a graph file, but the graph walks hash
   it into the freshness signature (`is_graph_candidate`), so an edit to it
   alone makes the graph stale and the delta that applies it re-resolves
-  every Ruby import.
+  every Ruby import. Every walked file extraction keeps no `files` row for
+  (a lockfile, a binstub that is not Ruby, a generated blob) has its content
+  hash in the graph's `walked_files` table, which `rows_match_tree` and
+  `tree_delta` read beside the source rows: an unchanged one neither
+  withholds an update's signature nor reappears in every delta.
 - The `graph` op rebuilds from scratch by default (`rebuild-graph`,
   `prepare-repo --rebuild-graph`). With `"if_stale": true` (a request field
   that defaults to `false` and is sent only when set, so an older daemon

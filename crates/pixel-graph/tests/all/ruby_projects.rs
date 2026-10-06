@@ -314,10 +314,10 @@ fn a_lockfile_edit_should_make_the_graph_stale_and_its_delta_re_resolve() {
     write(root.path(), "Gemfile.lock", &without_thor);
     let delta = tree_delta(root.path(), &db).unwrap().unwrap();
     assert!(!delta.fresh, "the lockfile is a freshness input");
-    // A hashed file the store never keeps (this lockfile, the shell
-    // binstub `bin/dev`) is listed whenever the tree drifted.
+    // The unchanged shell binstub `bin/dev`, hashed but never stored as a
+    // source, is not listed: its walked hash still matches.
     let changed: Vec<&str> = delta.changed.iter().map(|(rel, _)| rel.as_str()).collect();
-    assert_eq!(changed, ["Gemfile.lock", "bin/dev"]);
+    assert_eq!(changed, ["Gemfile.lock"]);
     apply_tree_delta(root.path(), &db, &delta).unwrap();
     let mut want = order_imports(true);
     want[1] = row("thor", Some("lib/thor.rb"));
@@ -326,6 +326,46 @@ fn a_lockfile_edit_should_make_the_graph_stale_and_its_delta_re_resolve() {
     // The lockfile is hashed, never stored as a source file.
     let store = GraphStore::open(&db).unwrap();
     assert!(store.file_by_path("Gemfile.lock").unwrap().is_none());
+}
+
+#[test]
+fn a_source_only_update_beside_a_lockfile_should_publish_a_fresh_graph() {
+    let root = tempfile::tempdir().unwrap();
+    for (rel, body) in TREE {
+        write(root.path(), rel, body);
+    }
+    let db = root.path().join("graph.db");
+    build_graph(root.path(), &db).unwrap();
+    // A watcher batch naming only a Ruby source: the lockfile and the shell
+    // binstub outside it are unchanged, so the update signs the tree.
+    write(
+        root.path(),
+        "app/services/checkout.rb",
+        "class Checkout\n  def run\n  end\nend\n",
+    );
+    update_file(root.path(), &db, "app/services/checkout.rb").unwrap();
+    let delta = tree_delta(root.path(), &db).unwrap().unwrap();
+    assert!(delta.fresh, "{delta:?}");
+    // An edit to a walked file outside the batch still withholds it.
+    write(root.path(), "bin/dev", "#!/usr/bin/env sh\nexec overmind\n");
+    write(
+        root.path(),
+        "app/services/checkout.rb",
+        "class Checkout\n  def run\n    1\n  end\nend\n",
+    );
+    update_file(root.path(), &db, "app/services/checkout.rb").unwrap();
+    let delta = tree_delta(root.path(), &db).unwrap().unwrap();
+    assert!(!delta.fresh);
+    assert_eq!(
+        delta
+            .changed
+            .iter()
+            .map(|(rel, _)| rel.as_str())
+            .collect::<Vec<_>>(),
+        ["bin/dev"]
+    );
+    apply_tree_delta(root.path(), &db, &delta).unwrap();
+    assert!(tree_delta(root.path(), &db).unwrap().unwrap().fresh);
 }
 
 #[test]

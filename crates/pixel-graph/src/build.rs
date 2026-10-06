@@ -470,19 +470,31 @@ fn build_graph_with(
     let snapshot_signature = input_signature(&inputs);
     phases.collect_ms = millis(t0.elapsed());
     let clock = Instant::now();
-    let extracted: Vec<Extracted> = inputs
+    // A walked file extraction drops is hashed into the signature all the
+    // same, so its hash is kept beside the rows (`walked_files`).
+    let outcomes: Vec<Result<Extracted, (String, String)>> = inputs
         .into_par_iter()
-        .filter_map(|(rel, content)| {
-            let fx = extract_file(&rel, &content)?;
+        .map(|(rel, content)| {
             let blob_oid = content_oid(&content);
-            Some(Extracted {
-                rel,
-                blob_oid,
-                content,
-                fx,
-            })
+            match extract_file(&rel, &content) {
+                Some(fx) => Ok(Extracted {
+                    rel,
+                    blob_oid,
+                    content,
+                    fx,
+                }),
+                None => Err((rel, blob_oid)),
+            }
         })
         .collect();
+    let mut extracted: Vec<Extracted> = Vec::with_capacity(outcomes.len());
+    let mut dropped: Vec<(String, String)> = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Ok(file) => extracted.push(file),
+            Err(walked) => dropped.push(walked),
+        }
+    }
     phases.extract_ms = millis(clock.elapsed());
     let clock = Instant::now();
 
@@ -504,6 +516,10 @@ fn build_graph_with(
         .collect();
     for path in &stale {
         store.remove_file(path)?;
+    }
+    store.clear_walked_files()?;
+    for (rel, blob_oid) in &dropped {
+        store.record_walked_file(rel, blob_oid)?;
     }
 
     let projects = ruby_projects::Projects::load(root, &all_paths);
@@ -922,17 +938,14 @@ fn tree_delta_with(
     }
     let current = hashes(root);
     let signature = signature_of(&current);
-    let known: HashMap<String, String> = store
-        .files()?
-        .into_iter()
-        .map(|f| (f.path, f.blob_oid))
-        .collect();
+    let indexed_files = store.files()?.len();
+    let known = known_hashes(&store)?;
     if stored == signature {
         return Ok(Some(TreeDelta {
             fresh: true,
             changed: Vec::new(),
             removed: Vec::new(),
-            indexed_files: known.len(),
+            indexed_files,
             signature,
         }));
     }
@@ -952,7 +965,7 @@ fn tree_delta_with(
         fresh: false,
         changed,
         removed,
-        indexed_files: known.len(),
+        indexed_files,
         signature,
     }))
 }
@@ -982,10 +995,14 @@ pub fn apply_tree_delta(root: &Path, db_path: &Path, delta: &TreeDelta) -> Resul
         db_path,
         &files,
         |store, _batch| {
+            let walked: HashMap<String, String> = store.walked_files()?.into_iter().collect();
             for (rel, hash) in &delta.changed {
-                let stored = store.file_by_path(rel)?.map(|f| f.blob_oid);
-                // A changed file that extraction dropped (unparseable, vanished)
-                // has no row; that is its stable state, not a race.
+                // A changed file that extraction dropped keeps no row but its
+                // walked hash; one that vanished has neither, its stable state.
+                let stored = store
+                    .file_by_path(rel)?
+                    .map(|f| f.blob_oid)
+                    .or_else(|| walked.get(rel).cloned());
                 if stored.is_some_and(|oid| oid != format!("{hash:016x}")) {
                     drifted = Some(rel.clone());
                     return Ok(None);
@@ -1070,15 +1087,24 @@ fn update_files_probed(
         files,
         |store, batch| {
             let walk = tree_hashes(root);
-            let known: HashMap<String, String> = store
-                .files()?
-                .into_iter()
-                .map(|f| (f.path, f.blob_oid))
-                .collect();
+            let known = known_hashes(store)?;
             Ok(rows_match_tree(&known, &walk, batch).then(|| signature_of(&walk)))
         },
         probe,
     )
+}
+
+/// Path to stored content hash of every file the graph walks account for:
+/// the source rows and the walked files extraction keeps no row for
+/// (`walked_files`). The freshness checks compare a walk against it.
+fn known_hashes(store: &GraphStore) -> Result<HashMap<String, String>, BoxErr> {
+    let mut known: HashMap<String, String> = store
+        .files()?
+        .into_iter()
+        .map(|f| (f.path, f.blob_oid))
+        .collect();
+    known.extend(store.walked_files()?);
+    Ok(known)
 }
 
 /// True iff the rows (`known`: path to stored content hash) describe exactly
@@ -1276,6 +1302,11 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
 
         let Some(fx) = extract_file(rel, &content) else {
             store.remove_file(rel)?;
+            // The walks hash it as they hash the build's inputs (binaries
+            // excluded), so its hash is what the freshness checks compare.
+            if is_graph_candidate(rel) && !is_binary(&content) {
+                store.record_walked_file(rel, &content_oid(&content))?;
+            }
             continue;
         };
 
