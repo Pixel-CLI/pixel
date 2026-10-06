@@ -499,15 +499,19 @@ impl SemanticFallback {
 /// worst tail on the hot path. `PIXEL_SEMANTIC_FALLBACK=1` (or `true`,
 /// `yes`, `on`) re-enables it; any other value keeps it off. Read once per
 /// process.
+#[cfg_attr(test, mutants::skip)] // process-wide env read cached once; `fallback_flag` holds the parsing and is tested
 pub fn semantic_fallback_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("PIXEL_SEMANTIC_FALLBACK").is_ok_and(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+    *ENABLED.get_or_init(|| fallback_flag(std::env::var("PIXEL_SEMANTIC_FALLBACK").ok().as_deref()))
+}
+
+/// Whether a `PIXEL_SEMANTIC_FALLBACK` value turns the fallback on.
+fn fallback_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
     })
 }
 
@@ -1238,10 +1242,10 @@ fn make_snippet(text: &str) -> String {
     let mut cut = joined;
     if cut.len() > 160 {
         // Truncate at a char boundary to avoid a multi-byte-char panic.
-        let mut boundary = 160;
-        while boundary > 0 && !cut.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
+        let boundary = (0..=160)
+            .rev()
+            .find(|&i| cut.is_char_boundary(i))
+            .unwrap_or(0);
         cut.truncate(boundary);
         cut.push('…');
     }
@@ -1468,6 +1472,63 @@ mod tests {
         assert_eq!(
             fallback.caps()[1],
             "semantic fallback embedded only a deterministic sample of 2000 of the eligible files"
+        );
+    }
+
+    #[test]
+    fn fallback_flag_should_accept_only_the_enabling_spellings() {
+        for on in ["1", "true", " YES ", "On"] {
+            assert!(fallback_flag(Some(on)), "{on}");
+        }
+        for off in ["0", "false", "", "enabled"] {
+            assert!(!fallback_flag(Some(off)), "{off}");
+        }
+        assert!(!fallback_flag(None));
+    }
+
+    #[test]
+    fn cosine_should_normalize_both_vectors() {
+        let c = cosine(&[1.0, 2.0], &[3.0, 4.0]);
+        assert!((c - 11.0 / 125f32.sqrt()).abs() < 1e-6, "{c}");
+        assert!((cosine(&[3.0, 0.0], &[1.0, 1.0]) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        assert!(cosine(&[0.0, 0.0], &[1.0, 1.0]).abs() < f32::EPSILON);
+        assert!(cosine(&[1.0], &[1.0, 1.0]).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn make_snippet_should_cut_long_text_at_a_char_boundary() {
+        assert_eq!(make_snippet("a  b\n c"), "a b c");
+        let exact = "x".repeat(160);
+        assert_eq!(make_snippet(&exact), exact);
+        let long = "y".repeat(200);
+        assert_eq!(make_snippet(&long), format!("{}…", "y".repeat(160)));
+        let wide = format!("{}é{}", "z".repeat(159), "z".repeat(50));
+        assert_eq!(make_snippet(&wide), format!("{}…", "z".repeat(159)));
+    }
+
+    /// Among chunks of a file that score the same, the first one gives the
+    /// snippet.
+    #[test]
+    fn ask_snippet_should_come_from_the_first_of_equally_scored_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!("{}{}", "firstpart ".repeat(400), "secondpart ".repeat(400));
+        std::fs::write(dir.path().join("big.md"), body).unwrap();
+        let (files, coverage) = collect_files(dir.path(), Some(10));
+        let result = ask_collected(
+            dir.path(),
+            "anything",
+            8,
+            files,
+            coverage,
+            &mut FixtureEmbedder { fail: false },
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert!(
+            result.hits[0].snippet.starts_with("firstpart firstpart"),
+            "{}",
+            result.hits[0].snippet
         );
     }
 

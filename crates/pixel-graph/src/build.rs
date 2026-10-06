@@ -129,11 +129,14 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    preserving that owner during incremental resolution.
 /// 19: Ruby constant receivers resolve against lexical owners, including
 ///    constructors and probable Rails dispatch; factory receivers are normalized.
-/// 20: Ruby `attr_*`, `alias_method`/`alias`, `delegate` and `scope` declare
+/// 20: `generic_import` takes the first string or identifier child only (the
+///    field lookup is gone) and every walker shares the `too_deep` depth
+///    guard; rebuild so no graph keeps rows from the older extractor.
+/// 21: Ruby `attr_*`, `alias_method`/`alias`, `delegate` and `scope` declare
 ///    methods of their owner (and are no longer calls of it), an alias or
 ///    delegator references its own owner's target, and an assignment through
 ///    a receiver calls the writer (`self.name = v` → `name=`).
-pub const EXTRACTOR_VERSION: &str = "20";
+pub const EXTRACTOR_VERSION: &str = "21";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {

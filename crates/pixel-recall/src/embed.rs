@@ -36,18 +36,18 @@ pub fn chunk_offsets(text: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start = 0usize;
     loop {
-        let mut end = (start + CHUNK_MAX).min(text.len());
-        while end < text.len() && !text.is_char_boundary(end) {
-            end += 1;
-        }
+        let from = (start + CHUNK_MAX).min(text.len());
+        let end = (from..=text.len())
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(text.len());
         out.push((start, end));
         if end >= text.len() {
             break;
         }
-        let mut next = end.saturating_sub(CHUNK_OVERLAP);
-        while next > 0 && !text.is_char_boundary(next) {
-            next -= 1;
-        }
+        let next = (0..=end.saturating_sub(CHUNK_OVERLAP))
+            .rev()
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(0);
         // Guarantee forward progress.
         start = next.max(start + 1);
     }
@@ -329,9 +329,15 @@ pub mod potion {
 
     /// Resolve the transcript model override. Repository `ask` passes its own
     /// model repository explicitly, without changing this process-wide choice.
+    #[cfg_attr(test, mutants::skip)] // process-wide env read; `repo_or_default` holds the rule and is tested
     fn resolved_repo() -> String {
-        match std::env::var("PIXEL_RECALL_MODEL_REPO") {
-            Ok(v) if !v.is_empty() => v,
+        repo_or_default(std::env::var("PIXEL_RECALL_MODEL_REPO").ok())
+    }
+
+    /// The override when it names a repository, else the default model.
+    pub(super) fn repo_or_default(value: Option<String>) -> String {
+        match value {
+            Some(v) if !v.is_empty() => v,
             _ => REPO.to_string(),
         }
     }
@@ -420,6 +426,7 @@ pub mod potion {
     }
 
     impl Embedder for PotionEmbedder {
+        #[cfg_attr(test, mutants::skip)] // accessor on a loaded model; no instance exists without the downloaded weights
         fn model_id(&self) -> &str {
             &self.model_id
         }
@@ -456,11 +463,7 @@ pub mod fast {
         /// Load multilingual-e5-small (int8 ONNX) from the local cache dir;
         /// `download` controls whether a missing model may be fetched.
         pub fn open(cache_dir: &std::path::Path, download: bool) -> Result<Self, String> {
-            if !download && !cache_dir.exists() {
-                return Err(
-                    "embedding model not present — run `pixel recall setup` first".to_string(),
-                );
-            }
+            require_present(cache_dir, download)?;
             let options =
                 fastembed::TextInitOptions::new(fastembed::EmbeddingModel::MultilingualE5Small)
                     .with_cache_dir(cache_dir.to_path_buf())
@@ -475,11 +478,24 @@ pub mod fast {
         }
     }
 
+    /// Refuse a load that may not download when the model dir is missing.
+    pub(super) fn require_present(
+        cache_dir: &std::path::Path,
+        download: bool,
+    ) -> Result<(), String> {
+        if !download && !cache_dir.exists() {
+            return Err("embedding model not present — run `pixel recall setup` first".to_string());
+        }
+        Ok(())
+    }
+
     impl Embedder for FastEmbedder {
+        #[cfg_attr(test, mutants::skip)] // accessor on a loaded ONNX model; no instance exists without the model files
         fn model_id(&self) -> &str {
             &self.model_id
         }
 
+        #[cfg_attr(test, mutants::skip)] // accessor on a loaded ONNX model; no instance exists without the model files
         fn dims(&self) -> usize {
             self.dims
         }
@@ -828,5 +844,41 @@ mod tests {
             assert!(w[1].0 < w[0].1, "windows must overlap");
         }
         assert_eq!(chunk_offsets("short"), vec![(0, 5)]);
+    }
+
+    #[cfg(feature = "model2vec")]
+    #[test]
+    fn repo_override_should_apply_only_when_it_names_a_repository() {
+        assert_eq!(potion::repo_or_default(None), POTION_REPO);
+        assert_eq!(potion::repo_or_default(Some(String::new())), POTION_REPO);
+        assert_eq!(potion::repo_or_default(Some("org/m".to_string())), "org/m");
+    }
+
+    #[cfg(feature = "fastembed")]
+    #[test]
+    fn fast_model_should_require_its_dir_only_when_it_may_not_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        let err = fast::require_present(&missing, false).unwrap_err();
+        assert!(err.contains("pixel recall setup"), "{err}");
+        assert_eq!(fast::require_present(&missing, true), Ok(()));
+        assert_eq!(fast::require_present(tmp.path(), false), Ok(()));
+    }
+
+    /// Window edges that fall inside a multi-byte char move to its
+    /// boundaries: the end forward, the next start backward.
+    #[test]
+    fn chunk_offsets_should_align_both_edges_to_char_boundaries() {
+        let text = format!(
+            "{}é{}é{}",
+            "a".repeat(1300),
+            "a".repeat(197),
+            "b".repeat(2000)
+        );
+        assert_eq!(text.len(), 3501);
+        assert_eq!(
+            chunk_offsets(&text),
+            vec![(0, 1501), (1300, 2800), (2600, 3501)]
+        );
     }
 }

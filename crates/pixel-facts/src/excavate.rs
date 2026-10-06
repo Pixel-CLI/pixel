@@ -748,6 +748,16 @@ mod tests {
     }
 
     #[test]
+    fn snippet_block_should_keep_a_line_that_ends_exactly_on_the_byte_cap() {
+        // Six lines of 1023 bytes plus their newlines are exactly 6 KiB.
+        let line = "y".repeat(1023);
+        let text = [line.as_str(); 6].join("\n");
+        let block = snippet_block(&text, "y");
+        assert_eq!(block.len(), SNIPPET_MAX_BYTES);
+        assert!(!block.ends_with('…'), "nothing was elided");
+    }
+
+    #[test]
     fn snippet_block_should_start_at_the_first_line_when_the_hit_is_near_the_top() {
         let text = "İİ first\nsecond NEEDLE\nthird";
         assert_eq!(

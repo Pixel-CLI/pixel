@@ -376,3 +376,106 @@ fn resolve_project_root_climbs_to_the_git_toplevel_or_keeps_the_start() {
         "a subdirectory resolves to the repository root"
     );
 }
+
+#[test]
+fn state_root_prefers_sniper_root_then_xdg_then_home_skipping_empty_values() {
+    use pixel_session::store::state_root_from;
+    let lookup = |pairs: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    };
+    assert_eq!(
+        state_root_from(lookup(&[
+            ("PIXEL_SNIPER_STATE_ROOT", "/s"),
+            ("XDG_STATE_HOME", "/x"),
+        ])),
+        PathBuf::from("/s")
+    );
+    assert_eq!(
+        state_root_from(lookup(&[
+            ("PIXEL_SNIPER_STATE_ROOT", ""),
+            ("XDG_STATE_HOME", "/x"),
+        ])),
+        PathBuf::from("/x")
+    );
+    assert_eq!(
+        state_root_from(lookup(&[("XDG_STATE_HOME", ""), ("HOME", "/h")])),
+        PathBuf::from("/h/.local/state")
+    );
+}
+
+#[test]
+fn record_event_raw_returns_the_new_row_id() {
+    let state = TempRoot::new();
+    let project = Path::new("/tmp/raw-ev");
+    let store = Store::open_at(project, state.path()).unwrap();
+    let first = store.record_event_raw("note", None, None).unwrap();
+    let second = store
+        .record_event_raw("note", Some(&serde_json::json!({"a": 1})), Some("r"))
+        .unwrap();
+    let conn = rusqlite::Connection::open(store_path(project, state.path())).unwrap();
+    let stored: Vec<(i64, Option<String>)> = conn
+        .prepare("SELECT id, run_id FROM events WHERE kind = 'note' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(stored, vec![(first, None), (second, Some("r".to_string()))]);
+}
+
+#[test]
+fn store_error_display_names_its_source() {
+    let json = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+    let shown = pixel_session::StoreError::from(json).to_string();
+    assert!(shown.starts_with("json: "), "{shown}");
+}
+
+#[test]
+fn gc_counts_rows_dropped_by_age_and_by_row_cap() {
+    let state = TempRoot::new();
+    let project = Path::new("/tmp/gc-cap");
+    let store = Store::open_at(project, state.path()).unwrap();
+    let mut old = error(Surface::Reported, "old");
+    old.ts = Some(1000);
+    store.record_error(&old).unwrap();
+    store
+        .record_event(&EventInput {
+            kind: EventKind::HmrUpdate,
+            data: None,
+            run_id: None,
+            ts: Some(1000),
+        })
+        .unwrap();
+    let aged = store.gc(false).unwrap();
+    assert_eq!(aged.errors_deleted, 1, "aged error");
+    assert_eq!(aged.events_deleted, 1, "aged event");
+    {
+        let mut conn = rusqlite::Connection::open(store_path(project, state.path())).unwrap();
+        let tx = conn.transaction().unwrap();
+        let now = now_ms();
+        for i in 0..5001 {
+            tx.execute(
+                "INSERT INTO errors (first_ts, last_ts, surface, message, dedup_hash)
+                 VALUES (?1, ?1, 'reported', 'm', ?2)",
+                rusqlite::params![now, format!("h{i}")],
+            )
+            .unwrap();
+        }
+        for _ in 0..20_001 {
+            tx.execute(
+                "INSERT INTO events (ts, kind) VALUES (?1, 'hmr-update')",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let capped = store.gc(false).unwrap();
+    assert_eq!(capped.errors_deleted, 1, "one error past the row cap");
+    assert_eq!(capped.events_deleted, 1, "one event past the row cap");
+}

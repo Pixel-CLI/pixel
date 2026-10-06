@@ -305,3 +305,62 @@ fn daemon_start_refuses_to_fight_a_newer_daemon() {
     assert_eq!(server.join().unwrap(), vec![Request::Ping]);
     let _ = std::fs::remove_file(daemon::socket_path(&root));
 }
+
+#[test]
+fn unwrap_response_folds_envelope_warnings_only_when_there_are_some() {
+    let bare = unwrap_response(Response::success("x", json!({"a": 1}))).unwrap();
+    assert_eq!(bare, json!({"a": 1}), "no warnings key without warnings");
+
+    let warning = pixel_proto::warning::Warning {
+        code: "capped".into(),
+        message: "m".into(),
+    };
+    let warned = Response::success("x", json!({"a": 1})).with_warnings(vec![warning.clone()]);
+    assert_eq!(
+        unwrap_response(warned).unwrap()["warnings"],
+        json!([{"code": "capped", "message": "m"}])
+    );
+    let own = Response::success("x", json!({"warnings": "op's own"})).with_warnings(vec![warning]);
+    assert_eq!(unwrap_response(own).unwrap()["warnings"], json!("op's own"));
+}
+
+#[test]
+fn only_a_missing_or_refusing_socket_reads_as_no_daemon_to_upgrade() {
+    let root = scratch_root("upgrade-absent");
+    assert_eq!(
+        upgrade_daemon_request(&root.join("absent.sock"), &Request::Shutdown).map(|r| r.is_none()),
+        Ok(true)
+    );
+    std::fs::write(root.join("file"), b"").unwrap();
+    let not_a_dir = upgrade_daemon_request(&root.join("file/daemon.sock"), &Request::Shutdown);
+    assert!(
+        not_a_dir
+            .as_ref()
+            .is_err_and(|e| e.starts_with("upgrade daemon connection:")),
+        "{:?}",
+        not_a_dir.map(|r| r.is_some())
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_closed_stdout_is_not_a_failure_but_another_write_error_is() {
+    struct Refusing(std::io::ErrorKind);
+    impl Write for Refusing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(self.0.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    assert_eq!(
+        write_text(&mut Refusing(std::io::ErrorKind::BrokenPipe), "x"),
+        Ok(())
+    );
+    let err = write_text(&mut Refusing(std::io::ErrorKind::WriteZero), "x").unwrap_err();
+    assert!(err.starts_with("write stdout:"), "{err}");
+    let mut sink = Vec::new();
+    write_text(&mut sink, "hello").unwrap();
+    assert_eq!(sink, b"hello");
+}

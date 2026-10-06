@@ -111,10 +111,10 @@ pub fn cap_text(s: &str, cap: usize) -> (String, bool) {
     if s.len() <= cap {
         return (s.to_string(), false);
     }
-    let mut end = cap;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = (0..=cap)
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(0);
     (s[..end].to_string(), true)
 }
 
@@ -145,4 +145,27 @@ pub fn format_ms(ms: i64) -> String {
         odt.hour(),
         odt.minute()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cap_text_should_cut_back_to_a_char_boundary() {
+        assert_eq!(cap_text("abc", 3), ("abc".to_string(), false));
+        assert_eq!(cap_text("abcd", 2), ("ab".to_string(), true));
+        assert_eq!(cap_text("aé", 2), ("a".to_string(), true));
+        assert_eq!(cap_text("éé", 1), (String::new(), true));
+    }
+
+    #[test]
+    fn derive_title_should_take_the_first_non_blank_line_trimmed() {
+        assert_eq!(
+            derive_title("\n   \n  fix the daemon  \nsecond"),
+            "fix the daemon"
+        );
+        assert_eq!(derive_title(&"t".repeat(200)), "t".repeat(TITLE_CAP));
+        assert_eq!(derive_title(""), "");
+    }
 }
