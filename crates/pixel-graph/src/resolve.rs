@@ -1190,7 +1190,9 @@ impl Affected {
     }
 
     /// Record the Ruby ancestor declarations a batch changed: `before` and
-    /// `after` list the batch files' stored and extracted `ruby_mixins`. A
+    /// `after` list the batch files' stored and extracted `ruby_mixins`, each
+    /// with its file path: a constant resolves in the lexical scope of its
+    /// file, so a declaration moved to another file counts as changed. A
     /// different multiset, or a changed class or module whose name a
     /// stored declaration's constant ends with (a new `Admin::Trackable`
     /// shadows `Trackable`), sets [`Self::ruby_ancestors`]. Call it after
@@ -1198,10 +1200,10 @@ impl Affected {
     pub fn record_changed_mixins(
         &mut self,
         store: &GraphStore,
-        before: &[crate::extract::RawMixin],
-        after: &[crate::extract::RawMixin],
+        before: &[(String, crate::extract::RawMixin)],
+        after: &[(String, crate::extract::RawMixin)],
     ) -> Result<(), StoreError> {
-        let mut count: HashMap<&crate::extract::RawMixin, i64> = HashMap::new();
+        let mut count: HashMap<&(String, crate::extract::RawMixin), i64> = HashMap::new();
         for mixin in before {
             *count.entry(mixin).or_default() -= 1;
         }
@@ -2878,5 +2880,29 @@ mod tests {
             (vec!["A::C::B".into()], vec!["B".into()]),
             "a constant counts by the segment a receiver spells"
         );
+    }
+
+    #[test]
+    fn a_ruby_ancestor_declaration_moved_to_another_file_should_count_as_changed() {
+        let store = GraphStore::open_in_memory().unwrap();
+        let mixin = crate::extract::RawMixin {
+            owner: "Admin::Order".into(),
+            kind: "include".into(),
+            target: Some("Trackable".into()),
+            site_line: 3,
+        };
+        let at = |path: &str| vec![(path.to_string(), mixin.clone())];
+        for (before, after, changed) in [
+            (at("a.rb"), at("a.rb"), false),
+            (at("a.rb"), at("b.rb"), true),
+            (at("a.rb"), vec![], true),
+            (vec![], at("b.rb"), true),
+        ] {
+            let mut affected = Affected::default();
+            affected
+                .record_changed_mixins(&store, &before, &after)
+                .unwrap();
+            assert_eq!(affected.ruby_ancestors, changed, "{before:?} -> {after:?}");
+        }
     }
 }
