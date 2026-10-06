@@ -135,7 +135,10 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         remove_cursor_hooks(&home, &exe, dry_run)?,
         crate::copilot_config::remove_copilot_hooks(&home, dry_run)?,
         remove_pi_extension(&home, dry_run)?,
-        crate::pi_global::uninstall(&home, dry_run)?,
+        crate::pi_global::uninstall(
+            &crate::pi_global::PiPaths::resolve(&home, options.home.is_some()),
+            dry_run,
+        )?,
         // 5. Remove pixel hooks from project-level .codex/hooks.json files.
         remove_project_codex_hooks(&home, &exe, dry_run)?,
         // 6. Remove the pixel rule source file.
@@ -148,7 +151,7 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
             dry_run,
         )?,
         // 7c. Remove Antigravity plugin and hooks.
-        crate::antigravity::remove_antigravity(&home, dry_run)?,
+        crate::antigravity::remove_antigravity(&home, &exe, dry_run)?,
         // 7d. Take the pixel block out of OpenCode's global AGENTS.md.
         crate::opencode_config::remove_opencode(
             &crate::opencode_config::opencode_config_dir(&home, options.home.is_some()),
@@ -247,36 +250,41 @@ fn uninstall_project(
         },
         remove_project_claude_guard(repo, exe, dry_run)?,
         crate::codex_config::remove_developer_instructions(&repo.join(".codex"), dry_run)?,
-        {
-            let devin_hooks = repo.join(routing::DEVIN_LOCAL_CONFIG);
-            let (legacy_removed, _) = remove_pixel_hooks_from_settings(
-                &repo.join(routing::DEVIN_LEGACY_HOOKS),
-                exe,
-                dry_run,
-            )?;
-            let (removed, backup_path) =
-                remove_pixel_hooks_from_settings(&devin_hooks, exe, dry_run)?;
-            let removed = removed + legacy_removed;
-            InstallStep {
-                id: "hooks.devin".into(),
-                status: CheckStatus::Green,
-                summary: install::dry_run_summary(
-                    dry_run,
-                    &format!("removed {removed} Devin hook entry/entries"),
-                ),
-                detail: Some(install::with_backup_note(
-                    format!("config={}", devin_hooks.display()),
-                    backup_path,
-                )),
-            }
-        },
-        crate::pi_project::uninstall(repo, dry_run)?,
+        remove_project_devin_hooks(repo, exe, dry_run)?,
+        crate::pi_project::remove(repo, dry_run)?,
         crate::warp::retire(repo, dry_run)?,
         crate::pixel_first::uninstall_rules(repo, dry_run)?,
         backups_step(&find_backups(&project_backup_dirs(repo)), dry_run),
     ];
 
     Ok(install::install_report(binary_path, repo, dry_run, steps))
+}
+
+/// Take Pixel's hooks out of `<repo>/.devin/config.local.json` and the
+/// legacy `.devin/hooks.json`, keeping every foreign entry. `install --repo`
+/// runs it too: Devin keeps its native tools.
+pub(crate) fn remove_project_devin_hooks(
+    repo: &Path,
+    exe: &Path,
+    dry_run: bool,
+) -> Result<InstallStep> {
+    let devin_hooks = repo.join(routing::DEVIN_LOCAL_CONFIG);
+    let (legacy_removed, _) =
+        remove_pixel_hooks_from_settings(&repo.join(routing::DEVIN_LEGACY_HOOKS), exe, dry_run)?;
+    let (removed, backup_path) = remove_pixel_hooks_from_settings(&devin_hooks, exe, dry_run)?;
+    let removed = removed + legacy_removed;
+    Ok(InstallStep {
+        id: "hooks.devin".into(),
+        status: CheckStatus::Green,
+        summary: install::dry_run_summary(
+            dry_run,
+            &format!("removed {removed} Devin hook entry/entries"),
+        ),
+        detail: Some(install::with_backup_note(
+            format!("config={}", devin_hooks.display()),
+            backup_path,
+        )),
+    })
 }
 
 /// Take the repo-local Claude guard out of `<repo>/.claude/settings.local.json`
@@ -516,7 +524,7 @@ fn remove_claude_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Install
 // Step 3a: remove Devin hooks
 // -------------------------------------------------------------------------
 
-fn remove_devin_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+pub(crate) fn remove_devin_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let config_path = home
         .join(config::DEVIN_CONFIG_DIR)
         .join(config::DEVIN_CONFIG_FILE);
@@ -575,7 +583,7 @@ fn remove_gemini_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Install
 // Step 3d: remove zcode hooks + AGENTS.md managed block
 // -------------------------------------------------------------------------
 
-fn remove_zcode_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
+pub(crate) fn remove_zcode_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let config_path = home.join(config::ZCODE_CONFIG_FILE);
     if !config_path.is_file() {
         return Ok(InstallStep {
@@ -1061,20 +1069,28 @@ fn remove_rule_source(home: &Path, dry_run: bool) -> Result<InstallStep> {
 // Step 6: remove the pixel agent system prompt
 // -------------------------------------------------------------------------
 
-fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
+pub(crate) fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let path = home.join(".local/share/pixel/agent-prompt.md");
     let subagent_path = home
         .join(".local/share/pixel")
         .join(install::SUBAGENT_PROMPT_FILE);
     let pi_path = home.join(install::PI_PROMPT_REL);
-    let existed = path.is_file();
-    if !existed && !subagent_path.is_file() && !pi_path.is_file() {
-        return Ok(InstallStep {
-            id: "agent-prompt".into(),
-            status: CheckStatus::Green,
-            summary: install::dry_run_summary(dry_run, "no agent-prompt file — skipping"),
-            detail: None,
-        });
+    let prompts: Vec<&str> = [
+        (&path, "agent-prompt.md"),
+        (&subagent_path, "subagent-prompt.md"),
+    ]
+    .into_iter()
+    .filter(|(file, _)| file.is_file())
+    .map(|(_, name)| name)
+    .collect();
+    let skipped = || InstallStep {
+        id: "agent-prompt".into(),
+        status: CheckStatus::Green,
+        summary: install::dry_run_summary(dry_run, "no agent-prompt file — skipping"),
+        detail: None,
+    };
+    if prompts.is_empty() && !pi_path.is_file() {
+        return Ok(skipped());
     }
     // Pi's system-prompt file is shared: pixel owns its managed block and
     // recognized pre-marker prompts, not the user's surrounding text. Remove
@@ -1087,6 +1103,10 @@ fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let pi_cleaned = config::strip_managed_block(&install::strip_unmarked_pi_prompts(&pi_original));
     let pi_touched = pi_cleaned != pi_original;
     let pi_removed = pi_touched && pi_cleaned.trim().is_empty();
+    // A Pi prompt file holding only the user's text is not Pixel's.
+    if prompts.is_empty() && !pi_touched {
+        return Ok(skipped());
+    }
     if !dry_run {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&subagent_path);
@@ -1100,17 +1120,27 @@ fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
             }
         }
     }
-    let summary = if pi_removed {
-        "removed agent-prompt.md, subagent-prompt.md and the pi prompt file"
-    } else if pi_touched {
-        "removed agent-prompt.md and subagent-prompt.md, kept the text around the pixel block in APPEND_SYSTEM.md"
-    } else {
-        "removed agent-prompt.md and subagent-prompt.md"
+    let kept_pi_text = pi_touched && !pi_removed;
+    let mut removed = prompts;
+    if pi_removed {
+        removed.push("the pi prompt file");
+    }
+    let summary = match removed.split_last() {
+        Some((last, [])) => format!("removed {last}"),
+        Some((last, rest)) => format!("removed {} and {last}", rest.join(", ")),
+        None => "removed the pixel block from APPEND_SYSTEM.md".into(),
+    };
+    let summary = match (kept_pi_text, removed.is_empty()) {
+        (true, true) => format!("{summary}, kept the text around it"),
+        (true, false) => {
+            format!("{summary}, kept the text around the pixel block in APPEND_SYSTEM.md")
+        }
+        (false, _) => summary,
     };
     Ok(InstallStep {
         id: "agent-prompt".into(),
         status: CheckStatus::Green,
-        summary: install::dry_run_summary(dry_run, summary),
+        summary: install::dry_run_summary(dry_run, &summary),
         detail: Some(format!(
             "path={} subagent={} pi={}",
             path.display(),

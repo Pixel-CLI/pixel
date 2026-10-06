@@ -19,6 +19,9 @@
 #                      `pixel install` writes nothing for it
 #             rules    a rules file the repository ships, copied into the
 #                      project by hand
+#             none     nothing: the agent keeps its native tools, and
+#                      `pixel install` only removes what an earlier release
+#                      wrote for it
 #   global  files `pixel install` writes for this agent, from the home
 #           directory (`~/`); a trailing `/` is a directory Pixel owns
 #   when    the condition `pixel install` checks before writing them
@@ -34,9 +37,9 @@
 # Text fields are Markdown rendered inline; a `pixel <command>` in them must
 # exist (docs_drift.rs reads this file).
 
-# Written by every `pixel install`, whichever agents are present: the agent
-# legacy prompt assets used by other integrations and explicit manual setup.
-shared = ["~/.local/share/pixel/agent-prompt.md", "~/.local/share/pixel/subagent-prompt.md", "~/.pixel/config.yaml"]
+# Written by every `pixel install`, whichever agents are present. No agent
+# prompt is deployed: install removes the copies earlier releases wrote.
+shared = ["~/.pixel/config.yaml"]
 
 # Repo-wide install artifacts and doctor checks, not owned by one agent entry.
 repo_shared = ["AGENTS.md"]
@@ -73,11 +76,12 @@ slug = "pi"
 name = "Pi"
 logo = "pi"
 wiring = "install"
-lede = "When Pi is configured, `pixel install` exposes the explicit `/pixel-impact <symbol>` extension command and removes the retired Pixel system-prompt block. The project adapter retains task lifecycle controls."
-global = ["~/.pi/agent/extensions/pixel-impact.ts"]
-wires = "an explicit `/pixel-impact` command; no automatic retrieval calls or model tools by default"
-repo = [".pi/extensions/pixel-guard.ts"]
-repo_note = "Pi loads the extension once it trusts the project."
+lede = "`pixel install` gives Pi the explicit `/pixel-impact <symbol>` command as a local Pi package and removes Pixel's retired system-prompt block and project extension. Pi keeps its native tools."
+global = ["~/.local/share/pixel/pi-package/package.json", "~/.local/share/pixel/pi-package/extensions/pixel-impact.ts", "~/.pi/agent/settings.json"]
+when = "when Pi's agent directory (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) exists or `pi` is on PATH"
+wires = "an explicit `/pixel-impact` command from a local package declared in the `packages` list of Pi's settings; no automatic retrieval, tool or prompt"
+note = "Your other Pi settings and packages stay: Pixel adds only its package path to `packages`, and `pixel uninstall` takes it out again. A copy of the command an earlier release put in `extensions/` is removed, so Pi does not list it twice. Installing the npm package with `pi install` as well registers the command a second time: use one or the other."
+repo_note = "`pixel install --repo .` writes nothing for Pi: it removes the `.pi/extensions/pixel-guard.ts` an earlier release wrote."
 plugin = "`pi install git:github.com/Pixel-CLI/pixel`"
 checks = ["install.pi-prompt", "install.pi-impact", "repo.pi-guard"]
 
@@ -86,7 +90,7 @@ slug = "cursor"
 name = "Cursor"
 logo = "cursor"
 wiring = "rules"
-lede = "`pixel install` does not touch Cursor. The repository ships a Cursor rule that always applies: copy it into your project."
+lede = "`pixel install` writes nothing for Cursor; it removes the hooks an earlier release put in `~/.cursor/hooks.json`. The repository ships an optional Cursor rule you can copy into a project."
 rules = ".cursor/rules/pixel.mdc"
 
 [[agent]]
@@ -94,31 +98,24 @@ slug = "copilot-cli"
 name = "Copilot CLI"
 logo = "copilot"
 wiring = "plugin"
-lede = "`pixel install` does not touch Copilot CLI. Pixel reaches it as a plugin, from the same manifest as Claude Code's (`.claude-plugin/plugin.json`)."
+lede = "`pixel install` writes nothing for Copilot CLI; it removes the `~/.copilot/hooks/pixel.json` an earlier release wrote. Pixel is available as an optional plugin, from the same manifest as Claude Code's (`.claude-plugin/plugin.json`)."
 plugin = "`copilot plugin marketplace add Pixel-CLI/pixel`, then `copilot plugin install pixel@pixel`"
 
 [[agent]]
 slug = "opencode"
 name = "OpenCode"
 logo = "opencode"
-wiring = "install"
-lede = "`pixel install` puts Pixel's protocol into OpenCode's global `AGENTS.md`, the one instruction file both OpenCode generations load, and drops a guard plugin into the plugins directory OpenCode auto-loads."
-global = ["~/.config/opencode/AGENTS.md", "~/.config/opencode/plugins/pixel.js"]
-when = "only when OpenCode's config directory exists: `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`"
-wires = "the prompt appended to `AGENTS.md`, and the `tool.execute.before` plugin"
-note = "Your own instructions in that `AGENTS.md` stay: Pixel owns only the block between its `pixel:managed` markers. When the file does not exist yet and `~/.claude/CLAUDE.md` does, the new file starts with that content, since on OpenCode's first generation a global `AGENTS.md` takes the place of the `CLAUDE.md` fallback. The plugin is what makes the protocol binding rather than advisory: `AGENTS.md` asks, and OpenCode is the one supported agent whose hook can refuse the call, so `rg` becomes `pixel search-like-rg` and an off-manifest repository read is stopped. It carries the same managed markers, so `pixel uninstall` removes it and a `pixel.js` you wrote yourself is left alone. Nothing needs registering in `opencode.json` — OpenCode auto-loads that directory."
+wiring = "none"
+lede = "OpenCode keeps its native tools: `pixel install` writes nothing for it, and removes the `AGENTS.md` block and guard plugin an earlier release put in OpenCode's config directory."
+note = "Your own instructions in that `AGENTS.md` stay: Pixel removes only the block between its `pixel:managed` markers, and the file when nothing else was in it. A `plugins/pixel.js` you wrote yourself is left alone."
 checks = ["install.opencode-agents-md"]
 
 [[agent]]
 slug = "devin"
 name = "Devin"
 logo = "devin"
-wiring = "install"
-lede = "`pixel install` adds Devin's own lifecycle hooks when Devin has been used on the machine (Devin imports Claude's hooks by default, so without them its sessions get the imported Claude text), and `pixel install --repo` adds a guard to one repository."
-global = ["~/.config/devin/config.json"]
-when = "only when `~/.config/devin` exists"
-wires = "`SessionStart` and `UserPromptSubmit` hooks with `--provider devin`, plus a `PostCompaction` hook, in `~/.config/devin/config.json`"
-repo = [".devin/config.local.json"]
+wiring = "plugin"
+lede = "Devin keeps its native tools: `pixel install` writes nothing for it and removes the lifecycle hooks an earlier release put in `~/.config/devin/config.json`; `pixel install --repo` removes the repository guard from `.devin/config.local.json`."
 plugin = "add `github.com/Pixel-CLI/pixel` as a Devin plugin"
 checks = ["install.devin-hooks", "repo.devin-hooks"]
 
@@ -126,10 +123,7 @@ checks = ["install.devin-hooks", "repo.devin-hooks"]
 slug = "antigravity"
 name = "Antigravity"
 logo = "antigravity"
-wiring = "install"
-lede = "`pixel install` deploys a Pixel plugin into Antigravity's config, enables it, and registers its guard hooks."
-global = ["~/.gemini/config/plugins/pixel/", "~/.gemini/config/config.json", "~/.gemini/antigravity-cli/plugins/pixel/plugin.json", "~/.gemini/antigravity-cli/plugins/pixel/hooks.json", "~/.gemini/antigravity-cli/plugins/pixel/rules/AGENTS.md", "~/.gemini/antigravity-cli/plugins/pixel/skills/pixel/SKILL.md", "~/.gemini/config/import_manifest.json"]
-when = "only when Antigravity's config directory, `~/.gemini/config`, exists"
-wires = "the Pixel plugin deployed and enabled, and its guard hooks registered"
-note = "The plugin carries the prompt once, as a rule; its skill only points to it, and its hooks replace the global `pixel-guard` older installs wrote in `~/.gemini/config/hooks.json`. In an indexed workspace, its `PreInvocation` hook runs a bounded Pixel search for the initial request and delivers the actual results as an `ephemeralMessage` before the model calls native tools. AGY 1.2.13 rejects injected `toolCall` steps, so Pixel executes the search inside the hook. Missing search terms, unavailable indexes and failed or empty searches leave native retrieval available. `PreToolUse` still runs Pixel's guard before `run_command`, `grep_search`, `find_by_name` and `view_file`."
+wiring = "none"
+lede = "Antigravity keeps its native tools: `pixel install` writes nothing for it, and removes the Pixel plugin, its `config.json` entry and the global `pixel-guard` an earlier release registered."
+note = "A `pixel-guard` you defined yourself in `~/.gemini/config/hooks.json` stays. When the `agy` CLI is on PATH, the plugin registration is removed through it."
 checks = ["install.antigravity"]

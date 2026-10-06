@@ -113,6 +113,29 @@ fn shell_profile_path(home: &std::path::Path) -> std::path::PathBuf {
 }
 const PIXEL_MANAGED_BEGIN: &str = "# >>> pixel-managed >>>";
 
+/// The prompt files releases before the native default deployed under
+/// `~/.local/share/pixel/`; no host reads them any more.
+const RETIRED_PROMPTS: [&str; 2] = [
+    ".local/share/pixel/agent-prompt.md",
+    ".local/share/pixel/subagent-prompt.md",
+];
+
+/// Write both retired prompt files the way an earlier release left them.
+fn write_retired_prompts(home: &Path) {
+    for rel in RETIRED_PROMPTS {
+        let path = home.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "# Pixel prompt from an earlier release\n").unwrap();
+    }
+}
+
+/// Neither retired prompt file is on disk.
+fn assert_no_retired_prompt(home: &Path) {
+    for rel in RETIRED_PROMPTS {
+        assert!(!home.join(rel).exists(), "{rel} must not be deployed");
+    }
+}
+
 /// This proves instruction delivery and stream preservation, not model obedience.
 #[test]
 #[cfg(unix)]
@@ -129,9 +152,7 @@ fn global_install_registers_only_task_hooks_for_claude_and_codex() {
         shell: Some(TEST_SHELL.into()),
     })
     .unwrap();
-    let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md"))
-        .expect("shared prompt asset is deployed for explicit integrations");
-    assert!(prompt.contains("## Retrieval commands"));
+    assert_no_retired_prompt(home);
 
     // Claude receives task accounting only. Retrieval prompts, metrics,
     // PostToolUse advice and PreToolUse rewriting stay out of global hooks.
@@ -190,7 +211,6 @@ fn doctor_should_run_every_catalogued_check_in_order_when_nothing_is_filtered() 
         home: Some(dir.path().join("home")),
         repo_root: Some(dir.path().join("repo")),
         shell: Some(TEST_SHELL.into()),
-        syntax_validator: Some(|_| Ok(())),
         ..Default::default()
     })
     .unwrap();
@@ -209,7 +229,6 @@ fn doctor_should_run_only_the_selected_checks_and_count_the_rest_as_skipped() {
         home: Some(dir.path().join("home")),
         repo_root: Some(dir.path().join("repo")),
         shell: Some(TEST_SHELL.into()),
-        syntax_validator: Some(|_| Ok(())),
         only: only.iter().map(ToString::to_string).collect(),
         skip: skip.iter().map(ToString::to_string).collect(),
         ..Default::default()
@@ -248,8 +267,11 @@ fn doctor_should_attach_a_fix_to_failing_checks_only() {
     let dir = TempDir::new().unwrap();
     let repo = dir.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
+    // A prompt an earlier release deployed makes the install check red.
+    let home = dir.path().join("home");
+    write_retired_prompts(&home);
     let report = doctor(&DoctorOptions {
-        home: Some(dir.path().join("home")),
+        home: Some(home),
         repo_root: Some(repo.clone()),
         shell: Some(TEST_SHELL.into()),
         only: ["binary.path", "install.agent-prompt", "index.freshness"]
@@ -326,24 +348,24 @@ fn install_creates_config_with_managed_markers() {
         claude, original,
         "CLAUDE.md must be byte-identical — install no longer rewrites agent configs"
     );
-    // The agent prompt and task-event hooks are install artifacts; no shell
+    // Task-event hooks are the install artifacts; no prompt file, shell
     // wrapper or automatic retrieval callback is written.
-    assert!(
-        home.join(".local/share/pixel/agent-prompt.md").is_file(),
-        "agent-prompt.md should be deployed"
-    );
+    assert_no_retired_prompt(home);
     let settings: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
             .unwrap();
-    assert!(
-        settings["hooks"]["SessionStart"]
-            .as_array()
-            .is_some_and(|g| !g.is_empty()),
+    assert_eq!(
+        settings["hooks"]["SessionStart"],
+        serde_json::json!([task_hook_group(
+            &home.join("pixel"),
+            "claude",
+            "session-start"
+        )]),
         "Claude task-event hooks should be installed: {settings}"
     );
     assert!(
         !shell_profile_path(home).exists(),
-        "no shell wrapper is installed — SessionStart injects the prompt"
+        "no shell wrapper is installed"
     );
 }
 
@@ -370,19 +392,13 @@ fn install_is_idempotent() {
     assert!(r2.ok, "second install should succeed");
     assert!(r2.summary.red == 0, "no red steps on re-install");
 
-    // The install deploys the agent prompt and Claude's task-event hooks.
-    // Both must be stable across re-installs.
-    let prompt = home.join(".local/share/pixel/agent-prompt.md");
-    let p1 = fs::read(&prompt).expect("agent-prompt deployed");
+    // The install deploys Claude's task-event hooks, stable across
+    // re-installs, and never a prompt file.
     let settings = home.join(".claude/settings.json");
     let s1 = fs::read(&settings).expect("claude settings installed");
 
     install(&options).expect("install 3");
-    assert_eq!(
-        fs::read(&prompt).unwrap(),
-        p1,
-        "agent-prompt must be byte-identical across re-installs"
-    );
+    assert_no_retired_prompt(home);
     assert_eq!(
         fs::read(&settings).unwrap(),
         s1,
@@ -603,15 +619,154 @@ fn dry_run_install_has_no_copilot_step_without_copilot_config() {
     assert!(!home.join(".copilot").exists());
 }
 
+/// Copilot keeps its native tools: on a machine that has run Copilot CLI,
+/// `pixel install` writes no hook file, and the `pixel.json` an earlier
+/// release deployed is removed while the user's own hook files stay.
 #[test]
-fn install_deploys_copilot_hooks_when_copilot_config_is_present() {
+fn install_removes_the_copilot_hooks_an_earlier_release_wrote() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
-    // A machine that has run Copilot CLI has ~/.copilot; pixel install then
-    // deploys its dedicated hooks file next to it.
-    fs::create_dir_all(home.join(".copilot")).unwrap();
+    let hooks_dir = home.join(".copilot").join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    let options = InstallOptions {
+        repo: None,
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    };
 
-    install(&InstallOptions {
+    // Nothing to remove: no hook file appears.
+    let report = install(&options).expect("install");
+    assert!(report.ok, "{report:?}");
+    assert_eq!(fs::read_dir(&hooks_dir).unwrap().count(), 0);
+
+    let pixel = hooks_dir.join("pixel.json");
+    let retired = serde_json::json!({
+        "version": 1,
+        "_pixel_managed": "pixel-managed-copilot-hooks-v1",
+        "hooks": {
+            "preToolUse": [{"type": "exec", "exec": "/opt/pixel", "args": ["run-hook", "guard", "--provider", "copilot"]}],
+            "postToolUse": [{"type": "exec", "exec": "/opt/pixel", "args": ["run-hook", "metrics", "--provider", "copilot"]}],
+        }
+    });
+    fs::write(&pixel, serde_json::to_string_pretty(&retired).unwrap()).unwrap();
+    let mine = hooks_dir.join("mine.json");
+    let user_hooks =
+        "{\"version\":1,\"hooks\":{\"preToolUse\":[{\"type\":\"exec\",\"exec\":\"notify\"}]}}\n";
+    fs::write(&mine, user_hooks).unwrap();
+
+    let report = install(&options).expect("install over an earlier release");
+    assert!(report.ok, "{report:?}");
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "copilot-hooks")
+        .expect("copilot step");
+    assert_eq!(step.summary, format!("removed {}", pixel.display()));
+    assert!(!pixel.exists(), "the retired Pixel hook file is removed");
+    assert_eq!(fs::read_to_string(&mine).unwrap(), user_hooks);
+    assert_eq!(
+        fs::read_dir(&hooks_dir).unwrap().count(),
+        1,
+        "only the user's hook file is left"
+    );
+}
+
+/// Cursor, ZCode and Antigravity keep their native tools: on a machine that
+/// uses them, `pixel install` writes no hook, prompt or plugin, and removes
+/// the ones an earlier release wrote while every foreign entry, setting and
+/// line of user text stays. Antigravity's doctor check is red on the
+/// leftovers and green after.
+#[test]
+#[cfg(unix)]
+fn global_install_removes_the_cursor_zcode_and_antigravity_integrations_an_earlier_release_wrote() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let old = "'/opt/old/pixel'";
+
+    let cursor = home.join(".cursor/hooks.json");
+    fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    fs::write(
+        &cursor,
+        serde_json::json!({"version": 1, "hooks": {
+            "preToolUse": [
+                {"command": format!("{old} run-hook guard --provider cursor"), "matcher": "Shell"},
+                {"command": "notify-send done"},
+            ],
+            "postToolUse": [{"command": format!("{old} run-hook metrics --provider cursor")}],
+        }})
+        .to_string(),
+    )
+    .unwrap();
+
+    let zcode = home.join(".zcode/cli/config.json");
+    fs::create_dir_all(zcode.parent().unwrap()).unwrap();
+    let zcode_foreign = serde_json::json!({"matcher": "Bash", "hooks": [{"type": "command", "command": "keep-zcode-check"}]});
+    fs::write(
+        &zcode,
+        serde_json::json!({"model": "glm", "hooks": {"events": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": format!("{old} run-hook guard --provider zcode")}]},
+            zcode_foreign.clone(),
+        ]}}})
+        .to_string(),
+    )
+    .unwrap();
+    let zcode_agents = home.join(".zcode/AGENTS.md");
+    fs::write(
+        &zcode_agents,
+        format!("mine\n{MANAGED_BEGIN}\nold prompt\n{MANAGED_END}\n"),
+    )
+    .unwrap();
+
+    let gemini = home.join(".gemini/config");
+    let plugin = gemini.join("plugins/pixel");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("plugin.json"), r#"{"managedBy":"pixel"}"#).unwrap();
+    fs::write(
+        gemini.join("config.json"),
+        r#"{"plugins":{"other":{"enabled":true},"pixel":{"enabled":true}},"keep":"config"}"#,
+    )
+    .unwrap();
+    let mine =
+        serde_json::json!({"PreToolUse": [{"matcher": "*", "hooks": [{"command": "audit"}]}]});
+    fs::write(
+        gemini.join("hooks.json"),
+        serde_json::json!({
+            "pixel-guard": {"PreToolUse": [{"matcher": "*", "hooks": [{"command": format!("{old} run-hook guard --provider antigravity")}]}]},
+            "mine": mine.clone(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let antigravity_check = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            shell: Some(TEST_SHELL.into()),
+            only: vec!["install.antigravity".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.antigravity").clone()
+    };
+    let red = antigravity_check();
+    assert_eq!(red.status, CheckStatus::Red, "{red:?}");
+    assert_eq!(
+        red.reason.as_deref(),
+        Some(
+            format!(
+                "retired Pixel Antigravity integration remains: {}, the pixel plugin entry in {}, the pixel-guard in {} — run `pixel install` to remove it",
+                plugin.display(),
+                gemini.join("config.json").display(),
+                gemini.join("hooks.json").display()
+            )
+            .as_str()
+        )
+    );
+
+    let report = install(&InstallOptions {
         repo: None,
         home: Some(home.to_path_buf()),
         executable_path: Some(fake_pixel_exe(home)),
@@ -620,25 +775,27 @@ fn install_deploys_copilot_hooks_when_copilot_config_is_present() {
         shell: Some(TEST_SHELL.into()),
     })
     .expect("install");
+    assert!(report.ok, "{report:?}");
 
-    let hooks = home.join(".copilot").join("hooks").join("pixel.json");
-    let doc: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&hooks).unwrap()).unwrap();
-    assert_eq!(doc["_pixel_managed"], "pixel-managed-copilot-hooks-v1");
-    assert!(
-        doc["hooks"]["preToolUse"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| {
-                e["args"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|a| a.as_str() == Some("guard"))
-            }),
-        "guard entry must be deployed: {doc}"
+    assert_eq!(
+        read_json(&cursor),
+        serde_json::json!({"version": 1, "hooks": {"preToolUse": [{"command": "notify-send done"}]}})
     );
+    assert_eq!(
+        read_json(&zcode),
+        serde_json::json!({"model": "glm", "hooks": {"events": {"PreToolUse": [zcode_foreign]}}})
+    );
+    assert_eq!(fs::read_to_string(&zcode_agents).unwrap(), "mine\n");
+    assert!(!plugin.exists(), "the managed plugin directory is removed");
+    assert_eq!(
+        read_json(&gemini.join("config.json")),
+        serde_json::json!({"plugins": {"other": {"enabled": true}}, "keep": "config"})
+    );
+    assert_eq!(
+        read_json(&gemini.join("hooks.json")),
+        serde_json::json!({"mine": mine})
+    );
+    assert_eq!(antigravity_check().status, CheckStatus::Green);
 }
 
 #[test]
@@ -663,7 +820,10 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
     install(&real_options).expect("real install");
 
     let settings_path = home.join(".claude").join("settings.json");
-    let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
+    // A prompt an earlier release deployed: a real install removes it, a
+    // dry run only says it would.
+    write_retired_prompts(home);
+    let prompt_path = home.join(RETIRED_PROMPTS[0]);
     // A profile with user content (no pixel block): the legacy-wrapper
     // cleanup must leave it byte-identical, dry-run or not.
     let profile_path = shell_profile_path(home);
@@ -692,8 +852,9 @@ fn dry_run_leaves_pre_existing_files_byte_identical() {
     );
     assert_eq!(
         before_prompt, after_prompt,
-        "dry-run must not modify agent-prompt.md"
+        "dry-run must not remove the retired agent-prompt.md"
     );
+    assert!(home.join(RETIRED_PROMPTS[1]).is_file());
     assert_eq!(
         before_profile, after_profile,
         "dry-run must not modify the shell profile"
@@ -777,8 +938,8 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
     };
     install(&options).expect("install on fresh home");
 
-    // The new install does NOT create or rewrite any CLAUDE.md/AGENTS.md —
-    // it deploys the agent system prompt and shell wrappers instead.
+    // The new install does NOT create or rewrite any CLAUDE.md/AGENTS.md,
+    // and deploys no prompt file either.
     assert!(
         !home.join("CLAUDE.md").exists(),
         "fresh install must not create root CLAUDE.md"
@@ -792,13 +953,12 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
         "fresh install must not create root AGENTS.md"
     );
 
-    // The agent system prompt is deployed.
-    let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
-    let prompt = fs::read_to_string(&prompt_path)
-        .expect("agent-prompt.md should be deployed on a fresh home");
+    // No agent system prompt is deployed: without Pi there is nothing for
+    // Pixel to keep under its data directory at all.
+    assert_no_retired_prompt(home);
     assert!(
-        prompt.contains("## Retrieval commands"),
-        "agent-prompt.md should carry the retrieval commands"
+        !home.join(".local/share/pixel").exists(),
+        "a fresh install without Pi writes nothing under ~/.local/share/pixel"
     );
 
     // Claude task-event hooks are installed in ~/.claude/settings.json; no
@@ -833,10 +993,10 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
 
 #[test]
 fn doctor_install_artifact_checks_red_and_green() {
-    // Doctor verifies the install artifacts: install.agent-prompt,
-    // install.claude-hooks (the SessionStart prompt injection), and
-    // install.legacy-wrappers (no stale `claude()` block survives). This test
-    // walks each through its red and green states.
+    // Doctor verifies the install artifacts: install.agent-prompt (no
+    // retired prompt file is left), install.claude-hooks (the task-event
+    // hooks), and install.legacy-wrappers (no stale `claude()` block
+    // survives). This test walks each through its red and green states.
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
 
@@ -850,18 +1010,14 @@ fn doctor_install_artifact_checks_red_and_green() {
         ..Default::default()
     };
 
-    // 1. With nothing installed, agent-prompt and claude-hooks are red;
-    //    legacy-wrappers is green (there is nothing to remove).
+    // 1. With nothing installed, claude-hooks is red; agent-prompt and
+    //    legacy-wrappers are green (there is nothing to remove).
     let report = doctor(&doc_opts).expect("doctor runs");
-    let prompt_check = report
-        .checks
-        .iter()
-        .find(|c| c.id == "install.agent-prompt")
-        .unwrap();
+    let prompt_check = check(&report, "install.agent-prompt");
     assert_eq!(
         prompt_check.status,
-        pixel_install::doctor::CheckStatus::Red,
-        "agent-prompt should be red when not deployed"
+        pixel_install::doctor::CheckStatus::Green,
+        "agent-prompt is green when no prompt file exists: {prompt_check:?}"
     );
     let hooks_check = report
         .checks
@@ -884,7 +1040,34 @@ fn doctor_install_artifact_checks_red_and_green() {
         "legacy-wrappers should be green when no stale block exists"
     );
 
-    // 2. Run install: deploys agent-prompt + claude lifecycle hooks → all green.
+    // 2. Prompt files an earlier release deployed are red, each named, with
+    //    the install that removes them as the fix.
+    write_retired_prompts(home);
+    let report = doctor(&doc_opts).expect("doctor runs");
+    let prompt_check = check(&report, "install.agent-prompt");
+    assert_eq!(
+        prompt_check.status,
+        pixel_install::doctor::CheckStatus::Red,
+        "{prompt_check:?}"
+    );
+    assert_eq!(
+        prompt_check.reason.as_deref(),
+        Some(
+            format!(
+                "retired Pixel prompt file(s) remain: {}, {} — run `pixel install` to remove them",
+                home.join(RETIRED_PROMPTS[0]).display(),
+                home.join(RETIRED_PROMPTS[1]).display()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        prompt_check.fix.as_deref(),
+        Some(format!("pixel install --shell {TEST_SHELL}").as_str())
+    );
+
+    // 3. Run install: removes the prompts, installs claude task hooks → all
+    //    green.
     install(&InstallOptions {
         repo: None,
         home: Some(home.to_path_buf()),
@@ -910,40 +1093,7 @@ fn doctor_install_artifact_checks_red_and_green() {
             check.reason
         );
     }
-
-    // 3. A prompt edited after deployment is stale, even though it still
-    //    carries the two headline sections the old substring heuristic looked
-    //    for: the check asserts byte equality with the bundled asset.
-    let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
-    let mut edited = fs::read_to_string(&prompt_path).expect("agent-prompt deployed");
-    assert!(
-        edited.contains("# Pixel — deterministic repository facts")
-            && edited.contains("## Retrieval commands"),
-        "fixture: the edited prompt must still satisfy the old heuristic"
-    );
-    edited.push_str("\nOne extra rule the bundled prompt does not carry.\n");
-    fs::write(&prompt_path, &edited).unwrap();
-    let report = doctor(&doc_opts).expect("doctor runs");
-    let prompt_check = report
-        .checks
-        .iter()
-        .find(|c| c.id == "install.agent-prompt")
-        .unwrap();
-    assert_eq!(
-        prompt_check.status,
-        pixel_install::doctor::CheckStatus::Red,
-        "agent-prompt should be red when the deployed prompt is stale"
-    );
-}
-
-/// Dry-run "parser" standing in for the CLI's clap definition: rejects the
-/// one subcommand the tests plant, accepts everything else.
-fn stub_validator(argv: &[String]) -> Result<(), String> {
-    if argv.iter().any(|a| a == "bogus-subcommand") {
-        Err("unrecognized subcommand 'bogus-subcommand'".into())
-    } else {
-        Ok(())
-    }
+    assert_no_retired_prompt(home);
 }
 
 fn check<'a>(
@@ -957,143 +1107,31 @@ fn check<'a>(
         .unwrap_or_else(|| panic!("doctor has no {id} check"))
 }
 
-/// 0.2.x installs write no managed block: the rule text agents receive is
-/// the deployed `agent-prompt.md`, so that is what `rule.parity` and
-/// `rule.scenarios` must validate. Before this, both reported yellow "no
-/// installed rule text" on every current install, and a prompt documenting
-/// a command line the binary rejects went unnoticed.
+/// No prompt or rule text is deployed any more, so the checks that validated
+/// it are retired: their ids are no longer catalogued, and naming one is
+/// refused like any unknown id rather than silently running nothing.
 #[test]
-fn doctor_rule_checks_validate_the_deployed_agent_prompt() {
-    let dir = TempDir::new().expect("tempdir");
-    let home = dir.path();
-    let doc_opts = DoctorOptions {
-        home: Some(home.to_path_buf()),
-        executable_path: None,
-        shell: Some(TEST_SHELL.into()),
-        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
-        syntax_validator: Some(stub_validator),
-        ..Default::default()
-    };
-
-    // 1. Nothing installed: no rule text anywhere → yellow, pointing at install.
-    let report = doctor(&doc_opts).expect("doctor runs");
-    for id in ["rule.parity", "rule.scenarios"] {
-        let c = check(&report, id);
-        assert_eq!(
-            c.status,
-            pixel_install::doctor::CheckStatus::Yellow,
-            "{id}: {c:?}"
-        );
+fn doctor_should_refuse_the_retired_prompt_validation_check_ids() {
+    let dir = TempDir::new().unwrap();
+    for id in ["install.subagent-prompt", "rule.parity", "rule.scenarios"] {
         assert!(
-            c.summary.contains("agent-prompt.md") && c.summary.contains("pixel install"),
-            "{id} names the missing artifact and the fix: {}",
-            c.summary
+            CHECKS.iter().all(|c| c.id != id),
+            "{id} is still catalogued"
+        );
+        let err = doctor(&DoctorOptions {
+            home: Some(dir.path().to_path_buf()),
+            only: vec![id.into()],
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&err, pixel_install::InstallError::UnknownDoctorCheck(found) if found == id),
+            "{err}"
         );
     }
-
-    // 2. A plain install (no CLAUDE.md, no managed block): both checks read
-    //    the deployed prompt and go green.
-    install(&InstallOptions {
-        repo: None,
-        home: Some(home.to_path_buf()),
-        executable_path: Some(fake_pixel_exe(home)),
-        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
-        dry_run: false,
-        shell: Some(TEST_SHELL.into()),
-    })
-    .expect("install");
-    let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
-    let report = doctor(&doc_opts).expect("doctor runs");
-    for id in ["rule.parity", "rule.scenarios"] {
-        let c = check(&report, id);
-        assert_eq!(
-            c.status,
-            pixel_install::doctor::CheckStatus::Green,
-            "{id} after install: {:?} {:?}",
-            c.summary,
-            c.reason
-        );
-        assert_eq!(
-            c.detail.as_ref().and_then(|d| d["source"].as_str()),
-            Some(prompt_path.to_str().unwrap()),
-            "{id} validated the deployed prompt"
-        );
-    }
-    let parity = check(&report, "rule.parity");
-    let parsed = parity.detail.as_ref().unwrap()["parsed_ok"]
-        .as_u64()
-        .unwrap();
-    assert!(
-        parsed > 0,
-        "the deployed prompt documents pixel command lines: {parity:?}"
-    );
-
-    // 3. A deployed prompt documenting a command the binary rejects is red,
-    //    even with a legacy managed block that would pass: the deployed
-    //    prompt is what agents read, so it wins over the older text.
-    let prompt = fs::read_to_string(&prompt_path).unwrap();
-    fs::write(
-        &prompt_path,
-        format!(
-            "{prompt}
-```bash
-pixel bogus-subcommand .
-```
-"
-        ),
-    )
-    .unwrap();
-    fs::write(
-        home.join("CLAUDE.md"),
-        format!(
-            "# mine
-{MANAGED_BEGIN}
-```bash
-pixel scope-task task
-pixel find-code x
-pixel plan-rollback
-pixel sync-branch
-pixel impact x
-```
-{MANAGED_END}
-"
-        ),
-    )
-    .unwrap();
-    let report = doctor(&doc_opts).expect("doctor runs");
-    let parity = check(&report, "rule.parity");
     assert_eq!(
-        parity.status,
-        pixel_install::doctor::CheckStatus::Red,
-        "{parity:?}"
-    );
-    assert!(
-        parity
-            .reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("bogus-subcommand"),
-        "the rejected line is named: {:?}",
-        parity.reason
-    );
-    // Red at all proves the precedence: the managed block alone parses
-    // green, so the rejected line can only have come from the deployed
-    // prompt (a red check carries no detail to name its source).
-
-    // 4. With the deployed prompt gone, the legacy managed block is the
-    //    fallback for installs that predate agent-prompt.md.
-    fs::remove_file(&prompt_path).unwrap();
-    let report = doctor(&doc_opts).expect("doctor runs");
-    let parity = check(&report, "rule.parity");
-    assert_eq!(
-        parity.status,
-        pixel_install::doctor::CheckStatus::Green,
-        "{parity:?}"
-    );
-    assert_eq!(
-        parity.detail.as_ref().and_then(|d| d["source"].as_str()),
-        Some(home.join("CLAUDE.md").to_str().unwrap()),
-        "legacy managed block is read when no prompt is deployed"
+        CHECKS.iter().filter(|c| c.id.starts_with("rule.")).count(),
+        0
     );
 }
 
@@ -1574,7 +1612,7 @@ fn uninstall_reports_every_backup_it_leaves_with_a_command_that_removes_them() {
     for rel in [
         ".claude/settings.json",
         ".codex/hooks.json",
-        ".pi/agent/extensions/pixel-impact.ts",
+        ".pi/agent/settings.json",
     ] {
         assert!(backup_of(rel), "no backup of {rel} in {on_disk:?}");
     }
@@ -1640,7 +1678,24 @@ fn repo_uninstall_reports_the_backups_left_in_the_repository() {
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&repo).unwrap();
     fs::write(repo.join("AGENTS.md"), "# user instruction\n").unwrap();
+    // A Devin guard an earlier release wrote beside a foreign hook: the
+    // install that removes it backs the file up first.
+    fs::create_dir_all(repo.join(".devin")).unwrap();
+    fs::write(
+        repo.join(".devin/config.local.json"),
+        serde_json::json!({"hooks":{"PreToolUse":[
+            {"matcher":"exec","hooks":[{"type":"command","command":"/opt/old/pixel run-hook guard --provider devin"}]},
+            {"matcher":"exec","hooks":[{"type":"command","command":"audit-exec"}]},
+        ]}})
+        .to_string(),
+    )
+    .unwrap();
     install(&repo_install_options(&repo, &home)).expect("repo install");
+    assert_eq!(
+        backups_on_disk(&repo.join(".devin")).len(),
+        1,
+        "the removal backed up the Devin config"
+    );
 
     let report = uninstall(&UninstallOptions {
         home: Some(home.clone()),
@@ -1906,12 +1961,23 @@ fn routing_isolated_provider_child() {
         _ => panic!("unexpected provider"),
     });
     fs::create_dir_all(config.parent().unwrap()).unwrap();
-    fs::write(&config, "{}").unwrap();
     let bin_dir = home.join("Pixel hook tools' directory");
     fs::create_dir_all(&bin_dir).unwrap();
     let exe = bin_dir.join("pixel");
     fs::write(&exe, "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s' \"$*\"\n").unwrap();
     fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    if provider == "devin" {
+        // The lifecycle hook an earlier release wrote, under the quoted path.
+        let quoted = format!("'{}'", exe.display().to_string().replace('\'', "'\\''"));
+        fs::write(
+            &config,
+            serde_json::json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":format!("{quoted} run-hook session-start --provider devin")}]}]}})
+                .to_string(),
+        )
+        .unwrap();
+    } else {
+        fs::write(&config, "{}").unwrap();
+    }
     let opts = InstallOptions {
         repo: None,
         home: Some(home.clone()),
@@ -1920,9 +1986,9 @@ fn routing_isolated_provider_child() {
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
-    // Claude and Codex get only synchronous task-event hooks. Devin keeps
-    // its separate lifecycle protocol. No automatic retrieval callbacks or
-    // hook scripts are deployed globally.
+    // Claude and Codex get only synchronous task-event hooks. Devin gets
+    // none. No automatic retrieval callbacks or hook scripts are deployed
+    // globally.
     install(&opts).unwrap();
     let first = fs::read(&config).unwrap();
     install(&opts).unwrap();
@@ -1967,36 +2033,10 @@ fn routing_isolated_provider_child() {
             );
         }
         "devin" => {
-            // Devin's own lifecycle protocol: the three lifecycle hooks with
-            // `--provider devin` where the provider decides the dialect (the
-            // post-compaction manifest reader needs none), and no
-            // PostToolUse — the relay is repo-scoped and would double it in
-            // every installed repository.
-            let hooks = value["hooks"].as_object().unwrap();
-            assert!(
-                hooks.get("PreToolUse").is_none() && hooks.get("PostToolUse").is_none(),
-                "global devin install wires lifecycle only: {value}"
-            );
-            for (event, verb) in [
-                ("SessionStart", "run-hook session-start --provider devin"),
-                (
-                    "UserPromptSubmit",
-                    "run-hook prompt-submit --provider devin",
-                ),
-                ("PostCompaction", "run-hook post-compaction"),
-            ] {
-                let groups = hooks[event].as_array().unwrap();
-                assert!(
-                    groups.iter().any(|g| {
-                        g["hooks"].as_array().is_some_and(|h| {
-                            h.iter().any(|hook| {
-                                hook["command"].as_str().is_some_and(|c| c.contains(verb))
-                            })
-                        })
-                    }),
-                    "{event} must register {verb}: {value}"
-                );
-            }
+            // Devin keeps its native retrieval: the lifecycle hook an earlier
+            // release registered under this quoted executable path is
+            // recognised and removed, and nothing replaces it.
+            assert_eq!(installed, serde_json::json!({}), "{installed}");
         }
         _ => unreachable!("unexpected provider {provider}"),
     }
@@ -2005,11 +2045,8 @@ fn routing_isolated_provider_child() {
         !home.join(".claude/hooks").exists(),
         "install must not create ~/.claude/hooks for any provider"
     );
-    // Explicitly invoked prompt assets are deployed regardless of provider.
-    assert!(
-        home.join(".local/share/pixel/agent-prompt.md").is_file(),
-        "agent-prompt.md should be deployed"
-    );
+    // No provider gets a prompt file either.
+    assert_no_retired_prompt(&home);
 }
 
 // ---------------------------------------------------------------------------
@@ -2153,8 +2190,10 @@ fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, FISH_SHELL);
-    let prompt = home.join(".local/share/pixel/agent-prompt.md");
-    assert!(prompt.is_file(), "fixture: the prompt is installed");
+    // Prompt files an earlier release left: only a full uninstall or
+    // install removes them, never the wrapper-only cleanup.
+    write_retired_prompts(home);
+    let prompt = home.join(RETIRED_PROMPTS[0]);
     // Two legacy blocks, one per shell, as an old install left them. The
     // .zshrc carries user content around its block so the profile survives
     // once the block is stripped.
@@ -2205,6 +2244,7 @@ fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
         "the fish block stays"
     );
     assert!(prompt.is_file(), "the prompt files stay");
+    assert!(home.join(RETIRED_PROMPTS[1]).is_file());
 
     // Doctor still flags the remaining fish block — it is stale too.
     let check = doctor(&DoctorOptions {
@@ -2403,54 +2443,57 @@ fn uninstall_deletes_a_fish_dropin_it_emptied() {
 }
 
 // ---------------------------------------------------------------------------
-// sub-agent prompt: `--append-subagent-system-prompt-file`
+// retired prompt files: `agent-prompt.md` and `subagent-prompt.md`
 //
-// Claude Code sub-agents receive neither the session's
-// `--append-system-prompt-file` nor its history, so the `claude` wrapper's
-// agent prompt never reaches them. Claude Code honours
-// `--append-subagent-system-prompt-file` in print mode only, and the same
-// wrapper fronts interactive sessions, so the flag is added exactly when
-// `-p`/`--print` is among the arguments. These tests pin the asset, the
-// argument-dependent flag in every supported shell, and the uninstall path.
+// Earlier releases deployed both under `~/.local/share/pixel/` for the
+// retired `claude` wrapper and the explicit integrations. No host reads them
+// any more: `pixel install` removes them, a dry run only announces it, and
+// nothing else Pixel keeps in that directory is touched.
 // ---------------------------------------------------------------------------
-
-const SUBAGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-subagent-prompt.md");
 
 fn subagent_prompt_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".local/share/pixel/subagent-prompt.md")
 }
 
 #[test]
-fn install_deploys_the_bundled_subagent_prompt_under_two_kilobytes() {
+fn install_removes_a_subagent_prompt_an_earlier_release_deployed() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
-    install_for_shell(home, TEST_SHELL);
+    let data = home.join(".local/share/pixel");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(subagent_prompt_path(home), "pixel who-calls X --callers\n").unwrap();
+    // A file of the user's beside it is not a prompt Pixel deployed.
+    fs::write(data.join("notes.md"), "mine\n").unwrap();
 
-    let deployed = fs::read_to_string(subagent_prompt_path(home))
-        .expect("subagent-prompt.md should be deployed next to agent-prompt.md");
-    assert_eq!(
-        deployed, SUBAGENT_PROMPT_ASSET,
-        "the deployed file must be the bundled asset, byte for byte"
-    );
-    // A long sub-agent prompt loses to a long agent body; the whole point of
-    // a separate file is that it stays short enough to be obeyed.
-    assert!(
-        deployed.len() <= 2048,
-        "subagent-prompt.md must stay under 2 KB, is {} bytes",
-        deployed.len()
-    );
-    for stale in ["--callers", "--callees", "~/.local/bin/pixel", "MANDATORY"] {
-        assert!(
-            !deployed.contains(stale),
-            "sub-agent prompt must not carry syntax the CLI rejects or an install path that is often wrong: {stale}"
-        );
-    }
+    let report = install(&InstallOptions {
+        repo: None,
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("install");
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "agent-prompt")
+        .expect("agent-prompt step");
+    assert_eq!(step.status, StepStatus::Green);
+    assert_eq!(step.summary, "removed subagent-prompt.md");
+    assert_no_retired_prompt(home);
+    assert_eq!(fs::read_to_string(data.join("notes.md")).unwrap(), "mine\n");
+
+    // Nothing left: the next install writes no prompt back.
+    install_for_shell(home, TEST_SHELL);
+    assert_no_retired_prompt(home);
 }
 
 #[test]
-fn dry_run_does_not_write_the_subagent_prompt() {
+fn dry_run_does_not_remove_the_retired_prompts() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
+    write_retired_prompts(home);
     let report = install(&InstallOptions {
         repo: None,
         home: Some(home.to_path_buf()),
@@ -2461,19 +2504,21 @@ fn dry_run_does_not_write_the_subagent_prompt() {
     })
     .expect("dry-run install");
     assert!(report.dry_run);
-    assert!(
-        !subagent_prompt_path(home).exists(),
-        "dry-run must not deploy subagent-prompt.md"
-    );
+    for rel in RETIRED_PROMPTS {
+        assert_eq!(
+            fs::read_to_string(home.join(rel)).unwrap(),
+            "# Pixel prompt from an earlier release\n",
+            "dry-run must not remove {rel}"
+        );
+    }
     let step = report
         .steps
         .iter()
         .find(|s| s.id == "agent-prompt")
         .expect("agent-prompt step");
-    assert!(
-        step.summary.contains("subagent-prompt.md"),
-        "the dry-run report must announce the sub-agent prompt it would deploy: {}",
-        step.summary
+    assert_eq!(
+        step.summary, "[dry-run] would report: removed agent-prompt.md and subagent-prompt.md",
+        "the dry-run report announces the removal it would make"
     );
 }
 
@@ -2557,27 +2602,49 @@ fn install_removes_a_retired_codex_block_and_preserves_surrounding_user_text() {
     );
 }
 
+/// OpenCode keeps its native tools: with OpenCode present, `pixel install`
+/// writes no prompt block and no plugin, and removes the ones an earlier
+/// release wrote (the managed block in its global `AGENTS.md`, the managed
+/// `plugins/pixel.js`, stale `opencode.json` entries) while user text, a
+/// user plugin and user settings survive. Doctor is red before, green after.
 #[test]
-fn install_writes_the_agent_prompt_into_opencode_agents_md_when_opencode_is_present() {
+fn install_removes_the_opencode_prompt_and_plugin_an_earlier_release_wrote() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     let opencode = home.join(".config/opencode");
     let agents_md = opencode.join("AGENTS.md");
     let config = opencode.join("opencode.json");
+    let plugin = opencode.join("plugins/pixel.js");
+    let mine = opencode.join("plugins/mine.js");
 
     // No ~/.config/opencode: the step is skipped and no files appear.
     install_for_shell(home, TEST_SHELL);
     assert!(
-        !agents_md.exists() && !config.exists(),
+        !opencode.exists(),
         "install must not create OpenCode config for a user without OpenCode"
     );
 
-    // OpenCode present with a global AGENTS.md and a config carrying a
-    // stale pixel instructions entry plus a dead pixel.mjs plugin entry:
-    // the block merges into AGENTS.md, user text survives, and the dead
-    // config entries are swept.
+    // Already native: OpenCode present without anything of Pixel's gains no
+    // block, no plugin and no config.
     fs::create_dir_all(&opencode).unwrap();
     fs::write(&agents_md, "user rules stay\n").unwrap();
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(fs::read_to_string(&agents_md).unwrap(), "user rules stay\n");
+    assert!(!opencode.join("plugins").exists() && !config.exists());
+
+    // What an earlier release left.
+    fs::write(
+        &agents_md,
+        format!("user rules stay\n{PIXEL_BLOCK_BEGIN}\nold prompt\n{PIXEL_BLOCK_END}\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+    fs::write(
+        &plugin,
+        format!("// {PIXEL_BLOCK_BEGIN}\nexport default {{}};\n"),
+    )
+    .unwrap();
+    fs::write(&mine, "export default {};\n").unwrap();
     fs::write(
         &config,
         serde_json::to_string_pretty(&serde_json::json!({
@@ -2588,46 +2655,53 @@ fn install_writes_the_agent_prompt_into_opencode_agents_md_when_opencode_is_pres
         .unwrap(),
     )
     .unwrap();
+    let opencode_check = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            shell: Some(TEST_SHELL.into()),
+            only: vec!["install.opencode-agents-md".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.opencode-agents-md").clone()
+    };
+    let red = opencode_check();
+    assert_eq!(red.status, CheckStatus::Red, "{red:?}");
+    assert_eq!(
+        red.reason.as_deref(),
+        Some(
+            format!(
+                "retired Pixel OpenCode integration remains: the Pixel block in {} and the guard plugin {} — run `pixel install` to remove it",
+                agents_md.display(),
+                plugin.display()
+            )
+            .as_str()
+        )
+    );
+
     install_for_shell(home, TEST_SHELL);
-    let content = fs::read_to_string(&agents_md).unwrap();
-    assert!(content.contains("user rules stay"), "{content}");
-    assert!(content.contains(PIXEL_BLOCK_BEGIN), "{content}");
-    let prompt = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md")).unwrap();
-    assert!(content.contains(&prompt), "the bundled prompt is embedded");
+    assert_eq!(fs::read_to_string(&agents_md).unwrap(), "user rules stay\n");
+    assert!(!plugin.exists(), "the managed plugin is removed");
+    assert_eq!(fs::read_to_string(&mine).unwrap(), "export default {};\n");
     let value: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
-    assert!(
-        value.get("instructions").is_none(),
-        "the stale instructions entry is swept: {value}"
-    );
     assert_eq!(
-        value["plugin"],
-        serde_json::json!(["./plugins/caveman/plugin.js"]),
-        "only the missing-file pixel.mjs entry goes"
+        value,
+        serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-5",
+            "plugin": ["./plugins/caveman/plugin.js"],
+        }),
+        "the stale instructions entry and the missing-file pixel.mjs entry go"
     );
-    assert_eq!(value["model"], "anthropic/claude-sonnet-4-5");
+    assert_eq!(opencode_check().status, CheckStatus::Green);
 
-    let written = fs::read_to_string(&agents_md).unwrap();
+    let written = fs::read(&agents_md).unwrap();
     install_for_shell(home, TEST_SHELL);
     assert_eq!(
-        fs::read_to_string(&agents_md).unwrap(),
+        fs::read(&agents_md).unwrap(),
         written,
         "a re-install must be byte-for-byte idempotent"
     );
-
-    // Uninstall strips only the block.
-    uninstall(&UninstallOptions {
-        repo: None,
-        home: Some(home.to_path_buf()),
-        binary_path: Some(home.join(".local/bin/pixel")),
-        running_binary: None,
-        executable_path: None,
-        shell: Some(TEST_SHELL.into()),
-        dry_run: false,
-        wrappers_only: false,
-    })
-    .expect("uninstall");
-    assert_eq!(fs::read_to_string(&agents_md).unwrap(), "user rules stay\n");
 }
 
 #[test]
@@ -2887,8 +2961,10 @@ fn reinstall_never_recreates_a_removed_wrapper_block() {
     }
 }
 
+/// One retired prompt file is enough for `install.agent-prompt` to go red,
+/// naming only that file; the install that removes it turns the check green.
 #[test]
-fn doctor_flags_a_missing_or_stale_subagent_prompt() {
+fn doctor_flags_a_retired_subagent_prompt_until_install_removes_it() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
@@ -2897,44 +2973,52 @@ fn doctor_flags_a_missing_or_stale_subagent_prompt() {
             home: Some(home.to_path_buf()),
             shell: Some(TEST_SHELL.into()),
             claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+            only: vec!["install.agent-prompt".into()],
             ..Default::default()
         })
         .expect("doctor")
         .checks
         .into_iter()
-        .find(|c| c.id == "install.subagent-prompt")
-        .expect("install.subagent-prompt check")
-        .status
+        .find(|c| c.id == "install.agent-prompt")
+        .expect("install.agent-prompt check")
     };
     assert_eq!(
-        check(home),
+        check(home).status,
         pixel_install::doctor::CheckStatus::Green,
-        "freshly installed sub-agent prompt must be green"
+        "a fresh install leaves no prompt file"
     );
+    fs::create_dir_all(subagent_prompt_path(home).parent().unwrap()).unwrap();
     fs::write(subagent_prompt_path(home), "pixel who-calls X --callers\n").unwrap();
+    let red = check(home);
     assert_eq!(
-        check(home),
+        red.status,
         pixel_install::doctor::CheckStatus::Red,
-        "a sub-agent prompt that differs from the bundled asset is stale: every print-mode \
-         sub-agent would be taught it"
+        "{red:?}"
     );
-    fs::remove_file(subagent_prompt_path(home)).unwrap();
     assert_eq!(
-        check(home),
-        pixel_install::doctor::CheckStatus::Red,
-        "the wrapper passes a path that no longer exists"
+        red.reason.as_deref(),
+        Some(
+            format!(
+                "retired Pixel prompt file(s) remain: {} — run `pixel install` to remove them",
+                subagent_prompt_path(home).display()
+            )
+            .as_str()
+        )
     );
+    install_for_shell(home, TEST_SHELL);
+    assert_eq!(
+        check(home).status,
+        pixel_install::doctor::CheckStatus::Green
+    );
+    assert!(!subagent_prompt_path(home).exists());
 }
 
 #[test]
-fn uninstall_removes_the_subagent_prompt() {
+fn uninstall_removes_the_retired_prompts() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
-    assert!(
-        subagent_prompt_path(home).is_file(),
-        "precondition: sub-agent prompt deployed"
-    );
+    write_retired_prompts(home);
 
     uninstall(&UninstallOptions {
         repo: None,
@@ -2946,20 +3030,13 @@ fn uninstall_removes_the_subagent_prompt() {
     })
     .expect("uninstall");
 
-    assert!(
-        !subagent_prompt_path(home).exists(),
-        "uninstall must remove subagent-prompt.md with the wrapper that referenced it"
-    );
-    assert!(
-        !home.join(".local/share/pixel/agent-prompt.md").exists(),
-        "agent-prompt.md is removed alongside"
-    );
+    assert_no_retired_prompt(home);
 }
 
 // ---------------------------------------------------------------------------
 // Pi's APPEND_SYSTEM.md is auto-loaded, so upgrades remove retired Pixel
-// prompt text while preserving user instructions. Explicit impact lives in
-// a managed extension under .pi/agent/extensions.
+// prompt text while preserving user instructions. Explicit impact is a Pi
+// package under ~/.local/share/pixel/pi-package that Pi's settings declare.
 // ---------------------------------------------------------------------------
 
 fn pi_prompt_path(home: &std::path::Path) -> std::path::PathBuf {
@@ -2993,6 +3070,18 @@ fn uninstall_home(home: &std::path::Path) {
     .expect("uninstall");
 }
 
+/// Whether `pixel install` declared its Pi package in `home`'s Pi settings
+/// and wrote the explicit command into it.
+fn pi_impact_package_installed(home: &std::path::Path) -> bool {
+    let package = home.join(".local/share/pixel/pi-package");
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(PI_SETTINGS_FILE)).unwrap_or_default())
+            .unwrap_or_default();
+    settings["packages"].as_array().is_some_and(|packages| {
+        packages.contains(&serde_json::json!(package.display().to_string()))
+    }) && package.join("extensions/pixel-impact.ts").is_file()
+}
+
 #[test]
 fn install_and_uninstall_strip_only_the_retired_pi_prompt() {
     let dir = TempDir::new().expect("tempdir");
@@ -3008,8 +3097,8 @@ fn install_and_uninstall_strip_only_the_retired_pi_prompt() {
     let migrated = "# my own pi instructions\nAlways answer in French.\n";
     assert_eq!(fs::read_to_string(&pi_path).unwrap(), migrated);
     assert!(
-        home.join(".pi/agent/extensions/pixel-impact.ts").is_file(),
-        "the explicit impact command is installed as an extension"
+        pi_impact_package_installed(home),
+        "the explicit impact command is installed as a Pi package"
     );
 
     let once = fs::read(&pi_path).unwrap();
@@ -3193,7 +3282,7 @@ fn install_removes_the_automatic_prompt_written_by_an_earlier_release() {
     let deployed = fs::read_to_string(&pi_path).expect("user text survives migration");
     assert_eq!(deployed, "Before.\nAfter.\n");
     assert!(!deployed.contains(MANAGED_BEGIN));
-    assert!(home.join(".pi/agent/extensions/pixel-impact.ts").is_file());
+    assert!(pi_impact_package_installed(home));
 }
 
 #[test]
@@ -3317,8 +3406,8 @@ fn uninstall_survives_a_missing_pi_prompt_file() {
         .find(|step| step.id == "agent-prompt")
         .unwrap();
     assert_eq!(
-        prompt_step.summary, "removed agent-prompt.md and subagent-prompt.md",
-        "an absent Pi file must not be reported as removed"
+        prompt_step.summary, "removed agent-prompt.md",
+        "an absent Pi file or subagent prompt must not be reported as removed"
     );
 }
 
@@ -3348,9 +3437,9 @@ fn install_skips_pi_when_the_configuration_path_is_not_a_directory() {
         .find(|step| step.id == "hooks.pi-impact")
         .expect("Pi status is reported");
     assert_eq!(pi_step.status, StepStatus::Green);
-    assert!(pi_step.summary.contains("not configured"));
+    assert!(pi_step.summary.contains("not installed"), "{pi_step:?}");
     assert_eq!(fs::read(&pi_path).unwrap(), original);
-    assert!(!home.join(".pi/agent/extensions/pixel-impact.ts").exists());
+    assert!(!home.join(".local/share/pixel/pi-package").exists());
 }
 
 #[test]
@@ -3394,20 +3483,28 @@ fn doctor_distinguishes_retired_pi_prompt_from_explicit_impact_extension() {
         .status
     };
     assert_eq!(impact_check(home), CheckStatus::Green);
-    let extension = home.join(".pi/agent/extensions/pixel-impact.ts");
+    let extension = home.join(".local/share/pixel/pi-package/extensions/pixel-impact.ts");
     assert!(
         !home.join(".pi/agent").exists(),
         "an unconfigured Pi installation must not create its configuration directory"
     );
 
-    // A configured Pi home receives the explicit command without changing
-    // Pi's existing settings.
+    // A configured Pi home receives the explicit command as a package its
+    // settings declare, beside the user's own settings.
     let pi_settings = home.join(PI_SETTINGS_FILE);
     fs::create_dir_all(pi_settings.parent().unwrap()).unwrap();
     fs::write(&pi_settings, "{\"extensions\": []}\n").unwrap();
-    let original_pi_settings = fs::read(&pi_settings).unwrap();
     install_for_shell(home, TEST_SHELL);
-    assert_eq!(fs::read(&pi_settings).unwrap(), original_pi_settings);
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&pi_settings).unwrap()).unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({
+            "extensions": [],
+            "packages": [home.join(".local/share/pixel/pi-package").display().to_string()],
+        })
+    );
+    assert!(pi_impact_package_installed(home));
     assert_eq!(impact_check(home), CheckStatus::Green);
     let source = fs::read_to_string(&extension).expect("explicit command extension installed");
     assert!(
@@ -3896,7 +3993,7 @@ fn repo_install_options(repo: &std::path::Path, home: &std::path::Path) -> Insta
 
 #[test]
 #[cfg(unix)]
-fn repo_install_keeps_native_defaults_and_scopes_enforcement_to_supported_hosts() {
+fn repo_install_keeps_native_defaults_for_every_host() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -3937,68 +4034,13 @@ fn repo_install_keeps_native_defaults_and_scopes_enforcement_to_supported_hosts(
         "a fresh install has no composed-guard backup sidecar"
     );
 
-    // .devin/config.local.json — pixel guard group, in the personal config
-    // Devin CLI reads (it never reads .devin/hooks.json).
-    assert!(!repo.join(".devin/hooks.json").exists());
-    let devin: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".devin/config.local.json")).unwrap())
-            .unwrap();
-    let devin_pre = devin["hooks"]["PreToolUse"].as_array().unwrap();
-    assert!(
-        devin_pre.iter().any(|group| {
-            group["matcher"]
-                .as_str()
-                .is_some_and(|matcher| matcher.contains("glob"))
-        }),
-        "native Devin glob must reach the Pixel guard: {devin}"
-    );
-    assert!(
-        devin_pre.iter().any(|g| {
-            g["hooks"].as_array().is_some_and(|h| {
-                h.iter().any(|hook| {
-                    hook["command"]
-                        .as_str()
-                        .is_some_and(|c| c.contains("run-hook guard --provider devin"))
-                })
-            })
-        }),
-        "{devin}"
-    );
-    let devin_prompt = devin["hooks"]["UserPromptSubmit"].as_array().unwrap();
-    assert!(
-        devin_prompt.iter().any(|group| {
-            group["hooks"].as_array().is_some_and(|hooks| {
-                hooks.iter().any(|hook| {
-                    hook["command"].as_str().is_some_and(|command| {
-                        command.contains("run-hook prompt-submit --provider devin")
-                    })
-                })
-            })
-        }),
-        "Devin must receive Pixel-first context on every prompt without blocking: {devin}"
-    );
-    let devin_permission = devin["hooks"]["PermissionRequest"].as_array().unwrap();
-    assert!(
-        devin_permission.iter().any(|group| {
-            group["matcher"] == "exec"
-                && group["hooks"].as_array().is_some_and(|hooks| {
-                    hooks.iter().any(|hook| {
-                        hook["command"].as_str().is_some_and(|command| {
-                            command.contains("run-hook guard --provider devin")
-                        })
-                    })
-                })
-        }),
-        "Devin must silently approve only Pixel retrieval execs: {devin}"
-    );
+    // Devin keeps its native tools: no guard, prompt or approval hook, and
+    // no `.devin/` directory at all, in either config Devin could read.
+    assert!(!repo.join(".devin").exists());
 
-    // Repo-scoped Pi enforcement remains a project extension; global Pi
-    // impact is installed separately under the user's agent extensions.
-    let ext = fs::read_to_string(repo.join(".pi/extensions/pixel-guard.ts")).unwrap();
-    assert!(ext.contains(MANAGED_BEGIN), "{ext}");
-    assert!(ext.contains("pi.registerTool({"), "{ext}");
-    assert!(ext.contains("pi.on(\"tool_call\""), "{ext}");
-    assert!(!repo.join(".pi/agent").exists());
+    // Pi keeps its native tools: no project extension is written; the
+    // explicit impact command is the global package.
+    assert!(!repo.join(".pi").exists());
 
     // Nothing global was touched.
     assert!(!home.join(".local/share/pixel").exists());
@@ -4164,11 +4206,14 @@ fn repo_install_preserves_foreign_hooks_and_removes_retired_callbacks() {
         .unwrap(),
     )
     .unwrap();
+    // .devin/config.local.json: a foreign group beside the guard an earlier
+    // release registered.
+    let devin_retired_guard = serde_json::json!({"matcher":"exec","hooks":[{"type":"command","command":format!("{} run-hook guard --provider devin", fake_pixel_exe(&home).display())}]});
     fs::write(
         repo.join(".devin/config.local.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "permissions": {"allow": ["read"]},
-            "hooks": {"PreToolUse": [foreign.clone()]}
+            "hooks": {"PreToolUse": [foreign.clone(), devin_retired_guard]}
         }))
         .unwrap(),
     )
@@ -4226,14 +4271,15 @@ fn repo_install_preserves_foreign_hooks_and_removes_retired_callbacks() {
             .exists()
     );
 
-    // Devin: foreign group and keys kept, pixel group appended.
-    let devin: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".devin/config.local.json")).unwrap())
-            .unwrap();
-    assert_eq!(devin["permissions"]["allow"][0], "read");
-    let pre = devin["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(pre[0], foreign, "foreign devin group preserved");
-    assert_eq!(pre.len(), 2);
+    // Devin: foreign group and keys kept, the retired Pixel guard removed
+    // and nothing added.
+    assert_eq!(
+        read_json(&repo.join(".devin/config.local.json")),
+        serde_json::json!({
+            "permissions": {"allow": ["read"]},
+            "hooks": {"PreToolUse": [foreign]}
+        })
+    );
 }
 
 #[test]
@@ -4419,10 +4465,8 @@ fn pixel_commands(value: &serde_json::Value, event: &str) -> Vec<String> {
 const MACHINE_LOCAL: &[&str] = &[
     ".claude/settings.local.json",
     ".claude/pixel-rtk-hooks.json",
-    ".devin/config.local.json",
     ".codex/hooks.json",
     ".codex/pixel-composed-guard-backup.json",
-    ".pi/extensions/pixel-guard.ts",
 ];
 
 /// A guard an earlier `--repo` install wrote into shared settings runs this
@@ -4490,8 +4534,8 @@ fn repo_install_should_move_a_guard_left_in_shared_settings_to_the_local_file() 
         devin_legacy["hooks"]["PreToolUse"],
         serde_json::json!([devin_foreign])
     );
-    let devin = read_json(&repo.join(".devin/config.local.json"));
-    assert_eq!(pixel_commands(&devin, "PreToolUse").len(), 1, "{devin}");
+    // No replacement guard moves to the file Devin does read.
+    assert!(!repo.join(".devin/config.local.json").exists());
 
     let doctor_report = doctor(&DoctorOptions {
         home: Some(home.clone()),
@@ -4499,14 +4543,15 @@ fn repo_install_should_move_a_guard_left_in_shared_settings_to_the_local_file() 
         ..Default::default()
     })
     .unwrap();
-    for id in ["repo.claude-hooks", "repo.devin-hooks"] {
-        let c = check(&doctor_report, id);
-        assert_eq!(c.status, CheckStatus::Green, "{id}: {c:?}");
-        assert!(
-            c.summary.contains("native") || c.summary.contains("registered"),
-            "{id}: {c:?}"
-        );
-    }
+    let claude = check(&doctor_report, "repo.claude-hooks");
+    assert_eq!(claude.status, CheckStatus::Green, "{claude:?}");
+    assert!(claude.summary.contains("native"), "{claude:?}");
+    let devin = check(&doctor_report, "repo.devin-hooks");
+    assert_eq!(devin.status, CheckStatus::Green, "{devin:?}");
+    assert_eq!(
+        devin.summary,
+        "no Pixel hook; the agent keeps its native tools"
+    );
 }
 
 /// An earlier delegated guard in shared settings is removed and its adopted
@@ -4747,7 +4792,15 @@ fn repo_install_should_keep_machine_local_artifacts_out_of_git() {
         .iter()
         .find(|s| s.id == "repo.git-exclude")
         .unwrap();
-    assert!(dry_step.summary.contains("6 machine-local"), "{dry_step:?}");
+    assert_eq!(
+        dry_step.summary,
+        format!(
+            "[dry-run] would report: {} machine-local path(s) added to the clone's info/exclude",
+            MACHINE_LOCAL.len()
+        ),
+        "{dry_step:?}"
+    );
+    assert_eq!(MACHINE_LOCAL.len(), 4);
 
     let report = install(&repo_install_options(&repo, &home)).unwrap();
     assert!(report.ok, "{report:?}");
@@ -4912,7 +4965,10 @@ fn doctor_repo_checks_should_stay_green_on_a_project_with_its_own_configs() {
                 "{id}: {c:?}"
             );
         } else {
-            assert!(c.summary.contains("not installed"), "{id}: {c:?}");
+            assert_eq!(
+                c.summary, "no Pixel hook; the agent keeps its native tools",
+                "{id}: {c:?}"
+            );
         }
     }
 }
@@ -4966,10 +5022,11 @@ fn doctor_repo_codex_hooks_should_not_depend_on_project_trust() {
     }
 }
 
-/// Evidence of a Pixel install that is broken stays red: a Pixel hook without
-/// the guard, an RTK backup without the guard, a Pixel block gone stale, a
-/// Pixel hook without its composed-guard sidecar, or a guard sitting in the
-/// shared settings.json where it runs this machine's path on every clone.
+/// Evidence of a Pixel install that is broken or retired stays red: a Pixel
+/// hook without the guard, a Devin hook of any kind, an RTK backup without
+/// the guard, a Pixel block gone stale, a Pixel hook without its
+/// composed-guard sidecar, or a guard sitting in the shared settings.json
+/// where it runs this machine's path on every clone.
 #[test]
 #[cfg(unix)]
 fn doctor_repo_checks_should_go_red_on_a_broken_pixel_install() {
@@ -5014,26 +5071,32 @@ fn doctor_repo_checks_should_go_red_on_a_broken_pixel_install() {
         CheckStatus::Green
     );
 
-    let devin_without_permission_approval = serde_json::json!({
-        "hooks": {
-            "PreToolUse": [{"matcher":"exec|Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider devin"}]}],
-            "UserPromptSubmit": [{"hooks":[{"type":"command","command":"'/p/pixel' run-hook prompt-submit --provider devin"}]}]
-        }
-    });
+    // Devin keeps its native tools: a Pixel guard left in the legacy
+    // `.devin/hooks.json` alone is red too, naming that file and the repo
+    // install that removes it.
     fs::write(
         repo.join(".devin/config.local.json"),
-        serde_json::to_string_pretty(&devin_without_permission_approval).unwrap(),
+        serde_json::json!({"hooks": {"PreToolUse": [{"matcher":"exec","hooks":[{"type":"command","command":"keep-me"}]}]}}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        repo.join(".devin/hooks.json"),
+        serde_json::json!({"hooks": {"PreToolUse": [{"matcher":"exec|Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider devin"}]}]}}).to_string(),
     )
     .unwrap();
     let report = doctor(&doctor_options).unwrap();
     let devin = check(&report, "repo.devin-hooks");
     assert_eq!(devin.status, CheckStatus::Red, "{devin:?}");
-    assert!(
-        devin
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("PermissionRequest")),
-        "{devin:?}"
+    assert_eq!(
+        devin.reason.as_deref(),
+        Some(
+            format!(
+                "retired Pixel hooks remain in {} — run `pixel install --repo '{}'` to remove them",
+                repo.join(".devin/hooks.json").display(),
+                repo.display()
+            )
+            .as_str()
+        )
     );
 
     // An RTK backup alone is evidence too.
@@ -5652,21 +5715,18 @@ fn uninstall_should_remove_the_pre_rename_guard_entry_and_script() {
     assert_eq!(settings["hooks"]["PreToolUse"], serde_json::json!([keep]));
 }
 
-/// A guard an older release left in `<repo>/.pi/agent/` never ran, since pi
-/// reads that directory only under `~`: doctor says so in yellow with the
-/// command that moves it, and the move turns the check green. A file at the
-/// guard's path that pixel did not write fails the check.
+/// A Pi guard extension Pixel wrote, in `.pi/extensions/` or (releases up
+/// to 0.4.0) `<repo>/.pi/agent/`, is retired: doctor is red with the
+/// command that removes it, `install --repo` removes it, and a file at that
+/// path Pixel did not write is the user's and stays green.
 #[test]
 #[cfg(unix)]
-fn doctor_pi_guard_should_flag_a_guard_pi_never_loads() {
+fn doctor_pi_guard_should_flag_a_retired_guard_until_repo_install_removes_it() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     // A space in the path: the suggested command is pasted into a shell.
     let repo = dir.path().join("my repo");
     fs::create_dir_all(&home).unwrap();
-    let legacy = repo.join(".pi/agent/extensions/pixel-guard.ts");
-    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-    fs::write(&legacy, format!("// {MANAGED_BEGIN}\n")).unwrap();
     let pi_check = || {
         let report = doctor(&DoctorOptions {
             home: Some(home.clone()),
@@ -5676,32 +5736,33 @@ fn doctor_pi_guard_should_flag_a_guard_pi_never_loads() {
         .unwrap();
         check(&report, "repo.pi-guard").clone()
     };
-
-    let c = pi_check();
-    assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
-    assert!(c.summary.contains("never loads"), "{c:?}");
-    assert!(
-        c.summary
-            .contains(&format!("pixel install --repo '{}'", repo.display())),
-        "{c:?}"
-    );
-
-    install(&repo_install_options(&repo, &home)).unwrap();
-    let c = pi_check();
-    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
-    assert!(c.summary.contains(".pi/extensions/pixel-guard.ts"), "{c:?}");
-    assert!(!legacy.exists());
-
-    fs::write(repo.join(".pi/extensions/pixel-guard.ts"), "// mine\n").unwrap();
-    let c = pi_check();
-    assert_eq!(c.status, CheckStatus::Red, "{c:?}");
-    assert!(
-        c.reason
-            .as_deref()
-            .is_some_and(|r| r.contains("not a pixel-managed guard extension")
+    for retired in [
+        repo.join(".pi/agent/extensions/pixel-guard.ts"),
+        repo.join(".pi/extensions/pixel-guard.ts"),
+    ] {
+        fs::create_dir_all(retired.parent().unwrap()).unwrap();
+        fs::write(&retired, format!("// {MANAGED_BEGIN}\n")).unwrap();
+        let c = pi_check();
+        assert_eq!(c.status, CheckStatus::Red, "{c:?}");
+        assert!(
+            c.reason.as_deref().is_some_and(|r| r.contains("retired")
                 && r.contains(&format!("pixel install --repo '{}'", repo.display()))),
-        "{c:?}"
-    );
+            "{c:?}"
+        );
+
+        install(&repo_install_options(&repo, &home)).unwrap();
+        let c = pi_check();
+        assert_eq!(c.status, CheckStatus::Green, "{c:?}");
+        assert!(!retired.exists());
+    }
+    assert!(!repo.join(".pi").exists(), "nothing of Pixel's is left");
+
+    let mine = repo.join(".pi/extensions/pixel-guard.ts");
+    fs::create_dir_all(mine.parent().unwrap()).unwrap();
+    fs::write(&mine, "// mine\n").unwrap();
+    install(&repo_install_options(&repo, &home)).unwrap();
+    assert_eq!(pi_check().status, CheckStatus::Green);
+    assert_eq!(fs::read_to_string(&mine).unwrap(), "// mine\n");
 }
 
 /// `REPO_ARTIFACTS` is the list the README and `--repo` help are checked
@@ -6438,30 +6499,82 @@ fn doctor_should_flag_a_claude_install_missing_a_task_event_hook() {
     assert_eq!(fixed.status, CheckStatus::Green, "{fixed:?}");
 }
 
-/// Devin's repo-local config gets the relay on `exec` beside its guard. A
-/// reinstall verifies instead of rewriting, a foreign PostToolUse group
-/// survives, doctor is green, and a guard-only file from an older install
-/// is red until reinstalled.
+/// Devin keeps its native tools in a repository too: `install --repo`
+/// writes no Devin hook, and the guard and metrics relay an earlier release
+/// registered in `.devin/config.local.json` (and the legacy
+/// `.devin/hooks.json`) are removed while a foreign group survives. Doctor
+/// is red on the leftover with the quoted repo fix, green after; a
+/// reinstall is byte-identical, and a repository without `.devin/` gains
+/// none.
 #[test]
 #[cfg(unix)]
-fn devin_repo_install_should_register_an_idempotent_exec_metrics_relay() {
+fn devin_repo_install_should_remove_the_retired_guard_and_metrics_relay() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
-    let repo = dir.path().join("repo");
+    // A space and an apostrophe: the fix is pasted into a shell.
+    let repo = dir.path().join("a 'repo'");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(repo.join(".devin")).unwrap();
+    let exe = fake_pixel_exe(&home);
+    let quoted = format!("'{}'", exe.display());
     let foreign = serde_json::json!({"hooks":[{"type":"command","command":"vibe-island-bridge --source devin"}]});
     let config = repo.join(".devin/config.local.json");
     fs::write(
         &config,
-        serde_json::to_string_pretty(
-            &serde_json::json!({"hooks":{"PostToolUse":[foreign.clone()]}}),
-        )
+        serde_json::to_string_pretty(&serde_json::json!({"hooks":{
+            "PreToolUse":[{"matcher":"exec","hooks":[{"type":"command","command":format!("{quoted} run-hook guard --provider devin")}]}],
+            "PostToolUse":[
+                foreign.clone(),
+                {"matcher":"exec","hooks":[{"type":"command","command":format!("{quoted} run-hook metrics --provider devin"),"timeout":10}]},
+            ],
+        }}))
         .unwrap(),
     )
     .unwrap();
+    let legacy = repo.join(".devin/hooks.json");
+    fs::write(
+        &legacy,
+        serde_json::json!({"hooks":{"PreToolUse":[{"matcher":"exec","hooks":[{"type":"command","command":"/opt/old/pixel run-hook guard --provider devin"}]}]}}).to_string(),
+    )
+    .unwrap();
+    let doctor_options = DoctorOptions {
+        home: Some(home.clone()),
+        executable_path: Some(exe.clone()),
+        repo_root: Some(repo.clone()),
+        only: vec!["repo.devin-hooks".into()],
+        ..Default::default()
+    };
+    let red = doctor(&doctor_options).unwrap();
+    let devin = check(&red, "repo.devin-hooks");
+    assert_eq!(devin.status, CheckStatus::Red, "{devin:?}");
+    let fix = format!(
+        "pixel install --repo '{}'",
+        repo.display().to_string().replace('\'', "'\\''")
+    );
+    assert_eq!(
+        devin.reason.as_deref(),
+        Some(
+            format!(
+                "retired Pixel hooks remain in {}, {} — run `{fix}` to remove them",
+                config.display(),
+                legacy.display()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(devin.fix.as_deref(), Some(fix.as_str()));
+
     let options = repo_install_options(&repo, &home);
     install(&options).unwrap();
+    assert_eq!(
+        read_json(&config),
+        serde_json::json!({"hooks":{"PostToolUse":[foreign]}}),
+        "the guard and the relay are gone, the foreign group stays"
+    );
+    assert_eq!(read_json(&legacy), serde_json::json!({}));
+    let green = doctor(&doctor_options).unwrap();
+    assert_eq!(check(&green, "repo.devin-hooks").status, CheckStatus::Green);
+
     let first = fs::read(&config).unwrap();
     let report = install(&options).unwrap();
     assert_eq!(
@@ -6470,62 +6583,20 @@ fn devin_repo_install_should_register_an_idempotent_exec_metrics_relay() {
         "reinstall is byte-identical"
     );
     let step = report.steps.iter().find(|s| s.id == "hooks.devin").unwrap();
-    assert!(step.summary.contains("verified"), "{step:?}");
+    assert_eq!(step.summary, "removed 0 Devin hook entry/entries");
 
-    let value = read_json(&config);
-    let relays = metrics_relays(&value, "devin");
-    assert_eq!(relays.len(), 1, "{value}");
-    assert_eq!(relays[0].0, "exec");
-    assert!(
-        relays[0].1.ends_with("run-hook metrics --provider devin"),
-        "{relays:?}"
-    );
-    assert!(
-        value["hooks"]["PostToolUse"]
-            .as_array()
-            .unwrap()
-            .contains(&foreign),
-        "{value}"
-    );
-
-    let doctor_options = DoctorOptions {
-        home: Some(home.clone()),
-        executable_path: Some(fake_pixel_exe(&home)),
-        repo_root: Some(repo.clone()),
-        ..Default::default()
-    };
-    let green = doctor(&doctor_options).unwrap();
-    assert_eq!(check(&green, "repo.devin-hooks").status, CheckStatus::Green);
-
-    let mut stale = value.clone();
-    stale["hooks"]["PostToolUse"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|g| g["matcher"] != "exec");
-    stale["hooks"]["PostToolUse"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({"matcher":"exec","hooks":[{"type":"command","command":"/usr/bin/other run-hook metrics --provider devin"}]}));
-    fs::write(&config, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
-    let red = doctor(&doctor_options).unwrap();
-    let devin = check(&red, "repo.devin-hooks");
-    assert_eq!(devin.status, CheckStatus::Red, "{devin:?}");
-    assert!(
-        devin
-            .reason
-            .as_deref()
-            .is_some_and(|r| r.contains("metrics relay")),
-        "{devin:?}"
-    );
-    install(&options).unwrap();
-    assert_eq!(fs::read(&config).unwrap(), first, "reinstall restores it");
+    let bare = dir.path().join("bare");
+    fs::create_dir_all(&bare).unwrap();
+    install(&repo_install_options(&bare, &home)).unwrap();
+    assert!(!bare.join(".devin").exists(), "no Devin config is created");
 }
 
 /// Uninstall removes global task hooks while preserving foreign PostToolUse
-/// groups and the separately scoped Devin relay.
+/// groups; a repo-local Devin config holding only a foreign group is never
+/// touched by install or uninstall.
 #[test]
 #[cfg(unix)]
-fn uninstall_should_remove_claude_task_hooks_and_the_devin_metrics_relay() {
+fn uninstall_should_remove_claude_task_hooks_and_leave_a_foreign_devin_config() {
     let dir = TempDir::new().unwrap();
     let home = dir.path().join("home");
     let repo = dir.path().join("repo");
@@ -6533,18 +6604,13 @@ fn uninstall_should_remove_claude_task_hooks_and_the_devin_metrics_relay() {
     fs::create_dir_all(repo.join(".devin")).unwrap();
     fs::create_dir_all(home.join(".claude")).unwrap();
     let foreign = serde_json::json!({"matcher":"Write","hooks":[{"type":"command","command":"fmt-on-write.sh"}]});
-    for path in [
-        home.join(".claude/settings.json"),
-        repo.join(".devin/config.local.json"),
-    ] {
-        fs::write(
-            path,
-            serde_json::to_string_pretty(
-                &serde_json::json!({"hooks":{"PostToolUse":[foreign.clone()]}}),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+    let original = serde_json::to_string_pretty(
+        &serde_json::json!({"hooks":{"PostToolUse":[foreign.clone()]}}),
+    )
+    .unwrap();
+    let devin = repo.join(".devin/config.local.json");
+    for path in [&home.join(".claude/settings.json"), &devin] {
+        fs::write(path, &original).unwrap();
     }
     let exe = fake_pixel_exe(&home);
     install(&InstallOptions {
@@ -6559,10 +6625,7 @@ fn uninstall_should_remove_claude_task_hooks_and_the_devin_metrics_relay() {
         task_event_counts(&read_json(&home.join(".claude/settings.json"))),
         ONE_EACH
     );
-    assert_eq!(
-        metrics_relays(&read_json(&repo.join(".devin/config.local.json")), "devin").len(),
-        1
-    );
+    assert_eq!(fs::read_to_string(&devin).unwrap(), original);
 
     for repo in [Some(repo.clone()), None] {
         uninstall(&UninstallOptions {
@@ -6575,24 +6638,19 @@ fn uninstall_should_remove_claude_task_hooks_and_the_devin_metrics_relay() {
         })
         .unwrap();
     }
-    for path in [
-        home.join(".claude/settings.json"),
-        repo.join(".devin/config.local.json"),
-    ] {
-        let value = read_json(&path);
-        assert!(pixel_commands(&value, "PostToolUse").is_empty(), "{value}");
-        assert_eq!(
-            value["hooks"]["PostToolUse"],
-            serde_json::json!([foreign]),
-            "{}",
-            path.display()
-        );
-    }
+    let value = read_json(&home.join(".claude/settings.json"));
+    assert!(pixel_commands(&value, "PostToolUse").is_empty(), "{value}");
+    assert_eq!(
+        value["hooks"]["PostToolUse"],
+        serde_json::json!([foreign]),
+        "{value}"
+    );
+    assert_eq!(fs::read_to_string(&devin).unwrap(), original);
 }
 
 /// A repository at `$HOME`: the global task suite remains singular, repo
-/// cleanup adds no duplicate callbacks, and Devin's repo-local relay stays
-/// in `~/.devin`.
+/// cleanup adds no duplicate callbacks, and no Devin config appears, global
+/// or repo-local.
 #[test]
 #[cfg(unix)]
 fn repo_install_at_home_should_keep_global_task_hooks_singular() {
@@ -6614,9 +6672,8 @@ fn repo_install_at_home_should_keep_global_task_hooks_singular() {
     assert_eq!(task_event_counts(&global), ONE_EACH, "{global}");
     let local = read_local_hooks(&home.join(".claude/settings.local.json"));
     assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
-    let devin = read_json(&home.join(".devin/config.local.json"));
-    assert_eq!(metrics_relays(&devin, "devin").len(), 1, "{devin}");
-    assert!(!home.join(".config/devin/config.json").exists());
+    assert!(!home.join(".devin").exists());
+    assert!(!home.join(".config/devin").exists());
 }
 
 /// A `pixel mcp` entry an older release wrote into Warp's config points Warp
@@ -6712,111 +6769,98 @@ fn repo_install_should_retire_the_warp_mcp_entry_older_releases_wrote() {
     assert_eq!(check(&report, "repo.warp-mcp").status, CheckStatus::Green);
 }
 
-/// Devin imports Claude's hooks, so its sessions previously received Pixel
-/// only through the imported Claude text. The global install now registers
-/// Devin's own lifecycle protocol — the three lifecycle hooks with
-/// `--provider devin` — in `~/.config/devin/config.json`, but only when
-/// Devin has been used on the machine. The metrics relay stays repo-scoped:
-/// a global one would double the repo-local relay in every installed repo.
+/// A Devin hook group running `command`, in Devin's Claude-style schema.
+fn devin_group(command: &str) -> serde_json::Value {
+    serde_json::json!({"hooks":[{"command":command,"type":"command"}]})
+}
+
+/// Devin keeps its native retrieval: the global install writes no Devin
+/// hook, and the lifecycle hooks an earlier release registered in
+/// `~/.config/devin/config.json` are removed while the user's settings and
+/// foreign hooks stay. Doctor is red on the leftover and green after. A
+/// machine that never ran Devin gains no Devin config.
 #[test]
 #[cfg(unix)]
-fn global_install_gives_devin_its_own_lifecycle_hooks_only_when_devin_is_in_use() {
+fn global_install_removes_the_devin_lifecycle_hooks_an_earlier_release_wrote() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
+    let exe = fake_pixel_exe(home);
     let devin_config = home.join(".config/devin/config.json");
     fs::create_dir_all(devin_config.parent().unwrap()).unwrap();
+    let foreign = devin_group("/opt/foreign --source devin");
+    let old = "'/opt/old/pixel'";
     fs::write(
         &devin_config,
-        r#"{"agent":{"model":"swe-2-medium"},"hooks":{"SessionStart":[{"hooks":[{"command":"/opt/foreign --source devin","type":"command"}]}]}}"#,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "agent": {"model": "swe-2-medium"},
+            "hooks": {
+                "SessionStart": [foreign.clone(), devin_group(&format!("{old} run-hook session-start --provider devin"))],
+                "UserPromptSubmit": [devin_group(&format!("{old} run-hook prompt-submit --provider devin"))],
+                "PostCompaction": [devin_group(&format!("{old} run-hook post-compaction"))],
+            }
+        }))
+        .unwrap(),
     )
     .unwrap();
-    install(&InstallOptions {
+    let options = InstallOptions {
         repo: None,
         home: Some(home.to_path_buf()),
-        executable_path: Some(fake_pixel_exe(home)),
+        executable_path: Some(exe.clone()),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
-    })
-    .unwrap();
-
-    let value: serde_json::Value =
-        serde_json::from_slice(&fs::read(&devin_config).unwrap()).unwrap();
-    // The foreign session-start hook survives beside Pixel's group.
-    let session = value["hooks"]["SessionStart"].as_array().unwrap();
-    assert!(
-        session.iter().any(|g| {
-            g["hooks"].as_array().is_some_and(|h| {
-                h.iter().any(|hook| {
-                    hook["command"]
-                        .as_str()
-                        .is_some_and(|c| c.contains("foreign"))
-                })
-            })
-        }),
-        "{session:?}"
-    );
-    let has = |event: &str, verb: &str| {
-        value["hooks"][event].as_array().is_some_and(|groups| {
-            groups.iter().any(|g| {
-                g["hooks"].as_array().is_some_and(|h| {
-                    h.iter().any(|hook| {
-                        hook["command"].as_str().is_some_and(|c| {
-                            c.contains(&format!("run-hook {verb} --provider devin"))
-                        })
-                    })
-                })
-            })
-        })
     };
-    assert!(has("SessionStart", "session-start"));
-    assert!(has("UserPromptSubmit", "prompt-submit"));
-    // Post-compaction reads the repo manifest; it needs no provider argument.
-    assert!(
-        value["hooks"]["PostCompaction"]
-            .as_array()
-            .is_some_and(|groups| {
-                groups.iter().any(|g| {
-                    g["hooks"].as_array().is_some_and(|h| {
-                        h.iter().any(|hook| {
-                            hook["command"]
-                                .as_str()
-                                .is_some_and(|c| c.contains("run-hook post-compaction"))
-                        })
-                    })
-                })
-            }),
-        "{:?}",
-        value["hooks"]["PostCompaction"]
-    );
-    // The relay is repo-scoped: no global PostToolUse entry at all.
-    assert!(
-        value["hooks"].get("PostToolUse").is_none(),
-        "{:?}",
-        value["hooks"].get("PostToolUse")
-    );
+    let devin_check = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
+            shell: Some(TEST_SHELL.into()),
+            only: vec!["install.devin-hooks".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.devin-hooks").clone()
+    };
 
-    // Idempotent: a second install rewrites nothing.
-    let before = fs::read(&devin_config).unwrap();
-    install(&InstallOptions {
-        repo: None,
-        home: Some(home.to_path_buf()),
-        executable_path: Some(fake_pixel_exe(home)),
-        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
-        dry_run: false,
-        shell: Some(TEST_SHELL.into()),
-    })
-    .unwrap();
-    let after = fs::read(&devin_config).unwrap();
+    let red = devin_check();
+    assert_eq!(red.status, CheckStatus::Red, "{red:?}");
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&before).unwrap(),
-        serde_json::from_slice::<serde_json::Value>(&after).unwrap()
+        red.reason.as_deref(),
+        Some(
+            format!(
+                "retired Pixel hooks remain in {} — run `pixel install` to remove them",
+                devin_config.display()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        red.fix.as_deref(),
+        Some(format!("pixel install --shell {TEST_SHELL}").as_str())
     );
 
-    // Without a Devin config dir, the install creates none: a machine that
-    // never ran Devin must not gain a config for it.
+    install(&options).unwrap();
+    assert_eq!(
+        read_json(&devin_config),
+        serde_json::json!({
+            "agent": {"model": "swe-2-medium"},
+            "hooks": {"SessionStart": [foreign]},
+        }),
+        "only Pixel's hooks are removed"
+    );
+    assert_eq!(devin_check().status, CheckStatus::Green);
+
+    // Idempotent: a second install rewrites nothing and reports nothing.
+    let before = fs::read(&devin_config).unwrap();
+    let report = install(&options).unwrap();
+    assert_eq!(fs::read(&devin_config).unwrap(), before);
+    let step = report.steps.iter().find(|s| s.id == "hooks.devin").unwrap();
+    assert_eq!(step.summary, "removed 0 Devin hook entry/entries");
+
+    // Without a Devin config dir, the install creates none and runs no Devin
+    // step: a machine that never ran Devin must not gain a config for it.
     let devinless = TempDir::new().unwrap();
-    install(&InstallOptions {
+    let report = install(&InstallOptions {
         repo: None,
         home: Some(devinless.path().to_path_buf()),
         executable_path: Some(fake_pixel_exe(devinless.path())),
@@ -6825,73 +6869,59 @@ fn global_install_gives_devin_its_own_lifecycle_hooks_only_when_devin_is_in_use(
         shell: Some(TEST_SHELL.into()),
     })
     .unwrap();
+    assert!(report.steps.iter().all(|s| s.id != "hooks.devin"));
     assert!(
         !devinless.path().join(".config/devin").exists(),
         "no Devin config on a machine without Devin"
     );
 }
 
-/// The `install.devin-hooks` check judges only what Pixel wrote, in the
-/// crate's own suite (the mutants of the check's match arms are scored
-/// here, not by the CLI suite): a machine without Devin is green-absent, a
-/// Devin config without the hooks is red, foreign hook groups that name
-/// the same verbs are still not Pixel's entries, and a real install turns
-/// the check green.
+/// The `install.devin-hooks` check judges only what Pixel wrote: a machine
+/// without Devin is green-absent, a Devin config with foreign hook groups
+/// naming Pixel's verbs is green (they are not Pixel's entries), one with a
+/// hook Pixel's binary runs is red, and a real install turns it green again
+/// with the foreign groups kept.
 #[test]
 fn doctor_devin_hooks_judge_only_what_pixel_wrote() {
     let options = |home: &std::path::Path| DoctorOptions {
         home: Some(home.to_path_buf()),
         executable_path: None,
         shell: Some(TEST_SHELL.into()),
+        only: vec!["install.devin-hooks".into()],
         ..Default::default()
     };
-    let check = |report: &pixel_install::doctor::DoctorReport| {
-        report
-            .checks
-            .iter()
-            .find(|c| c.id == "install.devin-hooks")
-            .expect("the check ran")
-            .status
+    let status = |home: &std::path::Path| {
+        let report = doctor(&options(home)).unwrap();
+        check(&report, "install.devin-hooks").status
     };
 
     // No Devin on the machine: green-absent.
     let dir = TempDir::new().unwrap();
-    let report = doctor(&options(dir.path())).unwrap();
-    assert_eq!(check(&report), CheckStatus::Green, "{report:?}");
+    assert_eq!(status(dir.path()), CheckStatus::Green);
 
-    // Devin used, nothing installed: red. The foreign hook groups name the
-    // exact verbs (and the provider argument the two provider-decided
-    // entries carry) without Pixel's binary, so only a real install can
-    // turn the check green.
+    // Foreign groups that name the exact verbs without Pixel's binary.
     let dir = TempDir::new().unwrap();
     let config = dir.path().join(".config/devin/config.json");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
-    fs::write(
-        &config,
-        r#"{"hooks":{
-            "SessionStart":[{"hooks":[{"command":"/opt/foreign run-hook session-start --provider devin","type":"command"}]}],
-            "UserPromptSubmit":[{"hooks":[{"command":"/opt/foreign run-hook prompt-submit --provider devin","type":"command"}]}],
-            "PostCompaction":[{"hooks":[{"command":"/opt/foreign run-hook post-compaction","type":"command"}]}]
-        }}"#,
-    )
-    .unwrap();
-    let report = doctor(&options(dir.path())).unwrap();
-    assert_eq!(check(&report), CheckStatus::Red, "{report:?}");
-    let finding = report
-        .checks
-        .iter()
-        .find(|c| c.id == "install.devin-hooks")
-        .unwrap();
-    let reason = finding.reason.as_deref().unwrap_or_default();
-    for event in [
-        "SessionStart→session-start",
-        "UserPromptSubmit→prompt-submit",
-        "PostCompaction→post-compaction",
-    ] {
-        assert!(reason.contains(event), "{event}: {reason}");
-    }
+    let foreign = serde_json::json!({
+        "SessionStart": [devin_group("/opt/foreign run-hook session-start --provider devin")],
+        "UserPromptSubmit": [devin_group("/opt/foreign run-hook prompt-submit --provider devin")],
+        "PostCompaction": [devin_group("/opt/foreign run-hook post-compaction")],
+    });
+    fs::write(&config, serde_json::json!({"hooks": foreign}).to_string()).unwrap();
+    assert_eq!(status(dir.path()), CheckStatus::Green);
 
-    // A real install writes the three entries and the check turns green.
+    // One hook Pixel's binary runs: red.
+    let mut hooks = foreign.clone();
+    hooks["SessionStart"]
+        .as_array_mut()
+        .unwrap()
+        .push(devin_group(
+            "/usr/local/bin/pixel run-hook session-start --provider devin",
+        ));
+    fs::write(&config, serde_json::json!({"hooks": hooks}).to_string()).unwrap();
+    assert_eq!(status(dir.path()), CheckStatus::Red);
+
     install(&InstallOptions {
         repo: None,
         home: Some(dir.path().to_path_buf()),
@@ -6901,8 +6931,8 @@ fn doctor_devin_hooks_judge_only_what_pixel_wrote() {
         shell: Some(TEST_SHELL.into()),
     })
     .unwrap();
-    let report = doctor(&options(dir.path())).unwrap();
-    assert_eq!(check(&report), CheckStatus::Green, "{report:?}");
+    assert_eq!(status(dir.path()), CheckStatus::Green);
+    assert_eq!(read_json(&config), serde_json::json!({"hooks": foreign}));
 }
 
 /// Doctor options that run the one Codex hook-review check under `home`.

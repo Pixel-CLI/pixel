@@ -1158,20 +1158,20 @@ enum Command {
         /// skipping every global step. Remove retired Claude and Codex
         /// retrieval hooks, restore adopted RTK/foreign hooks from matching
         /// backups, and preserve independent task controls. Tracked Codex
-        /// hooks are left alone. Configure Devin and Pi project adapters and
-        /// remove retired Pixel retrieval blocks from AGENTS.md and Codex
-        /// config. Foreign instructions and native tools are preserved.
+        /// hooks are left alone. Remove the retired Devin guard and Pi project
+        /// extension, and retired Pixel retrieval blocks from AGENTS.md and
+        /// Codex config. Adds no guard. Foreign instructions and native tools
+        /// are preserved.
         /// Files: `.claude/settings.local.json`, `.claude/pixel-rtk-hooks.json`,
         /// `.codex/config.toml`, `.codex/hooks.json`,
-        /// `.codex/pixel-composed-guard-backup.json`, `.devin/config.local.json`,
-        /// `.pi/extensions/pixel-guard.ts`, and `AGENTS.md`.
+        /// `.codex/pixel-composed-guard-backup.json`, and `AGENTS.md`.
         /// Machine-specific files naming this binary go into `info/exclude`.
         #[arg(long)]
         repo: Option<PathBuf>,
     },
     /// Remove everything `pixel install` wrote: managed blocks from
     /// agent-config files, hook entries from all settings files, hook
-    /// scripts, the pi guard extension, the rule source file, and the
+    /// scripts, the Pi impact package, the rule source file, and the
     /// pixel binary itself. Idempotent: safe to re-run.
     Uninstall {
         #[arg(long)]
@@ -4552,20 +4552,19 @@ fn bounded_result_note(basis: &str, cap_hits: &[Value], truncation_warned: bool)
     (!rest.is_empty()).then(|| format!("{tier}; caps: {}", rest.join("; ")))
 }
 
-/// One stderr line naming the deployed prompts that differ from this
-/// binary's copies. Nothing outside `pixel doctor` said so, and every agent kept the
-/// old command map after an upgrade until someone reran the install.
+/// One stderr line naming the prompts an earlier `pixel install` deployed:
+/// this release deploys none, and nothing outside `pixel doctor` said so.
 fn stale_prompt_note(stale: &[&str]) -> Option<String> {
     if stale.is_empty() {
         return None;
     }
     let (verb, pronoun) = if stale.len() == 1 {
-        ("differs", "it")
+        ("is", "it")
     } else {
-        ("differ", "them")
+        ("are", "them")
     };
     Some(format!(
-        "note: {} deployed by `pixel install` {verb} from the copy in this pixel ({}); agents read the deployed one — run `pixel install` to update {pronoun}\n",
+        "note: {} deployed by an earlier `pixel install` {verb} retired in this pixel ({}) — run `pixel install` to remove {pronoun}\n",
         stale.join(" and "),
         env!("CARGO_PKG_VERSION")
     ))
@@ -4655,7 +4654,7 @@ fn run() -> Result<(), String> {
     if checks_deployed_prompts(&command_label, protected, developer_build)
         && let Some(home) = std::env::var_os("HOME")
         && let Some(note) =
-            stale_prompt_note(&pixel_install::install::stale_prompts(Path::new(&home)))
+            stale_prompt_note(&pixel_install::install::retired_prompts(Path::new(&home)))
     {
         eprint!("{note}");
     }
@@ -6500,11 +6499,6 @@ fn run_command(
             let options = discover_root(&path).map(|root| pixel_install::doctor::DoctorOptions {
                 repo_root: Some(root),
                 shell,
-                // Hand the doctor this binary's REAL clap parser so the
-                // rule-vs-binary parity check dry-runs every `pixel …` line
-                // documented in the installed rule text against the actual
-                // CLI definition — documented-but-rejected syntax goes red.
-                syntax_validator: Some(validate_cli_syntax),
                 only,
                 skip,
                 ..Default::default()
@@ -6602,10 +6596,9 @@ fn run_command(
                 // `sync`) are not commands: `pixel update` is fast-forward,
                 // `pixel sync` is fetch.
                 let ops = session_commands();
-                // The usage doctrine is a shared constant beside the op
-                // registry (pixel-proto), so the injected text, the doctor's
-                // scenario-consistency check, and the rule file can never
-                // silently disagree on the five mandatory scenarios.
+                // The usage note is a shared constant beside the op registry
+                // (pixel-proto): it describes Pixel without directing the
+                // agent away from its native tools.
                 let mut pixel = serde_json::json!({
                     "capabilities": ops,
                     "protocol_version": PROTOCOL_VERSION,
@@ -7728,6 +7721,9 @@ fn normalize_commit_message(raw: &str) -> Result<String, String> {
     Ok(text.to_string())
 }
 
+/// Dry-runs one `pixel …` argv against the real clap definition; the
+/// prompt-asset parity tests hold the bundled prompt's commands to it.
+#[cfg(test)]
 fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
     let args = args.to_vec();
     std::thread::Builder::new()
@@ -7744,6 +7740,7 @@ fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
 /// Clap's error paragraph on one line: the first line alone would say
 /// "the following required arguments were not provided:" without naming
 /// them, and the name is what a doctor report or a failing test needs.
+#[cfg(test)]
 fn parse_error_summary(rendered: &str) -> String {
     let summary = rendered
         .lines()
@@ -7763,6 +7760,7 @@ fn parse_error_summary(rendered: &str) -> String {
 /// shape parses only because the extra value fell into another slot, a
 /// defaulted `PATH` or a multi-value positional after a one-value flag.
 /// `None` when the argv has no sentinel or both values bound to one argument.
+#[cfg(test)]
 fn variadic_sentinel_misfit(args: &[String]) -> Option<String> {
     use pixel_install::doctor::VARIADIC_SENTINEL;
     let sentinel = args.iter().position(|a| a == VARIADIC_SENTINEL)?;
@@ -8978,15 +8976,15 @@ mod renamed_command_tests {
         assert_eq!(
             one,
             format!(
-                "note: agent-prompt.md deployed by `pixel install` differs from the copy in this pixel ({}); agents read the deployed one — run `pixel install` to update it\n",
+                "note: agent-prompt.md deployed by an earlier `pixel install` is retired in this pixel ({}) — run `pixel install` to remove it\n",
                 env!("CARGO_PKG_VERSION")
             )
         );
         let both = stale_prompt_note(&["agent-prompt.md", "subagent-prompt.md"]).unwrap();
         assert!(
             both.starts_with(
-                "note: agent-prompt.md and subagent-prompt.md deployed by `pixel install` differ from"
-            ) && both.ends_with("update them\n"),
+                "note: agent-prompt.md and subagent-prompt.md deployed by an earlier `pixel install` are retired"
+            ) && both.ends_with("remove them\n"),
             "{both}"
         );
         assert_eq!(both.lines().count(), 1, "{both}");

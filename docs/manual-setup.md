@@ -5,15 +5,15 @@ wire (Cursor, Copilot, ...)? You don't need `pixel install`.
 
 `pixel install` does these things, and you can do each of them by hand:
 
-1. **Deploy CLI integration assets** under `~/.local/share/pixel/`.
-2. **Keep Claude and Codex task lifecycle hooks**, preserving foreign hooks,
+1. **Keep Claude and Codex task lifecycle hooks**, preserving foreign hooks,
    while removing Pixel's automatic retrieval prompts and metrics callbacks.
-3. **Remove retired Pixel instruction blocks** from Codex configuration and
+2. **Remove retired Pixel instruction blocks** from Codex configuration and
    project `AGENTS.md`, preserving unrelated text.
-4. **Install Pi's explicit impact extension when Pi is configured** and remove
-   Pixel's automatic Pi prompt. Repository task controls remain separate.
-5. **Keep other provider integrations** on their documented paths. The focused
-   skills pilot does not establish behavior or performance for every host.
+3. **Install Pi's explicit `/pixel-impact` package when Pi is present** and
+   remove Pixel's automatic Pi prompt.
+4. **Remove what earlier releases wrote for every other agent**: deployed
+   prompts, guard hooks and plugins. It wires none of them, and every agent
+   keeps its native tools.
 
 Native Codex and Claude plugins distribute a small, explicit-only
 `pixel-impact` skill. They do not register automatic retrieval hooks.
@@ -43,18 +43,14 @@ Homebrew installed: update those with `mise`/`brew`, try a local build with
 `pixel self-update --dev` (installed as `pixel-dev`), or pass
 `--install-path` to overwrite on purpose.
 
-## 2. Copy the system prompt
+## 2. Wire it into your agent
 
-The prompt is bundled in the repo at
-[`crates/pixel-install/assets/pixel-agent-prompt.md`](../crates/pixel-install/assets/pixel-agent-prompt.md).
-
-```bash
-mkdir -p ~/.local/share/pixel
-cp crates/pixel-install/assets/pixel-agent-prompt.md ~/.local/share/pixel/agent-prompt.md
-cp crates/pixel-install/assets/pixel-subagent-prompt.md ~/.local/share/pixel/subagent-prompt.md
-```
-
-## 3. Wire it into your agent
+`pixel install` deploys no prompt. To give an agent Pixel's full protocol
+anyway, copy
+[`crates/pixel-install/assets/pixel-agent-prompt.md`](../crates/pixel-install/assets/pixel-agent-prompt.md)
+into that agent's own instruction file (see [Any other agent](#any-other-agent)),
+not under `~/.local/share/pixel/`: `pixel install` deletes the
+`agent-prompt.md` and `subagent-prompt.md` earlier releases deployed there.
 
 ### Claude Code
 
@@ -70,9 +66,9 @@ hooks remain available for configured task contracts. Repository installation
 preserves foreign hooks and restores adopted RTK registrations, removing the
 Pixel retrieval wrapper. Native reads need no Pixel retrieval callback.
 
-The deployed full prompts remain available for explicitly selected legacy
-integrations. Copying or appending them manually enables a different profile
-with additional context; it is not the focused-skill configuration.
+Copying the full prompt into Claude's instructions by hand enables a
+different profile with additional context; it is not the focused-skill
+configuration.
 
 ### Codex
 
@@ -94,16 +90,18 @@ Existing sessions retain previously received context until a fresh session.
 
 ### Pi
 
-Pi uses an extension rather than a duplicated skill. The explicit
+Pi uses a package rather than a duplicated skill. The explicit
 `/pixel-impact <symbol>` command requests bounded graph evidence. It does
 not query Pixel at startup, classify every prompt, or replace native tools.
-See [Pi integration](pi-harness.md) for the extension and task-control modes.
+By hand, add the package path to `packages` in Pi's `settings.json`, or
+install the repository as a Pi package (`pi install git:github.com/Pixel-CLI/pixel`),
+not both. See [Pi integration](pi-harness.md) for the files.
 
 `pixel install` removes its managed and recognized historical automatic
 instructions from `~/.pi/agent/APPEND_SYSTEM.md`, preserving user text.
-`pixel install --repo .` maintains the separate repository task adapter;
-retrieval bootstrap and automatic post-edit advice are disabled by default.
-No Pixel-first block is added to project `AGENTS.md`.
+`pixel install --repo .` removes the retired project extension
+`.pi/extensions/pixel-guard.ts`. No Pixel-first block is added to project
+`AGENTS.md`.
 
 ### Bounded graph queries
 
@@ -127,64 +125,49 @@ this capability, not repaired during an ordinary task.
 Graph results remain incomplete candidates. Verify relevant source and
 look beyond the returned list when task correctness requires it.
 
-### Antigravity CLI (agy)
-
-In an indexed workspace, Pixel's `PreInvocation` hook extracts search terms
-from the initial user request, runs `pixel search-content` itself, and sends
-the actual matches to the same model invocation as an `ephemeralMessage`.
-The search runs before the model can call native retrieval tools. It is
-limited to 20 matching lines, 64 KiB of output and five seconds. Missing
-request terms, unavailable indexes, failed searches and empty results leave
-native retrieval available without a hook error or denial.
-
-AGY 1.2.13 documents `toolCall` injection but rejects Pixel's injected
-`run_command` with `unknown injected step type: <nil>`. Pixel therefore uses
-the [documented string-message response](https://antigravity.google/docs/hooks?tab=ide)
-to deliver a search that has already executed. Plugin installation or injected
-instructions alone do not prove retrieval: verify a fresh session's hook
-output and tool order. `pixel doctor` checks the `PreInvocation` registration
-in the global hooks and both installed plugin copies.
-
 ### Optional retrieval enforcement
 
-Pixel's retrieval policy defaults to advice. Run `pixel config policy enforce`
-to opt into supported repository retrieval restrictions in
-Antigravity or Devin — the repository file by default, the machine-wide
-`~/.pixel/config.yaml` with `--global` — or set `PIXEL_POLICY=enforce` in the
-environment that launches the agent to override every file layer.
-`pixel config policy` reports the effective value and the layer that set it.
-Devin's installed project hook keeps supported `exec` rewrites enabled by
-default, while native `read`, `grep` and `glob` calls proceed without a hook
-denial. The hook cannot silently turn a native tool call into `exec`; use the
-injected Pixel workflow instructions to steer retrieval, or enforce the policy
-if visible denials are acceptable. The simple `cat`, `ls` and `find` forms
-Pixel can map are rewritten too; larger reads and unsupported syntax are not
-guessed. Use `pixel config policy off` to disable policy decisions and
-rewrites. The existing `PIXEL_TARGETS_GUARD=0` (also `false` or `off`) remains
-an opt-out. Restart Devin after changing its environment.
+`pixel install` wires no guard for any agent, and Pixel's retrieval policy
+defaults to `advisory`, under which `pixel run-hook guard` and
+`pixel run-hook prompt-submit` answer nothing. To have Pixel steer an agent
+anyway, do both by hand:
+
+1. Register the hook in the agent's own configuration, for example
+   `pixel run-hook guard --provider devin` as a `PreToolUse` hook in Devin, or
+   `pixel run-hook guard --provider antigravity` in Antigravity's hooks.
+2. Run `pixel config policy enforce` — the repository file by default, the
+   machine-wide `~/.pixel/config.yaml` with `--global` — or set
+   `PIXEL_POLICY=enforce` in the environment that launches the agent to
+   override every file layer. `pixel config policy` reports the effective
+   value and the layer that set it.
+
+Under `enforce`, the guard rewrites the simple `cat`, `ls`, `find` and search
+forms Pixel can map, and denies other supported repository retrieval with a
+redirect; for Antigravity, its `PreInvocation` hook runs a bounded
+`pixel search-content` on the initial request and sends the matches with the
+same model invocation. Larger reads and unsupported shell syntax fall back to
+the original command, including its complete pipeline or sequence.
+`pixel config policy off` disables policy decisions; the existing
+`PIXEL_TARGETS_GUARD=0` (also `false` or `off`) remains an opt-out. Restart
+the agent after changing its environment.
 
 Claude and Codex retain native retrieval and permissions under every retrieval
-policy mode. Antigravity uses its own hook response contract; a Pixel
-recommendation does not grant host permissions. Composed Codex hooks still
-honour foreign hook decisions even when Pixel's policy is off.
-
-Shell syntax the policy cannot interpret reliably falls back to the original
-command, including its complete pipeline or sequence. Enforcement is a
-workflow preference, not a security sandbox. Pi task contracts remain
-independent of retrieval policy.
+policy mode. Composed Codex hooks still honour foreign hook decisions even when
+Pixel's policy is off. Enforcement is a workflow preference, not a security
+sandbox.
 
 ### Any other agent
 
-`pixel install` covers the agents above, plus OpenCode and Antigravity when
-their config directories exist; the website's
-[per-agent pages](https://pixel-cli.dev/for/) list what it writes
-for each, and the plugins or rules files for the others. For any other tool, put
-the full text of `~/.local/share/pixel/agent-prompt.md` wherever that tool
-reads always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
+`pixel install` wires only the agents above; the website's
+[per-agent pages](https://pixel-cli.dev/for/) list what it writes or removes
+for each, and the plugins or rules files for the others. To give any tool the
+full protocol, put the text of the bundled
+`crates/pixel-install/assets/pixel-agent-prompt.md` wherever that tool reads
+always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,
 `.github/copilot-instructions.md`), a system-prompt flag, or a global
-`AGENTS.md`. Copy the bundled prompt verbatim rather than a summary; it is
-the single source of truth, and `pixel doctor` checks the deployed copy
-against it. Re-copy it after each `pixel self-update`.
+`AGENTS.md`. Copy it verbatim rather than a summary, and re-copy it after an
+upgrade. `pixel install` does not manage that copy, and `pixel doctor` does
+not check it.
 
 ## Renamed commands
 

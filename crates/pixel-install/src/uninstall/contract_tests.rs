@@ -331,11 +331,46 @@ fn remove_agent_prompt_should_delete_a_pi_prompt_holding_only_pixels_block() {
 
     let step = remove_agent_prompt(home.path(), false).unwrap();
 
+    assert_eq!(step.summary, "removed the pi prompt file");
+    assert!(!pi.exists(), "nothing of the user's was left in it");
+
+    // With both prompts beside it, the summary names all three.
+    let share = home.path().join(".local/share/pixel");
+    write(&share.join("agent-prompt.md"), "prompt");
+    write(&share.join(install::SUBAGENT_PROMPT_FILE), "sub");
+    write(&pi, &managed("pixel prompt"));
+    let step = remove_agent_prompt(home.path(), false).unwrap();
     assert_eq!(
         step.summary,
         "removed agent-prompt.md, subagent-prompt.md and the pi prompt file"
     );
-    assert!(!pi.exists(), "nothing of the user's was left in it");
+}
+
+#[test]
+fn remove_agent_prompt_should_name_only_the_files_it_removed() {
+    let home = tempfile::tempdir().unwrap();
+    let share = home.path().join(".local/share/pixel");
+    write(&share.join(install::SUBAGENT_PROMPT_FILE), "sub");
+
+    let step = remove_agent_prompt(home.path(), false).unwrap();
+
+    assert_eq!(step.summary, "removed subagent-prompt.md");
+    assert!(!share.join(install::SUBAGENT_PROMPT_FILE).exists());
+}
+
+#[test]
+fn remove_agent_prompt_should_skip_a_pi_prompt_holding_only_the_users_text() {
+    let home = tempfile::tempdir().unwrap();
+    let pi = home.path().join(install::PI_PROMPT_REL);
+    write(&pi, "the user's own system prompt\n");
+
+    let step = remove_agent_prompt(home.path(), false).unwrap();
+
+    assert_eq!(step.summary, "no agent-prompt file — skipping");
+    assert_eq!(
+        fs::read_to_string(&pi).unwrap(),
+        "the user's own system prompt\n"
+    );
 }
 
 #[test]
@@ -348,7 +383,7 @@ fn remove_agent_prompt_should_keep_the_users_text_around_pixels_pi_block() {
 
     assert_eq!(
         step.summary,
-        "removed agent-prompt.md and subagent-prompt.md, kept the text around the pixel block in APPEND_SYSTEM.md"
+        "removed the pixel block from APPEND_SYSTEM.md, kept the text around it"
     );
     assert_eq!(fs::read_to_string(&pi).unwrap(), "be terse\n");
     assert_eq!(backups_in(pi.parent().unwrap()).len(), 1);

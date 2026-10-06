@@ -24,19 +24,6 @@ use crate::install;
 
 pub type Result<T> = std::result::Result<T, InstallError>;
 
-/// The five mandatory scenarios the rule text and the SessionStart usage
-/// string must agree on. One name per scenario (the guard-verb that anchors
-/// it): targets (sniper scoping — mandatory first call, advisory fence),
-/// resolve (phrase → code), rescue (history recovery, includes excavate),
-/// reconcile (branch sync), impact (blast radius, includes changes).
-pub const MANDATORY_SCENARIOS: &[&str] = &[
-    "scope-task",
-    "find-code",
-    "plan-rollback",
-    "sync-branch",
-    "impact",
-];
-
 /// Per-check status for the doctor report, ordered from healthy to broken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,7 +72,6 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("binary.executable", None),
     entry("binary.shell-path", None),
     entry("install.agent-prompt", FIX_INSTALL),
-    entry("install.subagent-prompt", FIX_INSTALL),
     entry("install.pi-prompt", FIX_INSTALL),
     entry("install.pi-impact", FIX_INSTALL),
     entry("install.codex-config", FIX_INSTALL),
@@ -99,8 +85,6 @@ pub const CHECKS: &[CheckSpec] = &[
     // The removal command names the orphaned file, so the outcome carries it.
     entry("install.rtk-backup", None),
     entry("install.legacy-wrappers", FIX_INSTALL),
-    entry("rule.parity", FIX_INSTALL),
-    entry("rule.scenarios", FIX_INSTALL),
     // The setup step is interactive and needs the user at a terminal, so
     // the check names it in the message but leaves `--fix` out of it.
     entry("web-search.provider", None),
@@ -237,14 +221,6 @@ pub struct DoctorOptions {
     /// expected (see `InstallOptions::claude_executable`). Defaults to the
     /// first `claude` on PATH.
     pub claude_executable: Option<PathBuf>,
-    /// Dry-run parser for one `pixel …` argv (including the leading
-    /// "pixel"), supplied by the CLI binary from its real clap definition.
-    /// When present, the `rule.parity` check parses every pixel command
-    /// line found in the installed rule text against it — documented
-    /// syntax the binary rejects goes red. When None (library callers
-    /// without access to the CLI parser), the parity check is skipped.
-    #[allow(clippy::type_complexity)]
-    pub syntax_validator: Option<fn(&[String]) -> std::result::Result<(), String>>,
     /// Check ids to run; empty runs every check. Ids come from [`CHECKS`].
     pub only: Vec<String>,
     /// Check ids to leave out.
@@ -331,55 +307,24 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     runner.check(
         "install.agent-prompt",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            let path = home.join(".local/share/pixel/agent-prompt.md");
-            if !path.is_file() {
-                return Err("agent-prompt.md not deployed — run `pixel install`".into());
-            }
-            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            // Byte equality with the bundled asset, like the sub-agent
-            // prompt: a deployed copy that still carries the headline
-            // sections but has diverged on the command map, the call shapes
-            // or the mutation warning teaches agents syntax this binary may
-            // no longer accept, and `rule.parity` does not cover it.
-            if content != install::AGENT_PROMPT_ASSET {
-                return Err("agent-prompt.md is stale — run `pixel install` to update".into());
-            }
-            Ok(DoctorCheckDetail {
-                summary: format!("agent-prompt.md deployed ({} bytes)", content.len()),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            })
-        },
-    );
-
-    runner.check(
-        "install.subagent-prompt",
-        || -> std::result::Result<DoctorCheckDetail, String> {
-            let path = home
-                .join(".local/share/pixel")
-                .join(install::SUBAGENT_PROMPT_FILE);
-            if !path.is_file() {
+            // No host reads a deployed Pixel prompt any more; copies an
+            // earlier release wrote are retired by `pixel install`.
+            let dir = home.join(".local/share/pixel");
+            let left: Vec<String> = ["agent-prompt.md", install::SUBAGENT_PROMPT_FILE]
+                .iter()
+                .map(|name| dir.join(name))
+                .filter(|path| path.is_file())
+                .map(|path| path.display().to_string())
+                .collect();
+            if !left.is_empty() {
                 return Err(format!(
-                    "{} not deployed — run `pixel install`",
-                    install::SUBAGENT_PROMPT_FILE
-                ));
-            }
-            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            // Byte equality with the bundled asset: the wrapper hands this
-            // file to every print-mode sub-agent, so a stale copy silently
-            // teaches them syntax this binary may no longer accept.
-            if content != install::SUBAGENT_PROMPT_ASSET {
-                return Err(format!(
-                    "{} is stale — run `pixel install` to update",
-                    install::SUBAGENT_PROMPT_FILE
+                    "retired Pixel prompt file(s) remain: {} — run `pixel install` to remove them",
+                    left.join(", ")
                 ));
             }
             Ok(DoctorCheckDetail {
-                summary: format!(
-                    "{} deployed ({} bytes)",
-                    install::SUBAGENT_PROMPT_FILE,
-                    content.len()
-                ),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                summary: "no Pixel prompt deployed; agents keep their own instructions".into(),
+                detail: Some(serde_json::json!({ "dir": dir.display().to_string() })),
             })
         },
     );
@@ -405,77 +350,37 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             })
         },
     );
+    let pi_paths = crate::pi_global::PiPaths::resolve(&home, options.home.is_some());
     runner.record("install.pi-impact", || {
-            let (managed, extension) = crate::pi_global::installed_state(&home);
-            let config_dir = home.join(crate::config::PI_CONFIG_DIR);
-            let (status, summary, remedy) =
-                if fs::symlink_metadata(&extension).is_ok() && !managed {
-                (
-                    CheckStatus::Yellow,
-                    format!("foreign Pi extension left untouched at {}", extension.display()),
-                    Remedy::Manual,
-                )
-            } else if managed {
-                let content = fs::read_to_string(&extension).map_err(|error| error.to_string())?;
-                let expected = crate::pi_global::extension_source(&exe);
-                if content != expected {
-                    return Err(format!(
-                        "managed Pi impact extension is stale or points to a different binary at {}; run `pixel install`",
-                        extension.display()
-                    ));
-                }
-                (
-                    CheckStatus::Green,
-                    format!("explicit impact command verified at {}", extension.display()),
-                    Remedy::Catalogue,
-                )
-            } else if let Some(extension_dir) = extension
-                .parent()
-                .filter(|path| {
-                    fs::symlink_metadata(path).is_ok() && !path.is_dir()
-                })
-            {
-                (
-                    CheckStatus::Yellow,
-                    format!(
-                        "Pi extension directory is not a directory; left untouched at {}",
-                        extension_dir.display()
-                    ),
-                    Remedy::Manual,
-                )
-            } else if config_dir.exists() && !config_dir.is_dir() {
-                (
-                    CheckStatus::Yellow,
-                    format!(
-                        "Pi configuration path is not a directory; left untouched at {}",
-                        config_dir.display()
-                    ),
-                    Remedy::Manual,
-                )
-            } else if config_dir.is_dir() {
-                return Err(format!(
-                    "Pi impact extension is missing from {}; run `pixel install`",
-                    extension.display()
-                ));
-            } else {
-                (
-                    CheckStatus::Green,
-                    "Pi is not configured; no explicit impact extension expected".into(),
-                    Remedy::Catalogue,
-                )
-            };
-            Ok((
-                status,
-                DoctorCheckDetail {
-                    summary,
-                    detail: Some(serde_json::json!({
-                        "extension_path": extension.display().to_string(),
-                        "managed": managed,
-                    })),
-                },
-                remedy,
-            ))
-        });
+        let detail = Some(serde_json::json!({
+            "settings": pi_paths.settings.display().to_string(),
+            "package": pi_paths.package_dir.display().to_string(),
+        }));
+        let pi_installed = options.home.is_none() && crate::pi_global::pi_on_path();
+        let (status, summary, remedy) = match crate::pi_global::check(&pi_paths, &exe, pi_installed)
+        {
+            crate::pi_global::PiImpactState::NotInstalled => (
+                CheckStatus::Green,
+                "Pi is not installed; no explicit impact command expected".to_owned(),
+                Remedy::Catalogue,
+            ),
+            crate::pi_global::PiImpactState::Current => (
+                CheckStatus::Green,
+                format!(
+                    "explicit impact package declared in {}",
+                    pi_paths.settings.display()
+                ),
+                Remedy::Catalogue,
+            ),
+            crate::pi_global::PiImpactState::Manual(reason) => {
+                (CheckStatus::Yellow, reason, Remedy::Manual)
+            }
+            crate::pi_global::PiImpactState::NeedsInstall(reason) => {
+                return Err(format!("{reason}; run `pixel install`"));
+            }
+        };
+        Ok((status, DoctorCheckDetail { summary, detail }, remedy))
+    });
 
     let codex_home = crate::codex_config::codex_home(&home, options.home.is_some());
     runner.check(
@@ -508,7 +413,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         || -> std::result::Result<DoctorCheckDetail, String> {
             let (summary, detail) = crate::opencode_config::check_opencode(
                 &crate::opencode_config::opencode_config_dir(&home, options.home.is_some()),
-                &exe,
             )?;
             Ok(DoctorCheckDetail {
                 summary,
@@ -613,111 +517,16 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     );
 
-    // Devin's own lifecycle protocol. The global install registers it only
-    // when Devin has been used on this machine, and `doctor` judges what
-    // Pixel wrote: with no `~/.config/devin/` the check is green-absent, not
-    // red. A Devin CLI present but never run is a foreign state, not a
-    // broken install.
+    // Devin keeps its native retrieval: a Pixel hook left in its global
+    // config by an earlier release is red until `pixel install` removes it.
+    // With no `~/.config/devin/` the check is green-absent.
     runner.check(
         "install.devin-hooks",
         || -> std::result::Result<DoctorCheckDetail, String> {
-            let dir = home.join(crate::config::DEVIN_CONFIG_DIR);
-            if !dir.is_dir() {
-                return Ok(DoctorCheckDetail {
-                    summary: "Devin not in use on this machine (no ~/.config/devin)".into(),
-                    detail: None,
-                });
-            }
-            let path = dir.join(crate::config::DEVIN_CONFIG_FILE);
-            if !path.is_file() {
-                return Err(format!(
-                    "{} not found while {} exists — run `pixel install`",
-                    path.display(),
-                    dir.display()
-                ));
-            }
-            let value = install::read_settings(&path).map_err(|e| e.to_string())?;
-            // A config without a hooks object (Devin's own settings only) is
-            // simply missing every hook, not a malformed install.
-            let hooks = value
-                .get("hooks")
-                .and_then(serde_json::Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            let has = |event: &str, verb: &str| {
-                hooks
-                    .get(event)
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|groups| {
-                        groups.iter().any(|group| {
-                            group
-                                .get("hooks")
-                                .and_then(serde_json::Value::as_array)
-                                .is_some_and(|inner| {
-                                    inner.iter().any(|hook| {
-                                        hook.get("command")
-                                            .and_then(serde_json::Value::as_str)
-                                            .is_some_and(|c| {
-                                                c.contains(&format!(
-                                                    "run-hook {verb} --provider devin"
-                                                )) && c.contains("pixel")
-                                            })
-                                    })
-                                })
-                        })
-                    })
-            };
-            let mut missing = Vec::new();
-            if !has("SessionStart", "session-start") {
-                missing.push("SessionStart→session-start");
-            }
-            if !has("UserPromptSubmit", "prompt-submit") {
-                missing.push("UserPromptSubmit→prompt-submit");
-            }
-            // Post-compaction reads the repo manifest; it carries no
-            // provider argument, unlike the other two.
-            if !hooks
-                .get("PostCompaction")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|groups| {
-                    groups.iter().any(|group| {
-                        group
-                            .get("hooks")
-                            .and_then(serde_json::Value::as_array)
-                            .is_some_and(|inner| {
-                                inner.iter().any(|hook| {
-                                    hook.get("command")
-                                        .and_then(serde_json::Value::as_str)
-                                        .is_some_and(|c| {
-                                            c.contains("run-hook post-compaction")
-                                                && c.contains("pixel")
-                                        })
-                                })
-                            })
-                    })
-                })
-            {
-                missing.push("PostCompaction→post-compaction");
-            }
-            if !missing.is_empty() {
-                return Err(format!(
-                    "missing pixel lifecycle hooks in {}: {} — run `pixel install`",
-                    path.display(),
-                    missing.join(", ")
-                ));
-            }
-            let stacked = crate::routing::stacked_pixel_hooks(&value, &exe);
-            if !stacked.is_empty() {
-                return Err(format!(
-                    "pixel hooks registered more than once in {}: {} — run `pixel install`",
-                    path.display(),
-                    stacked.join(", ")
-                ));
-            }
-            Ok(DoctorCheckDetail {
-                summary: format!("devin lifecycle hooks configured in {}", path.display()),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            })
+            let path = home
+                .join(crate::config::DEVIN_CONFIG_DIR)
+                .join(crate::config::DEVIN_CONFIG_FILE);
+            retired_pixel_hooks_check(&[path], &exe, "pixel install")
         },
     );
 
@@ -770,111 +579,6 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             })
         },
     );
-
-    // Rule-vs-binary parity: every `pixel …` command line documented in the
-    // INSTALLED rule text must dry-run parse against the binary's real clap
-    // definition. Drift between documented CLI syntax and the binary was the
-    // largest defect category found — this makes it a red doctor check
-    // instead of a silent lie agents follow into parse errors.
-    if let Some(validator) = options.syntax_validator {
-        let home_for_rule = home.clone();
-        // The prompt `pixel install` deploys always carries command lines, so
-        // a rule text without any is not something a reinstall repairs.
-        runner.record("rule.parity", move || {
-            let Some((source, rule_text)) = installed_rule_text(&home_for_rule) else {
-                return Ok((CheckStatus::Yellow, DoctorCheckDetail {
-                    summary: "no installed rule text found (agent-prompt.md not deployed, no managed block or rule file) — run `pixel install`; parity not checked".into(),
-                    detail: None,
-                }, Remedy::Catalogue));
-            };
-            let commands = extract_rule_commands(&rule_text);
-            if commands.is_empty() {
-                return Ok((CheckStatus::Yellow, DoctorCheckDetail {
-                    summary: format!(
-                        "installed rule text at {} contains no `pixel …` command lines — parity not checked",
-                        source.display()
-                    ),
-                    detail: None,
-                }, Remedy::Manual));
-            }
-            let mut parsed_ok = 0usize;
-            let mut unparsed: Vec<String> = Vec::new();
-            let mut failures: Vec<String> = Vec::new();
-            for line in &commands {
-                match normalize_rule_command(line) {
-                    None => unparsed.push(line.clone()),
-                    Some(argv) => match validator(&argv) {
-                        Ok(()) => parsed_ok += 1,
-                        Err(e) => failures.push(format!("`{line}` → {e}")),
-                    },
-                }
-            }
-            let detail = Some(serde_json::json!({
-                "source": source.display().to_string(),
-                "command_lines": commands.len(),
-                "parsed_ok": parsed_ok,
-                "unparsed": unparsed,
-                "failures": failures,
-            }));
-            if !failures.is_empty() {
-                return Err(format!(
-                    "{} documented command line(s) rejected by the CLI parser: {}",
-                    failures.len(),
-                    failures.join("; ")
-                ));
-            }
-            Ok((CheckStatus::Green, DoctorCheckDetail {
-                summary: format!(
-                    "{parsed_ok}/{} documented pixel command lines parse against the CLI ({} unparsed placeholder line(s) skipped)",
-                    commands.len(),
-                    unparsed.len()
-                ),
-                detail,
-            }, Remedy::Catalogue))
-        });
-    }
-
-    // Scenario-count consistency: the installed rule text and the
-    // SessionStart usage string must agree on the FIVE mandatory scenarios
-    // (targets/resolve/rescue/reconcile/impact). A scenario the rule
-    // mandates but the injected session never hears about — or vice versa —
-    // is exactly the drift class this doctor exists to catch.
-    {
-        let home_for_rule = home.clone();
-        runner.check_status("rule.scenarios", move || {
-            let Some((source, rule_text)) = installed_rule_text(&home_for_rule) else {
-                return Ok((
-                    CheckStatus::Yellow,
-                    DoctorCheckDetail {
-                        summary: "no installed rule text found (agent-prompt.md not deployed, no managed block or rule file) — run `pixel install`; scenario consistency not checked"
-                            .into(),
-                        detail: None,
-                    },
-                ));
-            };
-            let mismatches = scenario_mismatches(&rule_text, pixel_proto::op::SESSION_USAGE);
-            if !mismatches.is_empty() {
-                return Err(format!(
-                    "scenario drift between installed rule text ({}) and session usage string: {}",
-                    source.display(),
-                    mismatches.join("; ")
-                ));
-            }
-            Ok((
-                CheckStatus::Green,
-                DoctorCheckDetail {
-                    summary: format!(
-                        "rule text and session usage agree on all {} mandatory scenarios",
-                        MANDATORY_SCENARIOS.len()
-                    ),
-                    detail: Some(serde_json::json!({
-                        "scenarios": MANDATORY_SCENARIOS,
-                        "source": source.display().to_string(),
-                    })),
-                },
-            ))
-        });
-    }
 
     // Which web search provider the installed `pixel` resolves to, read
     // straight from the environment and the global config file — never
@@ -994,63 +698,18 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             codex_hook_review(&codex_home, &hooks_path, &exe)
         });
 
-        runner.check_status("repo.devin-hooks", || {
-            let path = root.join(crate::routing::DEVIN_LOCAL_CONFIG);
-            let value = if path.is_file() {
-                install::read_settings(&path).map_err(|e| e.to_string())?
-            } else {
-                serde_json::Value::Null
-            };
-            if !crate::routing::has_pixel_hook(&value, &exe) {
-                return Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: format!(
-                            "no pixel hook in {} — repo-local devin guard not installed",
-                            crate::routing::DEVIN_LOCAL_CONFIG
-                        ),
-                        detail: None,
-                    },
-                ));
-            }
-            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider devin", &exe) {
-                return Err(format!(
-                    "pixel hooks in {} but no pixel guard PreToolUse entry — run `pixel install --repo`",
-                    path.display()
-                ));
-            }
-            if !crate::routing::has_pixel_prompt_context(&value, &exe) {
-                return Err(format!(
-                    "Pixel Devin guard in {} has no non-blocking UserPromptSubmit context hook — run `pixel install --repo`",
-                    path.display()
-                ));
-            }
-            if !crate::routing::has_pixel_permission_approval(&value, &exe) {
-                return Err(format!(
-                    "Pixel Devin guard in {} has no narrow PermissionRequest approval hook — run `pixel install --repo`",
-                    path.display()
-                ));
-            }
-            if !crate::routing::has_pixel_metrics_relay(
-                &value,
-                crate::routing::Provider::Devin,
+        runner.check("repo.devin-hooks", || {
+            retired_pixel_hooks_check(
+                &[
+                    root.join(crate::routing::DEVIN_LOCAL_CONFIG),
+                    root.join(crate::routing::DEVIN_LEGACY_HOOKS),
+                ],
                 &exe,
-            ) {
-                return Err(format!(
-                    "Pixel Devin guard in {} has no PostToolUse metrics relay on exec — run `pixel install --repo`",
-                    path.display()
-                ));
-            }
-            Ok((
-                CheckStatus::Green,
-                DoctorCheckDetail {
-                    summary: format!(
-                        "devin Pixel rewrite, no-prompt retrieval approval, and prompt-context hooks registered in {}",
-                        path.display()
-                    ),
-                    detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-                },
-            ))
+                &format!(
+                    "pixel install --repo {}",
+                    crate::routing::quoted_executable(root)
+                ),
+            )
         });
 
         runner.check_status("repo.warp-mcp", || {
@@ -1447,9 +1106,6 @@ fn task_hook_observations(root: &Path) -> std::result::Result<DoctorCheckDetail,
     })
 }
 
-/// `repo.pi-guard`: where the repository's pi guard stands. A guard left in
-/// `.pi/agent/` by an older release is yellow, since pi never loads it there;
-/// a foreign file at the guard's path fails the check.
 /// `install.codex-hook-review` / `repo.codex-hook-review`: Pixel's hooks in
 /// one Codex `hooks.json` that Codex skips until the user reviews them.
 fn codex_hook_review(
@@ -1472,52 +1128,60 @@ fn codex_hook_review(
     ))
 }
 
+/// Green while none of `paths` holds a Pixel hook; red, naming `fix`, when
+/// one an earlier release registered is still there. An absent or foreign
+/// file is green: doctor judges what Pixel wrote.
+fn retired_pixel_hooks_check(
+    paths: &[PathBuf],
+    exe: &Path,
+    fix: &str,
+) -> std::result::Result<DoctorCheckDetail, String> {
+    let mut left = Vec::new();
+    for path in paths.iter().filter(|path| path.is_file()) {
+        let value = install::read_settings(path).map_err(|e| e.to_string())?;
+        if crate::routing::has_pixel_hook(&value, exe) {
+            left.push(path.display().to_string());
+        }
+    }
+    if !left.is_empty() {
+        return Err(format!(
+            "retired Pixel hooks remain in {} — run `{fix}` to remove them",
+            left.join(", ")
+        ));
+    }
+    Ok(DoctorCheckDetail {
+        summary: "no Pixel hook; the agent keeps its native tools".into(),
+        detail: Some(serde_json::json!({
+            "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        })),
+    })
+}
+
+/// `repo.pi-guard`: red while a Pi guard extension Pixel wrote (at
+/// `.pi/extensions/` or, from releases up to 0.4.0, `.pi/agent/`) is still in
+/// the repository; a file there Pixel did not write is the user's.
 fn pi_guard_check(
     root: &Path,
     state: crate::pi_project::GuardState,
 ) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
     use crate::pi_project::GuardState;
-    Ok(match state {
-        GuardState::Absent => (
-            CheckStatus::Green,
-            DoctorCheckDetail {
-                summary: format!(
-                    "no {} — repo-local pi guard not installed",
-                    crate::pi_project::EXTENSION
-                ),
-                detail: None,
-            },
-        ),
-        GuardState::Installed(path) => (
-            CheckStatus::Green,
-            DoctorCheckDetail {
-                summary: format!(
-                    "pi guard extension installed at {} (loads once pi trusts the project)",
-                    path.display()
-                ),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            },
-        ),
-        GuardState::Foreign(path) => {
-            return Err(format!(
-                "{} is not a pixel-managed guard extension — move it aside, then run `pixel install --repo {}`",
-                path.display(),
-                crate::routing::quoted_executable(root)
+    let path = match state {
+        GuardState::Absent => {
+            return Ok((
+                CheckStatus::Green,
+                DoctorCheckDetail {
+                    summary: "no Pixel Pi project extension; Pi keeps its native tools".into(),
+                    detail: None,
+                },
             ));
         }
-        GuardState::Legacy(path) => (
-            CheckStatus::Yellow,
-            DoctorCheckDetail {
-                summary: format!(
-                    "pi guard at {}, which pi never loads in a project — run `pixel install --repo {}` to move it to {}",
-                    path.display(),
-                    crate::routing::quoted_executable(root),
-                    crate::pi_project::EXTENSION
-                ),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            },
-        ),
-    })
+        GuardState::Retired(path) | GuardState::Legacy(path) => path,
+    };
+    Err(format!(
+        "retired Pixel Pi project extension remains at {} — run `pixel install --repo {}` to remove it",
+        path.display(),
+        crate::routing::quoted_executable(root)
+    ))
 }
 /// The final verdict of `install.claude-hooks` once every hook is present
 /// and registered once: yellow when they run `others` rather than `exe`, the
@@ -2454,39 +2118,6 @@ fn age_secs(mtime: SystemTime) -> u64 {
     now.saturating_sub(m)
 }
 
-/// Path of the prompt `pixel install` deploys and the shell wrappers inject
-/// (`--append-system-prompt-file`): the rule text agents actually read.
-fn deployed_agent_prompt(home: &Path) -> PathBuf {
-    home.join(".local/share/pixel/agent-prompt.md")
-}
-
-/// Locate the installed pixel rule text, in the order agents receive it:
-/// the deployed `~/.local/share/pixel/agent-prompt.md` (0.2.x installs write
-/// nothing else), else the managed block inside the first CLAUDE.md/AGENTS.md
-/// that carries one (installs before 0.2.0), else the canonical rule source
-/// at `~/.agent-config/rules/pixel.md`. Returns the source path and the text.
-fn installed_rule_text(home: &Path) -> Option<(PathBuf, String)> {
-    let prompt = deployed_agent_prompt(home);
-    if let Ok(text) = fs::read_to_string(&prompt) {
-        return Some((prompt, text));
-    }
-    for path in config::find_agent_configs(home) {
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Some(start) = content.find(config::MANAGED_BEGIN) {
-            let body = &content[start + config::MANAGED_BEGIN.len()..];
-            let block = match body.find(config::MANAGED_END) {
-                Some(end) => &body[..end],
-                None => body,
-            };
-            return Some((path, block.to_string()));
-        }
-    }
-    let rules = home.join(config::PIXEL_RULES_REL);
-    fs::read_to_string(&rules).ok().map(|text| (rules, text))
-}
-
 /// Extract every `pixel …` command line from the fenced code blocks of a
 /// rule document, and every backticked `` `pixel …` `` span of a table row.
 /// Trailing `# comments` are stripped from fenced lines and a table cell's
@@ -2633,33 +2264,6 @@ pub fn normalize_rule_command(line: &str) -> Option<Vec<String>> {
     Some(argv)
 }
 
-/// Compare the installed rule text and the session usage string on the
-/// mandatory scenarios. Returns one message per drift found (empty = agree).
-pub fn scenario_mismatches(rule_text: &str, session_usage: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for scenario in MANDATORY_SCENARIOS {
-        // A rule text deployed before the command rename names the scenario
-        // by its old name (`pixel targets`); that still runs, so it counts.
-        let in_rule = rule_text.contains(&format!("pixel {scenario}"))
-            || pixel_proto::commands::former_name(scenario)
-                .is_some_and(|old| rule_text.contains(&format!("pixel {old}")));
-        let in_usage = session_usage.contains(scenario);
-        match (in_rule, in_usage) {
-            (true, false) => out.push(format!(
-                "'{scenario}' is mandated by the rule text but missing from the session usage string"
-            )),
-            (false, true) => out.push(format!(
-                "'{scenario}' is in the session usage string but the rule text never mentions `pixel {scenario}`"
-            )),
-            (false, false) => out.push(format!(
-                "'{scenario}' is missing from BOTH the rule text and the session usage string"
-            )),
-            (true, true) => {}
-        }
-    }
-    out
-}
-
 /// One NDJSON retrieval round trip against a running daemon socket, checking
 /// whether the response carries an `epistemics` object (envelope- or
 /// data-level). Short timeouts — this is a health probe, not a query.
@@ -2713,8 +2317,8 @@ mod tests {
         Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL, age_secs, capped, catalogue_steps,
         claude_hooks_owner_check, extract_rule_commands, fix_for, judge_repair, load_pixel_config,
         names_check, normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
-        render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair, scenario_mismatches,
-        selected, shell_path_check, shell_word, spec, split_home_repairs, validate_selection,
+        render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair, selected,
+        shell_path_check, shell_word, spec, split_home_repairs, validate_selection,
         web_search_provider_check_with, web_search_provider_from,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
@@ -3032,7 +2636,7 @@ mod tests {
             .map(|spec| spec.id)
             .filter(|id| id.starts_with("install."))
             .collect();
-        assert_eq!(home.len(), 13, "the install group as catalogued");
+        assert_eq!(home.len(), 12, "the install group as catalogued");
         let skip = ids(&["install.*"]);
         for spec in CHECKS {
             assert_eq!(
@@ -4135,72 +3739,6 @@ Prose naming `pixel status` is not a table row.
     // -- scenario consistency ------------------------------------------------
 
     #[test]
-    fn scenario_agreement_is_empty_when_both_sides_name_all_five() {
-        let rule = "use pixel scope-task first, pixel find-code for phrases, \
-                    pixel plan-rollback for history, pixel sync-branch for sync, \
-                    pixel impact before edits";
-        assert!(
-            scenario_mismatches(rule, pixel_proto::op::SESSION_USAGE).is_empty(),
-            "all five scenarios present on both sides must produce zero mismatches"
-        );
-    }
-
-    #[test]
-    fn scenarios_named_by_their_pre_rename_names_still_agree() {
-        // Every install before the rename deployed this vocabulary.
-        let old_rule = "use pixel targets first, pixel resolve for phrases, \
-                        pixel rescue for history, pixel reconcile for sync, \
-                        pixel impact before edits";
-        assert!(
-            scenario_mismatches(old_rule, pixel_proto::op::SESSION_USAGE).is_empty(),
-            "old command names in the rule text must satisfy the scenarios"
-        );
-        let mixed =
-            "pixel scope-task, pixel resolve, pixel plan-rollback, pixel reconcile, pixel impact";
-        assert!(scenario_mismatches(mixed, pixel_proto::op::SESSION_USAGE).is_empty());
-        // A name that was never a scenario does not stand in for one.
-        let wrong = "pixel targets, pixel resolve, pixel rescue, pixel sync, pixel impact";
-        let drift = scenario_mismatches(wrong, pixel_proto::op::SESSION_USAGE);
-        assert_eq!(drift.len(), 1, "{drift:?}");
-        assert!(drift[0].contains("'sync-branch'"), "{drift:?}");
-    }
-
-    #[test]
-    fn scenario_drift_is_flagged_per_missing_side() {
-        let rule_without_impact =
-            "pixel scope-task, pixel find-code, pixel plan-rollback, pixel sync-branch";
-        let usage_without_impact =
-            "scope-task find-code plan-rollback sync-branch — four scenarios only";
-        // Rule lacks impact → usage-only drift message.
-        let drift = scenario_mismatches(rule_without_impact, pixel_proto::op::SESSION_USAGE);
-        assert_eq!(
-            drift.len(),
-            1,
-            "exactly the impact scenario drifts: {drift:?}"
-        );
-        assert!(drift[0].contains("impact"));
-        // Usage lacks impact while the rule mandates it → red-worthy drift.
-        let rule_full =
-            "pixel scope-task pixel find-code pixel plan-rollback pixel sync-branch pixel impact";
-        let drift = scenario_mismatches(rule_full, usage_without_impact);
-        assert_eq!(drift.len(), 1, "{drift:?}");
-        assert!(drift[0].contains("missing from the session usage string"));
-    }
-
-    #[test]
-    fn live_session_usage_and_live_rule_source_agree_when_rule_readable() {
-        // The real parity gate runs inside `pixel doctor` against the
-        // installed text; here we only pin that the SESSION_USAGE constant
-        // itself names every mandatory scenario.
-        for scenario in super::MANDATORY_SCENARIOS {
-            assert!(
-                pixel_proto::op::SESSION_USAGE.contains(scenario),
-                "SESSION_USAGE must name '{scenario}'"
-            );
-        }
-    }
-
-    #[test]
     fn poisoned_db_signature_is_red() {
         // The real-world poisoned DB: 11 commits marked indexed, 323 hunks all
         // stored with empty text.
@@ -4243,22 +3781,29 @@ Prose naming `pixel status` is not a table row.
     }
 
     #[test]
-    fn pi_impact_doctor_should_reject_a_managed_extension_for_another_binary() {
+    fn pi_impact_doctor_should_judge_the_package_install_wrote() {
         let home = tempfile::tempdir().unwrap();
+        let paths = crate::pi_global::PiPaths::resolve(home.path(), true);
         let old_exe = Path::new("/opt/old-pixel/pixel");
         let current_exe = Path::new("/opt/current-pixel/pixel");
-        std::fs::create_dir_all(home.path().join(".pi/agent")).unwrap();
-        crate::pi_global::install(home.path(), old_exe, false).unwrap();
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        let check = |exe: &Path| {
+            let report = super::doctor(&super::DoctorOptions {
+                home: Some(home.path().to_path_buf()),
+                executable_path: Some(exe.to_path_buf()),
+                only: vec!["install.pi-impact".into()],
+                ..Default::default()
+            })
+            .unwrap();
+            report.checks.into_iter().next().unwrap()
+        };
 
-        let report = super::doctor(&super::DoctorOptions {
-            home: Some(home.path().to_path_buf()),
-            executable_path: Some(current_exe.to_path_buf()),
-            only: vec!["install.pi-impact".into()],
-            ..Default::default()
-        })
-        .unwrap();
-        let stale = &report.checks[0];
-        assert_eq!(stale.id, "install.pi-impact");
+        let missing = check(current_exe);
+        assert_eq!(missing.status, CheckStatus::Red, "{missing:?}");
+        assert_eq!(missing.fix.as_deref(), Some("pixel install"));
+
+        crate::pi_global::install(&paths, old_exe, false, false).unwrap();
+        let stale = check(current_exe);
         assert_eq!(stale.status, CheckStatus::Red, "{stale:?}");
         assert!(
             stale
@@ -4268,191 +3813,50 @@ Prose naming `pixel status` is not a table row.
             "{stale:?}"
         );
 
-        crate::pi_global::install(home.path(), current_exe, false).unwrap();
-        let repaired = super::doctor(&super::DoctorOptions {
-            home: Some(home.path().to_path_buf()),
-            executable_path: Some(current_exe.to_path_buf()),
-            only: vec!["install.pi-impact".into()],
-            ..Default::default()
-        })
-        .unwrap();
-        assert_eq!(repaired.checks[0].status, CheckStatus::Green);
-    }
+        crate::pi_global::install(&paths, current_exe, false, false).unwrap();
+        let current = check(current_exe);
+        assert_eq!(current.status, CheckStatus::Green, "{current:?}");
+        assert_eq!(current.fix, None);
 
-    #[test]
-    fn pi_impact_doctor_should_report_an_unmanaged_extension_as_foreign_and_untouched() {
-        let home = tempfile::tempdir().unwrap();
-        let extension = home.path().join(".pi/agent/extensions/pixel-impact.ts");
-        std::fs::create_dir_all(extension.parent().unwrap()).unwrap();
-        std::fs::write(&extension, "// user-owned extension\n").unwrap();
-
-        let report = super::doctor(&super::DoctorOptions {
-            home: Some(home.path().to_path_buf()),
-            only: vec!["install.pi-impact".into()],
-            ..Default::default()
-        })
-        .unwrap();
-        let check = &report.checks[0];
-        assert_eq!(check.id, "install.pi-impact");
-        assert_eq!(check.status, CheckStatus::Yellow, "{check:?}");
+        // A foreign file under the retired name is the user's: manual, kept.
+        let legacy = paths.agent_dir.join(crate::pi_global::LEGACY_EXTENSION);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "// user-owned extension\n").unwrap();
+        let foreign = check(current_exe);
+        assert_eq!(foreign.status, CheckStatus::Yellow, "{foreign:?}");
+        assert_eq!(foreign.fix, None, "doctor offers no repair it cannot make");
         assert_eq!(
-            check.summary,
-            format!(
-                "foreign Pi extension left untouched at {}",
-                extension.display()
-            )
-        );
-        assert_eq!(
-            check.fix, None,
-            "install cannot replace a foreign extension"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&extension).unwrap(),
-            "// user-owned extension\n",
-            "doctor must leave the foreign extension untouched"
+            std::fs::read_to_string(&legacy).unwrap(),
+            "// user-owned extension\n"
         );
     }
 
     #[test]
-    fn pi_impact_doctor_should_not_offer_install_for_a_non_directory_config_path() {
+    fn pi_impact_doctor_should_not_offer_install_for_unparsable_settings_or_a_file_agent_dir() {
         let home = tempfile::tempdir().unwrap();
-        let config_path = home.path().join(".pi/agent");
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(&config_path, "user-owned file\n").unwrap();
-        let install =
-            crate::pi_global::install(home.path(), Path::new("/opt/pixel/pixel"), false).unwrap();
-        assert_eq!(
-            install.status,
-            crate::install::CheckStatus::Yellow,
-            "{install:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&config_path).unwrap(),
-            "user-owned file\n",
-            "install must leave a non-directory Pi configuration path untouched"
-        );
+        let paths = crate::pi_global::PiPaths::resolve(home.path(), true);
+        let check = || {
+            let report = super::doctor(&super::DoctorOptions {
+                home: Some(home.path().to_path_buf()),
+                executable_path: Some(PathBuf::from("/opt/pixel/pixel")),
+                only: vec!["install.pi-impact".into()],
+                ..Default::default()
+            })
+            .unwrap();
+            report.checks.into_iter().next().unwrap()
+        };
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        std::fs::write(&paths.settings, "{ not json").unwrap();
+        let unparsable = check();
+        assert_eq!(unparsable.status, CheckStatus::Yellow, "{unparsable:?}");
+        assert_eq!(unparsable.fix, None);
 
-        let report = super::doctor(&super::DoctorOptions {
-            home: Some(home.path().to_path_buf()),
-            only: vec!["install.pi-impact".into()],
-            ..Default::default()
-        })
-        .unwrap();
-        let check = &report.checks[0];
-        assert_eq!(check.status, CheckStatus::Yellow, "{check:?}");
-        assert_eq!(check.fix, None, "install cannot change this path safely");
-        assert!(
-            check
-                .summary
-                .contains("configuration path is not a directory"),
-            "{check:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(config_path).unwrap(),
-            "user-owned file\n",
-            "doctor must preserve the malformed user path"
-        );
-    }
-
-    #[test]
-    fn pi_impact_doctor_should_not_offer_install_when_extension_parent_is_a_file() {
-        let home = tempfile::tempdir().unwrap();
-        let config_dir = home.path().join(crate::config::PI_CONFIG_DIR);
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let extension_dir = config_dir.join("extensions");
-        std::fs::write(&extension_dir, "user-owned file\n").unwrap();
-
-        let report = super::doctor(&super::DoctorOptions {
-            home: Some(home.path().to_path_buf()),
-            only: vec!["install.pi-impact".into()],
-            ..Default::default()
-        })
-        .unwrap();
-        let check = &report.checks[0];
-        assert_eq!(check.status, CheckStatus::Yellow, "{check:?}");
-        assert_eq!(
-            check.fix, None,
-            "install cannot replace an extension parent file"
-        );
-        assert!(
-            check
-                .summary
-                .contains("Pi extension directory is not a directory"),
-            "{check:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(extension_dir).unwrap(),
-            "user-owned file\n",
-            "doctor must preserve the occupied extension directory path"
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn pi_impact_doctor_should_report_a_dangling_extension_parent_symlink_as_manual() {
-        use std::os::unix::fs::symlink;
-
-        let home = tempfile::tempdir().unwrap();
-        let config_dir = home.path().join(crate::config::PI_CONFIG_DIR);
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let extension_dir = config_dir.join("extensions");
-        let missing_target = home.path().join("missing-extension-directory");
-        symlink(&missing_target, &extension_dir).unwrap();
-
-        let report = super::doctor(&super::DoctorOptions {
-            home: Some(home.path().to_path_buf()),
-            only: vec!["install.pi-impact".into()],
-            ..Default::default()
-        })
-        .unwrap();
-        let check = &report.checks[0];
-        assert_eq!(check.status, CheckStatus::Yellow, "{check:?}");
-        assert_eq!(check.fix, None, "install cannot repair a dangling symlink");
-        assert!(
-            check
-                .summary
-                .contains("Pi extension directory is not a directory"),
-            "{check:?}"
-        );
-        assert_eq!(std::fs::read_link(&extension_dir).unwrap(), missing_target);
-        assert!(!extension_dir.is_dir());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn pi_impact_doctor_should_preserve_an_occupied_symlink_extension_path() {
-        use std::os::unix::fs::symlink;
-
-        let home = tempfile::tempdir().unwrap();
-        let target = home.path().join("foreign-extension-dir");
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(target.join("keep.ts"), "user-owned content\n").unwrap();
-        let extension = home.path().join(crate::pi_global::EXTENSION);
-        std::fs::create_dir_all(extension.parent().unwrap()).unwrap();
-        symlink(&target, &extension).unwrap();
-
-        let report = super::doctor(&super::DoctorOptions {
-            home: Some(home.path().to_path_buf()),
-            only: vec!["install.pi-impact".into()],
-            ..Default::default()
-        })
-        .unwrap();
-        let check = &report.checks[0];
-        assert_eq!(check.status, CheckStatus::Yellow, "{check:?}");
-        assert_eq!(
-            check.fix, None,
-            "install must not replace an occupied symlink"
-        );
-        assert!(
-            check
-                .summary
-                .contains("foreign Pi extension left untouched")
-        );
-        assert_eq!(std::fs::read_link(&extension).unwrap(), target);
-        assert_eq!(
-            std::fs::read_to_string(home.path().join("foreign-extension-dir/keep.ts")).unwrap(),
-            "user-owned content\n"
-        );
+        std::fs::remove_dir_all(&paths.agent_dir).unwrap();
+        std::fs::write(&paths.agent_dir, "user-owned file").unwrap();
+        let occupied = check();
+        assert_eq!(occupied.status, CheckStatus::Yellow, "{occupied:?}");
+        assert_eq!(occupied.fix, None);
+        assert!(occupied.summary.contains("not a directory"), "{occupied:?}");
     }
 
     #[test]

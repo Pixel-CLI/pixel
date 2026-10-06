@@ -36,7 +36,7 @@ model providers, and the website under `website/`.
 | Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `actions.jsonl`, `config.yaml`, `tasks/`, `env-snapshots/` | what the agent reads as ground truth; `actions.jsonl` and `env-snapshots/` can hold secrets |
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
-| Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, `~/.pi/agent/APPEND_SYSTEM.md`, OpenCode, Antigravity, zcode and Devin configs; per repository with `--repo`, `.claude/settings.local.json`, `.codex/`, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`, the managed block in `AGENTS.md` | a hook command runs with the user's privileges on every agent tool call |
+| Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`; per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
 | User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `PERPLEXITY_API_KEY` or `remote_keys` in the global config), `.env` values edited by `pixel edit-env` | credential theft, billing abuse |
 | Benchmark credentials | OAuth storage or an explicitly selected Claude gateway settings file read by `eval/claude_skill_pair.py` | credentials must reach only the selected model connection and stay out of benchmark receipts |
 | Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
@@ -433,11 +433,13 @@ boundary it crosses.
 - **Scenario**: a repository plants instructions in code, comments, commit
   messages, symbol names or file names; Pixel quotes them to the agent, which
   follows them.
-- **Mitigation**: the agent prompt states that Pixel output is data, not
-  instructions (`crates/pixel-install/assets/pixel-agent-prompt.md`,
-  `pixel-subagent-prompt.md`). Codex emits no retrieval context by default.
-  The explicit impact skill and Pi extension treat graph output as repository
-  data, not instructions. `impact --no-refresh` uses a read-only graph snapshot,
+- **Mitigation**: no install delivers Pixel output to an agent unasked: no
+  prompt is deployed and the guard hooks answer nothing outside
+  `pixel config policy enforce`. The bundled prompt a user copies by hand
+  states that Pixel output is data, not instructions
+  (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
+  skill and Pi command label graph output as repository data, not
+  instructions. `impact --no-refresh` uses a read-only graph snapshot,
   verifies extractor and source signatures (re-hashing only files whose mtime
   is not older than the last full build), and bounds the query to 1500 ms and
   the serialized result to 32 KiB. Its graph completeness claim remains open.

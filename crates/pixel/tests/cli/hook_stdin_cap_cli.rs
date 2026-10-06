@@ -26,6 +26,10 @@ use crate::support::{Scratch, pixel_command};
 /// the boundary is exact rather than a nearby round number.
 const MAX_HOOK_INPUT: usize = 1_048_576;
 
+/// The opt-in policy under which the guard rewrites and denies and
+/// `prompt-submit` injects its guidance: the default policy steers nothing.
+const ENFORCE: [(&str, &str); 1] = [("PIXEL_POLICY", "enforce")];
+
 /// One byte past the shared cap, so the payload is refused by the cap and not
 /// by a size the test happened to pick.
 fn oversized_payload() -> String {
@@ -42,7 +46,17 @@ fn oversized_payload() -> String {
 /// of failing it, which is the very bug under test. The write side is dropped
 /// either way so a correctly-capped reader sees EOF.
 fn feed(args: &[&str], payload: &str) -> Output {
-    let mut child = pixel_command()
+    feed_with(args, payload, &[])
+}
+
+/// [`feed`] with extra environment variables, such as the opt-in
+/// `PIXEL_POLICY=enforce` that turns on the steering a payload could reach.
+fn feed_with(args: &[&str], payload: &str, envs: &[(&str, &str)]) -> Output {
+    let mut command = pixel_command();
+    command
+        .env_remove("PIXEL_POLICY")
+        .envs(envs.iter().copied());
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -77,9 +91,10 @@ fn guard_should_leave_the_native_tool_untouched_on_an_oversized_payload() {
 #[test]
 fn provider_guard_should_leave_the_native_command_untouched_on_an_oversized_payload() {
     for provider in ["claude", "codex", "devin", "antigravity"] {
-        let output = feed(
+        let output = feed_with(
             &["run-hook", "guard", "--provider", provider],
             &oversized_payload(),
+            &ENFORCE,
         );
         assert!(
             output.status.success(),
@@ -102,7 +117,7 @@ fn prompt_submit_should_leave_the_prompt_untouched_on_an_oversized_payload() {
         r#"{{"session_id":"s","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"{filler}","transcript_path":"/tmp/t.jsonl"}}"#,
         filler = "a".repeat(MAX_HOOK_INPUT + 1)
     );
-    let output = feed(&["run-hook", "prompt-submit"], &payload);
+    let output = feed_with(&["run-hook", "prompt-submit"], &payload, &ENFORCE);
     assert!(output.status.success(), "prompt-submit: {output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
@@ -244,18 +259,20 @@ fn a_payload_under_the_cap_should_still_reach_the_hook() {
 }
 
 /// `prompt-submit` answers an indexed repository's prompt with Pixel-first
-/// guidance, and it must keep doing so at the cap: the guidance is the
-/// observable a read produces, since a payload the cap refused exits 0 with
-/// no output at all. Both a small payload and one sized to exactly the cap
-/// are checked, so the boundary is the cap and not some smaller limit.
+/// guidance under the opt-in `enforce` policy, and it must keep doing so at
+/// the cap: the guidance is the observable a read produces, since a payload
+/// the cap refused exits 0 with no output at all. Both a small payload and
+/// one sized to exactly the cap are checked, so the boundary is the cap and
+/// not some smaller limit.
 #[test]
 fn prompt_submit_should_still_inject_its_guidance_at_the_cap() {
     let dir = indexed_dir("prompt-under-cap");
 
     let small = prompt_payload(&dir, 1);
-    let output = feed(
+    let output = feed_with(
         &["run-hook", "prompt-submit", "--provider", "devin"],
         &small,
+        &ENFORCE,
     );
     assert!(
         output.status.success(),
@@ -278,9 +295,10 @@ fn prompt_submit_should_still_inject_its_guidance_at_the_cap() {
         MAX_HOOK_INPUT,
         "the boundary payload must be exactly the cap"
     );
-    let output = feed(
+    let output = feed_with(
         &["run-hook", "prompt-submit", "--provider", "devin"],
         &at_cap,
+        &ENFORCE,
     );
     assert!(output.status.success(), "prompt-submit at cap: {output:?}");
     let response: serde_json::Value =

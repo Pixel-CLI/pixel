@@ -57,7 +57,7 @@ The index, the code graph and the optional history data live in `.pixel/` at the
 
 ## What pixel install wires
 
-`pixel install` is global: run it once, from anywhere. It retains prompt assets under `~/.local/share/pixel/` for legacy/manual integrations. Codex and Claude keep native retrieval with separate task lifecycle hooks; Pi exposes an explicit impact command:
+`pixel install` is global: run it once, from anywhere. It deploys no agent prompt and no retrieval guard: every agent keeps its native search, and `pixel install` removes the prompts, guards and plugins earlier releases wrote. Claude Code and Codex keep task lifecycle hooks; Pi gets an explicit impact command:
 
 {{% agents-install %}}
 
@@ -67,24 +67,24 @@ At a terminal, `pixel install` opens with a short animation before its summary: 
 
 `pixel uninstall` removes everything `pixel install` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it (`mise uninstall pixel`, or the Homebrew equivalent).
 
-### Per-repository guards
+### Per-repository cleanup
 
-`pixel install --repo <path>` updates project-local integration and skips global steps:
+`pixel install --repo <path>` updates project-local integration and skips global steps. It adds no guard:
 
 - `<repo>/.claude/settings.local.json` and `.claude/settings.json`: removes owned retrieval guards and restores RTK hook groups from `<repo>/.claude/pixel-rtk-hooks.json`, preserving foreign hooks and independent task controls
 - `<repo>/.codex/config.toml`: removes retired Pixel `developer_instructions` while preserving foreign text
 - `<repo>/.codex/hooks.json`: removes owned retrieval registrations and restores adopted hooks from `<repo>/.codex/pixel-composed-guard-backup.json` when the managed snapshot still matches; preserves user changes and leaves Git-tracked hook files alone
-- `<repo>/.devin/config.local.json`: the guard hook for Devin
-- `<repo>/.pi/extensions/pixel-guard.ts`: Pi's task lifecycle adapter, loaded once Pi trusts the project
 - `<repo>/AGENTS.md`: removes the retired managed Pixel-first block; surrounding instructions are preserved
 
 Machine-specific artifacts that name this machine's `pixel` binary are listed in the clone's `.git/info/exclude`, so a `git add -A` cannot publish them. `.codex/config.toml` and the root `AGENTS.md` are portable and do not name the local binary.
 
-Codex and Claude leave retrieval native under every shared policy setting. Pi's default integration adds an explicit `/pixel-impact <symbol>` command; the project adapter retains task controls. Legacy Pi retrieval behavior requires `PIXEL_PI_RETRIEVAL=1`. Other providers retain their existing policy settings. [Pi integration and exceptions](https://github.com/Pixel-CLI/pixel/blob/main/docs/pi-harness.md) describe the boundary. `pixel doctor <repo>` checks global and project artifacts.
+It also removes two files earlier releases wrote, which it no longer writes: Pixel's Devin guard in `.devin/config.local.json` (other entries stay) and the Pi project extension `.pi/extensions/pixel-guard.ts`.
+
+Retrieval stays native under the default `advisory` policy: Pixel's guard hooks answer nothing, and only `pixel config policy enforce` lets a guard you wire by hand steer an agent. Claude Code and Codex stay native under every setting. [Pi integration](https://github.com/Pixel-CLI/pixel/blob/main/docs/pi-harness.md) describes the `/pixel-impact` package. `pixel doctor <repo>` checks global and project artifacts.
 
 ## Updating
 
-Upgrading replaces the binary only. The agent prompt and the per-agent config keys belong to you, not to the package manager, so they keep the old release's text until you refresh them.
+Upgrading replaces the binary only. The per-agent config keys belong to you, not to the package manager, so they keep the old release's text until you refresh them.
 
 | Installed with | Upgrade the binary |
 | --- | --- |

@@ -36,10 +36,16 @@ fn doctor_should_exit_1_with_the_fix_when_a_check_is_red() {
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.starts_with("pixel doctor: ran "), "{text}");
+    // A bare home has no Claude task hooks: red, with the install as the fix.
     assert!(
-        text.contains("  [red] install.agent-prompt: agent-prompt.md not deployed"),
+        text.contains(&format!(
+            "  [red] install.claude-hooks: {} not found — run `pixel install`\n",
+            home.join(".claude/settings.json").display()
+        )),
         "{text}"
     );
+    // No Pixel prompt is deployed any more, so its absence is healthy.
+    assert!(!text.contains("install.agent-prompt"), "{text}");
     assert!(
         text.contains("    fix: pixel install --shell zsh\n"),
         "{text}"
@@ -64,10 +70,14 @@ fn doctor_json_should_keep_the_exit_code_and_carry_the_fix() {
     let find = |id: &str| checks.iter().find(|c| c["id"] == id);
     assert!(find("install.pi-prompt").is_none(), "--skip left it out");
     assert_eq!(
-        find("install.agent-prompt").unwrap()["fix"],
+        find("install.claude-hooks").unwrap()["fix"],
         "pixel install --shell zsh",
         "the home install reads the profile of the shell the check read"
     );
+    // A home with no deployed prompt is green, so the check carries no fix.
+    let prompt = find("install.agent-prompt").unwrap();
+    assert_eq!(prompt["status"], "green", "{prompt}");
+    assert!(prompt.get("fix").is_none(), "{prompt}");
     // The repo checks judge the path given on the command line, and their
     // fix names it.
     let index = find("index.freshness").expect("repo checks ran");
@@ -76,8 +86,10 @@ fn doctor_json_should_keep_the_exit_code_and_carry_the_fix() {
         format!("pixel prepare-repo '{}'", repo.display()),
         "{index}"
     );
-    // The installed rule text is dry-run against this binary's own parser.
-    assert!(find("rule.parity").is_some(), "{report}");
+    // The checks that judged a deployed Pixel prompt are retired with it.
+    for retired in ["install.subagent-prompt", "rule.parity", "rule.scenarios"] {
+        assert!(find(retired).is_none(), "{retired}: {report}");
+    }
     // `--shell zsh` decides which profile the wrapper check reads first.
     let profiles = &find("install.legacy-wrappers").unwrap()["detail"]["profiles_checked"];
     assert!(
@@ -103,12 +115,14 @@ fn doctor_should_exit_0_when_the_selected_checks_are_green() {
 #[test]
 fn doctor_fail_on_yellow_should_turn_a_yellow_check_into_exit_1() {
     let (home, repo) = fixture("yellow");
-    // In a bare home no rule text is installed: rule.scenarios is yellow.
-    let only = ["--only", "rule.scenarios"];
+    // No daemon serves the scratch repository: the epistemics probe is
+    // skipped, which is yellow.
+    let only = ["--only", "daemon.epistemics"];
     let default = doctor(&home, &repo, &only);
     assert_eq!(default.status.code(), Some(0), "{default:?}");
     assert!(
-        String::from_utf8_lossy(&default.stdout).contains("[yellow] rule.scenarios"),
+        String::from_utf8_lossy(&default.stdout)
+            .contains("[yellow] daemon.epistemics: no daemon running — epistemics probe skipped"),
         "{default:?}"
     );
     let strict = doctor(&home, &repo, &[only[0], only[1], "--fail-on", "yellow"]);
@@ -151,14 +165,14 @@ fn doctor_list_should_name_every_check_with_its_fix() {
     assert_eq!(catalogue[0]["fix"], serde_json::Value::Null);
 }
 
-/// After an upgrade the prompts `pixel install` deployed are the old
-/// release's, and agents keep reading them: every ordinary command of an
-/// installed `pixel` names them in one stderr line, while `doctor`, which
-/// reports them itself, a home where nothing was ever deployed, and the
-/// developer builds (`pixel-dev`, a binary run from `target/`, #549) stay
-/// quiet.
+/// No release deploys a Pixel prompt any more, so a copy an earlier
+/// `pixel install` left is retired whatever its content, the bundled text
+/// included: every ordinary command of an installed `pixel` names it in one
+/// stderr line, while `doctor`, which reports it itself, a home where nothing
+/// was ever deployed, and the developer builds (`pixel-dev`, a binary run
+/// from `target/`, #549) stay quiet.
 #[test]
-fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
+fn a_retired_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
     let (home, repo) = fixture("stale-prompt");
     let bin = home.join(".local/bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -187,25 +201,31 @@ fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
 
     let deployed = home.join(".local/share/pixel");
     std::fs::create_dir_all(&deployed).unwrap();
+    let note = format!(
+        "note: agent-prompt.md deployed by an earlier `pixel install` is retired in this pixel ({}) — run `pixel install` to remove it",
+        env!("CARGO_PKG_VERSION")
+    );
+    // An older release's text and the text this release still bundles are
+    // both retired: the note does not compare contents.
+    for content in [
+        "# an older release's prompt\n",
+        include_str!("../../../pixel-install/assets/pixel-agent-prompt.md"),
+    ] {
+        std::fs::write(deployed.join("agent-prompt.md"), content).unwrap();
+        let warned = ordinary();
+        assert!(warned.status.success(), "{warned:?}");
+        let stderr = String::from_utf8_lossy(&warned.stderr).into_owned();
+        let notes: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.starts_with("note: agent-prompt.md"))
+            .collect();
+        assert_eq!(notes, [note.as_str()], "{stderr}");
+    }
     std::fs::write(
         deployed.join("agent-prompt.md"),
         "# an older release's prompt\n",
     )
     .unwrap();
-    let warned = ordinary();
-    assert!(warned.status.success(), "{warned:?}");
-    let stderr = String::from_utf8_lossy(&warned.stderr).into_owned();
-    let notes: Vec<&str> = stderr
-        .lines()
-        .filter(|line| line.starts_with("note: agent-prompt.md"))
-        .collect();
-    assert_eq!(notes.len(), 1, "{stderr}");
-    assert!(
-        notes[0].contains("differs from the copy in this pixel")
-            && notes[0].ends_with("run `pixel install` to update it"),
-        "{}",
-        notes[0]
-    );
 
     // The same binary as a developer build: installed as the `pixel-dev`
     // side build, or run from cargo's `target/` as built. The deployed
@@ -229,12 +249,20 @@ fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
     let stderr = String::from_utf8_lossy(&report.stderr).into_owned();
     assert!(!stderr.contains("note: agent-prompt.md"), "{stderr}");
     let text = String::from_utf8_lossy(&report.stdout).into_owned();
-    assert!(text.contains("agent-prompt.md is stale"), "{text}");
+    // No host reads a deployed prompt any more: doctor calls the copy an
+    // earlier release left retired, and `pixel install` removes it.
+    assert!(
+        text.contains(&format!(
+            "  [red] install.agent-prompt: retired Pixel prompt file(s) remain: {} — run `pixel install` to remove them\n",
+            deployed.join("agent-prompt.md").display()
+        )),
+        "{text}"
+    );
+    assert_eq!(report.status.code(), Some(1), "{report:?}");
 }
 
 /// A `pixel-dev` `--fix` leaves every home-install repair to the managed
-/// pixel, including the `pixel install` that `rule.*` carries once
-/// `install.*` is skipped: an empty home stays empty, the check keeps its
+/// pixel: an empty home stays empty, the red `install.claude-hooks` keeps its
 /// `fix:` line and colour, and stderr says which command was left.
 #[test]
 fn a_side_build_doctor_fix_should_leave_the_home_install_alone() {
@@ -248,15 +276,7 @@ fn a_side_build_doctor_fix_should_leave_the_home_install_alone() {
     let out = std::process::Command::new(&side_build)
         .arg("doctor")
         .arg(&*repo)
-        .args([
-            "--shell",
-            "zsh",
-            "--skip",
-            "install.*",
-            "--only",
-            "rule.*",
-            "--fix",
-        ])
+        .args(["--shell", "zsh", "--only", "install.claude-hooks", "--fix"])
         .env("HOME", &*home)
         .env("CODEX_HOME", home.join(".codex"))
         .env("PIXEL_METRICS", "0")
@@ -272,21 +292,20 @@ fn a_side_build_doctor_fix_should_leave_the_home_install_alone() {
         "{stderr}"
     );
     assert!(!stderr.contains("running pixel install"), "{stderr}");
-    for written in [
-        ".claude/settings.json",
-        ".local/share/pixel/agent-prompt.md",
-        ".codex/config.toml",
-    ] {
+    for written in [".claude", ".codex", ".local/share/pixel", ".pi"] {
         assert!(!home.join(written).exists(), "{written} written: {stderr}");
     }
     assert!(
-        stdout.contains("[yellow] rule.parity") && stdout.contains("fix: pixel install"),
+        stdout.contains(&format!(
+            "  [red] install.claude-hooks: {} not found — run `pixel install`\n    fix: pixel install --shell zsh\n",
+            home.join(".claude/settings.json").display()
+        )),
         "{stdout}"
     );
     assert_eq!(
         out.status.code(),
-        Some(0),
-        "yellow stays under the default red gate: {out:?}"
+        Some(1),
+        "the unrepaired check stays red: {out:?}"
     );
 }
 
@@ -308,11 +327,24 @@ fn doctor_fixing(home: &Path, repo: &Path, args: &[&str]) -> Output {
 
 /// The reason `--fix` exists: two checks share `pixel install`, which runs
 /// once, with the `--shell` the checks read, and the verdict and exit code
-/// come from the checks re-run afterwards, not from the first pass.
+/// come from the checks re-run afterwards, not from the first pass. The
+/// prompts an earlier release deployed are red, and the install removes them.
 #[test]
 fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
     let (home, repo) = fixture("fix");
     std::fs::create_dir_all(home.join(".pi/agent")).unwrap();
+    let deployed = home.join(".local/share/pixel");
+    std::fs::create_dir_all(&deployed).unwrap();
+    std::fs::write(
+        deployed.join("agent-prompt.md"),
+        "# an older release's prompt\n",
+    )
+    .unwrap();
+    std::fs::write(
+        deployed.join("subagent-prompt.md"),
+        "# an older release's sub-agent prompt\n",
+    )
+    .unwrap();
     let only = [
         "--only",
         "install.agent-prompt",
@@ -324,6 +356,14 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
     let text = String::from_utf8(before.stdout).unwrap();
     assert!(
         text.ends_with("rerun with `--fix` to apply the 1 repair command(s) above\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "  [red] install.agent-prompt: retired Pixel prompt file(s) remain: {}, {} — run `pixel install` to remove them\n",
+            deployed.join("agent-prompt.md").display(),
+            deployed.join("subagent-prompt.md").display()
+        )),
         "{text}"
     );
     assert!(
@@ -339,7 +379,7 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
         [
             "pixel doctor --fix: ran 1 repair(s) — 1 fixed, 0 not converged, 0 failed",
             "  [fixed] pixel install --shell zsh (install.agent-prompt, install.pi-impact)",
-            "pixel doctor: ran 2 check(s), skipped 31 — 2 green, 0 yellow, 0 red",
+            "pixel doctor: ran 2 check(s), skipped 28 — 2 green, 0 yellow, 0 red",
             "",
         ]
         .join("\n")
@@ -350,7 +390,12 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
         1,
         "{stderr}"
     );
-    assert!(home.join(".local/share/pixel/agent-prompt.md").is_file());
+    for retired in ["agent-prompt.md", "subagent-prompt.md"] {
+        assert!(
+            !deployed.join(retired).exists(),
+            "`pixel install` removes {retired}"
+        );
+    }
 }
 
 /// `--json` carries each repair's verdict beside the re-run report; a repair
@@ -386,15 +431,28 @@ fn doctor_fix_json_should_report_a_repair_that_failed() {
     assert_eq!(report["checks"][0]["status"], "red", "{report}");
 }
 
-/// Without `--fix` nothing runs and the JSON shape is unchanged.
+/// Without `--fix` nothing runs and the JSON shape is unchanged: the retired
+/// prompt that makes the check red is still there, byte for byte.
 #[test]
 fn doctor_without_fix_should_leave_the_home_untouched() {
     let (home, repo) = fixture("no-fix");
+    let prompt = home.join(".local/share/pixel/agent-prompt.md");
+    std::fs::create_dir_all(prompt.parent().unwrap()).unwrap();
+    std::fs::write(&prompt, "# an older release's prompt\n").unwrap();
     let out = doctor_fixing(&home, &repo, &["--only", "install.agent-prompt", "--json"]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(report.get("repairs").is_none(), "{report}");
-    assert!(!home.join(".local/share/pixel/agent-prompt.md").exists());
+    assert_eq!(report["checks"][0]["status"], "red", "{report}");
+    assert_eq!(
+        report["checks"][0]["fix"], "pixel install --shell zsh",
+        "{report}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&prompt).unwrap(),
+        "# an older release's prompt\n"
+    );
+    assert!(!home.join(".claude").exists(), "no install ran");
 }
 
 #[test]
@@ -586,76 +644,108 @@ fn shell_path_should_go_red_when_the_shell_cannot_run() {
     assert_eq!(report["checks"][0]["status"], "red", "{report}");
 }
 
-/// Devin's lifecycle protocol is judged only where Devin exists: a machine
-/// without `~/.config/devin` is green-absent (`doctor` judges what Pixel
-/// wrote), a Devin config without the hooks is red with the install as its
-/// fix, and after `pixel install` the check is green.
+/// The `"hooks"` object of a Devin config: one group per event, each holding
+/// the commands given for it.
+fn devin_hooks(entries: &[(&str, &str)]) -> serde_json::Value {
+    let mut hooks = serde_json::Map::new();
+    for (event, command) in entries {
+        hooks.insert(
+            (*event).to_string(),
+            serde_json::json!([{"hooks":[{"command":command,"type":"command"}]}]),
+        );
+    }
+    serde_json::Value::Object(hooks)
+}
+
+/// Devin keeps its native retrieval, so `pixel install` registers no Devin
+/// hook. The check is green with no `~/.config/devin`, green on a config
+/// that holds only foreign hooks naming the same verbs (`doctor` judges what
+/// Pixel wrote), red with the install as its fix while a hook an earlier
+/// release registered remains, and green again once `pixel install` has
+/// removed it, the foreign hooks intact.
 #[test]
-fn doctor_devin_hooks_absent_dir_is_green_and_missing_hooks_are_red_until_install() {
+fn doctor_devin_hooks_is_green_without_a_pixel_hook_and_red_until_install_removes_one() {
     let (home, repo) = fixture("devin-hooks-absent");
     let out = doctor(&home, &repo, &["--only", "install.devin-hooks", "--json"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["checks"][0]["status"], "green", "{report}");
 
-    // Devin used, never installed: red, the fix is the global install. The
-    // config carries foreign hook groups that name the same verbs — a
-    // foreign entry is not a pixel entry, so the check must still demand
-    // Pixel's own commands.
-    let (home, repo) = fixture("devin-hooks-missing");
+    let (home, repo) = fixture("devin-hooks-retired");
     std::fs::create_dir_all(home.join(".config/devin")).unwrap();
-    let foreign = |event: &str, verb: &str| {
-        format!(
-            r#"{event:?}: [{{"hooks":[{{"command":"/opt/foreign run-hook {verb}","type":"command"}}]}}]"#
-        )
-    };
+    let config = home.join(".config/devin/config.json");
+    let foreign = [
+        ("SessionStart", "/opt/foreign run-hook session-start"),
+        ("UserPromptSubmit", "/opt/foreign run-hook prompt-submit"),
+        ("PostCompaction", "/opt/foreign run-hook post-compaction"),
+    ];
     std::fs::write(
-        home.join(".config/devin/config.json"),
-        format!(
-            "{{{},{},{}}}",
-            foreign("SessionStart", "session-start"),
-            foreign("UserPromptSubmit", "prompt-submit"),
-            foreign("PostCompaction", "post-compaction")
-        ),
+        &config,
+        serde_json::json!({"hooks": devin_hooks(&foreign)}).to_string(),
     )
     .unwrap();
+    let out = doctor(&home, &repo, &["--only", "install.devin-hooks", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "foreign hooks only: {out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["checks"][0]["status"], "green", "{report}");
+    assert_eq!(
+        report["checks"][0]["summary"],
+        "no Pixel hook; the agent keeps its native tools"
+    );
+
+    // An earlier release's Pixel hooks beside the foreign ones: red.
+    let retired = [
+        (
+            "SessionStart",
+            "/usr/local/bin/pixel run-hook session-start --provider devin",
+        ),
+        (
+            "PreToolUse",
+            "/usr/local/bin/pixel run-hook guard --provider devin",
+        ),
+    ];
+    let mut hooks = devin_hooks(&foreign);
+    let retired_hooks = devin_hooks(&retired);
+    hooks["SessionStart"]
+        .as_array_mut()
+        .unwrap()
+        .extend(retired_hooks["SessionStart"].as_array().unwrap().clone());
+    hooks["PreToolUse"] = retired_hooks["PreToolUse"].clone();
+    std::fs::write(&config, serde_json::json!({"hooks": hooks}).to_string()).unwrap();
     let out = doctor(&home, &repo, &["--only", "install.devin-hooks"]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("missing pixel lifecycle hooks"),
-        "names the missing hooks: {text}"
+        text.contains(&format!(
+            "  [red] install.devin-hooks: retired Pixel hooks remain in {} — run `pixel install` to remove them\n    fix: pixel install --shell zsh\n",
+            config.display()
+        )),
+        "{text}"
     );
-    assert!(text.contains("fix: pixel install --shell zsh"), "{text}");
 
-    // The repair: `pixel install` writes the three lifecycle hooks.
+    // The repair: `pixel install` takes Pixel's hooks out and keeps the rest.
     let out = doctor_fixing(&home, &repo, &["--only", "install.devin-hooks", "--fix"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("[fixed]"), "{text}");
+    assert!(
+        text.contains("  [fixed] pixel install --shell zsh (install.devin-hooks)\n"),
+        "{text}"
+    );
     let value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.join(".config/devin/config.json")).unwrap())
-            .unwrap();
-    let has = |event: &str, verb: &str| {
-        value["hooks"][event].as_array().is_some_and(|groups| {
-            groups.iter().any(|g| {
-                g["hooks"].as_array().is_some_and(|h| {
-                    h.iter().any(|hook| {
-                        hook["command"]
-                            .as_str()
-                            .is_some_and(|c| c.contains(&format!("run-hook {verb}")))
-                    })
-                })
-            })
-        })
-    };
-    assert!(
-        has("SessionStart", "session-start --provider devin"),
-        "{value}"
-    );
-    assert!(
-        has("UserPromptSubmit", "prompt-submit --provider devin"),
-        "{value}"
-    );
-    assert!(has("PostCompaction", "post-compaction"), "{value}");
+        serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    let mut commands: Vec<(String, String)> = Vec::new();
+    for (event, groups) in value["hooks"].as_object().unwrap() {
+        for group in groups.as_array().unwrap() {
+            for hook in group["hooks"].as_array().unwrap() {
+                commands.push((event.clone(), hook["command"].as_str().unwrap().to_string()));
+            }
+        }
+    }
+    commands.sort();
+    let mut expected: Vec<(String, String)> = foreign
+        .iter()
+        .map(|(event, command)| ((*event).to_string(), (*command).to_string()))
+        .collect();
+    expected.sort();
+    assert_eq!(commands, expected, "{value}");
 }

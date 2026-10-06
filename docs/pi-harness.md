@@ -1,105 +1,53 @@
 # Pixel in the Pi harness
 
-Run `pixel install` to install Pi's command-only `/pixel-impact` extension, then
-`pixel install --repo .` in each repository for task lifecycle gates. Trust the
-project in Pi. The global extension registers no model-callable Pixel tool and
-does no startup retrieval. Invoke `/pixel-impact <symbol>` only when caller or
-impact evidence is useful; it runs `pixel impact <symbol> --no-refresh --depth
-2 --json --metrics off` once against the existing graph. Missing, stale,
-unsupported, or slow results fall back to native search without repairing or
-refreshing the index.
+Pi keeps its native tools. Pixel adds one explicit command, `/pixel-impact
+<symbol>`, and nothing that runs on its own: no model-callable Pixel tool, no
+startup retrieval, no per-prompt context, no system-prompt block and no
+policy check on Pi's tool calls.
 
-The project extension at `.pi/extensions/pixel-guard.ts` retains task
-authorization, telemetry, and stop gates. Its older model-callable retrieval
-tool, per-prompt context, native retrieval policy, and post-edit impact advice
-are disabled by default. Set `PIXEL_PI_RETRIEVAL=1` only to opt into that
-legacy retrieval adapter. `pixel doctor .` checks the project extension.
+## Install
 
-The opt-in adapter exposes these additional operations:
+`pixel install` writes a local Pi package when Pi's agent directory
+(`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) exists or `pi` is on `PATH`:
 
-| User outcome | Stable action | Pixel CLI operation |
-| --- | --- | --- |
-| Find likely files for a task | `scope_task` | `scope-task` |
-| See repository areas | `list_areas` | `list-areas` |
-| Search text | `search_content` | `search-content` |
-| Locate code by phrase | `find_code` | `find-code` |
-| Inspect symbol effects | `impact` | `impact` |
-| Read focused symbol context | `pack_context` | `pack-context` |
-| Inspect changed symbols | `what_changed` | `what-changed` |
-| Review the working tree | `review_changes` | `review-changes` |
-| Fetch remote refs | `fetch` | `fetch` |
-| Commit named files | `commit` | `commit` |
-| Commit and push named files | `commit_and_push` | `commit-and-push` |
-
-The action names remain stable if Pixel's CLI spelling changes. The extension
-reports an explicit error if the installed executable lacks an operation.
-Responses include bounded evidence, truncation, index and graph state, and a
-next action when results are capped or Pixel is unavailable. The extension
-checks `pixel status` before invoking an action. If the index is missing, run
-`pixel build-index --history .`. If the graph is missing, run
-`pixel rebuild-graph .`. Then retry. Native tools remain available under the
-default advisory policy. History facts can lag; their `fresh` field is returned.
-
-## Optional legacy native tool policy
-
-Set `PIXEL_PI_RETRIEVAL=1` before starting Pi to enable this compatibility
-adapter. Then choose its policy with `pixel config policy`, or for one
-environment with `PIXEL_POLICY`:
-
-| Value | Behaviour |
+| Path | Content |
 | --- | --- |
-| `advisory` (default) | Suggest Pixel retrieval while preserving native tool inputs and execution. |
-| `enforce` | Redirect supported simple retrieval commands and apply the scoped read/edit gates described below. |
-| `off` | Skip classification, policy logging and read/edit gates. |
+| `~/.local/share/pixel/pi-package/package.json` | the package manifest, naming its one extension |
+| `~/.local/share/pixel/pi-package/extensions/pixel-impact.ts` | the command, bound to this machine's `pixel` binary |
+| `settings.json` in Pi's agent directory | the package's absolute path, appended to `packages` |
 
-`pixel config policy enforce` writes the repository layer
-(`<repo>/.pixel/config.yaml`); `--global` writes the machine-wide
-`~/.pixel/config.yaml`. The repository file wins over the global one,
-`PIXEL_POLICY` overrides both for one environment, and an absent or
-unrecognised value selects `advisory`. The extension reads the effective
-setting once per project (`pixel config policy --json`) and keeps the
-advisory default when Pixel cannot answer. The legacy `PIXEL_TARGETS_GUARD=0`,
-`false`, or `off` also disables the policy. These settings do not disable the
-structured Pixel tool's write authorization.
+Every other key and package in `settings.json` stays. Pi loads the package on
+its next start; `/pixel-impact` then appears in its command list.
 
-In `enforce` mode, supported simple `ls`, `rg`, `grep`, and repository Git
-commands receive a redirect to the structured Pixel tool. The extension does
-not silently replace a native command with a different operation. Pi's in-repository `read` tool uses
-Pixel-resolved paths with a limit of at most 200 lines; outside paths are
-exempt. The mode can refuse supported repository retrieval with a redirect.
-Shell compositions, redirections, interpreters and unknown capabilities
-remain intact when the extension cannot classify them reliably. For example,
-`cargo test | tail -20`, `cargo test | rg error`, and
-`pixel repo-state --json | jq .branch` keep their original shell semantics.
-No leaf is removed or executed separately.
+The install leaves Pi alone and reports yellow, rather than rewriting, when
+`settings.json` does not parse or holds a `packages` that is not a list, or
+when the agent path is not a directory. A copy of the command an earlier
+release wrote to `extensions/pixel-impact.ts` in the agent directory is
+removed, so Pi does not register the name twice; a file there that Pixel did
+not write is left and reported. The install also removes Pixel's retired block
+from `APPEND_SYSTEM.md`, keeping any text of yours.
 
-The extension checks Pi tool calls, including read, bash, and named discovery
-tools. It cannot intercept Pi's own project context loading before an agent
-turn, file access performed *inside* an allowed build or test process, or a
-tool process that bypasses Pi's `tool_call` event. The policy is a retrieval
-workflow preference, not a repository sandbox. Pi's permissions remain
-authoritative. The extension's `classify()` is deterministic local code;
-it does not invoke the model-based `pixel classify` command.
+Installing the npm package as well (`pi install git:github.com/Pixel-CLI/pixel`)
+registers the same command a second time, and Pi then lists `pixel-impact:1`
+and `pixel-impact:2`: use one install path per machine.
 
-## Task lifecycle and optional legacy retrieval
+`pixel doctor` reports the package as `install.pi-impact`: red when it is
+missing from `packages` or bound to another binary, green when it is current or
+Pi is absent. `pixel uninstall` removes the package and its `packages` entry.
 
-Task authorization, telemetry, and stop gates remain active independently of
-retrieval settings. The explicit impact command is user-invoked and adds only
-its bounded query result to the current session.
+## The command
 
-When `PIXEL_PI_RETRIEVAL=1`, the legacy project adapter also registers its
-structured tool, automatic task context, retrieval policy checks, and post-edit
-`what-changed` advice. This compatibility mode can add startup calls and
-context; it is not the default experience.
+`/pixel-impact <symbol>` runs `pixel impact <symbol> --no-refresh --depth 2
+--json --metrics off` once against the existing graph and shows the bounded
+result (12 000 bytes at most) in the session without starting a turn. Missing,
+stale, unsupported or slow results fall back to native search; the command
+never builds or refreshes the index. If the graph is missing, run
+`pixel rebuild-graph .` yourself.
 
-`commit` and `commit_and_push` require explicit user intent in the current
-user message, plus named files, a message, and an idempotency request ID.
-`commit_and_push` requires intent to push as well. A fetch never grants it.
-The extension cannot cryptographically authenticate natural-language intent;
-it applies this check at tool execution and reports denials.
+## Per repository
 
-Policy decisions are logged in `.pixel/pi-policy.jsonl` with decision kind,
-tool, reason, and health or truncation metadata. The log does
-not record commands, query strings, file contents, or commit messages. Count
-policy entries to inspect which calls received advice or were blocked. This is an operational
-trace, not an audit of reads by allowed child processes.
+`pixel install --repo .` writes nothing for Pi. It removes the project
+extension `.pi/extensions/pixel-guard.ts` (and the older `.pi/agent/` copy)
+that earlier releases wrote, which carried task gates, a retrieval tool and a
+native-tool policy. A file under that name that Pixel did not write stays.
+`repo.pi-guard` in `pixel doctor .` is red while Pixel's copy is still there.

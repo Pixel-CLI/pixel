@@ -13,7 +13,7 @@ Start with `pixel audit` on your repository, then `pixel list-signatures <file>`
 
 `pixel impact` lists callers and callees before a change; `pixel review-changes` shows a structured diff. A static graph can miss dynamic calls, so an empty result is not proof that a change is safe.
 
-[Git operations](/docs/#git-changes) include leased pushes and `pixel plan-rollback`, which writes nothing until `--apply`. `pixel install --repo` adds project guidance and supported retrieval guards. [Wiring and policy](/docs/#per-repository-guards) explain their modes and exceptions.
+[Git operations](/docs/#git-changes) include leased pushes and `pixel plan-rollback`, which writes nothing until `--apply`. `pixel install --repo` keeps task lifecycle hooks and removes the retrieval guards and guidance blocks earlier releases added. [Per-repository cleanup](/docs/#per-repository-cleanup) lists every file it touches.
 
 ## Harness engineers
 

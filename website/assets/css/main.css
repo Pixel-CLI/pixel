@@ -704,6 +704,7 @@ main { counter-reset: chapter; }
 .ways__group--install { grid-column: 1 / -1; }
 .ways__group--plugin { border-top-color: color-mix(in srgb, var(--green) 55%, var(--line)); }
 .ways__group--rules { border-top-color: var(--line); }
+.ways__group--none { grid-column: 1 / -1; border-top-color: var(--line); }
 .ways__group h3 { margin: 0; font: 700 1.6rem/1.05 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; }
 .ways__group > p { margin: 0 0 6px; color: var(--ink-soft); font-size: 0.98rem; }
 .ways__list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }

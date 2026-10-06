@@ -10,6 +10,9 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const PIXEL: &str = env!("CARGO_BIN_EXE_pixel");
+/// The opt-in policy under which Devin's guard rewrites and denies; the
+/// default policy leaves every native search untouched.
+const ENFORCE: [(&str, &str); 1] = [("PIXEL_POLICY", "enforce")];
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture(PathBuf);
@@ -31,6 +34,9 @@ impl Fixture {
         command
             .current_dir(&self.0)
             .env("PIXEL_DAEMON_AUTO_START", "0")
+            // An empty home: no global `.pixel/config.yaml` sets the policy,
+            // and no deployed prompt adds a note to stderr.
+            .env("HOME", crate::support::neutral_home())
             .env_remove("RIPGREP_CONFIG_PATH")
             .env_remove("GREP_OPTIONS")
             .env_remove("PIXEL_POLICY")
@@ -73,6 +79,18 @@ impl Fixture {
     }
 
     fn guard(&self, provider: &str, command: &str, delegate: bool, path: Option<&Path>) -> Output {
+        self.guard_with(provider, command, delegate, path, &[])
+    }
+
+    /// [`Fixture::guard`] with extra environment variables (the policy).
+    fn guard_with(
+        &self,
+        provider: &str,
+        command: &str,
+        delegate: bool,
+        path: Option<&Path>,
+        envs: &[(&str, &str)],
+    ) -> Output {
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "tool_name": if provider == "devin" { "exec" } else { "Bash" },
@@ -87,6 +105,7 @@ impl Fixture {
         if let Some(path) = path {
             cmd.env("PATH", path);
         }
+        cmd.envs(envs.iter().copied());
         run_hook(cmd, &payload)
     }
 }
@@ -238,11 +257,30 @@ fn repeated_search_keeps_executing_and_reports_changed_file() {
     }
 }
 
+/// Steering is opt-in: under the default policy (and an explicit `advisory`)
+/// every host keeps its native search, Devin included; only `enforce` makes
+/// Devin's guard rewrite it.
 #[test]
-fn claude_and_codex_keep_native_search_while_devin_rewrites() {
+fn claude_and_codex_keep_native_search_while_devin_rewrites_only_under_enforce() {
+    for policy in [&[][..], &[("PIXEL_POLICY", "advisory")][..]] {
+        for provider in ["claude", "codex", "devin"] {
+            let fixture = Fixture::new(b"needle\n");
+            let out =
+                fixture.guard_with(provider, "grep -n needle 'a file.rs'", false, None, policy);
+            assert!(out.status.success(), "{provider} {policy:?}: {out:?}");
+            assert!(out.stdout.is_empty(), "{provider} {policy:?}: {out:?}");
+            assert!(out.stderr.is_empty(), "{provider} {policy:?}: {out:?}");
+        }
+    }
     for provider in ["claude", "codex", "devin"] {
         let fixture = Fixture::new(b"needle\n");
-        let out = fixture.guard(provider, "grep -n needle 'a file.rs'", false, None);
+        let out = fixture.guard_with(
+            provider,
+            "grep -n needle 'a file.rs'",
+            false,
+            None,
+            &ENFORCE,
+        );
         assert!(
             out.status.success(),
             "{}",
@@ -316,6 +354,8 @@ fn unsupported_provider_commands_never_get_authorized_or_rewritten() {
             assert!(out.stderr.is_empty(), "{provider}: {command}");
         }
     }
+    // Devin's rewrite is opt-in; even under `enforce` these shapes are not
+    // rewritable and stay native.
     for command in [
         "grep -rln needle . | wc -l",
         "grep -A20 needle 'a file.rs'",
@@ -323,12 +363,18 @@ fn unsupported_provider_commands_never_get_authorized_or_rewritten() {
         "env LC_ALL=C grep needle 'a file.rs'",
         "grep -F needle #file",
     ] {
-        let out = fixture.guard("devin", command, false, None);
+        let out = fixture.guard_with("devin", command, false, None, &ENFORCE);
         assert!(out.status.success(), "devin: {command}");
         assert!(out.stdout.is_empty(), "devin: {command}");
         assert!(out.stderr.is_empty(), "devin: {command}");
     }
-    let rtk_grep = fixture.guard("devin", "rtk grep needle 'a file.rs'", false, None);
+    let rtk_grep = fixture.guard_with(
+        "devin",
+        "rtk grep needle 'a file.rs'",
+        false,
+        None,
+        &ENFORCE,
+    );
     assert!(rtk_grep.status.success());
     let response: serde_json::Value = serde_json::from_slice(&rtk_grep.stdout).unwrap();
     assert_eq!(
@@ -336,9 +382,14 @@ fn unsupported_provider_commands_never_get_authorized_or_rewritten() {
         "pixel search-like-rg grep -- 'needle' 'a file.rs'"
     );
     assert!(response.get("decision").is_none(), "{response}");
+    // The default policy leaves the same rewritable command native.
+    let native = fixture.guard("devin", "rtk grep needle 'a file.rs'", false, None);
+    assert!(native.status.success(), "{native:?}");
+    assert!(native.stdout.is_empty(), "{native:?}");
+    assert!(native.stderr.is_empty(), "{native:?}");
 
     for provider in ["claude", "codex", "devin"] {
-        let quoted = fixture.guard(provider, "grep -F needle '#file'", false, None);
+        let quoted = fixture.guard_with(provider, "grep -F needle '#file'", false, None, &ENFORCE);
         if provider != "devin" {
             assert!(
                 quoted.status.success(),
@@ -373,11 +424,16 @@ fn credential_shaped_paths_keep_native_permission_boundaries() {
         // Synthetic, nonsensitive fixture bytes only. The guard examines
         // path metadata, never the contents of credential-shaped files.
         std::fs::write(fixture.0.join(path), b"fake fixture\n").unwrap();
-        for provider in ["claude", "codex", "devin"] {
-            let out = fixture.guard(provider, &format!("grep needle '{path}'"), false, None);
-            assert!(out.status.success(), "{provider}: {path}");
-            assert!(out.stdout.is_empty(), "{provider}: {path}");
-            assert!(out.stderr.is_empty(), "{provider}: {path}");
+        // Under the default policy and under `enforce`, where Devin's guard
+        // would otherwise rewrite a `grep`.
+        for policy in [&[][..], &ENFORCE[..]] {
+            for provider in ["claude", "codex", "devin"] {
+                let command = format!("grep needle '{path}'");
+                let out = fixture.guard_with(provider, &command, false, None, policy);
+                assert!(out.status.success(), "{provider} {policy:?}: {path}");
+                assert!(out.stdout.is_empty(), "{provider} {policy:?}: {path}");
+                assert!(out.stderr.is_empty(), "{provider} {policy:?}: {path}");
+            }
         }
     }
 }
@@ -585,6 +641,9 @@ impl TrackedFixture {
         command
             .current_dir(&self.0)
             .env("PIXEL_DAEMON_AUTO_START", "0")
+            // An empty home: no global `.pixel/config.yaml` sets the policy,
+            // and no deployed prompt adds a note to stderr.
+            .env("HOME", crate::support::neutral_home())
             .env_remove("RIPGREP_CONFIG_PATH")
             .env_remove("GREP_OPTIONS")
             .env_remove("PIXEL_POLICY")
@@ -605,6 +664,7 @@ impl Drop for TrackedFixture {
 #[test]
 fn native_configuration_and_environment_overrides_never_get_autoauthorized() {
     let fixture = Fixture::new(b"needle\n");
+    // `enforce` is the policy under which Devin's guard rewrites a search.
     for provider in ["claude", "codex", "devin"] {
         for (tool, key) in [
             ("rg", "RIPGREP_CONFIG_PATH"),
@@ -619,7 +679,9 @@ fn native_configuration_and_environment_overrides_never_get_autoauthorized() {
                 "tool_input": {"command": format!("{tool} needle 'a file.rs'")}
             });
             let mut command = fixture.command(PIXEL);
-            command.args(["run-hook", "guard", "--provider", provider]);
+            command
+                .args(["run-hook", "guard", "--provider", provider])
+                .envs(ENFORCE);
             if matches!(key, "env" | "environment") {
                 payload["tool_input"][key] =
                     serde_json::json!({"RIPGREP_CONFIG_PATH": "fake-native-config"});
@@ -652,6 +714,7 @@ fn the_other_tools_configuration_does_not_keep_a_search_native() {
         let mut command = fixture.command(PIXEL);
         command
             .args(["run-hook", "guard", "--provider", "devin"])
+            .envs(ENFORCE)
             .env(foreign_key, "fake-native-config");
         let output = run_hook(command, &payload);
         assert!(output.status.success(), "devin: {tool} with {foreign_key}");

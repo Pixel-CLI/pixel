@@ -912,14 +912,14 @@ fn claim_mismatch_should_match_files_and_whole_directories() {
 
 /// The agent pages tell a reader which files `pixel install` puts in their
 /// home. Run the real command into an empty one, with the config directories
-/// its conditional steps look for (OpenCode's, Antigravity's), and hold the
-/// data to exactly what landed: a file the install starts writing, stops
-/// writing or moves fails here until `website/data/agents.toml` says so.
+/// its Pi step and cleanup steps look for (OpenCode's, Devin's, Antigravity's,
+/// Pi's), and hold the data to exactly what landed: a file the install starts
+/// writing, stops writing or moves fails here until `website/data/agents.toml`
+/// says so.
 #[test]
 fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
-    // These are written only when `agy` registers its plugin or Codex has a
-    // retired Pixel block to remove.
-    const CONDITIONAL: &[&str] = &[".codex/config.toml", ".gemini/config/import_manifest.json"];
+    // Written only when Codex has a retired Pixel block to remove.
+    const CONDITIONAL: &[&str] = &[".codex/config.toml"];
 
     let home = crate::support::Scratch::for_test("docs-drift", "agents-global");
     for dir in [
@@ -1181,7 +1181,6 @@ fn agents_data_checks_should_be_exactly_the_agent_checks_of_doctor() {
     // Checks on Pixel's own files, which no single agent owns.
     const NOT_AN_AGENT: &[&str] = &[
         "install.agent-prompt",
-        "install.subagent-prompt",
         "install.rtk-backup",
         "install.legacy-wrappers",
     ];

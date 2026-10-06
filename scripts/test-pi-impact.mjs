@@ -23,37 +23,28 @@ try {
     passed += 1;
     console.log(`ok ${passed} - ${name}`);
   };
-  const host = (result = { code: 0, killed: false, stdout: '{"callers":[]}' }, existingCommands = []) => {
+  const host = (result = { code: 0, killed: false, stdout: '{"callers":[]}' }) => {
     const commands = [];
     const messages = [];
     const notifications = [];
-    const handlers = new Map();
+    const events = [];
     const api = {
-      on: (event, handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+      on: (event) => events.push(event),
       registerCommand: (name, options) => commands.push({ name, ...options }),
-      getCommands: () => [...existingCommands, ...commands.map(({ name }) => ({ name }))],
       exec: async (...args) => { commands.execArgs = args; return result; },
       sendMessage: (...args) => messages.push(args),
     };
     activate(api);
-    const startSession = () => handlers.get("session_start")?.forEach((handler) => handler());
-    startSession();
     return {
-      commands, messages, notifications, activateAgain: () => { activate(api); startSession(); }, startSession,
+      commands, messages, notifications, events,
       ctx: { cwd: "/repo", signal: new AbortController().signal, ui: { notify: (...args) => notifications.push(args) } },
     };
   };
 
-  await check("extension exposes only an explicit slash command", () => {
+  await check("extension registers only an explicit slash command while Pi loads it", () => {
     const h = host();
     assert.deepEqual(h.commands.map(({ name }) => name), ["pixel-impact"]);
-    h.activateAgain();
-    assert.equal(h.commands.length, 1, "direct installer and package copy cannot double-register");
-  });
-
-  await check("extension safely skips an already registered global command", () => {
-    const h = host(undefined, [{ name: "pixel-impact" }]);
-    assert.equal(h.commands.length, 0);
+    assert.deepEqual(h.events, [], "no lifecycle handler: nothing runs until the user types the command");
   });
 
   await check("package includes both Claude skills and the distributed Pi command", () => {

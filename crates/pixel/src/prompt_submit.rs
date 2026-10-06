@@ -127,8 +127,17 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
             .join(pixel_index::index::SHARD_FILE)
             .is_file()
     });
-    let task_context =
-        crate::config_cmd::feature_enabled(root.as_deref(), "task_context", "PIXEL_TASK_CONTEXT");
+    // Retrieval steering is opt-in (`pixel config policy enforce`): by
+    // default the hook adds no Pixel guidance, route or retrieval packet,
+    // and only the task-boundary note remains.
+    let steers =
+        crate::config_cmd::policy(root.as_deref()) == crate::config_cmd::PolicyMode::Enforce;
+    let task_context = steers
+        && crate::config_cmd::feature_enabled(
+            root.as_deref(),
+            "task_context",
+            "PIXEL_TASK_CONTEXT",
+        );
     let task_boundary =
         crate::config_cmd::feature_enabled(root.as_deref(), "task_boundary", "PIXEL_TASK_BOUNDARY");
     // Retrieval guidance and the route ride only a prompt that asks about code
@@ -140,7 +149,9 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // with both features disabled the guidance still rides an indexed
     // repository's prompt on Devin and on an explicitly wired Claude host.
     if prompt_features_disabled(task_context, task_boundary) {
-        let guidance = if matches!(provider, Some(crate::guard::Provider::Devin)) && indexed {
+        let guidance = if !steers {
+            ""
+        } else if matches!(provider, Some(crate::guard::Provider::Devin)) && indexed {
             DEVIN_PIXEL_GUIDANCE
         } else if claude_host && indexed {
             CLAUDE_PIXEL_GUIDANCE
@@ -211,7 +222,7 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // A prompt that asks about the Pixel tool itself carries the operation it
     // names as the first guidance line, so the agent consults the CLI instead
     // of answering about Pixel from memory.
-    if asks && matches!(provider, Some(crate::guard::Provider::Devin)) {
+    if steers && asks && matches!(provider, Some(crate::guard::Provider::Devin)) {
         context = render_devin_context(&context, pixel_note.as_deref());
     }
     // Codex has already returned. An explicitly wired Claude hook in an
@@ -219,10 +230,10 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // installs do not register this retrieval hook. The hosting gate keeps an imported
     // Claude config (Devin reading `~/.claude/settings.json` verbatim) from
     // prepending a second guidance over Devin's own.
-    if asks && claude_host && indexed {
+    if steers && asks && claude_host && indexed {
         context = render_claude_context(&context, pixel_note.as_deref());
     }
-    if indexed {
+    if steers && indexed {
         context = append_route(&context, request.as_deref());
     }
     if !context.is_empty() {

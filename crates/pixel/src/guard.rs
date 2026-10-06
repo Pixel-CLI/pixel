@@ -713,13 +713,12 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
         .filter(|cwd| !cwd.is_empty())
         .map(PathBuf::from)
         // Cursor sends `cwd: ""` on Shell calls and puts the repo in
-        // `workspace_roots` instead (observed on cursor-agent 2026.10.01).
+        // `workspace_roots` instead (observed on cursor-agent 2026.10.01);
+        // Antigravity's PreInvocation payload names only `workspacePaths`.
         .or_else(|| {
-            payload
-                .get("workspace_roots")
-                .and_then(Value::as_array)
-                .and_then(|roots| roots.first())
-                .and_then(Value::as_str)
+            ["workspace_roots", "workspacePaths"]
+                .into_iter()
+                .find_map(|key| payload.get(key)?.as_array()?.first()?.as_str())
                 .map(PathBuf::from)
         })
         .or_else(|| std::env::current_dir().ok())?;
@@ -1277,7 +1276,10 @@ fn policy_response(
     if matches!(provider, Provider::Codex | Provider::Claude) {
         return None;
     }
-    if mode == PolicyMode::Off {
+    // Steering is opt-in: under the default advisory policy, and under
+    // `off`, every host keeps its native retrieval — no rewrite, suggestion
+    // or retrieval approval.
+    if mode != PolicyMode::Enforce {
         return None;
     }
     if matches!(provider, Provider::Devin | Provider::Zcode)
@@ -1289,23 +1291,7 @@ fn policy_response(
         return Some(response);
     }
     let reason = enforce_reason(provider, payload)?;
-    match mode {
-        PolicyMode::Enforce => Some(enforce_deny(provider, &reason)),
-        // Devin documents `additionalContext` on PreToolUse; Antigravity
-        // does not (no response leaves its own permissions authoritative).
-        PolicyMode::Advisory if provider == Provider::Devin => Some(advisory_json(&format!(
-            "Pixel suggestion: {reason}. Original call proceeds."
-        ))),
-        // Cursor's preToolUse injects `additional_context` (documented on
-        // the deny path, accepted on pass-through); its own permissions
-        // stay authoritative — advisory only.
-        PolicyMode::Advisory if provider == Provider::Cursor => Some(serde_json::json!({
-            "additional_context": format!(
-                "Pixel suggestion: {reason}. Original call proceeds."
-            )
-        })),
-        _ => None,
-    }
+    Some(enforce_deny(provider, &reason))
 }
 
 /// Approve only standalone Pixel retrieval commands in supported permission hooks.
@@ -1977,7 +1963,10 @@ fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
     let Ok(payload) = serde_json::from_str::<Value>(raw) else {
         std::process::exit(0);
     };
+    // The pre-invocation search steers the model before it picks a tool, so
+    // it runs only under the opt-in enforce policy, like every rewrite.
     if provider == Provider::Antigravity
+        && policy_mode(&payload) == PolicyMode::Enforce
         && let Some(response) = antigravity_pre_invocation(&payload)
     {
         print!("{response}");
@@ -5622,8 +5611,11 @@ mod tests {
         (root, source)
     }
 
+    /// Steering is opt-in: under the default advisory policy and under
+    /// `off`, an unbounded read stays native with no suggestion; only
+    /// `enforce` turns it into a denial naming the Pixel route.
     #[test]
-    fn devin_advises_for_unbounded_large_repository_reads_without_blocking() {
+    fn devin_large_repository_reads_are_left_alone_unless_enforced() {
         let (root, source) = indexed_large_source("devin-large-read");
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
@@ -5631,32 +5623,33 @@ mod tests {
             "tool_input": {"file_path": source},
             "cwd": root,
         });
-
-        let response = policy_response(
+        for mode in [
+            crate::config_cmd::PolicyMode::Advisory,
+            crate::config_cmd::PolicyMode::Off,
+        ] {
+            assert_eq!(
+                policy_response(Provider::Devin, &payload, mode),
+                None,
+                "{mode:?}"
+            );
+        }
+        let denied = policy_response(
             Provider::Devin,
             &payload,
-            crate::config_cmd::PolicyMode::Advisory,
+            crate::config_cmd::PolicyMode::Enforce,
         )
-        .expect("an unbounded read of an indexed source file needs visible guidance");
-        let guidance = "Pixel suggestion: repository read: use exec with pixel search-content or pixel pack-context <uid>. Original call proceeds.";
-        assert_eq!(response["systemMessage"], guidance);
+        .expect("enforce denies the unbounded read");
+        assert_eq!(denied["decision"], "block");
         assert_eq!(
-            response["hookSpecificOutput"]["additionalContext"],
-            guidance
+            denied["reason"],
+            "pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"
         );
-        assert!(
-            response["hookSpecificOutput"]
-                .get("permissionDecision")
-                .is_none(),
-            "advisory must not deny or auto-allow the original read"
-        );
-        assert!(response.get("decision").is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn cursor_advises_with_flat_additional_context_without_blocking() {
+    fn cursor_reads_get_no_suggestion_unless_enforced() {
         let (root, source) = indexed_large_source("cursor-advisory-read");
         // The real cursor-agent 2026.10 payload: camelCase event name,
         // `cwd: ""`, repository in `workspace_roots`.
@@ -5667,20 +5660,22 @@ mod tests {
             "cwd": "",
             "workspace_roots": [root],
         });
-
-        let response = policy_response(
+        assert_eq!(
+            policy_response(
+                Provider::Cursor,
+                &payload,
+                crate::config_cmd::PolicyMode::Advisory,
+            ),
+            None
+        );
+        let denied = policy_response(
             Provider::Cursor,
             &payload,
-            crate::config_cmd::PolicyMode::Advisory,
+            crate::config_cmd::PolicyMode::Enforce,
         )
-        .expect("advisory mode still injects guidance for Cursor");
-        let context = response["additional_context"]
-            .as_str()
-            .expect("Cursor contract is flat additional_context");
-        assert!(context.contains("Pixel suggestion:"), "{context}");
-        assert!(context.contains("Original call proceeds"), "{context}");
-        assert!(response.get("permission").is_none());
-        assert!(response.get("hookSpecificOutput").is_none());
+        .expect("enforce denies through Cursor's flat permission contract");
+        assert_eq!(denied["permission"], "deny");
+        assert!(denied.get("hookSpecificOutput").is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -6160,6 +6155,15 @@ mod tests {
             policy_mode(&payload),
             crate::config_cmd::PolicyMode::Enforce,
             "policy reads the workspace layer, not the global one"
+        );
+        // Antigravity's PreInvocation payload carries only `workspacePaths`:
+        // the repository's own `policy: enforce` decides there too.
+        let pre_invocation = serde_json::json!({"workspacePaths": [root]});
+        assert_eq!(policy_root(&pre_invocation), Some(root.clone()));
+        assert_eq!(
+            policy_mode(&pre_invocation),
+            crate::config_cmd::PolicyMode::Enforce,
+            "a pre-invocation reads the workspace layer"
         );
         // A non-empty payload cwd still wins, with no workspace_roots.
         let payload = serde_json::json!({"cwd": root.display().to_string()});
