@@ -3,7 +3,7 @@
 
 //! Host hook normalization and response envelopes for durable task gates.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::iter::Peekable;
 use std::path::Path;
 use std::str::Chars;
@@ -12,7 +12,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 /// Hook payloads are bounded independently of the host's output limits (1 MiB).
-const MAX_INPUT: u64 = 1_048_576;
+/// One spelling shared with every other hook entry point, so the cap a host
+/// is measured against cannot drift between them.
+pub(crate) const MAX_INPUT: u64 = crate::hook_input::MAX_HOOK_INPUT;
 // Return a decision before the managed native hooks' ten-second host deadline
 // and Pi's eight-second subprocess deadline; a stalled worker dies with run().
 const DECISION_TIMEOUT: Duration = Duration::from_secs(6);
@@ -1041,25 +1043,20 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent) -> ! {
     {
         std::process::exit(0);
     }
-    let mut raw = String::new();
-    let output = if std::io::stdin()
-        .take(MAX_INPUT + 1)
-        .read_to_string(&mut raw)
-        .is_ok()
-        && u64::try_from(raw.len()).is_ok_and(|length| length <= MAX_INPUT)
-    {
-        let input = raw.clone();
-        bounded_decision(
-            provider,
-            event,
-            &raw,
-            DECISION_TIMEOUT,
-            move || process(provider, event, &input),
-            |payload| enforcement_applies(provider, payload),
-        )
-    } else {
-        envelope(provider, event, &unavailable(event, None, true))
-    };
+    let output =
+        if let Some(raw) = crate::hook_input::read_bounded(&mut std::io::stdin(), MAX_INPUT) {
+            let input = raw.clone();
+            bounded_decision(
+                provider,
+                event,
+                &raw,
+                DECISION_TIMEOUT,
+                move || process(provider, event, &input),
+                |payload| enforcement_applies(provider, payload),
+            )
+        } else {
+            envelope(provider, event, &unavailable(event, None, true))
+        };
     // Flush the only response before exit terminates any stalled evaluator.
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{output}");

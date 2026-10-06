@@ -127,7 +127,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    is a class method (`Klass.name`), not an instance method.
 /// 18: Ruby callback and literal self-send symbols reference the owning method,
 ///    preserving that owner during incremental resolution.
-pub const EXTRACTOR_VERSION: &str = "18";
+/// 19: Ruby constant receivers resolve against lexical owners, including
+///    constructors and probable Rails dispatch; factory receivers are normalized.
+pub const EXTRACTOR_VERSION: &str = "19";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
