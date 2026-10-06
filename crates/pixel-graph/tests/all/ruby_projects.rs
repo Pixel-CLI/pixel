@@ -407,6 +407,17 @@ fn walked_file_records_should_follow_every_lifecycle_transition() {
         .unwrap()
         .map(|f| f.blob_oid);
     assert_eq!(row, Some(oid(ruby)));
+    // And back: a shell binstub again loses its row and regains its record.
+    let shell = "#!/usr/bin/env sh\nexec overmind\n";
+    write(root.path(), "bin/dev", shell);
+    update_file(root.path(), &db, "bin/dev").unwrap();
+    assert_eq!(walked(), [("bin/dev".to_string(), oid(shell))]);
+    let row = GraphStore::open(&db)
+        .unwrap()
+        .file_by_path("bin/dev")
+        .unwrap()
+        .map(|f| f.blob_oid);
+    assert_eq!(row, None);
     // A full rebuild drops a stale record and rewrites the rest.
     GraphStore::open(&db)
         .unwrap()
@@ -414,7 +425,45 @@ fn walked_file_records_should_follow_every_lifecycle_transition() {
         .unwrap();
     write(root.path(), "Gemfile.lock", LOCK);
     build_graph(root.path(), &db).unwrap();
-    assert_eq!(walked(), [("Gemfile.lock".to_string(), oid(LOCK))]);
+    assert_eq!(
+        walked(),
+        [
+            ("Gemfile.lock".to_string(), oid(LOCK)),
+            ("bin/dev".to_string(), oid(shell)),
+        ]
+    );
+}
+
+#[test]
+fn a_changed_file_that_vanishes_before_its_delta_applies_should_withhold_the_signature() {
+    let root = tempfile::tempdir().unwrap();
+    for (rel, body) in TREE {
+        write(root.path(), rel, body);
+    }
+    let db = root.path().join("graph.db");
+    build_graph(root.path(), &db).unwrap();
+    write(
+        root.path(),
+        "app/services/checkout.rb",
+        "class Checkout\n  def run\n  end\nend\n",
+    );
+    let delta = tree_delta(root.path(), &db).unwrap().unwrap();
+    assert!(!delta.fresh);
+    fs::remove_file(root.path().join("app/services/checkout.rb")).unwrap();
+    assert!(
+        apply_tree_delta(root.path(), &db, &delta).is_err(),
+        "the delta's signature describes a file that is gone"
+    );
+    // The rows are committed (the vanished file's row is gone) but unsigned:
+    // the graph stays stale until the caller's rebuild.
+    assert!(!tree_delta(root.path(), &db).unwrap().unwrap().fresh);
+    let store = GraphStore::open(&db).unwrap();
+    assert!(
+        store
+            .file_by_path("app/services/checkout.rb")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
