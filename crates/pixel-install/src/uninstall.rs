@@ -1051,13 +1051,13 @@ fn legacy_composed_guard_signature(current_pre: &[serde_json::Value], sidecar: &
     let Some(command) = hook.get("command").and_then(serde_json::Value::as_str) else {
         return false;
     };
+    let Some(verb) = routing::pixel_hook_verb(command, Path::new("pixel")) else {
+        return false;
+    };
     let escaped_sidecar = sidecar.to_string_lossy().replace('\'', "'\\''");
     // Installs since the command rename write `run-hook`; 0.2.x wrote `hook`.
-    ["run-hook", "hook"].iter().any(|verb| {
-        command.contains(&format!(
-            " {verb} composed-guard --provider codex --backup "
-        ))
-    }) && command.ends_with(&format!("'{escaped_sidecar}'"))
+    verb.strip_prefix("composed-guard --provider codex --backup ")
+        .is_some_and(|backup| backup == format!("'{escaped_sidecar}'"))
 }
 
 /// Directories commonly holding project checkouts — mirrors the same logic
@@ -1653,13 +1653,8 @@ mod routing_tests {
         ));
     }
 
-    /// A side build's repo install interrupted after its backup write leaves
-    /// the config in the managed spelling and the backup in `pixel-dev`'s. The
-    /// next managed install must bring the backup back to the config's
-    /// spelling, or uninstall reads the two as a user change and keeps the
-    /// user's original PreToolUse locked in the backup.
     #[test]
-    fn project_composed_guard_uninstall_restores_after_a_side_build_left_its_backup_spelling() {
+    fn project_install_restores_legacy_codex_composition_before_uninstall() {
         let home = tempfile::tempdir().unwrap();
         let codex = home.path().join("Documents/project/.codex");
         let path = codex.join("hooks.json");
@@ -1667,32 +1662,43 @@ mod routing_tests {
         let managed = home.path().join("bin/pixel");
         let original =
             json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-guard"}]}]);
+        let command = format!(
+            "{} run-hook composed-guard --provider codex --backup {}",
+            routing::quoted_executable(&managed),
+            routing::quoted_executable(&sidecar)
+        );
+        let managed_pre_tool_use = json!([{"hooks":[{"type":"command","command":command}]}]);
         install::write_settings(
             &path,
-            &json!({"hooks":{"PreToolUse":original.clone()}}),
+            &json!({"hooks":{"PreToolUse":managed_pre_tool_use.clone()}}),
             false,
         )
         .unwrap();
-        routing::install_project_codex_at(home.path(), &path, &managed, false).unwrap();
-        let managed_config = fs::read(&path).unwrap();
+        install::write_settings(
+            &sidecar,
+            &json!({
+                "version": 1,
+                "provider": "codex",
+                "pre_tool_use": original.clone(),
+                "managed_pre_tool_use": managed_pre_tool_use,
+            }),
+            false,
+        )
+        .unwrap();
+        make_private(&sidecar);
+
         routing::install_project_codex_at(
             home.path(),
+            &routing::Provider::Codex.path(home.path()),
             &path,
-            &home.path().join("bin/pixel-dev"),
+            &managed,
             false,
         )
         .unwrap();
-        fs::write(&path, managed_config).unwrap();
-
-        routing::install_project_codex_at(home.path(), &path, &managed, false).unwrap();
 
         let installed = install::read_settings(&path).unwrap();
-        let stored = install::read_settings(&sidecar).unwrap();
-        assert_eq!(
-            stored["managed_pre_tool_use"],
-            installed["hooks"]["PreToolUse"]
-        );
-        assert_eq!(stored["pre_tool_use"], original);
+        assert_eq!(installed["hooks"]["PreToolUse"], original);
+        assert!(!sidecar.exists());
         let step = remove_project_codex_hooks(home.path(), &managed, false).unwrap();
         assert_eq!(step.status, CheckStatus::Green);
         assert_eq!(

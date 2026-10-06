@@ -3047,14 +3047,64 @@ mod tests {
         assert!(!repo.join(RTK_BACKUP).exists());
     }
 
-    /// The legacy spelling is not only a canonical path: `self-update --dev`
-    /// can point `bin/pixel` at a versioned file whose *name* is not `pixel`.
-    /// Such an entry is recognised by its canonicalised path alone, and it too
-    /// must migrate the backup, or the next install reads the config and the
-    /// backup as disagreeing and refuses.
+    /// Seed the legacy project guard format written by older Pixel versions.
+    /// New installs no longer compose a guard; upgrades must first restore this
+    /// exact private snapshot before native cleanup touches any task callbacks.
+    fn legacy_composed_codex_fixture(path: &Path, exe: &Path, original: &[Value]) -> PathBuf {
+        let sidecar = composed_backup_path(path).unwrap();
+        let managed = json!([composed_codex_group(exe, &sidecar)]);
+        install::write_settings(
+            path,
+            &json!({"hooks":{"PreToolUse":managed.clone()},"user_setting":"keep"}),
+            false,
+        )
+        .unwrap();
+        write_composed_backup(&sidecar, original, managed, false).unwrap();
+        sidecar
+    }
+
+    fn remove_managed_snapshot_field(sidecar: &Path) {
+        let mut backup = install::read_settings(sidecar).unwrap();
+        backup
+            .as_object_mut()
+            .unwrap()
+            .remove("managed_pre_tool_use");
+        fs::write(sidecar, serde_json::to_vec(&backup).unwrap()).unwrap();
+    }
+
     #[test]
+    fn project_codex_upgrade_restores_legacy_snapshot_written_by_side_build() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let original = json!([
+            {"matcher":"Bash","hooks":[{"type":"command","command":"deny-unsafe-shell"}]}
+        ]);
+        let sidecar = legacy_composed_codex_fixture(
+            &path,
+            &home.path().join("bin/pixel-dev"),
+            original.as_array().unwrap(),
+        );
+        let global_hooks = Provider::Codex.path(home.path());
+
+        install_project_codex_at(
+            home.path(),
+            &global_hooks,
+            &path,
+            &home.path().join("bin/pixel"),
+            false,
+        )
+        .unwrap();
+
+        let installed = install::read_settings(&path).unwrap();
+        assert_eq!(installed["hooks"]["PreToolUse"], original);
+        assert_eq!(installed["user_setting"], "keep");
+        assert!(!installed.to_string().contains("composed-guard"));
+        assert!(!sidecar.exists());
+    }
+
     #[cfg(unix)]
-    fn project_codex_composition_migrates_a_symlink_whose_target_has_another_name() {
+    #[test]
+    fn project_codex_upgrade_restores_snapshot_for_symlink_to_versioned_binary() {
         use std::os::unix::fs::symlink;
 
         let home = tempfile::tempdir().unwrap();
@@ -3065,152 +3115,88 @@ mod tests {
         fs::create_dir_all(stable.parent().unwrap()).unwrap();
         fs::write(&real, "pixel").unwrap();
         symlink(&real, &stable).unwrap();
-        install::write_settings(
-            &path,
-            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
-            false,
-        )
-        .unwrap();
-
-        let canonical = real.canonicalize().unwrap();
-        install_project_codex_at(home.path(), &path, &canonical, false).unwrap();
-        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
-        install_project_codex_at(home.path(), &path, &stable, false).unwrap();
-
-        let installed = install::read_settings(&path).unwrap();
-        let command = installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap();
-        assert!(
-            command.starts_with(&format!("'{}'", stable.display())),
-            "{command}"
-        );
-        assert_eq!(
-            read_composed_backup(&sidecar).unwrap()["managed_pre_tool_use"],
-            installed["hooks"]["PreToolUse"]
-        );
-    }
-
-    /// A repo install written by a side build (`pixel-dev install --repo .`)
-    /// must be taken back by the managed `pixel install --repo .`: the entry is
-    /// pixel's own, only under the other executable name. Both the config and
-    /// the backup must move to the managed spelling in one pass, or the next
-    /// install would read them as disagreeing and refuse.
-    #[test]
-    fn project_codex_composition_hands_a_side_build_install_back_to_the_managed_pixel() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("repo/.codex/hooks.json");
-        let side = home.path().join("bin/pixel-dev");
-        let managed = home.path().join("bin/pixel");
         let original = json!([
-            {"matcher":"Bash","hooks":[{"type":"command","command":"deny-unsafe-shell"}]}
+            {"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-policy"}]}
         ]);
-        install::write_settings(
-            &path,
-            &json!({"hooks":{"PreToolUse":original.clone()}, "keep":true}),
-            false,
-        )
-        .unwrap();
+        let sidecar = legacy_composed_codex_fixture(&path, &real, original.as_array().unwrap());
 
-        install_project_codex_at(home.path(), &path, &side, false).unwrap();
-        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
-        let side_managed = install::read_settings(&path).unwrap()["hooks"]["PreToolUse"].clone();
-
-        install_project_codex_at(home.path(), &path, &managed, false).unwrap();
-
-        let installed = install::read_settings(&path).unwrap();
-        let command = installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap();
-        assert!(
-            command.starts_with(&format!("'{}'", managed.display())),
-            "{command}"
-        );
-        assert_ne!(installed["hooks"]["PreToolUse"], side_managed);
-        assert_eq!(installed["keep"], json!(true));
-        let stored = read_composed_backup(&sidecar).unwrap();
-        assert_eq!(stored["pre_tool_use"], original);
-        assert_eq!(
-            stored["managed_pre_tool_use"],
-            installed["hooks"]["PreToolUse"]
-        );
-    }
-
-    /// The hand-back admits exactly one group. A user group added beside the
-    /// side build's entry is still a refusal, never a silent overwrite.
-    #[test]
-    fn project_codex_composition_refuses_a_user_group_added_beside_a_side_build_entry() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("repo/.codex/hooks.json");
-        let original = json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]);
-        install::write_settings(
-            &path,
-            &json!({"hooks":{"PreToolUse":original.clone()}}),
-            false,
-        )
-        .unwrap();
         install_project_codex_at(
             home.path(),
+            &Provider::Codex.path(home.path()),
             &path,
-            &home.path().join("bin/pixel-dev"),
+            &stable,
             false,
         )
         .unwrap();
 
-        let mut changed = install::read_settings(&path).unwrap();
-        changed["hooks"]["PreToolUse"].as_array_mut().unwrap().push(
-            json!({"matcher":"Bash","hooks":[{"type":"command","command":"later-user-guard"}]}),
-        );
-        install::write_settings(&path, &changed, false).unwrap();
-
-        assert!(
-            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
-                .is_err()
-        );
         assert_eq!(
-            read_composed_backup(&path.parent().unwrap().join(CODEX_COMPOSED_BACKUP)).unwrap()["pre_tool_use"],
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
             original
         );
+        assert!(!sidecar.exists());
     }
 
-    /// Install a side build's composed group, apply `edit` to it, and assert
-    /// the managed `pixel` refuses the hand-back without touching either file.
-    fn assert_hand_back_refused_after(edit: impl FnOnce(&mut Value)) {
+    #[test]
+    fn project_codex_upgrade_restores_early_sidecar_without_managed_snapshot_field() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("repo/.codex/hooks.json");
-        install::write_settings(
-            &path,
-            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
-            false,
-        )
-        .unwrap();
-        install_project_codex_at(
-            home.path(),
+        let original = json!([
+            {"matcher":"Bash","hooks":[{"type":"command","command":"keep-security-policy"}]}
+        ]);
+        let sidecar = legacy_composed_codex_fixture(
             &path,
             &home.path().join("bin/pixel-dev"),
+            original.as_array().unwrap(),
+        );
+        remove_managed_snapshot_field(&sidecar);
+
+        install_project_codex_at(
+            home.path(),
+            &Provider::Codex.path(home.path()),
+            &path,
+            &home.path().join("bin/pixel"),
             false,
         )
         .unwrap();
-        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
-        let mut changed = install::read_settings(&path).unwrap();
-        edit(&mut changed["hooks"]["PreToolUse"][0]);
-        install::write_settings(&path, &changed, false).unwrap();
+
+        assert_eq!(
+            install::read_settings(&path).unwrap()["hooks"]["PreToolUse"],
+            original
+        );
+        assert!(!sidecar.exists());
+    }
+
+    fn assert_legacy_codex_conflict_preserves_both_files(edit: impl FnOnce(&mut Value)) {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let original =
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-policy"}]}]);
+        let sidecar = legacy_composed_codex_fixture(
+            &path,
+            &home.path().join("bin/pixel-dev"),
+            original.as_array().unwrap(),
+        );
+        let mut settings = install::read_settings(&path).unwrap();
+        edit(&mut settings["hooks"]["PreToolUse"][0]);
+        install::write_settings(&path, &settings, false).unwrap();
         let config_before = fs::read(&path).unwrap();
         let backup_before = fs::read(&sidecar).unwrap();
 
-        assert!(
-            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
-                .is_err()
+        let result = install_project_codex_at(
+            home.path(),
+            &Provider::Codex.path(home.path()),
+            &path,
+            &home.path().join("bin/pixel"),
+            false,
         );
+        assert!(result.is_err());
         assert_eq!(fs::read(&path).unwrap(), config_before);
         assert_eq!(fs::read(&sidecar).unwrap(), backup_before);
     }
 
-    /// A user hook added *inside* the side build's group is a user edit: the
-    /// hand-back admits pixel's group only exactly as pixel wrote it.
     #[test]
-    fn project_codex_composition_refuses_a_user_hook_added_inside_a_side_build_group() {
-        assert_hand_back_refused_after(|group| {
+    fn project_codex_upgrade_preserves_a_user_hook_added_to_legacy_guard() {
+        assert_legacy_codex_conflict_preserves_both_files(|group| {
             group["hooks"]
                 .as_array_mut()
                 .unwrap()
@@ -3218,79 +3204,117 @@ mod tests {
         });
     }
 
-    /// A matcher set on the side build's group changes what the composed guard
-    /// sees; that is a user edit, not a stale spelling.
     #[test]
-    fn project_codex_composition_refuses_a_matcher_set_on_a_side_build_group() {
-        assert_hand_back_refused_after(|group| group["matcher"] = json!("*"));
+    fn project_codex_upgrade_preserves_a_user_matcher_added_to_legacy_guard() {
+        assert_legacy_codex_conflict_preserves_both_files(|group| group["matcher"] = json!("*"));
     }
 
-    /// A changed timeout on the side build's entry is a user edit too.
     #[test]
-    fn project_codex_composition_refuses_a_changed_timeout_on_a_side_build_entry() {
-        assert_hand_back_refused_after(|group| group["hooks"][0]["timeout"] = json!(1));
+    fn project_codex_upgrade_preserves_a_user_timeout_change_to_legacy_guard() {
+        assert_legacy_codex_conflict_preserves_both_files(|group| {
+            group["hooks"][0]["timeout"] = json!(1);
+        });
     }
 
-    /// A foreign executable that merely spells the composed verb is not pixel's,
-    /// even with the exact backup argument.
     #[test]
-    fn project_codex_composition_refuses_a_foreign_executable_naming_the_composed_verb() {
+    fn project_codex_upgrade_preserves_interrupted_pixel_side_build_snapshot_mismatch() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("repo/.codex/hooks.json");
+        let original =
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-policy"}]}]);
         let side = home.path().join("bin/pixel-dev");
+        let sidecar = legacy_composed_codex_fixture(&path, &side, original.as_array().unwrap());
+
+        // Model an interrupted old installer: the config was switched to the
+        // managed executable, but the private snapshot still records pixel-dev.
+        let managed = json!([composed_codex_group(
+            &home.path().join("bin/pixel"),
+            &sidecar
+        )]);
+        let mut settings = install::read_settings(&path).unwrap();
+        settings["hooks"]["PreToolUse"] = managed;
+        install::write_settings(&path, &settings, false).unwrap();
+        let config_before = fs::read(&path).unwrap();
+        let backup_before = fs::read(&sidecar).unwrap();
+
+        let result = install_project_codex_at(
+            home.path(),
+            &Provider::Codex.path(home.path()),
+            &path,
+            &home.path().join("bin/pixel"),
+            false,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), config_before);
+        assert_eq!(fs::read(&sidecar).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn project_codex_upgrade_rejects_legacy_guard_from_foreign_executable() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let sidecar = composed_backup_path(&path).unwrap();
+        let original =
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-policy"}]}]);
+        let foreign = json!([hook_group(
+            format!(
+                "'/usr/bin/notpixel' run-hook composed-guard --provider codex --backup {}",
+                quoted_executable(&sidecar)
+            ),
+            None,
+        )]);
+        install::write_settings(&path, &json!({"hooks":{"PreToolUse":foreign}}), false).unwrap();
+        write_composed_backup(&sidecar, original.as_array().unwrap(), json!([]), false).unwrap();
+        remove_managed_snapshot_field(&sidecar);
+        let config_before = fs::read(&path).unwrap();
+        let backup_before = fs::read(&sidecar).unwrap();
+
+        let result = install_project_codex_at(
+            home.path(),
+            &Provider::Codex.path(home.path()),
+            &path,
+            Path::new("/tmp/pixel"),
+            false,
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), config_before);
+        assert_eq!(fs::read(&sidecar).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn project_codex_upgrade_rejects_legacy_guard_pointing_at_another_backup() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        let sidecar = composed_backup_path(&path).unwrap();
+        let original =
+            json!([{"matcher":"Bash","hooks":[{"type":"command","command":"keep-policy"}]}]);
+        let foreign_backup = home.path().join("other-backup.json");
+        let managed = json!([composed_codex_group(
+            Path::new("/tmp/pixel"),
+            &foreign_backup
+        )]);
         install::write_settings(
             &path,
-            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            &json!({"hooks":{"PreToolUse":managed.clone()}}),
             false,
         )
         .unwrap();
-        install_project_codex_at(home.path(), &path, &side, false).unwrap();
+        write_composed_backup(&sidecar, original.as_array().unwrap(), json!([]), false).unwrap();
+        remove_managed_snapshot_field(&sidecar);
+        let config_before = fs::read(&path).unwrap();
+        let backup_before = fs::read(&sidecar).unwrap();
 
-        let mut changed = install::read_settings(&path).unwrap();
-        let command = changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .replace(&quoted_executable(&side), "'/usr/bin/notpixel'");
-        changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = json!(command);
-        install::write_settings(&path, &changed, false).unwrap();
-
-        assert!(
-            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
-                .is_err()
-        );
-    }
-
-    /// The composed entry must name *this* install's backup; one pointing at
-    /// another file is a foreign entry, not a stale spelling.
-    #[test]
-    fn project_codex_composition_refuses_a_composed_group_naming_another_backup() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("repo/.codex/hooks.json");
-        let side = home.path().join("bin/pixel-dev");
-        install::write_settings(
+        let result = install_project_codex_at(
+            home.path(),
+            &Provider::Codex.path(home.path()),
             &path,
-            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            Path::new("/tmp/pixel"),
             false,
-        )
-        .unwrap();
-        install_project_codex_at(home.path(), &path, &side, false).unwrap();
-        let backup = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
-
-        let mut changed = install::read_settings(&path).unwrap();
-        let command = changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .replace(
-                &quoted_executable(&backup),
-                &quoted_executable(&home.path().join("other-backup.json")),
-            );
-        changed["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = json!(command);
-        install::write_settings(&path, &changed, false).unwrap();
-
-        assert!(
-            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
-                .is_err()
         );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), config_before);
+        assert_eq!(fs::read(&sidecar).unwrap(), backup_before);
     }
 
     fn delegate_guard() -> Value {
