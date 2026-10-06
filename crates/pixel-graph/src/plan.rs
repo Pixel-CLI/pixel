@@ -2039,6 +2039,25 @@ mod tests {
         assert!(by_concept(&store, "zzqx unrelated").unwrap().is_empty());
     }
 
+    /// `by_concept` asks the resolver for 20 matches, not its default 8: a
+    /// concept spread over a dozen files lists every one of them.
+    #[test]
+    fn by_concept_lists_more_files_than_the_resolver_default() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            std::fs::write(
+                dir.path().join(format!("billing{i}.ts")),
+                format!("export function invoiceTotal{i}(n: number) {{ return n; }}\n"),
+            )
+            .unwrap();
+        }
+        let db = dir.path().join("graph.db");
+        crate::build::build_graph(dir.path(), &db).unwrap();
+        let store = GraphStore::open(&db).unwrap();
+        let findings = by_concept(&store, "invoice total").unwrap();
+        assert_eq!(findings.len(), 12, "{findings:?}");
+    }
+
     #[test]
     fn by_concept_drops_stopword_only_matches_and_groups_per_file() {
         let dir = tempfile::tempdir().unwrap();

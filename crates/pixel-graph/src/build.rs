@@ -129,7 +129,10 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    preserving that owner during incremental resolution.
 /// 19: Ruby constant receivers resolve against lexical owners, including
 ///    constructors and probable Rails dispatch; factory receivers are normalized.
-pub const EXTRACTOR_VERSION: &str = "19";
+/// 20: `generic_import` takes the first string or identifier child only (the
+///    field lookup is gone) and every walker shares the `too_deep` depth
+///    guard; rebuild so no graph keeps rows from the older extractor.
+pub const EXTRACTOR_VERSION: &str = "20";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {

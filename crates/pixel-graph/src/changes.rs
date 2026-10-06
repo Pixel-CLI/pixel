@@ -726,6 +726,14 @@ fn call_site_removed(file_diffs: &[FileDiff], path: &str, line: u32) -> bool {
         .any(|fd| fd.old_path == path && fd.old_ranges.iter().any(|&(s, e)| line >= s && line <= e))
 }
 
+/// Risk label of a change set from its depth-1 caller count, the number of
+/// affected processes, and whether any call site stayed unresolved (which
+/// raises the level one step, capped at CRITICAL).
+fn change_risk(d1: usize, nproc: usize, lower_bound: bool) -> String {
+    let d1 = u64::try_from(d1).unwrap_or(u64::MAX);
+    crate::impact::risk_label(crate::impact::risk_level(d1, nproc), lower_bound)
+}
+
 /// `detect` over an already-parsed diff: a caller that read the diff itself
 /// (`review`) shares the same change set instead of running a second
 /// `git diff` that could observe a newer tree. Without `--base` the diff is
@@ -831,25 +839,7 @@ pub(crate) fn detect_diffs(
     let d1 = caller_ids.len();
     let nproc = affected_processes.len();
     let lower_bound = !lower_bound_names.is_empty();
-    let mut level: u8 = if d1 > 50 || nproc > 20 {
-        3
-    } else if d1 > 15 || nproc > 8 {
-        2
-    } else if d1 > 3 {
-        1
-    } else {
-        0
-    };
-    if lower_bound && level < 3 {
-        level += 1;
-    }
-    let risk = match level {
-        0 => "LOW",
-        1 => "MEDIUM",
-        2 => "HIGH",
-        _ => "CRITICAL",
-    }
-    .to_string();
+    let risk = change_risk(d1, nproc, lower_bound);
     let envelope_note = if lower_bound {
         format!(
             "lower bound: unresolved same-name call sites exist for {}",
@@ -1006,6 +996,27 @@ fn suggest_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn change_risk_thresholds_and_lower_bound_bump() {
+        let cases = [
+            (3, 0, false, "LOW"),
+            (4, 0, false, "MEDIUM"),
+            (15, 8, false, "MEDIUM"),
+            (16, 0, false, "HIGH"),
+            (0, 9, false, "HIGH"),
+            (50, 20, false, "HIGH"),
+            (51, 0, false, "CRITICAL"),
+            (0, 21, false, "CRITICAL"),
+            (0, 0, true, "MEDIUM"),
+            (4, 0, true, "HIGH"),
+            (16, 0, true, "CRITICAL"),
+            (51, 0, true, "CRITICAL"),
+        ];
+        for (d1, nproc, lb, want) in cases {
+            assert_eq!(change_risk(d1, nproc, lb), want, "{d1} {nproc} {lb}");
+        }
+    }
 
     /// A diff is a protocol fixture: built line by line so an escape or an
     /// indentation slip cannot silently parse as something else.

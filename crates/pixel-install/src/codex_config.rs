@@ -1075,4 +1075,66 @@ mod tests {
 
         let _ = fs::remove_dir_all(&home);
     }
+
+    /// A multi-line value is written as a TOML literal string, so the file
+    /// keeps the prompt readable; text a literal cannot carry falls back to
+    /// a basic string.
+    #[test]
+    fn string_value_writes_a_literal_unless_the_text_forbids_it() {
+        for (text, literal) in [("a\nb", true), ("a\r\nb", false), ("a'\'\'b", false)] {
+            let value = string_value(text);
+            assert_eq!(value.as_str(), Some(text));
+            let rendered = value.to_string();
+            assert_eq!(
+                rendered.trim_start().starts_with('\''),
+                literal,
+                "{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_developer_instructions_names_what_it_did_to_the_value() {
+        let home = scratch_codex_home("developer-instructions");
+        let config = home.join(CODEX_CONFIG_FILE);
+        let summary = |home: &Path| install_developer_instructions(home, false).unwrap().summary;
+        let shown = config.display().to_string();
+
+        assert_eq!(
+            summary(&home),
+            format!("installed {DEVELOPER_INSTRUCTIONS_KEY} in {shown}")
+        );
+        let written = fs::read_to_string(&config).unwrap();
+        assert!(written.contains("= '''"), "{written}");
+        assert_eq!(
+            current_value(&read_document(&config).unwrap()).unwrap(),
+            Some(managed_block())
+        );
+        assert_eq!(
+            summary(&home),
+            format!("verified {DEVELOPER_INSTRUCTIONS_KEY} in {shown}")
+        );
+
+        fs::write(
+            &config,
+            format!("{DEVELOPER_INSTRUCTIONS_KEY} = \"mine\"\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            summary(&home),
+            format!(
+                "appended {DEVELOPER_INSTRUCTIONS_KEY} in {shown}, keeping the text outside the pixel markers"
+            )
+        );
+
+        let stale = format!("{MANAGED_BEGIN}\nold\n{MANAGED_END}\n");
+        let mut doc = DocumentMut::new();
+        doc[DEVELOPER_INSTRUCTIONS_KEY] = Item::Value(Value::from(stale.as_str()));
+        fs::write(&config, doc.to_string()).unwrap();
+        assert_eq!(
+            summary(&home),
+            format!("updated {DEVELOPER_INSTRUCTIONS_KEY} in {shown}")
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
 }

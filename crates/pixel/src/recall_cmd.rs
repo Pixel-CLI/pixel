@@ -441,6 +441,55 @@ pub(crate) fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
+/// The greedy token-budgeted packing of `recall context`: a piece is kept
+/// whole when it fits what is left of the budget, and a dropped block is
+/// counted for the closing `fitted:` line.
+struct ContextPack {
+    out: String,
+    budget: usize,
+    dropped: usize,
+}
+
+impl ContextPack {
+    fn new(budget: usize) -> Self {
+        Self {
+            out: String::new(),
+            budget,
+            dropped: 0,
+        }
+    }
+
+    fn fits(&self, piece: &str) -> bool {
+        self.out.len().saturating_add(piece.len()).div_ceil(4) <= self.budget
+    }
+
+    /// Keep `piece` if it fits, else count it as a dropped block.
+    fn offer(&mut self, piece: &str) {
+        if self.fits(piece) {
+            self.out.push_str(piece);
+        } else {
+            self.dropped += 1;
+        }
+    }
+
+    /// Keep `piece` if it fits; an optional layer is not counted when dropped.
+    fn offer_quietly(&mut self, piece: &str) {
+        if self.fits(piece) {
+            self.out.push_str(piece);
+        }
+    }
+
+    /// The packed text with its `fitted:` summary line.
+    fn finish(mut self) -> String {
+        let used = estimate_tokens(&self.out);
+        let (budget, dropped) = (self.budget, self.dropped);
+        self.out.push_str(&format!(
+            "\nfitted: budget={budget} used={used} dropped_blocks={dropped}\n"
+        ));
+        self.out
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_context(
     query: &str,
@@ -487,12 +536,10 @@ fn run_context(
     let result = result?;
 
     // Greedy layered packing: L0 headers always; L1 snippets; L2 full turns.
-    let mut out = String::new();
-    let mut dropped = 0usize;
-    let header = format!("recall context for: {query}\n");
-    out.push_str(&header);
+    let mut pack = ContextPack::new(budget);
+    pack.out.push_str(&format!("recall context for: {query}\n"));
     if let Some(n) = &result.notice {
-        out.push_str(&format!("note: {n}\n"));
+        pack.out.push_str(&format!("note: {n}\n"));
     }
     // L0: one header line per session group (always emitted, oldest cost first).
     for g in &result.groups {
@@ -506,11 +553,7 @@ fn run_context(
             g.best.cwd.as_deref().unwrap_or("-"),
             g.session_title.as_deref().unwrap_or("(untitled)")
         );
-        if estimate_tokens(&out) + estimate_tokens(&line) <= budget {
-            out.push_str(&line);
-        } else {
-            dropped += 1;
-        }
+        pack.offer(&line);
     }
     // L1: snippets.
     for g in &result.groups {
@@ -518,9 +561,7 @@ fn run_context(
             "  #{} t{} {}: {}\n",
             g.best.session_id, g.best.seq, g.best.role, g.best.snippet
         );
-        if estimate_tokens(&out) + estimate_tokens(&line) <= budget {
-            out.push_str(&line);
-        }
+        pack.offer_quietly(&line);
     }
     // L2: full turn texts, best-first, until the budget is spent.
     for g in &result.groups {
@@ -532,17 +573,10 @@ fn run_context(
                 "\n--- session #{} turn {} ({}) ---\n{}\n",
                 g.best.session_id, t.seq, t.role, t.text
             );
-            if estimate_tokens(&out) + estimate_tokens(&block) <= budget {
-                out.push_str(&block);
-            } else {
-                dropped += 1;
-            }
+            pack.offer(&block);
         }
     }
-    let used = estimate_tokens(&out);
-    out.push_str(&format!(
-        "\nfitted: budget={budget} used={used} dropped_blocks={dropped}\n"
-    ));
+    let out = pack.finish();
     // Composed text, not a JSON document: `write_stdout` is what keeps these
     // bytes in the output counters the metrics line reports.
     crate::write_stdout(&out)
@@ -1416,6 +1450,38 @@ fn run_status(json: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_context_pack_keeps_what_fits_and_counts_each_dropped_block() {
+        let mut pack = super::ContextPack::new(3);
+        pack.offer("abcd"); // 1 token
+        pack.offer(&"x".repeat(12)); // 3 tokens: over
+        pack.offer_quietly(&"y".repeat(12)); // over, not counted
+        pack.offer(&"z".repeat(9)); // 3 tokens: over
+        pack.offer("efgh"); // 1 token: fits exactly at 2
+        pack.offer("ijkl"); // 3 == budget: fits
+        assert_eq!(
+            pack.finish(),
+            "abcdefghijkl\nfitted: budget=3 used=3 dropped_blocks=2\n"
+        );
+    }
+
+    #[test]
+    fn the_context_pack_fits_a_piece_that_fills_the_budget_exactly() {
+        let mut pack = super::ContextPack::new(100);
+        pack.offer(&"p".repeat(397));
+        pack.offer("abc"); // 400 bytes in all: exactly 100 tokens
+        pack.offer("d"); // 401 bytes: 101 tokens, over
+        let out = pack.finish();
+        assert!(
+            out.starts_with(&format!("{}abc\n", "p".repeat(397))),
+            "{out}"
+        );
+        assert!(
+            out.ends_with("\nfitted: budget=100 used=100 dropped_blocks=1\n"),
+            "{out}"
+        );
+    }
+
     use super::*;
     use pixel_recall::model::{IntentSource, Role, TsSource, UnifiedSession, UnifiedTurn};
     use pixel_recall::sources::{
