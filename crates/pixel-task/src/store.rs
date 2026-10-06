@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::model::*;
-use crate::{Error, Result, digest, now_ms, policy, runner, snapshot};
+use crate::{Error, Result, digest, now_ms, policy, runner, sandbox, snapshot};
 
 /// Journal bounds fail explicitly; truncation never grants completion.
 const MAX_JOURNAL_BYTES: u64 = 67_108_864;
@@ -499,7 +499,7 @@ impl Store {
                     if process_alive(run.owner_pid) {
                         return Err(Error::Busy("verification process is still alive".into()));
                     }
-                    runner::check_recovery(
+                    sandbox::check_recovery(
                         &self
                             .directory(task_id)?
                             .join(format!("run-{}.json", run.run_id)),
