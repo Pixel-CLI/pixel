@@ -418,6 +418,19 @@ impl Store {
 
     // -- reads --------------------------------------------------------------
 
+    /// The newest raw output recorded under `source` (`run:<label>`): what a
+    /// wrapped command printed, kept whole beside the records read from it.
+    pub fn latest_raw_fallback(&self, source: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT raw FROM raw_fallbacks WHERE source = ?1 ORDER BY id DESC LIMIT 1",
+                params![source],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
     pub fn last_errors(&self, n: i64, surface: Option<Surface>) -> Result<Vec<ErrorRecord>> {
         match surface {
             Some(surface) => self.collect_errors(
