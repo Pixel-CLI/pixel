@@ -3912,38 +3912,23 @@ fn repo_install_keeps_native_defaults_and_scopes_enforcement_to_supported_hosts(
         !repo.join(".claude/settings.json").exists(),
         "the shared settings.json must not carry a machine-local guard"
     );
-    let claude: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(repo.join(".claude/settings.local.json")).unwrap(),
-    )
-    .unwrap();
-    let claude_hooks = claude["hooks"].as_object().unwrap();
+    // Native cleanup has nothing to remove in a fresh repository, so it
+    // registers no callback and creates no empty hook file.
     assert!(
-        pixel_commands(&claude, "PreToolUse").is_empty(),
-        "repo Claude must not register retrieval callbacks: {claude}"
+        !repo.join(".claude/settings.local.json").exists(),
+        "repo Claude must not get an empty settings file"
     );
-    for event in ["SessionStart", "UserPromptSubmit", "PostToolUse"] {
-        assert!(
-            claude_hooks.get(event).is_none(),
-            "repo settings must not wire {event} — lifecycle is global: {claude}"
-        );
-    }
 
     // Codex gets only task-scoped hooks; install does not create a permanent
     // developer-instructions config or root Pixel-first AGENTS.md block.
     assert!(!repo.join(".codex/config.toml").exists());
     assert!(!repo.join("AGENTS.md").exists());
 
-    // Codex project settings remove retired callbacks but do not duplicate
-    // the global task-event suite.
-    let hooks: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(repo.join(".codex/hooks.json")).unwrap()).unwrap();
+    // Codex project settings carry no retrieval callback and do not
+    // duplicate the global task-event suite: there is no file at all.
     assert!(
-        pixel_commands(&hooks, "PreToolUse").is_empty(),
-        "repo Codex must not register retrieval callbacks: {hooks}"
-    );
-    assert!(
-        pixel_commands(&hooks, "SessionStart").is_empty(),
-        "global task hooks must not be duplicated in repo settings: {hooks}"
+        !repo.join(".codex/hooks.json").exists(),
+        "repo Codex must not get an empty hooks file"
     );
     assert!(
         !repo
@@ -4106,7 +4091,8 @@ fn repo_install_is_idempotent() {
         ".devin/config.local.json",
         ".pi/extensions/pixel-guard.ts",
     ];
-    let snapshot = |rel: &str| fs::read(repo.join(rel)).unwrap();
+    // Native cleanup leaves the absent hook files absent; `None` compares too.
+    let snapshot = |rel: &str| fs::read(repo.join(rel)).ok();
     let before: Vec<_> = artifacts.iter().map(|rel| snapshot(rel)).collect();
 
     let report = install(&repo_install_options(&repo, &home)).unwrap();
@@ -4405,6 +4391,16 @@ fn read_json(path: &std::path::Path) -> serde_json::Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// A repo-local hook file that native cleanup leaves absent when it has
+/// nothing to remove: read as the empty hooks object it stands for.
+fn read_local_hooks(path: &std::path::Path) -> serde_json::Value {
+    if path.exists() {
+        read_json(path)
+    } else {
+        serde_json::json!({"hooks": {}})
+    }
+}
+
 fn pixel_commands(value: &serde_json::Value, event: &str) -> Vec<String> {
     value["hooks"][event]
         .as_array()
@@ -4486,7 +4482,7 @@ fn repo_install_should_move_a_guard_left_in_shared_settings_to_the_local_file() 
     let shared = read_json(&repo.join(".claude/settings.json"));
     assert_eq!(shared["hooks"]["PreToolUse"], serde_json::json!([write]));
     assert_eq!(shared["hooks"]["SessionStart"], serde_json::json!([start]));
-    let local = read_json(&repo.join(".claude/settings.local.json"));
+    let local = read_local_hooks(&repo.join(".claude/settings.local.json"));
     assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
 
     let devin_legacy = read_json(&repo.join(".devin/hooks.json"));
@@ -4553,7 +4549,7 @@ fn repo_install_should_hold_back_the_guard_beside_a_shell_rewriter_in_shared_set
         serde_json::json!([{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]),
         "the RTK group the delegate had adopted runs again"
     );
-    let local = read_json(&repo.join(".claude/settings.local.json"));
+    let local = read_local_hooks(&repo.join(".claude/settings.local.json"));
     assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
 }
 
@@ -4581,7 +4577,7 @@ fn repo_install_and_uninstall_preserve_a_plain_rtk_registration() {
         "the repo's adoption must not land in the global backup"
     );
     assert!(!repo.join(".claude/pixel-rtk-hooks.json").exists());
-    let local = read_json(&repo.join(".claude/settings.local.json"));
+    let local = read_local_hooks(&repo.join(".claude/settings.local.json"));
     assert_eq!(
         local["hooks"]["PreToolUse"],
         serde_json::json!([rtk.clone()])
@@ -4610,7 +4606,7 @@ fn repo_install_and_uninstall_preserve_a_plain_rtk_registration() {
     })
     .unwrap();
     assert_eq!(
-        read_json(&repo.join(".claude/settings.local.json"))["hooks"]["PreToolUse"],
+        read_local_hooks(&repo.join(".claude/settings.local.json"))["hooks"]["PreToolUse"],
         serde_json::json!([rtk])
     );
     assert!(!repo.join(".claude/pixel-rtk-hooks.json").exists());
@@ -4705,7 +4701,7 @@ fn repo_uninstall_should_clean_guards_left_in_shared_and_legacy_files() {
     assert!(pixel_commands(&shared, "PreToolUse").is_empty(), "{shared}");
     let legacy = read_json(&repo.join(".devin/hooks.json"));
     assert!(pixel_commands(&legacy, "PreToolUse").is_empty(), "{legacy}");
-    let local = read_json(&repo.join(".claude/settings.local.json"));
+    let local = read_local_hooks(&repo.join(".claude/settings.local.json"));
     assert_eq!(
         local,
         serde_json::json!({"permissions": {"allow": ["Bash(ls:*)"]}, "hooks": {}}),
@@ -5787,8 +5783,11 @@ fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
         }
     }
     written.sort();
+    // Recovery sidecars, and a Codex hooks file native cleanup has nothing
+    // to remove from, are documented artifacts no fresh install creates.
     let legacy_sidecars = [
         ".claude/pixel-rtk-hooks.json",
+        ".codex/hooks.json",
         ".codex/pixel-composed-guard-backup.json",
     ];
     for path in legacy_sidecars {
@@ -5984,7 +5983,7 @@ fn renamed_executable_preserves_existing_local_task_hooks_without_adding_repo_ho
                 "shared={shared}, foreign={foreign}: {step:?}"
             );
             assert_eq!(read_json(&inherited), settings);
-            let local = read_json(&repo.join(".claude/settings.local.json"));
+            let local = read_local_hooks(&repo.join(".claude/settings.local.json"));
             assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
             let report = doctor(&DoctorOptions {
                 home: Some(home),
@@ -6195,7 +6194,7 @@ fn repo_install_should_install_the_guard_when_the_global_settings_is_unreadable(
         "{step:?}"
     );
     assert!(step.summary.contains("native tools preserved"), "{step:?}");
-    let local = read_json(&repo.join(".claude/settings.local.json"));
+    let local = read_local_hooks(&repo.join(".claude/settings.local.json"));
     assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
 }
 
@@ -6244,7 +6243,7 @@ fn repo_install_at_home_should_read_the_global_file_once() {
     // removed there, with no repo-local replacement.
     let global = read_json(&home.join(".claude/settings.json"));
     assert!(pixel_commands(&global, "PreToolUse").is_empty(), "{global}");
-    let local = read_json(&home.join(".claude/settings.local.json"));
+    let local = read_local_hooks(&home.join(".claude/settings.local.json"));
     assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
 }
 
@@ -6282,7 +6281,7 @@ fn repo_install_should_not_duplicate_a_global_pixel_callback() {
     assert_eq!(fs::read(global_path).unwrap(), global_before);
     assert!(
         pixel_commands(
-            &read_json(&repo.join(".claude/settings.local.json")),
+            &read_local_hooks(&repo.join(".claude/settings.local.json")),
             "PreToolUse"
         )
         .is_empty()
@@ -6613,7 +6612,7 @@ fn repo_install_at_home_should_keep_global_task_hooks_singular() {
     }
     let global = read_json(&home.join(".claude/settings.json"));
     assert_eq!(task_event_counts(&global), ONE_EACH, "{global}");
-    let local = read_json(&home.join(".claude/settings.local.json"));
+    let local = read_local_hooks(&home.join(".claude/settings.local.json"));
     assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
     let devin = read_json(&home.join(".devin/config.local.json"));
     assert_eq!(metrics_relays(&devin, "devin").len(), 1, "{devin}");

@@ -969,11 +969,15 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
 /// every one of them but the conditional ones, and nothing outside them.
 #[test]
 fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
-    // These appear only when legacy hook backups exist or retired Pixel
-    // guidance is migrated out of an existing project file.
+    // These appear only when legacy hook backups exist, retired Pixel
+    // guidance is migrated out of an existing project file, or a retired
+    // Pixel callback is removed from an existing hook file: native cleanup
+    // never creates an empty one.
     const CONDITIONAL: &[&str] = &[
         ".claude/pixel-rtk-hooks.json",
+        ".claude/settings.local.json",
         ".codex/config.toml",
+        ".codex/hooks.json",
         ".codex/pixel-composed-guard-backup.json",
         "AGENTS.md",
     ];

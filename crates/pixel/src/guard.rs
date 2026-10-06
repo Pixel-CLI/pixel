@@ -525,7 +525,7 @@ struct Manifest {
 }
 
 /// Provider adapters only change the command field. Timeouts, cwd, metadata
-/// and future provider arguments survive untouched. Codex requires allow
+/// and future provider arguments survive untouched. ZCode requires allow
 /// alongside updatedInput; that authorization is restricted to this exact
 /// read-only compatibility subset, never applied to fallback calls.
 fn rewrite_json(provider: Provider, updated_input: Value) -> Value {
@@ -533,7 +533,7 @@ fn rewrite_json(provider: Provider, updated_input: Value) -> Value {
         "hookEventName": "PreToolUse",
         "updatedInput": updated_input,
     });
-    if matches!(provider, Provider::Codex | Provider::Zcode) {
+    if provider == Provider::Zcode {
         output["permissionDecision"] = Value::String("allow".into());
         output["permissionDecisionReason"] =
             Value::String("Pixel compatibility routing: single-file literal read only.".into());
@@ -568,11 +568,8 @@ fn provider_rewrite_with(
     }
     let tool = payload.get("tool_name")?.as_str()?;
     let shell = match provider {
-        Provider::Claude => tool == "Bash",
-        Provider::Codex => matches!(
-            tool,
-            "Bash" | "shell" | "unified_exec" | "local_shell" | "exec_command"
-        ),
+        // Native retrieval: `policy_response` never routes these here.
+        Provider::Claude | Provider::Codex => return None,
         Provider::Devin => tool == "exec" || tool == "Bash",
         Provider::Zcode => tool == "Bash" || tool == "exec",
         // OpenCode names the same tools as Claude but lowercases them.
@@ -739,10 +736,10 @@ fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
 /// Recognized retrieval is governed for providers whose hooks own that policy.
 /// Codex and unsupported capabilities remain the host's responsibility.
 fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
-    // Claude keeps its native permission flow (and its RTK delegate). Devin
-    // has a documented PreToolUse block contract, so its retrieval calls are
-    // subject to policy alongside Antigravity.
-    if provider == Provider::Claude {
+    // Claude and Codex keep their native permission flow (and Claude its RTK
+    // delegate). Devin has a documented PreToolUse block contract, so its
+    // retrieval calls are subject to policy alongside Antigravity.
+    if matches!(provider, Provider::Claude | Provider::Codex) {
         return None;
     }
     let payload = &if provider == Provider::Opencode {
@@ -1294,14 +1291,11 @@ fn policy_response(
     let reason = enforce_reason(provider, payload)?;
     match mode {
         PolicyMode::Enforce => Some(enforce_deny(provider, &reason)),
-        // Codex and Devin both document `additionalContext` on PreToolUse;
-        // Claude and Antigravity do not (no response leaves their own
-        // permissions authoritative).
-        PolicyMode::Advisory if matches!(provider, Provider::Codex | Provider::Devin) => {
-            Some(advisory_json(&format!(
-                "Pixel suggestion: {reason}. Original call proceeds."
-            )))
-        }
+        // Devin documents `additionalContext` on PreToolUse; Antigravity
+        // does not (no response leaves its own permissions authoritative).
+        PolicyMode::Advisory if provider == Provider::Devin => Some(advisory_json(&format!(
+            "Pixel suggestion: {reason}. Original call proceeds."
+        ))),
         // Cursor's preToolUse injects `additional_context` (documented on
         // the deny path, accepted on pass-through); its own permissions
         // stay authoritative — advisory only.
@@ -2514,10 +2508,8 @@ pub fn run_composed_codex(backup: &Path) -> ! {
     if incomplete_foreign {
         std::process::exit(0);
     }
-    if let Some(response) = policy_response(Provider::Codex, &payload, policy_mode(&payload)) {
-        print!("{}", compose_context(response, &contexts));
-        std::process::exit(0);
-    }
+    // Pixel adds no retrieval policy of its own to Codex: only the foreign
+    // hooks' combined context remains.
     if !contexts.is_empty() {
         print!("{}", compose_context(advisory_json(""), &contexts));
     }
@@ -8088,12 +8080,7 @@ mod tests {
             "tool_input": {"command": "rg needle src"},
             "cwd": repo,
         });
-        for provider in [
-            Provider::Claude,
-            Provider::Codex,
-            Provider::Devin,
-            Provider::Zcode,
-        ] {
+        for provider in [Provider::Devin, Provider::Zcode] {
             assert_eq!(
                 provider_rewrite_with(provider, &payload, |tool| {
                     tool == crate::search_compat::SearchTool::Rg
@@ -8103,6 +8090,14 @@ mod tests {
             );
             assert!(
                 provider_rewrite_with(provider, &payload, |_| false).is_some(),
+                "{provider:?}"
+            );
+        }
+        // Claude and Codex retrieval stays native: never rewritten.
+        for provider in [Provider::Claude, Provider::Codex] {
+            assert_eq!(
+                provider_rewrite_with(provider, &payload, |_| false),
+                None,
                 "{provider:?}"
             );
         }

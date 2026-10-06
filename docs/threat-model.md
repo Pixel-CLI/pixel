@@ -438,7 +438,8 @@ boundary it crosses.
   `pixel-subagent-prompt.md`). Codex emits no retrieval context by default.
   The explicit impact skill and Pi extension treat graph output as repository
   data, not instructions. `impact --no-refresh` uses a read-only graph snapshot,
-  verifies extractor and source signatures, and bounds the query to 1500 ms and
+  verifies extractor and source signatures (re-hashing only files whose mtime
+  is not older than the last full build), and bounds the query to 1500 ms and
   the serialized result to 32 KiB. Its graph completeness claim remains open.
   Other providers' hook packets still carry repository strings as JSON values
   (`[PIXEL:TASK_CONTEXT]` in `prompt_submit.rs`, the dependants list of

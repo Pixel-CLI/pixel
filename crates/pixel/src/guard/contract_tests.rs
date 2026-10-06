@@ -354,25 +354,23 @@ fn rewritten_command_value_should_replace_only_the_script_when_a_shell_wraps_it(
     }
 }
 
-/// Codex and Zcode need an explicit allow beside `updatedInput`; Claude,
-/// Devin and OpenCode take the bare rewrite. An allow sent to the others
-/// would grant more than the rewrite asked for.
+/// Zcode needs an explicit allow beside `updatedInput`; Claude (its RTK
+/// delegate), Devin and OpenCode take the bare rewrite. An allow sent to the
+/// others would grant more than the rewrite asked for. Codex retrieval is
+/// never rewritten.
 #[test]
 fn rewrite_json_should_grant_allow_only_when_the_host_requires_it() {
     use serde_json::json;
     let input = json!({"command": "pixel search-content x ."});
-    for provider in [Provider::Codex, Provider::Zcode] {
-        assert_eq!(
-            rewrite_json(provider, input.clone()),
-            json!({"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "updatedInput": input,
-                "permissionDecision": "allow",
-                "permissionDecisionReason": "Pixel compatibility routing: single-file literal read only.",
-            }}),
-            "{provider:?}"
-        );
-    }
+    assert_eq!(
+        rewrite_json(Provider::Zcode, input.clone()),
+        json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "updatedInput": input,
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "Pixel compatibility routing: single-file literal read only.",
+        }})
+    );
     for provider in [Provider::Claude, Provider::Devin, Provider::Opencode] {
         assert_eq!(
             rewrite_json(provider, input.clone()),
@@ -1275,7 +1273,7 @@ fn enforce_reason_should_judge_discovery_and_unbounded_reads_when_the_repo_is_in
     ] {
         assert_eq!(
             enforce_reason(
-                Provider::Codex,
+                Provider::Antigravity,
                 &policy_payload(tool, json!({"path": root}), &root)
             ),
             Some("repository discovery: use pixel search-content, find-code, or list-areas".into()),
@@ -1285,7 +1283,7 @@ fn enforce_reason_should_judge_discovery_and_unbounded_reads_when_the_repo_is_in
     for tool in ["read", "view", "view_file", "notebook_read"] {
         assert_eq!(
             enforce_reason(
-                Provider::Codex,
+                Provider::Antigravity,
                 &policy_payload(tool, json!({"file_path": lib}), &root)
             ),
             Some(REPO_READ_REASON.into()),
@@ -1293,14 +1291,17 @@ fn enforce_reason_should_judge_discovery_and_unbounded_reads_when_the_repo_is_in
         );
         assert_eq!(
             enforce_reason(
-                Provider::Codex,
+                Provider::Antigravity,
                 &policy_payload(tool, json!({"file_path": lib, "limit": 50}), &root)
             ),
             None,
             "bounded {tool}"
         );
         assert_eq!(
-            enforce_reason(Provider::Codex, &policy_payload(tool, json!({}), &root)),
+            enforce_reason(
+                Provider::Antigravity,
+                &policy_payload(tool, json!({}), &root)
+            ),
             None,
             "pathless {tool}"
         );
@@ -1347,7 +1348,7 @@ fn enforce_reason_should_judge_discovery_and_unbounded_reads_when_the_repo_is_in
     std::fs::write(outside.join("x.rs"), "x\n").unwrap();
     assert_eq!(
         enforce_reason(
-            Provider::Codex,
+            Provider::Antigravity,
             &policy_payload("read", json!({"file_path": outside.join("x.rs")}), &root)
         ),
         None,
@@ -1355,7 +1356,7 @@ fn enforce_reason_should_judge_discovery_and_unbounded_reads_when_the_repo_is_in
     );
     assert_eq!(
         enforce_reason(
-            Provider::Codex,
+            Provider::Antigravity,
             &policy_payload("Write", json!({"file_path": lib}), &root)
         ),
         None,
@@ -1373,18 +1374,23 @@ fn enforce_reason_should_stay_silent_when_the_call_is_not_policy_judged() {
     let read =
         |cwd: &Path| policy_payload("read", json!({"file_path": cwd.join("src/lib.rs")}), cwd);
     assert_eq!(enforce_reason(Provider::Claude, &read(&root)), None);
+    assert_eq!(
+        enforce_reason(Provider::Codex, &read(&root)),
+        None,
+        "Codex retrieval stays native under every policy"
+    );
     let mut post = read(&root);
     post["hook_event_name"] = json!("PostToolUse");
-    assert_eq!(enforce_reason(Provider::Codex, &post), None);
+    assert_eq!(enforce_reason(Provider::Antigravity, &post), None);
     post["hook_event_name"] = json!("postToolUse");
-    assert_eq!(enforce_reason(Provider::Codex, &post), None);
+    assert_eq!(enforce_reason(Provider::Antigravity, &post), None);
     let mut other = read(&root);
     other["hook_event_name"] = json!("SessionStart");
-    assert_eq!(enforce_reason(Provider::Codex, &other), None);
+    assert_eq!(enforce_reason(Provider::Antigravity, &other), None);
     let mut unnamed = read(&root);
     unnamed.as_object_mut().unwrap().remove("hook_event_name");
     assert_eq!(
-        enforce_reason(Provider::Codex, &unnamed),
+        enforce_reason(Provider::Antigravity, &unnamed),
         Some(REPO_READ_REASON.into()),
         "an unnamed event with tool fields is a pre-tool call (older Cursor)"
     );
@@ -1394,14 +1400,14 @@ fn enforce_reason_should_stay_silent_when_the_call_is_not_policy_judged() {
     std::fs::create_dir_all(bare.join("src")).unwrap();
     std::fs::write(bare.join("src/lib.rs"), "x\n").unwrap();
     assert_eq!(
-        enforce_reason(Provider::Codex, &read(&bare)),
+        enforce_reason(Provider::Antigravity, &read(&bare)),
         None,
         "no shard, no policy"
     );
     for key in ["env", "environment"] {
         assert_eq!(
             enforce_reason(
-                Provider::Codex,
+                Provider::Antigravity,
                 &policy_payload(
                     "Bash",
                     json!({"command": "cat README.md", key: {"A": "1"}}),
@@ -1439,7 +1445,10 @@ fn enforce_reason_should_judge_the_command_when_any_shell_tool_spelling_is_used(
             json!({"command": ["bash", "-lc", "cat README.md"]}),
         ] {
             assert_eq!(
-                enforce_reason(Provider::Codex, &policy_payload(tool, input.clone(), &root)),
+                enforce_reason(
+                    Provider::Antigravity,
+                    &policy_payload(tool, input.clone(), &root)
+                ),
                 Some(REPO_READ_REASON.into()),
                 "{tool} {input}"
             );
@@ -1447,7 +1456,7 @@ fn enforce_reason_should_judge_the_command_when_any_shell_tool_spelling_is_used(
     }
     assert_eq!(
         enforce_reason(
-            Provider::Codex,
+            Provider::Antigravity,
             &policy_payload("Bash", json!({"description": "x"}), &root)
         ),
         None,

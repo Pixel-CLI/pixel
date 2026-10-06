@@ -8,9 +8,8 @@ use std::time::Duration;
 
 use pixel_graph::GraphStore;
 use pixel_graph::build::{
-    EXTRACTOR_VERSION, EXTRACTOR_VERSION_KEY, FRESHNESS_KEY, freshness_signature,
+    EXTRACTOR_VERSION, EXTRACTOR_VERSION_KEY, FRESHNESS_KEY, freshness_signature_trusting_stat,
 };
-use pixel_graph::impact::{Direction, impact};
 use serde_json::Value;
 
 const QUERY_DEADLINE: Duration = Duration::from_millis(1500);
@@ -18,12 +17,15 @@ const MAX_RESULT_BYTES: usize = 32_768;
 const MAX_DEPTH: u32 = 3;
 
 /// Includes repository discovery, freshness verification and graph traversal in one deadline.
+/// `direction` is the daemon's spelling (`upstream`/`downstream`); `depth`
+/// defaults to the daemon's [`pixel_daemon::api::IMPACT_DEFAULT_DEPTH`].
 pub(crate) fn query(
     path: PathBuf,
     symbol: String,
-    direction: Direction,
-    depth: u32,
+    direction: &'static str,
+    depth: Option<u32>,
 ) -> Result<Value, String> {
+    let depth = depth.unwrap_or(pixel_daemon::api::IMPACT_DEFAULT_DEPTH);
     if !(1..=MAX_DEPTH).contains(&depth) {
         return Err("no-refresh impact requires depth 1 through 3".into());
     }
@@ -39,7 +41,7 @@ pub(crate) fn query(
     })?
 }
 
-fn read(path: &Path, symbol: &str, direction: Direction, depth: u32) -> Result<Value, String> {
+fn read(path: &Path, symbol: &str, direction: &str, depth: u32) -> Result<Value, String> {
     let root = crate::discover_root(path)?;
     let database = root
         .join(pixel_index::index::SHARD_DIR)
@@ -66,34 +68,16 @@ fn read(path: &Path, symbol: &str, direction: Direction, depth: u32) -> Result<V
         .meta_get(FRESHNESS_KEY)
         .map_err(|error| error.to_string())?
         .ok_or("graph freshness is unknown; continue with native tools")?;
-    if signature != freshness_signature(&root) {
+    // Only files edited since the last full build are read and hashed, so
+    // the check fits the deadline on a large tree; its stat trust is
+    // acceptable for a read the caller verifies against source.
+    if signature != freshness_signature_trusting_stat(&root, &store).map_err(|e| e.to_string())? {
         return Err("graph is stale; continue with native tools".into());
     }
-    let target = if symbol.contains('#') {
-        store
-            .symbol_by_uid(symbol)
-            .map_err(|error| error.to_string())?
-            .ok_or("symbol is absent from the graph")?
-    } else {
-        let mut candidates = store
-            .symbols_by_name(symbol, None, 2)
-            .map_err(|error| error.to_string())?;
-        if candidates.len() != 1 {
-            return Err("symbol is missing or ambiguous; use a known uid or native tools".into());
-        }
-        candidates.remove(0)
-    };
-    let report = impact(
-        &store,
-        &target.uid,
-        direction,
-        depth,
-        pixel_daemon::api::EDGE_LIMIT,
-    )
-    .map_err(|error| error.to_string())?;
-    let mut data = serde_json::to_value(report).map_err(|error| error.to_string())?;
+    let mut data = pixel_daemon::api::impact_on_graph(&store, symbol, direction, Some(depth))?;
     data["epistemics"] = serde_json::to_value(pixel_proto::Epistemics {
-        basis: "existing graph; source signature checked".into(),
+        basis: "existing graph; source signature checked (files older than the build by mtime)"
+            .into(),
         ..Default::default()
     })
     .map_err(|error| error.to_string())?;

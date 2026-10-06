@@ -472,10 +472,21 @@ preserving foreign settings and hooks.
 The focused capability calls `pixel impact SYMBOL --no-refresh`. This CLI path
 bypasses the daemon and all index maintenance: a read-only SQLite transaction
 checks graph schema/extractor metadata and the current source signature, then
-uses the normal impact traversal. Repository discovery, freshness checks and
-query work share a 1,500 ms deadline. Depth is limited to 1–3 and serialized
-results to 32 KiB. Missing, stale, incompatible, ambiguous or slow input fails
-back to native retrieval. Workspace fan-out is incompatible with this mode.
+answers through the daemon's own impact entry point
+(`pixel_daemon::api::impact_on_graph`): the same name resolution, the same
+`{candidates, hint}` reply on an ambiguous name, and the same default depth
+(`IMPACT_DEFAULT_DEPTH`, 3) and per-depth item limit. The signature check
+(`pixel_graph::build::freshness_signature_trusting_stat`) reads and hashes
+only files whose mtime is not older than the last full build's start
+(`BUILD_STARTED_KEY` in the graph's `meta`, less a 2 s clock margin) or that
+the graph does not hold; older files reuse their stored `blob_oid`. That is
+the stat trust the daemon's in-process `TreeHashCache` makes, here across
+processes: an edit that also restores an mtime older than the build is not
+seen. A graph built before the key existed gets the full content signature.
+Repository discovery, freshness checks and query work share a 1,500 ms
+deadline. Depth is limited to 1–3 and serialized results to 32 KiB. Missing,
+stale, incompatible or slow input fails back to native retrieval. Workspace
+fan-out is incompatible with this mode.
 Read-only SQLite access may create its WAL coordination sidecars, and normal
 CLI invocation accounting still applies; this mode does not promise zero
 filesystem writes. It never creates, migrates or refreshes graph data.
@@ -488,8 +499,8 @@ so no machine path is committed:
 
 | File | Agent | Content |
 | --- | --- | --- |
-| `.claude/settings.local.json` | Claude Code | Removes the retired retrieval guard and restores adopted RTK registrations; preserves foreign hooks and independent task controls |
-| `.codex/config.toml`, `.codex/hooks.json` (legacy backup sidecar during migration) | Codex | Removes retired Pixel `developer_instructions` text and restores foreign hooks from the owned composed-guard backup; removes duplicate task registrations only when enabled global hooks cover every event and their current definitions are approved; preserves project-only task controls and skips tracked files or paths aliasing the global hook file |
+| `.claude/settings.local.json` | Claude Code | Removes the retired retrieval guard and restores adopted RTK registrations; preserves foreign hooks and independent task controls; neither created nor rewritten when there is nothing to remove |
+| `.codex/config.toml`, `.codex/hooks.json` (legacy backup sidecar during migration) | Codex | Removes retired Pixel `developer_instructions` text and restores foreign hooks from the owned composed-guard backup; removes duplicate task registrations only when enabled global hooks cover every event and their current definitions are approved; preserves project-only task controls and skips tracked files or paths aliasing the global hook file; `.codex/hooks.json` is neither created nor rewritten when there is nothing to remove |
 | `.devin/config.local.json` | Devin | `PreToolUse` rewrite, `PermissionRequest` retrieval approval, prompt-context and metrics hooks |
 | `.pi/extensions/pixel-guard.ts` | Pi | task lifecycle adapter; legacy retrieval behavior requires explicit opt-in |
 | retired managed block in `AGENTS.md` | any agent that reads `AGENTS.md` | Removed on install so ordinary tasks carry no permanent Pixel retrieval instructions; foreign project instructions are preserved |

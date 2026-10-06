@@ -934,11 +934,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 ));
             }
             let value = install::read_settings(&hooks_path).map_err(|e| e.to_string())?;
-            if has_unexpected_pixel_hooks(
-                &value,
-                crate::routing::Provider::Codex,
-                &exe,
-            ) {
+            if has_unexpected_repo_pixel_hooks(&value, &exe) {
                 return Err(format!(
                     "{} still has a retired Pixel callback — run `pixel install --repo` to restore native Codex hooks",
                     hooks_path.display()
@@ -1126,7 +1122,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 serde_json::Value::Null
             };
             let rtk_backup = root.join(crate::routing::RTK_BACKUP);
-            if has_unexpected_pixel_hooks(&value, crate::routing::Provider::Claude, &exe) {
+            if has_unexpected_repo_pixel_hooks(&value, &exe) {
                 return Err(format!(
                     "retired Pixel callbacks remain in {}; run `pixel install --repo` to restore native Claude retrieval",
                     path.display()
@@ -1590,13 +1586,31 @@ fn rtk_backup_check(orphan: Option<PathBuf>) -> (CheckStatus, DoctorCheckDetail,
     }
 }
 
-/// Whether a settings file retains Pixel callbacks outside its task lifecycle.
+/// Whether a global settings file retains Pixel callbacks outside its own
+/// provider's task lifecycle: the global install rewrites every Pixel hook
+/// there, so any other one is retired.
 fn has_unexpected_pixel_hooks(
     value: &serde_json::Value,
     provider: crate::routing::Provider,
     exe: &Path,
 ) -> bool {
     let expected_task_prefix = format!("task-event --provider {} --event ", provider.name());
+    has_retired_pixel_hooks(value, exe, |verb| !verb.starts_with(&expected_task_prefix))
+}
+
+/// Whether a repo-local settings file retains a Pixel callback that
+/// `pixel install --repo` removes; it keeps task-event hooks of every
+/// provider, so those are not reported.
+fn has_unexpected_repo_pixel_hooks(value: &serde_json::Value, exe: &Path) -> bool {
+    has_retired_pixel_hooks(value, exe, crate::routing::native_cleanup_retires)
+}
+
+/// Whether any Pixel hook in `value` has a verb `retired` matches.
+fn has_retired_pixel_hooks(
+    value: &serde_json::Value,
+    exe: &Path,
+    retired: impl Fn(&str) -> bool,
+) -> bool {
     value
         .get("hooks")
         .and_then(serde_json::Value::as_object)
@@ -1614,9 +1628,7 @@ fn has_unexpected_pixel_hooks(
                                         .and_then(|command| {
                                             crate::routing::pixel_hook_verb(command, exe)
                                         })
-                                        .is_some_and(|verb| {
-                                            !verb.starts_with(&expected_task_prefix)
-                                        })
+                                        .is_some_and(&retired)
                                 })
                             })
                     })

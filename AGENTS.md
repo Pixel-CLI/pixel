@@ -127,8 +127,3 @@ Both commands target the account's login shell (from the user database, not `$SH
 
 Rebuild, install, index and doctor are optional unless local deployment was
 explicitly requested. Documentation and workflow work does not require them.
-
-### When to skip
-
-- Pure read-only exploration (no edits to `crates/` or rules).
-- The turn only touched docs, prompts, bench scripts, or contributor instructions (`AGENTS.md`, `CONTRIBUTING.md`, `.agents/`) — nothing that changes binary behavior or installed rules.

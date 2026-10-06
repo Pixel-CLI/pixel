@@ -45,6 +45,23 @@ pub(crate) fn install(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallS
         });
     }
     let path = home.join(EXTENSION);
+    // A file or dangling link where the extension directory belongs is the
+    // user's: leave it as doctor's `install.pi-impact` describes it, instead
+    // of failing the whole install on `create_dir_all`.
+    if let Some(extension_dir) = path
+        .parent()
+        .filter(|dir| fs::symlink_metadata(dir).is_ok() && !dir.is_dir())
+    {
+        return Ok(InstallStep {
+            id: "hooks.pi-impact".into(),
+            status: CheckStatus::Yellow,
+            summary: format!(
+                "Pi extension directory is not a directory; left untouched at {}",
+                extension_dir.display()
+            ),
+            detail: Some(format!("path={}", extension_dir.display())),
+        });
+    }
     let source = extension_source(exe);
     if fs::symlink_metadata(&path).is_ok() && !is_managed(&path) {
         return Ok(InstallStep {
@@ -175,6 +192,39 @@ mod tests {
         assert!(step.summary.contains("not a directory"));
         assert_eq!(fs::read_to_string(&config_path).unwrap(), "user-owned file");
         assert!(!home.path().join(EXTENSION).exists());
+    }
+
+    #[test]
+    fn install_should_preserve_an_occupied_extension_directory_path() {
+        let home = tempfile::tempdir().unwrap();
+        configure_pi(home.path());
+        let extensions = home.path().join(EXTENSION);
+        let extensions = extensions.parent().unwrap();
+        fs::create_dir_all(extensions.parent().unwrap()).unwrap();
+        fs::write(extensions, "user-owned file").unwrap();
+
+        let step = install(home.path(), Path::new("/opt/pixel"), false).unwrap();
+        assert_eq!(step.status, CheckStatus::Yellow);
+        assert!(
+            step.summary
+                .contains("Pi extension directory is not a directory")
+        );
+        assert_eq!(fs::read_to_string(extensions).unwrap(), "user-owned file");
+
+        #[cfg(unix)]
+        {
+            fs::remove_file(extensions).unwrap();
+            std::os::unix::fs::symlink(home.path().join("missing-target"), extensions).unwrap();
+            let step = install(home.path(), Path::new("/opt/pixel"), false).unwrap();
+            assert_eq!(step.status, CheckStatus::Yellow);
+            assert!(
+                fs::symlink_metadata(extensions)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(!home.path().join("missing-target").exists());
+        }
     }
 
     #[test]
