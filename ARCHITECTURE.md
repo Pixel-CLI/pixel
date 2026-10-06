@@ -100,6 +100,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel workspace` | Multi-repo registry (`.pixel/workspace.json` members add/remove/list); `--workspace` fans `impact`/`who-calls` out across registered repos with per-repo provenance |
 | `pixel index-pack` | Freeze the index into one checksummed `.pxpack` bundle — CI builds once, teammates install instead of re-indexing |
 | `pixel index-unpack` | Install a packed index bundle from a path or https:// URL, hash-verified, refusing to overwrite a live index without `--force` |
+| `pixel reference` | Version-pinned reference corpora: a manifest (`.pixel/references.json`) of local checkouts at exact revisions with role, licence and provenance; `setup` is the only operation that may clone/fetch/build; `query` is a cold, read-only bounded fan-out that discloses missing/wrong-revision corpora in a coverage report |
 | `pixel status` | Index + graph freshness status |
 | `pixel coverage` | Per-language index coverage: files on disk vs files indexed, with unrecognized extensions surfaced — the "what did the index miss?" answer |
 | `pixel audit` | What an agent reads to learn what the largest source files contain: each whole file against its `list-signatures` outline in tokens (bytes / 4, floored), the total and the per-file median, files changed since indexing or with no signatures left out and counted, then per-language coverage. Builds the graph on a first run only; local, read-only, sends nothing |

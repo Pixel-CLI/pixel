@@ -1,0 +1,1 @@
+**reference:** `pixel reference` — version-pinned reference corpora. A manifest (`.pixel/references.json`) of local checkouts at exact revisions with role, licence and provenance; `setup` is the only operation that may clone/fetch/build; `query` is a cold, read-only bounded fan-out that discloses missing/wrong-revision corpora in a coverage report.

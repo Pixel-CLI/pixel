@@ -61,6 +61,7 @@ mod prompt_intent;
 mod prompt_key;
 mod prompt_submit;
 mod recall_cmd;
+mod reference_cmd;
 mod rescue_cmd;
 mod search_compat;
 mod search_filter;
@@ -708,6 +709,12 @@ enum Command {
         force: bool,
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+    /// Version-pinned reference corpora: a manifest of local checkouts at
+    /// exact revisions, and a cold, read-only query over them.
+    Reference {
+        #[command(subcommand)]
+        cmd: reference_cmd::ReferenceCmd,
     },
     /// Index + graph freshness status.
     Status {
@@ -5758,6 +5765,7 @@ fn run_command(
             force,
             path,
         }),
+        Command::Reference { cmd } => reference_cmd::run(cmd),
         Command::Status {
             path,
             json,
