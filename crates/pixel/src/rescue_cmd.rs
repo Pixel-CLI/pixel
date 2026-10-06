@@ -521,9 +521,13 @@ mod tests {
             .unwrap()
             .trim()
             .to_string();
-        // A working-tree edit must not change the committed blob's id.
+        // A later commit and a working-tree edit must not change the blob
+        // named at the requested commit.
+        std::fs::write(dir.join("a.txt"), "second\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "two"]);
         std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
-        assert_eq!(blob_oid(&dir, "HEAD", "a.txt"), Some(expected));
+        assert_eq!(blob_oid(&dir, "HEAD~1", "a.txt"), Some(expected.clone()));
+        assert_ne!(blob_oid(&dir, "HEAD", "a.txt"), Some(expected));
         assert_eq!(blob_oid(&dir, "HEAD", "missing.txt"), None);
         std::fs::remove_dir_all(dir).unwrap();
     }

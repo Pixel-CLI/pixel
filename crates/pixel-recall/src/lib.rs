@@ -122,9 +122,6 @@ mod potion_marker_tests {
     const CODE_64M: &str = "minishlab/potion-code-64M-v2";
     const CODE_16M: &str = "minishlab/potion-code-16M-v2";
 
-    /// Serialises the tests that write `PIXEL_RECALL_DIR`.
-    static RECALL_DIR_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn potion_marker_should_be_one_file_per_repository() {
         let models = Path::new("/m");
@@ -170,7 +167,7 @@ mod potion_marker_tests {
     #[test]
     fn recall_dir_should_read_the_override_then_home() {
         {
-            let _guard = RECALL_DIR_ENV
+            let _guard = crate::testutil::RECALL_DIR_ENV
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let saved = std::env::var_os("PIXEL_RECALL_DIR");
@@ -214,6 +211,9 @@ mod potion_marker_tests {
 /// through `RecallStore::replace_session`, no source adapter involved.
 #[cfg(test)]
 pub(crate) mod testutil {
+    /// Serialises every test that reads or writes `PIXEL_RECALL_DIR`.
+    pub(crate) static RECALL_DIR_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use crate::model::{IntentSource, Role, TsSource, UnifiedSession, UnifiedTurn};
     use crate::store::{IngestState, RecallStore};
 
