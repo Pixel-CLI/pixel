@@ -504,6 +504,28 @@ mod tests {
         git(dir, &["config", "commit.gpgsign", "false"]);
     }
 
+    #[test]
+    fn blob_oid_names_the_files_blob_at_the_commit() {
+        let dir = tmpdir("blob-oid");
+        init_repo(&dir);
+        std::fs::write(dir.join("a.txt"), "hello\n").unwrap();
+        git(&dir, &["add", "a.txt"]);
+        git(&dir, &["commit", "-q", "-m", "one"]);
+        let expected = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["hash-object", "a.txt"])
+            .output()
+            .unwrap();
+        let expected = String::from_utf8(expected.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(blob_oid(&dir, "HEAD", "a.txt"), Some(expected));
+        assert_eq!(blob_oid(&dir, "HEAD", "missing.txt"), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn no_strategy() -> ApplyOptions {
         ApplyOptions {
             merge: false,

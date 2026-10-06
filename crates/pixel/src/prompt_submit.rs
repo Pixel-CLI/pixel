@@ -34,7 +34,7 @@ const COMPLETION_LOOKBACK_SECS: i64 = 300;
 /// Number of recent assistant turns to use as context.
 const CONTEXT_TURNS: usize = 5;
 /// Maximum age of a session in recall.db to be considered active context (4 hours).
-const MAX_SESSION_AGE_MS: i64 = 4 * 3600 * 1000;
+const MAX_SESSION_AGE_MS: i64 = 14_400_000;
 /// Hard deadline for the entire hook — never block the user's prompt.
 const HOOK_DEADLINE: Duration = Duration::from_millis(750);
 const TASK_CONTEXT_BYTES: usize = 1024;
@@ -628,6 +628,7 @@ struct BoundaryEvent {
 /// Core detection logic: embed prompt + context, compute similarity, check
 /// completion signals. Returns `Some(BoundaryEvent)` if a task boundary is
 /// detected, `None` otherwise.
+#[cfg_attr(test, mutants::skip)] // wires the recall store and the embedding model; the decision is `is_task_boundary`
 fn detect_boundary(prompt: &str, cwd: &Path) -> Result<Option<BoundaryEvent>, String> {
     // 1. Get recent assistant turns from the recall corpus for this cwd.
     // Early exit before opening embedder if there is no prior context!
@@ -652,13 +653,7 @@ fn detect_boundary(prompt: &str, cwd: &Path) -> Result<Option<BoundaryEvent>, St
     let similarity = cosine_similarity(&vecs[0], &vecs[1]);
 
     // 5. Decision logic.
-    let is_boundary = if similarity < SIMILARITY_THRESHOLD && completion {
-        true
-    } else {
-        similarity < WEAK_THRESHOLD
-    };
-
-    if !is_boundary {
+    if !is_task_boundary(similarity, completion) {
         return Ok(None);
     }
 
@@ -669,10 +664,21 @@ fn detect_boundary(prompt: &str, cwd: &Path) -> Result<Option<BoundaryEvent>, St
     }))
 }
 
+/// A low similarity after a completion signal, or a very low one without
+/// it, starts a new task.
+fn is_task_boundary(similarity: f32, completion: bool) -> bool {
+    if completion {
+        similarity < SIMILARITY_THRESHOLD
+    } else {
+        similarity < WEAK_THRESHOLD
+    }
+}
+
 /// Retrieve the last N assistant turns from the recall corpus for the given
 /// cwd, ensuring the session is within the recency cutoff and prioritizing the
 /// newest turns so Model2Vec's token budget does not truncate them away.
 /// Returns (embedding_text, context_summary).
+#[cfg_attr(test, mutants::skip)] // opens the user's recall store; the selection is `context_and_summary`
 fn recent_context_and_summary(cwd: &Path, n: usize) -> (String, String) {
     let db_path = pixel_recall::db_path();
     let Ok(store) = pixel_recall::store::RecallStore::open(&db_path) else {
@@ -694,14 +700,22 @@ fn recent_context_and_summary(cwd: &Path, n: usize) -> (String, String) {
     let Ok(turns) = store.turns_for_session(session.id, None) else {
         return (String::new(), String::new());
     };
+    context_and_summary(turns.iter().map(|t| (t.role.as_str(), t.text.as_str())), n)
+}
 
+/// The embedding text (the last `n` assistant turns, newest first, 500
+/// characters each) and the summary (the newest turn's first 200 characters)
+/// of a session's `(role, text)` turns in chronological order.
+fn context_and_summary<'a>(
+    turns: impl DoubleEndedIterator<Item = (&'a str, &'a str)>,
+    n: usize,
+) -> (String, String) {
     // Extract the last N assistant turns, newest first.
     let assistant_texts: Vec<String> = turns
-        .iter()
         .rev()
-        .filter(|t| t.role == "assistant")
+        .filter(|(role, _)| *role == "assistant")
         .take(n)
-        .map(|t| t.text.chars().take(500).collect::<String>()) // Budget per turn
+        .map(|(_, text)| text.chars().take(500).collect::<String>()) // Budget per turn
         .collect();
 
     if assistant_texts.is_empty() {
@@ -727,15 +741,20 @@ fn embed_text_for_prompt(prompt: &str, cwd: &Path) -> String {
 /// Check `actions.jsonl` for recent completion signals (commits, publishes,
 /// pushes, ships) in the given cwd within the lookback window.
 /// Checks the repository root first, then falls back to global `~/.pixel/actions.jsonl`.
+#[cfg_attr(test, mutants::skip)] // reads HOME and the clock; the search is `completion_signal_in`
 fn recent_completion_signal(cwd: &Path) -> bool {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    completion_signal_in(cwd, Path::new(&home), pixel_actionlog::now_ms())
+}
+
+/// [`recent_completion_signal`] with the home directory and the clock given.
+fn completion_signal_in(cwd: &Path, home: &Path, now_ms: i64) -> bool {
     let mut log_paths = Vec::new();
     if let Ok(root) = crate::discover_root(cwd) {
         log_paths.push(pixel_actionlog::ActionLog::path_for_root(&root));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    log_paths.push(PathBuf::from(&home).join(".pixel").join("actions.jsonl"));
+    log_paths.push(home.join(".pixel").join("actions.jsonl"));
 
-    let now_ms = pixel_actionlog::now_ms();
     let cutoff = now_ms - (COMPLETION_LOOKBACK_SECS * 1000);
 
     for path in log_paths {
@@ -1836,6 +1855,69 @@ mod tests {
 
     /// Only the tail is read: a signal past the tail window is invisible, one
     /// inside it is found even in a log far larger than the window.
+    #[test]
+    fn the_boundary_threshold_depends_on_the_completion_signal() {
+        assert!(is_task_boundary(0.40, true));
+        assert!(!is_task_boundary(0.40, false));
+        assert!(is_task_boundary(0.30, false));
+        assert!(!is_task_boundary(SIMILARITY_THRESHOLD, true));
+        assert!(!is_task_boundary(WEAK_THRESHOLD, false));
+        assert!(!is_task_boundary(0.9, true));
+    }
+
+    #[test]
+    fn context_keeps_the_newest_assistant_turns_first() {
+        let long = "y".repeat(600);
+        let turns = [
+            ("assistant", "old"),
+            ("user", "question"),
+            ("assistant", "mid"),
+            ("assistant", long.as_str()),
+        ];
+        let (text, summary) = context_and_summary(turns.iter().copied(), 2);
+        assert_eq!(text, format!("{}\n---\nmid", "y".repeat(500)));
+        assert_eq!(summary, "y".repeat(200));
+        assert_eq!(
+            context_and_summary([("user", "q")].into_iter(), 5),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn the_prompt_is_embedded_with_its_repository_name() {
+        assert_eq!(
+            embed_text_for_prompt("fix it", Path::new("/work/pixel")),
+            "[prompt] [pixel] user: fix it"
+        );
+        assert_eq!(
+            embed_text_for_prompt("x", Path::new("/")),
+            "[prompt] [-] user: x"
+        );
+    }
+
+    #[test]
+    fn a_completion_in_the_home_log_within_the_lookback_is_a_signal() {
+        let home = scratch("completion-home");
+        let cwd = Path::new("/work/pixel-completion-fixture");
+        let now = 10_000_000;
+        assert!(!completion_signal_in(cwd, &home, now), "no log");
+        std::fs::create_dir_all(home.join(".pixel")).unwrap();
+        let recent = entry(
+            now - 1_000,
+            "publish",
+            "/work/pixel-completion-fixture",
+            "ok",
+        );
+        std::fs::write(home.join(".pixel/actions.jsonl"), format!("{recent}\n")).unwrap();
+        assert!(completion_signal_in(cwd, &home, now));
+        let stale_now = now + COMPLETION_LOOKBACK_SECS * 1000;
+        assert!(
+            !completion_signal_in(cwd, &home, stale_now),
+            "past the lookback"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn action_log_reads_only_its_tail() {
         let dir = scratch("action-log-tail");

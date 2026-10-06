@@ -444,7 +444,7 @@ impl Shard {
         };
         let (mut lo, mut hi) = (0usize, n);
         while lo < hi {
-            let mid = (lo + hi) / 2;
+            let mid = lo.midpoint(hi);
             if record_hash(mid) < hash {
                 lo = mid + 1;
             } else {

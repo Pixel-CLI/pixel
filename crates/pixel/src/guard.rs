@@ -313,7 +313,7 @@ pub enum Provider {
     Copilot,
 }
 
-const MANIFEST_MAX_AGE_SECS: u64 = 24 * 3600;
+const MANIFEST_MAX_AGE_SECS: u64 = 86_400; // 24 h
 const ORIENTATION_ANY: &[&str] = &["CLAUDE.md", "AGENTS.md", "README.md"];
 const ORIENTATION_ROOT: &[&str] = &[
     "package.json",
@@ -2480,21 +2480,22 @@ fn compose_context(mut response: Value, contexts: &[String]) -> Value {
     response
 }
 
+/// The hook payload when it is readable, non-empty and at most `cap` bytes;
+/// anything else is a fail-open native execution.
+fn read_composed_payload(reader: impl Read, cap: usize) -> Option<Vec<u8>> {
+    let mut raw = Vec::new();
+    reader.take((cap + 1) as u64).read_to_end(&mut raw).ok()?;
+    (!raw.is_empty() && raw.len() <= cap).then_some(raw)
+}
+
 /// Execute the install-time snapshot of Codex foreign PreToolUse commands,
 /// then apply Pixel's transparent literal-read rewrite only when no foreign
 /// handler returned a denial or input/permission mutation. Every failure is a
 /// fail-open native execution with no Pixel rewrite.
 pub fn run_composed_codex(backup: &Path) -> ! {
-    let mut raw = Vec::new();
-    if std::io::stdin()
-        .take((COMPOSED_MAX_INPUT + 1) as u64)
-        .read_to_end(&mut raw)
-        .is_err()
-        || raw.is_empty()
-        || raw.len() > COMPOSED_MAX_INPUT
-    {
+    let Some(raw) = read_composed_payload(std::io::stdin(), COMPOSED_MAX_INPUT) else {
         std::process::exit(0);
-    }
+    };
     let Ok(payload) = serde_json::from_slice::<Value>(&raw) else {
         std::process::exit(0);
     };
@@ -2664,6 +2665,7 @@ fn delegate_rtk_hook(raw: &str) -> ! {
 /// Entry point for `pixel run-hook guard`. Reads the PreToolUse hook payload
 /// from stdin. Never returns an `Err` that would surface as exit 1 — every
 /// failure path is a deliberate exit 0 (allow, optionally with advice).
+#[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; the decisions are `is_shell_tool`, `edit_advice` and the advisory helpers
 pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     if env_flag_off("PIXEL_TARGETS_GUARD") {
         std::process::exit(0);
@@ -2736,16 +2738,7 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     let (manifest, manifest_expired) =
         manifest_pair(manifest_root.as_deref().map(load_manifest_state));
 
-    if tool == "Bash" || tool == "exec" || tool == "bash" || tool == "run_shell_command"
-        || tool == "execute" || tool == "Shell"
-        // Antigravity's bash tool
-        || tool == "run_command"
-        // Codex's real shell tools. `shell` and `unified_exec` are the names
-        // Codex 0.146.1 actually emits; without them a Codex session runs
-        // `grep`/`rg`/`find` completely unguarded. `local_shell` is the
-        // OpenAI Responses API tool type for the same capability.
-        || tool == "shell" || tool == "unified_exec" || tool == "local_shell"
-    {
+    if is_shell_tool(tool) {
         let cmd_value = tool_input
             .get("command")
             // Antigravity: run_command uses "CommandLine"
@@ -2820,20 +2813,16 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
                 std::process::exit(0);
             };
             let exists = p.is_file();
-            // write_to_file / Write / write / write_file create new files — always allowed
-            if (tool == "Write" || tool == "write" || tool == "write_file" || tool == "write_to_file") && !exists {
-                std::process::exit(0); // creating a new file is always allowed
-            }
-            if let Some(m) = &manifest {
-                if exists && !allowed(&p, m) {
-                    scoping_advisory(&p, m);
-                }
-                std::process::exit(0);
-            }
-            // MANDATE ADVISORY — indexed repo, no active manifest: suggest
-            // `pixel scope-task` before edits to existing files, but proceed.
-            if let Some(root) = &idx_root {
-                if exists && !is_exempt(&p, root) {
+            let advice = edit_advice(
+                exists,
+                manifest.as_ref().map(|m| allowed(&p, m)),
+                idx_root.as_deref().map(|root| is_exempt(&p, root)),
+            );
+            match (advice, &manifest, &idx_root) {
+                (EditAdvice::OutOfScope, Some(m), _) => scoping_advisory(&p, m),
+                // MANDATE ADVISORY — indexed repo, no active manifest: suggest
+                // `pixel scope-task` before edits to existing files, but proceed.
+                (EditAdvice::Unscoped, _, Some(root)) => {
                     if manifest_expired {
                         expired_manifest_advisory(root);
                     }
@@ -2843,22 +2832,73 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
                         edit_guard_advisory(&p, root);
                     }
                 }
-            } else if exists {
                 // Unindexed directory: suggest indexing so pixel's scoped
                 // retrieval works. Advisory only — the edit proceeds.
                 // Pixel works in ANY directory, not just git repos — the
                 // index is a `.pixel/` dir, independent of `.git/`.
-                if let Some(git_root) = find_up(&anchor, ".git") {
-                    suggest_index_advisory(&git_root, true);
-                } else {
-                    // Non-git directory: still suggest indexing.
-                    suggest_index_advisory(&canonical(&cwd), false);
+                (EditAdvice::SuggestIndex, _, _) => {
+                    if let Some(git_root) = find_up(&anchor, ".git") {
+                        suggest_index_advisory(&git_root, true);
+                    } else {
+                        // Non-git directory: still suggest indexing.
+                        suggest_index_advisory(&canonical(&cwd), false);
+                    }
                 }
+                _ => {}
             }
         }
         _ => {}
     }
     std::process::exit(0);
+}
+
+/// The shell-running tools of every supported harness: Claude's `Bash`,
+/// Antigravity's `run_command`, and Codex's real shell tools. `shell` and
+/// `unified_exec` are the names Codex 0.146.1 actually emits; without them a
+/// Codex session runs `grep`/`rg`/`find` completely unguarded. `local_shell`
+/// is the OpenAI Responses API tool type for the same capability.
+fn is_shell_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "Bash"
+            | "exec"
+            | "bash"
+            | "run_shell_command"
+            | "execute"
+            | "Shell"
+            | "run_command"
+            | "shell"
+            | "unified_exec"
+            | "local_shell"
+    )
+}
+
+/// What the guard says about an edit, before any advisory is printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditAdvice {
+    Proceed,
+    /// An active manifest does not scope the existing file.
+    OutOfScope,
+    /// An indexed repository with no active manifest, on a non-exempt file.
+    Unscoped,
+    /// An existing file outside any index.
+    SuggestIndex,
+}
+
+/// The edit decision: `in_scope` is the active manifest's verdict on the
+/// path (`None` without a manifest), `exempt` the index's (`None` outside an
+/// index). Only an existing file draws an advisory: creating a new file
+/// (`Write`, `write_file`, `write_to_file`) is always allowed.
+fn edit_advice(exists: bool, in_scope: Option<bool>, exempt: Option<bool>) -> EditAdvice {
+    if !exists {
+        return EditAdvice::Proceed;
+    }
+    match (in_scope, exempt) {
+        (Some(false), _) => EditAdvice::OutOfScope,
+        (Some(true), _) | (None, Some(true)) => EditAdvice::Proceed,
+        (None, Some(false)) => EditAdvice::Unscoped,
+        (None, None) => EditAdvice::SuggestIndex,
+    }
 }
 
 /// Accept Claude Code's/Codex's/Devin's/zcode's `PreToolUse`, Gemini's
@@ -3020,6 +3060,17 @@ fn post_tool_use_blast_radius(abs: &Path, idx_root: Option<&Path>, tool: &str) {
     }
 }
 
+/// Dependent paths the post-edit note lists at most.
+const PATH_LIMIT: i64 = 8;
+/// Characters of one listed path before it is shortened.
+const PATH_CHARS: usize = 120;
+
+/// Whether the listed dependants are fewer than the graph holds: more files
+/// than [`PATH_LIMIT`], or a path shortened past [`PATH_CHARS`].
+fn snapshot_paths_capped(files: i64, paths: &[String]) -> bool {
+    files > PATH_LIMIT || paths.iter().any(|path| path.chars().count() > PATH_CHARS)
+}
+
 /// Read the existing graph in one transaction; never refresh or read source in
 /// the post-edit path. Counts concern indexed references, not proven breakages.
 fn post_edit_snapshot_note(
@@ -3027,8 +3078,6 @@ fn post_edit_snapshot_note(
     file_id: i64,
     rel: &str,
 ) -> Option<String> {
-    const PATH_LIMIT: i64 = 8;
-    const PATH_CHARS: usize = 120;
     let tx = store.conn_mut().transaction().ok()?;
     let (symbols, cross_file, same_file, files, unresolved): (i64, i64, i64, i64, i64) = tx
         .query_row(
@@ -3069,13 +3118,12 @@ fn post_edit_snapshot_note(
     let rows = paths
         .query_map([file_id, PATH_LIMIT], |row| row.get::<_, String>(0))
         .ok()?;
-    let mut paths_capped = files > PATH_LIMIT;
+    let dependants = rows.collect::<Result<Vec<String>, _>>().ok()?;
+    let paths_capped = snapshot_paths_capped(files, &dependants);
     let mut rendered_paths = Vec::new();
-    for path in rows {
-        let path = path.ok()?;
-        paths_capped |= path.chars().count() > PATH_CHARS;
+    for path in &dependants {
         // Quote control characters and newlines: repository names are data.
-        rendered_paths.push(serde_json::to_string(&short_task(&path, PATH_CHARS)).ok()?);
+        rendered_paths.push(serde_json::to_string(&short_task(path, PATH_CHARS)).ok()?);
     }
     let paths = if rendered_paths.is_empty() {
         "none indexed".to_string()
@@ -4035,31 +4083,50 @@ fn suggest_index_advisory(dir: &Path, is_git: bool) -> ! {
 /// in run() so that rewrites take priority over advisories. This contains
 /// the scoping advisory plus advisories for common grep/search bypass patterns
 /// (sed, awk, perl, python, find, ls, cat).
+#[cfg_attr(test, mutants::skip)] // prints and exits through `advise`; the decision is `bash_advisory`
 fn check_bash_advisories(
     cmd: &str,
     cwd: &Path,
     idx_root: Option<&Path>,
     manifest: Option<&Manifest>,
 ) {
-    // Strip leading `cd X &&` before pattern matching — the same stripping
-    // that try_rewrite_bash does. strip_cd_prefix returns (effective_cwd, effective_cmd).
-    let (effective_cwd, effective_cmd) = strip_cd_prefix(cmd, cwd);
-    // Skip complex commands — heredocs, command substitution are left alone.
-    if effective_cmd.contains("<<") || effective_cmd.contains("$(") || effective_cmd.contains('`') {
-        return;
+    match (bash_advisory(cmd, cwd, idx_root, manifest), manifest) {
+        (Some(BashAdvisory::Bypass(lines)), _) => advise(&non_blocking_advisory_lines(&lines)),
+        (Some(BashAdvisory::OutOfScope(file)), Some(m)) => scoping_advisory(&file, m),
+        _ => {}
     }
-    // Bypass-pattern advisories for indexed repos
+}
+
+/// The advisory a Bash command draws, if any.
+#[derive(Debug, PartialEq, Eq)]
+enum BashAdvisory {
+    /// A search bypass in an indexed repository: the advisory lines.
+    Bypass(Vec<String>),
+    /// A single file read outside the active manifest.
+    OutOfScope(PathBuf),
+}
+
+/// Decide [`check_bash_advisories`]: a leading `cd X &&` is stripped first,
+/// the way `try_rewrite_bash` does; heredocs and command substitution are
+/// left alone; a bypass advisory wins over the manifest scoping.
+fn bash_advisory(
+    cmd: &str,
+    cwd: &Path,
+    idx_root: Option<&Path>,
+    manifest: Option<&Manifest>,
+) -> Option<BashAdvisory> {
+    let (effective_cwd, effective_cmd) = strip_cd_prefix(cmd, cwd);
+    if effective_cmd.contains("<<") || effective_cmd.contains("$(") || effective_cmd.contains('`') {
+        return None;
+    }
     if let Some(root) = idx_root
         && let Some(lines) = bypass_advisory_lines(effective_cmd, &effective_cwd, root)
     {
-        advise(&non_blocking_advisory_lines(&lines));
+        return Some(BashAdvisory::Bypass(lines));
     }
-    if let Some(m) = manifest
-        && let Some(first_file) = single_reader_target(effective_cmd, &effective_cwd)
-        && !allowed(&first_file, m)
-    {
-        scoping_advisory(&first_file, m);
-    }
+    let m = manifest?;
+    let first_file = single_reader_target(effective_cmd, &effective_cwd)?;
+    (!allowed(&first_file, m)).then_some(BashAdvisory::OutOfScope(first_file))
 }
 
 /// Advisory messages for common grep/search bypass patterns that should use pixel

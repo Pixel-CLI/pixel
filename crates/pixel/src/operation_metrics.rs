@@ -353,6 +353,16 @@ mod tests {
         assert_eq!(native_commands("task-state"), None);
     }
 
+    #[test]
+    fn only_a_positive_offset_marks_a_page_as_partial() {
+        for (offset, partial) in [(0, false), (1, true), (3, true)] {
+            let mut e = Evidence::default();
+            collect(&json!({"offset": offset}), &mut e, 0);
+            assert_eq!(e.partial, partial, "offset {offset}");
+        }
+        assert_eq!(native_commands("commit-and-push"), Some(4));
+    }
+
     /// A scratch directory holding one file of `len` bytes, unique per test.
     fn scratch_file(name: &str, len: usize) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
