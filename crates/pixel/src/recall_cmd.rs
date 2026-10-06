@@ -460,7 +460,7 @@ impl ContextPack {
     }
 
     fn fits(&self, piece: &str) -> bool {
-        estimate_tokens(&self.out) + estimate_tokens(piece) <= self.budget
+        self.out.len().saturating_add(piece.len()).div_ceil(4) <= self.budget
     }
 
     /// Keep `piece` if it fits, else count it as a dropped block.
@@ -1462,6 +1462,23 @@ mod tests {
         assert_eq!(
             pack.finish(),
             "abcdefghijkl\nfitted: budget=3 used=3 dropped_blocks=2\n"
+        );
+    }
+
+    #[test]
+    fn the_context_pack_fits_a_piece_that_fills_the_budget_exactly() {
+        let mut pack = super::ContextPack::new(100);
+        pack.offer(&"p".repeat(397));
+        pack.offer("abc"); // 400 bytes in all: exactly 100 tokens
+        pack.offer("d"); // 401 bytes: 101 tokens, over
+        let out = pack.finish();
+        assert!(
+            out.starts_with(&format!("{}abc\n", "p".repeat(397))),
+            "{out}"
+        );
+        assert!(
+            out.ends_with("\nfitted: budget=100 used=100 dropped_blocks=1\n"),
+            "{out}"
         );
     }
 

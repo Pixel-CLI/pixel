@@ -514,13 +514,15 @@ mod tests {
         let expected = Command::new("git")
             .arg("-C")
             .arg(&dir)
-            .args(["hash-object", "a.txt"])
+            .args(["rev-parse", "HEAD:a.txt"])
             .output()
             .unwrap();
         let expected = String::from_utf8(expected.stdout)
             .unwrap()
             .trim()
             .to_string();
+        // A working-tree edit must not change the committed blob's id.
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
         assert_eq!(blob_oid(&dir, "HEAD", "a.txt"), Some(expected));
         assert_eq!(blob_oid(&dir, "HEAD", "missing.txt"), None);
         std::fs::remove_dir_all(dir).unwrap();

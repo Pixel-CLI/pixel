@@ -628,25 +628,45 @@ struct BoundaryEvent {
 /// Core detection logic: embed prompt + context, compute similarity, check
 /// completion signals. Returns `Some(BoundaryEvent)` if a task boundary is
 /// detected, `None` otherwise.
-#[cfg_attr(test, mutants::skip)] // wires the recall store and the embedding model; the decision is `is_task_boundary`
+#[cfg_attr(test, mutants::skip)] // wires the recall store, the action logs and the embedding model; the logic is `detect_boundary_with`
 fn detect_boundary(prompt: &str, cwd: &Path) -> Result<Option<BoundaryEvent>, String> {
+    detect_boundary_with(
+        prompt,
+        cwd,
+        || recent_context_and_summary(cwd, CONTEXT_TURNS),
+        || recent_completion_signal(cwd),
+        |texts| {
+            // download=false — fail fast if the model is not cached.
+            let mut embedder = pixel_recall::embed::open_default_embedder(false)?;
+            embedder.embed_batch(texts, pixel_recall::embed::EmbedKind::Query)
+        },
+    )
+}
+
+/// [`detect_boundary`] with its I/O given: the recent `(context, summary)`,
+/// the completion signal, and the embedding of `[prompt, context]`. Each is
+/// called lazily, in that order, and only when the previous step allows it.
+fn detect_boundary_with(
+    prompt: &str,
+    cwd: &Path,
+    context: impl FnOnce() -> (String, String),
+    completion: impl FnOnce() -> bool,
+    embed: impl FnOnce(&[&str]) -> Result<Vec<Vec<f32>>, String>,
+) -> Result<Option<BoundaryEvent>, String> {
     // 1. Get recent assistant turns from the recall corpus for this cwd.
     // Early exit before opening embedder if there is no prior context!
-    let (context_text, context_summary) = recent_context_and_summary(cwd, CONTEXT_TURNS);
+    let (context_text, context_summary) = context();
     if context_text.is_empty() {
         return Ok(None);
     }
 
     // 2. Check actions.jsonl for recent completion signals.
-    let completion = recent_completion_signal(cwd);
+    let completion = completion();
 
-    // 3. Open embedder (download=false — fail fast if model not cached).
-    let mut embedder = pixel_recall::embed::open_default_embedder(false)?;
-
-    // 4. Embed prompt and context.
+    // 3. Embed prompt and context.
     let prompt_text = embed_text_for_prompt(prompt, cwd);
     let texts = [prompt_text.as_str(), context_text.as_str()];
-    let vecs = embedder.embed_batch(&texts, pixel_recall::embed::EmbedKind::Query)?;
+    let vecs = embed(&texts)?;
     if vecs.len() != 2 {
         return Ok(None);
     }
@@ -678,15 +698,24 @@ fn is_task_boundary(similarity: f32, completion: bool) -> bool {
 /// cwd, ensuring the session is within the recency cutoff and prioritizing the
 /// newest turns so Model2Vec's token budget does not truncate them away.
 /// Returns (embedding_text, context_summary).
-#[cfg_attr(test, mutants::skip)] // opens the user's recall store; the selection is `context_and_summary`
+#[cfg_attr(test, mutants::skip)] // opens the user's recall store and reads the clock; the selection is `context_in_store`
 fn recent_context_and_summary(cwd: &Path, n: usize) -> (String, String) {
     let db_path = pixel_recall::db_path();
     let Ok(store) = pixel_recall::store::RecallStore::open(&db_path) else {
         return (String::new(), String::new());
     };
+    context_in_store(&store, cwd, pixel_actionlog::now_ms(), n)
+}
 
+/// [`recent_context_and_summary`] over an open store at `now_ms`: the newest
+/// session under `cwd` active within [`MAX_SESSION_AGE_MS`].
+fn context_in_store(
+    store: &pixel_recall::store::RecallStore,
+    cwd: &Path,
+    now_ms: i64,
+    n: usize,
+) -> (String, String) {
     let cwd_str = cwd.display().to_string();
-    let now_ms = pixel_actionlog::now_ms();
     let since_ms = now_ms.saturating_sub(MAX_SESSION_AGE_MS);
 
     // Find the most recent session matching this cwd within the recency window.
@@ -1740,6 +1769,116 @@ mod tests {
             ""
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detect_boundary_with_stops_before_any_io_when_there_is_no_context() {
+        let out = detect_boundary_with(
+            "p",
+            Path::new("/r"),
+            || (String::new(), String::new()),
+            || panic!("completion read without context"),
+            |_| panic!("embedder opened without context"),
+        );
+        assert!(matches!(out, Ok(None)));
+    }
+
+    #[test]
+    fn detect_boundary_with_decides_from_the_embedding() {
+        let ctx = || ("ctx".to_string(), "sum".to_string());
+        let orthogonal = |texts: &[&str]| {
+            assert_eq!(texts, ["[prompt] [repo] user: p", "ctx"]);
+            Ok(vec![vec![1.0, 0.0], vec![0.0, 1.0]])
+        };
+        let event = detect_boundary_with("p", Path::new("/w/repo"), ctx, || true, orthogonal)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.similarity, 0.0);
+        assert!(event.completion_signal);
+        assert_eq!(event.context_summary, "sum");
+
+        let same = |_: &[&str]| Ok(vec![vec![1.0, 0.0], vec![1.0, 0.0]]);
+        assert!(matches!(
+            detect_boundary_with("p", Path::new("/r"), ctx, || false, same),
+            Ok(None)
+        ));
+        let short = |_: &[&str]| Ok(vec![vec![1.0, 0.0]]);
+        assert!(matches!(
+            detect_boundary_with("p", Path::new("/r"), ctx, || true, short),
+            Ok(None)
+        ));
+        let failed = |_: &[&str]| Err("no model".to_string());
+        assert!(matches!(
+            detect_boundary_with("p", Path::new("/r"), ctx, || true, failed),
+            Err(e) if e == "no model"
+        ));
+    }
+
+    #[test]
+    fn context_in_store_picks_the_newest_recent_session_under_cwd() {
+        use pixel_recall::model::{Role, TsSource, UnifiedSession, UnifiedTurn};
+        use pixel_recall::store::{IngestState, RecallStore};
+        let dir = scratch("ctx-store");
+        let mut store = RecallStore::open(&dir.join("recall.db")).unwrap();
+        let now = 100_000_000;
+        let mut add = |id: &str, cwd: &str, ts: i64, text: &str| {
+            let session = UnifiedSession {
+                agent: "claude",
+                source_session_id: id.to_string(),
+                source_path: id.to_string(),
+                cwd: Some(cwd.to_string()),
+                git_branch: None,
+                title: None,
+                ts_source: TsSource::Iso,
+                is_subagent: false,
+                parent_source_session_id: None,
+            };
+            let turn = |role, text: &str| UnifiedTurn {
+                role,
+                intent_source: None,
+                ts: Some(ts),
+                text: text.to_string(),
+                truncated: false,
+                source_byte_start: None,
+                source_byte_len: None,
+            };
+            let state = IngestState {
+                file_size: 0,
+                mtime_ms: 0,
+                bytes_ingested: 0,
+                cursor: None,
+            };
+            store
+                .replace_session(
+                    &session,
+                    &[turn(Role::User, "q"), turn(Role::Assistant, text)],
+                    id,
+                    &state,
+                )
+                .unwrap();
+        };
+        add("older", "/w/repo", now - 2_000, "older answer");
+        add("newest", "/w/repo", now - 1_000, "newest answer");
+        add("elsewhere", "/w/other", now, "other answer");
+        add(
+            "stale",
+            "/w/repo2",
+            now - MAX_SESSION_AGE_MS - 1,
+            "stale answer",
+        );
+        assert_eq!(
+            context_in_store(&store, Path::new("/w/repo"), now, 5),
+            ("newest answer".to_string(), "newest answer".to_string())
+        );
+        assert_eq!(
+            context_in_store(&store, Path::new("/w/repo2"), now, 5),
+            (String::new(), String::new())
+        );
+        assert_eq!(
+            context_in_store(&store, Path::new("/w/none"), now, 5),
+            (String::new(), String::new())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn scratch(tag: &str) -> PathBuf {

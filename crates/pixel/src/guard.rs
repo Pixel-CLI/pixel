@@ -2665,7 +2665,7 @@ fn delegate_rtk_hook(raw: &str) -> ! {
 /// Entry point for `pixel run-hook guard`. Reads the PreToolUse hook payload
 /// from stdin. Never returns an `Err` that would surface as exit 1 — every
 /// failure path is a deliberate exit 0 (allow, optionally with advice).
-#[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; the decisions are `is_shell_tool`, `edit_advice` and the advisory helpers
+#[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; decoding and routing are `guard_request`, the edit verdict `edit_advice`
 pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     if env_flag_off("PIXEL_TARGETS_GUARD") {
         std::process::exit(0);
@@ -2677,49 +2677,21 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     if let Some(provider) = provider {
         run_provider_guard(provider, delegate_rtk, &input);
     }
-    let Ok(payload) = serde_json::from_str::<Value>(&input) else {
+    let Some(request) = guard_request(&input, policy_mode, || {
+        std::env::current_dir().unwrap_or_default()
+    }) else {
         std::process::exit(0);
     };
-    if !payload.is_object() {
-        std::process::exit(0);
-    }
-    if policy_mode(&payload) == PolicyMode::Off {
-        std::process::exit(0);
-    }
-
-    let event = payload
-        .get("hook_event_name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if !is_guard_event(&payload, event) {
-        std::process::exit(0);
-    }
-
-    let tool = payload
-        .get("tool_name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
-        || std::env::current_dir().unwrap_or_default(),
-        PathBuf::from,
-    );
-    let tool_input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
-    let Some(tool_input) = tool_input.as_object() else {
-        std::process::exit(0);
-    };
-
-    let raw_path = tool_input
-        .get("file_path")
-        .or_else(|| tool_input.get("path"))
-        // Antigravity: view_file uses AbsolutePath; replace_file_content/write_to_file use TargetFile
-        .or_else(|| tool_input.get("AbsolutePath"))
-        .or_else(|| tool_input.get("TargetFile"))
-        // Cursor composer tools: target_file, filePath
-        .or_else(|| tool_input.get("target_file"))
-        .or_else(|| tool_input.get("filePath"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let anchor = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
+    let GuardRequest {
+        post_tool_use,
+        tool,
+        cwd,
+        tool_input,
+        raw_path,
+        route,
+    } = &request;
+    let (tool, cwd, raw_path) = (tool.as_str(), cwd.as_path(), raw_path.as_str());
+    let anchor = resolve(raw_path, cwd).unwrap_or_else(|| canonical(cwd));
 
     let idx_root = find_up(&anchor, ".pixel");
 
@@ -2729,7 +2701,7 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     // into a *delivered fact*: the PreToolUse doctrine says "run pixel impact
     // before editing a symbol", butthe bench shows agents don't. Here the
     // dependants arrive after the edit, unsolicited.
-    if event.eq_ignore_ascii_case("posttooluse") {
+    if *post_tool_use {
         post_tool_use_blast_radius(&anchor, idx_root.as_deref(), tool);
         std::process::exit(0);
     }
@@ -2738,27 +2710,15 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     let (manifest, manifest_expired) =
         manifest_pair(manifest_root.as_deref().map(load_manifest_state));
 
-    if is_shell_tool(tool) {
-        let cmd_value = tool_input
-            .get("command")
-            // Antigravity: run_command uses "CommandLine"
-            .or_else(|| tool_input.get("CommandLine"))
-            // Some harnesses use "cmd"
-            .or_else(|| tool_input.get("cmd"))
-            // Codex unified_exec passes argv under "input"
-            .or_else(|| tool_input.get("input"))
-            .cloned()
-            .unwrap_or(Value::Null);
-        // Codex passes argv as an array; everyone else passes a string.
-        let cmd_owned = command_text(&cmd_value);
-        let cmd = cmd_owned.as_str();
+    if let GuardRoute::Shell(cmd) = route {
+        let cmd = cmd.as_str();
         // SAFETY TIER FIRST: destructive git + git substitute + transcript store
         // advisories. These run before rewrite attempts so a safe read-only
         // rewrite never hides a more important mutation warning.
         if let Some(lines) = bash_deny_lines(cmd, idx_root.as_deref()) {
             advise(&non_blocking_advisory_lines(&lines));
         }
-        if let Some(lines) = git_mutation_substitute_lines(cmd, idx_root.as_deref(), &cwd) {
+        if let Some(lines) = git_mutation_substitute_lines(cmd, idx_root.as_deref(), cwd) {
             advise(&non_blocking_advisory_lines(&lines));
         }
         if let Some(store) = transcript_store_hit(cmd) {
@@ -2770,7 +2730,7 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         // priority over the advisory — the rewrite IS the resolution.
         if idx_root.is_some()
             && let Some(original) = tool_input.get("command").and_then(Value::as_str)
-            && let Some(rewritten) = crate::search_compat::rewrite(original, &cwd)
+            && let Some(rewritten) = crate::search_compat::rewrite(original, cwd)
         {
             // Read-only search rewrites are semantically equivalent, so
             // transparently replace the input and let the normal tool
@@ -2782,34 +2742,24 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         }
 
         // ADVISORY TIER (only if no rewrite applied): scoping advisory
-        check_bash_advisories(cmd, &cwd, idx_root.as_deref(), manifest.as_ref());
+        check_bash_advisories(cmd, cwd, idx_root.as_deref(), manifest.as_ref());
         std::process::exit(0);
     }
 
-    match tool {
-        "Read" | "Grep"
-        | "read" | "grep" | "find_file_by_name" | "notebook_read"
-        | "read_file" | "search" | "find" | "ls"
-        // Antigravity: view_file (read), grep_search (grep), find_by_name (find), list_dir (ls)
-        | "view_file" | "grep_search" | "find_by_name" | "list_dir"
-        // Cursor composer: file_search
-        | "file_search" => {
+    match route {
+        GuardRoute::Read => {
             non_shell_advisory(
                 tool,
                 tool_input,
-                &cwd,
+                cwd,
                 raw_path,
                 idx_root.as_deref(),
                 manifest.as_ref(),
                 manifest_expired,
             );
         }
-        "Edit" | "MultiEdit" | "NotebookEdit" | "Write"
-        | "edit" | "write" | "notebook_edit"
-        | "apply_patch" | "write_file"
-        // Antigravity: replace_file_content (edit), write_to_file (write), edit_file (edit)
-        | "replace_file_content" | "write_to_file" | "edit_file" => {
-            let Some(p) = resolve(raw_path, &cwd) else {
+        GuardRoute::Edit => {
+            let Some(p) = resolve(raw_path, cwd) else {
                 std::process::exit(0);
             };
             let exists = p.is_file();
@@ -2841,15 +2791,121 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
                         suggest_index_advisory(&git_root, true);
                     } else {
                         // Non-git directory: still suggest indexing.
-                        suggest_index_advisory(&canonical(&cwd), false);
+                        suggest_index_advisory(&canonical(cwd), false);
                     }
                 }
                 _ => {}
             }
         }
-        _ => {}
+        GuardRoute::Shell(_) | GuardRoute::Other => {}
     }
     std::process::exit(0);
+}
+
+/// Which branch of the guard a tool call takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GuardRoute {
+    /// A shell tool, with its command text.
+    Shell(String),
+    /// A read/search tool.
+    Read,
+    /// An edit/write tool.
+    Edit,
+    /// Any other tool: allowed silently.
+    Other,
+}
+
+/// A hook payload the guard acts on, decoded from stdin.
+#[derive(Debug, Clone, PartialEq)]
+struct GuardRequest {
+    /// The event is a PostToolUse (blast-radius delivery).
+    post_tool_use: bool,
+    tool: String,
+    cwd: PathBuf,
+    tool_input: serde_json::Map<String, Value>,
+    raw_path: String,
+    route: GuardRoute,
+}
+
+/// Decode a guard hook payload. `None` means allow silently (exit 0):
+/// invalid JSON, a non-object, policy `off`, a non-guard event, or a
+/// non-object `tool_input`. `policy` and `current_dir` are the I/O seams.
+fn guard_request(
+    input: &str,
+    policy: impl FnOnce(&Value) -> PolicyMode,
+    current_dir: impl FnOnce() -> PathBuf,
+) -> Option<GuardRequest> {
+    let payload = serde_json::from_str::<Value>(input).ok()?;
+    if !payload.is_object() || policy(&payload) == PolicyMode::Off {
+        return None;
+    }
+    let event = payload
+        .get("hook_event_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !is_guard_event(&payload, event) {
+        return None;
+    }
+    let tool = payload
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map_or_else(current_dir, PathBuf::from);
+    let tool_input = payload.get("tool_input")?.as_object()?.clone();
+    let raw_path = tool_input
+        .get("file_path")
+        .or_else(|| tool_input.get("path"))
+        // Antigravity: view_file uses AbsolutePath; replace_file_content/write_to_file use TargetFile
+        .or_else(|| tool_input.get("AbsolutePath"))
+        .or_else(|| tool_input.get("TargetFile"))
+        // Cursor composer tools: target_file, filePath
+        .or_else(|| tool_input.get("target_file"))
+        .or_else(|| tool_input.get("filePath"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let route = if is_shell_tool(&tool) {
+        let cmd_value = tool_input
+            .get("command")
+            // Antigravity: run_command uses "CommandLine"
+            .or_else(|| tool_input.get("CommandLine"))
+            // Some harnesses use "cmd"
+            .or_else(|| tool_input.get("cmd"))
+            // Codex unified_exec passes argv under "input"
+            .or_else(|| tool_input.get("input"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        // Codex passes argv as an array; everyone else passes a string.
+        GuardRoute::Shell(command_text(&cmd_value))
+    } else {
+        match tool.as_str() {
+            "Read" | "Grep"
+            | "read" | "grep" | "find_file_by_name" | "notebook_read"
+            | "read_file" | "search" | "find" | "ls"
+            // Antigravity: view_file (read), grep_search (grep), find_by_name (find), list_dir (ls)
+            | "view_file" | "grep_search" | "find_by_name" | "list_dir"
+            // Cursor composer: file_search
+            | "file_search" => GuardRoute::Read,
+            "Edit" | "MultiEdit" | "NotebookEdit" | "Write"
+            | "edit" | "write" | "notebook_edit"
+            | "apply_patch" | "write_file"
+            // Antigravity: replace_file_content (edit), write_to_file (write), edit_file (edit)
+            | "replace_file_content" | "write_to_file" | "edit_file" => GuardRoute::Edit,
+            _ => GuardRoute::Other,
+        }
+    };
+    Some(GuardRequest {
+        post_tool_use: event.eq_ignore_ascii_case("posttooluse"),
+        tool,
+        cwd,
+        tool_input,
+        raw_path,
+        route,
+    })
 }
 
 /// The shell-running tools of every supported harness: Claude's `Bash`,
@@ -5332,6 +5388,82 @@ fn search_can_replace(pattern: &str, flags: &[String], root: &str) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode(input: &str) -> Option<GuardRequest> {
+        guard_request(
+            input,
+            |_| PolicyMode::Advisory,
+            || PathBuf::from("/fallback"),
+        )
+    }
+
+    #[test]
+    fn guard_request_allows_silently_what_it_cannot_act_on() {
+        assert_eq!(decode("not json"), None);
+        assert_eq!(decode("[1]"), None);
+        assert_eq!(
+            decode(r#"{"hook_event_name":"Stop","tool_name":"Bash","tool_input":{}}"#),
+            None
+        );
+        assert_eq!(
+            decode(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":"x"}"#),
+            None
+        );
+        assert_eq!(
+            decode(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#),
+            None
+        );
+        let off = guard_request(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}"#,
+            |_| PolicyMode::Off,
+            PathBuf::new,
+        );
+        assert_eq!(off, None);
+    }
+
+    #[test]
+    fn guard_request_routes_each_tool_family() {
+        let shell = decode(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"/w","tool_input":{"command":"rg x ."}}"#,
+        )
+        .unwrap();
+        assert_eq!(shell.route, GuardRoute::Shell("rg x .".to_string()));
+        assert_eq!(shell.cwd, PathBuf::from("/w"));
+        assert_eq!(shell.tool, "Bash");
+        assert!(!shell.post_tool_use);
+
+        let codex = decode(r#"{"hook_event_name":"PreToolUse","tool_name":"unified_exec","tool_input":{"input":["grep","-n","x"]}}"#).unwrap();
+        assert_eq!(
+            codex.route,
+            GuardRoute::Shell(command_text(&serde_json::json!(["grep", "-n", "x"])))
+        );
+        assert_eq!(codex.cwd, PathBuf::from("/fallback"));
+
+        let read =
+            decode(r#"{"tool_name":"view_file","tool_input":{"AbsolutePath":"/a.rs"}}"#).unwrap();
+        assert_eq!(
+            (read.route, read.raw_path.as_str()),
+            (GuardRoute::Read, "/a.rs")
+        );
+
+        let edit = decode(
+            r#"{"hook_event_name":"postToolUse","tool_name":"Edit","tool_input":{"file_path":"/b.rs","path":"/c.rs"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (edit.route, edit.raw_path.as_str()),
+            (GuardRoute::Edit, "/b.rs")
+        );
+        assert!(edit.post_tool_use);
+
+        let other =
+            decode(r#"{"hook_event_name":"PreToolUse","tool_name":"WebFetch","tool_input":{}}"#)
+                .unwrap();
+        assert_eq!(
+            (other.route, other.raw_path.as_str()),
+            (GuardRoute::Other, "")
+        );
+    }
 
     /// Create a unique scratch dir (with a `src/` subdir) acting as the
     /// indexed repo root for path-validation tests. Returns the
