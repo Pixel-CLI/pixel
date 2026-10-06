@@ -1083,4 +1083,116 @@ mod tests {
         assert!(error.to_string().contains(".pixel/history.db"), "{error}");
         assert_eq!(std::fs::read(history_db_path(root)).unwrap(), before);
     }
+
+    /// A history db that Pixel did not write is wiped on open, never merged
+    /// into: `needs_rebuild` reads the `_pixel_marker` table and treats a db
+    /// without one — or with a `created_by` that is not `pixel-facts` — as
+    /// foreign. This covers both refusals the marker is checked for.
+    ///
+    /// The planted tables are asserted *gone*, not merely unread: a db that
+    /// kept its tables and only refused to serve them would still hand a
+    /// hostile repository's rows to a later query through another path.
+    #[test]
+    fn open_should_wipe_a_planted_history_database() {
+        for (case, marker) in [
+            ("no marker at all", None),
+            ("a foreign created_by", Some("someone-else")),
+        ] {
+            let (dir, _, _) = two_commit_repo();
+            let root = dir.path();
+            // Open once so `.pixel/` exists at its real 0700 mode before the
+            // plant, the way a hostile checkout would have left it.
+            drop(FactsStore::open(root).unwrap());
+            // `open_with` canonicalizes `.pixel/` before joining the db name,
+            // because `SQLITE_OPEN_NOFOLLOW` refuses a link at any component
+            // and macOS's temp dir is `/var` -> `/private/var`. The plant is
+            // written through the same directory the store reads.
+            let planted_path = root
+                .join(".pixel")
+                .canonicalize()
+                .unwrap()
+                .join(HISTORY_DB_FILE);
+
+            // Start from a db that carries none of Pixel's own rows: the
+            // opening store above left a valid marker behind, and a hostile
+            // repository's file would not have one. Drop it so the "no
+            // marker" case is really unmarked.
+            let clean = Connection::open(&planted_path).unwrap();
+            clean
+                .execute_batch("DROP TABLE IF EXISTS _pixel_marker;")
+                .unwrap();
+            drop(clean);
+
+            // Rows a hostile checkout would want a later query to return,
+            // one of them in Pixel's own `commits` table, which the store
+            // reads back without knowing who wrote it.
+            let planted = Connection::open(&planted_path).unwrap();
+            if let Some(by) = marker {
+                planted
+                    .execute_batch(&format!(
+                        "CREATE TABLE _pixel_marker (key TEXT PRIMARY KEY, val TEXT NOT NULL);
+                         INSERT INTO _pixel_marker (key, val) VALUES ('created_by', '{by}');"
+                    ))
+                    .unwrap();
+            }
+            planted
+                .execute_batch(
+                    "CREATE TABLE planted_commits (oid TEXT PRIMARY KEY, subject TEXT);
+                     INSERT INTO planted_commits (oid, subject) VALUES ('deadbeef', 'planted by a hostile repo');
+                     CREATE TABLE planted_only (secret TEXT);
+                     INSERT INTO planted_only (secret) VALUES ('attacker payload');
+                     INSERT INTO commits (oid, message) VALUES ('deadbeef', 'planted by a hostile repo');",
+                )
+                .unwrap();
+            drop(planted);
+
+            assert!(
+                FactsStore::needs_rebuild(&planted_path).unwrap(),
+                "{case}: needs_rebuild must refuse a foreign db"
+            );
+
+            let store = FactsStore::open(root).unwrap();
+
+            // Each planted table is gone, by name: a "must not happen" claim
+            // has to rule out every observable shape of it. The names are the
+            // planted ones only — Pixel's own `commits` must still exist.
+            for table in ["planted_only", "planted_commits"] {
+                let present: i64 = store
+                    .conn()
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                        [table],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    present, 0,
+                    "{case}: planted table {table} survived the wipe"
+                );
+            }
+
+            // The db is now demonstrably Pixel's own.
+            let created_by: String = store
+                .conn()
+                .query_row(
+                    "SELECT val FROM _pixel_marker WHERE key='created_by'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                created_by, "pixel-facts",
+                "{case}: the marker is not Pixel's"
+            );
+            assert!(
+                !FactsStore::needs_rebuild(&planted_path).unwrap(),
+                "{case}: a wiped db must not need rebuilding a second time"
+            );
+            assert_eq!(
+                store.index_state().total_commits,
+                0,
+                "{case}: the planted `commits` row survived the wipe"
+            );
+        }
+    }
 }

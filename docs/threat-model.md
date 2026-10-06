@@ -120,8 +120,9 @@ fields are agent-controlled. Entry points:
 and opens files through `pixel_index::index::open_regular_bounded`, which
 refuses a final-component symlink and anything over `MAX_FILE_BYTES`
 (4 MiB). `pixel-graph` parses each file with tree-sitter
-(`pixel_graph::extract::extract_file`) under the same 4 MiB cap, skips files
-with a NUL in their first `BINARY_SNIFF_BYTES`, and stops at
+(`pixel_graph::extract::extract_file`) under the same 4 MiB cap, cancels any
+parse still running after `PARSE_BUDGET` (3 s; the file then contributes no
+rows), skips files with a NUL in their first `BINARY_SNIFF_BYTES`, and stops at
 `DEFAULT_GRAPH_MAX_FILES` (50 000). Git-anchored shards read committed blobs
 through `git cat-file` rather than the filesystem.
 
@@ -204,9 +205,18 @@ version, sha256 check).
 
 ### 3.10 CI and release (B7)
 
-Pull requests run `ci.yml`, `cross-build.yml`, `mutants.yml`, `codeql.yml`,
+Pull requests run `ci.yml`, `cross-build.yml`, `codeql.yml`,
 `fuzz.yml` and the others listed in ARCHITECTURE.md, "Testing and gates".
 `board-sync.yml` runs on `pull_request_target` to move the project board.
+`mutants.yml` runs the cumulative main diff nightly, with read-only contents
+and Actions metadata access. It accepts checkpoint metadata only from its
+own completed main runs, and validates checkpoint ancestry before selecting
+the diff. Only fully judged campaigns write checkpoint artifacts; only scheduled main runs can produce or supply them.
+`coverage.yml` runs only at 02:47 UTC on main, with read-only contents and
+Actions access. Both instrumented jobs are skipped only after a successful
+scheduled measurement of the same SHA. Coverage is post-merge feedback;
+normal tests and lint still validate the PR head before merge. Local checks,
+including pre-push validation and reinstalling, are optional diagnostics.
 A `v*` tag runs `release.yml`, which calls `release-build.yml` to build and
 sign on GitHub-hosted runners.
 
@@ -275,10 +285,12 @@ boundary it crosses.
 - **Scenario**: a repository ships a huge, binary, deeply nested or malformed
   file to crash `pixel build-index` or the graph build, or to make a search
   pattern miss.
-- **Mitigation**: the caps in 3.4; symlinks are not followed by the walk;
+- **Mitigation**: the caps in 3.4, including the per-parse `PARSE_BUDGET`
+  that cuts off tree-sitter error recovery a few hundred malformed bytes can
+  stretch to minutes (#800); symlinks are not followed by the walk;
   `Shard::open` checks every section length with checked arithmetic before
   indexing into the map; the `graph_extract` fuzz target feeds arbitrary
-  source to `extract_file`, and `search_plan` checks that the query planner
+  source to `extract_file` and `extract_concepts`, and `search_plan` checks that the query planner
   never drops a document the verifier matches (`fuzz/`).
 - **Status**: Partial.
 - **Residual**: the tree-sitter grammars are C code outside Rust's memory
@@ -357,15 +369,23 @@ boundary it crosses.
 - **Mitigation**: the hook never executes `tool_input.command`; the rewrite
   grammar and quoting (3.3); rewritten paths must be regular files inside the
   discovered root, outside `.git` and `.pixel`, and not credential-shaped;
-  `tool_input.env` disables the rewrite; `task-event` caps its input at
-  `MAX_INPUT` (1 MiB) and `composed-guard` at `COMPOSED_MAX_INPUT`; every hook
-  except `task-event` fails open (exit 0), and `pixel install` registers a
-  10 s timeout (`HOOK_TIMEOUT`).
+  `tool_input.env` disables the rewrite; `guard`, `prompt-submit`,
+  `post-tool-use`, `metrics` and `task-event` read their payload through one
+  bounded reader, `hook_input::read_bounded`, capped at `MAX_HOOK_INPUT`
+  (1 MiB), so an over-cap payload is refused after `cap + 1` bytes instead of
+  being allocated in full; `composed-guard` keeps its own
+  `COMPOSED_MAX_INPUT` and `post-compaction` its smaller `MANIFEST_MAX_BYTES`
+  (64 KiB, which also bounds the manifest file it reads back); over-cap
+  `task-event` input emits its unavailable response, which denies `PreToolUse`
+  on an enforced session; the other hooks take their existing fail-open exit 0
+  and leave the native tool untouched; `pixel install` registers a 10 s
+  timeout (`HOOK_TIMEOUT`).
 - **Status**: Mitigated.
-- **Residual**: `guard`, `prompt-submit`, `post-tool-use` and `metrics` read
-  stdin without a cap, trusting the host; the native fallback after a
-  rewrite re-checks the file in Pixel's emulation but not in the native
-  `rg`/`grep` it falls back to.
+- **Residual**: the cap bounds allocation, not the wait — a host that writes
+  fewer than `MAX_HOOK_INPUT + 1` bytes and holds the pipe open still stalls
+  the hook until the host's `HOOK_TIMEOUT` (10 s) ends it; the native fallback
+  after a rewrite re-checks the file in Pixel's emulation but not in the
+  native `rg`/`grep` it falls back to.
 
 ### T11. A hook grants a permission it should not (E, B2)
 
@@ -534,14 +554,25 @@ boundary it crosses.
   write tokens (a "pwn request"), or injects through an interpolated title or
   body.
 - **Mitigation**: `board-sync.yml` (`pull_request_target`) never checks out
-  the pull request, runs with `permissions: {}`, and reads the body through
-  an environment variable; no workflow interpolates `github.event.*` or
+  the pull request, runs with `permissions: {}`, and never reads the
+  body: it takes the PR's closing issues from GitHub's GraphQL API; no workflow interpolates `github.event.*` or
   `inputs.*` directly in a `run:` script; workflows default to `contents:
   read`; runs of outside contributors wait for a maintainer's approval;
-  CodeQL scans the workflows (`actions` language).
+  CodeQL always scans workflows, Python and JavaScript with default security
+  queries on every PR. Rust analysis runs after merges to main, nightly and
+  on manual dispatch; a sensitive branch can be selected for a pre-merge
+  scan. The CodeQL merge-protection rule retains its error/medium-security
+  alert thresholds. The main ruleset also requires all three PR analysis
+  jobs from GitHub Actions; a missing or failed analysis cannot be hidden by
+  the aggregate CodeQL check's neutral warning about the omitted Rust config.
+  Its Rust extraction cache is separate from build/test caches;
+  only successful main analyses save executable build-script/proc-macro
+  outputs, while manual branch analyses may restore them. A cache hit never
+  replaces an analysis.
 - **Status**: Partial.
-- **Residual**: any pull request body can name `Task <n>` and move that
-  issue's board status; workflows that compile pull-request code on the
+- **Residual**: Rust CodeQL findings may be discovered after merge; triage
+  them before the next release. Any pull request can link an issue with a
+  closing keyword (`Closes #<n>`) and move that issue's board status; workflows that compile pull-request code on the
   persistent self-hosted runner depend on that runner's isolation, which is
   an operational control outside this repository.
 
@@ -580,9 +611,9 @@ boundary it crosses.
 
 | Path | Code | Tests |
 | --- | --- | --- |
-| Daemon request framing | `daemon::handle_conn`, `read_capped_line` | `oversized_line_is_rejected_without_unbounded_drain`, `expired_connection_deadline_stops_frame_read`, `socket_identity_should_follow_the_file_not_the_path` (`daemon.rs`); no test reads the socket's 0600 mode back |
+| Daemon request framing | `daemon::handle_conn`, `read_capped_line` | `oversized_line_is_rejected_without_unbounded_drain`, `expired_connection_deadline_stops_frame_read`, `socket_identity_should_follow_the_file_not_the_path`, `the_daemon_socket_should_be_0600_after_bind` (`daemon.rs`) |
 | Protocol skew | `classify_ping`, `PROTOCOL_VERSION` | `op_name_matches_serde_tag`, `session_capabilities_track_every_real_op` (`pixel-proto`) |
-| Planted history database | `FactsStore::needs_rebuild`, `_pixel_marker` | no dedicated test of the wipe; `concurrent_open_on_poisoned_db_never_ioerrors` covers the rebuild path |
+| Planted history database | `FactsStore::needs_rebuild`, `_pixel_marker` | `open_should_wipe_a_planted_history_database` (both refusals: no marker, foreign `created_by`; asserts the planted tables are gone and the marker is Pixel's); `concurrent_open_on_poisoned_db_never_ioerrors` covers the rebuild path |
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
 | Guard rewrite and permission | `search_compat::shell_argv`, `shell_quote`, `retrieval_permission_response` | `shell_parser_is_conservative_and_keeps_quoted_words`, the `permission_*` tests in `guard.rs`, `crates/pixel/tests/cli/guard_deny.rs` and `guard_enforce.rs` |
 | Composed foreign hooks | `load_composed_backup`, `run_foreign_command` | `composed_backup_replays_foreign_hooks_and_refuses_pixel_under_either_verb`, `composed_codex_*` in `guard_deny.rs` |
@@ -596,18 +627,20 @@ boundary it crosses.
 
 Across all of them:
 
-- **Mutation testing**: every pull request touching `crates/` must leave no
-  `MISSED` mutant in its diff (`mutants.yml`, `Mutants in diff`), and
-  `mutants-nightly.yml` rotates through the whole tree; a guard whose check
-  can be removed without a test failing does not merge (CONTRIBUTING.md,
-  "Mutation testing").
+- **Mutation testing**: `mutants.yml` checks main's cumulative diff nightly,
+  only when it has unjudged commits. Survivors and incomplete campaigns
+  fail that run and require follow-up; this is post-merge detection, not a
+  condition of merge. A test-only weakening can escape a diff campaign;
+  that limitation is accepted by the nightly cumulative-diff policy.
 - **Fuzzing**: `fuzz.yml` runs every cargo-fuzz target for 60 s on a pull
   request touching `fuzz/`, `pixel-graph`, `pixel-index`, `pixel-git`, the
   root `Cargo.toml` or `deny.toml`, for 600 s weekly, and for 120 s on every
   `v*` tag before `release.yml` builds anything.
-- **Static analysis**: `codeql.yml` scans Rust, the workflows, Python and
-  JavaScript/TypeScript on every pull request into `main`, every push to it,
-  and weekly; `cargo clippy` with warnings denied runs in CI.
+- **Static analysis**: `codeql.yml` scans workflows, Python and
+  JavaScript/TypeScript on every pull request into `main`. Rust runs after
+  merge, nightly at 05:41 UTC and manually on a selected branch; those
+  events scan all four languages. Rust findings require triage before the
+  next release; `cargo clippy` with warnings denied remains in PR CI.
 - **Dependencies**: `cargo deny check` and `scripts/check-advisory-ignores.py`
   in CI; Dependabot weekly for Cargo and GitHub Actions.
 

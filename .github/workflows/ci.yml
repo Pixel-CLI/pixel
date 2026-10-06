@@ -375,7 +375,7 @@ jobs:
         with:
           # One key for every job that builds the debug profile on Linux
           # (this one and mutants.yml), instead of the default per-job key.
-          # The Mutants workflow only runs on pull_request, so it can never
+          # The Mutants workflow sets save-if:false, so it can never
           # save under the main rule below: without a shared key it
           # started from an empty cache on every PR.
           shared-key: linux-debug
@@ -443,17 +443,9 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-gates.py
 
-      - name: Pre-push contract (stub cargo, disposable repo)
+      - name: Pre-push starts no local validation
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: sh scripts/test-pre-push.sh
-
-      - name: Mutation exposure pre-push contract (stub cargo, disposable repo)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: sh scripts/test-mutants-preflight.sh
-
-      - name: Remote mutation gate host contract (disposable worker home)
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: sh scripts/test-mutants-gate-host.sh
 
       - name: Release prepare contract (stub gh and cargo, disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
@@ -485,9 +477,17 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-prepare-only.py
 
-      - name: Nightly mutants rotation and report contract
+      - name: CodeQL scan policy contract
         if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: python3 scripts/test-mutants-nightly.py
+        run: python3 scripts/test-codeql-policy.py
+
+      - name: Nightly coverage selection contract
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-coverage-nightly.py
+
+      - name: Nightly diff checkpoint contract
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-mutants-nightly-range.py
 
       - name: Mutation gate config contract (no module silently excluded)
         if: ${{ needs.changes.outputs.scripts == 'true' }}

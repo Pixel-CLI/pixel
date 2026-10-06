@@ -22,7 +22,12 @@ each link the change touches:
 4. **Every resolution path**, not only the first one:
    - `resolve_calls` (full build and changed files),
    - `resolve_references` and its `names_a_symbol` prefilter,
-   - `resolve_all` (retries stored `unresolved_calls` rows),
+   - `resolve_affected` (an incremental update retries the stored
+     `unresolved_calls` rows whose inputs its batch changed; `resolve_all`
+     retries them all and is the reference). A new input a decision reads
+     goes into `Affected` too, or the update keeps the row the build would
+     resolve: `an_incremental_update_should_retry_every_row_whose_inputs_changed`
+     holds one step per input,
    - `reconsider_resolved_calls` (a changed definition re-decides edges),
    - the incoming-edge demotion in `write_rows` (a rewritten target file),
    - the dangling-import re-resolution in `write_rows` (a file added after
@@ -60,6 +65,13 @@ cases that separate it from a file-wide approximation. For a Rust `use`
 Other languages get the same treatment for their import forms (TS `import {
 a as b }`, re-exports, default imports; Ruby calls without receiver or
 parentheses, #236).
+
+Line-only symbol spans do not prove Ruby lexical scope at their boundaries:
+`class C < B.run` evaluates `B` outside `C`, and `end; B.run` can be outside
+the class whose span includes that line (verified 2026-10, RB-04 fixture).
+Until a stored AST scope or columns distinguish these sites, relative constant
+receivers on class/module boundary lines stay unresolved; an absolute `::B`
+does not need lexical scope.
 
 ## Tier honesty
 

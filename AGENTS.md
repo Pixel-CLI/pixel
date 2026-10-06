@@ -4,23 +4,12 @@
 
 ## Mutation Testing Loop
 
-- Mutation testing runs twice, both off the laptop: the pre-push gate (`scripts/mutants-remote-gate.sh`) bundles the committed diff to the gate host (default the ssh alias `a2`) and blocks the push on the campaign's verdict against a warm `target/`; the `Mutants` workflow then re-runs the same diff's shards on the same host and fails the pull request on any surviving mutant.
-- Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the gate host and the workflow's runners are for.
-- The loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push. A blocked push already lists the `MISSED`/`TIMEOUT` lines from the gate host — fix them and push again; the traveling outcome cache (`target/mutants-preflight/`) makes the retry re-test only the survivors. A PR opened after a green push has `Mutants in diff` necessarily green.
-- A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.
-- When the gate host is down: `PIXEL_MUTANTS_GATE=off git push` skips the remote run and leaves the verdict to CI. Do not make that the habit — CI then waits 5 to 10 minutes to say what the gate would have said in one.
-
-One habit keeps the CI side from being the bottleneck:
-
-- **Do not wait on the job.** Start `gh pr checks <pr> --watch` as a background task and work on the next unit (the next pull request of the stack, another worktree) until it returns; then read the `MISSED` lines. Never a foreground `sleep` loop.
-
-For each `MISSED` line either:
-
-- add a test that fails under that exact mutation (an assertion on the observable contract, not a weaker one), or
-- when the mutation cannot matter (a diagnostic formatter, a `main`, dead-by-design code), annotate the function with `#[cfg_attr(test, mutants::skip)]` plus a one-line reason, adding `mutants = { workspace = true }` to that crate's `[dependencies]` if it is the crate's first skip.
-
-Push the fix and let the workflow re-run until it reports `0 missed`. Skipping a business rule because the test is hard is not an option; see CONTRIBUTING.md "Mutation testing" for the outcome table and exit codes.
-
+- Automatic mutation testing runs once a night on `main`, only when commits remain since the last completed campaign. `.github/workflows/mutants.yml` mutates that cumulative diff; neither pull requests nor the pre-push hook run mutations.
+- Local builds, tests and review are optional diagnostic tools. Publish the reviewable candidate without a local gate; CI must validate the current PR head before merge. The pre-push hook runs no checks.
+- Mutation execution is scheduled CI only. Do not run local, PR or manual-dispatch campaigns. Use ordinary tests for diagnosis and the next nightly for mutation feedback.
+- A nightly campaign keeps its previous checkpoint if a shard crashes, its baseline fails, or the results are incomplete. A complete campaign with `MISSED`/`TIMEOUT` advances the checkpoint but stays red, with outcomes and the report retained in Actions.
+- For each reported survivor, add a test that fails under that exact mutation, or use a narrowly justified `#[cfg_attr(test, mutants::skip)]` only when the mutation cannot affect a contract. Skipping a business rule because its test is hard is not an option.
+- Watch PR checks in the background with `gh pr checks <pr> --watch`; never a foreground sleep/poll loop. Mutation results are post-merge feedback, not a PR gate.
 
 ## Rules Directory
 
@@ -40,11 +29,11 @@ apply to:
 | `change-propagation.md` | always | list every producer and reader of a value before changing it; siblings without the new input, version bumps, named constants, secrets in every sink, timers around the real cost |
 | `graph-resolver.md` | `crates/pixel-graph/**` | the chain a resolution change crosses (extraction, storage, index, six resolution paths, `rename`, diagnostics), the language rule it models, tier honesty |
 | `install-layouts.md` | `crates/pixel-install/**` | repo equal to `$HOME`, foreign configs, quoted paths in pasted commands, global and repo-local state kept apart |
-| `verify-installed-first.md` | always | when a change moves installed behaviour (hooks, deployed prompts, the binary), install and verify against the real installed binary / a real hook payload *before* writing or churning unit tests — a hand-built unit call that passes while the installed path is broken proves nothing |
+| `verify-installed-first.md` | always | when a change moves installed behaviour (hooks, deployed prompts, the binary), optional installed-path diagnosis and the evidence required to claim a deployment was verified |
 | `readme-webp.md` | `docs/examples/*.webp`, `docs/motion/**` | the verified lossless pipeline for README animated webp: render crf=10, 1600×1000 lanczos frames, `img2webp -lossless`, embed `width="800"` |
-| `project-task.md` | always | before any work: find the issue on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1) or open one and add it; the PR body opens with `Task <number>` (declared exceptions: `no task: <reason>`); the board Status follows the PR — In Progress at open, Done only at merge, back to Todo when closed unmerged |
-| `review-gate.md` | always | before pushing a feature branch: fetch the remote default (rebase only on a conflict or a needed change), then fix every `pixel review-gate` finding at CONCERN or above — the pre-push hook enforces the review |
-| `validation-loop.md` | always | publish one current validated candidate: scoped local feedback while editing, a frozen full-gate result, baseline compile and remote mutation verdict before Rust pushes, and precise CI triage |
+| `project-task.md` | always | before any work: find the issue on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1) or open one; the PR body opens with `Closes #<number>` (`Refs #<number>` for part of it), which closes the issue on merge; `board-sync.yml` moves the board from that link — In Progress while open, Done only at merge, back to Todo when closed unmerged |
+| `review-gate.md` | always | optional local review: current-base diff, triage findings, no pre-push enforcement |
+| `validation-loop.md` | always | optional local diagnosis, prompt publication, required current-head CI and failure triage |
 | `pr-swarm.md` | `scripts/pr-swarm.sh`, `.claude/settings.json` | the rmux pane-per-open-PR reconciler: the tool, the SessionStart watcher that replaces launchd (macOS TCC denies launchd any path under `~/Documents`), and the teardown rails that keep a merged PR's worktree when it is dirty, unpushed or the shared cache |
 
 `.claude/rules` is a symlink to that directory (Claude Code loads it by
@@ -69,7 +58,8 @@ and its supporting files; `.claude/skills` is a symlink to it.
 | `section-redesign/` | reworking a section of the pixel-cli.dev home, "/section-redesign #<anchor>", "même méthode que le hero" | the loop the hero went through: visitor critique, an artifact of mocked variants with votable points (`assets/review-sheet.html`), synthesis iterations, every claim checked against code and benchmarks, the Hugo implementation with desktop and mobile captures; lists the decisions that already bind every section |
 | `improve-codebase-architecture/` | manual only: "/improve-codebase-architecture [area]", an architecture review, where to deepen modules | finds deepening opportunities from churn, `pixel audit`, areas and callers, writes a local HTML report of before/after cards with their measured cost (mutants, diff, `ARCHITECTURE.md` sections, impact risk), then grills the picked candidate into a project-3 task; settled decisions live in `ARCHITECTURE.md` and `.agents/rules/`; adapted from Matt Pocock's MIT skill (`UPSTREAM` pins the commit) |
 | `agent-session-debugging/` | debugging real pi, agy, Claude, or Codex behavior in Herdr, especially Pixel retrieval, metrics, or installed hooks | keeps the main operator pane beside a 2×2 agent grid; inspect real transcripts, ask the CLI directly when its UI is ambiguous, then implement, retest, and redeploy with evidence |
-| `validation-loop/` | implementing Rust, preparing a PR, or reducing compile and mutation-fix round trips | chooses scoped local feedback, freezes one candidate, uses the remote mutation gate, and triages failed gates without blind push retries |
+| `pr/` | opening a pull request, writing or revising its body | fills `.github/pull_request_template.md`: `Closes #N`, a Summary sketch built from `pixel impact`/`who-calls`, before/after Evidence with commands, Merge Danger (one-way doors of this repo, blast radius), Docs touched; adapted from Matt Pocock's and HumanLayer's MIT skills (`UPSTREAM` pins both) |
+| `validation-loop/` | implementing Rust, preparing a PR, or reducing compile and mutation-fix round trips | chooses scoped local feedback, freezes one candidate, keeps mutations in nightly main feedback, and triages failed gates without blind push retries |
 
 Rules are always-on for the files they name; a skill is read when its
 `description` matches the task. A tool without skill support reads
@@ -78,14 +68,32 @@ a rule disagree, the rule wins (and the `Cargo.toml` lint table wins over both).
 
 ## Local Validation Loop
 
-- During editing, run the tests for the changed contract and its affected consumers, plus crate-scoped compilation or Clippy when needed. Run the full gates in CONTRIBUTING.md once the reviewable unit is ready, and again after a fix that can change their result; a status update or an unchanged tree does not need another run.
+- Choose local compilation, tests, lint or review only when they help diagnosis or reduce uncertainty. No local check is required before publishing a PR. CI runs the required gates; fix failures on the current head before merge.
 - Long local gates may run as a background task. Keep their checkout unchanged until they finish; to keep editing, validate a committed snapshot in a separate worktree with its own `target/`. Record the SHA, command, log and exit status. A pass covers that snapshot only, not later edits.
 - Keep Cargo builds sequential within one `target/`; parallel workers need separate build directories and a combined CPU/memory budget. Do independent review or another unit while gates run. When no useful independent work remains, wait for completion without repeated polling.
 - The CI lanes remain required before declaring the PR ready. See CONTRIBUTING.md "Agent validation workflow" for the local/CI split and how to verify the final run.
 
-## Reinstall and Reconfig After Each Implementation Unit
+## Cloud Sessions
 
-Complete this checklist once per finished reviewable implementation unit—including tests, website behavior/assets, install/config, and other non-Rust code—before declaring it done. Intermediate edits and progress replies do not trigger it. Run it earlier when a check needs the installed binary or hooks to exercise the new behavior, and repeat it if subsequent edits change the binary or installed rules. Only the explicit skip cases below apply:
+In a hosted agent session (Claude Code on the web), the environment differs
+from a maintainer's laptop:
+
+- `gh` may be installed without a usable token. Read and write GitHub through
+  the session's GitHub tools (MCP) instead: issues, PR creation, checks, and a
+  PR-activity subscription in place of `gh pr checks --watch`. The project 3
+  Status still follows the PR through `.github/workflows/board-sync.yml`.
+- When `pixel doctor . --json` reports `graph.freshness` red, run
+  `pixel prepare-repo .` once before graph or concept retrieval; until then
+  concept search ranks poorly.
+- Give `rg` an explicit path (`rg -n 'x' .`): with no path and a non-terminal
+  stdin, it reads stdin and waits forever.
+
+## Optional Local Install Verification
+
+Use this checklist only when local diagnosis needs the installed binary/hooks,
+or when the user requests a local deployment. It is not a publication or merge
+prerequisite. Otherwise leave the managed install alone and report CI results.
+When choosing to install, use the safe procedure below and report what passed.
 
 1. **Rebuild and reinstall the pixel binary** so the installed CLI matches the working tree:
    ```bash
@@ -97,7 +105,9 @@ Complete this checklist once per finished reviewable implementation unit—inclu
    - **Track B:** `pixel install` — reinstall hooks and managed blocks. Where `build-agent-config` is installed (it regenerates per-tool rule directories from `~/.agent-config`), run it first: `build-agent-config && pixel install`.
 3. **Run `pixel doctor . --fix --fail-on yellow`** and confirm it exits 0: `--fix` runs each repair command once and re-runs the checks (explicitly report each repair that did not end `fixed`, and each check left with a `fix:` line it cannot run by itself).
 
-Do not report the unit complete without evidence that self-update succeeded, both parallel tracks completed, and doctor exited 0. If a step cannot run, report the unit as incomplete and name the blocker rather than silently skipping it.
+Do not claim the local install was verified unless self-update, both tracks
+and doctor succeeded. A failed optional installation check is reported with
+its blocker; it does not make successful CI invalid.
 
 One check needs a human and no `--fix` clears it: `repo.codex-hook-review`. Codex runs a repository's hooks only after someone reviews them with `/hooks` in `codex`, and it keys that review by the `hooks.json` path, so every new worktree starts yellow; pixel never writes that trust itself. In a worktree Codex will not run in, add `--skip repo.codex-hook-review` to the doctor command (here and in the side build below) and name the skip in the report. Where Codex will run, review the hooks once with `/hooks` instead.
 
@@ -113,10 +123,10 @@ Only when the unit changes what the home install writes (`crates/pixel-install/`
 
 Both commands target the account's login shell (from the user database, not `$SHELL`, which an agent's command tool overrides: Claude Code's runs under `/bin/zsh` on a fish machine): `install` removes the retired `claude()` wrapper from that shell's profile and `doctor` reports one that remains. If `doctor` still reports `install.legacy-wrappers` for the wrong profile, pass the shell a human launches `claude` from to both commands: `--shell fish`.
 
-### When to skip
+### Default: no local installation
 
-- Pure read-only exploration (no edits to `crates/` or rules).
-- The turn only touched docs, prompts, bench scripts, or contributor instructions (`AGENTS.md`, `CONTRIBUTING.md`, `.agents/`) — nothing that changes binary behavior or installed rules.
+Rebuild, install, index and doctor are optional unless local deployment was
+explicitly requested. Documentation and workflow work does not require them.
 <!-- pixel:warp-retrieval:begin -->
 This repository has a Pixel index (`.pixel/`). Retrieval starts with Pixel: `pixel search-content -F '<identifier>'` for exact identifiers, `pixel find-code '<concept>'` for behavior-described code, and `pixel impact '<symbol>'` before renames — a native grep/rg over indexed code is a missed retrieval; native tools stay available for everything Pixel does not cover, and two fruitless pixel calls mean switch to grep.
 <!-- pixel:warp-retrieval:end -->

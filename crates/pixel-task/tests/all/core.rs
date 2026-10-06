@@ -777,7 +777,7 @@ fn interrupted_spawn_is_unknown_and_live_process_groups_are_not_replayed() {
     let lease = directory.path().join("run.json");
     fs::write(&lease, r#"{"state":"starting","process_group":null}"#).unwrap();
     assert!(matches!(
-        pixel_task::runner::check_recovery(&lease),
+        pixel_task::sandbox::check_recovery(&lease),
         Err(Error::Blocked(_))
     ));
     // SAFETY: getpgrp only reads this test process's process-group identity.
@@ -788,11 +788,11 @@ fn interrupted_spawn_is_unknown_and_live_process_groups_are_not_replayed() {
     )
     .unwrap();
     assert!(matches!(
-        pixel_task::runner::check_recovery(&lease),
+        pixel_task::sandbox::check_recovery(&lease),
         Err(Error::Busy(_))
     ));
     fs::write(&lease, r#"{"state":"finished","process_group":null}"#).unwrap();
-    assert!(pixel_task::runner::check_recovery(&lease).is_ok());
+    assert!(pixel_task::sandbox::check_recovery(&lease).is_ok());
 }
 
 #[test]

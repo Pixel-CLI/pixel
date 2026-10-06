@@ -2199,7 +2199,7 @@ fn antigravity_pre_invocation_should_inject_pixel_matches_without_denial() {
     // The ordered task route is appended from the recovered request.
     assert!(message.contains("[PIXEL:EXECUTION_ROUTE]"), "{message}");
     assert!(
-        message.contains("rtk pixel search-content -F 'AGY-PIXEL-7319'"),
+        message.contains("pixel search-content -F 'AGY-PIXEL-7319'"),
         "{message}"
     );
     let metric_lines = message
@@ -2405,7 +2405,7 @@ fn antigravity_pre_invocation_should_inject_the_task_route_built_from_the_recove
     // exact search and runs one task-aware find-code fallback on empty.
     assert!(message.contains("[PIXEL:EXECUTION_ROUTE]"), "{message}");
     assert!(
-        message.contains("rtk pixel search-content -F 'AGY-PIXEL-ROUTE-44'"),
+        message.contains("pixel search-content -F 'AGY-PIXEL-ROUTE-44'"),
         "{message}"
     );
     let metric_lines = message
@@ -2419,7 +2419,7 @@ fn antigravity_pre_invocation_should_inject_the_task_route_built_from_the_recove
     );
     assert!(message.contains("maximum 40-line window"), "{message}");
     assert!(
-        message.contains("rtk rg -m 5 -n -F -- 'AGY-PIXEL-ROUTE-44' ."),
+        message.contains("rg -m 5 -n -F -- 'AGY-PIXEL-ROUTE-44' ."),
         "{message}"
     );
     assert!(message.contains("[/PIXEL:EXECUTION_ROUTE]"), "{message}");

@@ -308,13 +308,26 @@ fn unresolved_breakdown() {
         let outcome = if site.enclosing.is_none() {
             stats.top_level += 1;
             "top-level"
-        } else if has_real_receiver(site.receiver.as_deref())
+        } else if !reference
+            && has_real_receiver(site.receiver.as_deref())
             && def.is_some_and(|d| d.files.contains(&site.file_id))
         {
             stats.shadowed += 1;
             "shadow"
         } else if matches!(
-            idx.decide_at(site.file_id, &site.name, None, site.site_line),
+            if reference {
+                // A reference's receiver column is the receiving DSL, not
+                // a call receiver. Replay the same owner-aware decision.
+                idx.decide_reference(
+                    site.file_id,
+                    site.enclosing,
+                    &site.name,
+                    site.receiver.as_deref(),
+                    site.site_line,
+                )
+            } else {
+                idx.decide_at(site.file_id, &site.name, None, site.site_line)
+            },
             Decision::Unresolved
         ) {
             stats.no_candidate += 1;

@@ -6,7 +6,6 @@
 #
 #   scripts/gates.sh            # skip when nothing Rust-affecting changed
 #   scripts/gates.sh --force    # run even when nothing changed
-#   scripts/gates.sh --mutants  # also run cargo-mutants on the diff against origin/main
 #
 # Why a script instead of three commands:
 # - Skip-if-untouched: outside CI, when neither the diff against `main` nor
@@ -30,11 +29,9 @@
 set -eu
 
 FORCE=0
-MUTANTS=0
 for arg in "$@"; do
     case "$arg" in
         --force) FORCE=1 ;;
-        --mutants) MUTANTS=1 ;;
         -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "gates.sh: unknown argument: $arg" >&2; exit 2 ;;
     esac
@@ -106,8 +103,9 @@ step "release prepare contract" python3 scripts/test-prepare.py
 step "release candidate contract" python3 scripts/test-release-candidate.py
 step "gate runner contract" python3 scripts/test-gates.py
 step "pre-push contract" sh scripts/test-pre-push.sh
+step "CodeQL scan policy contract" python3 scripts/test-codeql-policy.py
+step "nightly diff checkpoint contract" python3 scripts/test-mutants-nightly-range.py
 step "mutants config contract" python3 scripts/test-mutants-config.py
-step "mutants gate host contract" sh scripts/test-mutants-gate-host.sh
 step "clean contract" python3 scripts/test-clean.py
 step "harness recorder contract" python3 scripts/test-harness-recorder.py
 
@@ -128,23 +126,6 @@ else
     step "cargo test" cargo test --workspace --locked --no-fail-fast
 fi
 
-if [ "$MUTANTS" -eq 1 ]; then
-    # What a CI shard runs, without --shard and --in-place: the same diff
-    # (the merge base with origin/main, as the workflow and
-    # scripts/mutants-preflight.sh take it; a stale local `main` would add
-    # or drop mutants), the same order, the cargo arguments of
-    # .cargo/mutants.toml and the pinned cargo-mutants version.
-    # The pinned nightly first: .cargo/mutants.toml hands the test binary
-    # --fail-fast, which stable libtest rejects
-    # (scripts/mutants-toolchain.sh).
-    # shellcheck source=/dev/null
-    . "$REPO/scripts/mutants-toolchain.sh"
-    sh "$REPO/scripts/mutants-version-check.sh" "$REPO"
-    diff_file="$(mktemp)"
-    git diff "${PIXEL_MUTANTS_BASE:-origin/main}...HEAD" > "$diff_file"
-    step "cargo mutants (in diff)" cargo mutants --no-shuffle --in-diff "$diff_file"
-    rm -f "$diff_file"
-fi
 
 echo
 echo "gates.sh: all gates passed"

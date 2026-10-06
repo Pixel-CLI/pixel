@@ -8,6 +8,7 @@ pub mod model;
 pub mod policy;
 pub mod replay;
 pub mod runner;
+pub mod sandbox;
 pub mod snapshot;
 pub mod store;
 
