@@ -8,6 +8,21 @@ This removes a systematic source of extra model work, but cannot guarantee
 identical answers, tokens or latency across stochastic model runs. Independent
 task hooks and optional skill metadata still have a cost.
 
+## Skill decisions from the local runs
+
+| Information need | Observed evidence | Current decision |
+| --- | --- | --- |
+| Literal lookup, locale/API questions, component references | Generic runs favored native retrieval; context-parity controls did not show a Pixel benefit. | Native tools; no Pixel retrieval trigger. |
+| A private helper's local rename | Legacy s3 found more named callers with Pixel, but doubled median tokens; the useful chain stayed in one file. | Native when that file already answers the question. |
+| Callers or change impact across files | g5 loaded the impact skill and queried successfully, then used more tokens/time and omitted a requested helper name. | Narrow, explicit impact skill; no automatic promotion. |
+| A path between named entry and destination | g6 returned the correct path, but queried after reading that same path in source; tokens increased 40.5%. | Candidate rejected for automatic activation; retained only in arena fixtures. |
+| History archaeology or earlier-session recall | No matched task-specific skill comparison in the local results. | No automatic trigger inferred from unrelated Q&A runs. |
+
+These are task-level choices, not aliases for `grep`, `ls`, `echo`, or every
+Pixel subcommand. Skill selection, successful command execution and a net
+answering benefit are measured separately. A skill may decline to query Pixel
+when native source inspection already resolves the information need.
+
 ## Measurement corrections
 
 `rank.py` now selects the requested tasks, arms and repetitions from one output
@@ -694,3 +709,157 @@ authentication and was not rerun. The installed Rust implementation and its
 validation above are unchanged. Corrected harness SHA-256: `415faf83aa7b4748881c34ecc6fbccaf0dd6f8761a6c412fe036541208aa44e8`.
 The receipt and test log are `target/native-default-evidence/oauth-output-redaction-receipt.json`
 and `target/native-default-evidence/oauth-redaction-arena-tests-final.log`.
+
+## 2026-10-06: task-specific skill refinement
+
+The local transcript audit separates a useful capability from a reason to
+activate it. Generic locale routing, API research and component-reference
+questions favored native retrieval. The later generic skill-only control
+also found no benefit, even though the candidate skill was not read. These
+results exclude literal lookup, known-file reading, routine explanations and
+UI-label renames from an impact skill's description.
+
+The legacy `s3-rename-impact` transcripts contain three runs per arm. Their
+median required-pattern score was 9/12 for Pixel and 6/12 for raw; median
+gross tokens were 115,184 versus 54,636, and wall time 35s versus 20s.
+Pixel named the production caller `shell_path_check_within` in all three
+answers; raw named it once. Both arms named the test and the same source file.
+Raw described the private surface in all three answers; Pixel did so in two.
+The graph only supplied the `bounded_output` → `shell_path_check_within` →
+`shell_path_check` chain within `doctor.rs`. This is a completeness signal for
+one local helper, not a cross-file graph or efficiency win. The scenario's
+hard-coded definition/caller line numbers are obsolete and neither arm earned
+those points. Missing source, image and Codex-version receipts prevent
+attributing these old transcripts to the current candidate. Parsed answer
+features are retained in
+`target/native-default-evidence/skill-routing-evidence/s3-rename-impact-audit.json`.
+Reproduce these numbers with
+`rtk python3 target/native-default-evidence/skill-routing-evidence/s3_audit.py`
+from the repository root. The script delegates parsing and scoring to
+`eval/arena/rank.py`; its receipt, `s3-rename-impact-reproduction.json` in the
+same directory, records the scenario and all six transcript hashes. Script
+SHA-256: `a7b1fafa9a7f4eefbbc537e213a01b7ebb15e17732fe0d2948cdd467ef70ffa5`.
+
+The refined impact instructions therefore permit abstention when one file
+already answers the question, distinguish production callers from tests and
+textual references, and use depth one for a direct-caller question. They do
+not treat a broad implementation-policy request as a reason to query a graph.
+The distributable invocation policy is unchanged; editing a description does
+not establish reliable automatic selection or a benefit.
+
+Call-path tracing is a separate candidate: a request for the path between a
+known entry and destination can require relationships across files. Its next
+screen is one task, one repetition and two arms, using a source-derived oracle
+and the same pinned image, repository and graph preparation. Gross tokens are
+the primary efficiency proxy; semantic correctness, requested completeness,
+wall time, skill activation and actual command results are separate outcomes.
+Setup is recorded separately. The candidate is staged only for the arena;
+the current `call-path` implementation can maintain indexes and is not yet a
+bounded production retrieval route. No call-path benefit or promotion is
+claimed before that screen. Dedicated history and transcript-recall skills
+likewise have no matched supporting task runs in these local results.
+
+## Call-path skill screening result
+
+Run `g6-call-path-skill-r1` tested the separate candidate under
+`eval/arena/skills/pixel-call-path`, not a generated host package. The prompt
+asks for the ordered path from the transfer API's `POST` to
+`GhostClient.findPostsByTitle` and its Ghost SDK call. Before model execution,
+independent source inspection established two internal edges across three
+files: `POST` → `transferPageToGhost` → `findPostsByTitle`. The final
+`this.api.posts.browse` call is an external SDK boundary, verified from source.
+It is not a third internal graph edge.
+
+Both arms used the foreign revision
+`5c47874700c23a6c9e976de3f553ffe75bac39d8`, Codex `0.160.0`, Terra medium,
+and image
+`sha256:c0b7944e43713319226c5e1b096b6b5c80c8f9e7eb8f1420fdf65e1354701f1e`.
+Its Linux Pixel binary SHA-256 is
+`c07dded9c99b09c062ffcb58f373d8684a0970e83c6c73032fd2f531888b29ff`.
+That binary was built from archived commit `ab39daec219e75514fd3fa360cd01f6932d307ff`;
+its own version reports `commit unknown` because the archive has no `.git`.
+The archive/build receipt, rather than the runner's generic `pixel_source_id`,
+establishes its provenance. Later working-tree changes affect external skill
+text and experiment files only.
+
+The no-model preflight returned both expected edges and left the prepared
+graph hash unchanged. The two model containers each prepared their own graph
+with `pixel prepare-repo --no-daemon /repo`; setup took 757ms raw and 703ms
+candidate, separately from the model times below. Static base instructions
+matched, neither arm had hooks, and only the candidate discovered the staged
+skill with implicit selection enabled. The committed fixture remains disabled.
+The model-time query started a daemon; its action log records 223ms including
+221ms of startup. The graph hash stayed unchanged, which does not make this
+command a side-effect-free or bounded production route.
+
+```bash
+REPO_SNAPSHOT=target/native-default-evidence/skill-routing-evidence/g6-preflight/architech-t \
+PIXEL_IMAGE_SOURCE=existing \
+PIXEL_ARENA_IMAGE=sha256:c0b7944e43713319226c5e1b096b6b5c80c8f9e7eb8f1420fdf65e1354701f1e \
+CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium \
+rtk bash eval/arena.sh --arms "raw pixel" --tasks g6-call-path --reps 1 \
+  --skill-candidate-dir eval/arena/skills/pixel-call-path \
+  --results-dir eval/arena-results/g6-call-path-skill-r1
+
+rtk python3 eval/arena/rank.py \
+  --results eval/arena-results/g6-call-path-skill-r1 \
+  --scenarios-dir eval/scenarios --arms raw pixel --tasks g6-call-path --reps 1
+```
+
+The run directory is preserved; a repeat needs a new directory. The exact
+original command and input hashes were recorded before launch in
+`target/native-default-evidence/skill-routing-evidence/g6-screen/intent.json`.
+
+| Measure | Native | Call-path skill |
+| --- | ---: | ---: |
+| Completed / failed | 1 / 0 | 1 / 0 |
+| Required-pattern coverage | 13/13 | 13/13 |
+| Input / cached input (subset) | 43,529 / 36,096 | 61,013 / 52,224 |
+| Generated / gross tokens | 396 / 43,925 | 691 / 61,704 |
+| Model wall seconds | 22 | 24 |
+| Command tool calls | 2 | 3 |
+| Skill-file reads / Pixel queries | 0 / 0 | 1 / 1 |
+
+An independent assistant review found both answers correct on the requested
+functions, order, repository-relative files and SDK call. The candidate's
+destination citation points at line 24, just before the method at line 27;
+the requested file is correct and exact line numbers were not required.
+The review and transcript hashes are in `g6-screen/semantic-review.json`.
+This is source-grounded assistant review, not human approval.
+The run's command result, activation audit and setup receipts are indexed by
+`g6-screen/result-receipt.json` in the same evidence directory.
+
+The candidate first read the skill, then all three source files, and only
+then queried `call-path`. Its successful graph result repeated a chain already
+visible in those source reads. Gross tokens increased 40.5% and wall time
+increased 9.1%, with no gain in requested completeness. Dollar cost was not
+reported. One pair does not estimate a universal or causal effect, but this
+screen does not justify further confirmation runs or automatic promotion of
+this candidate. The failed candidate remains in the arena for reproducibility;
+it is absent from shipped Codex/Claude skills and Pi extensions. No new
+production call-path boundary was added for an unproven route.
+
+The outcome also reinforces the impact skill's new abstention instruction:
+loading a skill must not require a graph call after source has answered the
+question. Deeper or branching paths, history archaeology and transcript recall
+remain unmeasured task classes; these results do not establish their value.
+
+## Validation status refreshed on 2026-10-06
+
+The pending hook approvals in the historical frozen-build reports above are
+resolved. Through the same installed `9042b4d1` binary, `pixel doctor . --fix
+--fail-on yellow --json --metrics off` exited 0 with 33 green, zero yellow,
+zero red and zero skips. The stopped daemon and stale history were repaired;
+both repairs reported `fixed`. Pixel did not write hook trust. The command,
+full responses and repair receipt are under
+`target/native-default-evidence/resume-final-local/`.
+
+All seven workflows passed on published foundation commit
+`ab39daec219e75514fd3fa360cd01f6932d307ff`: CI, Coverage, CodeQL,
+Cross-build, Reproducible build, Homebrew core and Mutants. Mutation run
+`37372712326` passed all 15 shards: 180 tested, 152 caught, 28 unviable,
+zero missed, zero timeouts and zero disk-full outcomes. The complete log and
+exact-head verdict are under `target/native-default-evidence/resume-final-ci/`.
+These results validate that foundation; the current PR's checks govern later
+commits. This final skill refinement changes external prompt text, the arena
+scenario and experiment documentation, without changing Rust or Pi code.

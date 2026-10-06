@@ -1,0 +1,5 @@
+interface:
+  display_name: "Pixel Call Path"
+  short_description: "Trace a named entry to a named destination"
+policy:
+  allow_implicit_invocation: false

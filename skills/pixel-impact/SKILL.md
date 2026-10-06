@@ -1,23 +1,27 @@
 ---
 name: pixel-impact
 description: >
-  Assess callers and change impact for a known symbol before a requested
-  structural code change. Use only when caller completeness or blast radius
-  matters.
+  Find callers or change impact for a named code symbol across files or
+  call levels. Skip routine lookup, local renames, and broad implementation
+  or policy questions.
 license: MIT
 ---
 
 # Pixel impact
 
-Use this skill only when explicitly invoked or when the user asks for callers,
-blast radius, or the impact of changing a known symbol. Ordinary repository
-questions, textual lookup, known-file reading, and API research stay with the
-usual tools.
+Use Pixel for an unresolved caller or blast radius question about a known
+symbol. When a private helper and its references are already visible in one
+file, native search is sufficient. File listing, literal lookup, UI-label
+renames, API research, and general explanations stay with the usual tools.
 
-Query the known symbol once against the existing graph:
-`pixel impact '<symbol>' --no-refresh --depth 2 --json --metrics off`. Treat
-results as candidates: cite their paths and lines, inspect the relevant
-source, and account for the graph's open-world limits. If Pixel is unavailable,
-does not accept `--no-refresh`, the graph is missing or stale, or the result is
-empty or unhelpful, continue with native search immediately; do not repair,
-refresh, or repeat the query.
+For a relationship question spanning files or call levels, query the symbol
+once: `pixel impact '<symbol>' --no-refresh --depth 2 --json --metrics off`.
+Use `--depth 1` when only direct callers are requested. Treat graph edges as
+candidates and inspect the cited source; empty or incomplete results do not
+prove that no callers exist. Distinguish production callers, test callers,
+and textual references in the answer, citing the requested evidence.
+
+If Pixel is unavailable, rejects `--no-refresh`, or returns missing, stale,
+ambiguous, empty, or unhelpful results, continue with native tools immediately.
+Do not repair, refresh, retry, or expand the query during the task. Loading
+this skill does not require a Pixel call when the source already answers it.
