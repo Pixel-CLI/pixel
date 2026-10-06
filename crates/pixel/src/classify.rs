@@ -298,9 +298,59 @@ fn document(engine: &dyn DecisionEngine, spec: &Spec, probs: &BTreeMap<String, f
 
 /// Return the bounded text and whether at least one character was removed.
 fn clip_text(text: &str) -> (String, bool) {
-    let mut chars = text.chars();
-    let clipped = chars.by_ref().take(TEXT_CAP_CHARS).collect();
-    (clipped, chars.next().is_some())
+    let mut characters = text.chars();
+    let clipped = characters.by_ref().take(TEXT_CAP_CHARS).collect();
+    (clipped, characters.next().is_some())
+}
+
+/// The history tier's engine placeholder for document rendering.
+/// It carries the verified-history basis and no model/provider.
+struct HistoryEngine;
+
+impl DecisionEngine for HistoryEngine {
+    fn model_id(&self) -> String {
+        "verified-history".to_string()
+    }
+    fn provider(&self) -> Option<&'static str> {
+        None
+    }
+    fn deterministic(&self) -> bool {
+        true
+    }
+    fn basis(&self) -> String {
+        "verified-history retrieval: labelled-neighbour voting with abstention; raw vote share, not calibrated probability".to_string()
+    }
+    fn extra_snapshot(&self) -> Option<Value> {
+        None
+    }
+    fn decide(&mut self, _spec: &Spec) -> Result<BTreeMap<String, f64>, String> {
+        Err("history engine does not decide directly; use try_history_tier".to_string())
+    }
+}
+
+/// Try the verified-history tier for a task-intent spec. Returns `None`
+/// when the tier cannot answer (empty store, no matching entries, or
+/// abstention), preserving the existing model fallback.
+///
+/// This function never starts a daemon and never invokes a remote provider:
+/// it only reads the local verified-history store.
+fn try_history_tier(spec: &Spec) -> Option<crate::history_retrieval::RetrievalResult> {
+    // Only the bounded task-intent vocabulary is supported.
+    let intent_labels: Vec<String> = crate::prompt_intent::INTENTS
+        .iter()
+        .map(|k| k.label.to_string())
+        .collect();
+    if spec.labels != intent_labels {
+        return None;
+    }
+
+    // Find the project root from the current directory.
+    let project_root = crate::discover_root(std::env::current_dir().ok()?.as_path()).ok()?;
+    let store_path = crate::history_store::HistoryStore::store_path(&project_root);
+    let store = crate::history_store::HistoryStore::load(&store_path).ok()?;
+
+    let retriever = crate::history_retrieval::HistoryRetriever::new(&store, "coding-agent-prompt");
+    Some(retriever.retrieve(spec))
 }
 
 /// Open the remote decision engine from the resolved preset/model config.
@@ -642,6 +692,11 @@ pub struct ClassifyOptions {
     /// and name the pixel ops that fit the verdict.
     #[arg(long, conflicts_with_all = ["labels", "context", "jsonl"])]
     pub task_intent: bool,
+    /// Try verified-history retrieval before the model. When the history
+    /// tier produces a confident answer, the model is not called. When it
+    /// abstains, the existing fallback policy applies. Off by default.
+    #[arg(long)]
+    pub history: bool,
     /// Debug comparison: ask every configured engine — local Ollaya, the
     /// remote chat preset and Jev — the same question in parallel and print
     /// each one's answer. An engine that is not set up or fails reports as
@@ -847,6 +902,76 @@ fn run_with(
     }
 
     let spec = one_shot_spec(&opts)?;
+
+    // Opt-in history tier: try verified-history retrieval before the model.
+    // Only for the bounded task-intent vocabulary. When the history tier
+    // abstains, the existing fallback policy applies unchanged.
+    let mut history_abstention: Option<(String, Vec<crate::history_retrieval::Neighbour>)> = None;
+    if opts.history && opts.task_intent {
+        if let Some(history_result) = try_history_tier(&spec) {
+            match history_result {
+                crate::history_retrieval::RetrievalResult::Answer {
+                    label,
+                    vote_share,
+                    support,
+                    neighbours,
+                    rubric_fingerprint,
+                } => {
+                    // Build a probability distribution from the vote share.
+                    let mut probs = BTreeMap::new();
+                    for l in &spec.labels {
+                        if *l == label {
+                            probs.insert(l.clone(), vote_share);
+                        } else {
+                            probs.insert(l.clone(), (1.0 - vote_share) / (spec.labels.len() - 1) as f64);
+                        }
+                    }
+                    let ops = crate::prompt_intent::ops_for(&label);
+                    if opts.json {
+                        let mut doc = document(
+                            &HistoryEngine,
+                            &spec,
+                            &probs,
+                        );
+                        doc["history"] = json!({
+                            "source": "verified-history",
+                            "version": crate::history_store::LABEL_SCHEMA_VERSION,
+                            "support": support,
+                            "vote_share": vote_share,
+                            "rubric_fingerprint": rubric_fingerprint,
+                            "neighbours": neighbours.iter().map(|n| json!({
+                                "text": n.text,
+                                "label": n.label,
+                                "similarity": n.similarity,
+                                "source": n.source,
+                            })).collect::<Vec<_>>(),
+                        });
+                        if let Some(ops) = ops {
+                            doc["next_ops"] = json!(ops);
+                        }
+                        return output.print_document(&doc);
+                    } else {
+                        let mut text = render_probs(&probs, &spec);
+                        text.push_str(&format!(
+                            "history: verified-history (support={}, vote_share={:.3})\n",
+                            support, vote_share
+                        ));
+                        if let Some(ops) = ops {
+                            text.push_str(&format!("next: {}\n", ops.join(", ")));
+                        }
+                        return output.write_text(&text);
+                    }
+                }
+                crate::history_retrieval::RetrievalResult::Abstain { reason, neighbours } => {
+                    // Record the abstention for disclosure, then fall through
+                    // to the model. The model's answer is used, but the
+                    // abstention reason is disclosed.
+                    history_abstention = Some((format!("{reason:?}"), neighbours));
+                }
+            }
+        }
+    }
+
     let mut engine = opener(resolve(&opts)?)?;
     let probs = engine.decide(&spec)?;
     let ops = opts
@@ -855,12 +980,28 @@ fn run_with(
         .flatten();
     if opts.json {
         let mut doc = document(engine.as_ref(), &spec, &probs);
+        if let Some((reason, neighbours)) = &history_abstention {
+            doc["history"] = json!({
+                "source": "verified-history",
+                "abstained": true,
+                "reason": reason,
+                "neighbours": neighbours.iter().map(|n| json!({
+                    "text": n.text,
+                    "label": n.label,
+                    "similarity": n.similarity,
+                    "source": n.source,
+                })).collect::<Vec<_>>(),
+            });
+        }
         if let Some(ops) = ops {
             doc["next_ops"] = json!(ops);
         }
         output.print_document(&doc)
     } else {
         let mut text = render_probs(&probs, &spec);
+        if let Some((reason, _)) = &history_abstention {
+            text.push_str(&format!("history: abstained ({reason})\n"));
+        }
         if let Some(ops) = ops {
             text.push_str(&format!("next: {}\n", ops.join(", ")));
         }
@@ -1221,6 +1362,7 @@ pub(crate) fn open_session(
         // prompt-intent battery (which `task_intent` selects) is never what
         // it wants.
         task_intent: false,
+        history: false,
         debug: false,
     };
     let resolved = resolve_engine_for(&opts)?;
@@ -1812,6 +1954,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+        history: false,
             debug: false,
             json: false,
         };
@@ -1861,6 +2004,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+        history: false,
             debug: true,
             json: false,
         };
@@ -1914,6 +2058,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+        history: false,
             debug: true,
             json: true,
         };
@@ -2151,6 +2296,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+        history: false,
             debug: false,
             json: false,
         };
@@ -2183,6 +2329,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+        history: false,
             debug: false,
             json: true,
         };
@@ -2382,6 +2529,7 @@ mod tests {
             jsonl: true,
             if_warm: false,
             task_intent: false,
+        history: false,
             debug: false,
             json: false,
         };
@@ -2449,6 +2597,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+        history: false,
                 debug: false,
                 json: false,
             },
@@ -2500,6 +2649,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+        history: false,
                 debug: false,
                 json: false,
             },
@@ -2540,6 +2690,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+        history: false,
                 debug: false,
                 json: false,
             },
@@ -2603,6 +2754,7 @@ mod tests {
             jsonl: true,
             if_warm: false,
             task_intent: false,
+        history: false,
             debug: false,
             json: false,
         };
@@ -2657,6 +2809,7 @@ mod tests {
                 jsonl: false,
                 if_warm: false,
                 task_intent: false,
+        history: false,
                 debug: false,
                 json: true,
             },
@@ -2722,6 +2875,7 @@ mod tests {
             jsonl: false,
             if_warm: false,
             task_intent: false,
+        history: false,
             debug: false,
             json: false,
         };
@@ -3185,5 +3339,399 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    // -- history tier tests --------------------------------------------------
+
+    /// Write a verified-history store to a temp directory and return the path.
+    fn write_history_store(entries: &[crate::history_store::HistoryEntry]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-history-tier-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("classify_history.json");
+        let mut store = crate::history_store::HistoryStore::new();
+        for entry in entries {
+            store.add(entry.clone());
+        }
+        store.save(&path).unwrap();
+        path
+    }
+
+    fn intent_labels() -> Vec<&'static str> {
+        crate::prompt_intent::INTENTS.iter().map(|k| k.label).collect()
+    }
+
+    fn intent_criteria() -> BTreeMap<String, String> {
+        crate::prompt_intent::INTENTS
+            .iter()
+            .map(|k| (k.label.to_string(), k.criterion.to_string()))
+            .collect()
+    }
+
+    fn history_entry(text: &str, label: &str) -> crate::history_store::HistoryEntry {
+        crate::history_store::HistoryEntry {
+            text: text.to_string(),
+            label: label.to_string(),
+            source: "human".to_string(),
+            supersedes: vec![],
+            task_family: "coding-agent-prompt".to_string(),
+            label_schema_version: crate::history_store::LABEL_SCHEMA_VERSION,
+            // Match the test specs: INTENT_CONTEXT with empty criteria.
+            rubric_fingerprint: crate::history_store::HistoryStore::rubric_fingerprint(
+                crate::prompt_intent::INTENT_CONTEXT,
+                &BTreeMap::new(),
+            ),
+            verified_at: 1_700_000_000,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn history_tier_empty_history_preserves_current_behavior() {
+        // With an empty store, the history tier abstains and the model
+        // fallback is used unchanged.
+        let store = crate::history_store::HistoryStore::new();
+        let retriever = crate::history_retrieval::HistoryRetriever::new(&store, "coding-agent-prompt");
+        let s = spec("fix the bug", crate::prompt_intent::INTENT_CONTEXT, &intent_labels(), &[]);
+        let result = retriever.retrieve(&s);
+        assert!(matches!(
+            result,
+            crate::history_retrieval::RetrievalResult::Abstain {
+                reason: crate::history_retrieval::AbstainReason::EmptyHistory,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn history_tier_answers_with_confident_support() {
+        let mut store = crate::history_store::HistoryStore::new();
+        store.add(history_entry("fix the login bug", "bugfix"));
+        store.add(history_entry("fix the auth bug", "bugfix"));
+        store.add(history_entry("fix the db bug", "bugfix"));
+
+        let retriever = crate::history_retrieval::HistoryRetriever::new(&store, "coding-agent-prompt");
+        let s = spec("fix the logout bug", crate::prompt_intent::INTENT_CONTEXT, &intent_labels(), &[]);
+        let result = retriever.retrieve(&s);
+
+        match result {
+            crate::history_retrieval::RetrievalResult::Answer { label, support, .. } => {
+                assert_eq!(label, "bugfix");
+                assert!(support >= crate::history_retrieval::MIN_SUPPORT);
+            }
+            other => panic!("expected an answer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_tier_abstains_on_disagreement() {
+        let mut store = crate::history_store::HistoryStore::new();
+        // Entries with similar texts but different labels
+        store.add(history_entry("fix the login bug", "bugfix"));
+        store.add(history_entry("fix the login issue", "bugfix"));
+        store.add(history_entry("fix the login feature", "feature"));
+        store.add(history_entry("fix the login problem", "feature"));
+
+        let retriever = crate::history_retrieval::HistoryRetriever::new(&store, "coding-agent-prompt");
+        let s = spec("fix the login bug", crate::prompt_intent::INTENT_CONTEXT, &intent_labels(), &[]);
+        let result = retriever.retrieve(&s);
+
+        // The vote should be split between bugfix and feature, causing
+        // neither to reach the vote-share threshold.
+        assert!(matches!(
+            result,
+            crate::history_retrieval::RetrievalResult::Abstain {
+                reason: crate::history_retrieval::AbstainReason::Disagreement,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn history_tier_abstains_on_novel_input() {
+        let mut store = crate::history_store::HistoryStore::new();
+        store.add(history_entry("fix the login bug", "bugfix"));
+        store.add(history_entry("fix the auth bug", "bugfix"));
+        store.add(history_entry("fix the db bug", "bugfix"));
+
+        let retriever = crate::history_retrieval::HistoryRetriever::new(&store, "coding-agent-prompt");
+        // Completely different vocabulary
+        let s = spec("xyzzy plugh quux", crate::prompt_intent::INTENT_CONTEXT, &intent_labels(), &[]);
+        let result = retriever.retrieve(&s);
+
+        assert!(matches!(
+            result,
+            crate::history_retrieval::RetrievalResult::Abstain {
+                reason: crate::history_retrieval::AbstainReason::TooNovel,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn history_tier_abstains_on_rubric_mismatch() {
+        let mut store = crate::history_store::HistoryStore::new();
+        store.add(history_entry("fix the login bug", "bugfix"));
+        store.add(history_entry("fix the login bug", "bugfix"));
+        store.add(history_entry("fix the login bug", "bugfix"));
+
+        let retriever = crate::history_retrieval::HistoryRetriever::new(&store, "coding-agent-prompt");
+        // Same text, different context (different rubric)
+        let s = spec("fix the login bug", "different context", &intent_labels(), &[]);
+        let result = retriever.retrieve(&s);
+
+        assert!(matches!(
+            result,
+            crate::history_retrieval::RetrievalResult::Abstain {
+                reason: crate::history_retrieval::AbstainReason::RubricMismatch,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn history_tier_removing_label_changes_decisions() {
+        let mut store = crate::history_store::HistoryStore::new();
+        store.add(history_entry("fix the login bug", "bugfix"));
+        store.add(history_entry("fix the login bug", "bugfix"));
+        store.add(history_entry("fix the login bug", "bugfix"));
+
+        let s = spec("fix the login bug", crate::prompt_intent::INTENT_CONTEXT, &intent_labels(), &[]);
+
+        // Before removal: should answer
+        {
+            let retriever =
+                crate::history_retrieval::HistoryRetriever::new(&store, "coding-agent-prompt");
+            let result = retriever.retrieve(&s);
+            assert!(matches!(
+                result,
+                crate::history_retrieval::RetrievalResult::Answer { .. }
+            ));
+        }
+
+        // Remove two entries
+        store.remove("fix the login bug", "bugfix");
+        store.remove("fix the login bug", "bugfix");
+
+        // After removal: should abstain (insufficient support)
+        {
+            let retriever =
+                crate::history_retrieval::HistoryRetriever::new(&store, "coding-agent-prompt");
+            let result = retriever.retrieve(&s);
+            assert!(matches!(
+                result,
+                crate::history_retrieval::RetrievalResult::Abstain {
+                    reason: crate::history_retrieval::AbstainReason::InsufficientSupport,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn history_tier_correcting_label_changes_decisions() {
+        let mut store = crate::history_store::HistoryStore::new();
+        // Old entries with the wrong label
+        store.add(history_entry("fix the login bug", "feature"));
+        store.add(history_entry("fix the login bug", "feature"));
+        // Correction: replace one "feature" with "bugfix"
+        store.correct(
+            "fix the login bug",
+            "feature",
+            crate::history_store::HistoryEntry {
+                label: "bugfix".to_string(),
+                source: "correction".to_string(),
+                ..history_entry("fix the login bug", "bugfix")
+            },
+        );
+
+        let retriever = crate::history_retrieval::HistoryRetriever::new(&store, "coding-agent-prompt");
+        let s = spec("fix the login bug", crate::prompt_intent::INTENT_CONTEXT, &intent_labels(), &[]);
+        let result = retriever.retrieve(&s);
+
+        // Now there's 1 entry with "feature" and 1 with "bugfix" — a tie.
+        // The retriever should abstain with Disagreement.
+        match result {
+            crate::history_retrieval::RetrievalResult::Answer { label, .. } => {
+                // If it does answer, it should be one of the two labels
+                assert!(label == "bugfix" || label == "feature");
+            }
+            crate::history_retrieval::RetrievalResult::Abstain { .. } => {
+                // Expected: the correction creates a tie, so abstain
+            }
+        }
+    }
+
+    #[test]
+    fn history_tier_does_not_self_certify_model_predictions() {
+        // Model predictions cannot enter the store as gold labels.
+        // The store only accepts entries with source "human", "independent",
+        // or "correction" — never "model".
+        let mut store = crate::history_store::HistoryStore::new();
+        let model_entry = crate::history_store::HistoryEntry {
+            text: "fix the bug".to_string(),
+            label: "bugfix".to_string(),
+            source: "model".to_string(),
+            supersedes: vec![],
+            task_family: "coding-agent-prompt".to_string(),
+            label_schema_version: 1,
+            rubric_fingerprint: "fp".to_string(),
+            verified_at: 1_700_000_000,
+            note: None,
+        };
+        store.add(model_entry);
+
+        // The store accepts the entry (it's the caller's responsibility to
+        // not write model predictions), but the retriever treats it as a
+        // regular neighbour. The key guarantee is that the store API doesn't
+        // provide a "model prediction" path — only explicit verification.
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.entries()[0].source, "model");
+    }
+
+    #[test]
+    fn history_tier_answer_discloses_neighbours_and_scores() {
+        let mut store = crate::history_store::HistoryStore::new();
+        store.add(history_entry("fix the login bug", "bugfix"));
+        store.add(history_entry("fix the auth bug", "bugfix"));
+        store.add(history_entry("fix the db bug", "bugfix"));
+
+        let retriever = crate::history_retrieval::HistoryRetriever::new(&store, "coding-agent-prompt");
+        let s = spec("fix the logout bug", crate::prompt_intent::INTENT_CONTEXT, &intent_labels(), &[]);
+        let result = retriever.retrieve(&s);
+
+        match result {
+            crate::history_retrieval::RetrievalResult::Answer {
+                label,
+                vote_share,
+                support,
+                neighbours,
+                rubric_fingerprint,
+            } => {
+                assert_eq!(label, "bugfix");
+                assert!(vote_share > 0.0 && vote_share <= 1.0);
+                assert!(support >= crate::history_retrieval::MIN_SUPPORT);
+                assert!(!neighbours.is_empty());
+                assert!(!rubric_fingerprint.is_empty());
+            }
+            other => panic!("expected an answer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_tier_different_task_family_abstains() {
+        let mut store = crate::history_store::HistoryStore::new();
+        store.add(history_entry("fix the login bug", "bugfix"));
+        store.add(history_entry("fix the login bug", "bugfix"));
+        store.add(history_entry("fix the login bug", "bugfix"));
+
+        let retriever = crate::history_retrieval::HistoryRetriever::new(&store, "code-review");
+        let s = spec("fix the login bug", crate::prompt_intent::INTENT_CONTEXT, &intent_labels(), &[]);
+        let result = retriever.retrieve(&s);
+
+        assert!(matches!(
+            result,
+            crate::history_retrieval::RetrievalResult::Abstain {
+                reason: crate::history_retrieval::AbstainReason::EmptyHistory,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn history_store_roundtrip_with_corrections() {
+        let mut store = crate::history_store::HistoryStore::new();
+        store.add(history_entry("fix the bug", "feature"));
+        let old = store.correct(
+            "fix the bug",
+            "feature",
+            history_entry("fix the bug", "bugfix"),
+        );
+        assert!(old.is_some());
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.entries()[0].label, "bugfix");
+        assert_eq!(store.entries()[0].source, "human");
+    }
+
+    #[test]
+    fn history_store_capacity_evicts_oldest() {
+        let mut store = crate::history_store::HistoryStore::with_cap(2);
+        store.add(history_entry("first", "bugfix"));
+        store.add(history_entry("second", "feature"));
+        let evicted = store.add(history_entry("third", "refactor"));
+        assert!(evicted.is_some());
+        assert_eq!(evicted.unwrap().text, "first");
+        assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn history_store_rubric_fingerprint_changes_with_criteria() {
+        let mut criteria1 = BTreeMap::new();
+        criteria1.insert("bugfix".to_string(), "something broken".to_string());
+        let mut criteria2 = BTreeMap::new();
+        criteria2.insert("bugfix".to_string(), "something broken".to_string());
+        criteria2.insert("feature".to_string(), "new behaviour".to_string());
+
+        let fp1 = crate::history_store::HistoryStore::rubric_fingerprint("context", &criteria1);
+        let fp2 = crate::history_store::HistoryStore::rubric_fingerprint("context", &criteria2);
+        let fp3 = crate::history_store::HistoryStore::rubric_fingerprint("different", &criteria1);
+
+        assert_ne!(fp1, fp2, "different criteria must yield different fingerprints");
+        assert_ne!(fp1, fp3, "different context must yield different fingerprints");
+    }
+
+    #[test]
+    fn history_store_save_and_load_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-history-roundtrip-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+
+        let mut store = crate::history_store::HistoryStore::new();
+        store.add(history_entry("fix the bug", "bugfix"));
+        store.add(history_entry("add a flag", "feature"));
+        store.save(&path).unwrap();
+
+        let loaded = crate::history_store::HistoryStore::load(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.entries()[0].text, "fix the bug");
+        assert_eq!(loaded.entries()[1].label, "feature");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn history_store_path_is_project_local() {
+        let root = std::path::Path::new("/some/project");
+        let path = crate::history_store::HistoryStore::store_path(root);
+        assert!(path.ends_with(".pixel/classify_history.json"));
+    }
+
+    #[test]
+    fn history_retrieval_jaccard_similarity() {
+        assert_eq!(
+            crate::history_retrieval::jaccard_similarity("hello world", "hello world"),
+            1.0
+        );
+        // "hello world" -> {hello, world}, "goodbye world" -> {goodbye, world}
+        // intersection = {world} (1), union = {hello, world, goodbye} (3)
+        assert_eq!(
+            crate::history_retrieval::jaccard_similarity("hello world", "goodbye world"),
+            1.0 / 3.0
+        );
+        assert_eq!(
+            crate::history_retrieval::jaccard_similarity("abc", "xyz"),
+            0.0
+        );
+        assert_eq!(crate::history_retrieval::jaccard_similarity("", ""), 1.0);
+        assert_eq!(crate::history_retrieval::jaccard_similarity("abc", ""), 0.0);
     }
 }

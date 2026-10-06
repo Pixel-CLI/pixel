@@ -47,6 +47,8 @@ mod decide_remote;
 mod evaluate_cmd;
 mod execution_brief;
 mod guard;
+mod history_retrieval;
+mod history_store;
 mod hook_input;
 mod impact_read;
 mod index_cmd;
