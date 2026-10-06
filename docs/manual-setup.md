@@ -15,9 +15,9 @@ wire (Cursor, Copilot, ...)? You don't need `pixel install`.
    prompts, guard hooks and plugins. It wires none of them, and every agent
    keeps its native tools.
 
-Native Codex and Claude plugins distribute a small, explicit-only
-`pixel-impact` skill. They do not register automatic retrieval hooks.
-The CLI and skill/plugin are separate installations.
+The Codex and Claude plugins ship no skill and register no hooks; the
+per-prompt evidence brief comes from the task hook `pixel install` writes.
+The CLI and the plugins are separate installations.
 
 ## 1. Install the binary
 
@@ -54,11 +54,11 @@ not under `~/.local/share/pixel/`: `pixel install` deletes the
 
 ### Claude Code
 
-Use the native Pixel plugin's `pixel-impact` skill explicitly when assessing
-callers or the impact of a known symbol. Its description and instructions
-are separated from the legacy full agent prompt; ordinary work keeps the
-usual tools. The plugin does not inject a session prompt or register retrieval
-hooks. It requires a compatible Pixel binary on PATH.
+To assess callers or the impact of a known symbol, run `pixel impact
+<symbol> --no-refresh` yourself; the per-prompt brief already runs it for a
+prompt that names a symbol and asks to change it or find its callers.
+Ordinary work keeps the usual tools. The native Pixel plugin ships no skill,
+injects no session prompt and registers no retrieval hooks.
 
 `pixel install` removes its retired retrieval, post-edit advice, compaction
 and metrics registrations from Claude's user settings. Independent task-event
@@ -67,15 +67,13 @@ preserves foreign hooks and restores adopted RTK registrations, removing the
 Pixel retrieval wrapper. Native reads need no Pixel retrieval callback.
 
 Copying the full prompt into Claude's instructions by hand enables a
-different profile with additional context; it is not the focused-skill
-configuration.
+different profile with additional context.
 
 ### Codex
 
-Use `$pixel-impact` explicitly for a known symbol whose callers or change
-impact matter. Automatic selection stays disabled until paired evaluation
-supports enabling it. The native plugin declares only this focused skill;
-its default manifest registers no retrieval hooks.
+For a known symbol whose callers or change impact matter, run `pixel impact
+<symbol> --no-refresh`; the per-prompt brief covers the common case. The
+native plugin ships no skill, and its manifest registers no retrieval hooks.
 
 Global installation removes Pixel's old retrieval `UserPromptSubmit` and
 metrics hooks and retains the independent task-event suite. The previous
@@ -90,7 +88,7 @@ Existing sessions retain previously received context until a fresh session.
 
 ### Pi
 
-Pi uses a package rather than a duplicated skill. The explicit
+Pi uses a package. The explicit
 `/pixel-impact <symbol>` command requests bounded graph evidence. It does
 not query Pixel at startup, classify every prompt, or replace native tools.
 By hand, add the package path to `packages` in Pi's `settings.json`, or
@@ -105,7 +103,7 @@ instructions from `~/.pi/agent/APPEND_SYSTEM.md`, preserving user text.
 
 ### Bounded graph queries
 
-The skill and extension use:
+The Pi extension and the per-prompt brief use:
 
 ```bash
 pixel impact 'knownSymbol' --no-refresh --depth 2 --json --metrics off
@@ -153,12 +151,10 @@ silence it together with the metrics line. Hook invocations stay silent.
 
 ## Context and evaluation
 
-A discoverable skill can have metadata cost even when its body is not loaded.
-The focused skill stays explicit-only by default. Automatic activation is
-evaluated separately from command execution and task quality; more Pixel
-calls do not establish a benefit. See
+More Pixel calls do not establish a benefit. See
 [the arena evidence](../eval/arena/native-default-evidence.md) for measured
-runs and their limits.
+runs and their limits, including the explicit impact skill earlier releases
+shipped and later removed.
 
 ## Uninstall
 

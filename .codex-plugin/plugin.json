@@ -1,7 +1,7 @@
 {
   "name": "pixel",
   "version": "0.7.1",
-  "description": "Explicit Pixel skill for assessing callers and change impact of a known symbol.",
+  "description": "Deterministic code retrieval layer: indexed search, concept resolve, impact analysis, task targets, plan generation, and git archaeology via the pixel CLI.",
   "author": {
     "name": "Livio Gama",
     "url": "https://github.com/LivioGama"
@@ -10,17 +10,15 @@
   "repository": "https://github.com/Pixel-CLI/pixel",
   "license": "MIT",
   "keywords": ["code-graph", "impact-analysis", "retrieval", "tree-sitter", "productivity"],
-  "skills": "./skills/",
   "interface": {
     "displayName": "Pixel",
-    "shortDescription": "Assess callers and change impact",
-    "longDescription": "Use the explicit pixel-impact skill to assess callers and blast radius for a known symbol. Requires the pixel binary on PATH.",
+    "shortDescription": "Deterministic code retrieval layer",
+    "longDescription": "Pixel's code-graph retrieval layer. The plugin ships no skill or hook; `pixel install` wires the per-prompt evidence brief. Requires the pixel binary on PATH.",
     "developerName": "Livio Gama",
     "category": "Productivity",
-    "capabilities": ["Instructions"],
     "websiteURL": "https://github.com/Pixel-CLI/pixel",
     "defaultPrompt": [
-      "Use $pixel-impact to assess callers and change impact for a known symbol."
+      "Run pixel impact on the symbol I'm about to edit."
     ]
   }
 }

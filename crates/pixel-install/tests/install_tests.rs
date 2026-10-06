@@ -3627,9 +3627,9 @@ fn wrappers_step(report: &InstallReport) -> &pixel_install::install::InstallStep
         .expect("shell-wrappers step")
 }
 
-/// Plugin-manifest skill files come from the curated impact-skill asset;
-/// other generated rule surfaces still come from `assets/pixel-agent-prompt.md`.
-/// Keep both sets synchronized through the generator.
+/// Generated rule surfaces come from `assets/pixel-agent-prompt.md` and the
+/// Pi extension from `assets/pi-impact.ts`. Keep them synchronized through
+/// the generator.
 #[test]
 fn plugin_assets_are_in_sync() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3651,51 +3651,38 @@ fn plugin_assets_are_in_sync() {
 }
 
 #[test]
-fn plugin_skill_is_focused_explicit_and_replaces_the_broad_skill() {
+fn plugin_manifests_ship_no_skill_and_no_hook() {
     let repo = repo_root();
     let read =
         |rel: &str| fs::read_to_string(repo.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
-    let claude: serde_json::Value =
-        serde_json::from_str(&read(".claude-plugin/plugin.json")).unwrap();
-    let codex: serde_json::Value =
-        serde_json::from_str(&read(".codex-plugin/plugin.json")).unwrap();
-    assert_eq!(codex["skills"], "./skills/");
-    assert_eq!(claude["skills"], "./claude-skills/");
-    assert!(
-        codex.get("hooks").is_none(),
-        "Codex registers a retrieval hook"
-    );
-    assert!(
-        claude.get("hooks").is_none(),
-        "Claude registers a retrieval hook"
-    );
-
-    let codex_skill = read("skills/pixel-impact/SKILL.md");
-    assert!(codex_skill.contains("name: pixel-impact"));
-    assert!(codex_skill.contains("blast radius"));
-    assert!(!codex_skill.contains("disable-model-invocation"));
-    assert!(!codex_skill.contains("pixel build-index"));
-    let claude_skill = read("claude-skills/pixel-impact/SKILL.md");
-    assert!(claude_skill.contains("disable-model-invocation: true"));
-    assert_eq!(
-        claude_skill.replacen("disable-model-invocation: true\n", "", 1),
-        codex_skill,
-        "provider-specific copies must share one curated skill body"
-    );
-    let codex_policy = read("skills/pixel-impact/agents/openai.yaml");
-    assert!(codex_policy.contains("allow_implicit_invocation: false"));
+    for rel in [
+        ".claude-plugin/plugin.json",
+        ".codex-plugin/plugin.json",
+        ".qoder-plugin/plugin.json",
+    ] {
+        let manifest: serde_json::Value = serde_json::from_str(&read(rel)).unwrap();
+        assert!(manifest.get("skills").is_none(), "{rel} registers a skill");
+        assert!(manifest.get("hooks").is_none(), "{rel} registers a hook");
+        assert!(
+            !manifest.to_string().contains("pixel-impact"),
+            "{rel} still advertises the retired pixel-impact skill"
+        );
+    }
 
     let openclaw = read(".openclaw/skills/pixel/SKILL.md");
     assert!(openclaw.contains("name: pixel\n"));
     assert!(openclaw.ends_with(include_str!("../assets/pixel-agent-prompt.md")));
     for retired in [
         "skills/pixel/SKILL.md",
+        "skills/pixel-impact/SKILL.md",
+        "claude-skills/pixel-impact/SKILL.md",
+        "assets/plugin-skills/pixel-impact/SKILL.md",
         ".agents/skills/pixel/SKILL.md",
         ".agents/skills/pixel-impact/SKILL.md",
     ] {
         assert!(
             !repo.join(retired).exists(),
-            "retired broad skill remains: {retired}"
+            "retired skill remains: {retired}"
         );
     }
 }
@@ -3755,7 +3742,7 @@ fn repo_root() -> std::path::PathBuf {
 }
 
 /// Every manifest parses and every path it hands a harness exists in the
-/// repository: a moved skills directory breaks the plugin silently at install
+/// repository: a moved rules directory breaks the plugin silently at install
 /// time, never in a build.
 #[test]
 fn plugin_manifests_parse_and_point_at_files_that_exist() {
@@ -3806,8 +3793,8 @@ fn plugin_manifests_parse_and_point_at_files_that_exist() {
     assert!(
         package_files
             .iter()
-            .any(|entry| entry.as_str() == Some("claude-skills/")),
-        "npm package must include the Claude-specific explicit-only skill copy"
+            .any(|entry| entry.as_str() == Some("pi/")),
+        "npm package must include the distributed Pi command"
     );
     for entry in package_files {
         exists("package.json", entry.as_str().unwrap());

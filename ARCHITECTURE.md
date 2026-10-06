@@ -493,12 +493,12 @@ releases deployed, then handles each agent through its own extension point:
 
 - **Claude Code**: task lifecycle hooks in `~/.claude/settings.json`. Retired
   retrieval prompt, post-edit and metrics registrations are removed; task
-  contracts and foreign hooks are preserved. The optional plugin exposes the
-  explicit `pixel-impact` skill without registering automatic retrieval hooks.
+  contracts and foreign hooks are preserved. The optional plugin ships no
+  skill and registers no hooks; the per-prompt brief comes from the task hook.
 - **Codex**: task lifecycle hooks in `$CODEX_HOME/hooks.json` (default
   `~/.codex/hooks.json`). Retired permanent `developer_instructions` blocks,
   retrieval prompt and metrics registrations are removed. The optional
-  `pixel-impact` skill disables implicit invocation in its packaged metadata.
+  plugin ships no skill and registers no hooks.
 - **Pi**: when Pi's agent directory (`$PI_CODING_AGENT_DIR`, else
   `~/.pi/agent`) exists or `pi` is on `PATH`, a local Pi package under
   `~/.local/share/pixel/pi-package/` (`package.json` and
@@ -575,10 +575,7 @@ The same run removes two retired project files: Pixel's hooks in
 --repo` also remove the MCP server entry releases up to 0.6.1 wrote into
 `.warp/.mcp.json`, and `repo.warp-mcp` reports one still there.
 
-Automatic Codex caller-facts injection is retired. Distribution defaults
-remain explicit-only until independent paired measurements establish a benefit.
-The arena can enable implicit skill invocation in an isolated copy, recording
-both source and experimental policy hashes without changing the shipped skill.
+Automatic Codex caller-facts injection is retired.
 Global and project installation remove the retired `<!-- pixel:managed:begin
 -->`/`end` block from `developer_instructions` with `toml_edit`, preserving foreign
 text, unrelated configuration and layout. A key with no remaining instructions

@@ -30,8 +30,6 @@
   "files": [
     "PIXEL.md",
     "PIXEL-SUBAGENT.md",
-    "skills/",
-    "claude-skills/",
     "pi/",
     ".opencode/",
     ".agents/plugins/",
