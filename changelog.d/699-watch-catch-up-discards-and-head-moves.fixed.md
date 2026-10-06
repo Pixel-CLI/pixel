@@ -1,1 +1,0 @@
-**daemon:** once its file watch is live, a starting daemon also re-reads the files it held as edited and the files a HEAD move rewrote: an edit discarded (`git checkout -- f`, `git stash`) or a branch switched while the watch was being registered no longer leaves searches answering from the old text until the file is touched again.

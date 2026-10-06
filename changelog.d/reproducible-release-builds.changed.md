@@ -1,1 +1,0 @@
-**release:** release binaries are reproducible: the build date comes from the commit and the build paths are remapped, so rebuilding a tag with the same toolchain and `cross` gives a byte-identical `pixel` (SECURITY.md, "Reproducing a release build"); a weekly workflow builds the x86_64 Linux binary twice and compares them.

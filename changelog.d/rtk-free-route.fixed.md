@@ -1,1 +1,0 @@
-**hooks:** `[PIXEL:EXECUTION_ROUTE]` and `execution-brief` now print bare `pixel`, `rg` and `sed` commands instead of `rtk pixel …`, so the route runs on machines without rtk (a fresh cloud container exited 127 on the first step). An installed rtk hook still adds its own prefix.
