@@ -145,7 +145,10 @@ fn alias_method(w: &Walker, args: Node, separator: char) -> Option<Generated> {
 /// `delegate :a, :b, to: :target, prefix: true | :custom`. A dynamic `to:`
 /// still names the delegators unless a `prefix: true` needs it; a dynamic
 /// prefix names nothing. `to:` an instance variable, a constant or `:class`
-/// forwards to no method of the owner, so no reference is recorded.
+/// forwards to no method of the owner, so no reference is recorded. A
+/// Ruby 3.1 shorthand option (`to:`, `prefix:`, `allow_nil:` with no value)
+/// passes the local variable of that name: dynamic, like any other variable.
+/// <https://docs.ruby-lang.org/en/3.1/NEWS_md.html#label-Language+changes>
 fn delegate(w: &Walker, args: Node, separator: char) -> Option<Generated> {
     let mut target: Option<Option<String>> = None;
     let mut prefix: Option<Prefix> = None;
@@ -153,10 +156,11 @@ fn delegate(w: &Walker, args: Node, separator: char) -> Option<Generated> {
         let Some(key) = field_text(w, arg, "key") else {
             continue;
         };
-        let value = arg.child_by_field_name("value")?;
+        let value = arg.child_by_field_name("value");
         match key.trim_start_matches(':').trim_end_matches(':') {
-            "to" => target = Some(literal_name(w, value)),
+            "to" => target = Some(value.and_then(|value| literal_name(w, value))),
             "prefix" => {
+                let value = value?;
                 prefix = Some(match value.kind() {
                     "true" => Prefix::Target,
                     "false" | "nil" => Prefix::None,

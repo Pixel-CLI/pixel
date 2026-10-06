@@ -139,7 +139,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 /// 22: Ruby superclass/`include`/`prepend`/`extend` declarations are stored
 ///    (`ruby_mixins`), a concern's `class_methods` block defines its
 ///    `ClassMethods` module, and calls on `self` follow Ruby's ancestor
-///    lookup order; an instance call no longer reaches a class method.
+///    lookup order; an instance call no longer reaches a class method. A
+///    `delegate` option written as Ruby 3.1 shorthand (`allow_nil:`) no
+///    longer stops the declaration from generating its methods.
 pub const EXTRACTOR_VERSION: &str = "22";
 
 /// True iff the graph's rows were written by the current extractor.
