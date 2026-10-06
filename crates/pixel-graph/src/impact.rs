@@ -149,10 +149,24 @@ pub(crate) fn processes_for_symbol(
     Ok(out)
 }
 
-fn risk_label(mut level: u8, lower_bound: bool) -> String {
-    if lower_bound && level < 3 {
-        level += 1;
+/// Base risk level (0 = LOW .. 3 = CRITICAL) from the depth-1 caller count
+/// and the number of affected processes.
+pub(crate) fn risk_level(d1: u64, nproc: usize) -> u8 {
+    if d1 > 50 || nproc > 20 {
+        3
+    } else if d1 > 15 || nproc > 8 {
+        2
+    } else if d1 > 3 {
+        1
+    } else {
+        0
     }
+}
+
+/// Label of a risk `level`, raised one step when call sites stayed
+/// unresolved (`lower_bound`); every level from 3 up reads CRITICAL.
+pub(crate) fn risk_label(level: u8, lower_bound: bool) -> String {
+    let level = level.saturating_add(u8::from(lower_bound));
     match level {
         0 => "LOW",
         1 => "MEDIUM",
@@ -304,15 +318,7 @@ pub fn impact(
 
     let d1 = counts[0];
     let nproc = affected_processes.len();
-    let base = if d1 > 50 || nproc > 20 {
-        3
-    } else if d1 > 15 || nproc > 8 {
-        2
-    } else if d1 > 3 {
-        1
-    } else {
-        0
-    };
+    let base = risk_level(d1, nproc);
     // An upstream walk that resolved no caller cannot rank the change: an
     // empty caller set is as consistent with "unused" as with "reached only
     // through a reference class the index does not record", so ranking it
@@ -451,6 +457,38 @@ mod tests {
                 callee: None,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn processes_for_symbol_lists_each_process_label_once_in_order() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let fid = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        let a = sym(&store, fid, "alpha", 1, 5);
+        let b = sym(&store, fid, "beta", 6, 9);
+        store
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO processes (id, label, entry_symbol_id, step_count) VALUES
+                   (1, 'zeta flow', {a}, 2), (2, 'alpha flow', {a}, 1);
+                 INSERT INTO process_steps (process_id, step, symbol_id) VALUES
+                   (1, 0, {a}), (1, 1, {a}), (2, 0, {a});"
+            ))
+            .unwrap();
+        assert_eq!(
+            processes_for_symbol(&store, a).unwrap(),
+            vec!["alpha flow".to_string(), "zeta flow".to_string()]
+        );
+        assert!(processes_for_symbol(&store, b).unwrap().is_empty());
+    }
+
+    #[test]
+    fn split_ident_words_breaks_camel_case_and_acronym_runs() {
+        assert_eq!(split_ident_words("Foo"), vec!["foo"]);
+        assert_eq!(split_ident_words("HTTPServer"), vec!["http", "server"]);
+        assert_eq!(
+            split_ident_words("parseURL_fooBar"),
+            vec!["parse", "url", "foo", "bar"]
+        );
     }
 
     #[test]

@@ -137,6 +137,12 @@ pub struct FileExtraction {
     pub mixins: Vec<RawMixin>,
 }
 
+/// Whether a walker at `depth` has passed the recursion cap: a node at
+/// exactly `MAX_DEPTH` is still visited.
+fn too_deep(depth: usize) -> bool {
+    depth > MAX_DEPTH
+}
+
 /// Ruby files known by their whole name: Bundler's `Gemfile` and the
 /// Ruby-DSL build files whose tools evaluate them as Ruby.
 pub const RUBY_FILE_NAMES: &[&str] = &["Gemfile", "Rakefile", "Guardfile", "Capfile"];
@@ -729,7 +735,7 @@ fn self_member_name(w: &Walker, member: Node) -> Option<String> {
 // --- TypeScript / TSX / JavaScript ---------------------------------------
 
 fn walk_ts(w: &mut Walker, lang: &'static str, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let mut pushed = false;
@@ -1084,7 +1090,7 @@ fn jsx_text_content(w: &Walker, element: Node, opening: Node, tag: &str) -> Stri
 // --- Rust ----------------------------------------------------------------
 
 fn walk_rust(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     if rust_is_test_container(w, node) {
@@ -1632,7 +1638,7 @@ fn rust_constructed_type(w: &Walker, value: Node) -> Option<String> {
 // --- Go ------------------------------------------------------------------
 
 fn walk_go(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     match node.kind() {
@@ -1719,7 +1725,7 @@ fn first_descendant_of_kind<'t>(n: Node<'t>, kind: &str) -> Option<Node<'t>> {
 // --- Java ----------------------------------------------------------------
 
 fn walk_java(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let mut pushed = false;
@@ -1800,7 +1806,7 @@ fn walk_java(w: &mut Walker, node: Node, depth: usize) {
 // --- Python --------------------------------------------------------------
 
 fn walk_python(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let mut pushed = false;
@@ -1882,7 +1888,7 @@ fn walk_python(w: &mut Walker, node: Node, depth: usize) {
 // --- C# -------------------------------------------------------------------
 
 fn walk_csharp(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let mut pushed = false;
@@ -2195,7 +2201,7 @@ impl RubyLocals {
 }
 
 fn walk_ruby(w: &mut Walker, locals: &mut RubyLocals, node: Node, role: RubyIdent, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let mut pushed = false;
@@ -2464,7 +2470,7 @@ fn csharp_simple_name(w: &Walker, node: Node) -> String {
 // beats an absent one. Field names and node kinds degrade gracefully to `None`.
 
 fn walk_generic(w: &mut Walker, node: Node, depth: usize) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth) {
         return;
     }
     let kind = node.kind();
@@ -2713,19 +2719,10 @@ fn elixir_definition_head(w: &Walker, node: Node) -> bool {
         .is_some_and(|def| elixir_definer(w, def))
 }
 
-/// Best-effort import spec from import/use/require node kinds. Prefers source-like
-/// fields, then string/identifier children (php `require_expression`, kotlin
+/// Best-effort import spec from import/use/require node kinds: the first
+/// plain string or identifier child (php `require_expression`, kotlin
 /// `import_header`, swift `import_declaration`).
 fn generic_import(w: &mut Walker, node: Node) {
-    for field in ["source", "path", "module_name", "import_string", "name"] {
-        if let Some(src) = node.child_by_field_name(field) {
-            let spec = strip_quotes(&w.text(src));
-            if !spec.is_empty() {
-                w.push_import(spec, Vec::new());
-                return;
-            }
-        }
-    }
     for child in each_child(node) {
         match child.kind() {
             // PHP parses a double-quoted path as `encapsed_string`.

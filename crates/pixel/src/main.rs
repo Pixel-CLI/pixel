@@ -2275,7 +2275,15 @@ fn graph_build_notice(info: &Value) -> String {
 }
 
 fn write_stdout(text: &str) -> Result<(), String> {
-    match operation_metrics::Stdout(std::io::stdout().lock()).write_all(text.as_bytes()) {
+    write_text(
+        &mut operation_metrics::Stdout(std::io::stdout().lock()),
+        text,
+    )
+}
+
+/// Write `text` whole; a reader that closed its end is not a failure.
+fn write_text(out: &mut impl Write, text: &str) -> Result<(), String> {
+    match out.write_all(text.as_bytes()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(format!("write stdout: {error}")),
@@ -7357,6 +7365,33 @@ fn render_locate(locate: &Value) -> String {
     out
 }
 
+/// How many trailing log entries `pixel log` reads. Over-fetch when
+/// filtering to errors so `limit` still means "the last N errors", not "the
+/// last N entries, some of which happen to be errors".
+fn log_fetch_count(limit: usize, errors_only: bool) -> usize {
+    if errors_only {
+        limit.max(1) * 20
+    } else {
+        limit.max(1)
+    }
+}
+
+/// The last `limit` of the tailed entries, errors only when asked.
+fn select_log_events(
+    mut events: Vec<pixel_actionlog::ActionEvent>,
+    limit: usize,
+    errors_only: bool,
+) -> Vec<pixel_actionlog::ActionEvent> {
+    if errors_only {
+        events.retain(|e| e.outcome == pixel_actionlog::Outcome::Error);
+    }
+    if events.len() > limit {
+        let start = events.len() - limit;
+        events.drain(0..start);
+    }
+    events
+}
+
 /// `pixel log` — the self-assessment surface over the async action log every
 /// pixel invocation writes to `<root>/.pixel/actions.jsonl`.
 fn run_log(
@@ -7381,22 +7416,9 @@ fn run_log(
             Err(e) => Err(format!("remove {}: {e}", log_path.display())),
         };
     }
-    // Over-fetch when filtering to errors so `limit` still means "the last
-    // N errors", not "the last N entries, some of which happen to be errors".
-    let fetch = if errors_only {
-        limit.max(1) * 20
-    } else {
-        limit.max(1)
-    };
-    let mut events = pixel_actionlog::tail(&log_path, fetch)
+    let tailed = pixel_actionlog::tail(&log_path, log_fetch_count(limit, errors_only))
         .map_err(|e| format!("read {}: {e}", log_path.display()))?;
-    if errors_only {
-        events.retain(|e| e.outcome == pixel_actionlog::Outcome::Error);
-    }
-    if events.len() > limit {
-        let start = events.len() - limit;
-        events.drain(0..start);
-    }
+    let events = select_log_events(tailed, limit, errors_only);
     if json {
         for e in &events {
             println!("{}", serde_json::to_string(e).map_err(|e| e.to_string())?);
@@ -7434,17 +7456,56 @@ fn run_log(
     Ok(())
 }
 
+/// Per-command aggregate of `pixel savings`: invocations, pool chars,
+/// snippet chars.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SavingsAgg {
+    count: u64,
+    pool: u64,
+    snippet: u64,
+}
+
+/// The events at or after `cutoff_ms` (all of them without a cutoff).
+fn savings_window(
+    events: &[pixel_actionlog::ActionEvent],
+    cutoff_ms: Option<i64>,
+) -> Vec<pixel_actionlog::ActionEvent> {
+    events
+        .iter()
+        .filter(|e| cutoff_ms.is_none_or(|c| e.ts_ms >= c))
+        .cloned()
+        .collect()
+}
+
+/// Pool and snippet chars per command, over the events that recorded both.
+fn savings_by_command(
+    events: &[pixel_actionlog::ActionEvent],
+) -> std::collections::BTreeMap<String, SavingsAgg> {
+    let mut by_cmd = std::collections::BTreeMap::<String, SavingsAgg>::new();
+    for e in events {
+        let (Some(snippet), Some(pool)) = (e.snippet_cap_chars, e.pool_chars) else {
+            continue; // not retrieval-shaped (or volumes not recorded)
+        };
+        let agg = by_cmd.entry(e.command.clone()).or_default();
+        agg.count += 1;
+        agg.pool = agg.pool.saturating_add(pool);
+        agg.snippet = agg.snippet.saturating_add(snippet);
+    }
+    by_cmd
+}
+
+/// The share of the pool the snippets did not return; 0 for an empty pool.
+fn savings_ratio(snippet: u64, pool: u64) -> f64 {
+    if pool > 0 {
+        1.0 - (snippet as f64 / pool as f64)
+    } else {
+        0.0
+    }
+}
+
 /// Preserve legacy snippet/pool reports, separately aggregate versioned
 /// invocation metrics. Old measurements are never silently reclassified as a workflow version.
 fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), String> {
-    use std::collections::BTreeMap;
-    /// Per-command aggregate: invocations, pool chars, snippet chars.
-    #[derive(Default)]
-    struct Agg {
-        count: u64,
-        pool: u64,
-        snippet: u64,
-    }
     let root = discover_root(path)?;
     let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
     // Over-fetch; savings is a lightweight aggregate read.
@@ -7457,46 +7518,19 @@ fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), 
                 .saturating_mul(3_600_000),
         )
     });
-    let filtered: Vec<_> = events
-        .iter()
-        .filter(|e| cutoff_ms.is_none_or(|c| e.ts_ms >= c))
-        .cloned()
-        .collect();
+    let filtered = savings_window(&events, cutoff_ms);
     let workflow_metrics = pixel_actionlog::summarize_metrics(&filtered);
-    // Aggregate per command: pool chars, snippet chars, count.
-    let mut by_cmd: BTreeMap<String, Agg> = BTreeMap::new();
-    for e in &events {
-        if let Some(c) = cutoff_ms
-            && e.ts_ms < c
-        {
-            continue;
-        }
-        let (Some(snippet), Some(pool)) = (e.snippet_cap_chars, e.pool_chars) else {
-            continue; // not retrieval-shaped (or volumes not recorded)
-        };
-        let agg = by_cmd.entry(e.command.clone()).or_default();
-        agg.count += 1;
-        agg.pool = agg.pool.saturating_add(pool);
-        agg.snippet = agg.snippet.saturating_add(snippet);
-    }
+    let by_cmd = savings_by_command(&filtered);
 
     let tot_pool: u64 = by_cmd.values().map(|a| a.pool).sum();
     let tot_snippet: u64 = by_cmd.values().map(|a| a.snippet).sum();
-    let overall = if tot_pool > 0 {
-        1.0 - (tot_snippet as f64 / tot_pool as f64)
-    } else {
-        0.0
-    };
+    let overall = savings_ratio(tot_snippet, tot_pool);
 
     if json {
         let rows: Vec<serde_json::Value> = by_cmd
             .iter()
             .map(|(cmd, a)| {
-                let ratio = if a.pool > 0 {
-                    1.0 - (a.snippet as f64 / a.pool as f64)
-                } else {
-                    0.0
-                };
+                let ratio = savings_ratio(a.snippet, a.pool);
                 serde_json::json!({
                     "command": cmd,
                     "calls": a.count,
@@ -7531,11 +7565,7 @@ fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), 
         "command", "calls", "pool_chars", "snippet_chars", "savings"
     );
     for (cmd, a) in &by_cmd {
-        let ratio = if a.pool > 0 {
-            1.0 - (a.snippet as f64 / a.pool as f64)
-        } else {
-            0.0
-        };
+        let ratio = savings_ratio(a.snippet, a.pool);
         println!(
             "{:<14} {:>5}  {:>12}  {:>14}  {:>6.1}%",
             cmd,

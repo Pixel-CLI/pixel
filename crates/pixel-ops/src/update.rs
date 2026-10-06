@@ -25,12 +25,20 @@ pub struct UpdateOptions {
 }
 
 pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
+    update_with_state(root, opts, &state_root())
+}
+
+/// `update` with an explicit state root for the journal and the lock.
+pub fn update_with_state(
+    root: &Path,
+    opts: &UpdateOptions,
+    state_root: &Path,
+) -> Result<Value, String> {
     let runner = GitRunner::new(root);
     let repo_key = repo_identity(root);
     let input_hash = sha256_hex(&format!("{}\u{0}{}", opts.expected_head, opts.target_oid));
 
-    let state_root = state_root();
-    let journal = OperationJournal::with_state_root(state_root.clone());
+    let journal = OperationJournal::with_state_root(state_root.to_path_buf());
 
     let outcome = journal.begin(
         &opts.request_id,
@@ -42,7 +50,7 @@ pub fn update(root: &Path, opts: &UpdateOptions) -> Result<Value, String> {
         return Ok(result);
     }
 
-    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, &state_root)
+    let mut lock = RepositoryLock::acquire_with_state_root(&repo_key, state_root)
         .map_err(|_| "repository is busy".to_string())?;
 
     // Validate refs.
@@ -172,6 +180,57 @@ mod tests {
             .args(["commit", "-qm", "init"])
             .status()
             .unwrap();
+    }
+
+    #[test]
+    fn update_should_refuse_a_fast_forward_over_a_dirty_changed_file() {
+        let dir = tempdir().unwrap();
+        let state = tempdir().unwrap();
+        init_repo(dir.path());
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir.path())
+                    .args([
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "-c",
+                        "commit.gpgsign=false"
+                    ])
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        let head = GitRunner::new(dir.path()).rev_parse_head().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"upstream").unwrap();
+        git(&["commit", "-qam", "change a"]);
+        let target = GitRunner::new(dir.path()).rev_parse_head().unwrap();
+        git(&["reset", "-q", "--hard", &head]);
+        std::fs::write(dir.path().join("a.txt"), b"local edit").unwrap();
+
+        let opts = UpdateOptions {
+            expected_head: head,
+            target_oid: target,
+            request_id: "upd-dirty".to_string(),
+        };
+        let err = update_with_state(dir.path(), &opts, state.path()).unwrap_err();
+        assert!(err.starts_with("UNSUPPORTED_STATE: dirty files"), "{err}");
+        // The journal lives under the supplied state root, not the default one.
+        let journal = OperationJournal::with_state_root(state.path().to_path_buf());
+        assert!(
+            journal
+                .read(&repo_identity(dir.path()), "upd-dirty")
+                .is_some(),
+            "no journal record under {}",
+            state.path().display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "local edit"
+        );
     }
 
     #[test]

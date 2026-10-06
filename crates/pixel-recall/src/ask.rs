@@ -620,6 +620,146 @@ mod lexical_tests {
         assert!(format_group(&unknown).contains(" ? - [?] "));
     }
 
+    fn turn_ids(store: &RecallStore) -> Vec<i64> {
+        store
+            .connection()
+            .prepare("SELECT id FROM turns ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// At most `MAX_UNCOSTED_WORDS` words the index cannot cost are
+    /// searched: the alphabetically last of three never reaches a turn.
+    #[test]
+    fn ask_should_search_only_two_uncosted_words() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        add_session(
+            &mut store,
+            "claude",
+            "aaaa1111",
+            &[(Role::Assistant, "run qc now")],
+        );
+        let mut segments = SegmentSet::open(&tmp.path().join("segments")).unwrap();
+        segments.index_new(&store).unwrap();
+        let vectors = VectorStore::open(&tmp.path().join("vectors")).unwrap();
+        let run = |query: &str| {
+            ask(
+                &store,
+                &segments,
+                &vectors,
+                None,
+                query,
+                &SearchFilters::default(),
+                5,
+                false,
+            )
+            .unwrap()
+            .groups
+            .len()
+        };
+        assert_eq!(run("qc"), 1);
+        assert_eq!(run("qa qb qc"), 0);
+    }
+
+    /// A filter on one field alone still restricts the semantic channel.
+    #[test]
+    fn ask_semantic_channel_should_honour_an_agent_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        add_session(
+            &mut store,
+            "claude",
+            "aaaa1111",
+            &[(Role::Assistant, "alpha text")],
+        );
+        add_session(
+            &mut store,
+            "codex",
+            "bbbb2222",
+            &[(Role::Assistant, "beta text")],
+        );
+        let mut segments = SegmentSet::open(&tmp.path().join("segments")).unwrap();
+        segments.index_new(&store).unwrap();
+        let mut vectors = VectorStore::open(&tmp.path().join("vectors")).unwrap();
+        let mut rows = Vec::new();
+        for id in turn_ids(&store) {
+            for chunk in store.insert_chunks(id, &[(0, 4)]).unwrap() {
+                rows.push((chunk, vec![1.0, 0.0, 0.0]));
+            }
+        }
+        vectors
+            .append_segment(crate::embed::POTION_REPO, 3, &rows)
+            .unwrap();
+        let run = |filters: &SearchFilters| {
+            ask(
+                &store,
+                &segments,
+                &vectors,
+                Some(&mut FlatEmbedder),
+                "zzqqxx",
+                filters,
+                5,
+                false,
+            )
+            .unwrap()
+            .groups
+            .into_iter()
+            .map(|g| g.best.agent)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(run(&SearchFilters::default()).len(), 2);
+        let claude = SearchFilters {
+            agent: Some("claude".to_string()),
+            ..SearchFilters::default()
+        };
+        assert_eq!(run(&claude), vec!["claude".to_string()]);
+    }
+
+    /// The semantic channel asks KNN for three chunks per turn it keeps, so
+    /// turns with several chunks still fill `CHANNEL_DEPTH` turns.
+    #[test]
+    fn ask_semantic_channel_should_fill_its_depth_with_multi_chunk_turns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = RecallStore::open(&tmp.path().join("recall.db")).unwrap();
+        let texts: Vec<String> = (0..CHANNEL_DEPTH + 10)
+            .map(|i| format!("turn {i}"))
+            .collect();
+        let turns: Vec<(Role, &str)> = texts
+            .iter()
+            .map(|t| (Role::Assistant, t.as_str()))
+            .collect();
+        add_session(&mut store, "claude", "aaaa1111", &turns);
+        let mut segments = SegmentSet::open(&tmp.path().join("segments")).unwrap();
+        segments.index_new(&store).unwrap();
+        let mut vectors = VectorStore::open(&tmp.path().join("vectors")).unwrap();
+        let mut rows = Vec::new();
+        for id in turn_ids(&store) {
+            for chunk in store.insert_chunks(id, &[(0, 1), (1, 2), (2, 3)]).unwrap() {
+                rows.push((chunk, vec![1.0, 0.0, 0.0]));
+            }
+        }
+        vectors
+            .append_segment(crate::embed::POTION_REPO, 3, &rows)
+            .unwrap();
+        let result = ask(
+            &store,
+            &segments,
+            &vectors,
+            Some(&mut FlatEmbedder),
+            "zzqqxx",
+            &SearchFilters::default(),
+            5,
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].extra_hits, CHANNEL_DEPTH - 1);
+    }
+
     /// Without an embedding model `ask` is lexical only: it still groups
     /// the matching turns per session and says why the semantic channel is
     /// missing.

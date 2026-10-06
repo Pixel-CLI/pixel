@@ -529,6 +529,52 @@ mod tests {
     }
 
     #[test]
+    fn crux_lines_from_body_should_score_each_signal_and_skip_noise_lines() {
+        let body = [
+            "{",
+            "// if x = 1",
+            "# if x = 1",
+            "\"if x = 1\"",
+            "",
+            "foo()?",
+            "if a {",
+            "x = 1;",
+            "return x",
+            "if a { return b; }",
+            "plain()",
+        ]
+        .join("\n");
+        let at = |threshold| crux_lines_from_body(&body, threshold);
+        let line = |n: u32, t: &str| (n, t.to_string());
+        assert_eq!(
+            at(0),
+            vec![
+                line(6, "foo()?"),
+                line(7, "if a {"),
+                line(8, "x = 1;"),
+                line(9, "return x"),
+                line(10, "if a { return b; }"),
+                line(11, "plain()"),
+            ]
+        );
+        assert_eq!(
+            at(3),
+            vec![
+                line(6, "foo()?"),
+                line(7, "if a {"),
+                line(8, "x = 1;"),
+                line(9, "return x"),
+                line(10, "if a { return b; }"),
+            ]
+        );
+        assert_eq!(
+            at(6),
+            vec![line(9, "return x"), line(10, "if a { return b; }")]
+        );
+        assert_eq!(at(9), vec![line(10, "if a { return b; }")]);
+    }
+
+    #[test]
     fn deterministic_render() {
         let items = vec![item("alpha", "src/a.rs", 3), item("beta", "src/b.rs", 2)];
         let a = render(&items, Layer::L2);

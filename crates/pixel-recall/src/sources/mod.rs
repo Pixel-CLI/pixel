@@ -164,3 +164,20 @@ pub fn file_tail_hash(path: &std::path::Path, end: u64) -> Option<String> {
     f.read_exact(&mut buf).ok()?;
     Some(format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&buf)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ingest_error_should_display_its_cause() {
+        let io = IngestError::Io(std::io::Error::other("disk"));
+        assert_eq!(io.to_string(), "io: disk");
+        assert_eq!(IngestError::Other("corrupt".into()).to_string(), "corrupt");
+        let store = IngestError::Store(rusqlite::Error::InvalidQuery);
+        assert_eq!(
+            store.to_string(),
+            format!("store: {}", rusqlite::Error::InvalidQuery)
+        );
+    }
+}

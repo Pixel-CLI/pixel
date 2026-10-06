@@ -313,3 +313,33 @@ impl ReportEnvelope {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn surface_parse_round_trips_every_name() {
+        for name in [
+            "browser-window",
+            "browser-rejection",
+            "error-boundary",
+            "browser-console",
+            "server-console",
+            "node-uncaught",
+            "node-unhandled",
+            "http-5xx",
+            "vite-transform",
+            "vitest",
+            "tsc",
+            "minitest",
+            "rspec",
+            "rubocop",
+            "run-wrapper",
+            "reported",
+        ] {
+            assert_eq!(Surface::parse(name).map(|s| s.as_str()), Some(name));
+        }
+        assert_eq!(Surface::parse("nope"), None);
+    }
+}

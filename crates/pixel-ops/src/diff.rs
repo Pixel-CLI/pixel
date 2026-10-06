@@ -165,6 +165,42 @@ mod tests {
         assert!(files.iter().any(|f| f["path"] == "a.txt"));
         assert!(files.iter().any(|f| f["path"] == "b.txt"));
         assert!(result["diff"].as_str().unwrap().contains("v2"));
+        assert_eq!(result["truncated"], json!(false));
+    }
+
+    #[test]
+    fn diff_should_truncate_text_longer_than_the_cap() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir.path())
+                    .args([
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "-c",
+                        "commit.gpgsign=false"
+                    ])
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "one"]);
+        let head1 = GitRunner::new(dir.path()).rev_parse_head().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "line\n".repeat(1000)).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "two"]);
+        let head2 = GitRunner::new(dir.path()).rev_parse_head().unwrap();
+
+        let result = diff(dir.path(), &head1, Some(&head2), None, Some(1024)).unwrap();
+        assert_eq!(result["truncated"], json!(true));
+        assert_eq!(result["diff"].as_str().unwrap().len(), 1024);
     }
     #[test]
     fn diff_metadata_matches_worktree_and_path_scope() {

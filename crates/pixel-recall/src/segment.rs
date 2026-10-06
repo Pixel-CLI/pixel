@@ -98,18 +98,19 @@ impl SegmentSet {
             let batch = store
                 .turns_for_indexing(after, SEGMENT_TARGET)
                 .map_err(|e| e.to_string())?;
-            if batch.is_empty() {
+            // Stop on a batch that does not move past `after` (empty, or a
+            // store answering the same rows again): the loop always ends.
+            let max_id = batch.iter().map(|(id, _)| *id).max().unwrap_or(after);
+            if max_id <= after {
                 break;
             }
             let mut builder = ShardBuilder::new(&extractor.id());
-            let mut max_id = after;
             let mut hits = Vec::new();
             for (id, text) in &batch {
                 hits.clear();
                 extractor.grams(text.as_bytes(), &mut hits);
                 let hashes: Vec<u64> = hits.iter().map(|h| h.hash).collect();
                 builder.add_file(&id.to_string(), hashes);
-                max_id = (*id).max(max_id);
             }
             let seq = self.manifest.generation + self.manifest.segments.len() as u64 + 1;
             let name = format!("seg-{seq:06}.gpxshard");
@@ -155,6 +156,9 @@ impl SegmentSet {
     }
 }
 
+/// How long an indexer waits for another one's lock before giving up.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Exclusive lock file with stale-lock stealing (a crashed indexer must
 /// not wedge the corpus forever).
 struct SegmentLock {
@@ -163,8 +167,13 @@ struct SegmentLock {
 
 impl SegmentLock {
     fn acquire(dir: &Path) -> Result<Self, String> {
+        Self::acquire_within(dir, LOCK_WAIT)
+    }
+
+    /// [`Self::acquire`] waiting at most `wait` for another holder.
+    fn acquire_within(dir: &Path, wait: std::time::Duration) -> Result<Self, String> {
         let path = dir.join(".index.lock");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let deadline = std::time::Instant::now() + wait;
         loop {
             match fs::OpenOptions::new()
                 .write(true)
@@ -202,5 +211,93 @@ impl SegmentLock {
 impl Drop for SegmentLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Role;
+    use crate::testutil::add_session;
+    use std::time::Duration;
+
+    fn store_with_turns(dir: &Path) -> RecallStore {
+        let mut store = RecallStore::open(&dir.join("recall.db")).unwrap();
+        add_session(
+            &mut store,
+            "claude",
+            "aaaa1111",
+            &[(Role::User, "one needle"), (Role::Assistant, "two needle")],
+        );
+        add_session(&mut store, "codex", "bbbb2222", &[(Role::User, "three")]);
+        store
+    }
+
+    #[test]
+    fn index_new_should_report_its_turns_persist_the_manifest_and_release_the_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_with_turns(tmp.path());
+        let seg_dir = tmp.path().join("segments");
+        let mut set = SegmentSet::open(&seg_dir).unwrap();
+        let report = set.index_new(&store).unwrap();
+        assert_eq!(report.turns_indexed, 3);
+        assert_eq!(report.segments_written, 1);
+        assert!(!seg_dir.join(".index.lock").exists());
+        let reopened = SegmentSet::open(&seg_dir).unwrap();
+        assert_eq!(reopened.manifest.last_turn_id, 3);
+        assert_eq!(reopened.manifest.segments.len(), 1);
+        assert_eq!(set.index_new(&store).unwrap().turns_indexed, 0);
+    }
+
+    #[test]
+    fn rebuild_should_reindex_everything_under_a_new_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_with_turns(tmp.path());
+        let seg_dir = tmp.path().join("segments");
+        let mut set = SegmentSet::open(&seg_dir).unwrap();
+        set.index_new(&store).unwrap();
+        let report = set.rebuild(&store).unwrap();
+        assert_eq!(report.turns_indexed, 3);
+        assert_eq!(report.segments_written, 1);
+        assert_eq!(set.manifest.generation, 1);
+        assert_eq!(set.manifest.segments[0].file, "seg-000002.gpxshard");
+        assert!(!seg_dir.join("seg-000001.gpxshard").exists());
+        let reopened = SegmentSet::open(&seg_dir).unwrap();
+        assert_eq!(reopened.manifest.generation, 1);
+    }
+
+    /// A held lock is waited for, not failed on: the second indexer gets
+    /// it once the first lets go.
+    #[test]
+    fn acquire_should_wait_for_a_held_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = SegmentLock::acquire_within(tmp.path(), Duration::from_secs(5)).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(first);
+        });
+        let second = SegmentLock::acquire_within(tmp.path(), Duration::from_secs(5));
+        releaser.join().unwrap();
+        assert!(second.is_ok(), "{:?}", second.err());
+    }
+
+    #[test]
+    fn acquire_should_fail_at_once_on_an_error_other_than_a_held_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        let err = SegmentLock::acquire_within(&missing, Duration::from_secs(1))
+            .err()
+            .unwrap();
+        assert!(err.starts_with("segment lock: "), "{err}");
+    }
+
+    #[test]
+    fn acquire_should_give_up_after_its_wait() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _held = SegmentLock::acquire_within(tmp.path(), Duration::from_secs(1)).unwrap();
+        let err = SegmentLock::acquire_within(tmp.path(), Duration::ZERO)
+            .err()
+            .unwrap();
+        assert!(err.contains("lock held"), "{err}");
     }
 }

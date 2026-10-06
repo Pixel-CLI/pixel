@@ -1698,6 +1698,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn kind_priority_prefers_functions_then_methods_classes_structs() {
+        let order = [
+            SymbolKind::Function,
+            SymbolKind::Method,
+            SymbolKind::Class,
+            SymbolKind::Struct,
+            SymbolKind::Enum,
+        ]
+        .map(kind_priority);
+        assert_eq!(order, [0, 1, 2, 3, 9]);
+    }
+
+    #[test]
+    fn resolve_calls_counts_every_decision() {
+        let (store, local_file, local_f, _, _) = fixture();
+        let call = |name: &str, src: Option<i64>, receiver: Option<&str>| PendingCall {
+            callee_name: name.into(),
+            enclosing_symbol_id: src,
+            site_line: 1,
+            receiver: receiver.map(str::to_string),
+        };
+        let pending = [FileCalls {
+            file_id: local_file,
+            calls: vec![
+                call("f", Some(local_f), None),
+                call("f", Some(local_f), None),
+                call("g", Some(local_f), None),
+                call("nosuch", Some(local_f), None),
+                call("f", None, None),
+            ],
+        }];
+        let stats = resolve_calls(&store, &pending).unwrap();
+        assert_eq!(
+            (stats.exact, stats.probable, stats.unresolved),
+            (2, 1, 2),
+            "{stats:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_references_counts_top_level_sites_as_unresolved() {
+        let (store, local_file, _, _, _) = fixture();
+        let r = |line| PendingReference {
+            name: "g".into(),
+            enclosing_symbol_id: None,
+            site_line: line,
+            arg_of: Some("register".into()),
+        };
+        let pending = [FileReferences {
+            file_id: local_file,
+            references: vec![r(1), r(2)],
+        }];
+        let stats = resolve_references(&store, &pending).unwrap();
+        assert_eq!((stats.probable, stats.unresolved), (0, 2), "{stats:?}");
+    }
+
     /// Two Rust files that both define `f`: the caller's own `src/local.rs`
     /// and the `src/remote.rs` a qualified `other_crate::f()` names. `g` is
     /// defined in `src/remote.rs` only.

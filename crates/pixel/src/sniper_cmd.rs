@@ -116,9 +116,13 @@ pub enum SniperCmd {
     /// test` and `bundle exec rspec` both work) gives one record per failing
     /// test (kind failure|error, class, name, file, line, message,
     /// project-only backtrace, rerun command) plus a `summary` record;
-    /// rubocop gives one `lint` record per offense. Anything else gets a
-    /// generic tail record + full output in raw_fallbacks. A green Minitest
-    /// or RSpec run records a `test-pass` event with the run counters.
+    /// rubocop gives one `lint` record per remaining offense. RSpec's and
+    /// RuboCop's `--format json` documents give the same records (the
+    /// command is never changed to add a format). Anything else gets a
+    /// generic tail record; the full output of a failure is kept in
+    /// raw_fallbacks either way. A Minitest or RSpec run records a
+    /// `test-pass` event with its counters only when its summary is green
+    /// and it exited 0.
     Run {
         /// Name for the records (defaults to the command).
         #[arg(long)]
@@ -278,5 +282,21 @@ pub fn run_sniper(cmd: SniperCmd) -> Result<(), String> {
             // Mirror the wrapped command's exit code exactly.
             std::process::exit(code);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_surface_name_parses_and_an_unknown_one_is_an_error() {
+        assert_eq!(parse_surface(None), Ok(None));
+        assert_eq!(
+            parse_surface(Some("vitest".to_string())),
+            Ok(Some(Surface::Vitest))
+        );
+        let err = parse_surface(Some("nope".to_string())).unwrap_err();
+        assert!(err.contains("unknown surface \"nope\""), "{err}");
     }
 }

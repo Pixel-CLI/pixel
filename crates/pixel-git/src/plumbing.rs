@@ -257,15 +257,7 @@ impl GitRunner {
                 "--untracked-files=all",
                 "--no-renames",
             ])?;
-        Ok(out
-            .split(|&b| b == 0)
-            .filter(|s| s.len() > 3)
-            .map(|entry| {
-                let xy = String::from_utf8_lossy(&entry[0..2]).into_owned();
-                let path = String::from_utf8_lossy(&entry[3..]).into_owned();
-                (xy, path)
-            })
-            .collect())
+        Ok(parse_status_z(&out))
     }
 
     /// `git diff --unified=0 [--end-of-options <base_ref>] -- .`, validating
@@ -436,6 +428,19 @@ fn parse_ls_tree_blobs(out: &[u8]) -> Vec<String> {
             let tab = entry.iter().position(|&b| b == b'\t')?;
             let kind = entry[..tab].split(|&b| b == b' ').nth(1)?;
             (kind == b"blob").then(|| String::from_utf8_lossy(&entry[tab + 1..]).into_owned())
+        })
+        .collect()
+}
+
+/// Split `git status --porcelain -z` output into `(XY, path)` pairs,
+/// dropping entries too short to carry a path (`XY ` alone).
+fn parse_status_z(out: &[u8]) -> Vec<(String, String)> {
+    out.split(|&b| b == 0)
+        .filter(|s| s.len() > 3)
+        .map(|entry| {
+            let xy = String::from_utf8_lossy(&entry[0..2]).into_owned();
+            let path = String::from_utf8_lossy(&entry[3..]).into_owned();
+            (xy, path)
         })
         .collect()
 }
@@ -966,6 +971,14 @@ mod tests {
             .status_porcelain_or_err()
             .expect("status_porcelain_or_err must also survive the same large untracked tree");
         assert_eq!(strict.iter().filter(|(xy, _)| xy == "??").count(), N);
+    }
+
+    #[test]
+    fn parse_status_z_drops_entries_without_a_path() {
+        assert_eq!(
+            parse_status_z(b"?? \0 M a.rs\0"),
+            vec![(" M".to_string(), "a.rs".to_string())]
+        );
     }
 
     #[test]
