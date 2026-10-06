@@ -7,5 +7,6 @@
 //! one runs the daemon's socket loop to test transport ordering.
 
 mod graph_incremental;
+mod regions;
 mod targets;
 mod watcher_freshness;

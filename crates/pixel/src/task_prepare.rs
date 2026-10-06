@@ -29,6 +29,7 @@ pub(crate) fn prepare(
             limit: Some(SCOPE_LIMIT),
             max_tier: None,
             precision: false,
+            regions: false,
         },
         false,
     );
