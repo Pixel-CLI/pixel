@@ -17,8 +17,10 @@ use pixel_index::indexset::millis;
 use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::extract::{FileExtraction, RawMixin, extract_file, lang_of};
-use crate::imports::resolve_import;
+use crate::extract::{
+    FileExtraction, RawMixin, extract_file, is_binstub_candidate, lang_of, lang_of_file,
+};
+use crate::imports::{resolve_import_in, ruby as ruby_projects};
 use crate::resolve::{
     Affected, Definition, FileCalls, FileReferences, PendingCall, PendingReference,
     reconsider_resolved_calls, resolve_affected, resolve_calls, resolve_references,
@@ -137,7 +139,11 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    (`ruby_mixins`), a concern's `class_methods` block defines its
 ///    `ClassMethods` module, and calls on `self` follow Ruby's ancestor
 ///    lookup order; an instance call no longer reaches a class method.
-pub const EXTRACTOR_VERSION: &str = "21";
+/// 22: `Gemfile`, `Rakefile`, `Guardfile`, `Capfile` and Ruby-shebang
+///    binstubs under `bin/`/`exe/` are Ruby files, and Ruby `require` /
+///    `require_relative` resolve to files inside their project's load roots
+///    (`imports.path` keeps `require_relative` as `./spec`).
+pub const EXTRACTOR_VERSION: &str = "22";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -321,7 +327,7 @@ pub enum Indexability {
 /// the file appeared, or dropped at the file cap), which is the caller's
 /// distinction to make.
 pub fn indexability(root: &Path, rel: &str) -> Indexability {
-    if lang_of(rel).is_none() {
+    if !is_graph_candidate(rel) {
         return Indexability::UnsupportedLanguage;
     }
     let path = root.join(rel);
@@ -343,10 +349,22 @@ pub fn indexability(root: &Path, rel: &str) -> Indexability {
     if is_binary(&content) {
         return Indexability::Binary;
     }
+    if lang_of_file(rel, &content).is_none() {
+        return Indexability::UnsupportedLanguage;
+    }
     if crate::extract::is_generated_blob(&content) {
         return Indexability::Generated;
     }
     Indexability::Indexable
+}
+
+/// True iff the graph walks read `rel`: a file of a supported language, or
+/// a binstub whose shebang [`lang_of_file`] reads. The build, the freshness
+/// walks and [`indexability`] all filter through it, so they see one file
+/// set; a binstub that is not Ruby is walked and hashed, then extraction
+/// drops it, as it drops a generated blob.
+fn is_graph_candidate(rel: &str) -> bool {
+    lang_of(rel).is_some() || is_binstub_candidate(rel)
 }
 
 /// Walk `root` collecting supported source files (skips .git, .pixel,
@@ -377,7 +395,7 @@ fn collect_files(root: &Path) -> Vec<(String, Vec<u8>)> {
         let Some(rel) = rel_path(root, entry.path()) else {
             continue;
         };
-        if lang_of(&rel).is_none() {
+        if !is_graph_candidate(&rel) {
             continue;
         }
         let Some(content) = read_source_file(entry.path()) else {
@@ -478,7 +496,8 @@ fn build_graph_with(
         store.remove_file(path)?;
     }
 
-    let stored = store_batch(&mut store, extracted, &all_paths)?;
+    let projects = ruby_projects::Projects::load(root, &all_paths);
+    let stored = store_batch(&mut store, extracted, &all_paths, &projects)?;
     phases.store_ms = millis(stored.stored_at.duration_since(clock));
     phases.concepts_ms = millis(stored.concepts);
     phases.imports_ms = millis(stored.imports);
@@ -551,6 +570,7 @@ fn store_batch(
     store: &mut GraphStore,
     mut files: Vec<Extracted>,
     all_paths: &[String],
+    projects: &ruby_projects::Projects,
 ) -> Result<StoredBatch, BoxErr> {
     let mut concepts = Duration::ZERO;
     let mut stored_ids: Vec<(i64, Vec<i64>)> = Vec::with_capacity(files.len());
@@ -628,7 +648,7 @@ fn store_batch(
     for (e, (file_id, symbol_ids)) in files.iter().zip(&stored_ids) {
         let file_id = *file_id;
         for imp in &e.fx.imports {
-            let resolved = resolve_import(&imp.path, &e.rel, all_paths)
+            let resolved = resolve_import_in(&imp.path, &e.rel, all_paths, projects)
                 .and_then(|p| path_to_id.get(&p).copied());
             store.insert_import_at(
                 file_id,
@@ -701,7 +721,7 @@ fn tree_hashes(root: &Path) -> Vec<(String, u64)> {
                 return None;
             }
             let rel = rel_path(root, entry.path())?;
-            lang_of(&rel)?;
+            is_graph_candidate(&rel).then_some(())?;
             Some((rel, entry.into_path()))
         })
         .collect();
@@ -771,7 +791,7 @@ fn tree_hashes_cached(root: &Path, cache: &mut TreeHashCache) -> Vec<(String, u6
                 return None;
             }
             let rel = rel_path(root, entry.path())?;
-            lang_of(&rel)?;
+            is_graph_candidate(&rel).then_some(())?;
             Some((rel, entry.into_path()))
         })
         .collect();
@@ -1271,7 +1291,8 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             .map(|e| e.rel.clone()),
     );
     let added_any = extracted.iter().any(|e| !known_before.contains(&e.rel));
-    let stored = store_batch(store, extracted, &all_paths)?;
+    let projects = ruby_projects::Projects::load(root, &all_paths);
+    let stored = store_batch(store, extracted, &all_paths, &projects)?;
     affected.record_changed_definitions(&before, &after);
     affected.record_changed_mixins(store, &mixins_before, &mixins_after)?;
     // A file new to the graph gets its id here; its importers are any file
@@ -1302,7 +1323,7 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
             rows.collect::<std::result::Result<_, _>>()?
         };
         for (import_id, importer_id, import_path, importer) in dangling {
-            if let Some(target) = resolve_import(&import_path, &importer, &all_paths)
+            if let Some(target) = resolve_import_in(&import_path, &importer, &all_paths, &projects)
                 .and_then(|p| path_to_id.get(&p).copied())
             {
                 affected.files.insert(importer_id);
@@ -1312,6 +1333,16 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
                 )?;
             }
         }
+    }
+
+    // A Ruby require resolves against the project's manifests and load
+    // roots, which any Ruby file or manifest of the batch can move: a path
+    // gem declared, a second file on another load root, a gem added to the
+    // Gemfile. Re-resolve every Ruby import, resolved or not.
+    if files.iter().any(|(rel, _)| {
+        ruby_projects::is_manifest(rel) || lang_of(rel) == Some("ruby") || is_binstub_candidate(rel)
+    }) {
+        re_resolve_ruby_imports(store, &all_paths, &projects, &mut affected)?;
     }
 
     if !stored.calls.is_empty() {
@@ -1335,6 +1366,42 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         "DELETE FROM process_steps; DELETE FROM processes;
          DELETE FROM cluster_members; DELETE FROM clusters;",
     )?;
+    Ok(())
+}
+
+/// Resolve every stored import of a Ruby file again against `projects`,
+/// updating the rows whose target moved and recording their importers in
+/// `affected`.
+fn re_resolve_ruby_imports(
+    store: &GraphStore,
+    all_paths: &[String],
+    projects: &ruby_projects::Projects,
+    affected: &mut Affected,
+) -> Result<(), BoxErr> {
+    let path_to_id: HashMap<String, i64> =
+        store.files()?.into_iter().map(|f| (f.path, f.id)).collect();
+    let rows: Vec<(i64, i64, String, String, Option<i64>)> = {
+        let mut stmt = store.conn().prepare(
+            "SELECT i.id, i.file_id, i.path, f.path, i.resolved_file_id FROM imports i
+               JOIN files f ON f.id = i.file_id
+              WHERE f.lang = 'ruby'",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    for (import_id, importer_id, import_path, importer, before) in rows {
+        let after = resolve_import_in(&import_path, &importer, all_paths, projects)
+            .and_then(|p| path_to_id.get(&p).copied());
+        if after != before {
+            affected.files.insert(importer_id);
+            store.conn().exec_cached(
+                "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
+                rusqlite::params![import_id, after],
+            )?;
+        }
+    }
     Ok(())
 }
 

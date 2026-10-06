@@ -4,12 +4,38 @@
 //! Import-spec → file resolution. Best-effort per language family;
 //! `None` is an acceptable answer (the import simply stays unresolved).
 
-use crate::extract::lang_of;
+use crate::extract::{is_binstub_candidate, lang_of};
+
+pub mod ruby;
 
 /// Resolve `spec` (as written in `importer_rel`) to a repo-relative file
-/// path from `all_files`, or `None` when no confident match exists.
+/// path from `all_files`, or `None` when no confident match exists. A Ruby
+/// importer sees its projects' default load roots only; the build reads
+/// their manifests through [`resolve_import_in`].
 pub fn resolve_import(spec: &str, importer_rel: &str, all_files: &[String]) -> Option<String> {
+    resolve_import_in(
+        spec,
+        importer_rel,
+        all_files,
+        &ruby::Projects::from_paths(all_files),
+    )
+}
+
+/// [`resolve_import`] with the Ruby projects of the tree, which `Ruby`
+/// requires resolve against (`ruby::Projects::load`). `projects` must
+/// describe `all_files`.
+pub fn resolve_import_in(
+    spec: &str,
+    importer_rel: &str,
+    all_files: &[String],
+    projects: &ruby::Projects,
+) -> Option<String> {
+    // A binstub has imports only once its shebang made it Ruby.
+    if is_binstub_candidate(importer_rel) {
+        return projects.resolve(spec, importer_rel);
+    }
     match lang_of(importer_rel)? {
+        "ruby" => projects.resolve(spec, importer_rel),
         "ts" | "tsx" | "js" => resolve_js(spec, importer_rel, all_files),
         "rust" => resolve_rust(spec, importer_rel, all_files),
         "python" => resolve_python(spec, importer_rel, all_files),

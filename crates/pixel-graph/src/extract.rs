@@ -135,9 +135,16 @@ pub struct FileExtraction {
     pub mixins: Vec<RawMixin>,
 }
 
+/// Ruby files known by their whole name: Bundler's `Gemfile` and the
+/// Ruby-DSL build files whose tools evaluate them as Ruby.
+pub const RUBY_FILE_NAMES: &[&str] = &["Gemfile", "Rakefile", "Guardfile", "Capfile"];
+
 /// Language tag for a repo-relative path, or `None` if unsupported.
 pub fn lang_of(path: &str) -> Option<&'static str> {
     let file = path.rsplit('/').next().unwrap_or(path);
+    if RUBY_FILE_NAMES.contains(&file) {
+        return Some("ruby");
+    }
     let ext = file.rsplit_once('.')?.1;
     match ext {
         "ts" | "mts" | "cts" => Some("ts"),
@@ -157,6 +164,48 @@ pub fn lang_of(path: &str) -> Option<&'static str> {
         "lua" => Some("lua"),
         _ => None,
     }
+}
+
+/// True iff `path` may be a Ruby executable whose language only its shebang
+/// tells: an extensionless file directly in a `bin/` or `exe/` directory
+/// (`bin/rails`, `exe/mygem`), the places Rails and Bundler put binstubs.
+/// The graph walks read it; [`lang_of_file`] decides from its first line.
+pub fn is_binstub_candidate(path: &str) -> bool {
+    let mut parts = path.rsplit('/');
+    let file = parts.next().unwrap_or(path);
+    !file.is_empty()
+        && !file.contains('.')
+        && matches!(parts.next(), Some("bin" | "exe"))
+        && lang_of(path).is_none()
+}
+
+/// True iff the first line of `content` is a Ruby shebang: an interpreter
+/// path ending in `ruby` (`#!/usr/bin/ruby`), or `env` naming `ruby`
+/// (`#!/usr/bin/env ruby`, `#!/usr/bin/env -S ruby -w`).
+pub fn has_ruby_shebang(content: &[u8]) -> bool {
+    let line = content.split(|b| *b == b'\n').next().unwrap_or_default();
+    let Some(rest) = line.strip_prefix(b"#!") else {
+        return false;
+    };
+    let line = String::from_utf8_lossy(rest);
+    let mut words = line.split_whitespace();
+    let Some(interpreter) = words.next() else {
+        return false;
+    };
+    let base = interpreter.rsplit('/').next().unwrap_or(interpreter);
+    if base == "env" {
+        words.find(|w| !w.starts_with('-')) == Some("ruby")
+    } else {
+        base == "ruby"
+    }
+}
+
+/// [`lang_of`], plus a binstub ([`is_binstub_candidate`]) whose content opens
+/// with a Ruby shebang. An extensionless executable is never Ruby by its
+/// place alone: `bin/dev` is often a shell script.
+pub fn lang_of_file(path: &str, content: &[u8]) -> Option<&'static str> {
+    lang_of(path)
+        .or_else(|| (is_binstub_candidate(path) && has_ruby_shebang(content)).then_some("ruby"))
 }
 
 /// Size floor for the generated-blob guard: below this, even a one-line file
@@ -253,7 +302,7 @@ pub(crate) fn parse_bounded(parser: &mut Parser, content: &[u8]) -> Option<Tree>
 /// Shared by extraction and the rename verifier, which re-parses a file to
 /// confirm each candidate identifier's role before rewriting it.
 pub fn parse_file(path_rel: &str, content: &[u8]) -> Option<tree_sitter::Tree> {
-    let lang = lang_of(path_rel)?;
+    let lang = lang_of_file(path_rel, content)?;
     if is_generated_blob(content) {
         return None;
     }
@@ -276,7 +325,7 @@ pub fn parse_file(path_rel: &str, content: &[u8]) -> Option<tree_sitter::Tree> {
 /// `update_files_unsigned` — the incremental path the daemon runs on every
 /// save — does not, so a committed bundle was re-parsed on each touch.
 pub fn extract_file(path_rel: &str, content: &[u8]) -> Option<FileExtraction> {
-    let lang = lang_of(path_rel)?;
+    let lang = lang_of_file(path_rel, content)?;
     if is_generated_blob(content) {
         return None;
     }
@@ -2260,7 +2309,8 @@ fn walk_ruby_call(w: &mut Walker, locals: &mut RubyLocals, node: Node) {
         ruby_mixins::walk_mixin_call(w, node, &name);
         if recv.is_none() && RUBY_REQUIRE_METHODS.contains(&name.as_str()) {
             if let Some(spec) = ruby_first_string_argument(w, node) {
-                w.push_import(spec, Vec::new());
+                let path = ruby_require_path(&name, &spec);
+                w.push_import_at(spec, path, Vec::new(), Vec::new());
             }
         } else {
             // A declaration that generated methods defines them; it is not
@@ -2322,6 +2372,22 @@ fn ruby_receiver(w: &Walker, call: Node) -> Option<String> {
         return Some(format!("{}.{method}", w.text(owner)));
     }
     Some(w.text(receiver))
+}
+
+/// What `resolve_import` resolves for a Ruby load of `spec` through
+/// `method`: `require_relative` names a file relative to the requiring one,
+/// kept as an explicit `./`/`../` path; `require`, `require_dependency` and
+/// `load` search the load path, kept bare. A load path spec written as a
+/// relative or absolute path (`require "./x"`) is relative to the process's
+/// working directory, which the graph cannot know: it resolves to nothing.
+fn ruby_require_path(method: &str, spec: &str) -> String {
+    let explicit = spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/');
+    match (method, explicit) {
+        ("require_relative", false) => format!("./{spec}"),
+        ("require_relative", true) => spec.to_string(),
+        (_, false) => spec.to_string(),
+        (_, true) => String::new(),
+    }
 }
 
 /// Literal text of the first `string` argument of a Ruby `call`, or `None`
