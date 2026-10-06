@@ -163,6 +163,19 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn dropping_a_lock_should_release_it() {
+        let dir = tempdir().unwrap();
+        let common = "/test/repo-drop/.git";
+        {
+            let lock = RepositoryLock::acquire_with_state_root(common, dir.path()).unwrap();
+            assert!(lock.acquired);
+        }
+        let mut again = RepositoryLock::acquire_with_state_root(common, dir.path())
+            .expect("the dropped lock must have been released");
+        again.release();
+    }
+
+    #[test]
     fn acquire_and_release() {
         let dir = tempdir().unwrap();
         let common = "/test/repo/.git";

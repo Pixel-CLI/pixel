@@ -29,8 +29,8 @@ use crate::poison::{
 };
 use crate::store::{
     DIFF_STATE_EVICTED, DIFF_STATE_INDEXED, DIFF_STATE_PENDING, DIFF_STATE_SKIPPED, FactsStore,
-    HistoryLimits, REACH_BRANCH, REACH_REFLOG_ONLY, REACH_REMOTE, REACH_STASH, REACH_TAG, Result,
-    SKIP_NOTE_OUTSIDE_WINDOW, SKIP_NOTE_OVER_BUDGET, normalize_committed_at,
+    HistoryLimits, REACH_REFLOG_ONLY, REACH_STASH, Result, SKIP_NOTE_OUTSIDE_WINDOW,
+    SKIP_NOTE_OVER_BUDGET, normalize_committed_at,
 };
 
 /// Default wall-clock budget per tick (250ms per PLAN.md). Queries never wait
@@ -229,9 +229,18 @@ pub const DEFAULT_LAZY_INGEST_BUDGET_MS: u64 = 3000;
 
 /// Env-tunable lazy-ingest budget: `PIXEL_FACTS_QUERY_BUDGET_MS` (canonical)
 /// with `PIXEL_FACTS_LAZY_BUDGET_MS` accepted as an alias.
+#[cfg_attr(test, mutants::skip)] // process-env adapter; `lazy_budget_from_env` is tested
 pub fn lazy_ingest_budget_ms() -> u64 {
-    std::env::var("PIXEL_FACTS_QUERY_BUDGET_MS")
-        .or_else(|_| std::env::var("PIXEL_FACTS_LAZY_BUDGET_MS"))
+    lazy_budget_from_env(|name| std::env::var(name))
+}
+
+/// `lazy_ingest_budget_ms` over an injectable variable lookup: the
+/// canonical variable wins when set, even if it does not parse.
+fn lazy_budget_from_env(
+    mut var: impl FnMut(&str) -> std::result::Result<String, std::env::VarError>,
+) -> u64 {
+    var("PIXEL_FACTS_QUERY_BUDGET_MS")
+        .or_else(|_| var("PIXEL_FACTS_LAZY_BUDGET_MS"))
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_LAZY_INGEST_BUDGET_MS)
@@ -408,11 +417,9 @@ fn refresh_refs(store: &mut FactsStore) -> Result<()> {
         if line.is_empty() {
             continue;
         }
-        let mut parts = line.splitn(2, '\0');
-        let (refname, oid) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-        if refname.is_empty() || oid.is_empty() {
+        let Some((refname, oid)) = split_ref_record(&line) else {
             continue;
-        }
+        };
         let kind = if refname.starts_with("refs/heads/") {
             "branch"
         } else if refname.starts_with("refs/remotes/") {
@@ -439,9 +446,7 @@ fn refresh_refs(store: &mut FactsStore) -> Result<()> {
             if line.is_empty() {
                 continue;
             }
-            let mut parts = line.splitn(2, '\0');
-            let (refname, oid) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-            if !refname.is_empty() && !oid.is_empty() {
+            if let Some((refname, oid)) = split_ref_record(&line) {
                 store.conn().execute(
                     "INSERT INTO refs (ref, oid, kind, indexed_at) VALUES (?1, ?2, 'stash', ?3)
                      ON CONFLICT (ref) DO UPDATE SET oid = excluded.oid, indexed_at = excluded.indexed_at",
@@ -451,6 +456,22 @@ fn refresh_refs(store: &mut FactsStore) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Reach of a commit listed by `rev-list --branches --remotes --tags`:
+/// `REACH_BRANCH | REACH_REMOTE | REACH_TAG`, spelled as its value because
+/// the three bits are disjoint, so `|`, `^` and `+` agree (a test pins it).
+const REACH_LISTED_REFS: i64 = 0b111;
+
+/// `refname\0oid` from `for-each-ref`, or `None` when either half is empty.
+fn split_ref_record(line: &str) -> Option<(&str, &str)> {
+    let mut parts = line.splitn(2, '\0');
+    let (refname, oid) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    if refname.is_empty() || oid.is_empty() {
+        None
+    } else {
+        Some((refname, oid))
+    }
 }
 
 /// Enumerate every commit that should be indexed: all reachable from refs,
@@ -465,7 +486,7 @@ fn enumerate_all_commits(store: &FactsStore) -> Result<Vec<String>> {
     // Branches + remotes + tags via a single rev-list of all heads/remotes/tags.
     let args = vec!["rev-list", "--reverse", "--branches", "--remotes", "--tags"];
     if let Ok(out) = runner.run(&args) {
-        let reach = REACH_BRANCH | REACH_REMOTE | REACH_TAG;
+        let reach = REACH_LISTED_REFS;
         for oid in split_nul_lines(&out) {
             if !oid.is_empty() && seen.insert(oid.clone()) {
                 all.push(oid.clone());
@@ -580,40 +601,34 @@ fn parse_phase_a(output: &[u8]) -> Vec<PhaseACommit> {
         let committed_at = str(fields[3]).trim().to_string();
         let message = str(fields[4]).trim_end_matches('\n').to_string();
         let mut changes = Vec::new();
-        let mut index = 5;
-        while index < fields.len() {
-            let raw = str(fields[index]);
+        let mut rest = fields[5..].iter();
+        while let Some(raw) = rest.next() {
+            let raw = str(raw);
             let raw_status = raw.trim_start();
             if raw_status.is_empty() {
-                index += 1;
                 continue;
             }
             let status = raw_status.chars().next().unwrap_or(' ');
             match status {
                 'R' | 'C' => {
-                    if index + 2 >= fields.len() {
+                    let (Some(old_path), Some(path)) = (rest.next(), rest.next()) else {
                         break;
-                    }
-                    let old_path = str(fields[index + 1]);
-                    let path = str(fields[index + 2]);
+                    };
                     changes.push(Change {
                         status: status.to_string(),
-                        path,
-                        old_path: Some(old_path),
+                        path: str(path),
+                        old_path: Some(str(old_path)),
                     });
-                    index += 3;
                 }
                 _ => {
-                    if index + 1 >= fields.len() {
+                    let Some(path) = rest.next() else {
                         break;
-                    }
-                    let path = str(fields[index + 1]);
+                    };
                     changes.push(Change {
                         status: status.to_string(),
-                        path,
+                        path: str(path),
                         old_path: None,
                     });
-                    index += 2;
                 }
             }
         }
@@ -1582,6 +1597,174 @@ body"
         assert!(parsed[0].changes.is_empty());
         assert!(parse_phase_a(b"\x1eabc\x00\x00Ann\x00").is_empty());
         assert!(parse_phase_a(b"").is_empty());
+    }
+
+    #[test]
+    fn parse_phase_a_should_skip_blank_status_fields_and_pair_renames() {
+        let rec = b"\x1eabc\x00p1 p2\x00Ann\x00t\x00msg\x00\x00 \x00M\x00a.txt\x00R100\x00old.rs\x00new.rs\x00D\x00gone";
+        let parsed = parse_phase_a(rec);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].parents, vec!["p1", "p2"]);
+        let changes: Vec<(String, String, Option<String>)> = parsed[0]
+            .changes
+            .iter()
+            .map(|c| (c.status.clone(), c.path.clone(), c.old_path.clone()))
+            .collect();
+        assert_eq!(
+            changes,
+            vec![
+                ("M".to_string(), "a.txt".to_string(), None),
+                (
+                    "R".to_string(),
+                    "new.rs".to_string(),
+                    Some("old.rs".to_string())
+                ),
+                ("D".to_string(), "gone".to_string(), None),
+            ]
+        );
+        // A truncated trailing change is dropped, the earlier ones kept.
+        let cut = b"\x1eabc\x00\x00Ann\x00t\x00msg\x00M\x00a.txt\x00R100\x00old.rs";
+        assert_eq!(parse_phase_a(cut)[0].changes.len(), 1);
+        let cut = b"\x1eabc\x00\x00Ann\x00t\x00msg\x00M\x00a.txt\x00M";
+        assert_eq!(parse_phase_a(cut)[0].changes.len(), 1);
+    }
+
+    #[test]
+    fn parse_phase_c_should_drop_the_text_of_a_binary_file() {
+        for marker in ["Binary files a/x and b/x differ", "GIT binary patch"] {
+            let out = format!("\x1eabc\ndiff --git a/x b/x\n+text\n-gone\n{marker}\n");
+            let parsed = parse_phase_c(out.as_bytes());
+            assert_eq!(parsed[0].files.len(), 1, "{marker}");
+            assert_eq!(parsed[0].files[0].path, "x");
+            assert_eq!(parsed[0].files[0].added, "", "{marker}");
+            assert_eq!(parsed[0].files[0].removed, "", "{marker}");
+        }
+    }
+
+    #[test]
+    fn lazy_budget_from_env_should_prefer_the_canonical_variable() {
+        let env = |query: Option<&'static str>, lazy: Option<&'static str>| {
+            move |name: &str| {
+                let v = match name {
+                    "PIXEL_FACTS_QUERY_BUDGET_MS" => query,
+                    "PIXEL_FACTS_LAZY_BUDGET_MS" => lazy,
+                    other => panic!("unexpected variable {other}"),
+                };
+                v.map(str::to_string).ok_or(std::env::VarError::NotPresent)
+            }
+        };
+        assert_eq!(
+            lazy_budget_from_env(env(None, None)),
+            DEFAULT_LAZY_INGEST_BUDGET_MS
+        );
+        assert_eq!(lazy_budget_from_env(env(Some("7"), None)), 7);
+        assert_eq!(lazy_budget_from_env(env(Some("7"), Some("9"))), 7);
+        assert_eq!(lazy_budget_from_env(env(None, Some("9"))), 9);
+        assert_eq!(
+            lazy_budget_from_env(env(Some("x"), Some("9"))),
+            DEFAULT_LAZY_INGEST_BUDGET_MS
+        );
+    }
+
+    #[test]
+    fn ingest_until_fresh_bounded_should_return_at_once_when_fresh() {
+        let (dir, _, _) = two_commit_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_within(&mut store);
+        let start = Instant::now();
+        let report = ingest_until_fresh_bounded(&mut store, 8_000).unwrap();
+        assert!(report.fresh, "{report:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_fresh_index_should_need_no_phase_a_and_record_its_refs() {
+        let (dir, _, second) = two_commit_repo();
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        ingest_within(&mut store);
+        assert!(!needs_phase_a(&store).unwrap());
+        let refs: Vec<(String, String, String)> = {
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT ref, oid, kind FROM refs")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(
+            refs,
+            vec![(
+                "refs/heads/develop".to_string(),
+                second,
+                "branch".to_string()
+            )]
+        );
+        let reach: Vec<i64> = {
+            let mut stmt = store.conn().prepare("SELECT reach FROM commits").unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(reach, vec![REACH_LISTED_REFS; 2]);
+        assert_eq!(
+            REACH_LISTED_REFS,
+            crate::store::REACH_BRANCH | crate::store::REACH_REMOTE | crate::store::REACH_TAG
+        );
+    }
+
+    #[test]
+    fn split_ref_record_should_refuse_an_empty_half() {
+        assert_eq!(
+            split_ref_record("refs/heads/a\0abc"),
+            Some(("refs/heads/a", "abc"))
+        );
+        assert_eq!(split_ref_record("refs/heads/a\0"), None);
+        assert_eq!(split_ref_record("refs/heads/a"), None);
+        assert_eq!(split_ref_record("\0abc"), None);
+    }
+
+    #[test]
+    fn phase_b_should_count_the_paths_it_poisons() {
+        let dir = init_repo();
+        commit(
+            dir.path(),
+            &[("big.bin", &vec![b'x'; BLOB_CAP_BYTES + 1])],
+            "big",
+        );
+        let mut store = FactsStore::open(dir.path()).unwrap();
+        assert!(phase_a(&mut store, &far()).unwrap());
+        assert_eq!(phase_b(&mut store, &far()).unwrap(), (true, 1));
+    }
+
+    #[test]
+    fn ingest_diff_single_should_index_a_commit_just_under_its_output_cap() {
+        let dir = init_repo();
+        let line = format!("{}\n", "x".repeat(99));
+        let body = line.repeat(287).into_bytes();
+        let names: Vec<String> = (0..10).map(|n| format!("f{n}.txt")).collect();
+        let files: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), body.as_slice()))
+            .collect();
+        let oid = commit(dir.path(), &files, "ten files");
+        let shown = git(
+            dir.path(),
+            &["show", "-U0", "--no-color", "--format=%x1e%H", &oid],
+        );
+        let cap = COMMIT_TEXT_CAP_BYTES + FILE_TEXT_CAP_BYTES;
+        assert!(
+            shown.len() > cap - 4096 && shown.len() < cap,
+            "{}",
+            shown.len()
+        );
+        let mut store = metadata_only(dir.path());
+        ingest_diff_single(&mut store, &oid).unwrap();
+        assert!(hunks_for(&store, &oid) >= 1);
     }
 
     #[test]

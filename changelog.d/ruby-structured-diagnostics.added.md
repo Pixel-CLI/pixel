@@ -1,0 +1,1 @@
+**session:** `list-errors run` reads RSpec's and RuboCop's `--format json` documents (after any preamble) into the same records as their text output, records errors outside of RSpec examples and skips offenses RuboCop autocorrected. A failing test summary is never a pass, even with a green exit; the raw output stays recoverable; Ruby runs record `Gemfile.lock` as their lockfile.

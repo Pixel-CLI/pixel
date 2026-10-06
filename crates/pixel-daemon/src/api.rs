@@ -62,6 +62,8 @@ const MAX_SEED_SYMBOLS: usize = 24;
 /// P0 is the only tier the doctrine mandates checking before the first
 /// edit, so it is the only tier worth spending tokens to pre-justify.
 const EVIDENCE_MAX_LINES_PER_TARGET: usize = 2;
+/// Most keywords a `targets` content probe runs, expansions included.
+const MAX_PROBE_KEYWORDS: usize = 6;
 const TARGETS_FACTS_ALGORITHM_VERSION: u32 = 1;
 
 /// `context` and `uses`: edges returned per direction before elision.
@@ -1520,12 +1522,10 @@ impl Service {
         // without re-searching. Near-zero cost — the lines are already fetched.
         let mut evidence: BTreeMap<String, Vec<Value>> = BTreeMap::new();
 
-        let mut probe_keywords = query.keywords.clone();
-        for exp in engine::expand_keywords(&query.keywords, query.language) {
-            if !probe_keywords.contains(&exp) && probe_keywords.len() < 6 {
-                probe_keywords.push(exp);
-            }
-        }
+        let probe_keywords = probe_keywords(
+            &query.keywords,
+            engine::expand_keywords(&query.keywords, query.language),
+        );
 
         for kw in &probe_keywords {
             // Word-bounded so "auth" cannot count every "author" as signal.
@@ -1545,13 +1545,11 @@ impl Service {
                     ));
                 }
                 let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-                let mut kept_per_file: HashMap<String, usize> = HashMap::new();
                 for m in matches {
                     *counts.entry(m.path.clone()).or_default() += 1;
-                    let kept = kept_per_file.entry(m.path.clone()).or_insert(0);
-                    if *kept < 2 {
-                        *kept += 1;
-                        evidence.entry(m.path.clone()).or_default().push(json!({
+                    let lines = evidence.entry(m.path.clone()).or_default();
+                    if lines.len() < EVIDENCE_MAX_LINES_PER_TARGET {
+                        lines.push(json!({
                             "line": m.line_number,
                             "text": m.line,
                             "keyword": kw,
@@ -1656,12 +1654,7 @@ impl Service {
             // Per-path test penalty: demote a test file only when the task does
             // NOT mention tests/specs (a test file is a *worse* target for a
             // non-test task, but a *better* one for a test task).
-            let mentions_tests = task.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
-                matches!(
-                    t.to_ascii_lowercase().as_str(),
-                    "test" | "tests" | "spec" | "specs"
-                )
-            });
+            let mentions_tests = task_mentions_tests(task);
             let penalty = |path: &str| -> f64 { test_penalty(path, mentions_tests) };
             let weights =
                 engine::rerank::RerankWeights::from(&engine::signals::SignalOptions::default());
@@ -1698,9 +1691,7 @@ impl Service {
                 if let Some(path) = t.get("path").and_then(Value::as_str)
                     && let Some(ev) = evidence.get(path)
                 {
-                    let trimmed: Vec<&Value> =
-                        ev.iter().take(EVIDENCE_MAX_LINES_PER_TARGET).collect();
-                    t["evidence"] = json!(trimmed);
+                    t["evidence"] = json!(ev);
                 }
             }
         }
@@ -1866,20 +1857,8 @@ impl Service {
         };
         incoming.sort_by(edge_order);
         outgoing.sort_by(edge_order);
-        incoming.dedup_by(|a, b| {
-            a.src_id == b.src_id
-                && a.dst_id == b.dst_id
-                && a.kind == b.kind
-                && a.tier == b.tier
-                && a.site_line == b.site_line
-        });
-        outgoing.dedup_by(|a, b| {
-            a.src_id == b.src_id
-                && a.dst_id == b.dst_id
-                && a.kind == b.kind
-                && a.tier == b.tier
-                && a.site_line == b.site_line
-        });
+        incoming.dedup_by(|a, b| same_context_edge(a, b));
+        outgoing.dedup_by(|a, b| same_context_edge(a, b));
 
         // Bound source retained before rendering. The target gets priority;
         // neighbors share only the remaining aggregate allowance.
@@ -2138,7 +2117,7 @@ impl Service {
             }
         }
         let returned_edges = arr.len();
-        let has_more = offset.saturating_add(returned_edges) < total_edges;
+        let has_more = page_has_more(offset, returned_edges, total_edges);
         let mut out = json!({
             "symbol": symbol_json(&sym, &files),
             "role": if role == "callees" { "callees" } else { "callers" },
@@ -3166,7 +3145,7 @@ impl Service {
             );
         };
         let files = store.files().map_err(|e| e.to_string())?;
-        let truncated = files.len() > MAP_FILE_CAP;
+        let truncated = map_truncated(files.len());
         let mut grouped: Vec<(&FileRow, Vec<SymbolRow>)> = Vec::new();
         let mut symbol_total = 0usize;
         for f in files.iter().take(MAP_FILE_CAP) {
@@ -3393,6 +3372,46 @@ fn fan_in_counts(
 /// Whether `targets` may add semantic leads: only when the lexical pass found
 /// nothing in P0/P1, and only when the caller accepts P2 (the tier the leads
 /// land in).
+/// The keywords `targets` probes the content index with: the task's own
+/// keywords, then expansions not already present, up to
+/// [`MAX_PROBE_KEYWORDS`] in all (the task's own keywords are never cut).
+fn probe_keywords(keywords: &[String], expansions: Vec<String>) -> Vec<String> {
+    let mut probe = keywords.to_vec();
+    for exp in expansions {
+        if !probe.contains(&exp) && probe.len() < MAX_PROBE_KEYWORDS {
+            probe.push(exp);
+        }
+    }
+    probe
+}
+
+/// Whether a task names tests or specs as a word: the per-path test
+/// penalty is lifted for such a task.
+fn task_mentions_tests(task: &str) -> bool {
+    task.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
+        matches!(
+            t.to_ascii_lowercase().as_str(),
+            "test" | "tests" | "spec" | "specs"
+        )
+    })
+}
+
+/// Whether `map` over `files` indexed files cuts the list at
+/// [`MAP_FILE_CAP`] (a repository of exactly the cap is complete).
+fn map_truncated(files: usize) -> bool {
+    files > MAP_FILE_CAP
+}
+
+/// Two edges `context` lists once: same endpoints, kind, tier and site
+/// line (the receiver and the written callee name do not split them).
+fn same_context_edge(a: &EdgeRow, b: &EdgeRow) -> bool {
+    a.src_id == b.src_id
+        && a.dst_id == b.dst_id
+        && a.kind == b.kind
+        && a.tier == b.tier
+        && a.site_line == b.site_line
+}
+
 fn semantic_fallback_wanted(has_p0_p1: bool, max_tier: Option<&str>) -> bool {
     !has_p0_p1 && max_tier.is_none_or(|m| m == "P2")
 }
@@ -4432,7 +4451,7 @@ mod bridge {
             }
         }
         let returned_processes = v.len();
-        let has_more = offset.saturating_add(returned_processes) < total_processes;
+        let has_more = super::page_has_more(offset, returned_processes, total_processes);
         Ok(serde_json::json!({
             "list-flows": to_val(v),
             "total_processes": total_processes,
@@ -4465,7 +4484,7 @@ mod bridge {
         };
         v.truncate(CLUSTER_LIMIT);
         let returned_clusters = v.len();
-        let has_more = offset.saturating_add(returned_clusters) < total_clusters;
+        let has_more = super::page_has_more(offset, returned_clusters, total_clusters);
         Ok(serde_json::json!({
             "list-areas": to_val(v),
             "total_clusters": total_clusters,
@@ -6716,6 +6735,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Evidence is capped per target, not per keyword: a P0 file with many
+    /// matching lines carries exactly the first two.
+    #[test]
+    fn targets_cap_content_evidence_at_two_lines_per_target() {
+        let root = tmpdir("targets-evidence-cap");
+        std::fs::write(
+            root.join("ledger.rs"),
+            "// ledger one\n// ledger two\n// ledger three\npub fn ledger() {}\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Targets {
+            task: "gain ledger".into(),
+            limit: Some(5),
+            max_tier: None,
+            precision: false,
+        });
+        assert!(resp.ok, "targets: {:?}", resp.error);
+        let targets = resp
+            .data()
+            .get("targets")
+            .and_then(Value::as_array)
+            .unwrap();
+        let ledger = targets
+            .iter()
+            .find(|t| t["path"].as_str() == Some("ledger.rs"))
+            .expect("ledger.rs should be a target");
+        let lines: Vec<u64> = ledger["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["line"].as_u64().unwrap())
+            .collect();
+        assert_eq!(lines, vec![1, 2]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// `op_targets_mode`의 rerank 블록(`if !fact_mode`)과 그 안의
     /// `mentions_tests` 토큰화 게이트를 데몬 응답 수준에서 고정한다.
     /// 내용이 동일하고 파일명에 같은 키워드("login")를 포함한 두 파일은
@@ -7823,8 +7884,42 @@ mod tests {
                 .is_null()
         );
         assert!(svc.op_note("set", Some("login.rs"), None, None).is_err());
+        for (file, target) in [("", "login"), ("login.rs", ""), ("", "")] {
+            for action in ["get", "rm"] {
+                let err = svc
+                    .op_note(action, Some(file), Some(target), None)
+                    .unwrap_err();
+                assert_eq!(
+                    err,
+                    format!("note {action} requires <file> <target>"),
+                    "{action} {file:?} {target:?}"
+                );
+            }
+        }
         assert!(svc.op_note("teleport", None, None, None).is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn admitted_paths_lists_the_indexed_tree() {
+        let root = signals_repo("admitted-paths");
+        let svc = Service::open(&root).unwrap();
+        let mut paths = svc.admitted_paths();
+        paths.sort();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(paths, vec!["caller.rs".to_string(), "login.rs".to_string()]);
+    }
+
+    /// `reconcile` runs the real reconciliation, never an empty answer: a
+    /// repository whose remote cannot be fetched reports the fetch failure.
+    #[test]
+    fn op_reconcile_reports_a_fetch_it_cannot_make() {
+        let root = signals_repo("op-reconcile");
+        let mut svc = Service::open(&root).unwrap();
+        let out = svc.op_reconcile(None, None, None, None);
+        let _ = std::fs::remove_dir_all(&root);
+        let error = out.unwrap_err();
+        assert!(error.starts_with("git fetch: "), "{error}");
     }
 
     #[test]
@@ -8280,6 +8375,79 @@ mod tests {
     /// production task but a *better* one for a task that names tests. Pins
     /// the ``&& !mentions_tests`` guard against both flips the gate can make
     /// (``&&``↔``||`` and deleting the ``!``).
+    #[test]
+    fn probe_keywords_add_new_expansions_up_to_the_cap() {
+        let own = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            probe_keywords(&own(&["a", "b"]), own(&["b", "c", "d", "e", "f", "g"])),
+            own(&["a", "b", "c", "d", "e", "f"])
+        );
+        assert_eq!(
+            probe_keywords(&own(&["a", "b", "c", "d", "e", "f", "g"]), own(&["h"])),
+            own(&["a", "b", "c", "d", "e", "f", "g"])
+        );
+        assert_eq!(probe_keywords(&own(&["a"]), own(&["x"])), own(&["a", "x"]));
+    }
+
+    #[test]
+    fn same_context_edge_needs_every_identifying_field_equal() {
+        use pixel_graph::store::{EdgeKind, Tier};
+        let base = EdgeRow {
+            src_id: 1,
+            dst_id: 2,
+            kind: EdgeKind::Calls,
+            tier: Tier::Exact,
+            site_line: 3,
+            receiver: None,
+            callee: None,
+        };
+        let receiver = EdgeRow {
+            receiver: Some("x".into()),
+            callee: Some("y".into()),
+            ..base.clone()
+        };
+        assert!(same_context_edge(&base, &receiver));
+        for other in [
+            EdgeRow {
+                src_id: 9,
+                ..base.clone()
+            },
+            EdgeRow {
+                dst_id: 9,
+                ..base.clone()
+            },
+            EdgeRow {
+                kind: EdgeKind::Imports,
+                ..base.clone()
+            },
+            EdgeRow {
+                tier: Tier::Probable,
+                ..base.clone()
+            },
+            EdgeRow {
+                site_line: 9,
+                ..base.clone()
+            },
+        ] {
+            assert!(!same_context_edge(&base, &other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn map_truncates_only_past_the_file_cap() {
+        assert!(!map_truncated(MAP_FILE_CAP - 1));
+        assert!(!map_truncated(MAP_FILE_CAP));
+        assert!(map_truncated(MAP_FILE_CAP + 1));
+    }
+
+    #[test]
+    fn task_mentions_tests_matches_whole_words_only() {
+        assert!(task_mentions_tests("fix the login tests"));
+        assert!(task_mentions_tests("update Spec, please"));
+        assert!(!task_mentions_tests("fix the latest login"));
+        assert!(!task_mentions_tests("contest attestation"));
+    }
+
     #[test]
     fn op_targets_test_penalty_follows_the_phrase() {
         let test_path = "tests/login_test.rs";

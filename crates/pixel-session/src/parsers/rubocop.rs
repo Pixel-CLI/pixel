@@ -3,7 +3,9 @@
 
 //! Parser for RuboCop's default (progress/simple) formatter:
 //! `path:line:col: C: [Correctable] Cop/Name: message`, one line per
-//! offense, then `N files inspected, N offenses detected`.
+//! offense, then `N files inspected, N offenses detected`; and its JSON
+//! formatter (`--format json`, [`parse_json`]), which yields the same
+//! offenses.
 
 /// One RuboCop offense.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +19,9 @@ pub struct Offense {
     pub cop: String,
     pub message: String,
     pub correctable: bool,
+    /// Fixed by `--autocorrect` in this run (`[Corrected]`): reported, but
+    /// no longer in the file.
+    pub corrected: bool,
 }
 
 /// A parsed RuboCop run.
@@ -44,12 +49,12 @@ pub fn parse_line(line: &str) -> Option<Offense> {
     if severity.len() != 1 || !"CWEFRI".contains(severity) {
         return None;
     }
-    let (correctable, rest) = match rest
-        .strip_prefix("[Correctable] ")
-        .or_else(|| rest.strip_prefix("[Corrected] "))
-    {
-        Some(rest) => (true, rest),
-        None => (false, rest),
+    let (correctable, corrected, rest) = if let Some(rest) = rest.strip_prefix("[Correctable] ") {
+        (true, false, rest)
+    } else if let Some(rest) = rest.strip_prefix("[Corrected] ") {
+        (true, true, rest)
+    } else {
+        (false, false, rest)
     };
     let (cop, message) = rest.split_once(": ")?;
     if !cop.contains('/') || cop.contains(char::is_whitespace) {
@@ -63,6 +68,7 @@ pub fn parse_line(line: &str) -> Option<Offense> {
         cop: cop.to_owned(),
         message: message.to_owned(),
         correctable,
+        corrected,
     })
 }
 
@@ -88,6 +94,85 @@ pub fn parse(output: &str) -> Report {
         offenses: output.lines().filter_map(parse_line).collect(),
         files_inspected: output.lines().rev().find_map(parse_summary),
     }
+}
+
+/// The text formatter's one-letter severity for a JSON `severity`.
+fn severity_letter(severity: &str) -> Option<&'static str> {
+    Some(match severity {
+        "convention" => "C",
+        "warning" => "W",
+        "error" => "E",
+        "fatal" => "F",
+        "refactor" => "R",
+        "info" => "I",
+        _ => return None,
+    })
+}
+
+fn is_rubocop_document(value: &serde_json::Value) -> bool {
+    value.get("files").is_some_and(serde_json::Value::is_array)
+        && value
+            .get("summary")
+            .is_some_and(serde_json::Value::is_object)
+}
+
+/// Parse the document RuboCop's JSON formatter printed in `output`, or
+/// `None` when there is none (or it is incomplete). Each offense keeps the
+/// location's start line and column, the cop, the message, and whether it
+/// was correctable or corrected in this run.
+/// <https://docs.rubocop.org/rubocop/formatters.html#json-formatter>
+pub fn parse_json(output: &str) -> Option<Report> {
+    let doc = super::ruby::find_json_object(output, is_rubocop_document)?;
+    let mut offenses = Vec::new();
+    for file in doc["files"].as_array()? {
+        let Some(path) = file.get("path").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        for offense in file
+            .get("offenses")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let text = |key: &str| offense.get(key).and_then(serde_json::Value::as_str);
+            let flag = |key: &str| offense.get(key).and_then(serde_json::Value::as_bool);
+            let location = &offense["location"];
+            let at = |keys: [&str; 2]| {
+                keys.iter()
+                    .find_map(|k| location.get(*k).and_then(serde_json::Value::as_u64))
+                    .and_then(|n| u32::try_from(n).ok())
+            };
+            let (Some(severity), Some(cop), Some(message), Some(line), Some(column)) = (
+                text("severity").and_then(severity_letter),
+                text("cop_name"),
+                text("message"),
+                at(["start_line", "line"]),
+                at(["start_column", "column"]),
+            ) else {
+                continue;
+            };
+            offenses.push(Offense {
+                file: path.to_owned(),
+                line,
+                column,
+                severity: severity.to_owned(),
+                cop: cop.to_owned(),
+                // Some versions prefix the message with the cop name.
+                message: message
+                    .strip_prefix(&format!("{cop}: "))
+                    .unwrap_or(message)
+                    .to_owned(),
+                correctable: flag("correctable").unwrap_or(false),
+                corrected: flag("corrected").unwrap_or(false),
+            });
+        }
+    }
+    Some(Report {
+        offenses,
+        files_inspected: doc["summary"]
+            .get("inspected_file_count")
+            .and_then(serde_json::Value::as_u64),
+    })
 }
 
 #[cfg(test)]
@@ -122,6 +207,7 @@ mod tests {
                 cop: "Style/StringLiterals".into(),
                 message: "Prefer single-quoted strings when you don't need string interpolation or special symbols.".into(),
                 correctable: false,
+                corrected: false,
             }
         );
         assert_eq!(
@@ -134,6 +220,7 @@ mod tests {
                 cop: "Lint/UselessAssignment".into(),
                 message: "Useless assignment to variable - unused.".into(),
                 correctable: true,
+                corrected: false,
             }
         );
         assert_eq!(report.offenses[2].file, "app/services/order/checkout.rb");
@@ -199,5 +286,38 @@ mod tests {
             None
         );
         assert_eq!(parse_summary(""), None);
+    }
+
+    #[test]
+    fn json_offenses_match_the_text_ones_and_keep_corrections() {
+        let text = parse(OFFENSES);
+        let json = parse_json(include_str!("../../tests/fixtures/rubocop-offenses.json")).unwrap();
+        assert_eq!(json, text);
+        let auto = parse_json(include_str!(
+            "../../tests/fixtures/rubocop-autocorrect.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            auto.offenses
+                .iter()
+                .map(|o| (o.cop.as_str(), o.corrected))
+                .collect::<Vec<_>>(),
+            [
+                ("Style/StringLiterals", true),
+                ("Lint/UselessAssignment", false)
+            ]
+        );
+        assert!(
+            parse_line("a.rb:1:1: C: [Corrected] Style/X: msg")
+                .unwrap()
+                .corrected
+        );
+        assert!(
+            !parse_line("a.rb:1:1: C: [Correctable] Style/X: msg")
+                .unwrap()
+                .corrected
+        );
+        assert_eq!(parse_json("{\"examples\": [], \"summary\": {}}"), None);
+        assert_eq!(parse_json("{\"files\": [{\"path\": \"a.rb\""), None);
     }
 }

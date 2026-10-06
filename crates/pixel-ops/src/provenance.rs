@@ -457,6 +457,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blame_output_cap_should_be_64_mib() {
+        assert_eq!(BLAME_MAX_OUTPUT_BYTES, 67_108_864);
+    }
+
+    #[test]
     fn last_touch_moves_only_to_a_strictly_newer_epoch() {
         let at = |e: i64| (e, format!("iso-{e}"));
         assert!(is_newer_touch(None, 5));

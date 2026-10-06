@@ -336,6 +336,17 @@ pub fn build_with_budget(
     extractor: &dyn GramExtractor,
     budget: Option<std::time::Duration>,
 ) -> Result<BuildStats, IndexError> {
+    build_with_caps(root, extractor, budget, build_max_bytes_from_env())
+}
+
+/// [`build_with_budget`] with the total-size cap passed in rather than read
+/// from `PIXEL_INDEX_MAX_BYTES` (`None` disables it).
+fn build_with_caps(
+    root: &Path,
+    extractor: &dyn GramExtractor,
+    budget: Option<std::time::Duration>,
+    max_total_bytes: Option<u64>,
+) -> Result<BuildStats, IndexError> {
     /// One extracted file, as the rayon workers hand it back to the writer.
     struct FileGrams {
         rel: String,
@@ -345,7 +356,6 @@ pub fn build_with_budget(
 
     use std::sync::atomic::Ordering;
     let started = std::time::Instant::now();
-    let max_total_bytes = build_max_bytes_from_env();
 
     // The walk runs on its own thread and hands paths over a channel; this
     // thread collects them all, sorts them (file ids follow path order), and
@@ -834,5 +844,52 @@ mod tests {
                 "expected `credential_path({path:?}) == false`"
             );
         }
+    }
+
+    #[test]
+    fn regular_bounded_reads_accept_a_file_of_exactly_the_cap() {
+        let dir = std::env::temp_dir().join(format!("gpx-index-bounded-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f");
+        std::fs::write(&file, b"abcd").unwrap();
+        assert_eq!(read_regular_bounded(&file, 4).unwrap(), b"abcd");
+        assert!(open_regular_bounded(&file, 4).is_ok());
+        assert!(read_regular_bounded(&file, 3).is_err());
+        assert!(open_regular_bounded(&file, 3).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn policy_walk_skips_the_git_and_shard_directories() {
+        let dir = std::env::temp_dir().join(format!("gpx-index-walk-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let git_dir = dir.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::create_dir_all(dir.join(SHARD_DIR)).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "x").unwrap();
+        std::fs::write(dir.join(SHARD_DIR).join("shard"), "x").unwrap();
+        std::fs::write(dir.join("a.rs"), "x").unwrap();
+        let found = policy_file_paths(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(found, HashSet::from(["a.rs".to_string()]));
+    }
+
+    #[test]
+    fn build_size_cap_is_inclusive() {
+        let dir = std::env::temp_dir().join(format!("gpx-index-bytecap-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn byteCapFn() {}\n").unwrap();
+        let len = std::fs::metadata(dir.join("a.rs")).unwrap().len();
+        let ex = SparseGramExtractor::new(Crc32Weigher);
+        let stats = build_with_caps(&dir, &ex, None, Some(len)).unwrap();
+        assert_eq!(stats.files, 1);
+        let err = match build_with_caps(&dir, &ex, None, Some(len - 1)) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a cap under the tree size must trip"),
+        };
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(err.contains("total-size cap"), "{err}");
     }
 }

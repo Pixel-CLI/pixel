@@ -43,7 +43,6 @@ pub fn symbol_hits(
     struct Acc {
         symbols: Vec<(SymbolRow, String)>,
         matched_words: BTreeSet<String>,
-        symbol_count: usize,
         exact_name_hit: bool,
     }
 
@@ -94,10 +93,8 @@ pub fn symbol_hits(
         let acc = by_path.entry(path).or_insert_with(|| Acc {
             symbols: Vec::new(),
             matched_words: BTreeSet::new(),
-            symbol_count: 0,
             exact_name_hit: false,
         });
-        acc.symbol_count += 1;
         acc.exact_name_hit |= is_exact;
         for w in &matched {
             acc.matched_words.insert((*w).clone());

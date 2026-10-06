@@ -590,4 +590,30 @@ mod tests {
         assert_eq!(result["source_oid"], json!(side_oid));
         assert_eq!(git(remote.path(), &["rev-parse", "side"]), side_oid);
     }
+
+    #[test]
+    fn resume_push_should_replay_a_terminal_record_result() {
+        let dir = tempdir().unwrap();
+        let remote = tempdir().unwrap();
+        let state = tempdir().unwrap();
+        init_repo_with_remote(dir.path(), remote.path());
+        let opts = PushOptions {
+            remote: "origin".to_string(),
+            refspec: "main".to_string(),
+            request_id: "terminal-replay".to_string(),
+            force_with_lease: false,
+        };
+        let journal = OperationJournal::with_state_root(state.path().to_path_buf());
+        let repo_key = repo_identity(dir.path());
+        journal
+            .begin(&opts.request_id, JournalOperation::Push, &repo_key, "h")
+            .unwrap();
+        let stored = json!({"pushed": true, "source_oid": "abc"});
+        journal
+            .complete(&opts.request_id, &repo_key, stored.clone())
+            .unwrap();
+        let runner = GitRunner::new(dir.path());
+        let replay = resume_push(dir.path(), &opts, &journal, JournalPhase::Terminal, &runner);
+        assert_eq!(replay, Ok(stored));
+    }
 }

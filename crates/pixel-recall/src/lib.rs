@@ -32,12 +32,20 @@ use std::path::{Path, PathBuf};
 /// already exists (migration compat). Created on demand with owner-only
 /// permissions — this directory concentrates every transcript on the machine.
 pub fn recall_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("PIXEL_RECALL_DIR")
+    recall_dir_from(
+        std::env::var("PIXEL_RECALL_DIR").ok(),
+        std::env::var("HOME").ok(),
+    )
+}
+
+/// [`recall_dir`] over explicit `PIXEL_RECALL_DIR` and `HOME` values.
+fn recall_dir_from(override_dir: Option<String>, home: Option<String>) -> PathBuf {
+    if let Some(dir) = override_dir
         && !dir.is_empty()
     {
         return PathBuf::from(dir);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = home.unwrap_or_else(|| ".".to_string());
     let new_path = PathBuf::from(&home).join(".local/share/pixel/recall");
     // Migration: if the new path doesn't exist but the legacy gitpixel path
     // does, keep using the legacy path so existing users don't lose their
@@ -155,12 +163,57 @@ mod potion_marker_tests {
         assert!(potion_cached(dir.path(), CODE_64M));
         assert!(!potion_cached(dir.path(), CODE_16M));
     }
+
+    #[test]
+    fn recall_dir_should_read_the_override_then_home() {
+        {
+            let _guard = crate::testutil::RECALL_DIR_ENV
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let saved = std::env::var_os("PIXEL_RECALL_DIR");
+            let explicit = tempfile::tempdir().unwrap();
+            // SAFETY: `PIXEL_RECALL_DIR` is only written under `RECALL_DIR_ENV`.
+            unsafe { std::env::set_var("PIXEL_RECALL_DIR", explicit.path()) };
+            let got = recall_dir();
+            // SAFETY: as above, restoring the value read under the lock.
+            unsafe {
+                match saved {
+                    Some(v) => std::env::set_var("PIXEL_RECALL_DIR", v),
+                    None => std::env::remove_var("PIXEL_RECALL_DIR"),
+                }
+            }
+            assert_eq!(got, explicit.path());
+        }
+        assert_eq!(
+            recall_dir(),
+            recall_dir_from(
+                std::env::var("PIXEL_RECALL_DIR").ok(),
+                std::env::var("HOME").ok()
+            )
+        );
+        assert_eq!(
+            recall_dir_from(Some("/x/r".to_string()), Some("/h".to_string())),
+            Path::new("/x/r")
+        );
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path().to_string_lossy().into_owned();
+        let fresh = home.path().join(".local/share/pixel/recall");
+        assert_eq!(recall_dir_from(Some(String::new()), Some(h.clone())), fresh);
+        let legacy = home.path().join(".local/share/gitpixel/recall");
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(recall_dir_from(None, Some(h.clone())), legacy);
+        std::fs::create_dir_all(&fresh).unwrap();
+        assert_eq!(recall_dir_from(None, Some(h)), fresh);
+    }
 }
 
 /// Store fixtures shared by the unit tests: sessions inserted straight
 /// through `RecallStore::replace_session`, no source adapter involved.
 #[cfg(test)]
 pub(crate) mod testutil {
+    /// Serialises every test that reads or writes `PIXEL_RECALL_DIR`.
+    pub(crate) static RECALL_DIR_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use crate::model::{IntentSource, Role, TsSource, UnifiedSession, UnifiedTurn};
     use crate::store::{IngestState, RecallStore};
 

@@ -131,19 +131,24 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    preserving that owner during incremental resolution.
 /// 19: Ruby constant receivers resolve against lexical owners, including
 ///    constructors and probable Rails dispatch; factory receivers are normalized.
-/// 20: Ruby `attr_*`, `alias_method`/`alias`, `delegate` and `scope` declare
+/// 20: `generic_import` takes the first string or identifier child only (the
+///    field lookup is gone) and every walker shares the `too_deep` depth
+///    guard; rebuild so no graph keeps rows from the older extractor.
+/// 21: Ruby `attr_*`, `alias_method`/`alias`, `delegate` and `scope` declare
 ///    methods of their owner (and are no longer calls of it), an alias or
 ///    delegator references its own owner's target, and an assignment through
 ///    a receiver calls the writer (`self.name = v` → `name=`).
-/// 21: Ruby superclass/`include`/`prepend`/`extend` declarations are stored
+/// 22: Ruby superclass/`include`/`prepend`/`extend` declarations are stored
 ///    (`ruby_mixins`), a concern's `class_methods` block defines its
 ///    `ClassMethods` module, and calls on `self` follow Ruby's ancestor
-///    lookup order; an instance call no longer reaches a class method.
-/// 22: `Gemfile`, `Rakefile`, `Guardfile`, `Capfile` and Ruby-shebang
+///    lookup order; an instance call no longer reaches a class method. A
+///    `delegate` option written as Ruby 3.1 shorthand (`allow_nil:`) no
+///    longer stops the declaration from generating its methods.
+/// 23: `Gemfile`, `Rakefile`, `Guardfile`, `Capfile` and Ruby-shebang
 ///    binstubs under `bin/`/`exe/` are Ruby files, and Ruby `require` /
 ///    `require_relative` resolve to files inside their project's load roots
 ///    (`imports.path` keeps `require_relative` as `./spec`).
-pub const EXTRACTOR_VERSION: &str = "22";
+pub const EXTRACTOR_VERSION: &str = "23";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
