@@ -123,14 +123,20 @@ pub enum OnDrift {
 /// The repository snapshot a continuation is valid for.
 ///
 /// `head` is the commit the answer was computed against; `dirty_count` is the
-/// number of dirty files at answer time. The index shifts when either moves,
-/// so a continuation bound to this snapshot is invalid once they change.
+/// number of dirty files at answer time; `index_generation` is a monotonic
+/// counter that changes whenever the indexed content or ordering changes.
+/// The index shifts when any of these move, so a continuation bound to this
+/// snapshot is invalid once they change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotBinding {
     /// HEAD the answer was computed against.
     pub head: Option<String>,
     /// Dirty file count at answer time; the index shifts when it moves.
     pub dirty_count: u64,
+    /// Monotonic index-generation counter; changes when indexed content or
+    /// ordering changes even if HEAD and dirty_count stay the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_generation: Option<u64>,
 }
 
 /// A continuation token for a paged answer, bound to a snapshot.
@@ -190,10 +196,16 @@ pub struct RecoveryHint {
 }
 
 impl RecoveryHint {
-    /// Whether this hint suggests a runnable next call (either a typed
-    /// [`NextCall`] or a [`Continuation`] the caller can turn into one).
+    /// Whether this hint suggests a runnable next call.
+    ///
+    /// A hint is actionable only when it carries a typed [`NextCall`] with
+    /// enough information to execute the next call. A [`Continuation`] alone
+    /// is not actionable: it records where the next page starts and which
+    /// snapshot it is valid for, but not the filters, ordering, or paths
+    /// that produced the page. The caller must combine the continuation with
+    /// the original request to build a runnable command.
     pub const fn is_actionable(&self) -> bool {
-        self.next_call.is_some() || self.continuation.is_some()
+        self.next_call.is_some()
     }
 
     /// The human-readable label for this hint's side effect.
@@ -225,6 +237,7 @@ mod tests {
                 snapshot: SnapshotBinding {
                     head: Some("abc123".to_string()),
                     dirty_count: 0,
+                    index_generation: Some(1),
                 },
                 on_drift: OnDrift::Restart,
             }),
@@ -282,16 +295,43 @@ mod tests {
     }
 
     #[test]
-    fn hint_with_next_call_or_continuation_is_actionable() {
-        assert!(hint().is_actionable());
-        let no_action = RecoveryHint {
-            cause: RecoveryCause::EmptyResult,
-            applies_to: vec!["search".to_string()],
+    fn hint_with_next_call_is_actionable() {
+        let hint = RecoveryHint {
+            next_call: Some(NextCall {
+                argv: vec!["find-code".to_string(), "foo".to_string()],
+                purpose: "search for the name".to_string(),
+            }),
+            ..hint()
+        };
+        assert!(hint.is_actionable());
+    }
+
+    #[test]
+    fn hint_with_continuation_only_is_not_actionable() {
+        let hint = RecoveryHint {
+            next_call: None,
+            ..hint()
+        };
+        assert!(!hint.is_actionable());
+    }
+
+    #[test]
+    fn hint_with_neither_next_call_nor_continuation_is_not_actionable() {
+        let hint = RecoveryHint {
             next_call: None,
             continuation: None,
-            side_effect: SideEffect::None,
+            ..hint()
         };
-        assert!(!no_action.is_actionable());
+        assert!(!hint.is_actionable());
+    }
+
+    #[test]
+    fn side_effect_label_delegates_to_side_effect() {
+        let hint = RecoveryHint {
+            side_effect: SideEffect::WritesState,
+            ..hint()
+        };
+        assert_eq!(hint.side_effect_label(), "writes state");
     }
 
     #[test]
@@ -324,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_binding_carries_head_and_dirty_count() {
+    fn snapshot_binding_carries_head_dirty_count_and_index_generation() {
         let hint = hint();
         let v = serde_json::to_value(&hint).unwrap();
         assert_eq!(
@@ -334,6 +374,10 @@ mod tests {
         assert_eq!(
             v["continuation"]["snapshot"]["dirty_count"],
             serde_json::json!(0)
+        );
+        assert_eq!(
+            v["continuation"]["snapshot"]["index_generation"],
+            serde_json::json!(1)
         );
     }
 }

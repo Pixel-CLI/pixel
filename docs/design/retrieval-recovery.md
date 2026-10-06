@@ -1,10 +1,13 @@
 # Typed retrieval recovery hints — producer/consumer matrix and first slice
 
-Status: implemented (issue #625). This note is the inventory the slice was
-chosen from: every retrieval command, every way its answer can be less than
-the caller wanted, the authoritative producer of that signal, and every
-consumer that reads it. The two gaps the first slice closes are named at the
-end; everything else is recorded so the next slice does not re-derive it.
+Status: partial (issue #625). The producer/consumer inventory and the shared
+typed recovery-hint types in `pixel-proto` are implemented. The recovery flow
+(daemon derivation, CLI rendering, integration tests) remains pending. This
+note is the inventory the slice was chosen from: every retrieval command, every
+way its answer can be less than the caller wanted, the authoritative producer
+of that signal, and every consumer that reads it. The two gaps the first slice
+closes are named at the end; everything else is recorded so the next slice
+does not re-derive it.
 
 ## How to read this matrix
 
