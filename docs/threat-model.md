@@ -546,8 +546,8 @@ boundary it crosses.
   write tokens (a "pwn request"), or injects through an interpolated title or
   body.
 - **Mitigation**: `board-sync.yml` (`pull_request_target`) never checks out
-  the pull request, runs with `permissions: {}`, and reads the body through
-  an environment variable; no workflow interpolates `github.event.*` or
+  the pull request, runs with `permissions: {}`, and never reads the
+  body: it takes the PR's closing issues from GitHub's GraphQL API; no workflow interpolates `github.event.*` or
   `inputs.*` directly in a `run:` script; workflows default to `contents:
   read`; runs of outside contributors wait for a maintainer's approval;
   CodeQL always scans workflows, Python and JavaScript with default security
