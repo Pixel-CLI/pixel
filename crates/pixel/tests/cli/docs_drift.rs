@@ -1237,12 +1237,11 @@ fn assert_no_over_absolute_claims(doc: &str, text: &str) {
                 || text.contains("stays on your machine")
                 || text.contains("stays in `.pixel/`")
                 || text.contains("stays in .pixel/");
-            if !qualified {
-                panic!(
-                    "{doc}: over-absolute claim \"{pattern}\" — {why}. \
-                     Qualify it (e.g. \"beyond an optional release check\")."
-                );
-            }
+            assert!(
+                qualified,
+                "{doc}: over-absolute claim \"{pattern}\" — {why}. \
+                 Qualify it (e.g. \"beyond an optional release check\")."
+            );
         }
     }
 }
