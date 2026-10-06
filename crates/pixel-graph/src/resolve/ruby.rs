@@ -32,6 +32,8 @@ struct Mixin {
 pub(super) struct Index {
     constants: HashSet<String>,
     classes: HashSet<String>,
+    /// Qualified class name → its class symbols (one per reopening file).
+    class_ids: HashMap<String, Vec<i64>>,
     methods: HashMap<String, Vec<i64>>,
     scopes: HashMap<i64, Vec<Scope>>,
     /// Declaring owner → its declared ancestors, in file then line order.
@@ -103,6 +105,11 @@ impl Index {
                     index.constants.insert(qualified.clone());
                     if kind == "class" {
                         index.classes.insert(qualified.clone());
+                        index
+                            .class_ids
+                            .entry(qualified.clone())
+                            .or_default()
+                            .push(id);
                     }
                     index.scopes.entry(file).or_default().push(Scope {
                         owner: qualified,
@@ -563,6 +570,55 @@ impl Index {
 }
 
 impl Index {
+    /// The action `name` of the controller class `controller` (an absolute
+    /// constant, as Rails constantizes a route's controller): its own
+    /// unique definition or an inherited one, `Probable` either way; never a
+    /// same-name method of another class.
+    pub(super) fn route_action(&self, controller: &str, name: &str) -> Decision {
+        if !self.classes.contains(controller) {
+            return Decision::Unresolved;
+        }
+        match self.lookup(controller, '#', name) {
+            Lookup::Found(id) => Decision::Probable(id),
+            Lookup::Own => match self.method(controller, '#', name) {
+                Some(Decision::Exact(id)) => Decision::Probable(id),
+                _ => Decision::Unresolved,
+            },
+            Lookup::Abstain | Lookup::NotFound => Decision::Unresolved,
+        }
+    }
+
+    /// The model class an association of `owner` names with `path`, looked
+    /// up as Active Record's `compute_type` does: in the owner's own
+    /// namespace and each one around it (`Admin::Order` tries
+    /// `Admin::Order::Item`, `Admin::Item`, then `Item`), an absolute
+    /// `::Item` at the top only. The class must have one definition.
+    pub(super) fn association_target(&self, owner: &str, path: &str) -> Decision {
+        let candidates: Vec<String> = if let Some(rooted) = path.strip_prefix("::") {
+            vec![rooted.to_string()]
+        } else {
+            let segments: Vec<&str> = owner.split("::").collect();
+            (0..=segments.len())
+                .rev()
+                .map(|i| {
+                    let prefix = segments[..i].join("::");
+                    if prefix.is_empty() {
+                        path.to_string()
+                    } else {
+                        format!("{prefix}::{path}")
+                    }
+                })
+                .collect()
+        };
+        candidates
+            .iter()
+            .find_map(|c| self.class_ids.get(c))
+            .map_or(Decision::Unresolved, |ids| match ids.as_slice() {
+                [id] => Decision::Probable(*id),
+                _ => Decision::Unresolved,
+            })
+    }
+
     /// The decision an ancestor of `owner` gives `name` when the owner does
     /// not define it itself: `Probable` for the one definition first in
     /// lookup order, `Unresolved` when the chain cannot prove it, `None` when

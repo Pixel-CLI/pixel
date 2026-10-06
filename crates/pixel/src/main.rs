@@ -3277,6 +3277,33 @@ fn enrich_resolve_matches_with_context(data: &mut Value, root: &Path) {
     }
 }
 
+/// The first line `find-code` prints for one match: where, what kind and
+/// score, the matched text, and the handler a route concept records
+/// (`→ admin/orders#create (Admin::OrdersController#create)`).
+fn resolve_match_line(m: &Value) -> String {
+    let path = m.get("path").and_then(Value::as_str).unwrap_or("?");
+    let start_line = m.get("start_line").and_then(Value::as_u64).unwrap_or(0);
+    let kind = m.get("kind").and_then(Value::as_str).unwrap_or("");
+    let score = m.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+    let raw = m
+        .get("raw")
+        .or_else(|| m.get("norm"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    // Other kinds keep their own bookkeeping in `detail` (`component`,
+    // `key`, the route text again): only a route's handler is news.
+    let handler = m
+        .get("detail")
+        .and_then(Value::as_str)
+        .filter(|d| kind == "route" && !d.is_empty());
+    match handler {
+        Some(detail) => {
+            format!("{path}:{start_line} ({kind}, score: {score:.2}) {raw} → {detail}\n")
+        }
+        None => format!("{path}:{start_line} ({kind}, score: {score:.2}) {raw}\n"),
+    }
+}
+
 fn print_resolve_human(data: &Value) -> Result<(), String> {
     operation_metrics::observe(data);
     let Some(matches) = data.get("matches").and_then(Value::as_array) else {
@@ -3288,19 +3315,7 @@ fn print_resolve_human(data: &Value) -> Result<(), String> {
     }
     let mut output = String::new();
     for m in matches {
-        let path = m.get("path").and_then(Value::as_str).unwrap_or("?");
-        let start_line = m.get("start_line").and_then(Value::as_u64).unwrap_or(0);
-        let kind = m.get("kind").and_then(Value::as_str).unwrap_or("");
-        let score = m.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-        let raw = m
-            .get("raw")
-            .or_else(|| m.get("norm"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-
-        output.push_str(&format!(
-            "{path}:{start_line} ({kind}, score: {score:.2}) {raw}\n"
-        ));
+        output.push_str(&resolve_match_line(m));
         if let Some(notes) = m.get("notes").and_then(Value::as_array) {
             for n in notes {
                 output.push_str(&format!(

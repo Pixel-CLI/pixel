@@ -405,6 +405,18 @@ envelope talks to the daemon socket directly.
   hash in the graph's `walked_files` table, which `rows_match_tree` and
   `tree_delta` read beside the source rows: an unchanged one neither
   withholds an update's signature nor reappears in every delta.
+- Rails routes (`config/routes.rb` and drawn `config/routes/*.rb`) are read
+  statically by `pixel-graph/src/extract/ruby_routes.rs`: verbs, `root`,
+  `resources`/`resource` (`only`/`except`/`controller`/`path`/`param`),
+  `member`/`collection`, `namespace`, `scope`, `controller` blocks and
+  `mount`. Each route is a `route` concept (`raw` `POST /admin/orders`,
+  `detail` the handler, which `find-code` matches return as `detail`) and a
+  `references` edge from the routes file to the controller action
+  (`arg_of` `:route Admin::OrdersController`), resolved to that class's own
+  or inherited action only. Active Record associations reference their
+  model class (`arg_of` `:association has_many LineItem`), looked up in the
+  owner's namespaces as `compute_type` does; `through:` without
+  `class_name:`, `polymorphic:` and computed names reference nothing.
 - The `graph` op rebuilds from scratch by default (`rebuild-graph`,
   `prepare-repo --rebuild-graph`). With `"if_stale": true` (a request field
   that defaults to `false` and is sent only when set, so an older daemon

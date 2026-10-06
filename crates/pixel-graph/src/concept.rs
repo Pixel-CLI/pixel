@@ -222,11 +222,35 @@ pub fn extract_concepts(path_rel: &str, content: &[u8]) -> Vec<RawConcept> {
         "yaml" => extract_yaml_config(content),
         "css" => extract_css(content),
         "rust" => extract_rust(path_rel, content),
-        // go/java/python/ruby have no concept sources defined in PLAN.md Engine 1.
+        "ruby" if crate::extract::ruby_routes::is_routes_file(path_rel) => rails_routes(content),
+        // go/java/python and other Ruby files have no concept sources.
         _ => Vec::new(),
     };
     out.extend(path_routes(path_rel, content));
     out
+}
+
+/// One `Route` concept per statically known Rails route: `raw` is the verb
+/// and path a request names (`POST /admin/orders`), `detail` the handler
+/// (`admin/orders#create (Admin::OrdersController#create)`, `mount
+/// Sidekiq::Web`), on the declaring line.
+fn rails_routes(content: &[u8]) -> Vec<RawConcept> {
+    crate::extract::ruby_routes::routes(content)
+        .into_iter()
+        .filter_map(|route| {
+            let raw = format!("{} {}", route.verb, route.path);
+            let norm = normalize(&raw);
+            (!norm.is_empty() && norm.len() <= MAX_NORM_CHARS).then(|| RawConcept {
+                kind: ConceptKind::Route,
+                detail: route.handler(),
+                raw,
+                norm,
+                start_line: route.line,
+                end_line: route.line,
+                owner_symbol_id: None,
+            })
+        })
+        .collect()
 }
 
 // --- shared tree-sitter walker -------------------------------------------

@@ -312,3 +312,33 @@ fn savings_count_calls_within_the_window_and_rate_the_pool() {
     assert!((savings_ratio(200, 1_000) - 0.8).abs() < 1e-9);
     assert!(savings_ratio(5, 0).abs() < f64::EPSILON);
 }
+
+#[test]
+fn a_find_code_match_line_shows_a_route_handler_only_when_recorded() {
+    let route = json!({
+        "path": "config/routes.rb", "start_line": 3, "kind": "route", "score": 1.0,
+        "raw": "POST /admin/orders",
+        "detail": "admin/orders#create (Admin::OrdersController#create)",
+    });
+    assert_eq!(
+        resolve_match_line(&route),
+        "config/routes.rb:3 (route, score: 1.00) POST /admin/orders → admin/orders#create (Admin::OrdersController#create)\n"
+    );
+    let plain = json!({
+        "path": "src/a.ts", "start_line": 7, "kind": "string", "score": 0.5,
+        "raw": "hello world again", "detail": "",
+    });
+    assert_eq!(
+        resolve_match_line(&plain),
+        "src/a.ts:7 (string, score: 0.50) hello world again\n"
+    );
+    // Another kind's detail is bookkeeping, never printed as a handler.
+    let component = json!({
+        "path": "src/b.tsx", "start_line": 2, "kind": "component", "score": 0.9,
+        "raw": "Button", "detail": "component",
+    });
+    assert_eq!(
+        resolve_match_line(&component),
+        "src/b.tsx:2 (component, score: 0.90) Button\n"
+    );
+}

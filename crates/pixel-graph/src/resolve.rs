@@ -59,7 +59,8 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::params;
 
-use crate::extract::ruby_callbacks::{ReferenceKind, reference_kind};
+use crate::extract::ruby_associations::ASSOCIATION_REFERENCE;
+use crate::extract::ruby_callbacks::{ROUTE_REFERENCE, ReferenceKind, reference_kind};
 use crate::store::{
     EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, SymbolKind, Tier, decode_bindings,
     decode_scope,
@@ -450,6 +451,27 @@ impl ResolveIndex {
         let Some(kind) = self.ruby_reference_kind(file_id, arg_of) else {
             return self.decide_at(file_id, name, None, site_line);
         };
+        // A route names its controller, an association its model class:
+        // that owner's definition or nothing, never a same-name fallback.
+        match (kind, arg_of) {
+            (ReferenceKind::Route, Some(arg_of)) => {
+                let controller = arg_of.trim_start_matches(ROUTE_REFERENCE);
+                return self.ruby_constants.route_action(controller, name);
+            }
+            (ReferenceKind::Association, Some(arg_of)) => {
+                let path = arg_of
+                    .trim_start_matches(ASSOCIATION_REFERENCE)
+                    .split_once(' ')
+                    .map_or("", |(_, path)| path);
+                return caller_id
+                    .filter(|c| self.containers.contains(c))
+                    .and_then(|c| self.qualified_of.get(&c))
+                    .map_or(Decision::Unresolved, |owner| {
+                        self.ruby_constants.association_target(owner, path)
+                    });
+            }
+            _ => {}
+        }
         // A method its owner does not define itself may come from an
         // ancestor: a callback in a concern, an alias of an inherited method.
         if let Some((owner, separator)) = caller_id.and_then(|c| self.reference_side(c, kind)) {
