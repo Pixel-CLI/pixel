@@ -384,6 +384,27 @@ envelope talks to the daemon socket directly.
   own-method rules. An incremental batch that changes a declaration, or a
   constant a stored declaration ends with, sets `Affected::ruby_ancestors`
   and replays every Ruby `self` call and method-symbol reference.
+- Ruby files are known by extension, by name (`RUBY_FILE_NAMES`: `Gemfile`,
+  `Rakefile`, `Guardfile`, `Capfile`), or, for an extensionless file in a
+  `bin/` or `exe/` directory, by a Ruby shebang (`lang_of_file`); the graph
+  walks read such binstubs and extraction drops the ones that are not Ruby.
+  Ruby requires resolve in `pixel-graph/src/imports/ruby.rs`: a directory
+  with a `Gemfile` or `*.gemspec` is a project, a file belongs to the
+  nearest one, and `require` searches only that project's `require_paths`
+  (default `lib`) and its Gemfile's local path gems; a path whose prefix
+  names an external gem of the project (Gemfile, or `Gemfile.lock` specs,
+  transitive included) never resolves locally, and a miss never escapes to
+  a sibling project. `require_relative` is relative to the requiring file.
+  The manifests are read as literals from disk at each build and update; an
+  update touching a Ruby file or manifest re-resolves every Ruby import. A
+  `Gemfile.lock` is never stored as a graph file, but the graph walks hash
+  it into the freshness signature (`is_graph_candidate`), so an edit to it
+  alone makes the graph stale and the delta that applies it re-resolves
+  every Ruby import. Every walked file extraction keeps no `files` row for
+  (a lockfile, a binstub that is not Ruby, a generated blob) has its content
+  hash in the graph's `walked_files` table, which `rows_match_tree` and
+  `tree_delta` read beside the source rows: an unchanged one neither
+  withholds an update's signature nor reappears in every delta.
 - The `graph` op rebuilds from scratch by default (`rebuild-graph`,
   `prepare-repo --rebuild-graph`). With `"if_stale": true` (a request field
   that defaults to `false` and is sent only when set, so an older daemon

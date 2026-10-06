@@ -172,6 +172,9 @@ pub fn concept_words(norm: &str) -> Vec<String> {
 /// languages plus `.svelte/.vue/.html/.json/.yaml/.css`. `None` if unsupported.
 pub fn concept_lang_of(path: &str) -> Option<&'static str> {
     let file = path.rsplit('/').next().unwrap_or(path);
+    if crate::extract::RUBY_FILE_NAMES.contains(&file) {
+        return Some("ruby");
+    }
     let ext = file.rsplit_once('.')?.1;
     match ext {
         "ts" | "mts" | "cts" => Some("ts"),
