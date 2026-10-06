@@ -141,11 +141,14 @@ interface ClassifyResult {
 
 /** One `pixel classify` call. Throws with stderr text on failure. */
 function pixelClassify(stateText: string, context: string, criteria: Record<string, string | null>): Promise<ClassifyResult> {
-  const args = ["classify", stateText, "--context", context, "--json", "--metrics", "off"];
-  for (const label of Object.keys(criteria)) args.push("--label", label);
+  // `=`-joined values and a `--` before the state: a question, context or
+  // file that starts with `-` must stay a value, never parse as a flag.
+  const args = ["classify", `--context=${context}`, "--json", "--metrics=off"];
+  for (const label of Object.keys(criteria)) args.push(`--label=${label}`);
   for (const [label, criterion] of Object.entries(criteria)) {
-    if (criterion) args.push("--criterion", `${label}=${criterion}`);
+    if (criterion) args.push(`--criterion=${label}=${criterion}`);
   }
+  args.push("--", stateText);
   const started = performance.now();
   return new Promise((resolveP, reject) => {
     execFile(PIXEL, args, { timeout: CALL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
@@ -157,10 +160,14 @@ function pixelClassify(stateText: string, context: string, criteria: Record<stri
         return reject(new Error(`pixel classify returned non-JSON: ${stdout.slice(0, 300)}`));
       }
       if (parsed.ok === false || parsed.error) return reject(new Error(`pixel classify: ${parsed.error?.message ?? "error"}`));
+      const probs: Record<string, number> = parsed.probs ?? {};
       resolveP({
         predicted: parsed.predicted,
-        probs: parsed.probs ?? {},
-        confidence: parsed.snapshot?.confidence ?? 0,
+        probs,
+        // Remote chat engines disclose no calibrated confidence; the
+        // predicted label's probability stands in, so a confidence gate
+        // (pick_pixel_file) does not reject every remote answer.
+        confidence: parsed.snapshot?.confidence ?? probs[parsed.predicted] ?? 0,
         model: parsed.snapshot?.model,
         provider: parsed.snapshot?.provider,
         ms: Math.round(performance.now() - started),

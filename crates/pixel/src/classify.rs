@@ -334,7 +334,12 @@ enum RemoteOverrides {
 impl RemoteOverrides {
     /// One environment variable as this engine sees it.
     fn var(self, name: &str) -> Option<String> {
-        if self == Self::Ignored && name.starts_with("PIXEL_REMOTE_") {
+        // `PIXEL_INFISICAL_SECRET_NAME` renames the selected preset's secret
+        // the same way: read beside it, it would hand that preset's key to
+        // this engine's host.
+        if self == Self::Ignored
+            && (name.starts_with("PIXEL_REMOTE_") || name == "PIXEL_INFISICAL_SECRET_NAME")
+        {
             return None;
         }
         std::env::var(name).ok()
@@ -348,17 +353,7 @@ fn stored_base_when_unset(
     config: &crate::decide_remote::Config,
     overrides: RemoteOverrides,
 ) -> Result<String, String> {
-    let env_set = overrides
-        .var("PIXEL_REMOTE_BASE")
-        .is_some_and(|s| !s.is_empty());
-    // The stored base/model belong to the preset the install step saved them
-    // for — applied to a different `--remote-preset` they would send that
-    // preset's key to a host it was never meant for.
-    let same_preset = crate::config_cmd::classify_remote_preset() == Some(config.preset);
-    let Some(stored) = (!env_set && same_preset)
-        .then(crate::config_cmd::classify_remote_base)
-        .flatten()
-    else {
+    let Some(stored) = stored_base_for(config.preset, overrides) else {
         return Ok(config.base.clone());
     };
     if config.key_value().is_some() && crate::decide_remote::sends_in_clear_text(&stored) {
@@ -396,14 +391,56 @@ fn jev_config(
     overrides: RemoteOverrides,
 ) -> Result<crate::decide_remote::Config, String> {
     let preset = crate::decide_remote::Preset::Jev;
+    // The key follows the host it is sent to: the install step can route
+    // Jev through OpenCode's zen proxy, which takes the subscription key —
+    // a TypeSafe key in the environment must not reach it, nor the reverse.
+    let base = overrides
+        .var("PIXEL_REMOTE_BASE")
+        .filter(|s| !s.is_empty())
+        .or_else(|| stored_base_for(preset, overrides))
+        .unwrap_or_else(|| crate::decide_jev::DEFAULT_BASE.to_string());
     let mut config = crate::decide_remote::resolve_config_from(
         preset,
         model,
-        remote_key_value(preset, overrides)?,
+        remote_key_value_from(preset, jev_key_env(&base), overrides)?,
         |name| overrides.var(name),
     )?;
     config.base = stored_base_when_unset(&config, overrides)?;
     Ok(config)
+}
+
+/// The base the install step stored for `preset`, when `PIXEL_REMOTE_BASE`
+/// does not override it. The stored base/model belong to the preset the
+/// install step saved them for — applied to a different `--remote-preset`
+/// they would send that preset's key to a host it was never meant for.
+fn stored_base_for(
+    preset: crate::decide_remote::Preset,
+    overrides: RemoteOverrides,
+) -> Option<String> {
+    let env_set = overrides
+        .var("PIXEL_REMOTE_BASE")
+        .is_some_and(|s| !s.is_empty());
+    let same_preset = crate::config_cmd::classify_remote_preset() == Some(preset);
+    (!env_set && same_preset)
+        .then(crate::config_cmd::classify_remote_base)
+        .flatten()
+}
+
+/// The key variable a Jev base authenticates with: OpenCode's host proxies
+/// Jev for the OpenCode Go subscription key; every other host is
+/// TypeSafe's own key.
+fn jev_key_env(base: &str) -> Option<&'static str> {
+    let host = base
+        .split_once("://")
+        .map_or(base, |(_, rest)| rest)
+        .split(['/', ':'])
+        .next()
+        .unwrap_or_default();
+    if host.eq_ignore_ascii_case("opencode.ai") {
+        crate::decide_remote::Preset::OpencodeGo.key_env()
+    } else {
+        crate::decide_remote::Preset::Jev.key_env()
+    }
 }
 
 /// Read the remote API-key value for a preset, in disclosure order: the
@@ -418,12 +455,23 @@ fn remote_key_value(
     preset: crate::decide_remote::Preset,
     overrides: RemoteOverrides,
 ) -> Result<Option<String>, String> {
-    let explicit = overrides.var("PIXEL_REMOTE_KEY_ENV");
-    // A preset that takes no key (`local`) has nothing for Infisical to
-    // supply — checked before `explicit` moves into `key_env_name`.
-    let keyless_preset =
-        preset.key_env().is_none() && explicit.as_deref().is_none_or(str::is_empty);
-    let from_env = crate::decide_remote::key_env_name(preset, explicit)
+    remote_key_value_from(preset, preset.key_env(), overrides)
+}
+
+/// [`remote_key_value`] with the preset's key variable given: hosted Jev
+/// picks it from the host its key goes to (see `jev_key_env`).
+#[cfg_attr(test, mutants::skip)] // reads the real env and ~/.pixel; the name rule is key_env_name
+fn remote_key_value_from(
+    preset: crate::decide_remote::Preset,
+    key_env: Option<&'static str>,
+    overrides: RemoteOverrides,
+) -> Result<Option<String>, String> {
+    let explicit = overrides
+        .var("PIXEL_REMOTE_KEY_ENV")
+        .filter(|s| !s.is_empty());
+    let keyless_preset = key_env.is_none() && explicit.is_none();
+    let from_env = explicit
+        .or_else(|| key_env.map(str::to_string))
         .and_then(|name| std::env::var(name).ok().filter(|v| !v.is_empty()));
     if from_env.is_some() {
         return Ok(from_env);
@@ -441,8 +489,10 @@ fn remote_key_value(
         return Ok(None);
     }
     // Infisical is the third source, off unless configured; its own
-    // contract decides what counts as absent.
-    crate::decide_infisical::lookup_key(preset)
+    // contract decides what counts as absent. It reads the environment as
+    // this engine sees it, so a lane beside another preset never takes that
+    // preset's secret-name override.
+    crate::decide_infisical::lookup_key(key_env, &|name| overrides.var(name))
 }
 
 /// Parse one JSONL spec line (serve mode and tests share this path).
@@ -1657,11 +1707,16 @@ mod tests {
     #[test]
     fn open_resolved_routes_the_jev_preset_to_the_typesafe_engine() {
         // The hosted engine refuses to open without a key; the value is
-        // never asserted on or printed.
-        // SAFETY: this test's env mutation runs before the threads that
-        // read the variable are spawned, and the variable is unset again
-        // at the end; no other test in this binary reads TYPESAFE_API_KEY.
-        unsafe { std::env::set_var("TYPESAFE_API_KEY", "tsk-routing-test") };
+        // never asserted on or printed. Under ENV_LOCK with a scratch HOME,
+        // so neither the user's stored preset nor another test's
+        // TYPESAFE_API_KEY leaks in, and the base is a closed loopback port
+        // so the decide below fails fast without leaving the machine.
+        let _env = jev_env(&[
+            ("TYPESAFE_API_KEY", Some("tsk-routing-test")),
+            ("PIXEL_REMOTE_BASE", Some("http://127.0.0.1:9")),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ]);
         let mut jev = open_resolved(
             crate::classify_setup::ResolvedEngine::Remote,
             crate::decide_remote::Preset::Jev,
@@ -1690,9 +1745,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(chat.basis(), REMOTE_BASIS);
-        // SAFETY: restoring the machine state the test found at start; the
-        // variable is not read by any other test in this binary.
-        unsafe { std::env::remove_var("TYPESAFE_API_KEY") };
     }
 
     /// A criterion missing its `label=` prefix is rejected with the declared
@@ -3019,6 +3071,63 @@ mod tests {
         assert_eq!(shared.base, "https://proxy.example/v1");
         assert_eq!(shared.model, "chat-m");
         assert_eq!(shared.key_value().as_deref(), Some("sk-other"));
+    }
+
+    #[test]
+    fn remote_overrides_ignored_should_hide_the_infisical_secret_name_override() {
+        let _env = jev_env(&[("PIXEL_INFISICAL_SECRET_NAME", Some("OPENROUTER_API_KEY"))]);
+        assert_eq!(
+            RemoteOverrides::Ignored.var("PIXEL_INFISICAL_SECRET_NAME"),
+            None
+        );
+        assert_eq!(
+            RemoteOverrides::Shared
+                .var("PIXEL_INFISICAL_SECRET_NAME")
+                .as_deref(),
+            Some("OPENROUTER_API_KEY")
+        );
+    }
+
+    #[test]
+    fn jev_key_env_should_follow_the_host_the_key_goes_to() {
+        assert_eq!(
+            jev_key_env("https://opencode.ai/zen"),
+            Some("OPENCODE_API_KEY")
+        );
+        assert_eq!(
+            jev_key_env("https://OpenCode.ai:443/zen"),
+            Some("OPENCODE_API_KEY")
+        );
+        assert_eq!(
+            jev_key_env("https://api.typesafe.ai"),
+            Some("TYPESAFE_API_KEY")
+        );
+        assert_eq!(
+            jev_key_env("https://opencode.ai.evil.example/zen"),
+            Some("TYPESAFE_API_KEY")
+        );
+    }
+
+    #[test]
+    fn jev_config_through_opencode_should_send_the_opencode_key_not_the_typesafe_one() {
+        let env = jev_env(&[
+            ("PIXEL_REMOTE_BASE", None),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+            ("OPENCODE_API_KEY", Some("oc-key")),
+            ("TYPESAFE_API_KEY", Some("ts-key")),
+        ]);
+        env.write_config(
+            "classify: {remote_preset: jev, remote_base: 'https://opencode.ai/zen'}\n",
+        );
+        let config = jev_config(None, RemoteOverrides::Shared).unwrap();
+        assert_eq!(config.base, "https://opencode.ai/zen");
+        assert_eq!(config.key_value().as_deref(), Some("oc-key"));
+
+        env.write_config("classify: {remote_preset: jev}\n");
+        let config = jev_config(None, RemoteOverrides::Shared).unwrap();
+        assert_eq!(config.base, crate::decide_jev::DEFAULT_BASE);
+        assert_eq!(config.key_value().as_deref(), Some("ts-key"));
     }
 
     #[test]

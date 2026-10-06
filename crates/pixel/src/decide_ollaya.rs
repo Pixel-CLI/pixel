@@ -95,12 +95,14 @@ pub struct AnswerMeta {
 }
 
 impl AnswerMeta {
-    fn from_answer(answer: &Value) -> Result<AnswerMeta, String> {
+    fn from_answer(answer: &Value, engine: &str) -> Result<AnswerMeta, String> {
         let confidence = answer
             .get("confidence")
             .and_then(Value::as_f64)
             .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
-            .ok_or("ollaya answer confidence is not a finite number in [0, 1]")?;
+            .ok_or_else(|| {
+                format!("{engine} answer confidence is not a finite number in [0, 1]")
+            })?;
         Ok(AnswerMeta { confidence })
     }
 
@@ -291,7 +293,7 @@ pub(crate) fn parse_answer_for(
         .get("answers")
         .and_then(|a| a.get(QUESTION_ID))
         .ok_or_else(|| format!("{engine} response missing answers.{QUESTION_ID}"))?;
-    let meta = AnswerMeta::from_answer(answer).map_err(|e| e.replacen("ollaya", engine, 1))?;
+    let meta = AnswerMeta::from_answer(answer, engine)?;
     let probs_value = answer
         .get("probabilities")
         .and_then(Value::as_object)

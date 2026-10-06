@@ -32,7 +32,6 @@
 //! missing-key error can name the fix. A half-configured source (one of
 //! the two required variables set) is also a loud error.
 
-use crate::decide_remote::Preset;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -66,17 +65,24 @@ type GetFn = Box<dyn Fn(&str, &str) -> Result<String, HttpError>>;
 /// Read the preset's key from Infisical, once per invocation. `Ok(None)`
 /// means the source is not configured or has no such secret — the caller
 /// falls through to the standard missing-key error.
-#[cfg_attr(test, mutants::skip)] // env adapter over `lookup_key_from`; the policy is tested there
-pub(crate) fn lookup_key(preset: Preset) -> Result<Option<String>, String> {
-    lookup_key_from(preset, &|name| std::env::var(name).ok(), Box::new(http_get))
+///
+/// `key_env` is the key's environment variable, which names the secret
+/// unless `PIXEL_INFISICAL_SECRET_NAME` overrides it; `env` is the
+/// environment as the asking engine sees it.
+#[cfg_attr(test, mutants::skip)] // transport adapter over `lookup_key_from`; the policy is tested there
+pub(crate) fn lookup_key(
+    key_env: Option<&str>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    lookup_key_from(key_env, env, Box::new(http_get))
 }
 
 fn lookup_key_from(
-    preset: Preset,
+    key_env: Option<&str>,
     env: &dyn Fn(&str) -> Option<String>,
     get: GetFn,
 ) -> Result<Option<String>, String> {
-    let Some(settings) = settings_from(preset, env)? else {
+    let Some(settings) = settings_from(key_env, env)? else {
         return Ok(None);
     };
     if crate::decide_remote::sends_in_clear_text(&settings.base) {
@@ -112,7 +118,7 @@ fn lookup_key_from(
 /// off. One required variable without the other is a configuration error,
 /// not a silent skip.
 fn settings_from(
-    preset: Preset,
+    key_env: Option<&str>,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Option<Settings>, String> {
     let set = |name: &str| env(name).filter(|v| !v.is_empty());
@@ -133,12 +139,8 @@ fn settings_from(
             token,
             project_id,
             environment: set("PIXEL_INFISICAL_ENV").unwrap_or_else(|| "prod".to_string()),
-            secret_name: set("PIXEL_INFISICAL_SECRET_NAME").unwrap_or_else(|| {
-                preset
-                    .key_env()
-                    .unwrap_or("PIXEL_CLASSIFY_API_KEY")
-                    .to_string()
-            }),
+            secret_name: set("PIXEL_INFISICAL_SECRET_NAME")
+                .unwrap_or_else(|| key_env.unwrap_or("PIXEL_CLASSIFY_API_KEY").to_string()),
         })),
     }
 }
@@ -213,6 +215,7 @@ fn encode(component: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decide_remote::Preset;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -263,22 +266,25 @@ mod tests {
     #[test]
     fn the_source_is_off_when_no_infisical_variable_is_set() {
         let env = env_of(&[("OPENROUTER_API_KEY", "unrelated")]);
-        assert_eq!(settings_from(Preset::Jev, &env).unwrap(), None);
+        assert_eq!(settings_from(Preset::Jev.key_env(), &env).unwrap(), None);
         let (_calls, get) = recorded_get("{}");
-        assert_eq!(lookup_key_from(Preset::Jev, &env, get).unwrap(), None);
+        assert_eq!(
+            lookup_key_from(Preset::Jev.key_env(), &env, get).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn half_configured_sources_are_errors_not_silent_skips() {
         let token_only = env_of(&[("INFISICAL_TOKEN", "st-token")]);
-        let error = settings_from(Preset::Jev, &token_only).unwrap_err();
+        let error = settings_from(Preset::Jev.key_env(), &token_only).unwrap_err();
         assert!(error.contains("PIXEL_INFISICAL_PROJECT_ID"), "{error}");
         let project_only = env_of(&[("PIXEL_INFISICAL_PROJECT_ID", "proj")]);
-        let error = settings_from(Preset::Jev, &project_only).unwrap_err();
+        let error = settings_from(Preset::Jev.key_env(), &project_only).unwrap_err();
         assert!(error.contains("INFISICAL_TOKEN"), "{error}");
         // Both errors are loud even at lookup time.
         let (_calls, get) = recorded_get("{}");
-        assert!(lookup_key_from(Preset::Jev, &token_only, get).is_err());
+        assert!(lookup_key_from(Preset::Jev.key_env(), &token_only, get).is_err());
     }
 
     #[test]
@@ -289,7 +295,7 @@ mod tests {
             ("PIXEL_INFISICAL_PROJECT_ID", "proj-7"),
         ]);
         assert_eq!(
-            settings_from(Preset::Jev, &env).unwrap(),
+            settings_from(Preset::Jev.key_env(), &env).unwrap(),
             Some(Settings {
                 base: "https://app.infisical.com".to_string(),
                 token: "pixel-token".to_string(),
@@ -307,7 +313,7 @@ mod tests {
             ("PIXEL_INFISICAL_ENV", "staging"),
             ("PIXEL_INFISICAL_SECRET_NAME", "classify/jev"),
         ]);
-        let settings = settings_from(Preset::Jev, &env).unwrap().unwrap();
+        let settings = settings_from(Preset::Jev.key_env(), &env).unwrap().unwrap();
         assert_eq!(settings.token, "generic-token");
         assert_eq!(settings.base, "https://infisical.internal/");
         assert_eq!(settings.environment, "staging");
@@ -318,7 +324,7 @@ mod tests {
     fn lookup_builds_the_v4_read_url_and_sends_the_bearer_token() {
         let body = json!({"secret": {"secretValue": "tsk-live-key"}}).to_string();
         let (calls, get) = recorded_get(&body);
-        let key = lookup_key_from(Preset::Jev, &configured_env(&[]), get).unwrap();
+        let key = lookup_key_from(Preset::Jev.key_env(), &configured_env(&[]), get).unwrap();
         assert_eq!(key.as_deref(), Some("tsk-live-key"));
         let calls = calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 1, "one lookup, one request: {calls:?}");
@@ -337,7 +343,7 @@ mod tests {
             ("PIXEL_INFISICAL_SECRET_NAME", "classify/jev key"),
             ("PIXEL_INFISICAL_ENV", "dev,1"),
         ]);
-        let _ = lookup_key_from(Preset::Jev, &env, get).unwrap();
+        let _ = lookup_key_from(Preset::Jev.key_env(), &env, get).unwrap();
         let calls = calls.lock().unwrap().clone();
         assert!(
             calls[0]
@@ -365,13 +371,22 @@ mod tests {
         let missing =
             |_url: &str, _token: &str| -> Result<String, HttpError> { Err(HttpError::Status(404)) };
         assert_eq!(
-            lookup_key_from(Preset::Jev, &configured_env(&[]), Box::new(missing)).unwrap(),
+            lookup_key_from(
+                Preset::Jev.key_env(),
+                &configured_env(&[]),
+                Box::new(missing)
+            )
+            .unwrap(),
             None
         );
         let forbidden =
             |_url: &str, _token: &str| -> Result<String, HttpError> { Err(HttpError::Status(403)) };
-        let error =
-            lookup_key_from(Preset::Jev, &configured_env(&[]), Box::new(forbidden)).unwrap_err();
+        let error = lookup_key_from(
+            Preset::Jev.key_env(),
+            &configured_env(&[]),
+            Box::new(forbidden),
+        )
+        .unwrap_err();
         assert!(error.contains("HTTP 403"), "{error}");
         assert!(error.contains("infisical"), "{error}");
     }
@@ -381,8 +396,12 @@ mod tests {
         let broken = |_url: &str, _token: &str| -> Result<String, HttpError> {
             Err(HttpError::Transport("connection refused".to_string()))
         };
-        let error =
-            lookup_key_from(Preset::Jev, &configured_env(&[]), Box::new(broken)).unwrap_err();
+        let error = lookup_key_from(
+            Preset::Jev.key_env(),
+            &configured_env(&[]),
+            Box::new(broken),
+        )
+        .unwrap_err();
         assert!(error.contains("connection refused"), "{error}");
         assert!(error.contains("https://app.infisical.com"), "{error}");
         assert!(!error.contains("st-secret-token"), "{error}");
@@ -419,13 +438,13 @@ mod tests {
         let never = |_url: &str, _token: &str| -> Result<String, HttpError> {
             unreachable!("the guard must refuse before any request")
         };
-        let error = lookup_key_from(Preset::Jev, &env, Box::new(never)).unwrap_err();
+        let error = lookup_key_from(Preset::Jev.key_env(), &env, Box::new(never)).unwrap_err();
         assert!(error.contains("cleartext"), "{error}");
         // Loopback http stays allowed: that is a local, trusted hop.
         let body = json!({"secret": {"secretValue": "tsk-live-key"}}).to_string();
         let (calls, get) = recorded_get(&body);
         let env = configured_env(&[("PIXEL_INFISICAL_URL", "http://localhost:8080")]);
-        let key = lookup_key_from(Preset::Jev, &env, get).unwrap();
+        let key = lookup_key_from(Preset::Jev.key_env(), &env, get).unwrap();
         assert_eq!(key.as_deref(), Some("tsk-live-key"));
         let calls = calls.lock().unwrap().clone();
         assert_eq!(
@@ -443,13 +462,13 @@ mod tests {
             ("INFISICAL_TOKEN", ""),
             ("PIXEL_INFISICAL_PROJECT_ID", "proj-7"),
         ]);
-        let error = settings_from(Preset::Jev, &empty_token).unwrap_err();
+        let error = settings_from(Preset::Jev.key_env(), &empty_token).unwrap_err();
         assert!(error.contains("INFISICAL_TOKEN"), "{error}");
         let empty_project = env_of(&[
             ("INFISICAL_TOKEN", "st-token"),
             ("PIXEL_INFISICAL_PROJECT_ID", ""),
         ]);
-        let error = settings_from(Preset::Jev, &empty_project).unwrap_err();
+        let error = settings_from(Preset::Jev.key_env(), &empty_project).unwrap_err();
         assert!(error.contains("PIXEL_INFISICAL_PROJECT_ID"), "{error}");
     }
 

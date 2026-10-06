@@ -430,19 +430,21 @@ fn http_chat_within(
     let mut response = request
         .send_json(body)
         .map_err(|e| format!("remote chat {url}: {e}"))?;
+    let status = response.status().as_u16();
     let text = response
         .body_mut()
         .with_config()
         .limit(cap as u64)
-        .read_to_string()
-        .map_err(|e| format!("remote chat read {url}: {e}"))?;
-    let status = response.status().as_u16();
+        .read_to_string();
     if !(200..300).contains(&status) {
-        let snippet: String = text.chars().take(400).collect();
+        // The status is the fact; the body is a best-effort explanation, so
+        // an oversized or non-UTF-8 error body still reports the status.
+        let snippet: String = text.unwrap_or_default().chars().take(400).collect();
         return Err(format!(
             "remote chat {url}: http status {status}: {snippet}"
         ));
     }
+    let text = text.map_err(|e| format!("remote chat read {url}: {e}"))?;
     serde_json::from_str(&text).map_err(|e| format!("remote chat JSON {url}: {e}"))
 }
 
@@ -765,7 +767,16 @@ mod tests {
     /// body, answers `reply` (or nothing, when `None`). Polls with a
     /// deadline so a client that never connects fails instead of hanging.
     fn http_once(reply: Option<String>) -> (String, std::thread::JoinHandle<(String, String)>) {
+        http_once_with("200 OK", reply)
+    }
+
+    /// [`http_once`] answering with `status` instead of `200 OK`.
+    fn http_once_with(
+        status: &str,
+        reply: Option<String>,
+    ) -> (String, std::thread::JoinHandle<(String, String)>) {
         use std::io::{BufRead, BufReader, Read, Write};
+        let status = status.to_string();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -801,7 +812,7 @@ mod tests {
                         let mut stream = stream;
                         write!(
                             stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
                             reply.len()
                         )
                         .unwrap();
@@ -864,6 +875,57 @@ mod tests {
             !head.to_ascii_lowercase().contains("authorization"),
             "no key, no header: {head}"
         );
+    }
+
+    #[test]
+    fn the_transport_reports_a_non_2xx_status_with_the_provider_error_body() {
+        let body = format!(
+            r#"{{"error":"model blocked by guardrail","pad":"{}"}}"#,
+            "x".repeat(600)
+        );
+        let (base, server) = http_once_with("404 Not Found", Some(body.clone()));
+        let error = http_chat_within(
+            &config_for(&base, Some("sekret")),
+            &json!({}),
+            Duration::from_secs(5),
+            RESPONSE_CAP_BYTES,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        let expected: String = body.chars().take(400).collect();
+        assert_eq!(
+            error,
+            format!("remote chat {base}/chat/completions: http status 404: {expected}")
+        );
+        assert!(!error.contains("sekret"), "{error}");
+
+        // An error body over the cap still reports the status, not a read error.
+        let (base, server) = http_once_with("500 Internal Server Error", Some(body));
+        let error = http_chat_within(
+            &config_for(&base, None),
+            &json!({}),
+            Duration::from_secs(5),
+            16,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(
+            error,
+            format!("remote chat {base}/chat/completions: http status 500: ")
+        );
+
+        // 2xx is the success edge: a 299 still parses as an answer.
+        let reply = chat_with(r#"{"probs": {"a": 1}}"#).to_string();
+        let (base, server) = http_once_with("299 OK", Some(reply.clone()));
+        let response = http_chat_within(
+            &config_for(&base, None),
+            &json!({}),
+            Duration::from_secs(5),
+            RESPONSE_CAP_BYTES,
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(response.to_string(), reply);
     }
 
     #[test]

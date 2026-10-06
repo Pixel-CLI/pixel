@@ -3418,12 +3418,18 @@ fn uninstall_removes_the_classify_helpers_and_keeps_a_backup_of_them() {
         settings,
         serde_json::json!({"theme": "dark", "packages": ["npm:mine"]})
     );
-    let backups = fs::read_dir(home.join(".claude/skills"))
+    let backups = fs::read_dir(home.join(".claude"))
         .unwrap()
         .filter_map(std::result::Result::ok)
         .filter(|e| e.file_name().to_string_lossy().contains(".pixel-bak."))
         .count();
     assert_eq!(backups, 1, "a renamed .pixel-bak dir keeps the user copy");
+    // Outside `skills/`: a backup there would still load as a skill.
+    let left = fs::read_dir(home.join(".claude/skills"))
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .count();
+    assert_eq!(left, 0, "nothing skill-shaped stays in .claude/skills");
 }
 
 #[test]

@@ -805,9 +805,12 @@ fn remove_pi_extension_dir(config_dir: &Path, dry_run: bool) -> Result<InstallSt
     })
 }
 
-/// Rename `dir` to `<name>.pixel-bak.<nanos>-<seq>` beside itself — the
-/// directory counterpart of [`config::backup_if_changing`], so a user-edited
-/// copy survives an uninstall instead of being deleted outright.
+/// Rename the skill `dir` (`<root>/skills/<name>`) to
+/// `<root>/<name>.pixel-bak.<nanos>-<seq>` — the directory counterpart of
+/// [`config::backup_if_changing`], so a user-edited copy survives an
+/// uninstall instead of being deleted outright. The backup leaves `skills/`:
+/// a harness loads every `skills/*/SKILL.md`, so a backup beside the skill
+/// would keep it active after the uninstall.
 fn rename_as_backup(dir: &Path) -> Result<()> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -815,8 +818,8 @@ fn rename_as_backup(dir: &Path) -> Result<()> {
     let name = dir
         .file_name()
         .map_or_else(|| "dir".into(), |n| n.to_string_lossy().into_owned());
-    let backup = dir.with_file_name(format!("{name}.pixel-bak.{nanos}-0"));
-    fs::rename(dir, backup)?;
+    let root = dir.parent().and_then(Path::parent).unwrap_or(dir);
+    fs::rename(dir, root.join(format!("{name}.pixel-bak.{nanos}-0")))?;
     Ok(())
 }
 
@@ -1337,9 +1340,6 @@ fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Ve
         parent_of(home, config::CURSOR_HOOKS_FILE),
         home.join(config::PI_CONFIG_DIR),
         home.join(config::PI_CONFIG_DIR).join("extensions"),
-        // The classify helpers proposal writes under each harness's skills
-        // dir; a user-edited copy leaves a renamed `.pixel-bak` dir behind.
-        home.join(".claude/skills"),
         parent_of(home, config::PIXEL_RULES_REL),
         home.join(".local/share/pixel"),
         crate::antigravity::antigravity_config_dir(home),
@@ -1347,8 +1347,10 @@ fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Ve
         crate::antigravity::cli_plugin_dir(home),
         opencode_dir.to_path_buf(),
     ];
+    // The classify-skill step renames each harness's `skills/pixel-classify`
+    // to a `.pixel-bak` dir in that harness's root (`.claude` is above).
     for root in config::SKILL_ROOTS {
-        dirs.push(home.join(root).join("skills"));
+        dirs.push(home.join(root));
     }
     for root in project_hook_search_roots(home) {
         dirs.push(root.join(".codex"));

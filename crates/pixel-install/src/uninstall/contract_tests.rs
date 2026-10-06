@@ -819,7 +819,14 @@ fn remove_classify_skill_should_backup_the_skill_dir_and_keep_foreign_skills() {
         "removed dirs are named in the detail"
     );
     assert!(!skill.exists());
-    let renamed: Vec<PathBuf> = fs::read_dir(home.path().join(".claude/skills"))
+    // The backup leaves `skills/`, where the harness would still load it.
+    let skills: Vec<PathBuf> = fs::read_dir(home.path().join(".claude/skills"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(skills, vec![foreign.clone()]);
+    let renamed: Vec<PathBuf> = fs::read_dir(home.path().join(".claude"))
         .unwrap()
         .flatten()
         .map(|entry| entry.path())
@@ -848,5 +855,5 @@ fn remove_classify_skill_should_keep_every_dir_when_dry_run() {
         "[dry-run] would report: removed 1 classify skill dir(s)"
     );
     assert!(skill.join("SKILL.md").is_file());
-    assert!(backups_in(&home.path().join(".claude/skills")).is_empty());
+    assert!(backups_in(&home.path().join(".claude")).is_empty());
 }

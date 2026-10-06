@@ -130,27 +130,36 @@ fn http_post(config: &JevConfig, body: &Value) -> Result<Value, String> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(config.timeout))
         .user_agent("pixel-cli classify-jev")
+        // Non-2xx handled below, as for the chat presets: the provider's
+        // error body names the real cause (unknown model, quota, bad key).
+        .http_status_as_error(false)
         .build();
     let agent = ureq::Agent::new_with_config(agent);
     let mut request = agent.post(&url);
     if let Some(key) = &config.key {
         request = request.header("Authorization", &format!("Bearer {key}"));
     }
-    let mut response = request.send_json(body).map_err(|e| {
-        let status = match &e {
-            ureq::Error::StatusCode(code) => format!(
-                " (HTTP {code}; check the TYPESAFE_API_KEY value and the {JEV_LABEL} base URL)"
-            ),
-            _ => String::new(),
-        };
-        format!("{JEV_LABEL} {url}: {e}{status}")
-    })?;
+    let mut response = request
+        .send_json(body)
+        .map_err(|e| format!("{JEV_LABEL} {url}: {e}"))?;
+    let status = response.status().as_u16();
     let text = response
         .body_mut()
         .with_config()
         .limit(RESPONSE_CAP_BYTES as u64)
-        .read_to_string()
-        .map_err(|e| format!("{JEV_LABEL} read {url}: {e}"))?;
+        .read_to_string();
+    if !(200..300).contains(&status) {
+        // Only an authentication refusal points at the key; a 404 or a 5xx
+        // is the base, the model or the service.
+        let hint = if matches!(status, 401 | 403) {
+            "; check the API key value and the jev base URL"
+        } else {
+            ""
+        };
+        let snippet: String = text.unwrap_or_default().chars().take(400).collect();
+        return Err(format!("{JEV_LABEL} {url}: HTTP {status}{hint}: {snippet}"));
+    }
+    let text = text.map_err(|e| format!("{JEV_LABEL} read {url}: {e}"))?;
     serde_json::from_str(&text).map_err(|e| format!("{JEV_LABEL} JSON {url}: {e}"))
 }
 
@@ -314,15 +323,28 @@ mod tests {
             ..Default::default()
         };
         let error = http_post(&config, &json!({})).unwrap_err();
-        assert!(error.contains("HTTP 401"), "{error}");
-        assert!(error.starts_with("jev http"), "{error}");
-        assert!(
-            error.contains("check the TYPESAFE_API_KEY value"),
-            "{error}"
+        assert_eq!(
+            error,
+            format!(
+                "jev {base}/v1/systemone: HTTP 401; check the API key value and the jev base URL: {{}}"
+            )
         );
         assert!(
             !error.contains("tsk-wrong"),
             "the key value must never enter an error string: {error}"
+        );
+        server.join().unwrap();
+
+        // A non-auth status carries the provider's body, not a key hint.
+        let (base, server) = http_once("404 Not Found", r#"{"error":"unknown model"}"#.to_string());
+        let config = JevConfig {
+            base: base.clone(),
+            ..Default::default()
+        };
+        let error = http_post(&config, &json!({})).unwrap_err();
+        assert_eq!(
+            error,
+            format!(r#"jev {base}/v1/systemone: HTTP 404: {{"error":"unknown model"}}"#)
         );
         server.join().unwrap();
     }
