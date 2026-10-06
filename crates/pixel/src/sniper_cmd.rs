@@ -284,3 +284,19 @@ pub fn run_sniper(cmd: SniperCmd) -> Result<(), String> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_surface_name_parses_and_an_unknown_one_is_an_error() {
+        assert_eq!(parse_surface(None), Ok(None));
+        assert_eq!(
+            parse_surface(Some("vitest".to_string())),
+            Ok(Some(Surface::Vitest))
+        );
+        let err = parse_surface(Some("nope".to_string())).unwrap_err();
+        assert!(err.contains("unknown surface \"nope\""), "{err}");
+    }
+}

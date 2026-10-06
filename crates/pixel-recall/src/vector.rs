@@ -403,6 +403,70 @@ mod tests {
         let segment = OpenSegment::open(&path).unwrap();
         assert_eq!((segment.dim, segment.count), (8, 2));
     }
+
+    /// The header alone is a valid empty segment; anything shorter, or with
+    /// another magic, is refused before a field is read.
+    #[test]
+    fn open_should_check_the_header_length_and_the_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_with_count(dir.path(), 3, 1, 0);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..HEADER_LEN]).unwrap();
+        let empty = OpenSegment::open(&path).unwrap();
+        assert_eq!((empty.dim, empty.count), (3, 0));
+        std::fs::write(&path, &bytes[..10]).unwrap();
+        assert_eq!(
+            OpenSegment::open(&path).err().as_deref(),
+            Some("bad vector segment header")
+        );
+        let mut wrong_magic = bytes.clone();
+        wrong_magic[0] ^= 0xff;
+        std::fs::write(&path, &wrong_magic).unwrap();
+        assert_eq!(
+            OpenSegment::open(&path).err().as_deref(),
+            Some("bad vector segment header")
+        );
+    }
+
+    /// Rows are quantized against their own largest component, so a small
+    /// component keeps its share of the score.
+    #[test]
+    fn append_segment_should_scale_each_row_by_its_largest_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = VectorStore::open(dir.path()).unwrap();
+        store
+            .append_segment("test-model", 3, &[(1, vec![0.5, 0.2, 0.0])])
+            .unwrap();
+        let hits = store.knn(&[0.0, 1.0, 0.0], 1, None);
+        assert_eq!(hits[0].0, 1);
+        assert!((hits[0].1 - 0.2).abs() < 0.01, "{hits:?}");
+    }
+
+    /// A later row tying the best one does not overtake it.
+    #[test]
+    fn knn_should_keep_the_first_of_tied_rows_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = VectorStore::open(dir.path()).unwrap();
+        store
+            .append_segment(
+                "test-model",
+                2,
+                &[
+                    (1, vec![0.5, 0.5]),
+                    (2, vec![1.0, 0.0]),
+                    (3, vec![1.0, 0.0]),
+                    // Ties rows 2 and 3 at the cutoff: it must not displace them.
+                    (4, vec![1.0, 0.0]),
+                ],
+            )
+            .unwrap();
+        let ids: Vec<i64> = store
+            .knn(&[1.0, 0.0], 2, None)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, vec![2, 3]);
+    }
 }
 
 #[cfg(test)]

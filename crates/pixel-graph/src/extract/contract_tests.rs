@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use tree_sitter::Parser;
 
 use super::{
-    FileExtraction, ImportBinding, PARSE_BUDGET, RawSymbol, extract_file, generic_symbol_kind,
-    lang_of, language_for, over_budget, parse_file, parse_within,
+    FileExtraction, ImportBinding, MAX_DEPTH, PARSE_BUDGET, RawSymbol, extract_file,
+    generic_symbol_kind, lang_of, language_for, over_budget, parse_file, parse_within, too_deep,
 };
 use crate::store::SymbolKind;
 
@@ -1012,6 +1012,15 @@ class View {
         "{syms:?}"
     );
     assert!(import_paths(&fx).contains(&"Foundation".to_string()));
+    // Swift's `call_expression` has no callee field: its first named child is.
+    assert!(has_call(&fx, "layout"), "{:?}", calls(&fx));
+}
+
+#[test]
+fn walkers_should_visit_the_depth_cap_and_stop_past_it() {
+    assert!(!too_deep(0));
+    assert!(!too_deep(MAX_DEPTH));
+    assert!(too_deep(MAX_DEPTH + 1));
 }
 
 #[test]

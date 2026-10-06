@@ -268,4 +268,31 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn diff_name_status_lists_each_changed_path_with_its_status() {
+        let root = tmpdir("diff-name-status");
+        init_repo(&root);
+        std::fs::write(root.join("keep.txt"), b"1").unwrap();
+        std::fs::write(root.join("gone.txt"), b"1").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "one"]);
+        git(&root, &["tag", "one"]);
+        std::fs::write(root.join("keep.txt"), b"2").unwrap();
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        std::fs::write(root.join("new.txt"), b"1").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "two"]);
+        let mut changes = diff_name_status(&root, "one", "HEAD");
+        changes.sort();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            changes,
+            vec![
+                ('A', "new.txt".to_string()),
+                ('D', "gone.txt".to_string()),
+                ('M', "keep.txt".to_string()),
+            ]
+        );
+    }
 }

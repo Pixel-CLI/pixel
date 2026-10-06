@@ -77,17 +77,23 @@ pub fn now_ms() -> i64 {
 
 /// State root: `PIXEL_SNIPER_STATE_ROOT` > `XDG_STATE_HOME` > `~/.local/state`.
 pub fn resolve_state_root() -> PathBuf {
-    if let Ok(root) = std::env::var("PIXEL_SNIPER_STATE_ROOT")
+    state_root_from(|name| std::env::var(name).ok())
+}
+
+/// [`resolve_state_root`] over an injected variable lookup; an empty value
+/// counts as unset.
+pub fn state_root_from(var: impl Fn(&str) -> Option<String>) -> PathBuf {
+    if let Some(root) = var("PIXEL_SNIPER_STATE_ROOT")
         && !root.is_empty()
     {
         return PathBuf::from(root);
     }
-    if let Ok(root) = std::env::var("XDG_STATE_HOME")
+    if let Some(root) = var("XDG_STATE_HOME")
         && !root.is_empty()
     {
         return PathBuf::from(root);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = var("HOME").unwrap_or_else(|| ".".into());
     Path::new(&home).join(".local").join("state")
 }
 

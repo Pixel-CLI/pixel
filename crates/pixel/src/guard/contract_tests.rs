@@ -1699,3 +1699,285 @@ fn pixel_program_should_match_only_when_bare_or_this_executable() {
     let me = std::env::current_exe().unwrap();
     assert!(is_pixel_program(&me.display().to_string()));
 }
+
+/// Every source directory name draws the `ls` advisory, and `find -exec`
+/// is advised for each nested search tool.
+#[test]
+fn bypass_advisory_should_name_every_source_dir_and_nested_search_tool() {
+    let root = bypass_repo();
+    for dir in ["lib", "test", "tests", "include"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+        let lines = bypass_advisory_lines(&format!("ls {dir}"), &root, &root)
+            .unwrap_or_else(|| panic!("`ls {dir}` lists source"));
+        assert!(lines[0].contains("ls of source directory"), "{lines:?}");
+    }
+    for tool in ["rg", "ag", "ack"] {
+        let cmd = format!("find . -type f -exec {tool} needle {{}} +");
+        let lines = bypass_advisory_lines(&cmd, &root, &root)
+            .unwrap_or_else(|| panic!("`{cmd}` nests a search"));
+        assert!(lines[0].contains("find -exec grep"), "{lines:?}");
+    }
+}
+
+/// `git branch --delete` is destructive only when forced.
+#[test]
+fn branch_delete_is_denied_only_when_forced() {
+    let root = scratch("branch-delete");
+    for args in [
+        &["--delete", "--force", "x"][..],
+        &["--delete", "-f", "x"][..],
+        &["-D", "x"][..],
+    ] {
+        assert!(
+            destructive_git_deny("branch", &strings(args), &root).is_some(),
+            "{args:?}"
+        );
+    }
+    assert_eq!(
+        destructive_git_deny("branch", &strings(&["--delete", "x"]), &root),
+        None
+    );
+    assert_eq!(
+        destructive_git_deny("branch", &strings(&["--force", "x"]), &root),
+        None
+    );
+}
+
+/// A raw `git rebase` passes only when the repository it is pointed at by
+/// `cd` has a reported reconcile conflict.
+#[test]
+fn rebase_escapes_the_substitute_only_into_a_reported_conflict() {
+    let root = scratch("rebase-escape-root");
+    std::fs::create_dir_all(root.join(".pixel")).unwrap();
+    let alt = scratch("rebase-escape-alt");
+    std::fs::create_dir_all(alt.join(".pixel")).unwrap();
+    // Only the `cd` route: `git_invocations` drops the `-C` value from the
+    // args it hands over, so `extract_git_c_path` never sees one here.
+    let via_cd = format!("cd {} && git rebase main", alt.display());
+    assert!(
+        git_mutation_substitute_lines(&via_cd, Some(&root), &root).is_some(),
+        "`{via_cd}` with no conflict is substituted"
+    );
+    std::fs::write(alt.join(".pixel/reconcile-conflict.json"), "{}").unwrap();
+    assert_eq!(
+        git_mutation_substitute_lines(&via_cd, Some(&root), &root),
+        None,
+        "`{via_cd}` resolves a reported conflict"
+    );
+    let add = format!("cd {} && git add src/lib.rs", alt.display());
+    assert!(
+        git_mutation_substitute_lines(&add, Some(&root), &root).is_some(),
+        "only a rebase takes the conflict escape"
+    );
+}
+
+/// `git commit` flags map onto the substitute's fields, long and short.
+#[test]
+fn commit_args_should_read_every_flag_spelling() {
+    assert!(parse_commit_args(&strings(&["--all"])).all);
+    assert!(parse_commit_args(&strings(&["-a"])).all);
+    assert!(parse_commit_args(&strings(&["--amend"])).amend);
+    for flag in [
+        "--interactive",
+        "--patch",
+        "--fixup",
+        "--squash",
+        "--fixup=abc",
+        "--squash=abc",
+        "-p",
+    ] {
+        assert!(parse_commit_args(&strings(&[flag])).interactive, "{flag}");
+    }
+    for args in [
+        &["-m", "msg"][..],
+        &["--message", "msg"][..],
+        &["--message=msg"][..],
+        &["-am", "msg"][..],
+    ] {
+        assert_eq!(
+            parse_commit_args(&strings(args)).message.as_deref(),
+            Some("msg"),
+            "{args:?}"
+        );
+    }
+    let plain = parse_commit_args(&strings(&["--author", "me", "-F", "f", "a.rs", "b.rs"]));
+    assert_eq!(plain.files, strings(&["a.rs", "b.rs"]));
+    assert!(!plain.all && !plain.amend && !plain.interactive);
+    assert_eq!(plain.message, None);
+}
+
+fn composed_backup(dir: &Path, name: &str, pad_to: usize) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let mut body = serde_json::json!({
+        "version": 1,
+        "provider": "codex",
+        "pre_tool_use": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "keep-check"}]}
+        ],
+    })
+    .to_string();
+    while body.len() < pad_to {
+        body.push(' ');
+    }
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+/// A backup of exactly the input cap loads; one byte more does not.
+#[test]
+fn composed_backup_should_load_up_to_its_byte_cap() {
+    let dir = scratch("composed-cap");
+    let exact = composed_backup(&dir, "exact.json", COMPOSED_MAX_INPUT);
+    let hooks = load_composed_backup(&exact).expect("a backup at the cap loads");
+    assert_eq!(hooks.len(), 1);
+    assert_eq!(hooks[0].command, "keep-check");
+    let over = composed_backup(&dir, "over.json", COMPOSED_MAX_INPUT + 1);
+    assert!(load_composed_backup(&over).is_none());
+}
+
+/// A backup path that is not a regular file is refused before it is read,
+/// even when what it would yield is a valid backup: a FIFO fed by a writer.
+#[test]
+fn composed_backup_should_refuse_a_fifo() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = scratch("composed-fifo");
+    let fifo = dir.join("backup.json");
+    let c_path = std::ffi::CString::new(fifo.display().to_string()).unwrap();
+    // SAFETY: `c_path` is a valid NUL-terminated path for the call's duration.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    let body = std::fs::read(composed_backup(&dir, "valid.json", 0)).unwrap();
+    let writer_path = fifo.clone();
+    let writer = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            // Non-blocking: opening fails until a reader is there.
+            if let Ok(mut pipe) = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&writer_path)
+            {
+                let _ = std::io::Write::write_all(&mut pipe, &body);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+    assert!(load_composed_backup(&fifo).is_none());
+    writer.join().unwrap();
+}
+
+/// A foreign hook whose stderr runs past the output cap is ignored, even
+/// with an empty stdout and a zero exit.
+#[test]
+fn foreign_command_output_past_the_cap_is_dropped() {
+    let dir = scratch("foreign-output");
+    assert_eq!(
+        run_foreign_command("echo '{\"a\":1}'", b"{}", &dir),
+        Some(serde_json::json!({"a": 1}))
+    );
+    assert_eq!(run_foreign_command("true", b"{}", &dir), Some(Value::Null));
+    let over = COMPOSED_MAX_OUTPUT + 1;
+    assert_eq!(
+        run_foreign_command(&format!("head -c {over} /dev/zero >&2"), b"{}", &dir),
+        None
+    );
+}
+
+/// The composed hook reads a non-empty payload of at most the cap.
+#[test]
+fn composed_payload_should_be_non_empty_and_within_the_cap() {
+    assert_eq!(
+        read_composed_payload(&b"abcd"[..], 4),
+        Some(b"abcd".to_vec())
+    );
+    assert_eq!(read_composed_payload(&b"abc"[..], 4), Some(b"abc".to_vec()));
+    assert_eq!(read_composed_payload(&b"abcde"[..], 4), None);
+    assert_eq!(read_composed_payload(&b""[..], 4), None);
+}
+
+/// Every harness's shell tool is guarded as a shell; file tools are not.
+#[test]
+fn shell_tools_should_be_recognised_by_every_harness_name() {
+    for tool in [
+        "Bash",
+        "exec",
+        "bash",
+        "run_shell_command",
+        "execute",
+        "Shell",
+        "run_command",
+        "shell",
+        "unified_exec",
+        "local_shell",
+    ] {
+        assert!(is_shell_tool(tool), "{tool}");
+    }
+    for tool in ["Read", "Edit", "Write", "grep", ""] {
+        assert!(!is_shell_tool(tool), "{tool}");
+    }
+}
+
+/// Only an existing file draws an edit advisory: out of an active
+/// manifest's scope, unscoped in an index, or outside any index.
+#[test]
+fn edit_advice_should_follow_manifest_then_index_then_none() {
+    use EditAdvice::{OutOfScope, Proceed, SuggestIndex, Unscoped};
+    for (in_scope, exempt) in [
+        (Some(false), None),
+        (Some(true), Some(false)),
+        (None, Some(false)),
+        (None, None),
+    ] {
+        assert_eq!(edit_advice(false, in_scope, exempt), Proceed, "new file");
+    }
+    assert_eq!(edit_advice(true, Some(false), Some(true)), OutOfScope);
+    assert_eq!(edit_advice(true, Some(true), Some(false)), Proceed);
+    assert_eq!(edit_advice(true, None, Some(false)), Unscoped);
+    assert_eq!(edit_advice(true, None, Some(true)), Proceed);
+    assert_eq!(edit_advice(true, None, None), SuggestIndex);
+}
+
+/// The post-edit note's path list is capped past eight files or when a
+/// path is shortened.
+#[test]
+fn post_edit_paths_should_be_capped_past_the_limit_or_a_long_path() {
+    let short = vec!["src/a.rs".to_string()];
+    assert!(!snapshot_paths_capped(PATH_LIMIT, &short));
+    assert!(snapshot_paths_capped(PATH_LIMIT + 1, &short));
+    assert!(!snapshot_paths_capped(1, &["x".repeat(PATH_CHARS)]));
+    assert!(snapshot_paths_capped(1, &["x".repeat(PATH_CHARS + 1)]));
+}
+
+/// A Bash command draws the bypass advisory in an index, else the manifest
+/// scoping for a single out-of-scope read; substitutions draw nothing.
+#[test]
+fn bash_advisory_should_prefer_the_bypass_then_the_manifest_scope() {
+    let root = bypass_repo();
+    let m = manifest(&root, &["README.md"]);
+    assert!(matches!(
+        bash_advisory("ag needle", &root, Some(&root), Some(&m)),
+        Some(BashAdvisory::Bypass(_))
+    ));
+    assert!(matches!(
+        bash_advisory("cd src && egrep needle lib.rs", &root, Some(&root), None),
+        Some(BashAdvisory::Bypass(_))
+    ));
+    assert_eq!(
+        bash_advisory("cat notes.txt", &root, None, Some(&m)),
+        Some(BashAdvisory::OutOfScope(root.join("notes.txt")))
+    );
+    assert_eq!(bash_advisory("cat README.md", &root, None, Some(&m)), None);
+    assert_eq!(
+        bash_advisory("cat notes.txt", &root, Some(&root), None),
+        None
+    );
+    for cmd in ["ag $(echo x)", "ag `x`", "ag <<EOF"] {
+        assert_eq!(
+            bash_advisory(cmd, &root, Some(&root), Some(&m)),
+            None,
+            "{cmd}"
+        );
+    }
+}

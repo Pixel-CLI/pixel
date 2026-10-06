@@ -147,8 +147,12 @@ fn utc_timestamp() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = now.as_secs() as i64;
-    let nanos = now.subsec_nanos();
+    utc_timestamp_at(now.as_secs() as i64, now.subsec_nanos())
+}
+
+/// `utc_timestamp` for a given instant: pure, so the calendar arithmetic is
+/// testable against known dates.
+fn utc_timestamp_at(secs: i64, nanos: u32) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
@@ -609,6 +613,38 @@ mod tests {
                 .collect();
             assert_eq!(rebuilt, content);
         }
+    }
+
+    #[test]
+    fn utc_timestamp_at_should_render_known_instants() {
+        for (secs, nanos, want) in [
+            (0, 0, "19700101T000000.000000000Z"),
+            (951_782_400, 7, "20000229T000000.000000007Z"),
+            (1_709_251_199, 0, "20240229T235959.000000000Z"),
+            (1_735_689_599, 123, "20241231T235959.000000123Z"),
+            (1_738_368_000, 0, "20250201T000000.000000000Z"),
+            (1_754_016_245, 0, "20250801T024405.000000000Z"),
+            (-86_400, 0, "19691231T000000.000000000Z"),
+        ] {
+            assert_eq!(utc_timestamp_at(secs, nanos), want, "{secs}");
+        }
+    }
+
+    #[test]
+    fn parse_should_stop_at_the_end_of_the_line_in_every_scan() {
+        assert_eq!(parse_env_line(" \t"), None);
+        assert_eq!(parse_env_line("export  "), None);
+        assert_eq!(parse_env_line("FOO"), None);
+        assert_eq!(parse_env_line("FOO  "), None);
+        assert_eq!(parse_env_line("export"), None);
+    }
+
+    #[test]
+    fn parse_should_accept_every_key_character_class() {
+        assert_eq!(parse_env_line("a1_B.c-D=x"), Some(("a1_B.c-D".into(), 9)));
+        assert_eq!(parse_env_line("_=x"), Some(("_".into(), 2)));
+        assert_eq!(parse_env_line(".=x"), Some((".".into(), 2)));
+        assert_eq!(parse_env_line("-=x"), Some(("-".into(), 2)));
     }
 
     #[test]

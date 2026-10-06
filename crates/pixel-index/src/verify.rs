@@ -130,4 +130,35 @@ mod tests {
         assert!(out.iter().all(|m| m.path == "a.txt"));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn search_file_page_skips_then_stops_at_the_page_size() {
+        let dir = std::env::temp_dir().join(format!("gpx-verify-page-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = dir.join("p.txt");
+        std::fs::write(&text, "hit 1\nhit 2\nhit 3\nhit 4\nhit 5\n").unwrap();
+        let v = Verifier::new("hit").unwrap();
+        let mut out = vec![MatchLine {
+            path: "earlier".into(),
+            line_number: 9,
+            line: "earlier".into(),
+        }];
+        let mut skip = 1;
+        v.search_file_page(&text, "p.txt", &mut out, &mut skip, Some(2))
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let lines: Vec<u64> = out.iter().map(|m| m.line_number).collect();
+        assert_eq!(lines, vec![9, 2, 3]);
+        assert_eq!(skip, 0);
+    }
+
+    #[test]
+    fn verify_error_display_names_the_failure() {
+        assert_eq!(
+            VerifyError::BadPattern("x".into()).to_string(),
+            "bad pattern: x"
+        );
+        let io = VerifyError::Io(std::io::Error::other("boom")).to_string();
+        assert_eq!(io, "verify io error: boom");
+    }
 }
