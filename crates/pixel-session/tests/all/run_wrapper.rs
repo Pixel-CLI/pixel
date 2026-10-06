@@ -666,6 +666,11 @@ fn rspec_json_boot_failure_is_an_error_not_a_pass() {
         "rspec ./spec/models/order_spec.rb"
     );
     assert_eq!(errors[1].kind.as_deref(), Some("summary"));
+    assert_eq!(
+        errors[1].message,
+        "0 examples, 0 failures, 1 error occurred outside of examples"
+    );
+    assert_eq!(extra(&errors[1], "counters")["errorsOutside"], 1);
     assert_eq!(query::test_status(&store).unwrap().passing, Some(false));
     assert!(
         store

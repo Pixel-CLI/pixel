@@ -23,6 +23,8 @@ use crate::types::{
 const SCHEMA_VERSION: i64 = 1;
 const ERROR_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const ERROR_MAX_ROWS: i64 = 5000;
+/// Raw outputs kept at most (`raw_fallbacks`), newest first.
+const RAW_FALLBACK_MAX_ROWS: i64 = 200;
 const EVENT_RETENTION_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 const EVENT_MAX_ROWS: i64 = 20000;
 
@@ -554,7 +556,8 @@ impl Store {
 
     // -- maintenance --------------------------------------------------------
 
-    /// Retention pass: errors 7d / 5000 rows, events 3d / 20000 rows.
+    /// Retention pass: errors 7d / 5000 rows, raw outputs 7d / 200 rows,
+    /// events 3d / 20000 rows.
     pub fn retain(&self, now: i64) -> Result<(i64, i64)> {
         let mut errors_deleted = self.conn.execute(
             "DELETE FROM errors WHERE last_ts < ?1",
@@ -564,6 +567,17 @@ impl Store {
             "DELETE FROM errors WHERE id NOT IN (SELECT id FROM errors ORDER BY id DESC LIMIT ?1)",
             params![ERROR_MAX_ROWS],
         )? as i64;
+        // Raw outputs follow the errors they back: the same age, and fewer
+        // rows, each being a whole command output.
+        self.conn.execute(
+            "DELETE FROM raw_fallbacks WHERE ts < ?1",
+            params![now - ERROR_RETENTION_MS],
+        )?;
+        self.conn.execute(
+            "DELETE FROM raw_fallbacks WHERE id NOT IN
+               (SELECT id FROM raw_fallbacks ORDER BY id DESC LIMIT ?1)",
+            params![RAW_FALLBACK_MAX_ROWS],
+        )?;
         let mut events_deleted = self.conn.execute(
             "DELETE FROM events WHERE ts < ?1",
             params![now - EVENT_RETENTION_MS],

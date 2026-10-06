@@ -443,8 +443,8 @@ pub fn minitest_summary_line(report: &minitest::Report) -> (String, serde_json::
     }
 }
 
-/// `7 examples, 2 failures, 1 pending` (pending shown only when non-zero,
-/// as RSpec does).
+/// `7 examples, 2 failures, 1 pending` (pending and errors outside of
+/// examples shown only when non-zero, as RSpec does).
 pub fn rspec_summary_line(report: &rspec::Report) -> (String, serde_json::Value) {
     match report.counters {
         Some(c) => {
@@ -452,14 +452,26 @@ pub fn rspec_summary_line(report: &rspec::Report) -> (String, serde_json::Value)
             if c.pending > 0 {
                 line.push_str(&format!(", {} pending", c.pending));
             }
-            (
-                line,
-                json!({
-                    "examples": c.examples,
-                    "failures": c.failures,
-                    "pending": c.pending,
-                }),
-            )
+            let mut counters = json!({
+                "examples": c.examples,
+                "failures": c.failures,
+                "pending": c.pending,
+            });
+            // As RSpec prints it, and only then: a spec file that failed to
+            // load is why a `0 failures` run is red.
+            if c.errors_outside > 0 {
+                let noun = if c.errors_outside == 1 {
+                    "error"
+                } else {
+                    "errors"
+                };
+                line.push_str(&format!(
+                    ", {} {noun} occurred outside of examples",
+                    c.errors_outside
+                ));
+                counters["errorsOutside"] = json!(c.errors_outside);
+            }
+            (line, counters)
         }
         None => (
             format!(

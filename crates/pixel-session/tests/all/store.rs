@@ -376,3 +376,37 @@ fn resolve_project_root_climbs_to_the_git_toplevel_or_keeps_the_start() {
         "a subdirectory resolves to the repository root"
     );
 }
+
+#[test]
+fn raw_outputs_follow_the_error_retention() {
+    let state = TempRoot::new();
+    let store = Store::open_at(Path::new("/tmp/raw-retention"), state.path()).unwrap();
+    let now = now_ms();
+    store
+        .record_raw_fallback("run:old", "old output", Some(now - 8 * 86_400_000))
+        .unwrap();
+    store
+        .record_raw_fallback("run:new", "new output", Some(now))
+        .unwrap();
+    store.retain(now).unwrap();
+    assert_eq!(store.latest_raw_fallback("run:old").unwrap(), None);
+    assert_eq!(
+        store.latest_raw_fallback("run:new").unwrap().as_deref(),
+        Some("new output")
+    );
+    for n in 0..200 {
+        store
+            .record_raw_fallback("run:many", &format!("output {n}"), Some(now))
+            .unwrap();
+    }
+    store.retain(now).unwrap();
+    assert_eq!(
+        store.latest_raw_fallback("run:many").unwrap().as_deref(),
+        Some("output 199")
+    );
+    assert_eq!(
+        store.latest_raw_fallback("run:new").unwrap(),
+        None,
+        "beyond the newest 200 rows"
+    );
+}
