@@ -429,6 +429,20 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     format!("explicit impact command verified at {}", extension.display()),
                     Remedy::Catalogue,
                 )
+            } else if let Some(extension_dir) = extension
+                .parent()
+                .filter(|path| {
+                    fs::symlink_metadata(path).is_ok() && !path.is_dir()
+                })
+            {
+                (
+                    CheckStatus::Yellow,
+                    format!(
+                        "Pi extension directory is not a directory; left untouched at {}",
+                        extension_dir.display()
+                    ),
+                    Remedy::Manual,
+                )
             } else if config_dir.exists() && !config_dir.is_dir() {
                 (
                     CheckStatus::Yellow,
@@ -4308,6 +4322,70 @@ Prose naming `pixel status` is not a table row.
             "user-owned file\n",
             "doctor must preserve the malformed user path"
         );
+    }
+
+    #[test]
+    fn pi_impact_doctor_should_not_offer_install_when_extension_parent_is_a_file() {
+        let home = tempfile::tempdir().unwrap();
+        let config_dir = home.path().join(crate::config::PI_CONFIG_DIR);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let extension_dir = config_dir.join("extensions");
+        std::fs::write(&extension_dir, "user-owned file\n").unwrap();
+
+        let report = super::doctor(&super::DoctorOptions {
+            home: Some(home.path().to_path_buf()),
+            only: vec!["install.pi-impact".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let check = &report.checks[0];
+        assert_eq!(check.status, CheckStatus::Yellow, "{check:?}");
+        assert_eq!(
+            check.fix, None,
+            "install cannot replace an extension parent file"
+        );
+        assert!(
+            check
+                .summary
+                .contains("Pi extension directory is not a directory"),
+            "{check:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(extension_dir).unwrap(),
+            "user-owned file\n",
+            "doctor must preserve the occupied extension directory path"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pi_impact_doctor_should_report_a_dangling_extension_parent_symlink_as_manual() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let config_dir = home.path().join(crate::config::PI_CONFIG_DIR);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let extension_dir = config_dir.join("extensions");
+        let missing_target = home.path().join("missing-extension-directory");
+        symlink(&missing_target, &extension_dir).unwrap();
+
+        let report = super::doctor(&super::DoctorOptions {
+            home: Some(home.path().to_path_buf()),
+            only: vec!["install.pi-impact".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let check = &report.checks[0];
+        assert_eq!(check.status, CheckStatus::Yellow, "{check:?}");
+        assert_eq!(check.fix, None, "install cannot repair a dangling symlink");
+        assert!(
+            check
+                .summary
+                .contains("Pi extension directory is not a directory"),
+            "{check:?}"
+        );
+        assert_eq!(std::fs::read_link(&extension_dir).unwrap(), missing_target);
+        assert!(!extension_dir.is_dir());
     }
 
     #[test]
