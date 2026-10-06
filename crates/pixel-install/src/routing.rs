@@ -913,26 +913,19 @@ fn composed_codex_group(exe: &Path, backup: &Path) -> Value {
 /// security boundary: it must admit only the exact managed shape under another
 /// Pixel executable name, and refuse everything else. So it requires
 /// [`pixel_hook_verb`] to recognise the command (which admits only an
-/// executable named `pixel`/`pixel-dev`, or this install's own `exe`, and only
-/// the known verbs), and requires the backup argument to be *this* install's
-/// backup path — a group pointing at another repo's backup is a foreign entry,
-/// not a stale spelling.
+/// executable named `pixel`/`pixel-dev`, or this install's own `exe`), then
+/// requires the whole group to equal [`composed_codex_group`] rebuilt from
+/// that executable and *this* install's backup: the executable path is the
+/// only thing allowed to differ. A second hook in the group, a matcher, a
+/// changed timeout, or a group pointing at another repo's backup is a user or
+/// foreign edit, not a stale spelling.
 fn is_managed_composed_group(group: &Value, exe: &Path, backup: &Path) -> bool {
-    let Some(entries) = group.get("hooks").and_then(Value::as_array) else {
-        return false;
-    };
-    entries.iter().any(|entry| {
-        entry
-            .get("command")
-            .and_then(Value::as_str)
-            .and_then(|command| pixel_hook_verb(command, exe))
-            // The verb alone is not enough: it must be the composed one, and
-            // it must name this install's backup file.
-            .and_then(|verb| verb.strip_prefix("composed-guard --provider codex --backup "))
-            .is_some_and(|written| {
-                unquoted_executable(written.trim()) == Some(backup.to_path_buf())
-            })
-    })
+    group["hooks"][0]["command"]
+        .as_str()
+        .filter(|command| pixel_hook_verb(command, exe).is_some())
+        .and_then(|command| command.rsplit_once(" run-hook "))
+        .and_then(|(executable, _)| unquoted_executable(executable))
+        .is_some_and(|written| *group == composed_codex_group(&written, backup))
 }
 
 fn composed_backup(groups: Vec<Value>, managed_pre_tool_use: Value) -> Value {
@@ -1059,48 +1052,42 @@ pub(crate) fn install_project_codex_at(
                     path: path.into(),
                     reason: "composed Codex install lost its PreToolUse group; refusing to overwrite user changes".into(),
                 })?;
-            let existing_expected = existing.as_slice() == [expected_group.clone()];
-            let existing_legacy =
-                existing.as_slice() == [legacy_group.clone()] && legacy_group != expected_group;
-            // A side build (`pixel-dev install --repo .`) writes a
-            // composed-guard command naming `pixel-dev` at its own path, so
-            // handing the repo install back to the managed `pixel` finds
-            // pixel's own entry in a spelling this install would not write
-            // today. `legacy_group` above covers this install's own
-            // executable under its canonicalised spelling; this covers the
-            // binary *name*, at any install path. The count stays exactly
-            // one: a config that gained a second group is still a refusal,
+            // Pixel's own composed group, in any spelling pixel may have
+            // written: today's, this executable's canonicalised path
+            // (`legacy_group`), or another Pixel executable name at any path,
+            // which is how a side build (`pixel-dev install --repo .`) hands
+            // the repo install back to the managed `pixel`. Exactly one
+            // group: a config that gained a second group is still a refusal,
             // never a silent overwrite of the user's addition.
-            let existing_own = !existing_expected
-                && existing.len() == 1
-                && is_managed_composed_group(&existing[0], exe, &backup_path);
-            if !existing_legacy && !existing_expected && !existing_own {
+            let is_own = |groups: &[Value]| match groups {
+                [group] => {
+                    *group == legacy_group || is_managed_composed_group(group, exe, &backup_path)
+                }
+                _ => false,
+            };
+            if !is_own(existing) {
                 return Err(InstallError::InvalidSettings {
                     path: path.into(),
                     reason: "composed Codex PreToolUse diverged from its managed contract; refusing to overwrite user changes".into(),
                 });
             }
-            migrate_executable_spelling = existing_legacy || existing_own;
-            let stored_legacy = stored["managed_pre_tool_use"] == json!([legacy_group.clone()])
-                && legacy_group != expected_group;
-            let stored_expected = stored["managed_pre_tool_use"] == json!([expected_group.clone()]);
-            let stored_own = stored["managed_pre_tool_use"]
+            let stored_managed = stored["managed_pre_tool_use"]
                 .as_array()
-                .is_some_and(|groups| {
-                    groups.len() == 1 && is_managed_composed_group(&groups[0], exe, &backup_path)
-                });
-            if !stored_legacy && !stored_expected && !stored_own {
+                .map_or(&[][..], Vec::as_slice);
+            if !is_own(stored_managed) {
                 return Err(InstallError::InvalidSettings {
                     path: backup_path.clone(),
                     reason: "composed Codex backup managed contract diverged; refusing to execute or overwrite it".into(),
                 });
             }
-            if existing_legacy != stored_legacy {
-                return Err(InstallError::InvalidSettings {
-                    path: backup_path.clone(),
-                    reason: "composed Codex config and backup disagree on the managed executable spelling; refusing to overwrite either".into(),
-                });
-            }
+            // Both files hold pixel's own entry, so both move to today's
+            // spelling in this pass: the config is always rewritten below,
+            // the backup whenever its record is not already today's. The
+            // spellings may disagree when a previous install stopped between
+            // its backup write and its config write; uninstall restores only
+            // when the backup's record equals the config, so leaving the
+            // backup behind would lock the user's original groups in it.
+            migrate_executable_spelling = stored_managed != [expected_group.clone()];
         }
     }
 
@@ -2715,6 +2702,7 @@ mod tests {
     /// must migrate the backup, or the next install reads the config and the
     /// backup as disagreeing and refuses.
     #[test]
+    #[cfg(unix)]
     fn project_codex_composition_migrates_a_symlink_whose_target_has_another_name() {
         use std::os::unix::fs::symlink;
 
@@ -2832,6 +2820,64 @@ mod tests {
             read_composed_backup(&path.parent().unwrap().join(CODEX_COMPOSED_BACKUP)).unwrap()["pre_tool_use"],
             original
         );
+    }
+
+    /// Install a side build's composed group, apply `edit` to it, and assert
+    /// the managed `pixel` refuses the hand-back without touching either file.
+    fn assert_hand_back_refused_after(edit: impl FnOnce(&mut Value)) {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("repo/.codex/hooks.json");
+        install::write_settings(
+            &path,
+            &json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep"}]}]}}),
+            false,
+        )
+        .unwrap();
+        install_project_codex_at(
+            home.path(),
+            &path,
+            &home.path().join("bin/pixel-dev"),
+            false,
+        )
+        .unwrap();
+        let sidecar = path.parent().unwrap().join(CODEX_COMPOSED_BACKUP);
+        let mut changed = install::read_settings(&path).unwrap();
+        edit(&mut changed["hooks"]["PreToolUse"][0]);
+        install::write_settings(&path, &changed, false).unwrap();
+        let config_before = fs::read(&path).unwrap();
+        let backup_before = fs::read(&sidecar).unwrap();
+
+        assert!(
+            install_project_codex_at(home.path(), &path, &home.path().join("bin/pixel"), false)
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), config_before);
+        assert_eq!(fs::read(&sidecar).unwrap(), backup_before);
+    }
+
+    /// A user hook added *inside* the side build's group is a user edit: the
+    /// hand-back admits pixel's group only exactly as pixel wrote it.
+    #[test]
+    fn project_codex_composition_refuses_a_user_hook_added_inside_a_side_build_group() {
+        assert_hand_back_refused_after(|group| {
+            group["hooks"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type":"command","command":"user-audit"}));
+        });
+    }
+
+    /// A matcher set on the side build's group changes what the composed guard
+    /// sees; that is a user edit, not a stale spelling.
+    #[test]
+    fn project_codex_composition_refuses_a_matcher_set_on_a_side_build_group() {
+        assert_hand_back_refused_after(|group| group["matcher"] = json!("*"));
+    }
+
+    /// A changed timeout on the side build's entry is a user edit too.
+    #[test]
+    fn project_codex_composition_refuses_a_changed_timeout_on_a_side_build_entry() {
+        assert_hand_back_refused_after(|group| group["hooks"][0]["timeout"] = json!(1));
     }
 
     /// A foreign executable that merely spells the composed verb is not pixel's,
