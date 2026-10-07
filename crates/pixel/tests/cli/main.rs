@@ -10,6 +10,7 @@
 mod ai_cli_readify_cli;
 mod ask_contract;
 mod audit_cli;
+mod audit_prompt;
 mod classify_cli;
 mod config_cli;
 mod docs_drift;
