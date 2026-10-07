@@ -58,7 +58,8 @@ pub enum Op {
         types: Vec<String>,
     },
     /// Sniper target list: task description in, closed prioritized file
-    /// list (P0/P1/P2) out.
+    /// list (P0/P1/P2) out. With `regions`, the response also carries the
+    /// symbol-level regions manifest (`.pixel/regions.json`).
     Targets {
         task: String,
         #[serde(default)]
@@ -67,6 +68,10 @@ pub enum Op {
         max_tier: Option<String>,
         #[serde(default)]
         precision: bool,
+        /// Attach the regions manifest: symbol line ranges, conservative
+        /// conflict pairs, merge-order layers, and declared shared files.
+        #[serde(default)]
+        regions: bool,
     },
     /// Deterministic prompt-start file facts from already-published indexes.
     /// This operation never builds or refreshes either index; unavailable or
@@ -565,6 +570,7 @@ mod tests {
                 limit: None,
                 max_tier: None,
                 precision: false,
+                regions: false,
             }
         );
     }
@@ -744,6 +750,7 @@ mod tests {
                     limit: None,
                     max_tier: None,
                     precision: false,
+                    regions: false,
                 },
                 "targets",
             ),

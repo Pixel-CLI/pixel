@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+pub mod regions;
 pub mod rerank;
 pub mod signals;
 

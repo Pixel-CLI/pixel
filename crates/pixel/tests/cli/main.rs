@@ -32,6 +32,7 @@ mod prompt_brief_cli;
 mod publish_cli;
 mod recall_cli;
 mod reference_cli;
+mod regions_cli;
 mod release_check_cli;
 mod rename_cli;
 mod renamed_commands;
