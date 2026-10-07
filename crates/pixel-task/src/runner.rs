@@ -85,6 +85,10 @@ pub(crate) fn verify_with_lease(
                 Some(_) => CheckOutcome::Failed,
                 None => CheckOutcome::Unavailable,
             };
+            let exit_code = match &outcome {
+                CheckOutcome::Passed => Some(0),
+                _ => None,
+            };
             let diagnostic = match &result {
                 Some(result) => {
                     let mut parts: Vec<String> = result.witnesses.clone();
@@ -105,7 +109,7 @@ pub(crate) fn verify_with_lease(
                 contract_id: contract.id()?,
                 check_digest: structural_check_identity(check)?,
                 outcome,
-                exit_code: None,
+                exit_code,
                 started_ms,
                 finished_ms: now_ms(),
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -412,7 +416,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(receipts[0].outcome, CheckOutcome::Passed);
-        assert_eq!(receipts[0].exit_code, None);
+        assert_eq!(receipts[0].exit_code, Some(0));
         let structural = receipts[0].structural.as_ref().expect("structural result");
         assert!(structural.passed);
         assert!(structural.complete);
@@ -497,6 +501,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(receipts[0].outcome, CheckOutcome::Passed);
+        assert_eq!(receipts[0].exit_code, Some(0));
         assert_eq!(receipts[0].execution_root, "");
         assert!(snapshot::unchanged(root.path(), &captured, &configured).unwrap());
     }
