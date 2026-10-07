@@ -1349,7 +1349,6 @@ pub(crate) fn open_session(
         task_intent: false,
         debug: false,
         history: false,
-
     };
     let resolved = resolve_engine_for(&opts)?;
     let resolved_preset =
@@ -3208,7 +3207,6 @@ mod tests {
         assert!(
             calls.lock().unwrap().is_empty(),
             "the model must not be consulted when history accepts"
-
         );
     }
 
@@ -3254,7 +3252,6 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("not a calibrated probability")
-
         );
     }
 
@@ -3360,7 +3357,6 @@ mod tests {
             output.text.contains("history: abstained (empty)"),
             "{}",
             output.text
-
         );
     }
 
@@ -3417,7 +3413,6 @@ mod tests {
                 .contains("history: abstained (insufficient-support)"),
             "{}",
             output.text
-
         );
     }
 
@@ -3636,6 +3631,5 @@ mod tests {
         assert_eq!(doc["probs"]["no"], 0.0);
         assert_eq!(doc["history"]["scores"]["yes"], 1.0);
         assert_eq!(doc["marker"], "complete");
-
     }
 }
