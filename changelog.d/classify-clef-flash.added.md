@@ -1,0 +1,1 @@
+**classify:** Cloudflare's Clef-flash decision model is a remote engine through the typed `/v1/systemone` wire: `clef-ollama` (local Ollama, `ollama pull clef-flash`, no key) or `clef-cloudflare` (Workers AI, API token and account id). Pick it with `--remote-preset`, `pixel config classify-engine` or the new Clef-flash row in the `pixel install` classify menu.

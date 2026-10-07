@@ -7,7 +7,7 @@ description: "A model-backed decision aid, separate from Pixel’s local code in
 
 `pixel classify` chooses between labels you supply: task routing, severity or a review gate. It does not retrieve code and is not needed to try the local index. Unlike index queries, it uses a model and its answer is not deterministic.
 
-Use `--criterion` to define each label and `--context` to explain the decision. The output gives a probability per label and `predicted:` names the highest score. Remote engines send the question to the configured provider; Ollaya runs a local model. Model scores are a decision aid, not evidence that the choice is correct.
+Use `--criterion` to define each label and `--context` to explain the decision. The output gives a probability per label and `predicted:` names the highest score. Remote engines send the question to the configured provider; Ollaya runs a local model, and Clef-flash, Cloudflare's 9B decision model, runs through local Ollama (`clef-ollama`, no key) or Cloudflare Workers AI (`clef-cloudflare`, API token and account id). Model scores are a decision aid, not evidence that the choice is correct.
 
 ## Example and published evidence
 

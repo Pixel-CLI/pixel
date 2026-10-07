@@ -44,6 +44,7 @@ mod config_cmd;
 mod config_file;
 mod coverage_cmd;
 mod cycles_cmd;
+mod decide_clef;
 mod decide_infisical;
 mod decide_jev;
 mod decide_ollaya;
@@ -1981,7 +1982,7 @@ enum ConfigCmd {
     /// the previous provider's stale choice.
     RemotePreset {
         /// Remote provider preset (openrouter, ollama, deepseek,
-        /// opencode-go, jev, local).
+        /// opencode-go, jev, clef-ollama, clef-cloudflare, local).
         #[arg(value_enum)]
         preset: decide_remote::Preset,
         /// Model id the preset runs (default: the preset's own).
@@ -1994,12 +1995,14 @@ enum ConfigCmd {
     /// Which engine answers `pixel classify` when no `--engine` flag is
     /// given: `local` (an installed Ollaya server), `remote` (a hosted LLM
     /// behind a stored key), `jev` (TypeSafe's hosted decision model —
-    /// remote engine on the `jev` preset), or `auto` (probe local, fall
-    /// back to remote — the default). `pixel install` sets this when you
-    /// choose an engine.
+    /// remote engine on the `jev` preset), `clef-ollama` / `clef-cloudflare`
+    /// (Cloudflare's Clef-flash decision model through Ollama, or on Workers
+    /// AI behind a Cloudflare API token — remote engine on that preset), or
+    /// `auto` (probe local, fall back to remote — the default). `pixel
+    /// install` sets this when you choose an engine.
     ClassifyEngine {
         /// The engine preference to store.
-        #[arg(value_parser = ["local", "remote", "jev", "auto"])]
+        #[arg(value_parser = ["local", "remote", "jev", "clef-ollama", "clef-cloudflare", "auto"])]
         value: String,
     },
 }
@@ -6861,9 +6864,12 @@ fn run_command(
                 Ok(())
             }
             Some(ConfigCmd::ClassifyEngine { value }) => {
-                if value == "jev" {
-                    config_cmd::set_classify_remote_model(decide_remote::Preset::Jev, None, None)?;
-                    println!("classify engine: remote (jev) stored");
+                // `jev` and the `clef-*` names are remote engines on that preset.
+                let hosted = decide_remote::Preset::parse_name(&value)
+                    .filter(|preset| *preset == decide_remote::Preset::Jev || preset.is_clef());
+                if let Some(preset) = hosted {
+                    config_cmd::set_classify_remote_model(preset, None, None)?;
+                    println!("classify engine: remote ({}) stored", preset.display());
                 } else {
                     config_cmd::set_classify_engine(&value)?;
                     println!("classify engine: {value} stored");

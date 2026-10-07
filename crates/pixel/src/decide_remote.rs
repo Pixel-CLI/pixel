@@ -18,7 +18,7 @@
 //! reaches the caller.
 //!
 //! Config: a preset (`openrouter` | `ollama` | `local` | `deepseek` |
-//! `opencode-go` | `jev`) selects the base URL, the default model, and the
+//! `opencode-go` | `jev` | `clef-ollama` | `clef-cloudflare`) selects the base URL, the default model, and the
 //! env var that names the API key; the preset is overridable by
 //! `--remote-model` / `PIXEL_REMOTE_MODEL`, `PIXEL_REMOTE_BASE`, and
 //! `PIXEL_REMOTE_KEY_ENV`. The key resolves from the env var first, then
@@ -31,6 +31,9 @@
 //! `jev` is the exception in transport: TypeSafe's hosted Jev speaks the
 //! `/v1/systemone` decision shape, not `/chat/completions`, so its preset
 //! config is resolved here (base, model, key) but served by [`decide_jev`].
+//! `clef-ollama` and `clef-cloudflare` are the same kind of exception for
+//! Cloudflare's Clef-flash decision model: resolved here, served by
+//! [`decide_clef`] (Ollama's `/v1/systemone`, or Workers AI's REST run path).
 
 use crate::classify::Spec;
 use serde_json::{Value, json};
@@ -52,6 +55,13 @@ pub enum Preset {
     Deepseek,
     OpencodeGo,
     Jev,
+    /// Cloudflare's Clef-flash decision model served by Ollama
+    /// (`/v1/systemone`): a local server needs no key, a remote Ollama host
+    /// takes `OLLAMA_API_KEY`. Served by [`decide_clef`].
+    ClefOllama,
+    /// Cloudflare's Clef-flash decision model on Workers AI behind a
+    /// Cloudflare API token plus account id. Served by [`decide_clef`].
+    ClefCloudflare,
 }
 
 impl Preset {
@@ -68,6 +78,10 @@ impl Preset {
             // `decide_jev` — the base stays bare so the shared
             // `PIXEL_REMOTE_BASE` override keeps working for it too.
             Preset::Jev => "https://api.typesafe.ai",
+            // Clef-flash speaks the same `/v1/systemone` shape; the bare
+            // bases are appended to by `decide_clef`.
+            Preset::ClefOllama => crate::decide_clef::OLLAMA_DEFAULT_BASE,
+            Preset::ClefCloudflare => crate::decide_clef::CLOUDFLARE_DEFAULT_BASE,
         }
     }
 
@@ -81,7 +95,22 @@ impl Preset {
             Preset::Deepseek => Some("DEEPSEEK_API_KEY"),
             Preset::OpencodeGo => Some("OPENCODE_API_KEY"),
             Preset::Jev => Some("TYPESAFE_API_KEY"),
+            Preset::ClefOllama => Some("OLLAMA_API_KEY"),
+            Preset::ClefCloudflare => Some(crate::decide_clef::CLOUDFLARE_KEY_ENVS[0]),
         }
+    }
+
+    /// Whether the preset runs without a key: a local Ollama serving Clef
+    /// takes none, and only a remote Ollama host asks for `OLLAMA_API_KEY`.
+    /// The key is still read when one is stored or set.
+    pub fn key_optional(&self) -> bool {
+        matches!(self, Preset::ClefOllama)
+    }
+
+    /// Whether this preset is Cloudflare's Clef-flash, served by
+    /// [`decide_clef`] over Ollama or Workers AI.
+    pub fn is_clef(&self) -> bool {
+        matches!(self, Preset::ClefOllama | Preset::ClefCloudflare)
     }
 
     /// A sensible default model for the preset; overridable by
@@ -94,6 +123,7 @@ impl Preset {
             Preset::Deepseek => "deepseek-flash",
             Preset::OpencodeGo => "deepseek-v4.1-flash",
             Preset::Jev => "jev-latest",
+            Preset::ClefOllama | Preset::ClefCloudflare => crate::decide_clef::DEFAULT_MODEL,
         }
     }
 
@@ -107,6 +137,8 @@ impl Preset {
             Preset::Deepseek => "deepseek",
             Preset::OpencodeGo => "opencode-go",
             Preset::Jev => "jev",
+            Preset::ClefOllama => "clef-ollama",
+            Preset::ClefCloudflare => "clef-cloudflare",
         }
     }
 
@@ -126,6 +158,8 @@ impl Preset {
             Preset::Deepseek,
             Preset::OpencodeGo,
             Preset::Jev,
+            Preset::ClefOllama,
+            Preset::ClefCloudflare,
         ]
         .into_iter()
         .find(|preset| preset.display() == normalized)
@@ -214,6 +248,7 @@ pub(crate) fn resolve_config_from(
     if key.is_none()
         && base_override.is_none()
         && preset.key_env().is_some()
+        && !preset.key_optional()
         && let Some(var) = key_env_name(preset, set("PIXEL_REMOTE_KEY_ENV"))
     {
         let name = preset.display();
@@ -577,6 +612,20 @@ mod tests {
                 "jev",
                 Some("TYPESAFE_API_KEY"),
             ),
+            (
+                Preset::ClefOllama,
+                "http://127.0.0.1:11434",
+                "clef-flash",
+                "clef-ollama",
+                Some("OLLAMA_API_KEY"),
+            ),
+            (
+                Preset::ClefCloudflare,
+                "https://api.cloudflare.com/client/v4",
+                "clef-flash",
+                "clef-cloudflare",
+                Some("CLOUDFLARE_API_TOKEN"),
+            ),
         ];
         for (preset, base, model, display, key_env) in table {
             assert_eq!(
@@ -596,6 +645,15 @@ mod tests {
         assert!(!Preset::Openrouter.wants_session_header());
         assert!(!Preset::Local.wants_session_header());
         assert!(!Preset::Jev.wants_session_header());
+        assert!(!Preset::ClefOllama.wants_session_header());
+        assert!(!Preset::ClefCloudflare.wants_session_header());
+        // Only a local Ollama serves Clef without a key.
+        for preset in [Preset::Openrouter, Preset::Jev, Preset::ClefCloudflare] {
+            assert!(!preset.key_optional(), "{preset:?}");
+        }
+        assert!(Preset::ClefOllama.key_optional());
+        assert!(Preset::ClefOllama.is_clef() && Preset::ClefCloudflare.is_clef());
+        assert!(!Preset::Jev.is_clef() && !Preset::Ollama.is_clef());
     }
 
     #[test]
@@ -604,6 +662,11 @@ mod tests {
         assert_eq!(Preset::parse_name("opencode_go"), Some(Preset::OpencodeGo));
         assert_eq!(Preset::parse_name("  DEEPSEEK  "), Some(Preset::Deepseek));
         assert_eq!(Preset::parse_name("jev"), Some(Preset::Jev));
+        assert_eq!(Preset::parse_name("clef_ollama"), Some(Preset::ClefOllama));
+        assert_eq!(
+            Preset::parse_name("Clef-Cloudflare"),
+            Some(Preset::ClefCloudflare)
+        );
         assert_eq!(Preset::parse_name("not-a-provider"), None);
     }
 
@@ -617,6 +680,37 @@ mod tests {
         assert_eq!(keyed.key_value().as_deref(), Some("tsk-resolved"));
         let keyless = resolve_config_from(Preset::Jev, None, None, env_of(&[]));
         assert!(keyless.is_err(), "Jev always needs a key");
+    }
+
+    #[test]
+    fn clef_presets_resolve_keyless_on_ollama_and_keyed_on_cloudflare() {
+        let local = resolve_config_from(Preset::ClefOllama, None, None, env_of(&[])).unwrap();
+        assert_eq!(local.base, "http://127.0.0.1:11434");
+        assert_eq!(local.model, "clef-flash");
+        assert_eq!(local.key_value(), None);
+        let remote = resolve_config_from(
+            Preset::ClefOllama,
+            None,
+            Some("ollama-key".into()),
+            env_of(&[("PIXEL_REMOTE_BASE", "https://ollama.example")]),
+        )
+        .unwrap();
+        assert_eq!(remote.key_value().as_deref(), Some("ollama-key"));
+        // A key never crosses cleartext http to a non-loopback Ollama host.
+        let error = resolve_config_from(
+            Preset::ClefOllama,
+            None,
+            Some("ollama-key".into()),
+            env_of(&[("PIXEL_REMOTE_BASE", "http://ollama.example:11434")]),
+        )
+        .unwrap_err();
+        assert!(error.contains("cleartext http"), "{error}");
+        let error =
+            resolve_config_from(Preset::ClefCloudflare, None, None, env_of(&[])).unwrap_err();
+        assert_eq!(
+            error,
+            "remote preset clef-cloudflare needs an API key: set CLOUDFLARE_API_TOKEN or run `pixel config remote-key clef-cloudflare -`"
+        );
     }
 
     #[test]

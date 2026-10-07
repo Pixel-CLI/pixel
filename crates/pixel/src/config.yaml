@@ -57,7 +57,15 @@
 #   jev:   remote engine on the jev preset — TypeSafe's hosted decision model
 #          (TYPESAFE_API_KEY or an OpenCode Go key at remote_base
 #          https://opencode.ai/zen); API charges may apply.
-# remote_preset options: openrouter, ollama, deepseek, opencode-go, jev, local.
+#   clef-ollama / clef-cloudflare: remote engine on Cloudflare's Clef-flash
+#          decision model. clef-ollama talks to an Ollama server (default
+#          http://127.0.0.1:11434, `ollama pull clef-flash`, Ollama 0.35.1 or
+#          later; no key locally, OLLAMA_API_KEY for a remote host).
+#          clef-cloudflare talks to Workers AI with CLOUDFLARE_API_TOKEN and
+#          CLOUDFLARE_ACCOUNT_ID (or a remote_base ending in
+#          /accounts/<account-id>); API charges may apply.
+# remote_preset options: openrouter, ollama, deepseek, opencode-go, jev,
+#   clef-ollama, clef-cloudflare, local.
 # remote_model/remote_base pin the preset's model and endpoint; the command
 #   pixel config remote-preset <preset> [--model --base] writes all three.
 # The local preset uses an existing OpenAI-compatible server on localhost;
