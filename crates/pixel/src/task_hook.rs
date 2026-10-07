@@ -26,6 +26,9 @@ pub enum TaskProvider {
     Claude,
     Codex,
     Pi,
+    Devin,
+    Gemini,
+    Antigravity,
 }
 
 impl TaskProvider {
@@ -34,6 +37,20 @@ impl TaskProvider {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Pi => "pi",
+            Self::Devin => "devin",
+            Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
+        }
+    }
+
+    /// The host's name for the prompt-submission event: Gemini calls it
+    /// `BeforeAgent`; Antigravity's closest event is `PreInvocation`, gated
+    /// on `invocationNum == 0`. The rest share Claude's `UserPromptSubmit`.
+    fn prompt_event_name(self) -> &'static str {
+        match self {
+            Self::Gemini => "BeforeAgent",
+            Self::Antigravity => "PreInvocation",
+            _ => "UserPromptSubmit",
         }
     }
 }
@@ -983,8 +1000,19 @@ fn envelope(provider: TaskProvider, event: TaskHookEvent, decision: &Value) -> V
             json!({"continue": false, "stopReason": reason})
         }
         (_, _) if decision.get("context").and_then(Value::as_str).is_some() => {
+            // Antigravity injects steps into the trajectory, not a
+            // hookSpecificOutput block; every other provider shares the
+            // Claude contract, with Gemini naming the event BeforeAgent.
+            if provider == TaskProvider::Antigravity && event == TaskHookEvent::PromptSubmit {
+                return json!({"injectSteps": [{"ephemeralMessage": decision["context"]}]});
+            }
+            let event_name = if event == TaskHookEvent::PromptSubmit {
+                provider.prompt_event_name()
+            } else {
+                event.host_name()
+            };
             json!({"hookSpecificOutput": {
-                "hookEventName": event.host_name(), "additionalContext": decision["context"]
+                "hookEventName": event_name, "additionalContext": decision["context"]
             }})
         }
         _ => json!({}),
@@ -1059,9 +1087,59 @@ fn start_brief(
     if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {
         return None;
     }
-    let prompt = string(payload, &["prompt"])?;
+    let prompt = match provider {
+        // Antigravity's PreInvocation payload carries no prompt; it points
+        // at the session transcript. `invocationNum == 0` is the first model
+        // call of a turn — the prompt-submit equivalent; later calls get
+        // nothing.
+        TaskProvider::Antigravity => {
+            if payload.get("invocationNum").and_then(Value::as_u64) != Some(0) {
+                return None;
+            }
+            antigravity_prompt(payload)?
+        }
+        _ => string(payload, &["prompt"])?.to_string(),
+    };
     let root = crate::discover_root(&payload_cwd(payload)).ok()?;
-    crate::execution_brief::chain::start(prompt, &root)
+    crate::execution_brief::chain::start(&prompt, &root)
+}
+
+/// The latest user turn in the transcript `transcriptPath` points at. The
+/// file is JSONL; a turn is any entry whose role reads "user", its text the
+/// `content`/`text` field (string or a parts array of `{"text": ...}`).
+/// Tolerant on purpose: a transcript shape the reader cannot parse yields
+/// no brief, never a hook failure.
+fn antigravity_prompt(payload: &Value) -> Option<String> {
+    let path = string(payload, &["transcriptPath", "transcript_path"])?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut last: Option<String> = None;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let role = entry["role"].as_str().or_else(|| entry["type"].as_str());
+        if role != Some("user") && role != Some("human") {
+            continue;
+        }
+        let content = entry["content"].as_str().map_or_else(
+            || {
+                entry["text"].as_str().map(str::to_string).or_else(|| {
+                    entry["content"].as_array().map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|part| part["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                })
+            },
+            |text| Some(text.to_string()),
+        );
+        if let Some(content) = content.filter(|text| !text.trim().is_empty()) {
+            last = Some(content);
+        }
+    }
+    last
 }
 
 /// `decision` with the brief as its `context`, which the envelope delivers as

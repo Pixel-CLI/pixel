@@ -172,6 +172,11 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         crate::codex_config::remove_developer_instructions(&codex_home, dry_run)?,
         crate::codex_config::install_task_hooks(&codex_home, &exe, dry_run)?,
     ];
+    // The Gemini CLI brief hook: BeforeAgent in ~/.gemini/settings.json,
+    // only where the file already exists.
+    steps.push(crate::antigravity::install_gemini_brief(
+        &home, &exe, dry_run,
+    )?);
     // Every other host keeps its native retrieval: install writes no prompt,
     // rewrite, approval or pre-invocation hook for it, and removes the ones
     // an earlier release wrote. Each step runs only where that host's
@@ -183,12 +188,38 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             &home,
             dry_run,
         )?);
+        steps.push(crate::opencode_config::install_brief(
+            &opencode_dir,
+            &exe,
+            dry_run,
+        )?);
     }
     if home.join(crate::config::DEVIN_CONFIG_DIR).is_dir() {
-        steps.push(crate::uninstall::remove_devin_hooks(&home, &exe, dry_run)?);
+        steps.push(crate::uninstall::remove_retired_devin_hooks(
+            &home, &exe, dry_run,
+        )?);
+        // Devin shares Claude's hook schema and reads every configured
+        // hooks file; its task events include prompt-submit, which carries
+        // the brief. Registered after the retired-entry sweep so a stale
+        // install does not re-add what was just removed.
+        steps.push(crate::routing::install_at_scoped(
+            &home,
+            &crate::routing::Provider::Devin.path(&home),
+            &exe,
+            crate::routing::Provider::Devin,
+            crate::routing::HookScope::TaskEventsOnly,
+            &[],
+            dry_run,
+        )?);
     }
     if crate::antigravity::antigravity_config_dir(&home).is_dir() {
         steps.push(crate::antigravity::remove_antigravity(
+            &home, &exe, dry_run,
+        )?);
+        // The Antigravity brief hook: PreInvocation in the global
+        // hooks.json, written after the removal sweep so a stale copy the
+        // sweep just deleted is not re-added before removal runs.
+        steps.push(crate::antigravity::install_antigravity_brief(
             &home, &exe, dry_run,
         )?);
     }

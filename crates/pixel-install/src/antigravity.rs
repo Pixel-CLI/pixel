@@ -221,11 +221,31 @@ pub fn remove_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Ins
             path: h_path.clone(),
             reason: "hooks.json root is not an object".into(),
         })?;
+    // The `pixel-brief` PreInvocation entry this install registers is wholly
+    // Pixel's and goes on every sweep, whatever the guard's state.
+    let had_brief = root.get("pixel-brief").is_some();
     match root.get("pixel-guard") {
         None => {
+            if !had_brief {
+                return Ok(step(
+                    CheckStatus::Green,
+                    "no retired Antigravity global guard found".into(),
+                ));
+            }
+            if dry_run {
+                return Ok(step(
+                    CheckStatus::Green,
+                    format!(
+                        "would remove the prompt brief hook from {}",
+                        h_path.display()
+                    ),
+                ));
+            }
+            root.remove("pixel-brief");
+            fs::write(&h_path, serde_json::to_string_pretty(&root_val)? + "\n")?;
             return Ok(step(
                 CheckStatus::Green,
-                "no retired Antigravity global guard found".into(),
+                "removed the prompt brief hook from global hooks.json".into(),
             ));
         }
         Some(entry) if !is_retired_global_guard(entry, exe) => {
@@ -254,11 +274,153 @@ pub fn remove_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Ins
         ));
     }
     root.remove("pixel-guard");
+    root.remove("pixel-brief");
     fs::write(&h_path, serde_json::to_string_pretty(&root_val)? + "\n")?;
     Ok(step(
         CheckStatus::Green,
         "removed retired pixel-guard from global hooks.json".into(),
     ))
+}
+
+/// The prompt-submission evidence brief for Gemini CLI: a `BeforeAgent`
+/// entry in `~/.gemini/settings.json` (Claude's group schema, `matcher`
+/// groups), whose stdout `additionalContext` carries the brief. Registered
+/// only where the settings file already exists; re-running replaces Pixel's
+/// earlier entries, never the user's.
+pub fn install_gemini_brief(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let path = home.join(".gemini/settings.json");
+    let step = |status, summary: String| InstallStep {
+        id: "hooks.gemini-brief".into(),
+        status,
+        summary,
+        detail: Some(format!("path={}", path.display())),
+    };
+    if !path.is_file() {
+        return Ok(step(
+            CheckStatus::Green,
+            "Gemini CLI is not configured; skipped the prompt brief hook".into(),
+        ));
+    }
+    let mut root_val = read_json_object(&path)?;
+    let hooks = root_val
+        .as_object_mut()
+        .ok_or_else(|| crate::InstallError::InvalidSettings {
+            path: path.clone(),
+            reason: "settings.json root is not an object".into(),
+        })?
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| crate::InstallError::InvalidSettings {
+            path: path.clone(),
+            reason: "settings.json `hooks` is not an object".into(),
+        })?;
+    let command = format!(
+        "{} run-hook task-event --provider gemini --event prompt-submit",
+        shell_quote(exe)
+    );
+    let groups = hooks
+        .entry("BeforeAgent")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| crate::InstallError::InvalidSettings {
+            path: path.clone(),
+            reason: "hooks.BeforeAgent is not an array".into(),
+        })?;
+    for group in groups.iter_mut() {
+        if let Some(inner) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+            inner.retain(|hook| {
+                !hook
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|cmd| cmd.contains("task-event --provider gemini"))
+            });
+        }
+    }
+    groups.retain(|group| {
+        group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .is_none_or(|inner| !inner.is_empty())
+    });
+    if dry_run {
+        return Ok(step(
+            CheckStatus::Green,
+            format!("would register the prompt brief hook in {}", path.display()),
+        ));
+    }
+    groups.push(json!({
+        "matcher": "*",
+        "hooks": [{
+            "name": "pixel-brief",
+            "type": "command",
+            "command": command,
+            "timeout": 10000
+        }]
+    }));
+    fs::write(&path, serde_json::to_string_pretty(&root_val)? + "\n")?;
+    Ok(step(
+        CheckStatus::Green,
+        "registered the prompt brief hook for Gemini CLI".into(),
+    ))
+}
+
+/// The prompt-submission evidence brief for Antigravity: a `pixel-brief`
+/// entry in `~/.gemini/config/hooks.json` running on `PreInvocation`. The
+/// hook gates on `invocationNum == 0` (the first model call of each turn)
+/// and answers `injectSteps[].ephemeralMessage`. Registered only where the
+/// file already exists; the `pixel-brief` key is wholly ours, so a re-run
+/// rewrites it.
+pub fn install_antigravity_brief(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let path = hooks_path(home);
+    let step = |status, summary: String| InstallStep {
+        id: "hooks.antigravity-brief".into(),
+        status,
+        summary,
+        detail: Some(format!("path={}", path.display())),
+    };
+    if !path.is_file() {
+        return Ok(step(
+            CheckStatus::Green,
+            "Antigravity is not configured; skipped the prompt brief hook".into(),
+        ));
+    }
+    let mut root_val = read_json_object(&path)?;
+    if !root_val.is_object() {
+        return Err(crate::InstallError::InvalidSettings {
+            path,
+            reason: "hooks.json root is not an object".into(),
+        });
+    }
+    if dry_run {
+        return Ok(step(
+            CheckStatus::Green,
+            format!("would register the prompt brief hook in {}", path.display()),
+        ));
+    }
+    root_val["pixel-brief"] = json!({
+        "enabled": true,
+        "PreInvocation": [{
+            "type": "command",
+            "command": format!("{} run-hook task-event --provider antigravity --event prompt-submit", shell_quote(exe)),
+            "timeout": 10
+        }]
+    });
+    fs::write(&path, serde_json::to_string_pretty(&root_val)? + "\n")?;
+    Ok(step(
+        CheckStatus::Green,
+        "registered the prompt brief hook for Antigravity".into(),
+    ))
+}
+
+/// An executable path inside a hooks.json command line.
+fn shell_quote(exe: &Path) -> String {
+    let text = exe.display().to_string();
+    if text.chars().any(char::is_whitespace) {
+        format!("'{text}'")
+    } else {
+        text
+    }
 }
 
 /// `pixel doctor` check: Antigravity keeps its native tools, so no Pixel

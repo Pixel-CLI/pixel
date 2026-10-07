@@ -548,6 +548,32 @@ pub(crate) fn remove_devin_hooks(home: &Path, exe: &Path, dry_run: bool) -> Resu
     })
 }
 
+/// Install's Devin sweep: retired entries go; the `task-event` hooks the
+/// install itself registers stay, so a repeat install reports `removed 0`
+/// instead of deleting and re-adding them every run. Uninstall still strips
+/// everything through [`remove_devin_hooks`].
+pub(crate) fn remove_retired_devin_hooks(
+    home: &Path,
+    exe: &Path,
+    dry_run: bool,
+) -> Result<InstallStep> {
+    let config_path = home
+        .join(config::DEVIN_CONFIG_DIR)
+        .join(config::DEVIN_CONFIG_FILE);
+    let (removed, backup_path) =
+        remove_retired_pixel_hooks_from_settings(&config_path, exe, dry_run)?;
+    let summary = format!("removed {removed} Devin hook entry/entries");
+    Ok(InstallStep {
+        id: "hooks.devin".into(),
+        status: CheckStatus::Green,
+        summary: install::dry_run_summary(dry_run, &summary),
+        detail: Some(install::with_backup_note(
+            format!("config={}", config_path.display()),
+            backup_path,
+        )),
+    })
+}
+
 // -------------------------------------------------------------------------
 // Step 3b: remove Codex hooks
 // -------------------------------------------------------------------------
@@ -1459,6 +1485,26 @@ fn remove_pixel_hooks_from_settings(
     exe: &Path,
     dry_run: bool,
 ) -> Result<(usize, Option<PathBuf>)> {
+    remove_hooks_from_settings(config_path, exe, dry_run, false)
+}
+
+/// The same sweep limited to retired verbs: the `task-event` entries the
+/// current install registers stay. Install uses this on Devin so a repeat
+/// install does not churn the hooks it owns.
+fn remove_retired_pixel_hooks_from_settings(
+    config_path: &Path,
+    exe: &Path,
+    dry_run: bool,
+) -> Result<(usize, Option<PathBuf>)> {
+    remove_hooks_from_settings(config_path, exe, dry_run, true)
+}
+
+fn remove_hooks_from_settings(
+    config_path: &Path,
+    exe: &Path,
+    dry_run: bool,
+    retired_only: bool,
+) -> Result<(usize, Option<PathBuf>)> {
     if !config_path.is_file() {
         return Ok((0, None));
     }
@@ -1469,7 +1515,11 @@ fn remove_pixel_hooks_from_settings(
         .and_then(serde_json::Value::as_object_mut)
     {
         let before = hooks.clone();
-        routing::remove_pixel_hooks(hooks, exe);
+        if retired_only {
+            routing::remove_retired_pixel_hooks(hooks, exe);
+        } else {
+            routing::remove_pixel_hooks(hooks, exe);
+        }
         // Flat-schema (Cursor-style) entries are matched by executable
         // ownership, not by a command substring.
         routing::remove_flat_pixel_hooks(hooks, exe);

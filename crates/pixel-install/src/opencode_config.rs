@@ -54,6 +54,10 @@ const PIXEL_PLUGIN_FILE: &str = "pixel.mjs";
 /// extension and silently ignores a `.mjs` there.
 const PLUGIN_PATH: &str = "plugins/pixel.js";
 
+/// The evidence-brief plugin `pixel install` deploys; the `plugins`
+/// directory auto-loads it, so no registration entry is needed.
+const BRIEF_PLUGIN_PATH: &str = "plugins/pixel-brief.js";
+
 /// Whether `path` is a plugin pixel wrote: a file carrying the managed
 /// marker. Anything else under that name belongs to the user, so uninstall
 /// leaves it alone rather than deleting work it did not create.
@@ -210,8 +214,13 @@ pub(crate) fn remove_opencode(
     // The plugin goes only when pixel wrote it. A file carrying the managed
     // marker is ours; anything else under that name is the user's, and
     // deleting it would take work this step never created.
-    let plugin_file = config_dir.join(PLUGIN_PATH);
-    if plugin_file.is_file() && is_managed_plugin(&plugin_file) {
+    for plugin_file in [
+        config_dir.join(PLUGIN_PATH),
+        config_dir.join(BRIEF_PLUGIN_PATH),
+    ] {
+        if !(plugin_file.is_file() && is_managed_plugin(&plugin_file)) {
+            continue;
+        }
         if dry_run {
             removed.push(format!("plugin {}", plugin_file.display()));
         } else if let Err(e) = fs::remove_file(&plugin_file) {
@@ -249,6 +258,64 @@ pub(crate) fn remove_opencode(
         format!("removed {}", removed.join(" and "))
     };
     Ok(step(CheckStatus::Green, summary))
+}
+
+/// The prompt-submission evidence brief for OpenCode: `plugins/` auto-loads
+/// `pixel-brief.js`, whose `chat.message` hook runs `pixel brief` and
+/// prepends the result as a synthetic part. Written only where the config
+/// directory already exists; a managed earlier copy is replaced, a foreign
+/// file under that name is never touched.
+pub(crate) fn install_brief(config_dir: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
+    let plugin = config_dir.join(BRIEF_PLUGIN_PATH);
+    let step = |status, summary: String| InstallStep {
+        id: "opencode-brief".into(),
+        status,
+        summary,
+        detail: Some(format!("plugin={}", plugin.display())),
+    };
+    if !config_dir.is_dir() {
+        return Ok(step(
+            CheckStatus::Green,
+            "OpenCode is not configured; skipped the prompt brief plugin".into(),
+        ));
+    }
+    if plugin.exists() && !is_managed_plugin(&plugin) {
+        return Ok(step(
+            CheckStatus::Yellow,
+            format!(
+                "{} exists and is not Pixel's; left untouched",
+                plugin.display()
+            ),
+        ));
+    }
+    let source = include_str!("../assets/opencode-brief.js")
+        .replace("__PIXEL_BIN__", &format!("{:?}", exe.display().to_string()))
+        .replace("__MANAGED_BEGIN__", config::MANAGED_BEGIN)
+        .replace("__MANAGED_END__", config::MANAGED_END);
+    let current = fs::read_to_string(&plugin).is_ok_and(|text| text == source);
+    if current {
+        return Ok(step(
+            CheckStatus::Green,
+            "the OpenCode prompt brief plugin is current".into(),
+        ));
+    }
+    if dry_run {
+        return Ok(step(
+            CheckStatus::Green,
+            format!(
+                "would write the prompt brief plugin to {}",
+                plugin.display()
+            ),
+        ));
+    }
+    if let Some(dir) = plugin.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    install::write_atomically(&plugin, &source)?;
+    Ok(step(
+        CheckStatus::Green,
+        "wrote the OpenCode prompt brief plugin".into(),
+    ))
 }
 
 /// `pixel doctor` check: OpenCode keeps its native tools, so neither the

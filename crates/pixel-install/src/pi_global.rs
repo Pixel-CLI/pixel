@@ -32,6 +32,10 @@ pub(crate) const PACKAGE_DIR: &str = ".local/share/pixel/pi-package";
 /// The extension inside the package, relative to the package directory.
 const PACKAGE_EXTENSION: &str = "extensions/pixel-impact.ts";
 
+/// The evidence-brief extension inside the package: Pi's `before_agent_start`
+/// event is its prompt-submit channel, so the same package carries it.
+const BRIEF_EXTENSION: &str = "extensions/pixel-brief.ts";
+
 const PACKAGE_MANIFEST: &str = "package.json";
 
 const STEP_ID: &str = "hooks.pi-impact";
@@ -103,12 +107,19 @@ pub(crate) fn extension_source(exe: &Path) -> String {
         .replace("__MANAGED_END__", config::MANAGED_END)
 }
 
+pub(crate) fn brief_extension_source(exe: &Path) -> String {
+    include_str!("../assets/pi-brief.ts")
+        .replace("__PIXEL_BIN__", &format!("{:?}", exe.display().to_string()))
+        .replace("__MANAGED_BEGIN__", config::MANAGED_BEGIN)
+        .replace("__MANAGED_END__", config::MANAGED_END)
+}
+
 fn package_manifest() -> String {
     let manifest = json!({
         "name": "pixel-impact",
         "private": true,
-        "description": "Pixel's explicit /pixel-impact command, managed by `pixel install`",
-        "pi": { "extensions": [format!("./{PACKAGE_EXTENSION}")] },
+        "description": "Pixel's explicit /pixel-impact command and evidence brief, managed by `pixel install`",
+        "pi": { "extensions": [format!("./{PACKAGE_EXTENSION}"), format!("./{BRIEF_EXTENSION}")] },
     });
     format!("{manifest:#}\n")
 }
@@ -242,6 +253,10 @@ pub(crate) fn install(
         &package_manifest(),
     )?;
     install::write_atomically(&paths.package_extension(), &extension_source(exe))?;
+    install::write_atomically(
+        &paths.package_dir.join(BRIEF_EXTENSION),
+        &brief_extension_source(exe),
+    )?;
     if !declared {
         install::write_settings(&paths.settings, &settings, false)?;
     }
@@ -291,6 +306,7 @@ pub(crate) fn uninstall(paths: &PiPaths, dry_run: bool) -> Result<InstallStep> {
         }
         for file in [
             paths.package_extension(),
+            paths.package_dir.join(BRIEF_EXTENSION),
             paths.package_dir.join(PACKAGE_MANIFEST),
         ] {
             match fs::remove_file(&file) {
@@ -355,6 +371,10 @@ pub(crate) fn check(paths: &PiPaths, exe: &Path, pi_installed: bool) -> PiImpact
         &paths.package_dir.join(PACKAGE_MANIFEST),
         &package_manifest(),
     ) || !current(&paths.package_extension(), &extension_source(exe))
+        || !current(
+            &paths.package_dir.join(BRIEF_EXTENSION),
+            &brief_extension_source(exe),
+        )
     {
         return PiImpactState::NeedsInstall(format!(
             "the Pixel Pi impact package at {} is missing, stale or points to a different binary",
@@ -598,7 +618,7 @@ mod tests {
         let manifest: serde_json::Value = serde_json::from_str(&package_manifest()).unwrap();
         assert_eq!(
             manifest["pi"],
-            json!({"extensions": ["./extensions/pixel-impact.ts"]})
+            json!({"extensions": ["./extensions/pixel-impact.ts", "./extensions/pixel-brief.ts"]})
         );
         assert_eq!(manifest["name"], "pixel-impact");
     }

@@ -490,16 +490,31 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     );
 
-    // Devin keeps its native retrieval: a Pixel hook left in its global
-    // config by an earlier release is red until `pixel install` removes it.
-    // With no `~/.config/devin/` the check is green-absent.
+    // Devin keeps its task hooks and its prompt brief; a Pixel hook of any
+    // other kind left in its global config by an earlier release is red until
+    // `pixel install` removes it. With no `~/.config/devin/` the check is
+    // green-absent.
     runner.check(
         "install.devin-hooks",
         || -> std::result::Result<DoctorCheckDetail, String> {
             let path = home
                 .join(crate::config::DEVIN_CONFIG_DIR)
                 .join(crate::config::DEVIN_CONFIG_FILE);
-            retired_pixel_hooks_check(&[path], &exe, "pixel install")
+            if path.is_file() {
+                let value = install::read_settings(&path).map_err(|e| e.to_string())?;
+                if crate::routing::has_retired_pixel_hook(&value, &exe) {
+                    return Err(format!(
+                        "retired Pixel hooks remain in {} — run `pixel install` to remove them",
+                        path.display()
+                    ));
+                }
+            }
+            Ok(DoctorCheckDetail {
+                summary: "no retired Pixel hook; the agent keeps its own tools".into(),
+                detail: Some(serde_json::json!({
+                    "paths": [path.display().to_string()],
+                })),
+            })
         },
     );
 
