@@ -165,8 +165,60 @@ Eight frozen scenarios are saved as `eval/scenarios/qk-*.json`, with a
 The impact prompt deliberately requests tests too: it is a mixed evidence
 case, not a pure impact label. The diagnosis rubric scores the requested
 behavior, not unasked regression-test names. Scenario structure and regex
-compilation were checked. These scenarios have
-**not** been run as an eight-kind live agent matrix.
+compilation were checked. One live Arena run now covers every scenario, but
+the Pixel prompt hook did not deliver context. Treat it as a no-hook control,
+not as evidence for the brief's effect; details follow.
+
+## Live question-kind Arena control: no brief delivered
+
+One paired repetition ran all eight `qk-*` scenarios against the Pixel repo:
+16 completed Codex answers, with zero failed or missing pairs. This closes
+the live-matrix execution gap only for the no-hook control. The Pixel
+`UserPromptSubmit` preflight receipt has `response_valid: false` and
+`context_bytes: 0`; Arena warned that live Pixel brief evidence was disabled.
+The helper still calls the retired `pixel run-hook prompt-submit --provider
+codex` command, while the current installed command is
+`pixel run-hook task-event --provider codex --event prompt-submit`.
+
+| Kind | Regex score, raw → Pixel | Median tokens, raw → Pixel | Seconds, raw → Pixel |
+| --- | ---: | ---: | ---: |
+| Lookup | 4/8 → 4/8 | 66,132 → 120,089 | 25 → 27 |
+| Impact | 6/9 → 4/9 | 73,285 → 79,395 | 21 → 16 |
+| Flow | 10/10 → 10/10 | 355,244 → 363,041 | 66 → 51 |
+| Diagnosis | 6/8 → 6/8 | 325,707 → 263,023 | 43 → 40 |
+| Configuration | 8/9 → 8/9 | 274,683 → 192,412 | 35 → 23 |
+| Tests | 8/10 → 8/10 | 145,926 → 203,218 | 14 → 34 |
+| History | 6/11 → 8/11 | 78,593 → 131,820 | 26 → 24 |
+| Architecture | 9/9 → 9/9 | 113,661 → 243,366 | 14 → 36 |
+
+Across these one-shot rows, the macro regex score was 76.9% raw and 76.4%
+Pixel; the mean of task-median tokens was 179,154 and 199,546, and mean
+task-median time was 30.5 and 31.4 seconds. All eight Pixel answers made
+zero Pixel CLI calls. Direct inspection found the 16 answers broadly
+consistent with the requested source facts, so the regex percentages are
+coverage signals, not semantic accuracy; no independent second scorer or
+held-out sample was used.
+
+This is not a controlled comparison of brief delivery. The captured context
+manifests differ: raw has zero Pixel-reference lines and no Codex hook
+configuration, while Pixel has 32 Pixel-reference lines and a hook
+configuration. Raw stderr also records six repository skills rejected by
+Codex for missing frontmatter descriptions. The prompt hook was not verified
+as delivered, and the two arms do not have context parity. Do not pool these
+numbers with the historical hook or skill runs, or use them to claim a
+speedup or a Pixel effect. The run used headless `codex exec`; it did not
+validate a Herdr TUI session.
+
+Identity, per-row usage, scenario hashes, the preflight receipt, and harness
+hashes are in the [no-hook Arena receipt](bench/brief-question-kinds-2026-10-07/qk-live-no-hook.json).
+Raw transcripts remain in the local, gitignored
+`eval/arena-results/qk-live-20261007-02/` directory. The Pixel image was
+`sha256:acb729d951f9ea9772a896534011ebaff6336578846a2d3a4bb513aa888fd130`;
+the raw image was
+`sha256:16e4f6d87b0705fe34c15f0f6869acb89c15ab8273f21590ba36f357650550e3`.
+Both arms used Codex 0.160.0, `gpt-5.6-terra`, medium effort, and one fresh
+snapshot per arm. Arena wall time was 357 seconds, including the local Pixel
+image build. A portable reproduction command is retained in the receipt.
 
 ## Classify: cheap routing hint, not a mandatory first step
 
