@@ -1,0 +1,1 @@
+**scope:** `scope-task --regions` writes `.pixel/regions.json` beside `targets.json`: symbol line ranges + context reference, conservative conflict pairs with reasons, merge-order layers (callees before callers), and shared files with importer witnesses. The manifest is evidence for orchestration, never an action recommendation. `--no-manifest` and `--read-only` suppress it.
