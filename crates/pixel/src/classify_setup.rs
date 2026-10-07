@@ -770,8 +770,25 @@ fn setup_local_with(
             "pull".to_string(),
             crate::decide_ollaya::DEFAULT_MODEL.to_string(),
         ],
-        &[("OLLAYA_MODELS".to_string(), models_str.clone())],
+        &[
+            ("OLLAYA_MODELS".to_string(), models_str.clone()),
+            ("OLLAYA_HOST".to_string(), "127.0.0.1:11435".to_string()),
+        ],
     )?;
+
+    // Verify the pull wrote the model into the managed store, not into some
+    // other location picked up by a pre-existing Ollaya server. If the model
+    // is missing, recording the launch would silently select a local engine
+    // that has nothing to serve.
+    let model_dir = models.join(crate::decide_ollaya::DEFAULT_MODEL);
+    if !runtime.exists(&model_dir) {
+        return Err(format!(
+            "ollaya pull reported success but the model directory {} was not found under {}; \
+             the pull may have written to a different store",
+            model_dir.display(),
+            models.display(),
+        ));
+    }
 
     let launch = json!({
         "base": crate::decide_ollaya::DEFAULT_BASE,
@@ -1054,6 +1071,10 @@ mod tests {
         created_dirs: Vec<PathBuf>,
         /// When set, `create_dir` fails with this message — the failure path.
         create_dir_error: Option<String>,
+        /// Snapshot of `created_dirs` captured when the pull command runs,
+        /// so the test can assert the three required paths existed at pull
+        /// time (issue #407).
+        pull_snapshot: Option<Vec<PathBuf>>,
     }
 
     impl LocalSetupRuntime for FakeLocalSetup {
@@ -1062,7 +1083,15 @@ mod tests {
         }
 
         fn exists(&self, path: &std::path::Path) -> bool {
-            path == self.root.join("bin").join("ollaya") && self.binary_exists
+            let bin_path = self.root.join("bin").join("ollaya");
+            // Recognise the model store and its known subdirectories so the
+            // post-pull verification passes (issue #407).
+            if path == bin_path && self.binary_exists {
+                return true;
+            }
+            self.created_dirs
+                .iter()
+                .any(|d| d == path || path.starts_with(d))
         }
 
         fn create_dir(&mut self, path: &std::path::Path) -> Result<(), String> {
@@ -1090,6 +1119,12 @@ mod tests {
             args: &[String],
             env: &[(String, String)],
         ) -> Result<(), String> {
+            // Snapshot `created_dirs` when the pull command runs so the test
+            // verifies the three model-store paths existed at pull time
+            // (issue #407).
+            if args.first().is_some_and(|a| a == "pull") {
+                self.pull_snapshot = Some(self.created_dirs.clone());
+            }
             self.runs
                 .push((program.to_string(), args.to_vec(), env.to_vec()));
             self.install_done = true;
@@ -1849,6 +1884,7 @@ mod tests {
             engine_set: false,
             created_dirs: Vec::new(),
             create_dir_error: None,
+            pull_snapshot: None,
         };
         let mut output = Vec::new();
 
@@ -1875,6 +1911,13 @@ mod tests {
                 "pull".to_string(),
                 crate::decide_ollaya::DEFAULT_MODEL.to_string()
             ]
+        );
+        assert!(
+            runtime.runs[2]
+                .2
+                .iter()
+                .any(|(k, v)| k == "OLLAYA_HOST" && v == "127.0.0.1:11435"),
+            "pull must set OLLAYA_HOST to target the managed server"
         );
         let launch = runtime.launch.unwrap();
         assert_eq!(
@@ -1916,6 +1959,7 @@ mod tests {
             engine_set: false,
             created_dirs: Vec::new(),
             create_dir_error: None,
+            pull_snapshot: None,
         };
         let mut output = Vec::new();
 
@@ -1936,6 +1980,24 @@ mod tests {
         // run: curl, sh, pull).
         assert_eq!(runtime.runs.len(), 3);
         assert_eq!(runtime.runs[2].1[0], "pull");
+        // Snapshot of created_dirs at pull time must contain the three
+        // required model-store paths (issue #407).
+        let snapshot = runtime
+            .pull_snapshot
+            .as_ref()
+            .expect("pull_snapshot must be set");
+        assert!(
+            snapshot.contains(&root.join("models")),
+            "pull must see models/ created"
+        );
+        assert!(
+            snapshot.contains(&root.join("models/blobs")),
+            "pull must see models/blobs/ created"
+        );
+        assert!(
+            snapshot.contains(&root.join("models/manifests")),
+            "pull must see models/manifests/ created"
+        );
         let launch = runtime.launch.unwrap();
         assert_eq!(
             launch["env"]["OLLAYA_MODELS"],
@@ -1970,6 +2032,7 @@ mod tests {
             create_dir_error: Some(
                 "create /pixel-test/ollaya/models: Permission denied".to_string(),
             ),
+            pull_snapshot: None,
         };
 
         let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
@@ -2003,6 +2066,7 @@ mod tests {
             engine_set: false,
             created_dirs: Vec::new(),
             create_dir_error: None,
+            pull_snapshot: None,
         };
 
         let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
@@ -2105,6 +2169,7 @@ mod tests {
             engine_set: false,
             created_dirs: Vec::new(),
             create_dir_error: None,
+            pull_snapshot: None,
         };
         let mut output = Vec::new();
 
@@ -2145,6 +2210,7 @@ mod tests {
             engine_set: false,
             created_dirs: Vec::new(),
             create_dir_error: None,
+            pull_snapshot: None,
         };
 
         let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
@@ -2171,6 +2237,7 @@ mod tests {
             engine_set: false,
             created_dirs: Vec::new(),
             create_dir_error: None,
+            pull_snapshot: None,
         };
 
         let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();

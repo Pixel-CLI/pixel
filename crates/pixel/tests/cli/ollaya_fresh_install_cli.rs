@@ -83,6 +83,35 @@ fn the_reproducer_encodes_the_acceptance_flow() {
 }
 
 #[test]
+fn the_reproducer_uses_private_ollaya_server_and_verify_failure_propagation() {
+    let text = std::fs::read_to_string(script_path())
+        .unwrap_or_else(|e| panic!("read {}: {e}", script_path().display()));
+    // The script should configure a private OLLAYA_HOST endpoint for its
+    // ollaya CLI calls, so the model pull targets the server owned by this
+    // run rather than a pre-existing server (issue #407).
+    assert!(
+        text.contains("127.0.0.1:11435"),
+        "reproducer must target a private OLLAYA_HOST endpoint"
+    );
+    // The script must exit non-zero on the first failure so regressions
+    // propagate up to CI.
+    assert!(
+        text.contains("set -eu"),
+        "reproducer must use set -eu for failure propagation"
+    );
+    assert!(
+        text.contains("|| fail"),
+        "reproducer must use fail() to exit non-zero on step failure"
+    );
+    // The script should clean up (remove the temp HOME) on exit unless
+    // KEEP=1 is set.
+    assert!(
+        text.contains("cleanup") && text.contains("trap cleanup EXIT"),
+        "reproducer must clean up the throwaway environment on exit"
+    );
+}
+
+#[test]
 fn the_reproducer_verifies_the_recorded_launch_and_engine() {
     let text = std::fs::read_to_string(script_path())
         .unwrap_or_else(|e| panic!("read {}: {e}", script_path().display()));

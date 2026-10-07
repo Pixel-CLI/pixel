@@ -76,6 +76,9 @@ export XDG_CONFIG_HOME="$HOME_DIR/.config"
 export XDG_DATA_HOME="$HOME_DIR/.local/share"
 export XDG_STATE_HOME="$HOME_DIR/.local/state"
 export XDG_CACHE_HOME="$HOME_DIR/.cache"
+# Configure a private OLLAYA_HOST for the server this run owns, so model
+# pulls target the managed store and not a pre-existing server.
+export OLLAYA_HOST="127.0.0.1:11435"
 
 # The pixel-managed ollaya prefix, matching OLLAYA_ROOT in
 # crates/pixel/src/classify_setup.rs.
@@ -112,7 +115,7 @@ pass "pixel install"
 # metrics on, daemon auto-start, task context, task boundary, advisory
 # policy, classify enabled, save), then 3 (skip web search) and 1 (local).
 echo "--- [2/5] ollaya setup (pixel config setup → local) ---"
-printf '\r\r\r\r\r\r\r31' | script -qec "$PIXEL_BIN config setup" /dev/null \
+printf '\r\r\r\r\r\r\r31' | PIXEL_BIN="$PIXEL_BIN" script -qec 'export PIXEL_BIN="${PIXEL_BIN}"; "$PIXEL_BIN" config setup' /dev/null \
     >"$WORK/setup.out" 2>&1 \
     || fail "pixel config setup exited non-zero; tail: $(tail -10 "$WORK/setup.out")"
 grep -q "ollaya setup" "$WORK/setup.out" \
@@ -131,10 +134,17 @@ pass "ollaya binary: $OLLAYA_BIN ($("$OLLAYA_BIN" --version 2>/dev/null | head -
 echo "--- [4/5] model pull (winnow:e4b) ---"
 if "$OLLAYA_BIN" list 2>/dev/null | grep -q "winnow:e4b"; then
     pass "model pull: winnow:e4b (ollaya list)"
-elif [ -d "$OLLAYA_MODELS" ] && ls "$OLLAYA_MODELS" 2>/dev/null | grep -qi "winnow"; then
-    pass "model pull: winnow:e4b (models dir)"
+elif [ -d "$OLLAYA_MODELS" ]; then
+    # The ollaya list command may not show the model when no server is
+    # running; fall back to scanning the model store's nested manifests
+    # for the exact winnow:e4b model ID (issue #407).
+    if find "$OLLAYA_MODELS" -type f -name "*.json" 2>/dev/null | head -20 | xargs grep -l "winnow:e4b" >/dev/null 2>&1; then
+        pass "model pull: winnow:e4b (store manifest)"
+    else
+        fail "model winnow:e4b not found (ollaya list and store manifests empty or missing)"
+    fi
 else
-    fail "model winnow:e4b not found (ollaya list and models dir empty or missing)"
+    fail "model store $OLLAYA_MODELS missing — pull may not have run"
 fi
 
 # --- [5/5] config --------------------------------------------------------------
