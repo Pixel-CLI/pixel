@@ -11,11 +11,11 @@
 //! (target or reference).
 //!
 //! `setup` clones or fetches each pinned corpus to its exact revision.
-//! `query` searches across pinned references in a cold, read-only manner —
-//! it cannot fetch, clone, build, or modify source. Every query result
-//! identifies the target/reference role, repository, exact revision, and
-//! source location. Missing or wrong-revision corpora are disclosed
-//! individually.
+//! `query` verifies each pinned corpus in a cold, read-only manner — it
+//! cannot fetch, clone, build, or modify source; it reports each corpus's
+//! status. Every query result identifies the target/reference role,
+//! repository, exact revision, and source location. Missing or
+//! wrong-revision corpora are disclosed individually.
 
 use std::path::{Path, PathBuf};
 
@@ -91,13 +91,26 @@ fn manifest_path(root: &Path) -> PathBuf {
 
 fn load_manifest(root: &Path) -> Result<ReferenceManifest, String> {
     let path = manifest_path(root);
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).map_err(|e| format!("reference {}: {e}", path.display()))
+    let manifest = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| format!("reference {}: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ReferenceManifest::default(),
+        Err(e) => return Err(format!("reference {}: {e}", path.display())),
+    };
+    // A manifest is untrusted input: `setup` forwards every revision to
+    // `git fetch`/`git checkout` as argv, so a revision that starts with `-`
+    // (`--upload-pack=…`) would select a program for git to run. Reject the
+    // whole manifest rather than run a hostile revision.
+    for entry in &manifest.entries {
+        if let Err(e) = pixel_git::validate_ref(&entry.revision) {
+            return Err(format!(
+                "reference {}: entry {} has an unsafe revision: {e}",
+                path.display(),
+                entry.id
+            ));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ReferenceManifest::default()),
-        Err(e) => Err(format!("reference {}: {e}", path.display())),
     }
+    Ok(manifest)
 }
 
 fn save_manifest(root: &Path, manifest: &ReferenceManifest) -> Result<(), String> {
@@ -122,52 +135,101 @@ fn source_path(root: &Path, entry: &ReferenceEntry) -> PathBuf {
     }
 }
 
+/// Resolve one revision spec to the commit it names, or `None`.
+///
+/// `rev-parse --verify <rev>` returns the *tag object* id for an annotated
+/// tag, never the commit it peels to, so the spec always carries `^{commit}`.
+/// `--end-of-options` keeps a hostile revision from being read as a flag.
+fn resolve_commit(runner: &pixel_git::GitRunner, spec: &str) -> Option<String> {
+    let out = runner
+        .run(&["rev-parse", "--verify", "--end-of-options", spec])
+        .ok()?;
+    let value = String::from_utf8_lossy(&out).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
 /// Clone or fetch a reference corpus to its exact revision.
 ///
-/// Returns the actual commit hash after checkout, or an error describing
-/// what went wrong.
+/// Returns the commit the corpus now sits at, or an error describing what
+/// went wrong. The revision is resolved to a commit *at the moment of the
+/// fetch* and HEAD is detached onto that commit, so a pin is never left on a
+/// stale local branch (a moved branch whose local ref was not fast-forwarded)
+/// and an annotated tag is peeled to its commit rather than compared by tag
+/// object id.
 fn fetch_corpus(root: &Path, entry: &ReferenceEntry) -> Result<String, String> {
     let dest = source_path(root, entry);
 
-    // If the destination already exists as a git repo, fetch and checkout.
-    if dest.join(".git").is_dir() {
+    // Fetch into an existing checkout, or clone a fresh one. `--` ends option
+    // parsing so a repository string can never be read as a git flag.
+    let (runner, fetched) = if dest.join(".git").is_dir() {
         let runner = pixel_git::GitRunner::new(&dest);
         runner
             .run(&["fetch", "--quiet", "origin", &entry.revision])
             .map_err(|e| format!("reference setup: {}: fetch: {e}", entry.id))?;
-        runner
-            .run(&["checkout", "--quiet", &entry.revision])
-            .map_err(|e| format!("reference setup: {}: checkout: {e}", entry.id))?;
-        let head = runner
-            .rev_parse_head()
-            .ok_or_else(|| format!("reference setup: {}: no HEAD after checkout", entry.id))?;
-        return Ok(head);
-    }
+        (runner, true)
+    } else {
+        std::fs::create_dir_all(&dest).map_err(|e| {
+            format!(
+                "reference setup: {}: create {}: {e}",
+                entry.id,
+                dest.display()
+            )
+        })?;
+        pixel_git::GitRunner::new(root)
+            .run(&[
+                "clone",
+                "--quiet",
+                "--",
+                &entry.repo,
+                dest.to_str().unwrap_or(""),
+            ])
+            .map_err(|e| format!("reference setup: {}: clone: {e}", entry.id))?;
+        (pixel_git::GitRunner::new(&dest), false)
+    };
 
-    // Clone the repository.
-    std::fs::create_dir_all(&dest).map_err(|e| {
+    // A fetch writes the fetched commit to `FETCH_HEAD` but does not
+    // fast-forward a local branch pin; a fresh clone has the revision itself.
+    let spec = if fetched {
+        "FETCH_HEAD^{commit}".to_string()
+    } else {
+        format!("{}^{{commit}}", entry.revision)
+    };
+    let resolved = resolve_commit(&runner, &spec).ok_or_else(|| {
         format!(
-            "reference setup: {}: create {}: {e}",
-            entry.id,
-            dest.display()
+            "reference setup: {}: cannot resolve revision {}",
+            entry.id, entry.revision
         )
     })?;
-
-    let runner = pixel_git::GitRunner::new(root);
     runner
-        .run(&["clone", "--quiet", &entry.repo, dest.to_str().unwrap_or("")])
-        .map_err(|e| format!("reference setup: {}: clone: {e}", entry.id))?;
-
-    // Checkout the exact revision.
-    let dest_runner = pixel_git::GitRunner::new(&dest);
-    dest_runner
-        .run(&["checkout", "--quiet", &entry.revision])
+        .run(&["checkout", "--quiet", "--detach", &resolved])
         .map_err(|e| format!("reference setup: {}: checkout: {e}", entry.id))?;
 
-    let head = dest_runner
+    let head = runner
         .rev_parse_head()
         .ok_or_else(|| format!("reference setup: {}: no HEAD after checkout", entry.id))?;
+    if head != resolved {
+        return Err(format!(
+            "reference setup: {}: checked out {resolved} but HEAD is {head}",
+            entry.id
+        ));
+    }
     Ok(head)
+}
+
+/// Does the corpus on disk sit at the commit the pin names?
+///
+/// `HEAD` matches when it is the commit the local ref resolves to (a tag or
+/// commit pin, or a branch whose local ref is current) or the commit the last
+/// fetch of this pin wrote (`FETCH_HEAD`). The latter is what makes a fetched
+/// branch pin — whose local ref is deliberately not fast-forwarded — verify
+/// without a network round trip.
+fn revision_matches(runner: &pixel_git::GitRunner, revision: &str, head: &str) -> bool {
+    [
+        format!("{revision}^{{commit}}"),
+        "FETCH_HEAD^{commit}".to_string(),
+    ]
+    .iter()
+    .any(|spec| resolve_commit(runner, spec).is_some_and(|resolved| resolved == head))
 }
 
 /// Verify that a reference corpus is at its exact revision.
@@ -188,36 +250,23 @@ fn verify_corpus(root: &Path, entry: &ReferenceEntry) -> Result<(), String> {
         .rev_parse_head()
         .ok_or_else(|| format!("reference setup: {}: cannot determine HEAD", entry.id))?;
 
-    // If the revision is a full commit hash, compare directly.
-    // Otherwise, resolve it to a commit hash and compare.
-    if entry.revision.len() == 40 && entry.revision.chars().all(|c| c.is_ascii_hexdigit()) {
-        if head != entry.revision {
-            return Err(format!(
-                "reference setup: {}: wrong revision: expected {}, got {}",
-                entry.id, entry.revision, head
-            ));
-        }
-    } else {
-        // For tags and branches, resolve to a commit and compare.
-        let resolved = runner
-            .run(&["rev-parse", "--verify", &entry.revision])
-            .map_err(|e| format!("reference setup: {}: resolve: {e}", entry.id))?;
-        let resolved_str = String::from_utf8_lossy(&resolved).trim().to_string();
-        if resolved_str != head {
-            return Err(format!(
-                "reference setup: {}: wrong revision: expected {} (resolved to {}), got {}",
-                entry.id, entry.revision, resolved_str, head
-            ));
-        }
+    if !revision_matches(&runner, &entry.revision, &head) {
+        return Err(format!(
+            "reference setup: {}: wrong revision: expected {}, got {}",
+            entry.id, entry.revision, head
+        ));
     }
     Ok(())
 }
 
 /// Setup action: clone/fetch/build all pinned references.
 ///
-/// Each entry is processed independently. Missing or wrong-revision corpora
-/// are disclosed individually in the result.
-pub fn setup(root: &Path) -> Result<Value, String> {
+/// Each entry is processed independently, and the per-entry report is always
+/// returned. A failed corpus is disclosed in `failures` with its own error,
+/// and the returned count lets the caller set the exit status after printing
+/// the report — so a partial failure never hides which corpus failed or why.
+/// The only `Err` here is a missing or unusable manifest.
+pub fn setup(root: &Path) -> Result<(Value, usize), String> {
     let manifest = load_manifest(root)?;
     if manifest.entries.is_empty() {
         return Err(
@@ -276,18 +325,11 @@ pub fn setup(root: &Path) -> Result<Value, String> {
         "total": manifest.entries.len(),
     });
 
-    if !failures.is_empty() {
-        return Err(format!(
-            "reference setup: {} of {} corpora failed",
-            failures.len(),
-            manifest.entries.len()
-        ));
-    }
-
-    Ok(out)
+    let failure_count = failures.len();
+    Ok((out, failure_count))
 }
 
-/// Query action: search across pinned references in a cold, read-only manner.
+/// Query action: verify each pinned reference in a cold, read-only manner.
 ///
 /// This function cannot fetch, clone, build, or modify source. It reads the
 /// manifest and reports the status of each pinned corpus. Every result
@@ -330,19 +372,7 @@ pub fn query(root: &Path, filter: Option<&str>) -> Result<Value, String> {
         let runner = pixel_git::GitRunner::new(&dest);
         match runner.rev_parse_head() {
             Some(head) => {
-                // Check if the revision matches.
-                let revision_matches = if entry.revision.len() == 40
-                    && entry.revision.chars().all(|c| c.is_ascii_hexdigit())
-                {
-                    head == entry.revision
-                } else {
-                    // For tags/branches, resolve and compare.
-                    runner
-                        .run(&["rev-parse", "--verify", &entry.revision])
-                        .is_ok_and(|r| String::from_utf8_lossy(&r).trim() == head)
-                };
-
-                if revision_matches {
+                if revision_matches(&runner, &entry.revision, &head) {
                     results.push(json!({
                         "id": entry.id,
                         "repo": entry.repo,
@@ -404,6 +434,11 @@ pub fn add(
 ) -> Result<(), String> {
     let mut manifest = load_manifest(root)?;
 
+    // The revision becomes argv in `setup`'s `git fetch`/`checkout`; refuse a
+    // flag-shaped value here so a bad manifest never reaches git.
+    pixel_git::validate_ref(&revision)
+        .map_err(|e| format!("reference: unsafe revision {revision:?}: {e}"))?;
+
     // Compute the source path.
     let source =
         source.unwrap_or_else(|| PathBuf::from(format!(".pixel/references/{id}/{revision}")));
@@ -460,25 +495,31 @@ pub fn remove(root: &Path, id: &str, revision: Option<&str>) -> Result<(), Strin
     Ok(())
 }
 
+/// The JSON shape of a manifest listing, separate from its printing so the
+/// `--json` contract has a test that fails when a field is dropped.
+fn list_value(manifest: &ReferenceManifest) -> Value {
+    json!({
+        "format": manifest.format,
+        "entries": manifest.entries.iter().map(|e| {
+            json!({
+                "id": e.id,
+                "repo": e.repo,
+                "revision": e.revision,
+                "source": e.source.display().to_string(),
+                "licence": e.licence,
+                "provenance": e.provenance,
+                "role": e.role.as_str(),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
 /// List all reference entries in the manifest.
 pub fn list(root: &Path, json: bool) -> Result<(), String> {
     let manifest = load_manifest(root)?;
 
     if json {
-        let out = json!({
-            "format": manifest.format,
-            "entries": manifest.entries.iter().map(|e| {
-                json!({
-                    "id": e.id,
-                    "repo": e.repo,
-                    "revision": e.revision,
-                    "source": e.source.display().to_string(),
-                    "licence": e.licence,
-                    "provenance": e.provenance,
-                    "role": e.role.as_str(),
-                })
-            }).collect::<Vec<_>>(),
-        });
+        let out = list_value(&manifest);
         println!(
             "{}",
             serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
@@ -532,11 +573,19 @@ pub fn run(cmd: ReferenceCmd) -> Result<(), String> {
         }
         ReferenceCmd::List { path, json } => list(&path, json),
         ReferenceCmd::Setup { path } => {
-            let out = setup(&path)?;
+            let (out, failures) = setup(&path)?;
+            // Print the per-entry report before signalling failure: the report
+            // is the only place a failed corpus and its error are named.
             println!(
                 "{}",
                 serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
             );
+            if failures > 0 {
+                return Err(format!(
+                    "reference setup: {failures} of {} corpora failed",
+                    out["total"].as_u64().unwrap_or(0)
+                ));
+            }
             Ok(())
         }
         ReferenceCmd::Query { path, filter, json } => {
@@ -635,7 +684,7 @@ pub enum ReferenceCmd {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Query pinned references (cold, read-only — cannot fetch, clone, build, or modify source).
+    /// Report each pinned reference's status and revision (cold, read-only — cannot fetch, clone, build, or modify source).
     Query {
         /// Project root.
         #[arg(default_value = ".")]
@@ -909,8 +958,22 @@ mod tests {
         let remote = root.join("remote-repo");
         std::fs::create_dir_all(&remote).unwrap();
         init_repo(&remote);
-        // Create a tag for the revision.
-        git(&remote, &["tag", "v1.0.0"]);
+        // An *annotated* tag: `rev-parse v1.0.0` returns the tag object, not
+        // the commit, so this is the case a naive comparison gets wrong.
+        git(
+            &remote,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "tag",
+                "-a",
+                "v1.0.0",
+                "-m",
+                "release",
+            ],
+        );
 
         let entry = ReferenceEntry {
             id: "test-crate".to_string(),
@@ -934,7 +997,8 @@ mod tests {
         )
         .unwrap();
 
-        let result = setup(&root).unwrap();
+        let (result, failures) = setup(&root).unwrap();
+        assert_eq!(failures, 0, "an annotated-tag pin must verify cleanly");
         let ok = result["ok"].as_array().unwrap();
         assert_eq!(ok.len(), 1);
         assert_eq!(ok[0]["id"], "test-crate");
@@ -948,20 +1012,20 @@ mod tests {
     }
 
     #[test]
-    fn setup_reports_missing_and_wrong_revision_corpora() {
+    fn setup_reports_each_failed_corpus_with_its_own_error() {
         let root = scratch("setup-fail");
 
-        // Add an entry pointing to a non-existent repo.
+        // A local path that does not exist: the clone fails, with no network.
+        let missing_repo = root.join("no-such-repo");
         let bad_entry = ReferenceEntry {
             id: "bad-crate".to_string(),
-            repo: "https://example.com/nonexistent".to_string(),
+            repo: missing_repo.display().to_string(),
             revision: "v1.0.0".to_string(),
             source: PathBuf::from(".pixel/references/bad-crate/v1.0.0"),
             licence: "MIT".to_string(),
-            provenance: "https://example.com/nonexistent".to_string(),
+            provenance: missing_repo.display().to_string(),
             role: Role::Reference,
         };
-
         add(
             &root,
             bad_entry.id.clone(),
@@ -974,8 +1038,50 @@ mod tests {
         )
         .unwrap();
 
-        let err = setup(&root).unwrap_err();
-        assert!(err.contains("failed"), "{err}");
+        // A real local repo whose pinned revision does not exist: the clone
+        // succeeds and the revision then cannot be resolved.
+        let remote = root.join("remote-repo");
+        std::fs::create_dir_all(&remote).unwrap();
+        init_repo(&remote);
+        let wrong_rev_entry = ReferenceEntry {
+            id: "wrong-rev".to_string(),
+            repo: remote.display().to_string(),
+            revision: "v9.9.9".to_string(),
+            source: PathBuf::from(".pixel/references/wrong-rev/v9.9.9"),
+            licence: "MIT".to_string(),
+            provenance: remote.display().to_string(),
+            role: Role::Reference,
+        };
+        add(
+            &root,
+            wrong_rev_entry.id.clone(),
+            wrong_rev_entry.repo.clone(),
+            wrong_rev_entry.revision.clone(),
+            Some(wrong_rev_entry.source.clone()),
+            wrong_rev_entry.licence.clone(),
+            wrong_rev_entry.provenance.clone(),
+            wrong_rev_entry.role,
+        )
+        .unwrap();
+
+        // `setup` reports both failures in-band and names each one, rather
+        // than collapsing them into a single error string.
+        let (out, failures) = setup(&root).unwrap();
+        assert_eq!(failures, 2, "both corpora should fail");
+        let reported = out["failures"].as_array().unwrap();
+        assert_eq!(reported.len(), 2);
+        let ids: Vec<&str> = reported
+            .iter()
+            .map(|f| f["id"].as_str().unwrap_or("?"))
+            .collect();
+        assert!(ids.contains(&"bad-crate"), "{ids:?}");
+        assert!(ids.contains(&"wrong-rev"), "{ids:?}");
+        for f in reported {
+            assert!(
+                f["error"].as_str().is_some_and(|e| !e.is_empty()),
+                "each failure names its own error: {f}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1120,6 +1226,148 @@ mod tests {
         let path = root.join(SHARD_DIR).join(REFERENCE_FILE);
         assert!(path.exists(), "manifest not at {}", path.display());
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A branch pin fetched into an existing checkout must land on the remote's
+    /// current tip, not the stale local branch ref (`fetch` does not
+    /// fast-forward it).
+    #[test]
+    fn setup_moves_a_fetched_branch_pin_to_the_new_remote_tip() {
+        let root = scratch("branch-move");
+        let remote = root.join("remote-repo");
+        std::fs::create_dir_all(&remote).unwrap();
+        init_repo(&remote);
+        // Pin whatever branch the fixture's HEAD names, so the test does not
+        // depend on the machine's `init.defaultBranch`.
+        let branch = pixel_git::GitRunner::new(&remote)
+            .current_branch()
+            .expect("fixture has a branch");
+
+        let entry = ReferenceEntry {
+            id: "branch-crate".to_string(),
+            repo: remote.display().to_string(),
+            revision: branch.clone(),
+            source: PathBuf::from(format!(".pixel/references/branch-crate/{branch}")),
+            licence: "MIT".to_string(),
+            provenance: remote.display().to_string(),
+            role: Role::Reference,
+        };
+        add(
+            &root,
+            entry.id.clone(),
+            entry.repo.clone(),
+            entry.revision.clone(),
+            Some(entry.source.clone()),
+            entry.licence.clone(),
+            entry.provenance.clone(),
+            entry.role,
+        )
+        .unwrap();
+
+        let (_, failures) = setup(&root).unwrap();
+        assert_eq!(failures, 0);
+        let dest = source_path(&root, &entry);
+        let first = pixel_git::GitRunner::new(&dest).rev_parse_head().unwrap();
+
+        // Advance the remote branch.
+        git(
+            &remote,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "second",
+            ],
+        );
+        let remote_head = pixel_git::GitRunner::new(&remote).rev_parse_head().unwrap();
+        assert_ne!(first, remote_head, "fixture failed to advance the branch");
+
+        // Re-running setup takes the fetch path and must move the pin.
+        let (out, failures) = setup(&root).unwrap();
+        assert_eq!(failures, 0, "{out}");
+        let after = pixel_git::GitRunner::new(&dest).rev_parse_head().unwrap();
+        assert_eq!(
+            after, remote_head,
+            "setup left the branch pin on the stale local tip"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A flag-shaped revision is refused before it can become git argv.
+    #[test]
+    fn unsafe_revision_is_rejected_before_it_reaches_git() {
+        let root = scratch("unsafe");
+        let err = add(
+            &root,
+            "evil".to_string(),
+            "https://example.com/x".to_string(),
+            "--upload-pack=/bin/sh".to_string(),
+            None,
+            String::new(),
+            String::new(),
+            Role::Reference,
+        )
+        .unwrap_err();
+        assert!(err.contains("unsafe revision"), "{err}");
+        assert!(
+            load_manifest(&root).unwrap().entries.is_empty(),
+            "a rejected revision must not be persisted"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A manifest edited by hand to carry a hostile revision is refused at
+    /// load, so `setup` never forwards it to git.
+    #[test]
+    fn a_flag_shaped_revision_in_a_hand_written_manifest_is_refused_on_load() {
+        let root = scratch("hostile-manifest");
+        let path = root.join(SHARD_DIR).join(REFERENCE_FILE);
+        std::fs::write(
+            &path,
+            r#"{"format":1,"entries":[{"id":"evil","repo":"https://example.com/x","revision":"--upload-pack=/bin/sh","source":".pixel/references/evil/x","role":"reference"}]}"#,
+        )
+        .unwrap();
+        let err = load_manifest(&root).unwrap_err();
+        assert!(err.contains("unsafe revision"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The `--json` listing exposes every documented field per entry.
+    #[test]
+    fn list_value_reports_every_field_of_every_entry() {
+        let root = scratch("list-value");
+        let entry = make_entry("serde", "v1.0.0", Role::Reference);
+        add(
+            &root,
+            entry.id.clone(),
+            entry.repo.clone(),
+            entry.revision.clone(),
+            Some(entry.source.clone()),
+            entry.licence.clone(),
+            entry.provenance.clone(),
+            entry.role,
+        )
+        .unwrap();
+
+        let out = list_value(&load_manifest(&root).unwrap());
+        assert_eq!(out["format"], 1);
+        let entries = out["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e["id"], "serde");
+        assert_eq!(e["repo"], "https://example.com/serde");
+        assert_eq!(e["revision"], "v1.0.0");
+        assert_eq!(e["source"], ".pixel/references/serde/v1.0.0");
+        assert_eq!(e["licence"], "MIT");
+        assert_eq!(e["provenance"], "https://example.com/serde");
+        assert_eq!(e["role"], "reference");
         let _ = std::fs::remove_dir_all(&root);
     }
 
