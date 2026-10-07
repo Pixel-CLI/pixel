@@ -1994,6 +1994,7 @@ mod tests {
             task_intent: false,
             debug: true,
             json: false,
+            history: false,
         };
         let lanes: Vec<DebugLane> = vec![
             (
@@ -2047,6 +2048,7 @@ mod tests {
             task_intent: false,
             debug: true,
             json: true,
+            history: false,
         };
         let lanes: Vec<DebugLane> = vec![
             (
@@ -3178,6 +3180,7 @@ mod tests {
             task_intent: false,
             history: true,
             json: false,
+            debug: false,
         }
     }
 
