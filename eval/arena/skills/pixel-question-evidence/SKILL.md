@@ -5,7 +5,7 @@ description: Use Pixel for bounded evidence when a code question asks for an exa
 
 # Retrieve evidence for code questions
 
-Use one direct Pixel query for the requested evidence. Do not run `classify` for these recognizable question types.
+Use one direct Pixel query for an exact lookup; a rename question runs the two queries named below and no more. Do not run `classify` for these recognizable question types.
 
 For an exact definition or export, search the literal identifier with a bounded result count, then read the actual declaration and nearby initializer from the source file. Treat matches as leads; a search snippet or import does not prove what a symbol exports.
 

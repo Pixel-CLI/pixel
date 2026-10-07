@@ -183,7 +183,11 @@ const buildPacket = async (root: string, task: string, rep: number, backend: 'na
     return { backend, task, rep, query, queryMs: query.wallMs, packMs: 0, totalMs: query.wallMs, packetBytes: 0, packetSha256: sha256(''), packet: '', complete: false, reason: `query failed with ${query.exitCode}` }
   }
   const matches = normalizePaths(query.stdout, root)
-  if (!matches.length || query.stdout.length >= 1900) {
+  if (
+    !matches.length ||
+    Buffer.byteLength(query.stdout) >= 1900 ||
+    (backend === 'pixel' && query.stderr.includes('stdout cap (PIXEL_OUTPUT_CAP_BYTES)'))
+  ) {
     return { backend, task, rep, query, queryMs: query.wallMs, packMs: 0, totalMs: query.wallMs, packetBytes: 0, packetSha256: sha256(''), packet: '', complete: false, reason: 'query returned no paths or may have been capped' }
   }
 

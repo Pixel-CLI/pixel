@@ -471,7 +471,11 @@ launch_watch_panes() {  # <container>...
     watch_out="$RESULTS/watch-out-$watch_arm-$watch_rep"
     watch_c="arena-watch-$watch_arm-$RUN_ID-$watch_rep"
     watch_image=$("$DOCKER_BIN" inspect -f '{{.Image}}' "$c")
-    "$DOCKER_BIN" create --name "$watch_c" \
+    # A same-named leftover from an earlier run with this RUN_ID wedges
+    # `create`; the arena-watch-* name belongs to this harness, so removing
+    # the stale one first is safe.
+    "$DOCKER_BIN" rm -f "$watch_c" >/dev/null 2>&1 || true
+    if ! "$DOCKER_BIN" create --name "$watch_c" \
       -v "$watch_snap":/repo \
       -v "$AUTH":/root/.codex/auth.json:ro \
       -v "$ARENA_DIR/arena/entrypoint.sh":/usr/local/bin/arena-entrypoint:ro \
@@ -486,8 +490,18 @@ launch_watch_panes() {  # <container>...
       -e PIXEL_ARENA_REUSE_INDEX="${PIXEL_ARENA_REUSE_INDEX:-1}" \
       -e ARENA_SKILL_PILOT="$SKILL_PILOT" \
       -e CODEX_MODEL="${CODEX_MODEL:-}" -e CODEX_EFFORT="${CODEX_EFFORT:-}" \
-      "$watch_image" >/dev/null
-    "$DOCKER_BIN" start "$watch_c" >/dev/null
+      "$watch_image" >/dev/null; then
+      echo "WARNING: $watch_c create failed" >&2
+      ready=0
+      continue
+    fi
+    if ! "$DOCKER_BIN" start "$watch_c" >/dev/null; then
+      echo "WARNING: $watch_c start failed" >&2
+      "$DOCKER_BIN" rm -f "$watch_c" >/dev/null 2>&1 || true
+      ready=0
+      continue
+    fi
+    WATCH_CONTAINERS+=("$watch_c")
     for _ in $(seq 1 120); do
       if "$DOCKER_BIN" exec "$watch_c" test -e "/out/arena-ready-${watch_arm}-${watch_rep}" >/dev/null 2>&1; then
         break
@@ -566,6 +580,7 @@ launch_watch_tmux() {  # <container>... — tiled tmux fallback
 CONTAINERS=()
 CONTAINER_ARMS=()
 CONTAINER_REPS=()
+WATCH_CONTAINERS=()
 LAUNCH_FAIL=0
 for rep in $(seq 1 "$REPS"); do
   # fresh snapshot per rep: prior reps' index artifacts and tool edits must
@@ -620,6 +635,11 @@ for i in "${!CONTAINERS[@]}"; do
     done
   fi
   docker rm "$c" >/dev/null 2>&1
+done
+# Sweep watch containers that already exited; ones still running belong to
+# panes the operator may still be using, so they are left for docker to reap.
+for watch_c in "${WATCH_CONTAINERS[@]:-}"; do
+  [ -n "$watch_c" ] && "$DOCKER_BIN" rm "$watch_c" >/dev/null 2>&1 || true
 done
 [ -z "$(find "$RESULTS" -maxdepth 1 \( -name 'pixel-hook-live-*.failed' -o -name 'pixel-hook-trust-*.failed' \) -print -quit 2>/dev/null)" ] || FAIL=1
 [ "$FAIL" -ne 0 ] && echo "WARNING: some arm containers failed (see above)"

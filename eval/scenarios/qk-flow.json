@@ -60,7 +60,7 @@
       "why": "the active Codex registration is task-event; the older prompt-submit verb is retained only as a legacy marker/fixture"
     },
     {
-      "pattern": "(?i)(?:starts?|builds?|rebuilds?)\\s+(?:a\\s+)?(?:daemon|index|graph)",
+      "pattern": "(?i)(?<!\\bnot\\s)(?<!\\bnever\\s)(?<!\\bdoesn't\\s)(?<!\\bdoes\\snot\\s)(?<!\\bwithout\\s)(?<!\\bno\\s)(?<!\\bcannot\\s)(?<!\\bcan't\\s)(?:starts?|builds?|rebuilds?)\\s+(?:a\\s+)?(?:daemon|index|graph)",
       "penalty": 2,
       "why": "the hook brief does not start daemons or build indexes"
     }

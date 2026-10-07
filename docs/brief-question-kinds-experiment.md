@@ -82,7 +82,10 @@ injected brief context, not explicit tool chaining or classification.
 
 - **g4:** the 706-byte context supplied useful file references despite
   unavailable graph evidence. Answers identified the definition and eight
-  consumer files. This is the strongest historical result.
+  consumer files. This is the strongest historical result — its shared
+  `apps/(site|project)/…Contact` rubric pattern credits either consumer,
+  so a full pattern score does not prove the answer listed every affected
+  file the prompt asked for.
 - **g7:** the first 665-byte-context answer mistook seven consumer files for
   definitions and omitted the real declaration at
   `packages/ui/handleError.ts:4`. Its 3/10 score still credited a generic
@@ -107,6 +110,12 @@ The earlier `openai-brief-arena-20261007-01` and `-03` runs had invalid
 hook receipts and no emitted context. Their scores are excluded. The
 historical graph files were absent; this report does not pretend to replay
 impact against them without preparation.
+
+The frozen rubrics carry two known weak spots, kept verbatim: a `never`
+pattern matching `modified` can penalize the honest sentence "No files
+were modified", and g4's shared Contact pattern credits either consumer
+rather than requiring both. Historical scores are read with those limits
+in mind.
 
 ## Fresh index: useful evidence, not yet an efficient packet
 

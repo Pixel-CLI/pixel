@@ -35,7 +35,7 @@
   ],
   "never": [
     {
-      "pattern": "(?i)(?:starts?|builds?)\\s+(?:a\\s+)?(?:daemon|index|graph)\\s+(?:for|during|on)\\s+(?:each|every|the)\\s+prompt",
+      "pattern": "(?i)(?<!\\bnot\\s)(?<!\\bnever\\s)(?<!\\bdoesn't\\s)(?<!\\bdoes\\snot\\s)(?<!\\bwithout\\s)(?<!\\bno\\s)(?<!\\bcannot\\s)(?<!\\bcan't\\s)(?:starts?|builds?)\\s+(?:a\\s+)?(?:daemon|index|graph)\\s+(?:for|during|on)\\s+(?:each|every|the)\\s+prompt",
       "penalty": 2,
       "why": "the prompt brief does not initialize indexes or daemons"
     }

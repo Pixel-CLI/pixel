@@ -45,7 +45,7 @@
   ],
   "never": [
     {
-      "pattern": "(?i)(?:Pi|TaskProvider::Pi).{0,60}(?:starts?|gets?|receives?)\\s+(?:a\\s+)?brief",
+      "pattern": "(?i)(?:\\bPi\\b|TaskProvider::Pi).{0,60}(?<!\\bnot\\s)(?<!\\bnever\\s)(?<!\\bdoesn't\\s)(?<!\\bdoes\\snot\\s)(?<!\\bwithout\\s)(?<!\\bno\\s)(?<!\\bcannot\\s)(?<!\\bcan't\\s)(?:starts?|gets?|receives?)\\s+(?:a\\s+)?brief",
       "penalty": 2,
       "why": "Pi is excluded from this brief path"
     }
