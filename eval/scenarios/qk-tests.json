@@ -1,0 +1,60 @@
+{
+  "id": "qk-tests",
+  "suite": "brief-question-kinds",
+  "task_class": "explanation",
+  "mode": "answer",
+  "commit": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+  "max_turns": 30,
+  "prompt": "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+  "must": [
+    {
+      "pattern": "(?i)a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository",
+      "points": 2,
+      "why": "names the start_brief provider/event test"
+    },
+    {
+      "pattern": "(?i)(?:TaskProvider::Pi|Pi).{0,80}(?:is_none|none|no brief|excluded|does not start)",
+      "points": 2,
+      "why": "states that Pi starts no brief"
+    },
+    {
+      "pattern": "(?i)a_brief_should_become_the_context_the_envelope_delivers_to_the_host",
+      "points": 2,
+      "why": "names the host-envelope test"
+    },
+    {
+      "pattern": "(?i)UserPromptSubmit",
+      "points": 1,
+      "why": "names the Codex/Claude prompt event in the envelope"
+    },
+    {
+      "pattern": "(?i)additionalContext",
+      "points": 1,
+      "why": "names the host context field"
+    },
+    {
+      "pattern": "(?i)pi_should_keep_its_own_decision_without_a_brief",
+      "points": 1,
+      "why": "names the CLI-level Pi exclusion test"
+    },
+    {
+      "pattern": "(?is)(?=.*context.{0,40}is_none)(?=.*hookSpecificOutput.{0,40}is_none)",
+      "points": 1,
+      "why": "covers the CLI test's no-context/no-envelope assertions"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "(?i)(?:Pi|TaskProvider::Pi).{0,60}(?:starts?|gets?|receives?)\\s+(?:a\\s+)?brief",
+      "penalty": 2,
+      "why": "Pi is excluded from this brief path"
+    }
+  ],
+  "semantic_review": {
+    "criteria": [
+      "The CLI pi_should_keep_its_own_decision_without_a_brief asserts both context and hookSpecificOutput are absent.",
+      "a_brief_should_become_the_context_the_envelope_delivers_to_the_host asserts a PIXEL:BRIEF context and a hookSpecificOutput object with hookEventName UserPromptSubmit and additionalContext for Claude and Codex.",
+      "start_brief returns none for Pi in a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository."
+    ]
+  }
+}

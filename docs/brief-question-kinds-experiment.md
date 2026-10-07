@@ -1,382 +1,412 @@
-# Pixel brief: question-kind experiments and continuation
+# Pixel brief: question-kind and tool-chain experiment
 
-Date: 2026-10-07
-Repository: /Users/livio/Documents/pixel
-Inspected HEAD: 14feba456b479be165ab40ec14dde3958a865368
-Branch during investigation: fix/brief-evidence-871
-Status: investigation complete; adaptations not implemented
+Date: 2026-10-07. Tracking: [#877](https://github.com/Pixel-CLI/pixel/issues/877);
+candidate: [#876](https://github.com/Pixel-CLI/pixel/pull/876).
+This report replaces the earlier continuation checklist with measured results.
 
-## Main conclusion
+## Finding
 
-The brief is worth extending. The initial recommendation to drop most
-question kinds was premature: it assessed the current brief's output rather
-than testing whether existing evidence could support better output.
+Pixel can retrieve useful evidence for all eight selected question kinds.
+That does not make a compulsory Pixel tool chain efficient. Two explicit
+skill treatments recovered missing evidence on three foreign-repository tasks,
+but used more model tokens than native retrieval in every task group.
 
-Useful evidence exists for lookup, impact, flow, tests, configuration,
-bounded diagnosis, recorded rationale, and bounded architecture questions.
+The useful unit is a compact packet containing the **requested facts**:
+a real signature, export and initializer, reference paths, or named test
+assertions. File locations alone can save tokens while producing incomplete
+or false answers. Classification is optional routing help, not evidence;
+the remote classifier confused two of nine selected prompts.
 
-The current brief loses information during prompt parsing, evidence
-aggregation, and rendering. Correcting those losses is promising, but we
-have not demonstrated automatic retrieval quality or live latency for the
-proposed routes.
+These findings do not establish general superiority over native tools.
+The source-aware eight-kind probe measures retrieval only. Live answer
+comparisons cover three tasks, not eight kinds or unseen repositories.
 
-## What the current prompt brief does
+## Runs and measurement boundaries
 
-This is the `[PIXEL:BRIEF]` returned by the prompt-submit task-event hook.
-It is distinct from the explicit `pixel execution-brief` command.
-
-The source path is:
-
-Codex/Claude prompt-submit
-→ task_hook::process
-→ start_brief
-→ chain::start
-→ prompt/config/index gates
-→ chain::run
-→ Pending::finish
-→ render
-→ with_brief
-→ host additionalContext
-
-Pi is excluded from this prompt-brief path.
-
-The brief requires an enabled feature, an existing index shard, a
-discoverable repository, and a qualifying code-related prompt.
-
-Limits:
-
-- Four index operations.
-- One shared 750 ms deadline.
-- 2,048 rendered bytes.
-- Up to four extracted anchors, but retrieval primarily uses the first.
-- Up to six words in the concept query.
-
-Current retrieval:
-
-1. Literal search for the first anchor.
-2. Concept search if no usable file was found.
-3. Symbol lookup.
-4. Direct upstream callers when change/caller intent is detected.
-5. A source-line read for the selected definition, outside the index-op count.
-
-Evidence comes from a compatible warm daemon or read-only local stores.
-Local concept lookup requires a daemon. The brief does not start a daemon,
-build indexes, or refresh graphs.
-
-A stale/missing graph can leave text evidence available, with graph failure
-reported under `unresolved`. If every operation fails, no brief is rendered.
-
-## Question kinds and revised assessment
-
-| Kind | Useful evidence | Remaining limitation |
+| Run | Scope | Identity and control |
 | --- | --- | --- |
-| Definition/value lookup | Declaration location and source line | Multiline or computed values may need more context |
-| Change impact | Definition, direct caller, direct test references | Graph and text evidence do not prove exhaustive impact |
-| Code flow | Ordered sequence supported by call sites and source | A function signature alone does not establish the sequence |
-| Diagnosis | Guard conditions, error sites, fallback behavior | Static evidence does not establish an arbitrary live root cause |
-| Configuration/install | Registrations, install destinations, setting precedence | Relevant evidence spans config and install code |
-| Tests/validation | Test names, assertions, workflow commands | Discovery does not prove tests ran or current CI passed |
-| History/rationale | Recorded commit messages and documentation | Authorship is not ownership; undocumented intent stays unknown |
-| Architecture | Component boundaries and bounded dependency paths | A retrieved path is not a complete system model |
+| Historical delivered hooks | 3 tasks × 3 paired repetitions = 18 answers | Foreign snapshot `5c47874700c23a6c9e976de3f553ffe75bac39d8`; nine valid delivery receipts |
+| Stale local index | Eight direct brief requests | Pixel source/binary `8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1`; base shard still at `14feba4`, no delta |
+| Prepared local retrieval v3 | 8 kinds × 3 repetitions × 2 arms = 48 records, 57 CLI invocations | Same `8fe6e10` binary and isolated source snapshot; no model |
+| Classifier probe | Nine prompts | Same binary; remote Jev preset, `jev-latest`, temperature 0 |
+| Skill A | 3 tasks × 3 paired repetitions = 18 answers | Foreign snapshot above; frozen skill, same container image in both arms |
+| Skill B | 3 tasks × 2 paired repetitions = 12 answers | Same snapshot/image; typed source search, separate frozen skill |
+| Packet C | Two lookup tasks; native agent and two precomputed-packet arms | See the packet comparison below |
 
-None of these kinds should be declared generally solved from this sample.
-The revised finding is that none is demonstrated to be a dead end.
+All live answer comparisons use Codex 0.160.0, `gpt-5.6-terra`, medium
+reasoning and fresh sessions. A/B keep task wording identical within a pair;
+C appends source evidence to the original prompt in its packet arms.
+The new skill runs reuse Linux image
+`sha256:1426219784d53f6e86e4a305a96544a2baf5a648d12e894801ef8461b7f4ebd7`.
+It reports Pixel 0.7.1; its source commit is **unverified**. Do not attribute
+these Linux results to the exact local macOS binary or the final PR head.
+The harness checkout was based on `e4068530dd9bc428f2a709c8d8fb2363ac6b18d4`.
 
-## Concrete information loss
+The prepared local binary is Pixel 0.7.1 at `8fe6e10`, SHA-256
+`a1b87d4e8de80c380958aa43d65365a8e0f5e22c0c3ffa076379a5fa9417d6e8`.
+No global installation or hook configuration was changed.
 
-### Matching source text is discarded
+Definitions used below:
 
-Search already supplies matching text. The adapter retains path/line
-locations rather than the matching content.
+- Tokens are input plus generated tokens. Cached input is already included;
+  it is not added a second time. These are usage counts, not dollar costs.
+- Paired saving is `100 × (raw − pixel) / raw` for each matched repetition,
+  then the median. It is not the ratio of group medians.
+- Arena seconds surround the Codex command, including a live hook when used.
+  They exclude image, container, install, index, and preflight setup.
+- Pattern scores are coverage signals. The semantic review below checks
+  the actual answer against source; a passing regex cannot prove correctness.
+- These are small, selected samples. There are no confidence intervals,
+  held-out routing evaluation, or claims of calibrated classifier confidence.
 
-Sources:
+## Historical hook evidence: delivery verified, completeness uneven
 
-- crates/pixel/src/execution_brief/evidence.rs:
-  local_files, search_files, file_rows
-- crates/pixel-index/src/verify.rs: MatchLine
+[Historical receipts, rows and hashes](bench/brief-question-kinds-2026-10-07/historical.json)
+retain all 18 trials. Every Pixel receipt has return code 0,
+`response_valid`, `forwarded_to_codex`, and `emitted_context` true, with
+`hook_event_name: UserPromptSubmit`. Context contents, byte counts and
+hashes are retained. Snapshot/static baseline parity was checked on the
+first repetition of each task.
 
-Preserving short excerpts could help without requiring another search.
+| Task | Raw scores | Pixel scores | Median paired token saving | Median seconds, raw → Pixel |
+| --- | --- | --- | ---: | ---: |
+| g4: rename impact | 12, 12, 12 / 12 | 12, 12, 12 / 12 | 35.3% | 26 → 15 |
+| g7: handleError definition/signature | 10, 10, 10 / 10 | 3, 10, 10 / 10 | 2.4% | 11 → 13 |
+| g8: CustomMenu definition/initializer | 7, 7, 10 / 10 | 7, 7, 7 / 10 | 67.6% | 8 → 6 |
 
-### Same-file matches collapse
+The g4 group-median token ratio would show 52.4%; that is a different
+statistic from the reported 35.3% median paired saving.
 
-Brief::absorb deduplicates by file path. That hides separate production and
-test references when they occur in one Rust file.
+All nine Pixel transcripts contain **zero Pixel CLI calls**. This measures
+injected brief context, not explicit tool chaining or classification.
 
-For `build_decisions_request`:
+- **g4:** the 706-byte context supplied useful file references despite
+  unavailable graph evidence. Answers identified the definition and eight
+  consumer files. This is the strongest historical result.
+- **g7:** the first 665-byte-context answer mistook seven consumer files for
+  definitions and omitted the real declaration at
+  `packages/ui/handleError.ts:4`. Its 3/10 score still credited a generic
+  signature pattern. Later answers used native search and bounded reads,
+  and correctly recovered the declaration.
+- **g8:** all three 374-byte-context answers omitted
+  `defineMultiStyleConfig({ variants })`. Repetition 2 additionally called
+  `CustomMenu` a default export; it is a named export. The 7/10 score
+  conceals that false statement. Raw repetition 3 read both files and
+  answered completely.
 
-- Definition: decide_remote.rs:538.
-- Production call: decide_remote.rs:341.
-- Direct test call: decide_remote.rs:1268.
-- Direct test call: decide_remote.rs:1351.
+Thus the largest token reduction is not automatically a quality win.
 
-The corresponding direct tests are:
+Historical raw and Pixel images differ:
+`sha256:16e4f6d87b0705fe34c15f0f6869acb89c15ab8273f21590ba36f357650550e3`
+and
+`sha256:6c713ea2d70fbb80f5dd927615ce3aacf780669f656e5a02bad81df190cbdf86`.
+Receipt image identities matched their expected values, but this is not the
+same-image control used for the new skill runs.
 
-- the_decisions_request_maps_labels_to_choice_values_with_their_criteria
-  — decide_remote.rs:1261.
-- the_openai_preset_posts_to_decisions_not_chat_completions
-  — decide_remote.rs:1334.
+The earlier `openai-brief-arena-20261007-01` and `-03` runs had invalid
+hook receipts and no emitted context. Their scores are excluded. The
+historical graph files were absent; this report does not pretend to replay
+impact against them without preparation.
 
-Indirect behavior coverage also exists through
-decide_routes_the_openai_preset_through_the_decisions_wire_end_to_end.
+## Fresh index: useful evidence, not yet an efficient packet
 
-These references show why the earlier file-only impact brief was incomplete.
+Eight initial requests against the stale index exited successfully with
+**zero stdout bytes**. Shard existence was not enough: the base named an
+older HEAD and no delta covered the current commit. Those empty outputs
+cannot establish that the eight question kinds are unanswerable.
 
-### Concept extraction drops important clauses
+The corrected v3 probe prepared an isolated `8fe6e10` checkout with
+`pixel prepare-repo "${SNAPSHOT}" --no-daemon --json`: **8,001 ms**,
+1,133 indexed files; graph 539 files, 8,887 symbols, 21,525 edges and 44,654
+unresolved references. Preparation is separate from query timing.
 
-A source-derived reproduction of the six-word extraction produced:
+[Fresh probe inputs, exact argv, outputs and timings](bench/brief-question-kinds-2026-10-07/fresh-probes.json)
+record all 48 trials and 57 invocations. Each baseline is
+`pixel brief "$PROMPT" "${SNAPSHOT}" --metrics off`. Each route is the
+listed sequence of evidence commands; its time and output bytes are summed.
 
-| Prompt kind | Retained query | Important discarded words |
-| --- | --- | --- |
-| Flow | codex prompt reach pixel evidence brief | step |
-| Diagnosis | pixel prompt brief report stale graph | failure, surface |
-| Configuration | pixel install codex prompt hook config | layers, control |
-| Validation | tests cover start brief routing stale | graph, workspace, checks, release |
-| Architecture | boundaries prompt brief cross hook graph | evidence, downstream, readers, depend |
+| Kind | Current brief evidence | Source-aware route evidence | Median ms, brief → route | Stdout bytes, brief → route |
+| --- | --- | --- | ---: | ---: |
+| Lookup | Unrelated file locations | Three budget constants and checks | 89 → 137 | 272 → 3,338 |
+| Impact + tests | Definition/production location | Production call and named same-file provider/event test | 89 → 141 | 381 → 3,315 |
+| Flow | Config/test file locations | Registration, event mapping, processing, attachment and host envelope | 101 → 150 | 251 → 36,228 |
+| Diagnosis | Unrelated daemon files | Guard, fallback, no-rebuild behavior and test assertions | 409 → 148 | 259 → 14,055 |
+| Configuration | Config/doctor locations | Exact dynamic task-event command and Codex event mapping | 457 → 148 | 276 → 15,106 |
+| Tests | Definition/nearby locations | Pi exclusion, provider cases and envelope assertions | 73 → 289 | 381 → 10,947 |
+| History | Empty | Recorded constraints for the requested commit | 30 → 48 | 0 → 4,229 |
+| Architecture | Several file locations | Ownership signatures and source handoffs | 373 → 218 | 285 → 10,056 |
 
-This verifies query information loss. It does not measure resulting search
-quality.
+All invocations exited 0 and none reported result truncation. Output was
+identical within each kind/arm across three repetitions. Repeated-query
+advisories appeared on stderr but did not alter results.
 
-### Confidence describes evidence presence, not answer completeness
+The routes use `search-content` with source context, `list-signatures`,
+and `commit-history`. **Identifiers and paths were selected after source
+inspection.** This tests evidence availability once locations are known,
+not automatic discovery, model answer accuracy, hook delivery, or overall
+agent efficiency. Five routes were slower; every route emitted more text.
+The long flow/configuration output is particularly unsuitable for direct
+injection into a 2 KiB hook.
 
-Any nonempty callers list produces `high` confidence. A file or definition
-produces `medium`.
+Rehearsal v1 used a removed impact identifier and an invalid absolute path
+for `list-signatures`; v2's context window omitted the dynamic command.
+They were corrected before v3 and are not pooled. Impact now uses the live
+`start_brief` symbol, not the removed `build_decisions_request`.
+This is a tuned development set, not a held-out evaluation.
 
-The label does not establish that every requested subquestion was answered,
-all tests were found, or the graph is complete.
+The diagnosis boundary is conditional: the text index must cover HEAD and
+at least one evidence operation must answer. A stale/missing graph can
+leave text evidence available; zero successful operations render no brief.
+The probe read the relevant tests; it did not deliberately stale its
+prepared graph or establish a live application's root cause.
 
-### The footer restricts useful follow-up
+Eight frozen scenarios are saved as `eval/scenarios/qk-*.json`, with a
+[semantic gold ledger](bench/brief-question-kinds-2026-10-07/expected-facts.json).
+The impact prompt deliberately requests tests too: it is a mixed evidence
+case, not a pure impact label. The diagnosis rubric scores the requested
+behavior, not unasked regression-test names. Scenario structure and regex
+compilation were checked. These scenarios have
+**not** been run as an eight-kind live agent matrix.
 
-The fixed footer instructs the agent to open a file only if it contradicts
-the brief. That is too restrictive for evidence that supplies navigation
-without enough content to answer the question.
+## Classify: cheap routing hint, not a mandatory first step
 
-An incomplete packet needs an explicit follow-up allowance, even when its
-existing facts are correct.
+The [classifier receipt](bench/brief-question-kinds-2026-10-07/classify.json)
+contains the exact nine-label rubric, prompts, and winning decisions.
+One remote invocation took 237 ms; an eight-prompt JSONL batch took
+2,575 ms in total. The batch has no per-question timing or token/cost
+receipt, and temperature 0 does not make a remote model deterministic.
+The exact invocation argv and full label distributions were not retained;
+the saved latency is diagnostic evidence, not a fully replayable benchmark.
 
-### Generated-file filtering needs question-aware review
+Agreement with the frozen human routing labels was **7/9**:
 
-The brief excludes JSON as generated/data evidence. Some configuration and
-hook questions concern meaningful JSON files. Reconsidering that exclusion
-requires care around credential paths and secret values.
+| Prompt intention | Expected route | Returned route | Returned confidence |
+| --- | --- | --- | ---: |
+| Why a stale graph still leaves text evidence | diagnosis | history | 0.62 |
+| Rename a symbol and find its direct tests | mixed_or_other | tests | 0.81 |
+| Seven remaining prompts | Their single evidence kind | Agreed | See receipt |
 
-## Existing capabilities worth reusing
+The mixed request needs both impact and tests regardless of a top label.
+No measured deterministic router comparison was run. These nine prompts
+are too few to claim general accuracy, useful confidence thresholds, or a
+net latency benefit.
 
-Pixel already contains:
+`pixel classify --task-intent` uses broader task-intent labels; it does not
+select these eight evidence routes. The hook's classifier path is
+warm-local-only with a 400 ms child budget inside the 750 ms total window.
+The remote Jev probe is not a measurement of that hook path.
 
-- A composed locate recipe with resolve, source context, and caller-derived
-  test-file discovery.
-- Direct caller/callee and trace operations.
-- Repository mapping and context facilities.
-- Commit history and provenance operations.
-- Searchable architecture, workflow, and configuration documentation.
+## Explicit tool-chain skills: correct answers cost more
 
-The locate recipe is not a drop-in replacement for the hook chain: it can
-perform additional calls and has different execution/budget behavior.
+Skill A routes an exact symbol lookup through one literal
+`search-content` call and a source read. Rename impact uses one
+`impact --direction upstream --depth 1 --no-refresh` plus a literal search.
+It asks for every requested fact and allows native fallback when graph
+evidence is unavailable. No classify call, index maintenance, or hook runs
+inside the model session.
 
-Its test discovery also has an explicit limitation: Rust inline `#[test]`
-functions are not indexed. Test-path naming heuristics miss tests embedded
-in production files.
+Skill B adds `--type ts` to literal searches. That filter includes TSX,
+MTS and CTS as well as TS. Both frozen skills disable implicit invocation
+in the repository; the arena enables only its disposable candidate copy.
 
-History can establish recorded changes and constraints. Provenance can
-establish authorship. Neither alone establishes the reason for a decision
-or its current owner.
+| Treatment/task | Pairs | Median tokens, raw → Pixel | Median paired token increase | Median seconds, raw → Pixel |
+| --- | ---: | ---: | ---: | ---: |
+| A / g4 impact | 3 | 42,974 → 67,256 | 56.5% | 33 → 37 |
+| A / g7 signature | 3 | 42,033 → 73,969 | 75.5% | 10 → 16 |
+| A / g8 initializer | 3 | 41,329 → 57,635 | 39.5% | 14 → 12 |
+| B / g4 impact | 2 | 51,081 → 92,186.5 | 94.9% | 29 → 42.5 |
+| B / g7 signature | 2 | 42,087 → 74,240 | 76.4% | 10 → 23.5 |
+| B / g8 initializer | 2 | 41,172.5 → 56,068.5 | 36.2% | 15.5 → 17 |
 
-## Source-derived prototype packets
+All **30 answers** completed. A scored full marks on 16/18 answers:
+Pixel g4 repetition 3 scored 9/12 and raw g8 repetition 3 scored 7/10.
+B scored full marks on 12/12. The retained final answers allow semantic
+review alongside the pattern scores; neither score nor token savings
+should be treated as answer-wide confidence.
+Pixel's partial g4 answer omitted the login consumer. Its score also lost
+one point because “No files were modified” matched the broad `modified`
+penalty: that point is a rubric false positive, not evidence of an edit.
+Raw's partial g8 answer described the named configuration and variants but
+omitted the `defineMultiStyleConfig` initializer. Original scores are kept.
+Receipts: [A](bench/brief-question-kinds-2026-10-07/skill-a1.json),
+[B](bench/brief-question-kinds-2026-10-07/skill-b1.json).
 
-Five packets were manually assembled in memory from inspected source and
-a verified commit message. UTF-8 size was measured using
-`len(packet.encode())`.
+Raw A used two command tool calls per answer. Pixel A used 2–5, in addition
+to reading its skill, and sometimes needed native follow-up. Output noise
+also increased. Filtering generated JSON matches reduced the diagnostic
+g4 query output from 11,867 to 9,007 bytes and g8 from 4,479 to 1,085 bytes;
+g7 stayed at 5,012 bytes. It did not recover the model-token overhead.
 
-| Packet | Bytes |
-| --- | ---: |
-| Rename and direct tests | 539 |
-| Ordered prompt-to-context flow | 520 |
-| Stale-graph guard explanation | 456 |
-| Named brief regression tests | 446 |
-| Recorded historical constraints | 517 |
+A and B have different skill names as well as the filter change. Their
+model comparison is not a strict one-variable ablation. The byte reduction
+is a direct query comparison; an A-to-B token change cannot be attributed
+only to filtering.
 
-All fit the 2,048-byte cap.
+Frozen source:
+[skill A](../eval/arena/skills/pixel-question-evidence/SKILL.md)
+(SHA-256 `2df428f71b8a63e23d8ffa5f6113c63e55b518aa8dd497b0b233f5dbe95dbe4c`);
+[skill B](../eval/arena/skills/pixel-question-evidence-filtered/SKILL.md)
+(`ecfc93e79a54373114b94ae63ab7207eb7d9747cd81d03be08fb6fc3c1f6b6b4`).
+These are experimental fixtures, not a new default agent skill.
 
-These are feasibility examples, not emitted hook outputs or automatically
-retrieved answers. They use manually selected source locations. They do
-not prove a four-operation route, 750 ms latency, or generalization to
-unfamiliar repositories.
+## Precomputed packet comparison
 
-Recorded rationale was verified with:
+The third treatment moves retrieval ahead of the first model turn. It
+compares native-agent (original prompt), native-packet, and Pixel-packet
+on g7/g8, with two repetitions per task/arm: **12 answers**.
+
+The [separate Bun runner](../eval/brief-packet-pair.ts) extracts a backtick
+identifier, searches matching TS-family file paths, then uses the **same
+custom source packer** in both packet arms. The packer reads declarations
+and local constants directly from files. Pixel supplies paths through
+`search-content -F ... --type ts --files-with-matches`; Pixel itself does
+not produce the final source packet. Native retrieval supplies those paths
+through `rg -l -F`. No skill or prompt hook is added.
+
+The complete emitted packets are byte-identical across backends: **1,025
+bytes** for g7 and **1,045 bytes** for g8, below the 2,048-byte cap. They
+contain the real `handleError` declaration and signature, and the named
+`CustomMenu` initializer plus local variants. Matching paths, packet text,
+hashes, prompts, answers and per-call timings are retained in
+[packet C receipts](bench/brief-question-kinds-2026-10-07/packet-c1.json).
+
+| Task / arm | Median tokens | Median charged seconds | Model tool calls per answer |
+| --- | ---: | ---: | ---: |
+| g7 / native-agent | 41,735 | 12.68 | 2 |
+| g7 / native-packet | 13,399.5 | 7.59 | 0 |
+| g7 / Pixel-packet | 13,399.5 | 7.87 | 0 |
+| g8 / native-agent | 40,966.5 | 13.15 | 2 |
+| g8 / native-packet | 13,396 | 6.23 | 0 |
+| g8 / Pixel-packet | 13,394.5 | 7.75 | 0 |
+
+All 12 answers scored 10/10. Independent transcript review confirmed the
+requested location/signature or named export/initializer. The eight packet
+answers needed no model tool calls.
+
+Averaging the two task medians gives 41,350.75 tokens / 12.92 seconds for
+native-agent; 13,397.75 / 6.91 for native-packet; and 13,397 / 7.81 for
+Pixel-packet. Against native-agent, those aggregate ratios imply about
+**67.6% fewer tokens** for both packet arms, and **46.5% / 39.5% less
+charged time**, respectively. These are ratios of task-median averages,
+not the median paired savings used in the historical/A/B tables.
+
+Charged time includes query, packing, and the Docker model invocation.
+Pixel search also starts a Docker container, while native search runs
+on the host. The approximately 0.90-second difference between packet
+arms is therefore a measured workflow difference, **not an isolated
+Pixel-versus-ripgrep engine latency comparison**. Shared snapshot/graph
+preparation and image acquisition are excluded. This is a prepared
+fixture experiment, not cold-start total deployment cost.
+
+The result supports preturn evidence packaging for these two selected
+lookup questions. The native control shows that the gain is not unique
+to Pixel. It comes from eliminating discovery turns while retaining
+requested facts; making Pixel relevant here would mean providing this
+bounded source-packet behavior directly, without requiring an agent to
+read a skill and perform a serial discovery chain.
+
+The runner is an experiment prototype, not a general TypeScript parser or
+a production hook. Its declaration extraction and local-dependency scan
+were checked on this frozen fixture, not on arbitrary syntax, ambiguous
+symbols, no-match prompts, or eight question kinds. Current graph/context
+commands were also probed: capped `pack-context` was truncated for
+`handleError`, and `CustomMenu` was absent from that graph. Those failures
+are why C tests literal path retrieval plus the shared source packer;
+it does not demonstrate that the existing locate recipe solves the case.
+
+
+## What this establishes about the product
+
+The current prompt brief travels through `task_hook::process`,
+`start_brief`, the execution-brief chain, `Pending::finish`/render, and
+`with_brief` into host additional context. Pi is excluded. The hook keeps
+its existing four-operation, 750 ms shared deadline and 2,048-byte output
+limits; it does not initialize a daemon or refresh indexes.
+
+The experiment identifies concrete information losses without claiming
+they are all fixed by this documentation change:
+
+- Literal matching text becomes locations. Distinct same-file sites
+  collapse, hiding production and inline Rust test evidence.
+- Six-word concept extraction can discard later requested constraints;
+  the first anchor dominates retrieval.
+- Evidence-presence confidence does not measure answer completeness.
+- “Open a file only if it contradicts you” discourages reads needed to
+  obtain a missing signature, initializer, or second requested fact.
+- A broad generated-JSON exclusion also needs care for real configuration
+  questions. The TS filter is suitable for the selected TS tasks only.
+
+Existing source-rich commands are useful explicit follow-ups:
+`run-recipe --kind locate --budget 300 --json` can resolve, collect source
+context and find caller-derived test files; `pack-context` accepts a unique
+symbol name or UID. Neither is a drop-in replacement for the read-only,
+750 ms hook. Context budgets are approximate; enforce a serialized byte
+cap and inspect truncation rather than assuming every required fact fits.
+Graph-based test discovery also misses Rust inline tests.
+
+A packet must distinguish observed references from exhaustive impact,
+test discovery from a test run, and recorded history from inferred intent.
+Missing evidence warrants a bounded source read even when existing facts
+are correct. The measured skill regressions do not justify making every
+agent start with classification and several Pixel calls.
+
+## Reproduction and retained evidence
+
+The committed JSON receipts retain trial rows, final answers, settings,
+scenario contents/hashes, hook contents, normalized source outputs, and
+original transcript hashes. Raw model
+transcripts remain in the local `eval/arena-results/` run directories;
+a hash provides identity, not public access to the underlying transcript.
+No credentials or complete agent environments are published.
+
+Recompute historical paired statistics from retained arena directories:
 
 ```sh
-rtk proxy git show -s --format='%h%n%B' \
-  14feba456b479be165ab40ec14dde3958a865368
+rtk proxy bun eval/brief-question-kinds-summary.ts \
+  eval/arena-results/brief-hooks-g4-rename-impact \
+  eval/arena-results/brief-hooks-g7-lookup-handleerror \
+  eval/arena-results/brief-hooks-g8-lookup-custommenu
 ```
 
-That commit records the four-operation, 750 ms, read-only, 2 KiB design.
-It references #865 and includes documentation corrections for Pi exclusion
-and stale-graph fallback.
+Replay a skill treatment with the foreign repository snapshot available.
+Use a new results directory. Keep the image and source snapshot pinned:
 
-## Earlier arena runs and hook-delivery problem
+```sh
+rtk env REPO_SNAPSHOT=/path/to/architech-t \
+  PIXEL_IMAGE_SOURCE=existing \
+  PIXEL_ARENA_IMAGE=sha256:1426219784d53f6e86e4a305a96544a2baf5a648d12e894801ef8461b7f4ebd7 \
+  CODEX_MODEL=gpt-5.6-terra CODEX_EFFORT=medium \
+  bash eval/arena.sh --arms "raw pixel" \
+  --tasks "g4-rename-impact g7-lookup-handleerror g8-lookup-custommenu" \
+  --reps 3 --skill-candidate-dir eval/arena/skills/pixel-question-evidence \
+  --results-dir eval/arena-results/question-evidence-new-run
+```
 
-The arena uses two Codex arms: raw and pixel. The runner, not ad hoc panes,
-should create the labeled Herdr sessions.
+For B, use the filtered skill directory and `--reps 2`.
+For C, the standalone runner uses the pinned image above and checks out
+the pinned foreign fixture commit in disposable copies:
 
-Historical runs reported:
+```sh
+rtk proxy bun eval/brief-packet-pair.ts \
+  --repo /path/to/architech-t --auth /path/to/codex/auth.json \
+  --graph /path/to/prepared/graph.v2.db \
+  --results /path/to/new-packet-results
+```
 
-| Run directory suffix | Raw score | Pixel score |
-| --- | ---: | ---: |
-| openai-brief-arena-20261007-01 | 78.6% | 85.7% |
-| openai-brief-arena-20261007-03 | 85.7% (12/14) | 100% (14/14) |
+`--preflight-only` verifies matching paths and packet facts without calling
+the model. `--graph` is optional for the runner; the frozen C run supplied
+a prepared graph. Post-run portability/provenance fixes are listed beside
+the original measured runner hash in the receipt; they were preflighted
+without rerunning the 12 model answers.
 
-However, the Pixel receipt reported:
+The current reviewed-hook arena mode still refers to the retired
+prompt-submit command; it does not reproduce the historical delivered-hook
+runs without a separate harness repair. The new skill trials avoid that
+mode and do not claim to validate host hook delivery.
 
-- response_valid: false
-- emitted_context: false
-- hook_event_name: null
-
-Therefore these scores do not establish a benefit from brief delivery.
-
-The arena entrypoint still invokes the legacy prompt-submit hook command.
-Current source documents that retired hook verbs exit successfully without
-output; the live brief is delivered through task-event prompt-submit.
-
-Two entrypoint lines were temporarily changed during an earlier attempt,
-then restored after the user objected. Do not silently reapply that change.
-Any future repair must be explicit, minimal, and independently validated.
-
-Relevant files:
-
-- eval/arena.sh
-- eval/arena/entrypoint.sh
-- eval/arena/README.md
-- eval/arena-results/openai-brief-arena-20261007-03
-
-## Previous local checks
-
-Earlier in the session, these focused suites were reported passing:
-
-| Command | Passed |
-| --- | ---: |
-| cargo test -p pixel-cli --bin pixel classify:: | 54 |
-| cargo test -p pixel-cli --bin pixel decide_remote:: | 31 |
-| cargo test -p pixel-cli --bin pixel execution_brief:: | 74 |
-| cargo test -p pixel-cli --test cli config_cli::classify_accepts_the_openai_preset_and_names_its_key_when_missing | 1 |
-| cargo test -p pixel-cli --test cli prompt_brief_cli:: | 9 |
-
-These are historical session results. They do not validate a future
-adaptation, current-head CI, installation, or arena hook delivery.
-
-## How to continue
-
-### 1. Establish a valid delivery baseline
-
-Confirm the arena's exact hook command and host envelope against current
-source. Obtain one captured Codex prompt where:
-
-- The correct task-event prompt-submit path runs.
-- A valid additional-context response contains `[PIXEL:BRIEF]`.
-- The transcript shows the agent actually received the block.
-
-Record emission, host relay, receipt, and model use separately.
-
-Keep this harness correction separate from question-kind adaptations so
-the experiment does not change both delivery and retrieval simultaneously.
-
-### 2. Freeze a reproducible question matrix
-
-Use the eight question kinds above. Include:
-
-- Exact identifiers and natural-language prompts.
-- Multiple requirements in one prompt.
-- Same-file Rust unit tests.
-- Missing and stale graphs.
-- No matching code.
-- Ambiguous symbol names.
-- Configuration files.
-- A rationale question with no recorded rationale.
-
-For each case, record expected evidence and what would count as an
-unsupported claim. Avoid equating a file hit with a complete answer.
-
-### 3. Compare parallel and ordered execution separately
-
-Use isolated raw/pixel Codex arms with identical model settings, repository
-snapshot, and task wording.
-
-Run kinds concurrently in isolated sessions for throughput. Run a separate
-ordered pass to check consistency and any effects of session history.
-
-Do not compare a fresh session against a session carrying earlier answers.
-Label question kind and raw/pixel arm visibly in Herdr.
-
-### 4. Adapt evidence selection before adding broad new providers
-
-Evaluate the smallest changes independently:
-
-- Retain bounded matching text.
-- Preserve distinct reference sites within a file.
-- Preserve important later clauses and multiple requested evidence types.
-- Distinguish direct test references from indirect behavior coverage.
-- Report missing evidence and coverage rather than answer-wide confidence.
-- Allow bounded follow-up reads when the packet is insufficient.
-
-Use the existing locate/context/trace/history machinery where appropriate,
-but preserve the hook's read-only behavior and explicit deadline.
-
-### 5. Measure the complete behavior
-
-For every run record:
-
-- Snapshot/commit, binary version, task, model, and settings.
-- Exact brief and rendered byte count.
-- Operations attempted and answered.
-- End-to-end hook latency.
-- Files and ranges read afterward.
-- Correct requested facts and unsupported claims.
-- Whether failure paths continue safely.
-- Tokens and commands, alongside answer quality.
-
-Keep a route when it improves supported answers or reduces necessary
-follow-up without increasing false confidence. Require more than one
-hand-selected example before calling a question kind solved.
-
-### 6. Implement and validate a focused candidate
-
-Preserve existing dirty work. Read CONTRIBUTING.md, applicable scoped
-rules, and the Rust guidelines before editing.
-
-Delegate independent work with disjoint write ownership. Use ordinary
-focused regression tests for the observed contracts. Publish a reviewable
-candidate; required current-head validation belongs to CI.
-
-Do not run local/manual mutation campaigns. Do not reinstall global hooks
-unless installed-behavior verification requires it. An installation check
-must follow the repository's documented workflow and be reported separately.
-
-## Workspace and operational constraints
-
-- Existing user changes remain in the working tree.
-- No adaptation edits or rebase were performed during the deeper investigation.
-- The branch was last observed behind origin/main; fetch had occurred, but
-  integration was not performed.
-- Preserve unrelated Herdr panes and the main operator pane.
-- User requested Codex, with visibly labeled raw/pixel arena arms.
-- The current session is read-only, blocking document persistence and
-  implementation.
-- No claim of a completed eight-kind live arena experiment is warranted.
-
-## Primary continuation sources
-
-- crates/pixel/src/execution_brief/chain.rs
-- crates/pixel/src/execution_brief/evidence.rs
-- crates/pixel/src/execution_brief.rs
-- crates/pixel/src/task_hook.rs
-- crates/pixel-proto/src/query.rs
-- crates/pixel/src/main.rs — run_locate and LOCATE_TESTS_NOTE
-- crates/pixel/src/decide_remote.rs
-- crates/pixel/tests/cli/prompt_brief_cli.rs
-- crates/pixel-install/src/codex_config.rs
-- crates/pixel-install/src/install.rs
-- crates/pixel-ops/src/history.rs
-- crates/pixel-ops/src/provenance.rs
-- ARCHITECTURE.md — hooks and prompt brief
-- CONTRIBUTING.md
-- .agents/rules/measuring.md
-- .agents/skills/agent-session-debugging/SKILL.md
+Fresh-probe JSON replaces host paths with `${PIXEL_BIN}` and
+`${SNAPSHOT}`; resolve those to the identified binary and an isolated
+prepared checkout, then replay each recorded argv. Output hashes in that
+file cover the normalized text. Repeated route outputs are stored once by
+hash. The fixture scenarios and gold ledger expose the requirements for a
+future live matrix without reporting unrun trials as results.

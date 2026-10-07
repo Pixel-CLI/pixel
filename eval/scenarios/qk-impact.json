@@ -1,0 +1,64 @@
+{
+  "id": "qk-impact",
+  "suite": "brief-question-kinds",
+  "task_class": "callers-impact",
+  "mode": "answer",
+  "commit": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+  "max_turns": 30,
+  "prompt": "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+  "must": [
+    {
+      "pattern": "(?i)start_brief",
+      "points": 1,
+      "why": "identifies the function"
+    },
+    {
+      "pattern": "(?i)(?:start_brief.{0,100}1097|1097.{0,80}start_brief)",
+      "points": 1,
+      "why": "gives the definition location"
+    },
+    {
+      "pattern": "(?i)(?:process.{0,100}start_brief|start_brief.{0,100}process)",
+      "points": 1,
+      "why": "identifies the production caller"
+    },
+    {
+      "pattern": "(?i)(?:start_brief.{0,100}1068|1068.{0,80}start_brief)",
+      "points": 1,
+      "why": "gives the production call location"
+    },
+    {
+      "pattern": "(?i)a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository",
+      "points": 2,
+      "why": "names the same-file provider/event test"
+    },
+    {
+      "pattern": "(?is)(?=.*Claude)(?=.*Codex)(?=.*Pi)(?=.*PreToolUse)(?=.*PostToolUse)(?=.*SessionStart)",
+      "points": 2,
+      "why": "covers the tested provider and non-prompt-event cases"
+    },
+    {
+      "pattern": "(?i)(?:no.prompt|prompt.{0,40}missing).{0,100}(?:none|no brief|is_none)|(?:outside|missing).{0,40}repository.{0,100}(?:none|no brief|is_none)",
+      "points": 1,
+      "why": "covers missing prompt and undiscoverable repository cases"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "(?i)(?:Pi|TaskProvider::Pi).{0,60}(?:starts?|gets?|receives?)\\s+(?:a\\s+)?brief",
+      "penalty": 2,
+      "why": "Pi is explicitly excluded from start_brief"
+    }
+  ],
+  "semantic_review": {
+    "criteria": [
+      "Production process calls start_brief at task_hook.rs:1068; its definition starts at 1097.",
+      "The same-file test a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository exercises Claude and Codex prompt-submit, non-prompt events, Pi, missing prompt, and an undiscoverable repository.",
+      "The test establishes a bounded provider/event contract, not exhaustive graph callers."
+    ]
+  },
+  "evidence_kinds": [
+    "impact",
+    "tests"
+  ]
+}

@@ -1,0 +1,599 @@
+{
+  "schema_version": 1,
+  "token_definition": "input_tokens + generation_tokens; cached input is already included",
+  "time_definition": "Codex command wall seconds, including live hooks; excludes image/index/install/setup",
+  "quality_definition": "required-pattern score, not semantic adjudication",
+  "runs": [
+    {
+      "results_directory_name": "brief-chain-pilot-20261007-b1",
+      "run": {
+        "run_id": "20261007205755-42973",
+        "model": "gpt-5.6-terra",
+        "effort": "medium",
+        "codex_version": "codex-cli 0.160.0",
+        "pixel_image_id": "sha256:1426219784d53f6e86e4a305a96544a2baf5a648d12e894801ef8461b7f4ebd7",
+        "pixel_source_id": "git",
+        "skill_candidate_name": "pixel-question-evidence-filtered",
+        "skill_source_sha256": "ecfc93e79a54373114b94ae63ab7207eb7d9747cd81d03be08fb6fc3c1f6b6b4",
+        "fixture_repository": "architech-t",
+        "fixture_commits_from_scenarios": [
+          "5c47874700c23a6c9e976de3f553ffe75bac39d8"
+        ],
+        "tasks": [
+          "g4-rename-impact",
+          "g7-lookup-handleerror",
+          "g8-lookup-custommenu"
+        ],
+        "arms": [
+          "raw",
+          "pixel"
+        ],
+        "reps": 2
+      },
+      "scenario_provenance": "Scenario content and hashes read at export from the run's recorded scenario directory; scenario.commit identifies the fixture revision.",
+      "scenarios": [
+        {
+          "sha256": "d042c43b76d2671037b00e48371d9652da022ce3b2b09b78be005d6b3430630d",
+          "scenario": {
+            "id": "g4-rename-impact",
+            "suite": "generic",
+            "task_class": "rename",
+            "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+            "mode": "answer",
+            "max_turns": 30,
+            "prompt": "The shared helper handleError in packages/ui/handleError.ts is being renamed to reportError. List every file that would need to change because it imports or calls handleError — do not modify anything, just produce the complete list of affected files with the importing symbol or component for each.",
+            "must": [
+              {
+                "pattern": "(?im)^(?=.*packages/login/)(?=.*SignOnComponent).*$",
+                "points": 2,
+                "why": "login path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/feedback/)(?=.*SuggestForm).*$",
+                "points": 2,
+                "why": "feedback path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/feedback/)(?=.*AnswerForm).*$",
+                "points": 2,
+                "why": "feedback path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/feedback/)(?=.*playground).*$",
+                "points": 1,
+                "why": "feedback playground path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/project/)(?=.*Business).*$",
+                "points": 1,
+                "why": "project path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/site/)(?=.*Chatbot).*$",
+                "points": 1,
+                "why": "site path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/(?:site|project)/)(?=.*Contact).*$",
+                "points": 1,
+                "why": "site or project path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*packages/ui/)(?=.*handleError).*$",
+                "points": 2,
+                "why": "definition path and symbol"
+              }
+            ],
+            "never": [
+              {
+                "pattern": "modified|edited|updated the file",
+                "why": "answer-only task"
+              }
+            ]
+          }
+        },
+        {
+          "sha256": "7a8f0500cee4865219435bcd4f1b624cd388427f599a36ab2639899baf61eeab",
+          "scenario": {
+            "id": "g7-lookup-handleerror",
+            "suite": "generic",
+            "task_class": "exact-identifier",
+            "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+            "mode": "answer",
+            "max_turns": 30,
+            "prompt": "Where is `handleError` defined in this repository? Give the file path, the line, and the exact signature.",
+            "must": [
+              {
+                "pattern": "packages/ui/handleError\\.ts",
+                "points": 4,
+                "why": "definition file"
+              },
+              {
+                "pattern": "packages/ui/handleError\\.ts[\\s\\S]{0,100}(?::4\\b|line\\s+4)",
+                "points": 3,
+                "why": "definition path and line 4"
+              },
+              {
+                "pattern": "(?:const|function)\\s+handleError[\\s\\S]{0,120}(?:Error|string)",
+                "points": 3,
+                "why": "handleError signature mentions param or return type"
+              }
+            ]
+          }
+        },
+        {
+          "sha256": "ab299e8ad91e48cefe057f9d9092a041d35e81e348becc68ee3867f382b821df",
+          "scenario": {
+            "id": "g8-lookup-custommenu",
+            "suite": "generic",
+            "task_class": "exact-identifier",
+            "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+            "mode": "answer",
+            "max_turns": 30,
+            "prompt": "Where is `CustomMenu` defined in this repository, and what does it export?",
+            "must": [
+              {
+                "pattern": "packages/ui/CustomMenu\\.ts",
+                "points": 4,
+                "why": "definition file"
+              },
+              {
+                "pattern": "defineMultiStyleConfig",
+                "points": 3,
+                "why": "what it exports"
+              },
+              {
+                "pattern": "packages/ui/CustomMenu\\.ts[\\s\\S]{0,100}(?::48\\b|line\\s+48)",
+                "points": 3,
+                "why": "definition path and line 48"
+              }
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "arm": "raw",
+          "task": "g4-rename-impact",
+          "rep": "1",
+          "status": "complete",
+          "score": 12,
+          "max_score": 12,
+          "score_pct": 100,
+          "input_tokens": 58619,
+          "generation_tokens": 850,
+          "cache_read_tokens": 52224,
+          "cache_creation_tokens": null,
+          "tokens": 59469,
+          "cost_usd": null,
+          "tool_calls": 3,
+          "pixel_calls": 0,
+          "native_search_calls": 3,
+          "native_command_count": 3,
+          "native_command_counts": {
+            "rg": 3
+          },
+          "candidate_skill_file_reads": 0,
+          "seconds": 33,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g4-rename-impact",
+          "rep": "1",
+          "status": "complete",
+          "score": 12,
+          "max_score": 12,
+          "score_pct": 100,
+          "input_tokens": 62628,
+          "generation_tokens": 889,
+          "cache_read_tokens": 52224,
+          "cache_creation_tokens": null,
+          "tokens": 63517,
+          "cost_usd": null,
+          "tool_calls": 3,
+          "pixel_calls": 1,
+          "native_search_calls": 1,
+          "native_command_count": 3,
+          "native_command_counts": {
+            "pwd": 1,
+            "sed": 1,
+            "rg": 1
+          },
+          "candidate_skill_file_reads": 1,
+          "seconds": 30,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g4-rename-impact",
+          "rep": "2",
+          "status": "complete",
+          "score": 12,
+          "max_score": 12,
+          "score_pct": 100,
+          "input_tokens": 41976,
+          "generation_tokens": 717,
+          "cache_read_tokens": 36096,
+          "cache_creation_tokens": null,
+          "tokens": 42693,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 2,
+          "native_command_count": 5,
+          "native_command_counts": {
+            "rg": 2,
+            "for": 1,
+            "do": 1,
+            "done": 1
+          },
+          "candidate_skill_file_reads": 0,
+          "seconds": 25,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g4-rename-impact",
+          "rep": "2",
+          "status": "complete",
+          "score": 12,
+          "max_score": 12,
+          "score_pct": 100,
+          "input_tokens": 119243,
+          "generation_tokens": 1613,
+          "cache_read_tokens": 105728,
+          "cache_creation_tokens": null,
+          "tokens": 120856,
+          "cost_usd": null,
+          "tool_calls": 6,
+          "pixel_calls": 1,
+          "native_search_calls": 5,
+          "native_command_count": 19,
+          "native_command_counts": {
+            "sed": 1,
+            "printf": 1,
+            "rg": 5,
+            "sh": 1,
+            "cat": 1,
+            "for": 3,
+            "do": 3,
+            "done": 3,
+            "true": 1
+          },
+          "candidate_skill_file_reads": 1,
+          "seconds": 55,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g7-lookup-handleerror",
+          "rep": "1",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 41882,
+          "generation_tokens": 222,
+          "cache_read_tokens": 37120,
+          "cache_creation_tokens": null,
+          "tokens": 42104,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 2,
+          "native_command_counts": {
+            "rg": 1,
+            "nl": 1
+          },
+          "candidate_skill_file_reads": 0,
+          "seconds": 9,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g7-lookup-handleerror",
+          "rep": "1",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 73592,
+          "generation_tokens": 443,
+          "cache_read_tokens": 67328,
+          "cache_creation_tokens": null,
+          "tokens": 74035,
+          "cost_usd": null,
+          "tool_calls": 4,
+          "pixel_calls": 1,
+          "native_search_calls": 1,
+          "native_command_count": 3,
+          "native_command_counts": {
+            "sed": 1,
+            "rg": 1,
+            "nl": 1
+          },
+          "candidate_skill_file_reads": 1,
+          "seconds": 20,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g7-lookup-handleerror",
+          "rep": "2",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 41827,
+          "generation_tokens": 243,
+          "cache_read_tokens": 37120,
+          "cache_creation_tokens": null,
+          "tokens": 42070,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 2,
+          "native_command_counts": {
+            "rg": 1,
+            "nl": 1
+          },
+          "candidate_skill_file_reads": 0,
+          "seconds": 11,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g7-lookup-handleerror",
+          "rep": "2",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 73945,
+          "generation_tokens": 500,
+          "cache_read_tokens": 67328,
+          "cache_creation_tokens": null,
+          "tokens": 74445,
+          "cost_usd": null,
+          "tool_calls": 4,
+          "pixel_calls": 1,
+          "native_search_calls": 1,
+          "native_command_count": 4,
+          "native_command_counts": {
+            "sed": 1,
+            "rg": 2,
+            "nl": 1
+          },
+          "candidate_skill_file_reads": 1,
+          "seconds": 27,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g8-lookup-custommenu",
+          "rep": "1",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 41059,
+          "generation_tokens": 304,
+          "cache_read_tokens": 33024,
+          "cache_creation_tokens": null,
+          "tokens": 41363,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 6,
+          "native_command_counts": {
+            "rg": 1,
+            "sed": 2,
+            "if": 1,
+            "then": 1,
+            "fi": 1
+          },
+          "candidate_skill_file_reads": 0,
+          "seconds": 15,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g8-lookup-custommenu",
+          "rep": "1",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 55857,
+          "generation_tokens": 365,
+          "cache_read_tokens": 50176,
+          "cache_creation_tokens": null,
+          "tokens": 56222,
+          "cost_usd": null,
+          "tool_calls": 3,
+          "pixel_calls": 1,
+          "native_search_calls": 0,
+          "native_command_count": 3,
+          "native_command_counts": {
+            "sed": 3
+          },
+          "candidate_skill_file_reads": 1,
+          "seconds": 15,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g8-lookup-custommenu",
+          "rep": "2",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 40764,
+          "generation_tokens": 218,
+          "cache_read_tokens": 39168,
+          "cache_creation_tokens": null,
+          "tokens": 40982,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 2,
+          "native_command_count": 3,
+          "native_command_counts": {
+            "rg": 2,
+            "sed": 1
+          },
+          "candidate_skill_file_reads": 0,
+          "seconds": 16,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g8-lookup-custommenu",
+          "rep": "2",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 55602,
+          "generation_tokens": 313,
+          "cache_read_tokens": 48128,
+          "cache_creation_tokens": null,
+          "tokens": 55915,
+          "cost_usd": null,
+          "tool_calls": 3,
+          "pixel_calls": 1,
+          "native_search_calls": 0,
+          "native_command_count": 3,
+          "native_command_counts": {
+            "sed": 2,
+            "git": 1
+          },
+          "candidate_skill_file_reads": 1,
+          "seconds": 19,
+          "reason": null
+        }
+      ],
+      "answers": [
+        {
+          "arm": "raw",
+          "task": "g4-rename-impact",
+          "rep": "1",
+          "final_answer": "9 files import and call `handleError` from `ui/handleError`:\n\n- [packages/login/SignOnComponent.tsx](/repo/packages/login/SignOnComponent.tsx:18) — `SignOnComponent`\n- [apps/site/components/Chatbot.tsx](/repo/apps/site/components/Chatbot.tsx:40) — `Chatbot`\n- [apps/project/components/Business.tsx](/repo/apps/project/components/Business.tsx:45) — `Business`\n- [apps/site/components/Contact.tsx](/repo/apps/site/components/Contact.tsx:16) — `Contact`\n- [apps/project/components/Contact.tsx](/repo/apps/project/components/Contact.tsx:16) — `Contact`\n- [apps/feedback/components/home/AnswerForm.tsx](/repo/apps/feedback/components/home/AnswerForm.tsx:11) — `AnswerForm`\n- [apps/feedback/components/home/SuggestForm.tsx](/repo/apps/feedback/components/home/SuggestForm.tsx:7) — `SuggestForm`\n- [apps/feedback/app/(root)/playground/page.tsx](/repo/apps/feedback/app/(root)/playground/page.tsx:30) — `Home`\n- [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4) — helper export itself, which must be renamed to `reportError`\n\nI excluded generated analyzer JSON references and unrelated helpers with the same filename."
+        },
+        {
+          "arm": "pixel",
+          "task": "g4-rename-impact",
+          "rep": "1",
+          "final_answer": "8 consumer files import and call `handleError` (all import it as `{handleError}` from `ui/handleError`):\n\n- `apps/feedback/app/(root)/playground/page.tsx` — `Home` (1 call)\n- `apps/feedback/components/home/AnswerForm.tsx` — `AnswerForm` (6 calls)\n- `apps/feedback/components/home/SuggestForm.tsx` — `SuggestForm` (2 calls)\n- `apps/project/components/Business.tsx` — `Business` (3 calls)\n- `apps/project/components/Contact.tsx` — `Contact` (1 call)\n- `apps/site/components/Chatbot.tsx` — `Chatbot` (2 calls)\n- `apps/site/components/Contact.tsx` — `Contact` (1 call)\n- `packages/login/SignOnComponent.tsx` — `SignOnComponent` (1 call)\n\nThe defining export in `packages/ui/handleError.ts` also needs its own rename, but it does not import or call the symbol."
+        },
+        {
+          "arm": "raw",
+          "task": "g4-rename-impact",
+          "rep": "2",
+          "final_answer": "9 files import and call `handleError` from `ui/handleError`:\n\n- [AnswerForm.tsx](/repo/apps/feedback/components/home/AnswerForm.tsx) — `AnswerForm`\n- [SuggestForm.tsx](/repo/apps/feedback/components/home/SuggestForm.tsx) — `SuggestForm`\n- [page.tsx](/repo/apps/feedback/app/(root)/playground/page.tsx) — `Home`\n- [SignOnComponent.tsx](/repo/packages/login/SignOnComponent.tsx) — `SignOnComponent`\n- [Chatbot.tsx](/repo/apps/site/components/Chatbot.tsx) — `Chatbot`\n- [Contact.tsx](/repo/apps/site/components/Contact.tsx) — `Contact` (site)\n- [Business.tsx](/repo/apps/project/components/Business.tsx) — `Business`\n- [Contact.tsx](/repo/apps/project/components/Contact.tsx) — `Contact` (project)\n\nAdditionally, the helper declaration itself is in [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts)."
+        },
+        {
+          "arm": "pixel",
+          "task": "g4-rename-impact",
+          "rep": "2",
+          "final_answer": "Eight consumer files import and call the named symbol `handleError`:\n\n- [apps/feedback/app/(root)/playground/page.tsx](/repo/apps/feedback/app/(root)/playground/page.tsx:30) — `Home`\n- [apps/feedback/components/home/AnswerForm.tsx](/repo/apps/feedback/components/home/AnswerForm.tsx:11) — `AnswerForm`\n- [apps/feedback/components/home/SuggestForm.tsx](/repo/apps/feedback/components/home/SuggestForm.tsx:7) — `SuggestForm`\n- [apps/project/components/Business.tsx](/repo/apps/project/components/Business.tsx:45) — `Business`\n- [apps/project/components/Contact.tsx](/repo/apps/project/components/Contact.tsx:16) — `Contact`\n- [apps/site/components/Chatbot.tsx](/repo/apps/site/components/Chatbot.tsx:40) — `Chatbot`\n- [apps/site/components/Contact.tsx](/repo/apps/site/components/Contact.tsx:16) — `Contact`\n- [packages/login/SignOnComponent.tsx](/repo/packages/login/SignOnComponent.tsx:18) — `SignOnComponent`\n\nAdditionally, the defining export in [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4) must be renamed. The only other literal hit is generated analyzer output (`playground/dev-time-analyzerr/output/data.json`), not an import or call site."
+        },
+        {
+          "arm": "raw",
+          "task": "g7-lookup-handleerror",
+          "rep": "1",
+          "final_answer": "Defined at [packages/ui/handleError.ts:4](/repo/packages/ui/handleError.ts:4):\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+        },
+        {
+          "arm": "pixel",
+          "task": "g7-lookup-handleerror",
+          "rep": "1",
+          "final_answer": "`handleError` is defined at [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4).\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+        },
+        {
+          "arm": "raw",
+          "task": "g7-lookup-handleerror",
+          "rep": "2",
+          "final_answer": "[`packages/ui/handleError.ts`](/repo/packages/ui/handleError.ts:4), lines 4–8:\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+        },
+        {
+          "arm": "pixel",
+          "task": "g7-lookup-handleerror",
+          "rep": "2",
+          "final_answer": "`handleError` is defined at [packages/ui/handleError.ts:4](/repo/packages/ui/handleError.ts:4).\n\nExact signature:\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+        },
+        {
+          "arm": "raw",
+          "task": "g8-lookup-custommenu",
+          "rep": "1",
+          "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt has a named export:\n\n```ts\nexport const CustomMenu = defineMultiStyleConfig({variants})\n```\n\nThis is a Chakra UI multi-style Menu theme config, exporting `sidebar` and `navbar` variants. It is imported into [packages/ui/themes.tsx](/repo/packages/ui/themes.tsx:8) and registered as the `Menu` component theme."
+        },
+        {
+          "arm": "pixel",
+          "task": "g8-lookup-custommenu",
+          "rep": "1",
+          "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt is a named export:\n\n```ts\nexport const CustomMenu = defineMultiStyleConfig({variants})\n```\n\nIt exports a Chakra UI multi-style Menu configuration with `sidebar` and `navbar` variants. It is imported by [packages/ui/themes.tsx](/repo/packages/ui/themes.tsx:8) and registered as the theme’s `Menu` component."
+        },
+        {
+          "arm": "raw",
+          "task": "g8-lookup-custommenu",
+          "rep": "2",
+          "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports the named constant `CustomMenu`, a Chakra UI multi-style menu configuration created with `defineMultiStyleConfig({ variants })`. Its variants are `sidebar` and `navbar`."
+        },
+        {
+          "arm": "pixel",
+          "task": "g8-lookup-custommenu",
+          "rep": "2",
+          "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports a named constant, `CustomMenu`, created with Chakra UI’s `defineMultiStyleConfig`. It provides `sidebar` and `navbar` menu-item style variants."
+        }
+      ],
+      "paired": [
+        {
+          "task": "g4-rename-impact",
+          "complete_pairs": 2,
+          "token_pairs": 2,
+          "median_paired_token_saving_percent": -94.94422170772033,
+          "raw_median_seconds": 29,
+          "pixel_median_seconds": 42.5
+        },
+        {
+          "task": "g7-lookup-handleerror",
+          "complete_pairs": 2,
+          "token_pairs": 2,
+          "median_paired_token_saving_percent": -76.39673751360627,
+          "raw_median_seconds": 10,
+          "pixel_median_seconds": 23.5
+        },
+        {
+          "task": "g8-lookup-custommenu",
+          "complete_pairs": 2,
+          "token_pairs": 2,
+          "median_paired_token_saving_percent": -36.180679089138195,
+          "raw_median_seconds": 15.5,
+          "pixel_median_seconds": 17
+        }
+      ],
+      "receipts": [],
+      "sha256": {
+        "ranking.json": "e920c59e6d4a0c1e0ae4c1627314d134d8ca58dfc1d63a76ffdd44c456ad3d42",
+        "raw-g4-rename-impact-1.jsonl": "66bf6459bc4c04276b1b87745eab046ca5d7e690d8df7e65952ebbd5face6618",
+        "pixel-g4-rename-impact-1.jsonl": "e98937cfd4d54a0017e6575dfe53780619b5eea13290c849b6a0beb701b69dd9",
+        "raw-g4-rename-impact-2.jsonl": "9db5cc47e69f36e39c2aa6266521362b41b4322d314930b2eb29c230c65156b4",
+        "pixel-g4-rename-impact-2.jsonl": "4261e5bf68bffbbd1c5fb4bafb3a2f69744c46dd2510b66b0553a10c192b317d",
+        "raw-g7-lookup-handleerror-1.jsonl": "84ee7dfcb167f1bd422c390033bb601fbbc060656289cef16a88c9f4215d1429",
+        "pixel-g7-lookup-handleerror-1.jsonl": "7bd057c30f739b492cebd52e112dc1ee540e2ac75ec2fb91aede2161c405f805",
+        "raw-g7-lookup-handleerror-2.jsonl": "02b03b2728d17234c66cf03800770819098d326267c8efbb6cb7132e31eac905",
+        "pixel-g7-lookup-handleerror-2.jsonl": "742b329e73c17d8e387a39934a6e39c13a59d7b19a570fff81f5a6ba5bd707a7",
+        "raw-g8-lookup-custommenu-1.jsonl": "e6ddc0e21dc490563862e4820f42afa68efe5ad685e0a34ea51acd0e5dc42fb5",
+        "pixel-g8-lookup-custommenu-1.jsonl": "eea74054c02fc7b6d3ae6b3365d42bf4ec0bb17c0b83973660dd5966b994baf4",
+        "raw-g8-lookup-custommenu-2.jsonl": "746b5bec18121564736a60c6d1d2549632f01baeeafa51813913c99ff04c41b3",
+        "pixel-g8-lookup-custommenu-2.jsonl": "4a26310470e5fae0950d7670f0948ab1090136255037967b52bc653a659e5bed"
+      }
+    }
+  ]
+}

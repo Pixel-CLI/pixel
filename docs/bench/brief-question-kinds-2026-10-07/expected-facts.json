@@ -1,0 +1,169 @@
+[
+  {
+    "id": "qk-lookup",
+    "expected_facts": [
+      "The byte cap, operation cap, and deadline are distinct limits.",
+      "The rendered brief cap is 2,048 bytes (2 KiB).",
+      "The shared deadline is 750 ms and at most four operations may start."
+    ],
+    "false_claims": [
+      "The brief can start an unbounded number of operations.",
+      "The brief has no output-size cap.",
+      "The brief starts a daemon or rebuilds an index for every prompt."
+    ],
+    "source": [
+      "crates/pixel/src/execution_brief/chain.rs:33",
+      "crates/pixel/src/execution_brief/chain.rs:35",
+      "crates/pixel/src/execution_brief/chain.rs:37"
+    ],
+    "regex_rubric_role": "coverage signal only; semantic criteria require human/transcript review"
+  },
+  {
+    "id": "qk-impact",
+    "expected_facts": [
+      "Production process calls start_brief at task_hook.rs:1068; its definition starts at 1097.",
+      "The same-file test a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository exercises Claude and Codex prompt-submit, non-prompt events, Pi, missing prompt, and an undiscoverable repository.",
+      "The test establishes a bounded provider/event contract, not exhaustive graph callers."
+    ],
+    "false_claims": [
+      "A missing prompt or undiscoverable repository still starts the brief.",
+      "Every hook event starts a prompt brief.",
+      "Pi receives a prompt brief."
+    ],
+    "source": [
+      "crates/pixel/src/task_hook.rs:1068",
+      "crates/pixel/src/task_hook.rs:1097",
+      "crates/pixel/src/task_hook.rs:2153"
+    ],
+    "regex_rubric_role": "coverage signal only; semantic criteria require human/transcript review"
+  },
+  {
+    "id": "qk-flow",
+    "expected_facts": [
+      "Codex UserPromptSubmit maps to the prompt-submit task-event verb and the installed command includes task-event plus --provider codex.",
+      "The ordered flow is supported by source handoffs; it does not prove a live host forwarded or used the context.",
+      "task_hook::process starts the brief, start_brief calls execution_brief::chain::start, with_brief attaches completed text, and envelope returns it as additionalContext."
+    ],
+    "false_claims": [
+      "The brief path starts a daemon or builds an index.",
+      "The context field is produced by the retrieval module rather than wrapped by task_hook.",
+      "The current Codex hook is the retired pixel run-hook prompt-submit --provider codex command."
+    ],
+    "source": [
+      "crates/pixel-install/src/codex_config.rs:1044",
+      "crates/pixel-install/src/codex_config.rs:1054",
+      "crates/pixel/src/execution_brief/chain.rs:596",
+      "crates/pixel/src/execution_brief/chain.rs:722",
+      "crates/pixel/src/task_hook.rs:1015",
+      "crates/pixel/src/task_hook.rs:1062",
+      "crates/pixel/src/task_hook.rs:1097",
+      "crates/pixel/src/task_hook.rs:1148"
+    ],
+    "regex_rubric_role": "coverage signal only; semantic criteria require human/transcript review"
+  },
+  {
+    "id": "qk-diagnosis",
+    "expected_facts": [
+      "Shard presence alone is insufficient: the index must cover HEAD, and at least one evidence operation must answer for render to produce a brief. If all operations fail, it renders no brief.",
+      "The source snapshot for this run was freshly prepared; stale/missing behavior is supported by existing CLI tests, not by corrupting this run's graph.",
+      "With a stale graph and a current text index whose search succeeds, the brief can retain file evidence and names the graph failure under unresolved; graph callers are absent.",
+      "With no graph and a current text shard whose search succeeds, text file evidence remains, unresolved says the graph is not built, and the hook leaves the graph absent."
+    ],
+    "false_claims": [
+      "A stale or missing graph makes the brief disappear even when the text index is available.",
+      "Any existing text shard guarantees a rendered brief, regardless of its freshness or whether any operation succeeds.",
+      "Text evidence proves graph impact coverage is complete.",
+      "The hook renders a brief even when all evidence operations fail.",
+      "The prompt hook rebuilds the graph or index to answer the prompt."
+    ],
+    "source": [
+      "crates/pixel/src/execution_brief/chain.rs:1352",
+      "crates/pixel/src/execution_brief/chain.rs:1424",
+      "crates/pixel/src/execution_brief/chain.rs:469",
+      "crates/pixel/src/execution_brief/chain.rs:508",
+      "crates/pixel/src/execution_brief/chain.rs:723",
+      "crates/pixel/tests/cli/prompt_brief_cli.rs:204",
+      "crates/pixel/tests/cli/prompt_brief_cli.rs:261"
+    ],
+    "regex_rubric_role": "coverage signal only; semantic criteria require human/transcript review"
+  },
+  {
+    "id": "qk-configuration",
+    "expected_facts": [
+      "Do not present the retained legacy prompt-submit marker or old test fixture as the current installed command.",
+      "The Codex host event UserPromptSubmit maps to prompt-submit.",
+      "The current installed command is the configured Pixel executable followed by run-hook task-event --provider codex --event prompt-submit."
+    ],
+    "false_claims": [
+      "The Codex provider flag is omitted or names another provider.",
+      "The currently installed hook uses the old direct run-hook prompt-submit command.",
+      "The host event is a different Codex event."
+    ],
+    "source": [
+      "crates/pixel-install/src/codex_config.rs:1044",
+      "crates/pixel-install/src/codex_config.rs:1054",
+      "crates/pixel-install/src/codex_config.rs:203"
+    ],
+    "regex_rubric_role": "coverage signal only; semantic criteria require human/transcript review"
+  },
+  {
+    "id": "qk-tests",
+    "expected_facts": [
+      "The CLI pi_should_keep_its_own_decision_without_a_brief asserts both context and hookSpecificOutput are absent.",
+      "a_brief_should_become_the_context_the_envelope_delivers_to_the_host asserts a PIXEL:BRIEF context and a hookSpecificOutput object with hookEventName UserPromptSubmit and additionalContext for Claude and Codex.",
+      "start_brief returns none for Pi in a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository."
+    ],
+    "false_claims": [
+      "Codex receives the prompt brief in a field other than additionalContext.",
+      "Pi is included in start_brief.",
+      "The CLI Pi test expects a Codex-style hookSpecificOutput envelope."
+    ],
+    "source": [
+      "crates/pixel/src/task_hook.rs:2122",
+      "crates/pixel/src/task_hook.rs:2153",
+      "crates/pixel/tests/cli/prompt_brief_cli.rs:196"
+    ],
+    "regex_rubric_role": "coverage signal only; semantic criteria require human/transcript review"
+  },
+  {
+    "id": "qk-history",
+    "expected_facts": [
+      "It says the brief reads warm daemon/index/graph state read-only and never starts a daemon or builds an index.",
+      "The commit message is historical design evidence, not a measurement of model accuracy, live latency, or delivered context.",
+      "The prompt-submit path serves Claude Code and Codex; Pi is skipped. A stale or missing graph can leave text evidence with the reason under unresolved.",
+      "The requested commit records four operations, one shared 750 ms deadline, and a 2 KiB rendered cap."
+    ],
+    "false_claims": [
+      "Pi is covered by the start_brief path.",
+      "The brief may write or build graph/index state.",
+      "The commit proves that models use the brief or answer more accurately."
+    ],
+    "source": [
+      "crates/pixel/src/execution_brief/chain.rs:33",
+      "crates/pixel/src/task_hook.rs:1081",
+      "git commit 14feba456b479be165ab40ec14dde3958a865368"
+    ],
+    "regex_rubric_role": "coverage signal only; semantic criteria require human/transcript review"
+  },
+  {
+    "id": "qk-architecture",
+    "expected_facts": [
+      "The module path is a code boundary, not a complete architecture or exhaustive call graph.",
+      "execution_brief::chain owns bounded retrieval and renders a Pending brief; task_hook owns translating that text into the host additionalContext envelope.",
+      "task_hook::process receives the host event and payload, calls start_brief, attaches the pending brief with with_brief, then calls envelope."
+    ],
+    "false_claims": [
+      "The recovered handoff path proves the complete system architecture.",
+      "execution_brief::chain constructs the Codex hookSpecificOutput envelope.",
+      "task_hook contains the bounded search/find-symbol/impact retrieval implementation."
+    ],
+    "source": [
+      "crates/pixel/src/execution_brief/chain.rs:596",
+      "crates/pixel/src/execution_brief/chain.rs:722",
+      "crates/pixel/src/task_hook.rs:1062",
+      "crates/pixel/src/task_hook.rs:1148",
+      "crates/pixel/src/task_hook.rs:980"
+    ],
+    "regex_rubric_role": "coverage signal only; semantic criteria require human/transcript review"
+  }
+]
