@@ -283,3 +283,4 @@ fn structural_checks_run_alongside_argv_checks_in_one_verify() {
     assert_eq!(receipt(&verified, "content")["outcome"], "failed");
     assert_eq!(receipt(&verified, "diff-scope")["outcome"], "passed");
 }
+

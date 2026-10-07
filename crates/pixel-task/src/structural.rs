@@ -10,7 +10,7 @@
 //! behind a verdict, `complete` is false and the cap is named in `note`, so
 //! a capped check never claims an absence it did not attest.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -173,16 +173,29 @@ pub fn diff_in_scope(diff_paths: &[String], manifest_paths: &[String]) -> Struct
 /// dropped edge, named with both endpoints.
 pub fn graph_resolves(before: &[CallEdge], after: &[CallEdge]) -> StructuralResult {
     let capped = before.len() > MAX_GRAPH_EDGES || after.len() > MAX_GRAPH_EDGES;
-    let after_set: HashSet<&CallEdge> = after.iter().take(MAX_GRAPH_EDGES).collect();
+    // Count (src, dst) endpoints from the full after input so a line-number
+    // change in a resolved edge does not produce a false dropped-edge witness.
+    let mut after_counts: HashMap<(&str, &str), usize> = HashMap::new();
+    for edge in after {
+        *after_counts
+            .entry((edge.src.as_str(), edge.dst.as_str()))
+            .or_default() += 1;
+    }
     let mut dropped: Vec<String> = before
         .iter()
         .take(MAX_GRAPH_EDGES)
-        .filter(|edge| !after_set.contains(*edge))
-        .map(|edge| {
-            format!(
-                "dropped edge: {} -> {} (site line {})",
-                edge.src, edge.dst, edge.site_line
-            )
+        .filter_map(|edge| {
+            let key = (edge.src.as_str(), edge.dst.as_str());
+            match after_counts.get_mut(&key) {
+                Some(count) if *count > 0 => {
+                    *count -= 1;
+                    None
+                }
+                _ => Some(format!(
+                    "dropped edge: {} -> {} (site line {})",
+                    edge.src, edge.dst, edge.site_line
+                )),
+            }
         })
         .collect();
     dropped.sort();
@@ -195,9 +208,9 @@ pub fn graph_resolves(before: &[CallEdge], after: &[CallEdge]) -> StructuralResu
     let mut notes: Vec<String> = Vec::new();
     if capped {
         notes.push(format!(
-            "edge comparison capped at {MAX_GRAPH_EDGES}; {} before / {} after compared",
+            "edge comparison capped at {MAX_GRAPH_EDGES}; {} before edges compared against all {} after edges",
             before.len().min(MAX_GRAPH_EDGES),
-            after.len().min(MAX_GRAPH_EDGES)
+            after.len()
         ));
     }
     if witness_truncated {
@@ -372,14 +385,17 @@ mod tests {
     }
 
     #[test]
-    fn graph_resolves_edge_moved_to_a_new_site_line_is_dropped() {
-        // Re-extraction rewrites the site line; the edge identity includes it,
-        // so a moved site is reported rather than silently passing.
+    fn graph_resolves_passes_when_endpoints_match_despite_site_line_change() {
+        // Re-extraction may rewrite site lines on an ordinary source edit;
+        // the check must count (src, dst) endpoints, not the full edge
+        // (which includes site_line), so a mere line move does not produce a
+        // false dropped-edge witness.
         let before = vec![edge("a::f", "b::g", 3)];
         let after = vec![edge("a::f", "b::g", 4)];
         let result = graph_resolves(&before, &after);
-        assert!(!result.passed);
-        assert_eq!(result.witnesses.len(), 1);
+        assert!(result.passed, "moved site line must not drop the edge");
+        assert!(result.complete);
+        assert!(result.witnesses.is_empty());
     }
 
     #[test]
@@ -392,11 +408,14 @@ mod tests {
 
     #[test]
     fn graph_resolves_caps_compared_edges_and_reports_incomplete() {
+        // Use distinct (src, dst) pairs that actually drop in the after set
+        // so the cap truncates witnesses rather than the endpoint matching
+        // silently resolving every edge.
         let before: Vec<CallEdge> = (0..(MAX_GRAPH_EDGES + 10))
-            .map(|i| edge(&format!("a{i}::f"), "b::g", i as u32))
+            .map(|i| edge(&format!("a{i}::f"), "b::g", 1))
             .collect();
         let after: Vec<CallEdge> = (0..(MAX_GRAPH_EDGES + 10))
-            .map(|i| edge(&format!("a{i}::f"), "b::g", i as u32 + 1))
+            .map(|i| edge(&format!("c{i}::f"), "b::g", 1))
             .collect();
         let result = graph_resolves(&before, &after);
         assert!(!result.passed);
