@@ -345,6 +345,17 @@ enum Command {
         #[arg(long)]
         precision: bool,
     },
+    /// `pixel brief "<prompt>"` — the evidence brief a prompt-submit hook
+    /// injects for Claude and Codex, on stdout. Harnesses without a
+    /// prompt-submit context channel (Pi's `before_agent_start` extension)
+    /// call this directly. Empty output means no brief (a non-code prompt,
+    /// an unindexed repository, or `PIXEL_BRIEF=0`).
+    Brief {
+        /// The user's prompt, verbatim.
+        prompt: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Build a deterministic, bounded execution brief from scope-task evidence.
     ExecutionBrief {
         /// Task/feature description.
@@ -4651,6 +4662,7 @@ fn run() -> Result<(), String> {
         _ if matches!(
             &cli.command,
             Command::SearchLikeRg { .. }
+                | Command::Brief { .. }
                 | Command::RunHook {
                     cmd: HookCmd::Retired(_)
                 }
@@ -5025,6 +5037,16 @@ fn run_command(
                 );
             }
             Ok(())
+        }
+        Command::Brief { prompt, path } => {
+            let root = discover_root(&path)?;
+            let brief = execution_brief::chain::start(&prompt, &root)
+                .and_then(execution_brief::chain::Pending::finish);
+            if let Some(text) = brief {
+                write_stdout(&text)
+            } else {
+                Ok(())
+            }
         }
         Command::ExecutionBrief {
             task,

@@ -1,0 +1,14 @@
+{
+  "id": "g8-lookup-custommenu",
+  "suite": "generic",
+  "task_class": "exact-identifier",
+  "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+  "mode": "answer",
+  "max_turns": 30,
+  "prompt": "Where is `CustomMenu` defined in this repository, and what does it export?",
+  "must": [
+    { "pattern": "packages/ui/CustomMenu\\.ts", "points": 4, "why": "definition file" },
+    { "pattern": "defineMultiStyleConfig", "points": 3, "why": "what it exports" },
+    { "pattern": "packages/ui/CustomMenu\\.ts[\\s\\S]{0,100}(?::48\\b|line\\s+48)", "points": 3, "why": "definition path and line 48" }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "g7-lookup-handleerror",
+  "suite": "generic",
+  "task_class": "exact-identifier",
+  "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+  "mode": "answer",
+  "max_turns": 30,
+  "prompt": "Where is `handleError` defined in this repository? Give the file path, the line, and the exact signature.",
+  "must": [
+    { "pattern": "packages/ui/handleError\\.ts", "points": 4, "why": "definition file" },
+    { "pattern": "packages/ui/handleError\\.ts[\\s\\S]{0,100}(?::4\\b|line\\s+4)", "points": 3, "why": "definition path and line 4" },
+    { "pattern": "(?:const|function)\\s+handleError[\\s\\S]{0,120}(?:Error|string)", "points": 3, "why": "handleError signature mentions param or return type" }
+  ]
+}

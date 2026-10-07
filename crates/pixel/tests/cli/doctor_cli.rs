@@ -657,12 +657,11 @@ fn devin_hooks(entries: &[(&str, &str)]) -> serde_json::Value {
     serde_json::Value::Object(hooks)
 }
 
-/// Devin keeps its native retrieval, so `pixel install` registers no Devin
-/// hook. The check is green with no `~/.config/devin`, green on a config
-/// that holds only foreign hooks naming the same verbs (`doctor` judges what
-/// Pixel wrote), red with the install as its fix while a hook an earlier
-/// release registered remains, and green again once `pixel install` has
-/// removed it, the foreign hooks intact.
+/// Devin keeps its native retrieval. The check is green with no
+/// `~/.config/devin`, green on a config that holds only foreign hooks naming
+/// the same verbs, and red while retired Pixel hooks remain. `pixel install`
+/// removes those retired hooks, registers current task hooks, and keeps the
+/// foreign hooks intact.
 #[test]
 fn doctor_devin_hooks_is_green_without_a_pixel_hook_and_red_until_install_removes_one() {
     let (home, repo) = fixture("devin-hooks-absent");
@@ -690,7 +689,7 @@ fn doctor_devin_hooks_is_green_without_a_pixel_hook_and_red_until_install_remove
     assert_eq!(report["checks"][0]["status"], "green", "{report}");
     assert_eq!(
         report["checks"][0]["summary"],
-        "no Pixel hook; the agent keeps its native tools"
+        "no retired Pixel hook; the agent keeps its own tools"
     );
 
     // An earlier release's Pixel hooks beside the foreign ones: red.
@@ -747,5 +746,14 @@ fn doctor_devin_hooks_is_green_without_a_pixel_hook_and_red_until_install_remove
         .map(|(event, command)| ((*event).to_string(), (*command).to_string()))
         .collect();
     expected.sort();
-    assert_eq!(commands, expected, "{value}");
+    assert!(
+        expected.iter().all(|hook| commands.contains(hook)),
+        "foreign hooks were not preserved: {value}"
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|(_, command)| command.contains("/usr/local/bin/pixel run-hook")),
+        "retired Pixel hooks remain: {value}"
+    );
 }

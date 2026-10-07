@@ -791,9 +791,23 @@ fn global_install_removes_the_cursor_zcode_and_antigravity_integrations_an_earli
         read_json(&gemini.join("config.json")),
         serde_json::json!({"plugins": {"other": {"enabled": true}}, "keep": "config"})
     );
+    let exe_path = fs::canonicalize(fake_pixel_exe(home))
+        .unwrap()
+        .display()
+        .to_string();
     assert_eq!(
         read_json(&gemini.join("hooks.json")),
-        serde_json::json!({"mine": mine})
+        serde_json::json!({
+            "mine": mine,
+            "pixel-brief": {
+                "enabled": true,
+                "PreInvocation": [{
+                    "type": "command",
+                    "command": format!("'{exe_path}' run-hook task-event --provider antigravity --event prompt-submit"),
+                    "timeout": 10
+                }]
+            }
+        })
     );
     assert_eq!(antigravity_check().status, CheckStatus::Green);
 }
@@ -1986,9 +2000,8 @@ fn routing_isolated_provider_child() {
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
-    // Claude and Codex get only synchronous task-event hooks. Devin gets
-    // none. No automatic retrieval callbacks or hook scripts are deployed
-    // globally.
+    // Every provider gets only synchronous task-event hooks. No automatic
+    // retrieval callbacks or hook scripts are deployed globally.
     install(&opts).unwrap();
     let first = fs::read(&config).unwrap();
     install(&opts).unwrap();
@@ -1998,11 +2011,7 @@ fn routing_isolated_provider_child() {
         "repeat install must leave the provider config stable"
     );
     let installed: serde_json::Value = serde_json::from_slice(&first).unwrap();
-    let value = if provider == "devin" {
-        installed.clone()
-    } else {
-        without_task_hooks(&installed, &provider, &exe)
-    };
+    let value = without_task_hooks(&installed, &provider, &exe);
     match provider.as_str() {
         "codex" => {
             assert_eq!(value["hooks"], serde_json::json!({}), "{installed}");
@@ -2033,10 +2042,18 @@ fn routing_isolated_provider_child() {
             );
         }
         "devin" => {
-            // Devin keeps its native retrieval: the lifecycle hook an earlier
-            // release registered under this quoted executable path is
-            // recognised and removed, and nothing replaces it.
-            assert_eq!(installed, serde_json::json!({}), "{installed}");
+            // The lifecycle hook an earlier release registered under this
+            // quoted executable path is recognised and removed; the
+            // task-event suite replaces it.
+            assert_eq!(value["hooks"], serde_json::json!({}), "{installed}");
+            let command = pixel_commands(&installed, "UserPromptSubmit")[0].clone();
+            assert!(command.contains("task-event --provider devin"), "{command}");
+            assert!(
+                command.starts_with('\'')
+                    && command.contains("directory/pixel' run-hook")
+                    && command.contains("'\\''"),
+                "the executable path must survive spaces and quotes: {command}"
+            );
         }
         _ => unreachable!("unexpected provider {provider}"),
     }
@@ -2625,12 +2642,17 @@ fn install_removes_the_opencode_prompt_and_plugin_an_earlier_release_wrote() {
     );
 
     // Already native: OpenCode present without anything of Pixel's gains no
-    // block, no plugin and no config.
+    // block and no config; the brief plugin is the one file install adds.
     fs::create_dir_all(&opencode).unwrap();
     fs::write(&agents_md, "user rules stay\n").unwrap();
     install_for_shell(home, TEST_SHELL);
     assert_eq!(fs::read_to_string(&agents_md).unwrap(), "user rules stay\n");
-    assert!(!opencode.join("plugins").exists() && !config.exists());
+    assert!(!config.exists());
+    let plugins = fs::read_dir(opencode.join("plugins"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(plugins, ["pixel-brief.js"]);
 
     // What an earlier release left.
     fs::write(
@@ -6558,13 +6580,14 @@ fn global_install_removes_the_devin_lifecycle_hooks_an_earlier_release_wrote() {
     );
 
     install(&options).unwrap();
+    let installed = read_json(&devin_config);
     assert_eq!(
-        read_json(&devin_config),
+        without_task_hooks(&installed, "devin", &exe),
         serde_json::json!({
             "agent": {"model": "swe-2-medium"},
             "hooks": {"SessionStart": [foreign]},
         }),
-        "only Pixel's hooks are removed"
+        "only Pixel's retired hooks are removed: {installed}"
     );
     assert_eq!(devin_check().status, CheckStatus::Green);
 
@@ -6640,17 +6663,23 @@ fn doctor_devin_hooks_judge_only_what_pixel_wrote() {
     fs::write(&config, serde_json::json!({"hooks": hooks}).to_string()).unwrap();
     assert_eq!(status(dir.path()), CheckStatus::Red);
 
+    let exe = fake_pixel_exe(dir.path());
     install(&InstallOptions {
         repo: None,
         home: Some(dir.path().to_path_buf()),
-        executable_path: Some(fake_pixel_exe(dir.path())),
+        executable_path: Some(exe.clone()),
         claude_executable: Some(fake_claude_exe(dir.path(), CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     })
     .unwrap();
     assert_eq!(status(dir.path()), CheckStatus::Green);
-    assert_eq!(read_json(&config), serde_json::json!({"hooks": foreign}));
+    let installed = read_json(&config);
+    assert_eq!(
+        without_task_hooks(&installed, "devin", &exe),
+        serde_json::json!({"hooks": foreign}),
+        "the foreign groups survive beside the task hooks: {installed}"
+    );
 }
 
 /// Doctor options that run the one Codex hook-review check under `home`.

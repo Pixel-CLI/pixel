@@ -11,11 +11,12 @@ from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from hook_audit import ALLOWED, PIXEL, audit, run_hook
+from hook_audit import ALLOWED, PIXEL, PROMPT_SHAPES, REQUIRED_NON_PROMPT, audit, run_hook
 
 
-def pixel_hooks():
-    commands = sorted(ALLOWED)
+def pixel_hooks(prompt_shape=None):
+    prompt_shape = prompt_shape or (PIXEL, "run-hook", "prompt-submit", "--provider", "codex")
+    commands = sorted(REQUIRED_NON_PROMPT | {prompt_shape})
     return {"hooks": {f"event-{index}": [{"type": "command", "command": " ".join(command)}]
                       for index, command in enumerate(commands)}}
 
@@ -37,7 +38,7 @@ class HookAuditTest(unittest.TestCase):
         audit("raw", self.home, self.repo, receipt, "1", self.root / "no-system-config")
         self.assertEqual(json.loads(receipt.read_text())["commands"], [])
 
-    def test_pixel_requires_exact_11_and_wraps_one_prompt_hook(self):
+    def test_pixel_requires_all_hooks_and_wraps_one_prompt_hook(self):
         hooks = pixel_hooks()
         path = self.home / "hooks.json"
         path.write_text(json.dumps(hooks))
@@ -48,6 +49,58 @@ class HookAuditTest(unittest.TestCase):
         self.assertEqual(len(wrapped), 1)
         self.assertIn("/out/pixel-hook-2.jsonl", wrapped[0])
         self.assertTrue(json.loads(receipt.read_text())["trust_bypass_safe"])
+
+    def test_pixel_accepts_task_event_prompt_shape(self):
+        prompt_shape = (PIXEL, "run-hook", "task-event", "--provider", "codex", "--event", "prompt-submit")
+        hooks = pixel_hooks(prompt_shape)
+        path = self.home / "hooks.json"
+        path.write_text(json.dumps(hooks))
+        audit("pixel", self.home, self.repo, self.root / "pixel.json", "2", self.root / "no-system-config")
+        updated = json.loads(path.read_text())
+        self.assertEqual(sum("arena-hook-audit.py" in command for command in _commands(updated)), 1)
+
+    def test_pixel_rejects_missing_metrics_hook(self):
+        hooks = pixel_hooks()
+        hooks["hooks"] = {
+            key: value for key, value in hooks["hooks"].items()
+            if "metrics" not in value[0]["command"]
+        }
+        (self.home / "hooks.json").write_text(json.dumps(hooks))
+        with self.assertRaisesRegex(RuntimeError, "missing or duplicating"):
+            audit("pixel", self.home, self.repo, self.root / "pixel.json", "1", self.root / "no-system-config")
+
+    def test_pixel_rejects_missing_task_event_hook(self):
+        hooks = pixel_hooks()
+        hooks["hooks"] = {
+            key: value for key, value in hooks["hooks"].items()
+            if "session-start" not in value[0]["command"]
+        }
+        (self.home / "hooks.json").write_text(json.dumps(hooks))
+        with self.assertRaisesRegex(RuntimeError, "missing or duplicating"):
+            audit("pixel", self.home, self.repo, self.root / "pixel.json", "1", self.root / "no-system-config")
+
+    def test_pixel_rejects_zero_prompt_hooks(self):
+        hooks = pixel_hooks()
+        hooks["hooks"] = {
+            key: value for key, value in hooks["hooks"].items()
+            if "prompt-submit" not in value[0]["command"]
+        }
+        (self.home / "hooks.json").write_text(json.dumps(hooks))
+
+        with self.assertRaisesRegex(RuntimeError, "missing or duplicating"):
+            audit("pixel", self.home, self.repo, self.root / "pixel.json", "1", self.root / "no-system-config")
+
+    def test_pixel_rejects_duplicated_required_non_prompt_hook(self):
+        hooks = pixel_hooks()
+        duplicate = next(
+            value[0] for value in hooks["hooks"].values()
+            if "run-hook metrics" in value[0]["command"]
+        )
+        hooks["hooks"]["duplicate-metrics"] = [duplicate.copy()]
+        (self.home / "hooks.json").write_text(json.dumps(hooks))
+
+        with self.assertRaisesRegex(RuntimeError, "missing or duplicating"):
+            audit("pixel", self.home, self.repo, self.root / "pixel.json", "1", self.root / "no-system-config")
 
     def test_foreign_hook_fails_closed(self):
         (self.home / "hooks.json").write_text(json.dumps({"hooks": {"UserPromptSubmit": [

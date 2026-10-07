@@ -244,3 +244,40 @@ fn a_missing_graph_should_leave_the_text_evidence_and_build_nothing() {
     );
     assert!(!root.join(".pixel/graph.v2.db").exists());
 }
+
+/// `pixel brief "<prompt>"` is the same chain, on stdout, for harnesses
+/// without a prompt-submit context channel (Pi's extension calls it).
+#[test]
+fn the_brief_command_should_print_the_brief_or_stay_silent() {
+    let root = indexed("brief-cmd");
+    let output = pixel_command()
+        .current_dir(&*root)
+        .args(["brief", RENAME, "--metrics", "off"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.starts_with("[PIXEL:BRIEF]"), "{text}");
+    assert!(text.contains("confidence:"), "{text}");
+
+    let silent = pixel_command()
+        .current_dir(&*root)
+        .args(["brief", "thanks, that looks good", "--metrics", "off"])
+        .output()
+        .unwrap();
+    assert!(silent.status.success());
+    assert!(silent.stdout.is_empty());
+}
+
+#[test]
+fn the_brief_command_should_leave_an_unindexed_repository_untouched() {
+    let root = fixture("brief-cmd-unindexed");
+    let output = pixel_command()
+        .current_dir(&*root)
+        .args(["brief", RENAME, "--metrics", "off"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert!(!root.join(".pixel").exists());
+}

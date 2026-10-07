@@ -1,0 +1,1 @@
+**brief:** Weak code-related prompts receive bounded intent classification and relevant repository evidence. Ambiguous symbols resolve against path anchors before impact lookup; strong prompts skip classification, while uncertain or unavailable results fall back to heuristics.

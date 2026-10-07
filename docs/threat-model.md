@@ -169,12 +169,12 @@ repository file.
   `crates/pixel/src/decide_remote.rs` (`Preset::base`), over `ureq` with
   `rustls-webpki-roots`; the question and its context are sent, each capped
   at `TEXT_CAP_CHARS` (32 768). `PIXEL_REMOTE_BASE` overrides the endpoint.
-- The prompt hook's task-intent question, when classify is enabled
-  (`prompt_intent::hook_intent`, `HOOK_CALL_TIMEOUT` 300 ms), carries the full
-  prompt to the Ollaya endpoint the global config names
-  (`classify_setup::local_base`: the launch entry's `base`, else
-  `decide_ollaya::DEFAULT_BASE` on loopback). A non-loopback base receives
-  every prompt the hook classifies.
+- The prompt-submit brief's optional intent judge carries the full prompt
+  only to `decide_ollaya::DEFAULT_BASE` (loopback), passed explicitly with
+  `--if-warm --engine ollaya --ollaya-url`. It does not inherit the configured
+  classify engine or endpoint, does not start the local engine, and never
+  falls back to a remote provider; a cold engine leaves the heuristic plan
+  unchanged (`execution_brief::intent::judge`, 400 ms child budget).
 - `pixel web-search`: SearXNG at `PIXEL_WEB_SEARCH_URL`, Perplexity with a
   key, else DuckDuckGo then Wikipedia (`crates/pixel/src/web_search.rs`).
 - The release check: one `HEAD` to `RELEASES_LATEST_URL`
@@ -485,12 +485,13 @@ hold.
 - **Scenario**: repository text or prompts reach a third party.
 - **Mitigation**: nothing is sent without an explicit command or setting:
   `classify` sends its capped input to the configured endpoint, `web-search`
-  sends its query, the prompt hook sends the prompt to the local engine only,
-  the release check sends no repository data (SECURITY.md, "Security model").
+  sends its query, and the automatic prompt-submit brief judge is pinned to an
+  already-warm loopback Ollaya endpoint with no remote fallback; the release
+  check sends no repository data (SECURITY.md, "Security model").
 - **Status**: Mitigated.
-- **Residual**: the local engine's base comes from the global config and is
-  not restricted to loopback; a non-local base would receive every prompt
-  while `classify.enabled` is on.
+- **Residual**: an explicit `pixel classify` invocation may use a configured
+  remote provider or non-loopback local endpoint; the prompt hook never makes
+  that choice on the user's behalf.
 
 ### T18. A downloaded model or tool is tampered with (T, B6)
 
@@ -617,6 +618,7 @@ hold.
 | Planted history database | `FactsStore::needs_rebuild`, `_pixel_marker` | `open_should_wipe_a_planted_history_database` (both refusals: no marker, foreign `created_by`; asserts the planted tables are gone and the marker is Pixel's); `concurrent_open_on_poisoned_db_never_ioerrors` covers the rebuild path |
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
 | Hook payload cap | `hook_input::read_bounded` | the `read_bounded` tests in `hook_input.rs` |
+| Prompt-submit intent judge | `execution_brief::intent::judge` | subprocess JSON, empty stdout and invalid UTF-8 fallback tests in `intent.rs` |
 | Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask` (`main.rs`) |
 | Keys over clear text | `sends_in_clear_text` | `a_key_never_leaves_the_machine_over_cleartext_http`, `only_plain_http_to_another_host_counts_as_clear_text` |
 | Untrusted shard files | `Shard::open` | `malformed_shard_rejected_gracefully`, `corrupt_posting_cannot_escape_section_or_overflow_delta` (`shard.rs`) |

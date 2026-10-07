@@ -222,7 +222,7 @@ pub(crate) const TASK_HOOK_EVENTS: &[(&str, &str)] = &[
 
 fn task_hook_verb(verb: &str) -> bool {
     let words: Vec<_> = verb.split_whitespace().collect();
-    matches!(words.as_slice(), ["task-event", "--provider", "claude" | "codex" | "pi", "--event", event]
+    matches!(words.as_slice(), ["task-event", "--provider", "claude" | "codex" | "pi" | "devin" | "gemini" | "antigravity", "--event", event]
         if TASK_HOOK_EVENTS.iter().any(|(_, name)| name == event)
             || matches!(*event, "tool-failure" | "interrupt" | "model-response" | "user-bash"))
 }
@@ -364,6 +364,17 @@ pub(crate) fn task_hooks_registered(value: &Value, provider: Provider, exe: &Pat
 /// entries an earlier install stacked.
 pub(crate) fn remove_pixel_hooks(hooks: &mut Map<String, Value>, exe: &Path) {
     remove_matching_hooks(hooks, |command| is_pixel_hook(command, exe));
+}
+
+/// Remove Pixel's retired hook commands — every pixel verb other than the
+/// `task-event` entries the current install owns. Devin's sweep uses this so
+/// a repeat install leaves the task hooks it registered in place; uninstall
+/// still removes everything through [`remove_pixel_hooks`].
+pub(crate) fn remove_retired_pixel_hooks(hooks: &mut Map<String, Value>, exe: &Path) {
+    remove_matching_hooks(hooks, |command| {
+        is_pixel_hook(command, exe)
+            && !pixel_run_hook_verb(command, exe).is_some_and(|verb| verb.starts_with("task-event"))
+    });
 }
 
 /// Remove matching commands without disturbing foreign hooks or group metadata.
@@ -1326,6 +1337,27 @@ fn commands(groups: &[Value]) -> impl Iterator<Item = &str> {
         .filter_map(|group| group.get("hooks").and_then(Value::as_array))
         .flatten()
         .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+}
+
+/// Whether any hook command in a settings value is one of Pixel's other than
+/// a `task-event` entry: a file Pixel's current install legitimately fills
+/// with task hooks may carry nothing else. `install.devin-hooks` uses this —
+/// the task hooks there are the install's own product, not retired residue.
+pub(crate) fn has_retired_pixel_hook(value: &Value, exe: &Path) -> bool {
+    value
+        .get("hooks")
+        .and_then(Value::as_object)
+        .is_some_and(|events| {
+            events
+                .values()
+                .filter_map(Value::as_array)
+                .flat_map(|groups| commands(groups))
+                .any(|command| {
+                    is_pixel_hook(command, exe)
+                        && !pixel_run_hook_verb(command, exe)
+                            .is_some_and(|verb| verb.starts_with("task-event"))
+                })
+        })
 }
 
 /// Whether any hook command in a settings value (`{"hooks": {<event>: [...]}}`)

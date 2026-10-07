@@ -26,6 +26,9 @@ pub enum TaskProvider {
     Claude,
     Codex,
     Pi,
+    Devin,
+    Gemini,
+    Antigravity,
 }
 
 impl TaskProvider {
@@ -34,6 +37,20 @@ impl TaskProvider {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Pi => "pi",
+            Self::Devin => "devin",
+            Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
+        }
+    }
+
+    /// The host's name for the prompt-submission event: Gemini calls it
+    /// `BeforeAgent`; Antigravity's closest event is `PreInvocation`, gated
+    /// on `invocationNum == 0`. The rest share Claude's `UserPromptSubmit`.
+    fn prompt_event_name(self) -> &'static str {
+        match self {
+            Self::Gemini => "BeforeAgent",
+            Self::Antigravity => "PreInvocation",
+            _ => "UserPromptSubmit",
         }
     }
 }
@@ -983,8 +1000,19 @@ fn envelope(provider: TaskProvider, event: TaskHookEvent, decision: &Value) -> V
             json!({"continue": false, "stopReason": reason})
         }
         (_, _) if decision.get("context").and_then(Value::as_str).is_some() => {
+            // Antigravity injects steps into the trajectory, not a
+            // hookSpecificOutput block; every other provider shares the
+            // Claude contract, with Gemini naming the event BeforeAgent.
+            if provider == TaskProvider::Antigravity && event == TaskHookEvent::PromptSubmit {
+                return json!({"injectSteps": [{"ephemeralMessage": decision["context"]}]});
+            }
+            let event_name = if event == TaskHookEvent::PromptSubmit {
+                provider.prompt_event_name()
+            } else {
+                event.host_name()
+            };
             json!({"hookSpecificOutput": {
-                "hookEventName": event.host_name(), "additionalContext": decision["context"]
+                "hookEventName": event_name, "additionalContext": decision["context"]
             }})
         }
         _ => json!({}),
@@ -1049,6 +1077,21 @@ fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
     envelope(provider, event, &with_brief(decision, brief))
 }
 
+fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -> Option<String> {
+    if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {
+        return None;
+    }
+    match provider {
+        TaskProvider::Antigravity => {
+            if payload.get("invocationNum").and_then(Value::as_u64) != Some(0) {
+                return None;
+            }
+            antigravity_prompt(payload)
+        }
+        _ => string(payload, &["prompt"]).map(str::to_string),
+    }
+}
+
 /// Start the evidence brief for a Claude or Codex prompt; Pi, every other
 /// event and a prompt outside a repository start none.
 fn start_brief(
@@ -1056,12 +1099,47 @@ fn start_brief(
     event: TaskHookEvent,
     payload: &Value,
 ) -> Option<crate::execution_brief::chain::Pending> {
-    if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {
-        return None;
-    }
-    let prompt = string(payload, &["prompt"])?;
+    let prompt = brief_prompt(provider, event, payload)?;
     let root = crate::discover_root(&payload_cwd(payload)).ok()?;
-    crate::execution_brief::chain::start(prompt, &root)
+    crate::execution_brief::chain::start(&prompt, &root)
+}
+
+/// The latest user turn in the transcript `transcriptPath` points at. The
+/// file is JSONL; a turn is any entry whose role reads "user", its text the
+/// `content`/`text` field (string or a parts array of `{"text": ...}`).
+/// Tolerant on purpose: a transcript shape the reader cannot parse yields
+/// no brief, never a hook failure.
+fn antigravity_prompt(payload: &Value) -> Option<String> {
+    let path = string(payload, &["transcriptPath", "transcript_path"])?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut last: Option<String> = None;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let role = entry["role"].as_str().or_else(|| entry["type"].as_str());
+        if role != Some("user") && role != Some("human") {
+            continue;
+        }
+        let content = entry["content"].as_str().map_or_else(
+            || {
+                entry["text"].as_str().map(str::to_string).or_else(|| {
+                    entry["content"].as_array().map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|part| part["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                })
+            },
+            |text| Some(text.to_string()),
+        );
+        if let Some(content) = content.filter(|text| !text.trim().is_empty()) {
+            last = Some(content);
+        }
+    }
+    last
 }
 
 /// `decision` with the brief as its `context`, which the envelope delivers as
@@ -2035,6 +2113,7 @@ mod tests {
             },
             Duration::from_secs(5),
             |_| Box::new(OneFile),
+            |_, _| None,
         )
         .expect("a code prompt in an open gate starts a brief")
     }
@@ -2109,5 +2188,106 @@ mod tests {
             .is_none()
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn antigravity_prompt_should_parse_user_text_and_ignore_other_roles() {
+        let path = std::env::temp_dir().join(format!(
+            "pixel-antigravity-transcript-{}",
+            std::process::id()
+        ));
+        for (content, field, expected) in [
+            (json!("string prompt"), "content", "string prompt"),
+            (json!("text prompt"), "text", "text prompt"),
+            (
+                json!([{"text":"first part"}, {"image":"ignored"}, {"text":"second part"}]),
+                "content",
+                "first part\nsecond part",
+            ),
+        ] {
+            let mut user = json!({"role":"user"});
+            user[field] = content;
+            std::fs::write(
+                &path,
+                [
+                    user.to_string(),
+                    json!({"role":"assistant","content":"assistant text"}).to_string(),
+                ]
+                .join("\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                antigravity_prompt(&json!({"transcriptPath":path})).as_deref(),
+                Some(expected)
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn prompt_dispatch_should_gate_antigravity_and_accept_gemini_before_agent() {
+        let path =
+            std::env::temp_dir().join(format!("pixel-antigravity-dispatch-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            json!({"role":"user","content":"where is fetchUser defined?"}).to_string(),
+        )
+        .unwrap();
+        let antigravity = json!({"invocationNum":0,"transcriptPath":path});
+        assert_eq!(
+            brief_prompt(
+                TaskProvider::Antigravity,
+                TaskHookEvent::PromptSubmit,
+                &antigravity
+            )
+            .as_deref(),
+            Some("where is fetchUser defined?")
+        );
+        assert!(
+            brief_prompt(
+                TaskProvider::Antigravity,
+                TaskHookEvent::PromptSubmit,
+                &json!({"invocationNum":1,"transcriptPath":path})
+            )
+            .is_none()
+        );
+        assert_eq!(
+            brief_prompt(
+                TaskProvider::Gemini,
+                TaskHookEvent::PromptSubmit,
+                &json!({"prompt":"where is fetchUser defined?"})
+            )
+            .as_deref(),
+            Some("where is fetchUser defined?")
+        );
+        assert!(
+            brief_prompt(
+                TaskProvider::Gemini,
+                TaskHookEvent::SessionStart,
+                &json!({"prompt":"where is fetchUser defined?"})
+            )
+            .is_none()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn gemini_and_antigravity_should_receive_their_prompt_context_envelopes() {
+        let decision = json!({"decision":"observe","context":"[PIXEL:BRIEF]\nfiles: src/a.ts:2"});
+        assert_eq!(
+            envelope(TaskProvider::Gemini, TaskHookEvent::PromptSubmit, &decision),
+            json!({"hookSpecificOutput":{
+                "hookEventName":"BeforeAgent",
+                "additionalContext":"[PIXEL:BRIEF]\nfiles: src/a.ts:2"
+            }})
+        );
+        assert_eq!(
+            envelope(
+                TaskProvider::Antigravity,
+                TaskHookEvent::PromptSubmit,
+                &decision
+            ),
+            json!({"injectSteps":[{"ephemeralMessage":"[PIXEL:BRIEF]\nfiles: src/a.ts:2"}]})
+        );
     }
 }

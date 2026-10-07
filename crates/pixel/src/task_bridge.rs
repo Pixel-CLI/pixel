@@ -64,7 +64,10 @@ pub(crate) fn handle_hook(
     payload: &Value,
 ) -> Result<Value, String> {
     let started = Instant::now();
-    if !matches!(provider, "claude" | "codex" | "pi") {
+    if !matches!(
+        provider,
+        "claude" | "codex" | "pi" | "devin" | "gemini" | "antigravity"
+    ) {
         return Err("unsupported task provider".into());
     }
     let mutation = payload["mutation"] == true;
@@ -749,6 +752,29 @@ mod tests {
         }
     }
 
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    }
+
+    fn init_repo(root: &Path) {
+        git(root, &["init", "-q"]);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn seed() {}\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "seed"]);
+    }
+
     // Telemetry tests must not append to an export sink inherited from the host.
     fn isolated_telemetry_test(name: &str, test: impl FnOnce()) {
         if std::env::var("PIXEL_BRIDGE_TELEMETRY_TEST").as_deref() == Ok(name) {
@@ -963,6 +989,55 @@ mod tests {
             handle_hook(&root.0, "pi", "session-start", &json!({"mutation":false})).unwrap(),
             json!({"decision":"observe","coverage":"unavailable"})
         );
+    }
+
+    #[test]
+    fn provider_hooks_should_enforce_edits_and_stop_with_separate_provider_sessions() {
+        let root = Scratch::new();
+        init_repo(&root.0);
+        let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
+        let store = Store::open(&root.0).unwrap();
+        for (provider, session) in [
+            ("devin", "devin-session"),
+            ("gemini", "gemini-session"),
+            ("antigravity", "antigravity-session"),
+        ] {
+            let prompt = json!({
+                "session_id":session,
+                "prompt":"fix the parser bug in src/a.rs",
+                "mutation":false
+            });
+            let started = handle_hook(&root.0, provider, "prompt-submit", &prompt).unwrap();
+            assert_eq!(started["decision"], "observe", "{provider}: {started}");
+
+            let task = store.find_session(provider, session).unwrap().unwrap();
+            assert_eq!(task.provider, provider);
+
+            let edit = handle_hook(
+                &root.0,
+                provider,
+                "pre-tool-use",
+                &json!({"session_id":session,"mutation":true}),
+            )
+            .unwrap();
+            assert_eq!(edit["decision"], "deny", "{provider}: {edit}");
+
+            let stopped = handle_hook(
+                &root.0,
+                provider,
+                "stop",
+                &json!({"session_id":session,"mutation":false}),
+            )
+            .unwrap();
+            assert_eq!(stopped["task_id"], task.task_id);
+            assert_eq!(stopped["decision"], "continue", "{provider}: {stopped}");
+            assert!(
+                store.find_session("claude", session).unwrap().is_none(),
+                "{provider} lifecycle state must not alias Claude sessions"
+            );
+        }
     }
 
     #[test]
