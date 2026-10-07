@@ -115,6 +115,16 @@ pub fn potion_cached(models: &Path, repo: &str) -> bool {
             .is_ok_and(|content| content.trim() == repo)
 }
 
+/// Whether a no-download open of the potion model `repo` would proceed on
+/// `models`: [`potion_cached`], or a legacy marker exists at all — that
+/// marker proved some model finished a download and named only the last
+/// one, so it keeps admitting every repository as it did before
+/// per-repository markers. The admission rule `PotionEmbedder`'s
+/// `require_set_up` applies, readable without the embedding dependency.
+pub fn potion_set_up(models: &Path, repo: &str) -> bool {
+    potion_cached(models, repo) || models.join(LEGACY_POTION_MARKER).is_file()
+}
+
 #[cfg(test)]
 mod potion_marker_tests {
     use super::*;

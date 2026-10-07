@@ -28,8 +28,13 @@ use pixel_index::{GramExtractor, TrigramExtractor, gitsync};
 use serde_json::Value;
 
 use super::chain::{
-    CONCEPT_ROWS, CallerHit, Evidence, FileHit, Found, SEARCH_ROWS, SYMBOL_ROWS, SymbolHit,
+    CONCEPT_ROWS, CallerHit, Evidence, Flow, Found, HistoryHit, RichFound, RichHit, SEARCH_ROWS,
+    SYMBOL_ROWS, StatusProbe, SymbolHit,
 };
+
+/// The path search's bound: `evaluate`'s own default when the field is
+/// unset, named here for `trace`'s required `max_depth`.
+const FLOW_DEPTH: u32 = 6;
 
 /// Where the facts come from, decided once per brief.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,7 +95,7 @@ impl Live {
         }
     }
 
-    fn local_files(&self, anchor: &str) -> Result<Found, String> {
+    fn local_rows(&self, anchor: &str) -> Result<RichFound, String> {
         if !index_current(&self.root) {
             return Err("the text index does not cover HEAD".into());
         }
@@ -99,22 +104,200 @@ impl Live {
         let (rows, stats) = set
             .search_page_filtered(&regex::escape(anchor), 0, Some(SEARCH_ROWS), None, None)
             .map_err(|error| error.to_string())?;
-        Ok(Found {
+        Ok(RichFound {
             hits: rows
                 .into_iter()
                 .filter(|row| !pixel_index::index::credential_path(Path::new(&row.path)))
-                .map(|row| FileHit {
+                .map(|row| RichHit {
                     path: row.path,
                     line: row.line_number,
+                    text: (!row.line.is_empty()).then_some(row.line),
                 })
                 .collect(),
             capped: stats.truncated,
         })
     }
+
+    /// The concept index on the already-open graph store: same cascade as
+    /// the daemon's `find-code`, defaults only — never an `ensure_graph`
+    /// or a signal build.
+    fn local_concept(&self, phrase: &str) -> Result<RichFound, String> {
+        self.with_graph(|store| {
+            let outcome = pixel_graph::concept_resolve::resolve(
+                store,
+                phrase,
+                &pixel_graph::concept_resolve::ResolveOptions {
+                    limit: CONCEPT_ROWS,
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(RichFound {
+                hits: outcome
+                    .matches
+                    .iter()
+                    .map(|m| RichHit {
+                        path: m.path.clone(),
+                        line: u64::from(m.start_line),
+                        text: concept_text(m),
+                    })
+                    .collect(),
+                capped: outcome.scan_capped,
+            })
+        })
+    }
+
+    /// The picked definition's body from the file itself, bounded to the
+    /// token budget's ~4 chars each — the local `pack-context`.
+    fn local_context(&self, hit: &SymbolHit, budget_tokens: usize) -> Result<String, String> {
+        let text = std::fs::read_to_string(self.root.join(&hit.path)).map_err(|e| e.to_string())?;
+        let max_chars = budget_tokens.saturating_mul(4);
+        let start = (hit.start_line as usize).saturating_sub(1);
+        let rows = (hit.end_line.max(hit.start_line) as usize).saturating_sub(start);
+        let mut body = String::new();
+        for line in text.lines().skip(start).take(rows.max(1)) {
+            if body.len() + line.len() + 1 > max_chars {
+                break;
+            }
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(line);
+        }
+        if body.is_empty() {
+            return Err("empty definition".to_string());
+        }
+        Ok(body)
+    }
+
+    /// `impact d1` on the local graph kept to callers under a test path —
+    /// the same rows `uses`' `caller_test_files` would keep.
+    fn local_test_files(&self, uid: &str) -> Result<Vec<String>, String> {
+        self.with_graph(|store| {
+            let data = pixel_daemon::api::impact_on_graph(store, uid, "upstream", Some(1))?;
+            if data.get("candidates").is_some() {
+                return Err("the name is ambiguous, a uid is needed".into());
+            }
+            let mut files: Vec<String> = data
+                .get("d1_will_break")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|caller| caller.get("path").and_then(Value::as_str))
+                .filter(|path| pixel_proto::query::looks_like_test_path(path))
+                .map(ToString::to_string)
+                .collect();
+            files.sort();
+            files.dedup();
+            Ok(files)
+        })
+    }
+
+    /// A call path on the local graph: uid resolution by name, then the
+    /// bounded BFS of `pixel_graph::trace`.
+    fn local_flow(&self, from: &str, to: &str) -> Result<Flow, String> {
+        self.with_graph(|store| {
+            let from_uid = resolve_uid(store, from)?;
+            let to_uid = resolve_uid(store, to)?;
+            let result = pixel_graph::trace::trace(store, &from_uid, &to_uid, FLOW_DEPTH)
+                .map_err(|error| error.to_string())?;
+            Ok(if result.found {
+                Flow::Path {
+                    hops: result.hops.iter().map(|hop| hop.name.clone()).collect(),
+                    notes: Vec::new(),
+                }
+            } else {
+                Flow::Absent
+            })
+        })
+    }
+
+    /// `list-signatures` on the local graph: the file's symbols as the
+    /// graph recorded them.
+    fn local_skeleton(&self, file: &str) -> Result<Vec<SymbolHit>, String> {
+        self.with_graph(|store| {
+            let row = store
+                .file_by_path(file)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("no indexed file matching '{file}'"))?;
+            let symbols = store
+                .symbols_in_file(row.id)
+                .map_err(|error| error.to_string())?;
+            Ok(symbols
+                .into_iter()
+                .map(|row_sym| SymbolHit {
+                    uid: row_sym.uid,
+                    name: row_sym.name,
+                    kind: row_sym.kind.as_str().to_string(),
+                    path: row.path.clone(),
+                    start_line: u64::from(row_sym.start_line),
+                    end_line: u64::from(row_sym.end_line),
+                })
+                .collect())
+        })
+    }
+
+    /// `evaluate` on the daemon, `trace` when it cannot answer: an `Err`,
+    /// a technical `{"kind":"error"}` and an `unknown` verdict all hand
+    /// the question to the bounded BFS.
+    fn daemon_flow(
+        &self,
+        from: &str,
+        to: &str,
+        budget_ms: u64,
+        deadline: Instant,
+    ) -> Result<Flow, String> {
+        let request = Request::Evaluate {
+            from: from.to_string(),
+            to: to.to_string(),
+            traversal: None,
+            tiers: None,
+            max_depth: None,
+            time_budget_ms: Some(budget_ms.max(1)),
+            scope: None,
+            at_snapshot: true,
+        };
+        let reason = match self.ask(&request, deadline) {
+            Ok(data) => match evaluate_flow(&data) {
+                Verdict::Answer(flow) => return Ok(flow),
+                Verdict::Unknown(reason) => reason,
+                Verdict::Unreadable => "evaluate: unreadable reply".to_string(),
+            },
+            Err(reason) => reason,
+        };
+        let data = self.ask(
+            &Request::Trace {
+                from: from.to_string(),
+                to: to.to_string(),
+            },
+            deadline,
+        )?;
+        if data.get("found").and_then(Value::as_bool) == Some(true) {
+            let hops = data
+                .get("hops")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|hop| hop.get("name").and_then(Value::as_str))
+                .map(ToString::to_string)
+                .collect();
+            return Ok(Flow::Path {
+                hops,
+                notes: vec![format!("evaluate: {reason}")],
+            });
+        }
+        Err(format!(
+            "evaluate: {reason}; trace found no path within depth {FLOW_DEPTH}"
+        ))
+    }
 }
 
 impl Evidence for Live {
     fn files_with(&self, anchor: &str, deadline: Instant) -> Result<Found, String> {
+        self.files_matching(anchor, deadline).map(Found::from)
+    }
+
+    fn files_matching(&self, anchor: &str, deadline: Instant) -> Result<RichFound, String> {
         match self.route {
             Route::Daemon => {
                 let request = Request::Search {
@@ -127,22 +310,196 @@ impl Evidence for Live {
                     globs: Vec::new(),
                     types: Vec::new(),
                 };
-                Ok(search_files(&self.ask(&request, deadline)?))
+                Ok(search_rows(&self.ask(&request, deadline)?))
             }
-            Route::Local => self.local_files(anchor),
+            Route::Local => self.local_rows(anchor),
         }
     }
 
     fn concept(&self, phrase: &str, deadline: Instant) -> Result<Found, String> {
+        self.concept_matching(phrase, deadline).map(Found::from)
+    }
+
+    fn concept_matching(&self, phrase: &str, deadline: Instant) -> Result<RichFound, String> {
         match self.route {
             Route::Daemon => {
                 let request = Request::Resolve {
                     phrase: phrase.to_string(),
                     limit: Some(CONCEPT_ROWS),
                 };
-                Ok(resolve_files(&self.ask(&request, deadline)?))
+                Ok(resolve_rows(&self.ask(&request, deadline)?))
             }
-            Route::Local => Err("a concept search needs a running daemon".into()),
+            Route::Local => self.local_concept(phrase),
+        }
+    }
+
+    fn context(
+        &self,
+        hit: &SymbolHit,
+        budget_tokens: usize,
+        deadline: Instant,
+    ) -> Result<(String, Vec<String>), String> {
+        match self.route {
+            Route::Daemon => {
+                // `context` would otherwise let the daemon open a graph it
+                // still needed to build: the gate proves the published one
+                // is current first, so the request can only read.
+                self.with_graph(|_| Ok(()))?;
+                let data = self.ask(
+                    &Request::Context {
+                        uid: hit.uid.clone(),
+                        budget_tokens: Some(budget_tokens),
+                    },
+                    deadline,
+                )?;
+                let body = context_body(&data)?;
+                Ok((body, caps_of(&data)))
+            }
+            Route::Local => self
+                .local_context(hit, budget_tokens)
+                .map(|body| (body, Vec::new())),
+        }
+    }
+
+    fn test_files(
+        &self,
+        uid: &str,
+        deadline: Instant,
+    ) -> Result<(Vec<String>, Vec<String>), String> {
+        match self.route {
+            Route::Daemon => {
+                self.with_graph(|_| Ok(()))?;
+                let data = self.ask(
+                    &Request::Uses {
+                        uid_or_name: uid.to_string(),
+                        role: "callers".to_string(),
+                        offset: None,
+                    },
+                    deadline,
+                )?;
+                if data.get("candidates").is_some() {
+                    return Err("the name is ambiguous, a uid is needed".into());
+                }
+                Ok((pixel_proto::query::caller_test_files(&data), caps_of(&data)))
+            }
+            Route::Local => self.local_test_files(uid).map(|files| (files, Vec::new())),
+        }
+    }
+
+    fn flow(
+        &self,
+        from: &str,
+        to: &str,
+        budget_ms: u64,
+        deadline: Instant,
+    ) -> Result<Flow, String> {
+        match self.route {
+            Route::Daemon => {
+                self.with_graph(|_| Ok(()))?;
+                self.daemon_flow(from, to, budget_ms, deadline)
+            }
+            Route::Local => self.local_flow(from, to),
+        }
+    }
+
+    fn skeleton(&self, file: &str, deadline: Instant) -> Result<Vec<SymbolHit>, String> {
+        match self.route {
+            Route::Daemon => {
+                self.with_graph(|_| Ok(()))?;
+                let data = self.ask(
+                    &Request::Skeleton {
+                        file: file.to_string(),
+                    },
+                    deadline,
+                )?;
+                Ok(row_rows(&data, "symbols", "start_line"))
+            }
+            Route::Local => self.local_skeleton(file),
+        }
+    }
+
+    fn status(&self, deadline: Instant) -> Result<StatusProbe, String> {
+        match self.route {
+            Route::Daemon => {
+                let data = self.ask(&Request::Status {}, deadline)?;
+                Ok(StatusProbe {
+                    facts_fresh: data
+                        .get("facts")
+                        .and_then(|f| f.get("fresh"))
+                        .and_then(Value::as_bool),
+                })
+            }
+            // No daemon to ask, and the brief's own graph gate already
+            // says whether the local graph is current — the facts index is
+            // then a question the run names when it cannot answer it.
+            Route::Local => Err("no daemon to probe".into()),
+        }
+    }
+
+    fn history(
+        &self,
+        query: &str,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<(Vec<HistoryHit>, Vec<String>), String> {
+        match self.route {
+            Route::Daemon => {
+                let data = self.ask(
+                    &Request::History {
+                        query: query.to_string(),
+                        facet: Some("all".to_string()),
+                        limit: Some(limit),
+                        // The facts db exactly as it stands: the request
+                        // never ingests, builds or spawns the warmer — an
+                        // absent db is an error, not a reason to write.
+                        read_only: true,
+                    },
+                    deadline,
+                )?;
+                Ok((history_hits(&data)?, caps_of(&data)))
+            }
+            Route::Local => Err("history needs a running daemon".into()),
+        }
+    }
+
+    fn task_facts(&self, task: &str, deadline: Instant) -> Result<Vec<String>, String> {
+        match self.route {
+            Route::Daemon => {
+                let data = self.ask(
+                    &Request::TargetsFacts {
+                        task: task.to_string(),
+                        limit: Some(1),
+                    },
+                    deadline,
+                )?;
+                let targets =
+                    targets_of(&data).ok_or_else(|| "facts did not name targets".to_string())?;
+                Ok(targets)
+            }
+            Route::Local => Err("task facts need a running daemon".into()),
+        }
+    }
+
+    fn semantic_hint(&self, phrase: &str) -> Option<String> {
+        match self.route {
+            // Read-only: the probe checks the model's on-disk marker and the
+            // vector store's manifest only — it never loads a model,
+            // embeds, downloads or writes. A warm index makes
+            // `search-meaning` the follow-up; a cold one makes the first
+            // call itself the embed step.
+            Route::Daemon => {
+                let probe = pixel_recall::code_search::warm_probe(&self.root);
+                if !probe.model_on_disk {
+                    return None;
+                }
+                let command = format!("pixel search-meaning {}", super::routes::q(phrase));
+                Some(if probe.vectors_present {
+                    format!("{command} (index warm, {} chunks)", probe.vectors_chunks)
+                } else {
+                    format!("{command} (model on disk; first run embeds the repo)")
+                })
+            }
+            Route::Local => None,
         }
     }
 
@@ -305,34 +662,284 @@ fn local_symbols(store: &GraphStore, name: &str) -> Result<Vec<SymbolHit>, Strin
     Ok(hits)
 }
 
-/// `search` rows (`{path, line, text}`) as file hits.
-fn search_files(data: &Value) -> Found {
-    Found {
-        hits: file_rows(data, "matches", "line"),
+/// `search` rows (`{path, line, text}`) with the matched text kept.
+fn search_rows(data: &Value) -> RichFound {
+    RichFound {
+        hits: rich_rows(data, "matches", "line"),
         capped: data.get("truncated").and_then(Value::as_bool) == Some(true),
     }
 }
 
-/// `resolve` matches (`{path, start_line, kind, score, raw}`) as file hits.
-fn resolve_files(data: &Value) -> Found {
-    Found {
-        hits: file_rows(data, "matches", "start_line"),
-        capped: false,
+/// `resolve` matches (`{path, start_line, kind, score, raw}`) keeping the
+/// raw span's text as the row's snippet.
+fn resolve_rows(data: &Value) -> RichFound {
+    RichFound {
+        hits: rich_rows(data, "matches", "start_line"),
+        capped: data
+            .get("scan_capped")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
-fn file_rows(data: &Value, key: &str, line_key: &str) -> Vec<FileHit> {
+/// `list-skeleton`/`skeleton` rows (`{name, kind, path?, start_line}`).
+fn row_rows(data: &Value, key: &str, line_key: &str) -> Vec<SymbolHit> {
     data.get(key)
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|row| {
-            Some(FileHit {
-                path: row.get("path")?.as_str()?.to_string(),
-                line: row.get(line_key).and_then(Value::as_u64).unwrap_or(0),
+            let path = row.get("path").and_then(Value::as_str).unwrap_or_default();
+            Some(SymbolHit {
+                uid: row
+                    .get("uid")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                name: row.get("name")?.as_str()?.to_string(),
+                kind: row
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                path: path.to_string(),
+                start_line: row.get(line_key).and_then(Value::as_u64).unwrap_or(0),
+                end_line: row
+                    .get("end_line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| row.get(line_key).and_then(Value::as_u64).unwrap_or(0)),
             })
         })
         .collect()
+}
+
+fn rich_rows(data: &Value, key: &str, line_key: &str) -> Vec<RichHit> {
+    data.get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let text = row
+                .get("text")
+                .or_else(|| row.get("raw"))
+                .or_else(|| row.get("detail"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(ToString::to_string);
+            Some(RichHit {
+                path: row.get("path")?.as_str()?.to_string(),
+                line: row.get(line_key).and_then(Value::as_u64).unwrap_or(0),
+                text,
+            })
+        })
+        .collect()
+}
+
+/// What an `evaluate` reply means for the path question.
+enum Verdict {
+    /// A found path or a proven no-path.
+    Answer(Flow),
+    /// `verdict: "unknown"` or an error — hand `trace` the same pair.
+    Unknown(String),
+    /// The reply did not fit any known shape.
+    Unreadable,
+}
+
+/// `evaluate` replies are an `EvaluateAnswer`: `{kind:"path"|"none"|"error"}`.
+/// `none` is an honest negative; `error` and `unknown` are not answers.
+fn evaluate_flow(data: &Value) -> Verdict {
+    match data.get("kind").and_then(Value::as_str) {
+        Some("path") => {
+            let hops: Vec<String> = data
+                .get("path")
+                .or_else(|| data.get("hops"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|hop| {
+                    hop.get("name")
+                        .or_else(|| hop.get("uid"))
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                })
+                .collect();
+            let notes: Vec<String> = data
+                .get("notes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect();
+            Verdict::Answer(Flow::Path { hops, notes })
+        }
+        Some("none") => Verdict::Answer(Flow::Absent),
+        Some("unknown") => Verdict::Unknown(
+            data.get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+        ),
+        Some("error") => Verdict::Unknown(
+            data.get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("error")
+                .to_string(),
+        ),
+        _ => Verdict::Unreadable,
+    }
+}
+
+/// The advisory strings an op's envelope or body carried under `caps` —
+/// truncation, lower-bound and witness notes the brief must not drop.
+fn caps_of(data: &Value) -> Vec<String> {
+    let read = |list: &Value| {
+        list.as_array().map(|rows| {
+            rows.iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<String>>()
+        })
+    };
+    let mut caps = data.get("caps").and_then(read).unwrap_or_default();
+    if let Some(envelope) = data.get("envelope") {
+        caps.extend(envelope.get("caps").and_then(read).unwrap_or_default());
+    }
+    caps
+}
+
+/// `history`/`dig-history` candidates (`{oid|sha, subject|message}`).
+fn history_hits(data: &Value) -> Result<Vec<HistoryHit>, String> {
+    let rows = data
+        .get("candidates")
+        .or_else(|| data.get("matches"))
+        .or_else(|| data.get("results"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the reply carries no history rows".to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let sha = row
+                .get("sha")
+                .or_else(|| row.get("oid"))
+                .or_else(|| row.get("commit_oid"))
+                .and_then(Value::as_str)?
+                .chars()
+                .take(10)
+                .collect();
+            let subject = row
+                .get("subject")
+                .or_else(|| row.get("message"))
+                .and_then(Value::as_str)
+                .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+                .unwrap_or_default();
+            Some(HistoryHit { sha, subject })
+        })
+        .collect())
+}
+
+/// `targets_facts` rows (`facts.targets[].path`) — the files the task
+/// facts index names for the task.
+fn targets_of(data: &Value) -> Option<Vec<String>> {
+    let paths: Vec<String> = data
+        .get("targets")
+        .or_else(|| data.get("facts")?.get("targets"))
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|row| {
+            row.get("path")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .collect();
+    Some(paths)
+}
+
+/// `pack-context`/`context` replies carry the packed source under
+/// `body`/`context`/`text`; a reply that only names the uid is no
+/// body at all.
+fn context_body(data: &Value) -> Result<String, String> {
+    if let Some(raw) = data
+        .get("body")
+        .or_else(|| data.get("context"))
+        .and_then(Value::as_str)
+        .filter(|body| !body.is_empty())
+    {
+        return Ok(raw.to_string());
+    }
+    let Some(rendered) = data
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    else {
+        return Err("the reply carries no source body".to_string());
+    };
+    // `text` is the rendered pack; a signature-only reply carries no
+    // snippet lines and yields an empty body, not an error.
+    Ok(target_snippet(rendered).unwrap_or_default())
+}
+
+/// The target item's body inside pack-context's rendered text: its first
+/// line is the item's own header (`path:range kind name — sig`), which a
+/// caller rendering a `defined` line already prints, so only the indented
+/// snippet lines that follow — including `… body cut` and `crux:` markers
+/// — belong in the body. `None` when the pack carried signatures only.
+fn target_snippet(rendered: &str) -> Option<String> {
+    let mut lines = rendered.lines();
+    let first = lines.next()?;
+    let mut kept: Vec<&str> = Vec::new();
+    // A pack that starts mid-body (no header line) keeps its first line.
+    if first.starts_with("    ") {
+        kept.push(first);
+    }
+    for line in lines {
+        if !line.starts_with("    ") {
+            break;
+        }
+        kept.push(line);
+    }
+    if kept.is_empty() {
+        return None;
+    }
+    Some(
+        kept.iter()
+            .map(|line| line.trim_start())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// A concept match's best snippet: its detail when it differs from the
+/// raw span, else the raw span itself.
+fn concept_text(m: &pixel_graph::concept_resolve::ConceptMatch) -> Option<String> {
+    let text = if m.detail.is_empty() {
+        &m.raw
+    } else {
+        &m.detail
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.chars().take(140).collect())
+}
+
+/// Name → uid on the graph store: one exact symbol, or an ambiguity/
+/// absence error that names what happened.
+fn resolve_uid(store: &GraphStore, name_or_uid: &str) -> Result<String, String> {
+    if store
+        .symbol_by_uid(name_or_uid)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Ok(name_or_uid.to_string());
+    }
+    let rows = store
+        .symbols_by_name(name_or_uid, None, 2)
+        .map_err(|error| error.to_string())?;
+    match rows.len() {
+        1 => Ok(rows[0].uid.clone()),
+        0 => Err(format!("no symbol named '{name_or_uid}'")),
+        _ => Err(format!("'{name_or_uid}' names more than one symbol")),
+    }
 }
 
 /// `symbol` rows (`{uid, name, kind, path, start_line, end_line}`).
@@ -460,6 +1067,31 @@ mod tests {
                         Some("impact") => json!({"d1_will_break": [
                             {"path": "src/b.ts", "name": "main", "line": 7}
                         ]}),
+                        Some("uses") => json!({"edges": [
+                            {"symbol": {"path": "tests/a_test.rs"}},
+                            {"symbol": {"path": "src/lib.rs"}},
+                            {"symbol": {"path": "tests/a_test.rs"}}
+                        ]}),
+                        Some("context") => json!({"body": "fn go() {\n  go_body();\n}"}),
+                        Some("evaluate") => json!({"kind": "path",
+                            "path": [{"name": "go"}, {"name": "mid"}, {"name": "stop"}],
+                            "notes": ["2 hops"]}),
+                        Some("trace") => json!({"found": true, "hops": [
+                            {"name": "go"}, {"name": "stop"}
+                        ]}),
+                        Some("skeleton") => json!({"symbols": [
+                            {"uid": "cfg/x.json#top#const", "name": "top", "kind": "const",
+                             "path": "cfg/x.json", "start_line": 1, "end_line": 3}
+                        ]}),
+                        Some("status") => json!({"facts": {"present": true, "fresh": true},
+                            "embedding": {"model_on_disk": true, "vectors_present": false,
+                                          "vectors_chunks": 0, "embedder_resident": false}}),
+                        Some("history") => json!({"candidates": [
+                            {"oid": "0123456789abcdef", "subject": "add the retry loop"}
+                        ]}),
+                        Some("targets_facts") => json!({"targets": [
+                            {"path": "src/flag.ts"}, {"path": "cfg/app.toml"}
+                        ]}),
                         _ => json!({}),
                     };
                     let reply = pixel_daemon::Response::success("test", result);
@@ -488,42 +1120,45 @@ mod tests {
     }
 
     #[test]
-    fn search_files_should_read_rows_and_the_truncation_flag() {
+    fn search_rows_should_read_text_and_the_truncation_flag() {
         let data = json!({"matches": [
             {"path": "src/a.ts", "line": 4, "text": "x"},
             {"line": 5},
             {"path": "src/b.ts"}
         ], "truncated": true});
         assert_eq!(
-            search_files(&data),
-            Found {
+            search_rows(&data),
+            RichFound {
                 hits: vec![
-                    FileHit {
+                    RichHit {
                         path: "src/a.ts".into(),
-                        line: 4
+                        line: 4,
+                        text: Some("x".into())
                     },
-                    FileHit {
+                    RichHit {
                         path: "src/b.ts".into(),
-                        line: 0
+                        line: 0,
+                        text: None
                     }
                 ],
                 capped: true
             }
         );
-        assert_eq!(search_files(&json!({})), Found::default());
-        assert!(!search_files(&json!({"matches": [], "truncated": false})).capped);
+        assert_eq!(search_rows(&json!({})), RichFound::default());
+        assert!(!search_rows(&json!({"matches": [], "truncated": false})).capped);
     }
 
     #[test]
-    fn resolve_files_should_read_the_start_line_of_each_match() {
+    fn resolve_rows_should_read_the_start_line_and_raw_text_of_each_match() {
         let data = json!({"matches": [
             {"path": "app/routes.rb", "start_line": 12, "kind": "route", "score": 0.9, "raw": "x"}
         ]});
         assert_eq!(
-            resolve_files(&data).hits,
-            [FileHit {
+            resolve_rows(&data).hits,
+            [RichHit {
                 path: "app/routes.rb".into(),
-                line: 12
+                line: 12,
+                text: Some("x".into())
             }]
         );
     }
@@ -725,6 +1360,174 @@ mod tests {
     }
 
     #[test]
+    fn daemon_route_should_send_the_kind_operations_and_read_their_replies() {
+        let root = scratch("daemon-kinds");
+        let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
+        let live = Live::new(&root, Route::Daemon);
+        *live.graph.lock().unwrap() = Some(Ok(GraphStore::open_in_memory().unwrap()));
+        let deadline = Instant::now() + WINDOW;
+        let hit = SymbolHit {
+            uid: "src/a.ts#go#function".into(),
+            name: "go".into(),
+            kind: "function".into(),
+            path: "src/a.ts".into(),
+            start_line: 3,
+            end_line: 8,
+        };
+
+        assert_eq!(
+            live.files_matching("a.b", deadline).unwrap().hits[0]
+                .text
+                .as_deref(),
+            Some("x")
+        );
+        assert_eq!(
+            live.context(&hit, 400, deadline).unwrap().0,
+            "fn go() {\n  go_body();\n}"
+        );
+        assert_eq!(
+            live.test_files(&hit.uid, deadline).unwrap().0,
+            ["tests/a_test.rs"]
+        );
+        assert_eq!(
+            live.flow("go", "stop", 100, deadline).unwrap(),
+            Flow::Path {
+                hops: vec!["go".into(), "mid".into(), "stop".into()],
+                notes: vec!["2 hops".into()]
+            }
+        );
+        assert_eq!(
+            live.skeleton("cfg/x.json", deadline).unwrap()[0].name,
+            "top"
+        );
+        assert_eq!(
+            live.status(deadline).unwrap(),
+            StatusProbe {
+                facts_fresh: Some(true)
+            }
+        );
+        assert_eq!(
+            live.history("retry", 3, deadline).unwrap().0,
+            [HistoryHit {
+                sha: "0123456789".into(),
+                subject: "add the retry loop".into()
+            }]
+        );
+        assert_eq!(
+            live.task_facts("add flag", deadline).unwrap(),
+            ["src/flag.ts", "cfg/app.toml"]
+        );
+
+        let requests = daemon.requests();
+        let ops: Vec<&str> = requests
+            .iter()
+            .map(|req| req["op"].as_str().unwrap_or("?"))
+            .collect();
+        assert_eq!(
+            ops,
+            [
+                "search",
+                "context",
+                "uses",
+                "evaluate",
+                "skeleton",
+                "status",
+                "history",
+                "targets_facts"
+            ]
+        );
+        assert_eq!(requests[1]["uid"], "src/a.ts#go#function");
+        assert_eq!(requests[1]["budget_tokens"], 400);
+        assert_eq!(requests[2]["uid_or_name"], "src/a.ts#go#function");
+        assert_eq!(requests[2]["role"], "callers");
+        assert_eq!(requests[3]["from"], "go");
+        assert_eq!(requests[3]["to"], "stop");
+        assert_eq!(requests[3]["at_snapshot"], true);
+        assert_eq!(requests[4]["file"], "cfg/x.json");
+        // Read-only history: the flag rides the wire only when set, so its
+        // presence here is the contract — an absent flag would let a daemon
+        // take the ingest-and-warm path a hook must never start.
+        assert_eq!(requests[6]["read_only"], true);
+        assert_eq!(requests[7]["task"], "add flag");
+        drop(daemon);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn daemon_flow_should_fall_back_to_trace_when_evaluate_cannot_answer() {
+        // `evaluate` answered `unknown`; `trace` still found the path —
+        // the flow carries the path and the reason evaluate gave up.
+        let data = json!({"kind": "unknown", "reason": "budget"});
+        assert!(matches!(evaluate_flow(&data), Verdict::Unknown(r) if r == "budget"));
+        let none = json!({"kind": "none"});
+        assert!(matches!(
+            evaluate_flow(&none),
+            Verdict::Answer(Flow::Absent)
+        ));
+        let err = json!({"kind": "error", "reason": "no uid"});
+        assert!(matches!(evaluate_flow(&err), Verdict::Unknown(_)));
+        assert!(matches!(
+            evaluate_flow(&json!({"unexpected": true})),
+            Verdict::Unreadable
+        ));
+    }
+
+    #[test]
+    fn history_hits_should_take_the_first_subject_line_and_a_short_sha() {
+        let data = json!({"candidates": [
+            {"oid": "0123456789abcdef", "subject": "first line\nsecond line"},
+            {"sha": "abc", "message": "subject via message"},
+            {"subject": "no sha"}
+        ]});
+        assert_eq!(
+            history_hits(&data).unwrap(),
+            [
+                HistoryHit {
+                    sha: "0123456789".into(),
+                    subject: "first line".into()
+                },
+                HistoryHit {
+                    sha: "abc".into(),
+                    subject: "subject via message".into()
+                }
+            ]
+        );
+        assert_eq!(
+            history_hits(&json!({})).unwrap_err(),
+            "the reply carries no history rows"
+        );
+    }
+
+    #[test]
+    fn targets_of_should_read_either_the_top_or_facts_list() {
+        assert_eq!(
+            targets_of(&json!({"targets": [{"path": "a.ts"}, {"nope": 1}] })).unwrap(),
+            ["a.ts"]
+        );
+        assert_eq!(
+            targets_of(&json!({"facts": {"targets": [{"path": "b.ts"}]}})).unwrap(),
+            ["b.ts"]
+        );
+        assert!(targets_of(&json!({})).is_none());
+    }
+
+    #[test]
+    fn context_body_should_take_the_packed_source_or_fail() {
+        assert_eq!(
+            context_body(&json!({"body": "fn go() {}"})).unwrap(),
+            "fn go() {}"
+        );
+        assert_eq!(
+            context_body(&json!({"context": "packed"})).unwrap(),
+            "packed"
+        );
+        assert_eq!(
+            context_body(&json!({"uid": "x"})).unwrap_err(),
+            "the reply carries no source body"
+        );
+    }
+
+    #[test]
     fn daemon_route_should_fail_instead_of_waiting_when_no_time_is_left() {
         let root = scratch("daemon-late");
         let _daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
@@ -740,9 +1543,11 @@ mod tests {
         let root = scratch("local-refusals");
         let live = Live::new(&root, Route::Local);
         let deadline = Instant::now() + WINDOW;
+        // The local concept cascade runs on the open graph store: no graph,
+        // no answer — the error names the missing prerequisite.
         assert_eq!(
             live.concept("anything", deadline).unwrap_err(),
-            "a concept search needs a running daemon"
+            "the graph is not built"
         );
         assert_eq!(
             live.files_with("anything", deadline).unwrap_err(),

@@ -471,3 +471,170 @@ prepared checkout, then replay each recorded argv. Output hashes in that
 file cover the normalized text. Repeated route outputs are stored once by
 hash. The fixture scenarios and gold ledger expose the requirements for a
 future live matrix without reporting unrun trials as results.
+
+## Continuation 2026-10-07: brief-delivery path repaired and isolated validation
+
+The arena's brief-delivery path called the retired `pixel run-hook
+prompt-submit --provider codex` verb (`RetiredHookCmd::PromptSubmit` in
+`crates/pixel/src/main.rs:1891`: accepted, does nothing, exits 0). This
+continuation repairs the two call sites inside `eval/arena/entrypoint.sh`
+and validates the stdin-to-stdout contract standalone; no model was run.
+
+### What was repaired (eval/arena/entrypoint.sh only)
+
+- `verify_pixel_brief`: invocation changed to the live verb
+  `pixel run-hook task-event --provider codex --event prompt-submit`,
+  the spelling `pixel install` registers for Codex `UserPromptSubmit`
+  (`crates/pixel-install/src/routing.rs:214,303`). The stdin payload keeps
+  `session_id`/`prompt`/`cwd`/`hook_event_name`; the hook reads `prompt`
+  (`task_hook.rs:1091`) and `cwd` (`task_hook.rs:1038-1042`). The probe
+  prompt changed from "How should a contributor approach this repository's
+  setup and tests?" to "where is README.md and how is the project tested?"
+  because the old text is a Weak signal that abstains on this repository
+  (measured below); `README.md` is a Strong anchor (`names_code` accepts a
+  source extension, `execution_brief.rs:388-404`) and `tested` is a code
+  word, so an indexed repo can render real evidence.
+- Receipt schema: added `emitted_context` (non-empty `additionalContext`),
+  keeping `hook_event_name` and `brief_present`. `response_valid` now
+  mirrors `hook_audit.py:run_hook` semantics: non-empty stdout AND (no
+  `hookSpecificOutput` key — Codex's `{}` abstention — OR the correct
+  `hookEventName` with a string-or-absent `additionalContext`). Plumbing
+  validity and evidence presence are now recorded as separate fields; an
+  abstention no longer masquerades as a broken pipe.
+- `install_live_brief_hook`: the audit-wrapped command written into
+  `hooks.json` changed to `/usr/local/bin/pixel run-hook task-event
+  --provider codex --event prompt-submit`, the argv `hook_audit.py`
+  allowlists (`ALLOWED`, `PROMPT_SHAPES`; `eval/arena/hook_audit.py:21-35`).
+- Out of scope, still broken: `--review-pixel-hooks` mode requires the
+  retired `run-hook metrics` command in `REQUIRED_NON_PROMPT`, which the
+  native-default install no longer writes; `eval/arena.sh:415-431` still
+  pre-rejects it. The reviewed-mode audit also wraps in place instead of
+  appending; neither path was touched.
+
+`git diff eval/arena/entrypoint.sh`: 1 file changed, 27 insertions(+),
+8 deletions(-), including comments; no other file was modified by this
+repair.
+
+### Validation evidence (no Codex, no arena run)
+
+Worktree binary: `cargo build -p pixel-cli --profile dev-release` →
+`target/dev-release/pixel`, `pixel 0.7.1 commit c481dfc4…-dirty` (this
+branch head plus the pre-existing uncommitted pixel-recall edits).
+Installed binary for contrast: `/Users/livio/.cargo/bin/pixel`,
+`pixel 0.7.1 commit 3db32a37…-dirty` — older provider list
+(`claude|codex|pi`) and no `brief` subcommand, so installed-binary results
+carry a protocol-version caveat.
+
+Index: `./target/dev-release/pixel build-index .` →
+`indexed via daemon: base_files=1156 delta_files=0 overlay_files=5`;
+`.pixel/base.shard` exists (the brief's `Gate.indexed` check,
+`chain.rs:154-157`). Caveat measured below: the index must be written by a
+compatible binary — the new binary abstained (`{}`) against the
+installed binary's shard until the shard was rebuilt.
+
+Command (the exact repaired entrypoint invocation):
+
+```sh
+printf '%s' '{"session_id":"arena-brief-1","prompt":"where is README.md and how is the project tested?","cwd":"<repo>","hook_event_name":"UserPromptSubmit"}' \
+  | pixel run-hook task-event --provider codex --event prompt-submit
+```
+
+Observed, worktree binary, cwd=this worktree (verbatim, wrapped for print):
+
+```json
+{"hookSpecificOutput":{"additionalContext":"[PIXEL:BRIEF]\nfiles: crates/pixel-install/src/pi_project.rs:47 crates/pixel-install/src/install.rs:310 crates/pixel-install/src/uninstall.rs:239\nconfidence: medium | ops: 1/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.","hookEventName":"UserPromptSubmit"}}
+```
+
+Same 296-byte context, `context_sha256
+f2bece39222348567d55b5a5b2417bd78cc3f252beead209948bc2d9066410d7`, from
+three independent paths: the extracted `verify_pixel_brief` function run
+verbatim, the installed binary, and the audit-wrapper passthrough
+(`hook_audit.py run_hook` with `PIXEL` repointed at the local binary).
+Wrapper receipt row (verbatim):
+
+```json
+{"returncode": 0, "stderr": "", "response_valid": true, "forwarded_to_codex": true, "emitted_context": true, "hook_event_name": "UserPromptSubmit", "additional_context_bytes": 296, "additional_context_sha256": "f2bece39222348567d55b5a5b2417bd78cc3f252beead209948bc2d9066410d7"}
+```
+
+Repaired `verify_pixel_brief` receipt (verbatim, temp-dir receipt path):
+
+```json
+{"arm": "pixel", "rep": "1", "provider": "codex", "event": "prompt-submit",
+ "response_valid": true, "emitted_context": true,
+ "hook_event_name": "UserPromptSubmit", "brief_present": true,
+ "execution_route_present": false, "context_bytes": 296,
+ "context_sha256": "f2bece39222348567d55b5a5b2417bd78cc3f252beead209948bc2d9066410d7"}
+```
+
+Boundaries measured (commands identical, argv/prompt/cwd varied):
+
+| Case | Observed stdout | Meaning |
+| --- | --- | --- |
+| Retired `run-hook prompt-submit --provider codex`, same payload | empty, rc 0 | the bug signature: accepted, emits nothing |
+| Unindexed `/tmp/unindexed-repo`, new verb | `{}`, rc 0 | `Gate.indexed` false → graceful abstention |
+| `PIXEL_BRIEF=0`, new verb, indexed | `{}`, rc 0 | env opt-out honored (`feature_enabled`, `config_cmd.rs:57-67`) |
+| Old preflight prompt, indexed repo | `{}` (installed binary) | Weak prompt, no evidence — abstention, not a pipe failure |
+| Malformed stdin (unescaped inner quotes) | `{}`, rc 0 | `process` parse failure → fail-closed abstention |
+| Unregistered provider/event spelling | clap error, rc != 0 | only `task-event --provider … --event …` is live |
+
+`install_live_brief_hook` was run verbatim against a scratch
+`CODEX_HOME`; observed `hooks.json` (verbatim):
+
+```json
+{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command",
+ "command": "python3 /usr/local/lib/arena-hook-audit.py --receipt /out/pixel-hook-1.jsonl -- /usr/local/bin/pixel run-hook task-event --provider codex --event prompt-submit"}]}]}}
+```
+
+The wrapper's allowlist gate accepts this argv
+(`tuple in ALLOWED` and `"prompt-submit" == argv[-1]` verified by
+importing `eval/arena/hook_audit.py` and re-evaluating
+`run_hook`'s predicate). `python3 -m pytest test_hook_audit.py
+test_entrypoint_prep_failure.py -q` → 20 passed.
+
+Not validated: a real `codex exec` turn, Codex's actual stdin payload
+shape, and multi-hook context merging. In the default arm, `pixel
+install`'s direct `UserPromptSubmit` hook and the appended audit-wrapped
+duplicate can both fire — the same duplication the historical
+delivered-hook runs had; whether Codex concatenates or de-duplicates
+`additionalContext` across same-event hooks is unmeasured. The arena's
+`--arms "raw pixel"` warning at `eval/arena.sh:94-96` still prints for
+this mode; it refers to the audit-mode harness, not to this repair.
+
+### Frozen question matrix (11 rows)
+
+Runnable per row, in an indexed repository
+(`pixel build-index <repo>`; the row's evidence column assumes this
+worktree's index — `c481dfc4`, base_files=1156). Payloads must be real
+JSON — inner quotes escaped — or the hook abstains (`{}`); build them
+with `json.dumps`, not shell string interpolation:
+
+```sh
+python3 -c 'import json,sys; print(json.dumps(
+    {"session_id":"m","prompt":sys.argv[1],
+     "cwd":sys.argv[2],"hook_event_name":"UserPromptSubmit"}))' \
+  "<PROMPT>" "<REPO>" \
+| ./target/dev-release/pixel run-hook task-event --provider codex --event prompt-submit
+```
+
+An answer counts as *delivered* only when the envelope carries
+`hookSpecificOutput.additionalContext` containing `[PIXEL:BRIEF]`; `{}`
+is an abstention and proves nothing about evidence.
+
+| # | Kind | Exact prompt | Expected evidence ops | Unsupported claim |
+| --- | --- | --- | --- | --- |
+| 1 | Lookup | What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce? | Literal anchors `BRIEF_BYTES`, `MAX_OPS`, `BRIEF_WINDOW` → `files_with` + `line_at` | Naming limits not present in source (2048 B / 4 ops / 750 ms) or citing file locations as values |
+| 2 | Change impact | Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks. | `find-symbol` uid + `impact` callers + test-file location | Naming a test that does not exist, or a call site absent from `task_hook.rs` (def :1097, call :1068) |
+| 3 | Flow | Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order. | `files_with` on `UserPromptSubmit`/`task-event` + ordered handoffs | Skipping `with_brief`/`envelope`, or claiming `run-hook prompt-submit` is the installed command |
+| 4 | Diagnosis | If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything. | Fallback-condition text + `unresolved` reason + no-rebuild assertion | Claiming the hook rebuilds index/graph, or that a stale graph alone kills the brief |
+| 5 | Configuration/install | Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass? | Literal command-string search in `routing.rs`/`codex_config.rs` | Answering the retired `run-hook prompt-submit --provider codex` spelling as the live one |
+| 6 | Tests/validation | Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields. | `files_with`/`find-symbol` on the three named tests + assertion text | Inventing test names, or claiming Pi starts a brief (`brief_prompt` excludes it, `task_hook.rs:1081`) |
+| 7 | History/rationale | What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage. | `commit-history` on the named commit | Asserting constraints not in that commit's record, or dating them |
+| 8 | Architecture | Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope? | Module/function locations: `task_hook` vs `execution_brief::chain` | Attributing the `hookSpecificOutput` envelope to the chain, or retrieval ops to task_hook |
+| 9 | ≥2-symbol flow | how does start_brief reach the host envelope through with_brief? | Anchors `start_brief`+`with_brief` → `find-symbol` + `files_with`; measured 668 B, ops 2/4 | Claiming a chain hop no evidence names, or that multi-anchor prompts are unhandled |
+| 10 | Pure paraphrase | where does the code cap the size of injected prompt context? | Weak signal → `judge` verdict → `concept` route only; measured NON-DETERMINISTIC: 5 runs → 4 briefs (289–313 B, `intent: question (0.80)` line present once), 1 abstention `{}` | Claiming delivery on an abstained run, or determinism — the judge's 750 ms-window subprocess decides |
+| 11 | Config-in-JSON | in the hook response {"hookSpecificOutput":{"hookEventName":"UserPromptSubmit"}} which field carries the rendered brief? | Quoted anchors `hookSpecificOutput`,`hookEventName`,`UserPromptSubmit` → `files_with`; measured 783 B | Naming a field outside the emitted schema, or claiming JSON blocks are ignored (they are anchors) |
+
+Rows 1–8 are the frozen `eval/scenarios/qk-*.json` prompts verbatim;
+their `must`/`never` regexes remain the scoring contract. Rows 9–11 were
+measured live against the worktree binary during this repair; only
+observed outputs are recorded, not scenario scores.

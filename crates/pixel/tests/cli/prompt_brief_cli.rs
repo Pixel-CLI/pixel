@@ -133,12 +133,13 @@ fn rename_prompt_should_carry_files_definition_and_callers_in_the_hook_context()
             context(&output),
             [
                 "[PIXEL:BRIEF]",
+                "kind: lookup",
                 "anchors: handleError, reportError, packages/ui/handleError.ts",
-                "defined: function handleError packages/ui/handleError.ts:1-3 — export function handleError(e: Error): string {",
-                "files: apps/web/page.tsx:1 packages/ui/handleError.ts:1",
+                "defined: function handleError packages/ui/handleError.ts:1-3 — export function handleError(e: Error): string {   return \"boom \" + e.message; }",
+                "files: apps/web/page.tsx:1 — import { handleError } from \"../../packages/ui/handleError\";; apps/web/page.tsx:3 —   try { return 1; } catch (e) { return handleError(e as Error); }; apps/web/page.tsx:5 — export function Other() { return handleError(new Error(\"x\")); }; packages/ui/handleError.ts:1 — export function handleError(e: Error): string {",
                 "callers (impact d1): apps/web/page.tsx -> Page:2; apps/web/page.tsx -> Other:5",
                 "excluded (generated): data/out.json",
-                "confidence: high | ops: 3/4",
+                "coverage: 4/4 ops answered",
                 "Answer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
             ]
             .join("\n"),
@@ -148,13 +149,13 @@ fn rename_prompt_should_carry_files_definition_and_callers_in_the_hook_context()
 }
 
 #[test]
-fn literal_lookup_should_skip_impact_and_report_medium_confidence() {
+fn literal_lookup_should_skip_impact_and_answer_every_op() {
     let root = indexed("lookup");
     let output = hook(&root, "claude", "where is `handleError` defined?", &[]);
     let text = context(&output);
     assert!(text.contains("\ndefined: function handleError packages/ui/handleError.ts:1-3 — export function handleError"));
     assert!(!text.contains("callers (impact"), "{text}");
-    assert!(text.contains("\nconfidence: medium | ops: 2/4\n"), "{text}");
+    assert!(text.contains("\ncoverage: 3/3 ops answered\n"), "{text}");
 }
 
 #[test]
@@ -218,7 +219,8 @@ fn a_stale_graph_should_be_named_and_never_rebuilt_by_the_hook() {
         "{text}"
     );
     assert!(!text.contains("callers (impact"), "{text}");
-    assert!(text.contains("\nconfidence: medium | ops: 2/4\n"), "{text}");
+    assert!(text.contains("\ncoverage: 1/2 ops answered\n"), "{text}");
+    assert!(text.contains("\npacket partial —"), "{text}");
     assert_eq!(before, (stamp(&graph), stamp(&shard)));
 }
 
@@ -270,7 +272,11 @@ fn a_missing_graph_should_leave_the_text_evidence_and_build_nothing() {
     let output = hook(&root, "claude", RENAME, &[]);
     let text = context(&output);
     assert!(
-        text.contains("\nfiles: apps/web/page.tsx:1 packages/ui/handleError.ts:1\n"),
+        text.contains("apps/web/page.tsx:1 — import { handleError }"),
+        "{text}"
+    );
+    assert!(
+        text.contains("packages/ui/handleError.ts:1 — export function handleError"),
         "{text}"
     );
     assert!(
@@ -293,7 +299,7 @@ fn the_brief_command_should_print_the_brief_or_stay_silent() {
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.starts_with("[PIXEL:BRIEF]"), "{text}");
-    assert!(text.contains("confidence:"), "{text}");
+    assert!(text.contains("coverage:"), "{text}");
 
     let silent = pixel_command()
         .current_dir(&*root)

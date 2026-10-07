@@ -52,8 +52,14 @@ verify_pixel_brief() {
   local output_file receipt_file
   output_file=$(mktemp)
   receipt_file="/out/pixel-brief-hook-${REP:-1}.json"
-  if ! printf '%s' '{"session_id":"arena-brief-'"${REP:-1}"'","prompt":"How should a contributor approach this repository'"'"'"s setup and tests?","cwd":"'"$REPO_DIR"'","hook_event_name":"UserPromptSubmit"}' \
-    | pixel run-hook prompt-submit --provider codex > "$output_file"; then
+  # `run-hook prompt-submit` is a retired no-op verb (RetiredHookCmd); the live
+  # brief path is the task-event hook `pixel install` registers for Codex's
+  # UserPromptSubmit. The probe prompt carries a strong code signal
+  # (`README.md` names code by its source extension, `tested` is a code word)
+  # so an indexed repository can answer with a real [PIXEL:BRIEF] block; a
+  # vague prompt would legitimately abstain with `{}`.
+  if ! printf '%s' '{"session_id":"arena-brief-'"${REP:-1}"'","prompt":"where is README.md and how is the project tested?","cwd":"'"$REPO_DIR"'","hook_event_name":"UserPromptSubmit"}' \
+    | pixel run-hook task-event --provider codex --event prompt-submit > "$output_file"; then
     rm -f "$output_file"
     echo "Pixel prompt-submit hook invocation failed" >&2
     return 1
@@ -68,19 +74,29 @@ output_path, receipt_path, rep = sys.argv[1:]
 try:
     raw_response = Path(output_path).read_text().strip()
     response = json.loads(raw_response) if raw_response else {}
-    hook_output = response.get("hookSpecificOutput", {})
+    hook_output = response.get("hookSpecificOutput") or {}
     context = hook_output.get("additionalContext", "")
+    # Same validity contract as hook_audit.py's run_hook: an absent
+    # hookSpecificOutput is Codex's valid abstention shape (`{}`), so the hook
+    # plumbing is verified separately from whether this prompt found evidence.
     valid = (
-        hook_output.get("hookEventName") == "UserPromptSubmit"
-        and isinstance(context, str)
-        and bool(context)
+        bool(raw_response)
+        and (
+            "hookSpecificOutput" not in response
+            or (
+                hook_output.get("hookEventName") == "UserPromptSubmit"
+                and ("additionalContext" not in hook_output or isinstance(context, str))
+            )
+        )
     )
+    emitted = isinstance(context, str) and bool(context.strip())
     receipt = {
         "arm": "pixel",
         "rep": rep,
         "provider": "codex",
         "event": "prompt-submit",
         "response_valid": valid,
+        "emitted_context": emitted,
         "hook_event_name": hook_output.get("hookEventName"),
         "brief_present": "[PIXEL:BRIEF]" in context if isinstance(context, str) else False,
         "execution_route_present": "[PIXEL:EXECUTION_ROUTE]" in context if isinstance(context, str) else False,
@@ -94,6 +110,7 @@ except (OSError, ValueError, TypeError):
         "provider": "codex",
         "event": "prompt-submit",
         "response_valid": False,
+        "emitted_context": False,
         "hook_event_name": None,
         "brief_present": False,
         "context_bytes": 0,
@@ -101,7 +118,7 @@ except (OSError, ValueError, TypeError):
     }
 Path(receipt_path).write_text(json.dumps(receipt, indent=2) + "\n")
 if not receipt["response_valid"]:
-    raise SystemExit("Pixel prompt-submit hook did not return valid context")
+    raise SystemExit("Pixel prompt-submit hook did not return a valid Codex envelope")
 print("=== Pixel prompt-submit context ===")
 print(context)
 print("=== End Pixel prompt-submit context ===")
@@ -126,10 +143,12 @@ except (OSError, ValueError):
     config = {}
 hooks = config.setdefault("hooks", {})
 groups = hooks.setdefault("UserPromptSubmit", [])
+# The live brief verb (the retired `run-hook prompt-submit` accepted anything
+# and emitted nothing); hook_audit.py allowlists exactly this argv.
 command = (
     "python3 /usr/local/lib/arena-hook-audit.py --receipt "
     + str(receipt_path)
-    + " -- /usr/local/bin/pixel run-hook prompt-submit --provider codex"
+    + " -- /usr/local/bin/pixel run-hook task-event --provider codex --event prompt-submit"
 )
 if not any(command in json.dumps(group) for group in groups):
     groups.append({"hooks": [{"type": "command", "command": command}]})
