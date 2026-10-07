@@ -18,6 +18,7 @@ pub mod changes;
 pub mod cluster;
 pub mod concept;
 pub mod concept_resolve;
+pub mod cycles;
 pub mod extract;
 pub mod impact;
 pub mod imports;

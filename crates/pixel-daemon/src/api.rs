@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::cycles;
 use pixel_context::estimate_tokens;
 use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
@@ -1166,6 +1167,19 @@ impl Service {
                 time_budget_ms,
                 scope,
                 at_snapshot,
+            }),
+            Request::Cycles {
+                tiers,
+                max_nodes,
+                max_edges,
+                time_budget_ms,
+                max_components,
+            } => self.op_cycles(CyclesRequest {
+                tiers,
+                max_nodes,
+                max_edges,
+                time_budget_ms,
+                max_components,
             }),
         }
     }
@@ -2330,6 +2344,49 @@ impl Service {
         );
         serde_json::to_value(wire::Output::Evaluation(Box::new(envelope)))
             .map_err(|e| e.to_string())
+    }
+
+    /// Enumerate recursion cycles in the call graph, bounded by the four
+    /// budgets. The answer carries explicit coverage so an incomplete graph
+    /// is never read as proof of safety.
+    fn op_cycles(&mut self, req: CyclesRequest) -> Result<Value, String> {
+        let args = req.parse()?;
+
+        // Nothing to attribute an answer to: report it, never build one.
+        if let Err(reason) = self.evaluate_gate()? {
+            let reason_str = match reason {
+                wire::Reason::GraphUnavailable => "graph_unavailable",
+                wire::Reason::GraphStale => "graph_stale",
+                _ => "graph_unavailable",
+            };
+            let result = json!({
+                "op": "cycles",
+                "components": [],
+                "coverage": {
+                    "enumeration_exhausted": false,
+                    "stopped_by": null,
+                    "reason": reason_str,
+                },
+            });
+            return serde_json::to_value(result).map_err(|e| e.to_string());
+        }
+
+        let db = self.graph_db_path();
+        if self.graph.is_none() {
+            self.graph = Some(GraphStore::open(&db).map_err(|e| e.to_string())?);
+        }
+        let store = self.graph.as_ref().expect("opened above");
+
+        let enumeration = cycles::run(store, &args)?;
+
+        let caps = cycles_caps(&enumeration);
+        let result = json!({
+            "op": "cycles",
+            "components": enumeration.components,
+            "coverage": enumeration.coverage,
+            "caps": caps,
+        });
+        serde_json::to_value(result).map_err(|e| e.to_string())
     }
 
     /// Bring the graph to a generation an answer can name, or say why not.
@@ -3504,6 +3561,7 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "processes",
     "clusters",
     "plan",
+    "cycles",
 ];
 
 fn is_retrieval_op(op_name: &str) -> bool {
@@ -3878,6 +3936,83 @@ impl EvaluateRequest {
             at_snapshot: self.at_snapshot,
         })
     }
+}
+
+/// The `cycles` op's arguments as they arrive on the wire, before the
+/// strings are parsed into the types the enumeration runs on.
+pub(crate) struct CyclesRequest {
+    pub tiers: Option<String>,
+    pub max_nodes: Option<u32>,
+    pub max_edges: Option<u32>,
+    pub time_budget_ms: Option<u64>,
+    pub max_components: Option<u32>,
+}
+
+/// Default node cap for cycle enumeration.
+pub(crate) const DEFAULT_CYCLES_MAX_NODES: u32 = 10_000;
+/// Default edge cap for cycle enumeration.
+pub(crate) const DEFAULT_CYCLES_MAX_EDGES: u32 = 100_000;
+/// Default wall-clock budget for cycle enumeration.
+pub(crate) const DEFAULT_CYCLES_TIME_BUDGET_MS: u64 = 500;
+/// Default component cap for cycle enumeration.
+pub(crate) const DEFAULT_CYCLES_MAX_COMPONENTS: u32 = 1_000;
+
+impl CyclesRequest {
+    /// Parse the wire strings. An unknown `tiers` is a usage error, never a
+    /// silent fallback to a different relation.
+    fn parse(self) -> Result<cycles::Args, String> {
+        let tiers = match self.tiers.as_deref() {
+            None => cycles::TierSelection::Exact,
+            Some(value) => pixel_graph::cycles::TierSelection::parse(value).ok_or_else(|| {
+                format!("cycles: unknown --tiers {value:?} (exact | exact,probable)")
+            })?,
+        };
+        Ok(cycles::Args {
+            tiers,
+            max_nodes: self.max_nodes.unwrap_or(DEFAULT_CYCLES_MAX_NODES),
+            max_edges: self.max_edges.unwrap_or(DEFAULT_CYCLES_MAX_EDGES),
+            time_budget_ms: self.time_budget_ms.unwrap_or(DEFAULT_CYCLES_TIME_BUDGET_MS),
+            max_components: self.max_components.unwrap_or(DEFAULT_CYCLES_MAX_COMPONENTS),
+        })
+    }
+}
+
+/// The caps a cycle enumeration hit, in the words `derive_epistemics` turns
+/// into `lower_bound`. An enumeration that stopped early is a bounded answer
+/// and the envelope must say so.
+fn cycles_caps(enumeration: &pixel_graph::cycles::Enumeration) -> Vec<String> {
+    let mut caps = Vec::new();
+    if !enumeration.coverage.enumeration_exhausted
+        && let Some(param) = enumeration.coverage.stopped_by
+    {
+        match param {
+            pixel_graph::cycles::BudgetParameter::MaxNodes => {
+                caps.push(format!(
+                    "node cap {} stopped the enumeration; cycles beyond it were not found",
+                    enumeration.coverage.max_nodes
+                ));
+            }
+            pixel_graph::cycles::BudgetParameter::MaxEdges => {
+                caps.push(format!(
+                    "edge cap {} stopped the enumeration; cycles beyond it were not found",
+                    enumeration.coverage.max_edges
+                ));
+            }
+            pixel_graph::cycles::BudgetParameter::TimeBudgetMs => {
+                caps.push(format!(
+                    "time budget {}ms expired with nodes still queued",
+                    enumeration.coverage.time_budget_ms
+                ));
+            }
+            pixel_graph::cycles::BudgetParameter::MaxComponents => {
+                caps.push(format!(
+                    "component cap {} stopped the enumeration; further cycles were not reported",
+                    enumeration.coverage.max_components
+                ));
+            }
+        }
+    }
+    caps
 }
 
 /// The caps an evaluation hit, in the words `derive_epistemics` turns into
@@ -7191,6 +7326,16 @@ mod tests {
                     query: Some("dead-code".into()),
                     tag: None,
                     limit: None,
+                },
+            ),
+            (
+                "cycles",
+                Request::Cycles {
+                    tiers: Some("exact".into()),
+                    max_nodes: None,
+                    max_edges: None,
+                    time_budget_ms: None,
+                    max_components: None,
                 },
             ),
         ];
