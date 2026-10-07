@@ -157,8 +157,13 @@ prep_pixel() {
       return 1
     fi
     prep_end_ms=$(date +%s%3N) || return $?
-    python3 -c 'import json,sys; graph=sys.argv[1]; json.dump({"arm":"pixel","rep":sys.argv[4],"prepare_commands":["pixel install","pixel install --repo /repo","pixel prepare-repo --no-daemon /repo"],"duration_ms":int(sys.argv[2])-int(sys.argv[3]),"graph_db":graph,"graph_db_bytes":__import__("pathlib").Path(graph).stat().st_size},open(sys.argv[5],"w"),indent=2); open(sys.argv[5],"a").write("\n")' \
-      "$graph_db" "$prep_end_ms" "$prep_start_ms" "${REP:-1}" "$setup_receipt"
+    prepare_commands='["pixel install"]'
+    if [ "${ARENA_REVIEWED_PIXEL_HOOKS:-0}" != "1" ]; then
+      prepare_commands='["pixel install", "pixel install --repo /repo"]'
+    fi
+    prepare_commands="${prepare_commands%]}, \"pixel prepare-repo --no-daemon /repo\"]"
+    python3 -c 'import json,sys; graph=sys.argv[1]; json.dump({"arm":"pixel","rep":sys.argv[4],"prepare_commands":json.loads(sys.argv[6]),"duration_ms":int(sys.argv[2])-int(sys.argv[3]),"graph_db":graph,"graph_db_bytes":__import__("pathlib").Path(graph).stat().st_size},open(sys.argv[5],"w"),indent=2); open(sys.argv[5],"a").write("\n")' \
+      "$graph_db" "$prep_end_ms" "$prep_start_ms" "${REP:-1}" "$setup_receipt" "$prepare_commands"
   else
     pixel prepare-repo --no-daemon "$REPO_DIR" || return $?
   fi
@@ -247,6 +252,10 @@ case "${ARM_TOOL:-raw}" in
   gortex)   : ;;   # registered in prep_gortex
   pixel)    : ;;   # pixel wires itself via pixel install
 esac
+
+if [ "${ARENA_WATCH_ONLY:-0}" = "1" ]; then
+  while :; do sleep 3600; done
+fi
 
 IFS=' ' read -r -a TASK_LIST <<< "${TASKS:-s1-hook-install s2-vector-recall s3-rename-impact}"
 MODEL_ARGS=()

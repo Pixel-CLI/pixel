@@ -61,18 +61,18 @@ pane, and split again.
 A newly started Codex in this repository opens Pixel's hook-review dialog
 ("⚠ N hooks need review before they can run", footer `t trust all · esc close`)
 and Herdr classifies it `idle`, so the first `agent prompt` fails with
-`agent_prompt_stalled` while the dialog is up. Accept the hooks before the
-first prompt — the review is keyed by the `hooks.json` path, so every new
+`agent_prompt_stalled` while the dialog is up. Review the pending definitions
+in `/hooks` before the first prompt. Trust only the hooks whose commands you
+have inspected; the review is keyed by the `hooks.json` path, so every new
 worktree starts untrusted (the `repo.codex-hook-review` doctor check):
 
 ```sh
-rtk env HERDR_ENV=1 herdr agent send-keys <codex-name> t   # mark reviews done: Review column drops to 0
-rtk env HERDR_ENV=1 herdr agent send-keys <codex-name> esc # close the dialog
+rtk env HERDR_ENV=1 herdr agent send-keys <codex-name> esc # close the dialog after reviewed hooks are trusted
 ```
 
-`send-keys t` alone is not enough — the dialog stays up after `t` until `esc`.
-Only prompt after `herdr agent get` shows a changed `state_change_seq` and the
-dialog text is gone from `herdr agent read`.
+`esc` only closes the dialog after the reviewed hooks are trusted; it does not
+approve hooks. Only prompt after `herdr agent get` shows a changed
+`state_change_seq` and the dialog text is gone from `herdr agent read`.
 
 Start or address agents with Herdr's `agent` commands, for example:
 

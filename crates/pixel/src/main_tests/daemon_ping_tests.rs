@@ -330,7 +330,7 @@ fn only_a_missing_or_refusing_socket_reads_as_no_daemon_to_upgrade() {
     // On macOS /tmp is a symlink to /private/tmp, and canonicalize() resolves
     // it into a path that already eats ~44 of sockaddr_un's ~104 usable bytes;
     // keep the fixture socket short enough to stay under SUN_LEN.
-    let short = std::env::temp_dir().join(format!("px-upg-{}", std::process::id()));
+    let short = PathBuf::from("/tmp").join(format!("px-upg-{}", std::process::id()));
     let _ = std::fs::remove_file(&short);
     assert_eq!(
         upgrade_daemon_request(&short, &Request::Shutdown).map(|r| r.is_none()),

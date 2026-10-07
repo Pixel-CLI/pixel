@@ -14,8 +14,8 @@
 #                      [--results-dir DIR] [--reuse-pixel-image] [--watch]
 #                      [--assert-context-parity] [--prepare-pixel-graph]
 #                      [--review-pixel-hooks] [--skill-candidate-dir DIR]
-#   --watch opens one Herdr pane per arm container (when inside Herdr)
-#   running `docker exec -it <c> codex` — interactive codex with and
+#   --watch opens one Herdr pane per isolated watch container (when inside Herdr)
+#   running `docker exec -it <watch-c> codex` — interactive codex with and
 #   without pixel side by side; falls back to a tmux session otherwise.
 # Results: <results-dir>/<arm>-<task>-<rep>.jsonl + rank table.
 set -euo pipefail
@@ -273,6 +273,11 @@ launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
       rm -f "$snap/.codex/hooks.json" "$snap/.codex/pixel-composed-guard-backup.json"
     fi
   fi
+  if [ "$WATCH" = "1" ]; then
+    rm -rf "$RESULTS/watch-snapshot-$arm-$rep" "$RESULTS/watch-out-$arm-$rep"
+    cp -a "$snap" "$RESULTS/watch-snapshot-$arm-$rep"
+    mkdir -p "$RESULTS/watch-out-$arm-$rep"
+  fi
   local missing=0
   for task in $TASKS; do
     [ -s "$RESULTS/$arm-$task-$rep.jsonl" ] || missing=1
@@ -433,7 +438,7 @@ fi
 launch_watch_panes() {  # <container>...
   local watch_rep="$1"
   shift
-  local c watch_pane watch_arm watch_owner
+  local c watch_c watch_pane watch_arm watch_owner watch_image watch_snap watch_out
   submit_codex_prompt() {
     local pane_id="$1" prompt="$2" attempt screen
     herdr pane send-text "$pane_id" "$prompt" >/dev/null 2>&1
@@ -449,40 +454,6 @@ launch_watch_panes() {  # <container>...
     echo "WARNING: Codex prompt was not visibly submitted in pane $pane_id" >&2
     return 1
   }
-  wait_for_live_hook() {
-    local rep="$1" receipt="$RESULTS/pixel-hook-${rep}.jsonl"
-    for _ in $(seq 1 90); do
-      if [ -s "$receipt" ] && python3 - "$receipt" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-try:
-    rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines() if line.strip()]
-except (OSError, ValueError):
-    rows = []
-for row in rows:
-    if (
-        row.get("hook_event_name") == "UserPromptSubmit"
-        and row.get("response_valid") is True
-        and row.get("emitted_context") is True
-    ):
-        print("=== Live Pixel prompt-submit context ===")
-        print(row.get("additional_context", ""))
-        print("=== End live Pixel prompt-submit context ===")
-        raise SystemExit(0)
-raise SystemExit(1)
-PY
-      then
-        echo "verified: live Pixel UserPromptSubmit hook in $receipt"
-        return 0
-      fi
-      sleep 1
-    done
-    echo "WARNING: live Pixel UserPromptSubmit hook was not observed in $receipt" >&2
-    touch "$RESULTS/pixel-hook-live-${rep}.failed"
-    return 1
-  }
   watch_owner="${HERDR_PANE_ID:-}"
   if [ -z "$watch_owner" ]; then
     watch_owner=$(herdr pane list | python3 -c \
@@ -496,61 +467,75 @@ PY
   local ready=1
   for c in "$@"; do
     watch_arm=${c#arena-}; watch_arm=${watch_arm%%-*}
+    watch_snap="$RESULTS/watch-snapshot-$watch_arm-$watch_rep"
+    watch_out="$RESULTS/watch-out-$watch_arm-$watch_rep"
+    watch_c="arena-watch-$watch_arm-$RUN_ID-$watch_rep"
+    watch_image=$("$DOCKER_BIN" inspect -f '{{.Image}}' "$c")
+    "$DOCKER_BIN" create --name "$watch_c" \
+      -v "$watch_snap":/repo \
+      -v "$AUTH":/root/.codex/auth.json:ro \
+      -v "$ARENA_DIR/arena/entrypoint.sh":/usr/local/bin/arena-entrypoint:ro \
+      -v "$ARENA_DIR/arena/context_manifest.py":/usr/local/lib/arena-context-manifest.py:ro \
+      -v "$ARENA_DIR/arena/hook_audit.py":/usr/local/lib/arena-hook-audit.py:ro \
+      -v "$ARENA_DIR/arena/skill_candidate.py":/usr/local/lib/arena-skill-candidate.py:ro \
+      -v "$SCENARIOS_DIR":/prompts:ro \
+      -v "$watch_out":/out \
+      -e ARM_TOOL="$watch_arm" -e REP="$watch_rep" -e TASKS="$TASKS" -e ARENA_RUN_ID="$RUN_ID" \
+      -e ARENA_WATCH_ONLY=1 -e ARENA_REVIEWED_PIXEL_HOOKS=0 \
+      -e PIXEL_ARENA_PREP_GRAPH="$PREPARE_PIXEL_GRAPH" \
+      -e PIXEL_ARENA_REUSE_INDEX="${PIXEL_ARENA_REUSE_INDEX:-1}" \
+      -e ARENA_SKILL_PILOT="$SKILL_PILOT" \
+      -e CODEX_MODEL="${CODEX_MODEL:-}" -e CODEX_EFFORT="${CODEX_EFFORT:-}" \
+      "$watch_image" >/dev/null
+    "$DOCKER_BIN" start "$watch_c" >/dev/null
     for _ in $(seq 1 120); do
-      if "$DOCKER_BIN" exec "$c" test -e "/out/arena-ready-${watch_arm}-${watch_rep}" >/dev/null 2>&1; then
+      if "$DOCKER_BIN" exec "$watch_c" test -e "/out/arena-ready-${watch_arm}-${watch_rep}" >/dev/null 2>&1; then
         break
       fi
       sleep 1
     done
-    if ! "$DOCKER_BIN" exec "$c" test -e "/out/arena-ready-${watch_arm}-${watch_rep}" >/dev/null 2>&1; then
-      echo "WARNING: $c did not finish setup before pane launch" >&2
+    if ! "$DOCKER_BIN" exec "$watch_c" test -e "/out/arena-ready-${watch_arm}-${watch_rep}" >/dev/null 2>&1; then
+      echo "WARNING: $watch_c did not finish setup before pane launch" >&2
       ready=0
     fi
   done
   [ "$ready" -eq 1 ] || return 1
   for c in "$@"; do
+    watch_arm=${c#arena-}; watch_arm=${watch_arm%%-*}
+    watch_c="arena-watch-$watch_arm-$RUN_ID-$watch_rep"
+    watch_out="$RESULTS/watch-out-$watch_arm-$watch_rep"
     watch_pane=$(HERDR_PANE_ID="$watch_owner" herdr pane split --current --direction right \
       | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['pane']['pane_id'])" 2>/dev/null || true)
     if [ -n "$watch_pane" ]; then
       echo "$watch_pane" >> "$RESULTS/.watch-panes"
-      watch_arm=${c#arena-}; watch_arm=${watch_arm%%-*}
       herdr pane rename "$watch_pane" "arena-$watch_arm" >/dev/null 2>&1
-      # interactive Codex inside the arm's container, YOLO. The task is sent
+      # Interactive Codex runs in its isolated watch-only container. The task is sent
       # through the normal TUI after it reaches its input prompt.
       local prompt
       prompt=$(prompt_for "${TASKS%% *}")
       herdr pane run "$watch_pane" \
-        "docker exec -it $c codex -m $CODEX_MODEL -c model_reasoning_effort=$CODEX_EFFORT --dangerously-bypass-approvals-and-sandbox"
-      # codex asks to trust /repo, then to trust installed hooks (pixel
-      # arm): answer both so the pane lands on the prompt, unattended.
+        "docker exec -it $watch_c codex -m $CODEX_MODEL -c model_reasoning_effort=$CODEX_EFFORT --dangerously-bypass-approvals-and-sandbox"
+      # Codex may ask to trust /repo. Hook definitions require an explicit
+      # human review in /hooks before the prompt is submitted.
       (
         pane_id="$watch_pane"
-        hook_trust_required=0
-        hook_trust_complete=0
         for _ in $(seq 1 45); do
           screen=$(herdr pane read "$pane_id" 2>/dev/null | tail -20)
           case "$screen" in
             *"Hooks need review"*|*"Trust all and continue"*)
-              hook_trust_required=1
-              herdr pane send-keys "$pane_id" Down >/dev/null 2>&1
-              sleep 1
-              herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1
-              sleep 2
-              screen=$(herdr pane read "$pane_id" 2>/dev/null | tail -20)
-              case "$screen" in
-                *"Hooks need review"*|*"Trust all and continue"*) ;;
-                *) hook_trust_complete=1 ;;
-              esac ;;
+              echo "WARNING: review hooks in /hooks for pane $pane_id, then resume the pane" >&2
+              herdr pane send-keys "$pane_id" esc >/dev/null 2>&1
+              exit 1 ;;
             *"Trust and continue"*)
               herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
             *"Ask Codex"*)
-              if [ "$watch_arm" = "pixel" ] && [ "$hook_trust_required" = "1" ] && [ "$hook_trust_complete" != "1" ]; then
-                echo "WARNING: Pixel hook trust was not confirmed in pane $pane_id" >&2
-                touch "$RESULTS/pixel-hook-trust-${watch_rep}.failed"
-                exit 1
-              fi
               submit_codex_prompt "$pane_id" "$prompt" || true
-              [ "$watch_arm" = "pixel" ] && wait_for_live_hook "$watch_rep" || true
+              if [ "$watch_arm" = "pixel" ]; then
+                for _ in $(seq 1 90); do
+                  [ -s "$watch_out/pixel-hook-${watch_rep}.jsonl" ] && break
+                  sleep 1
+                done
+              fi
               exit 0 ;;
           esac
           sleep 2
@@ -621,28 +606,6 @@ for rep in $(seq 1 "$REPS"); do
   fi
 done
 
-# --watch, tmux fallback (no Herdr): streaming `docker logs -f` also works
-# after the containers exit, so it stays after the wait. The interactive herdr
-# panes open in launch_watch_panes, before the rep loop's `docker wait`.
-if [ "$WATCH" = "1" ] && { [ -z "${HERDR_ENV:-}" ] || ! command -v herdr >/dev/null 2>&1; }; then
-  if command -v tmux >/dev/null 2>&1; then
-    if [ "${#CONTAINERS[@]}" -gt 0 ]; then
-      WATCH_SESSION="arena-$$"
-      tmux new-session -d -s "$WATCH_SESSION" -x 220 -y 50 \
-        "docker logs -f ${CONTAINERS[0]}; echo; echo 'container exited'; exec \${SHELL:-sh}"
-      for c in "${CONTAINERS[@]:1}"; do
-        tmux split-window -t "$WATCH_SESSION" \
-          "docker logs -f $c; echo; echo 'container exited'; exec \${SHELL:-sh}"
-        tmux select-layout -t "$WATCH_SESSION" tiled >/dev/null
-      done
-      tmux select-layout -t "$WATCH_SESSION" tiled >/dev/null
-      echo "watching: tmux attach -t $WATCH_SESSION"
-    fi
-  else
-    echo "WARNING: --watch needs herdr (HERDR_ENV) or tmux; neither found" >&2
-  fi
-fi
-
 FAIL="$LAUNCH_FAIL"
 for i in "${!CONTAINERS[@]}"; do
   c="${CONTAINERS[$i]}"
@@ -658,7 +621,7 @@ for i in "${!CONTAINERS[@]}"; do
   fi
   docker rm "$c" >/dev/null 2>&1
 done
-[ -z "$(rtk find "$RESULTS" -maxdepth 1 \( -name 'pixel-hook-live-*.failed' -o -name 'pixel-hook-trust-*.failed' \) -print -quit 2>/dev/null)" ] || FAIL=1
+[ -z "$(find "$RESULTS" -maxdepth 1 \( -name 'pixel-hook-live-*.failed' -o -name 'pixel-hook-trust-*.failed' \) -print -quit 2>/dev/null)" ] || FAIL=1
 [ "$FAIL" -ne 0 ] && echo "WARNING: some arm containers failed (see above)"
 
 echo "=== ranking"
