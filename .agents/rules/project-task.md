@@ -40,3 +40,38 @@ issue the way GitHub itself understands.
   emergency revert may go without an issue; its PR body then has no closing
   keyword and says in a line why no issue was needed. Everything else links
   its issue as above.
+
+## Install side-build & remote smoke (item #4, sub-task openai-install-smoke)
+
+Recorded procedure, verified live on 2026-10-07:
+
+1. `pixel self-update --dev --repo . --build "cargo build --profile
+   dev-release -p pixel-cli"` — green (~1.2s rebuild, installs
+   `target/dev-release/pixel` to `~/.local/bin/pixel-dev`).
+2. `pixel-dev build-index --history .` (fresh, 2413 commits, 100% diff
+   coverage) then `pixel-dev install --repo .` — 8 green, 0 yellow, 0 red.
+3. `printf '%s' '<key>' | pixel-dev config remote-key openai -` writes the
+   key to `~/.pixel/config.yaml` (never the repo, never printed back).
+4. Live smoke: `pixel-dev classify 'Choose the letter that comes first in
+   the alphabet.' --context 'Classify the text.' --label a --label b
+   --remote-preset openai --engine remote --json` returned
+   `probs {a:0.94, b:0.06}`, `snapshot.provider=openai`,
+   `model=gpt-6-luna` (the openai preset's default model).
+
+Findings from the smoke (candidate edits live in `crates/`, not here):
+
+- The `openai` preset posts to `https://api.openai.com/v1/decisions`
+  (OpenAI's Decisions shape), not `/chat/completions`; a Decisions
+  `refusal` answer surfaces as
+  `remote decisions refused the decision: (no reason given)`.
+- The key itself is valid (`GET /v1/models` → 200; chat completions
+  work), but the account has Decisions access only on `gpt-6-luna`:
+  every other model id (gpt-4o, gpt-5, gpt-5.1, gpt-6.1-sol, …)
+  returns 404 `model_not_found` on `/v1/decisions`.
+- Vague input (`'smoke test'` + context `t`) makes `gpt-6-luna` return a
+  Decisions refusal with no reason; a well-posed question returns a
+  proper `probabilities` distribution. Consider a clearer error hint
+  (input too vague / model lacks Decisions access) in
+  `crates/pixel/src/decide_remote.rs`.
+5. `pixel-dev doctor . --fix --fail-on yellow --skip 'install.*' --skip
+   repo.codex-hook-review` — 17 checks ran, 17 green, 0 yellow, 0 red.

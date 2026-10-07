@@ -64,7 +64,7 @@
 #          clef-cloudflare talks to Workers AI with CLOUDFLARE_API_TOKEN and
 #          CLOUDFLARE_ACCOUNT_ID (or a remote_base ending in
 #          /accounts/<account-id>); API charges may apply.
-# remote_preset options: openrouter, ollama, deepseek, opencode-go, jev,
+# remote_preset options: openrouter, ollama, deepseek, opencode-go, openai, jev,
 #   clef-ollama, clef-cloudflare, local.
 # remote_model/remote_base pin the preset's model and endpoint; the command
 #   pixel config remote-preset <preset> [--model --base] writes all three.

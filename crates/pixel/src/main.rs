@@ -1982,7 +1982,7 @@ enum ConfigCmd {
     /// the previous provider's stale choice.
     RemotePreset {
         /// Remote provider preset (openrouter, ollama, deepseek,
-        /// opencode-go, jev, clef-ollama, clef-cloudflare, local).
+        /// opencode-go, openai, jev, clef-ollama, clef-cloudflare, local).
         #[arg(value_enum)]
         preset: decide_remote::Preset,
         /// Model id the preset runs (default: the preset's own).

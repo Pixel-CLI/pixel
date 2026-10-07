@@ -34,15 +34,18 @@ use std::path::{Path, PathBuf};
 pub const LOCAL_LABEL: &str = "Local — Ollaya winnow:e4b on this Mac (offline, $0 per call; 0.722 typed-decisions accuracy vs Jev's 0.738)";
 pub const REMOTE_LABEL: &str = "Remote — hosted LLM behind your key (DeepSeek-v4.1-flash: 100% on the 14-item public coding exam; ~$0.0001/call, needs network)";
 pub const JEV_LABEL: &str = "Jev — TypeSafe's hosted decision model behind your TYPESAFE_API_KEY (0.738 typed-decisions accuracy, needs network)";
+pub const OPENAI_LABEL: &str = "OpenAI — the Decisions API with gpt-6-luna behind your OPENAI_API_KEY (native typed answers: probability, choice, score; ~$0.10 per 1M input tokens, needs network)";
 pub const CLEF_LABEL: &str = "Clef-flash — Cloudflare's 9B decision model via Ollama (local, no key) or Workers AI (your Cloudflare token); 39 ms median latency, BFCL 98.8 vs Jev's 95.8 (Cloudflare-published)";
 /// What one menu row launches: the local auto-setup, the remote-provider
-/// key flow (any chat preset), the Jev flow (a TypeSafe or OpenCode Go
-/// key, then the model the source carries), or the Clef-flash flow (an
-/// Ollama server or a Cloudflare account id and token).
+/// key flow (any chat preset), the OpenAI Decisions flow (its own wire
+/// and model), the Jev flow (a TypeSafe or OpenCode Go key, then the
+/// model the source carries), or the Clef-flash flow (an Ollama server or
+/// a Cloudflare account id and token).
 #[derive(Clone, Copy, PartialEq)]
 enum SetupKind {
     Local,
     Remote,
+    Openai,
     Jev,
     Clef,
 }
@@ -51,6 +54,7 @@ enum SetupKind {
 const MENU: &[(&str, SetupKind)] = &[
     (LOCAL_LABEL, SetupKind::Local),
     (REMOTE_LABEL, SetupKind::Remote),
+    (OPENAI_LABEL, SetupKind::Openai),
     (JEV_LABEL, SetupKind::Jev),
     (CLEF_LABEL, SetupKind::Clef),
 ];
@@ -218,6 +222,7 @@ pub fn install_step(
         stored_engine(),
         setup_local,
         propose_remote_key,
+        propose_openai_key,
         propose_jev_key,
         propose_clef_key,
         propose_classify_helpers,
@@ -227,13 +232,14 @@ pub fn install_step(
 }
 
 #[allow(clippy::too_many_arguments)] // the seams are the point: tests inject each collaborator
-fn install_step_with<FLocal, FRemote, FJev, FClef, FHelpers>(
+fn install_step_with<FLocal, FRemote, FOpenai, FJev, FClef, FHelpers>(
     tty: bool,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
     stored: Option<String>,
     setup_local: FLocal,
     propose_remote_key: FRemote,
+    propose_openai_key: FOpenai,
     propose_jev_key: FJev,
     propose_clef_key: FClef,
     propose_helpers: FHelpers,
@@ -243,6 +249,7 @@ fn install_step_with<FLocal, FRemote, FJev, FClef, FHelpers>(
 where
     FLocal: FnOnce(&mut dyn std::io::Write) -> Result<(), String>,
     FRemote: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
+    FOpenai: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
     FJev: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
     FClef: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
     FHelpers: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
@@ -288,6 +295,7 @@ where
     match choice.and_then(|index| MENU.get(index).map(|(_, kind)| *kind)) {
         Some(SetupKind::Local) => setup_local(stdout),
         Some(SetupKind::Remote) => propose_remote_key(stdin, stdout),
+        Some(SetupKind::Openai) => propose_openai_key(stdin, stdout),
         Some(SetupKind::Jev) => propose_jev_key(stdin, stdout),
         Some(SetupKind::Clef) => propose_clef_key(stdin, stdout),
         None => {
@@ -453,7 +461,7 @@ fn propose_remote_key_with(
 ) -> Result<(), String> {
     writeln!(
         stdout,
-        "Remote providers: openrouter / ollama / deepseek / opencode-go"
+        "Remote providers: openrouter / ollama / deepseek / opencode-go / openai"
     )
     .map_err(|e| e.to_string())?;
     write!(stdout, "Provider [openrouter]> ").map_err(|e| e.to_string())?;
@@ -469,7 +477,7 @@ fn propose_remote_key_with(
     };
     let Some(preset) = crate::decide_remote::Preset::parse_name(provider) else {
         return Err(format!(
-            "unknown provider {provider:?} (openrouter, ollama, deepseek, opencode-go, local)"
+            "unknown provider {provider:?} (openrouter, ollama, deepseek, opencode-go, openai, local)"
         ));
     };
     if preset.is_clef()
@@ -565,6 +573,30 @@ fn propose_jev_key_with(
 /// a secret: it is stored in the preset's base URL, the token in the global
 /// config's `remote_keys` like every other key.
 #[cfg_attr(test, mutants::skip)] // Config adapter; prompt and persistence dispatch are tested with injected storage.
+/// The OpenAI path: one key source (OPENAI_API_KEY, platform.openai.com)
+/// and one Decisions-capable model today (gpt-6-luna, per OpenAI's Decisions
+/// guide), so the flow is a single key prompt that stores the preset and
+/// its default model — no provider or model menu.
+#[cfg_attr(test, mutants::skip)] // Config adapter; prompt and persistence dispatch are tested with injected storage.
+fn propose_openai_key(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    propose_key_for(
+        crate::decide_remote::Preset::Openai,
+        None,
+        None,
+        None,
+        stdin,
+        stdout,
+        |preset, key, model, base| {
+            if let Some(key) = key {
+                crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+            }
+            crate::config_cmd::set_classify_remote_model(preset, model, base)
+        },
+    )
+}
 fn propose_clef_key(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
@@ -1732,6 +1764,7 @@ mod tests {
             Some("remote".to_string()),
             |_| panic!("stored setting must not start local setup"),
             |_, _| panic!("stored setting must not prompt for a key"),
+            |_, _| panic!("stored setting must not run the openai flow"),
             |_, _| panic!("stored setting must not prompt for a jev key"),
             |_, _| panic!("stored setting must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
@@ -1752,6 +1785,7 @@ mod tests {
             None,
             |_| panic!("non-interactive install must not start local setup"),
             |_, _| panic!("non-interactive install must not prompt for a key"),
+            |_, _| panic!("non-interactive install must not run the openai flow"),
             |_, _| panic!("non-interactive install must not prompt for a jev key"),
             |_, _| panic!("non-interactive install must not prompt for a clef key"),
             |_, _| panic!("non-interactive install must not offer helpers"),
@@ -1773,6 +1807,7 @@ mod tests {
             None,
             |stdout| writeln!(stdout, "local setup ran").map_err(|e| e.to_string()),
             |_, _| panic!("local choice must not prompt for a remote key"),
+            |_, _| panic!("local choice must not run the openai flow"),
             |_, _| panic!("local choice must not prompt for a jev key"),
             |_, _| panic!("local choice must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
@@ -1797,6 +1832,7 @@ mod tests {
                 stdin.read_line(&mut provider).map_err(|e| e.to_string())?;
                 writeln!(stdout, "remote key for {}", provider.trim()).map_err(|e| e.to_string())
             },
+            |_, _| panic!("remote choice must not run the openai flow"),
             |_, _| panic!("remote choice must not prompt for a jev key"),
             |_, _| panic!("remote choice must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
@@ -1814,8 +1850,29 @@ mod tests {
             &mut std::io::Cursor::new(b"3\n".to_vec()),
             &mut output,
             None,
+            |_| panic!("openai choice must not start local setup"),
+            |_, _| panic!("openai choice must not ask for a provider"),
+            |_, stdout| writeln!(stdout, "openai prompt ran").map_err(|e| e.to_string()),
+            |_, _| panic!("openai choice must not prompt for a jev key"),
+            |_, _| panic!("openai choice must not prompt for a clef key"),
+            |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("openai prompt ran"));
+        assert!(output.contains("helpers proposed"));
+
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"4\n".to_vec()),
+            &mut output,
+            None,
             |_| panic!("jev choice must not start local setup"),
             |_, _| panic!("jev choice must not ask for a provider"),
+            |_, _| panic!("jev choice must not run the openai flow"),
             |_, stdout| writeln!(stdout, "jev key prompt ran").map_err(|e| e.to_string()),
             |_, _| panic!("jev choice must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
@@ -1830,11 +1887,12 @@ mod tests {
         let mut output = Vec::new();
         install_step_with(
             true,
-            &mut std::io::Cursor::new(b"4\n".to_vec()),
+            &mut std::io::Cursor::new(b"5\n".to_vec()),
             &mut output,
             None,
             |_| panic!("clef choice must not start local setup"),
             |_, _| panic!("clef choice must not ask for a provider"),
+            |_, _| panic!("clef choice must not run the openai flow"),
             |_, _| panic!("clef choice must not prompt for a jev key"),
             |_, stdout| writeln!(stdout, "clef prompt ran").map_err(|e| e.to_string()),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
@@ -1855,6 +1913,7 @@ mod tests {
             None,
             |_| panic!("a skipped engine must not start local setup"),
             |_, _| panic!("a skipped engine must not prompt for a key"),
+            |_, _| panic!("a skipped engine must not run the openai flow"),
             |_, _| panic!("a skipped engine must not prompt for a jev key"),
             |_, _| panic!("a skipped engine must not prompt for a clef key"),
             |_, _| panic!("a skipped engine must not offer helpers"),

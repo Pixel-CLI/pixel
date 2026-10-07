@@ -14,6 +14,7 @@ fn run(home: &Path, cwd: &Path, args: &[&str]) -> Output {
         .env_remove("PIXEL_DAEMON_AUTO_START")
         .env_remove("PIXEL_TASK_CONTEXT")
         .env_remove("PIXEL_TASK_BOUNDARY")
+        .env_remove("OPENAI_API_KEY")
         .current_dir(cwd)
         .args(args)
         .output()
@@ -402,4 +403,75 @@ fn classify_engine_jev_should_store_the_remote_preset_not_a_plain_engine() {
         serde_saphyr::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(doc["classify"]["engine"], "local");
     assert_eq!(doc["classify"]["remote_preset"], "jev");
+}
+
+#[test]
+fn classify_accepts_the_openai_preset_and_names_its_key_when_missing() {
+    let home = Scratch::for_test("config", "classify-openai-home");
+    let repo = Scratch::for_test("config", "classify-openai-repo");
+    // The preset is a valid clap value.
+    stdout(&run(&home, &repo, &["config", "remote-preset", "openai"]));
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(home.join(".pixel/config.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(doc["classify"]["remote_preset"], "openai");
+
+    // Without a key anywhere the classify call must fail naming OPENAI_API_KEY
+    // and the `pixel config remote-key openai` remedy — before any network call.
+    stdout(&run(&home, &repo, &["config", "classify", "on"]));
+    let out = run(
+        &home,
+        &repo,
+        &[
+            "classify",
+            "t",
+            "--engine",
+            "remote",
+            "--remote-preset",
+            "openai",
+            "--label",
+            "a",
+            "--label",
+            "b",
+        ],
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "remote preset openai needs an API key: set OPENAI_API_KEY or run `pixel config remote-key openai -`",
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn config_remote_key_openai_round_trips_and_clears() {
+    let home = Scratch::for_test("config", "remote-key-openai-home");
+    stdout(&run(
+        &home,
+        &home,
+        &["config", "remote-key", "openai", "sk-openai-test"],
+    ));
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(home.join(".pixel/config.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(doc["remote_keys"]["openai"], "sk-openai-test");
+
+    let out = run(&home, &home, &["config", "remote-key", "openai"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("set"));
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("sk-openai-test"),
+        "the stored key value must never be echoed"
+    );
+
+    stdout(&run(
+        &home,
+        &home,
+        &["config", "remote-key", "openai", "--clear"],
+    ));
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(home.join(".pixel/config.yaml")).unwrap())
+            .unwrap();
+    assert!(doc["remote_keys"].get("openai").is_none());
 }
