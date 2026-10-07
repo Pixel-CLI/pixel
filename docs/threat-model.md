@@ -135,6 +135,13 @@ under it are written without following links (`pixel_git::nofollow`,
 `SQLITE_OPEN_NOFOLLOW`), and a path read from a shard or the graph is used only
 inside the repository (`pixel_git::repo_path::confine`); see T6.
 
+The reference manifest (`.pixel/reference.json`, `reference_cmd`) is read back
+the same way, but its entries carry revisions that become git argv in
+`reference setup`: every revision passes through `pixel_git::validate_ref`
+both when an entry is added and when the manifest is loaded, so a
+hand-edited manifest cannot smuggle a flag-shaped revision into `git fetch`
+(see T8).
+
 ### 3.6 Git operations (B1, B2)
 
 `pixel-git::GitRunner` is the only git spawner
@@ -149,6 +156,14 @@ the global and system configs at `/dev/null` and disables hooks and
 `core.fsmonitor`, is used for the task layer's private snapshots
 (`pixel-task/src/snapshot.rs`); every other git call runs with the
 repository's own configuration and hooks.
+
+`pixel reference setup` clones or fetches each corpus named in
+`.pixel/reference.json` under `.pixel/references/`: the repository URL is
+passed after `--` to `git clone`, the pinned revision is validated by
+`validate_ref` before it reaches `git fetch`/`git checkout`, and the fetched
+commit is checked out detached — so a pin is never left on a stale local
+branch and a fetched revision is used as the object, not re-resolved from a
+local ref.
 
 ### 3.7 Configuration (B1, B2)
 
@@ -185,6 +200,9 @@ repository file.
   Hugging Face into `~/.local/share/pixel/models/`.
 - `pixel index-unpack <path|url>` (`crates/pixel/src/index_cmd.rs`,
   `FETCH_CAP` 2 GiB).
+- `pixel reference setup`: `git clone`/`git fetch` (through `GitRunner`) from
+  each repository URL recorded in `.pixel/reference.json`; the manifest is
+  user-authored, so no destination is invented and no URL is guessed.
 - The local engine setup (`classify_setup::setup_local_with`) downloads and
   runs `https://ollaya.dev/install.sh`.
 
@@ -360,11 +378,14 @@ boundary it crosses.
 - **Mitigation**: `validate_ref` and `--end-of-options` on caller-supplied
   refs and remotes, `--` before pathspecs, `-m <message>` as one argument,
   the `boundary.rs` test keeping every spawn in `GitRunner`; no git call goes
-  through a shell.
+  through a shell. The reference manifest's revisions are validated on load
+  and on add (`reference_cmd`), so a hand-edited `.pixel/reference.json` is
+  refused rather than forwarded to `git fetch`.
 - **Status**: Partial.
 - **Residual**: pathspec magic (`:/`, `:(glob)`) is not disabled; a remote
   may be a local path (`/abs/repo`), which `validate_ref` accepts; refs read
-  from the repository's own state are not all passed through `validate_ref`.
+  from the repository's own state are not all passed through `validate_ref`
+  (the reference manifest is one that is).
 
 ### T9. Repository hooks run on `pixel commit` and `pixel push` (E, B1)
 
