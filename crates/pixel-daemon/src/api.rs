@@ -46,7 +46,11 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// itself; an older daemon would ignore them and answer unfiltered.
 /// 14: `targets` takes `regions` and attaches the symbol-level regions
 /// manifest; an older daemon would ignore the flag and answer without it.
-pub const PROTOCOL_VERSION: u64 = 14;
+/// 15: `history`, `excavate`/`dig-history` and `lifecycle` take
+/// `read_only`, and `status` reports `embedding`; an older daemon would
+/// drop the flag and run the facts-ingest path a prompt hook must never
+/// start.
+pub const PROTOCOL_VERSION: u64 = 15;
 
 /// Rows a `search` returns when the request names no `limit`.
 pub const SEARCH_DEFAULT_ROWS: usize = 100;
@@ -252,6 +256,21 @@ pub fn facts_visibility(root: &Path) -> Value {
         "diffs_evicted": state.diffs_evicted,
         "diff_coverage_since": state.diff_coverage_since,
         "fresh": state.fresh,
+    })
+}
+
+/// The semantic code-search warmth fields of `status`: whether the
+/// code-search model and this repo's persisted chunk vectors are already on
+/// disk, and whether this daemon holds a loaded embedder. Reads download
+/// markers and the vector store's manifest only — never loads a model,
+/// embeds, downloads or writes, so `status` stays cheap.
+fn embedding_status(root: &Path, embedder_resident: bool) -> Value {
+    let probe = pixel_recall::code_search::warm_probe(root);
+    json!({
+        "model_on_disk": probe.model_on_disk,
+        "vectors_present": probe.vectors_present,
+        "vectors_chunks": probe.vectors_chunks,
+        "embedder_resident": embedder_resident,
     })
 }
 
@@ -1037,12 +1056,14 @@ impl Service {
             Request::Status {} => self.op_status(),
             Request::Reindex {} => self.op_reindex(),
             Request::Resolve { phrase, limit } => self.op_resolve(&phrase, limit),
-            Request::History { query, facet, limit } => {
-                self.op_history(&query, facet.as_deref(), limit)
+            Request::History { query, facet, limit, read_only } => {
+                self.op_history(&query, facet.as_deref(), limit, read_only)
             }
-            Request::Lifecycle { path, token } => self.op_lifecycle(path.as_deref(), token.as_deref()),
-            Request::Excavate { phrase, path, from, to, limit } => {
-                self.op_excavate(phrase.as_deref(), path.as_deref(), from.as_deref(), to.as_deref(), limit)
+            Request::Lifecycle { path, token, read_only } => {
+                self.op_lifecycle(path.as_deref(), token.as_deref(), read_only)
+            }
+            Request::Excavate { phrase, path, from, to, limit, read_only } => {
+                self.op_excavate(phrase.as_deref(), path.as_deref(), from.as_deref(), to.as_deref(), limit, read_only)
             }
             Request::Reconcile { strategy, push, into, request_id } => {
                 self.op_reconcile(strategy.as_deref(), push.as_deref(), into.as_deref(), request_id.as_deref())
@@ -2826,6 +2847,7 @@ impl Service {
                 "notify_errors": self.watcher_failures.count(),
             },
             "facts": facts_visibility(&self.root),
+            "embedding": embedding_status(&self.root, self.embedder.is_some()),
         }))
     }
 
@@ -3162,6 +3184,31 @@ impl Service {
         Ok(facts)
     }
 
+    /// The facts db exactly as it stands, for a `read_only` history
+    /// request: `open_existing` never creates the file and this path never
+    /// ingests, rebuilds or spawns the warmer — `Ok(None)` (no db) is an
+    /// error because the read-only contract forbids the open-and-catch-up
+    /// that would serve it. The answer's `index_state` says how stale the
+    /// index it came from was.
+    fn facts_open_read_only(&self) -> Result<FactsStore, String> {
+        match FactsStore::open_existing(&self.root) {
+            Ok(Some(facts)) => Ok(facts),
+            Ok(None) => Err("facts index absent or not built".to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The facts store an op sees: `read_only` takes the index as it
+    /// stands, otherwise the open-and-catch-up path that built today's
+    /// behaviour.
+    fn facts_for(&self, read_only: bool) -> Result<FactsStore, String> {
+        if read_only {
+            self.facts_open_read_only()
+        } else {
+            self.facts_open_and_catch_up()
+        }
+    }
+
     /// True exactly once per Service: the first facts-consuming request.
     /// Claims the flag atomically so a second caller never double-spawns.
     fn facts_warmer_needed(&self) -> bool {
@@ -3174,8 +3221,9 @@ impl Service {
         query: &str,
         facet: Option<&str>,
         limit: Option<usize>,
+        read_only: bool,
     ) -> Result<Value, String> {
-        let facts = self.facts_open_and_catch_up()?;
+        let facts = self.facts_for(read_only)?;
         let result = pixel_facts::search::search(
             &facts,
             query,
@@ -3190,8 +3238,13 @@ impl Service {
     }
 
     /// Engine 2: lifecycle of a path or token.
-    fn op_lifecycle(&mut self, path: Option<&str>, token: Option<&str>) -> Result<Value, String> {
-        let facts = self.facts_open_and_catch_up()?;
+    fn op_lifecycle(
+        &mut self,
+        path: Option<&str>,
+        token: Option<&str>,
+        read_only: bool,
+    ) -> Result<Value, String> {
+        let facts = self.facts_for(read_only)?;
         let result = match (path, token) {
             (Some(p), _) => facts.path_lifecycle(p).map_err(|e| e.to_string())?,
             (None, Some(t)) => facts.token_lifecycle(t).map_err(|e| e.to_string())?,
@@ -3217,8 +3270,9 @@ impl Service {
         from: Option<&str>,
         to: Option<&str>,
         limit: Option<usize>,
+        read_only: bool,
     ) -> Result<Value, String> {
-        let facts = self.facts_open_and_catch_up()?;
+        let facts = self.facts_for(read_only)?;
         // Default cut from 200 to 15: only the top SNIPPET_TOP_N=5 candidates
         // ever carry a code snippet, so the other ~195 were pure metadata
         // rows a caller almost never needs — measured 2026-08-30, a 31-hit
@@ -8100,7 +8154,7 @@ mod tests {
         // No warm loop outliving the test: the index is already fresh.
         svc.facts_warmer_started.store(true, Ordering::SeqCst);
 
-        let missing = svc.op_lifecycle(None, Some("legacy_token")).unwrap();
+        let missing = svc.op_lifecycle(None, Some("legacy_token"), false).unwrap();
         assert_eq!(missing["first_seen"], Value::Null, "{missing}");
         assert_eq!(
             missing["coverage"],
@@ -8115,13 +8169,13 @@ mod tests {
         );
         assert_eq!(missing["index_state"]["diffs_evicted"], 1, "{missing}");
 
-        let found = svc.op_lifecycle(None, Some("fresh_token")).unwrap();
+        let found = svc.op_lifecycle(None, Some("fresh_token"), false).unwrap();
         assert_eq!(found["total_touches"], 1, "{found}");
         assert_eq!(found["coverage"]["lower_bound"], true, "{found}");
         assert_eq!(found["coverage"]["first_seen_exact"], false, "{found}");
 
         let by_path = svc
-            .op_lifecycle(Some("old.rs"), Some("legacy_token"))
+            .op_lifecycle(Some("old.rs"), Some("legacy_token"), false)
             .unwrap();
         assert_eq!(by_path["what"], "old.rs", "{by_path}");
         assert!(by_path.get("coverage").is_none(), "{by_path}");

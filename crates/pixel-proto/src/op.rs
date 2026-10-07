@@ -1,19 +1,13 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! `Op`: a type-level mirror of `pixel_daemon::api::Request`
-//! (`crates/pixel-daemon/src/api.rs`), reproduced here so the shared
-//! contract crate carries the wire-format definition rather than the daemon
-//! crate.
+//! `Op`: the daemon request type, defined in the shared contract crate so
+//! the daemon and CLI share one enum — `crates/pixel-daemon/src/api.rs`
+//! re-exports it (`pub use pixel_proto::Op as Request`) and dispatches on
+//! it.
 //!
-//! This is **not yet wired into `pixel-daemon`** — `Request` there remains
-//! the live type the daemon dispatches on. Swapping the daemon over to this
-//! `Op` (and re-deriving CLI args from it, per `PLAN.md` A2) is a separate future step. Until then, this enum's only job is to
-//! exist, compile, and round-trip identically to `Request`'s current wire
-//! format so it is ready to be swapped in without a contract change.
-//!
-//! Variants, field shapes, and the `#[serde(tag = "op", rename_all =
-//! "snake_case")]` wire convention are copied verbatim from `Request`.
+//! Re-deriving CLI args from it (per `PLAN.md` A2) is a separate future
+//! step.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -167,6 +161,13 @@ pub enum Op {
         facet: Option<String>,
         #[serde(default)]
         limit: Option<usize>,
+        /// Answer from the facts db exactly as it stands: never ingest,
+        /// never create it, never spawn the warmer — an absent db is an
+        /// error. Omitted on the wire when false so pre-flag requests
+        /// serialize identically; an older daemon ignores the flag and
+        /// answers the ingesting path.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
     /// Engine 2: lifecycle of a path or token — first-seen, last-changed,
     /// removed-in, present-at-HEAD.
@@ -175,6 +176,9 @@ pub enum Op {
         path: Option<String>,
         #[serde(default)]
         token: Option<String>,
+        /// Same contract as `History::read_only`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
     /// Engine 2: history-wide discovery ("dig-history"). `phrase` may be empty
     /// to list the ingest checkpoint/state only.
@@ -189,6 +193,9 @@ pub enum Op {
         to: Option<String>,
         #[serde(default)]
         limit: Option<usize>,
+        /// Same contract as `History::read_only`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
     /// Engine 4: one-call deterministic branch sync. `strategy` is
     /// "report" (default) or "rebase-if-clean" (explicit opt-in).
@@ -627,6 +634,79 @@ mod tests {
         );
     }
 
+    /// `read_only` is opt-in on the wire: the history ops deserialize it as
+    /// false when absent and emit it only when set, so a flag-aware client
+    /// and a pre-flag client serialize identically when it is off.
+    #[test]
+    fn history_ops_read_only_defaults_off_and_is_sent_only_when_set() {
+        let bare: Op = serde_json::from_value(json!({"op": "history", "query": "login"})).unwrap();
+        assert_eq!(
+            bare,
+            Op::History {
+                query: "login".into(),
+                facet: None,
+                limit: None,
+                read_only: false,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&Op::History {
+                query: "login".into(),
+                facet: None,
+                limit: None,
+                read_only: true,
+            })
+            .unwrap()["read_only"],
+            json!(true)
+        );
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap().get("read_only"),
+            None,
+            "read_only: false must not reach the wire"
+        );
+
+        for (value, expected) in [
+            (
+                json!({"op": "lifecycle", "path": "a.rs"}),
+                Op::Lifecycle {
+                    path: Some("a.rs".into()),
+                    token: None,
+                    read_only: false,
+                },
+            ),
+            (
+                json!({"op": "excavate", "phrase": "login"}),
+                Op::Excavate {
+                    phrase: Some("login".into()),
+                    path: None,
+                    from: None,
+                    to: None,
+                    limit: None,
+                    read_only: false,
+                },
+            ),
+        ] {
+            assert_eq!(serde_json::from_value::<Op>(value).unwrap(), expected);
+        }
+        for op in [
+            Op::Lifecycle {
+                path: None,
+                token: Some("login".into()),
+                read_only: true,
+            },
+            Op::Excavate {
+                phrase: None,
+                path: None,
+                from: None,
+                to: None,
+                limit: None,
+                read_only: true,
+            },
+        ] {
+            assert_eq!(serde_json::to_value(&op).unwrap()["read_only"], json!(true));
+        }
+    }
+
     #[test]
     fn graph_and_status_serialize_as_empty_object_variants() {
         assert_eq!(
@@ -818,6 +898,7 @@ mod tests {
                     query: "".into(),
                     facet: None,
                     limit: None,
+                    read_only: false,
                 },
                 "history",
             ),
@@ -825,6 +906,7 @@ mod tests {
                 Op::Lifecycle {
                     path: None,
                     token: None,
+                    read_only: false,
                 },
                 "lifecycle",
             ),
@@ -835,6 +917,7 @@ mod tests {
                     from: None,
                     to: None,
                     limit: None,
+                    read_only: false,
                 },
                 "excavate",
             ),

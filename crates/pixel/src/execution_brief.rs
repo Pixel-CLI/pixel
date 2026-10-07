@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 pub(crate) mod chain;
 mod evidence;
 pub(crate) mod intent;
+pub(crate) mod routes;
 
 const MAX_CAPS: usize = 32;
 const MAX_EVIDENCE_PER_TARGET: usize = 8;

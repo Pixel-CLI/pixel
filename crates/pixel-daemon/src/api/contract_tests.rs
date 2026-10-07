@@ -758,6 +758,7 @@ fn lifecycle_should_require_a_path_or_a_token() {
         Request::Lifecycle {
             path: None,
             token: None,
+            read_only: false,
         },
     );
     assert_eq!(code, "INVALID_INPUT");
@@ -773,6 +774,7 @@ fn lifecycle_should_report_coverage_for_a_token_found_nowhere() {
         Request::Lifecycle {
             path: None,
             token: Some("never_written_token".into()),
+            read_only: false,
         },
     );
     assert!(
@@ -786,11 +788,151 @@ fn lifecycle_should_report_coverage_for_a_token_found_nowhere() {
         Request::Lifecycle {
             path: Some("login.rs".into()),
             token: None,
+            read_only: false,
         },
     );
     assert!(
         by_path.get("coverage").is_none(),
         "a path answer carries no token coverage: {by_path}"
+    );
+}
+
+/// A `read_only` history op sees the facts db exactly as it stands — never
+/// created, never ingested, never warmed — so a db that was never built is
+/// a clean refusal while the same op without the flag still builds it.
+#[test]
+fn read_only_history_ops_should_refuse_a_facts_db_that_was_never_built() {
+    let root = fixture("read-only-absent");
+    let mut service = Service::open(&root).unwrap();
+    for req in [
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: None,
+            read_only: true,
+        },
+        Request::Lifecycle {
+            path: Some("login.rs".into()),
+            token: None,
+            read_only: true,
+        },
+        Request::Excavate {
+            phrase: Some("login".into()),
+            path: None,
+            from: None,
+            to: None,
+            limit: None,
+            read_only: true,
+        },
+    ] {
+        let (code, message) = err(&mut service, req);
+        assert_eq!(code, "INVALID_INPUT");
+        assert_eq!(message, "facts index absent or not built");
+    }
+    assert!(
+        !pixel_facts::store::history_db_path(&root).exists(),
+        "a read-only op never creates history.db"
+    );
+    assert!(
+        !service.facts_warmer_started.load(Ordering::SeqCst),
+        "a read-only op never spawns the facts warmer"
+    );
+
+    // Without the flag, today's behaviour is unchanged: the same op opens
+    // the db and ingests instead of refusing.
+    service.facts_warmer_started.store(true, Ordering::SeqCst); // no warm loop outliving the test
+    let out = ok(
+        &mut service,
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: None,
+            read_only: false,
+        },
+    );
+    assert!(out["index_state"].is_object(), "{out}");
+    assert!(pixel_facts::store::history_db_path(&root).exists());
+}
+
+/// A `read_only` history op on a built-but-stale index answers the stale
+/// rows instead of catching up: the same query without the flag ingests the
+/// newer commit in-band.
+#[test]
+fn read_only_history_should_answer_the_stale_index_without_ingesting() {
+    let root = fixture("read-only-stale");
+    let mut facts = FactsStore::open(&root).unwrap();
+    let report = pixel_facts::ingest::ingest_until_fresh_within(
+        &mut facts,
+        &pixel_facts::ingest::IngestOptions::default(),
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(report.fresh, "{report:?}");
+    drop(facts);
+
+    // A commit after the ingest makes the stored index stale. Only the
+    // source file is added: `add .` would stage the `.pixel/` the ingest
+    // created, and a tracked sidecar is refused on the next open.
+    std::fs::write(root.join("late.rs"), "pub fn late() {}\n").unwrap();
+    git(&root, &["add", "late.rs"]);
+    git(&root, &["commit", "-qm", "late"]);
+
+    let mut service = Service::open(&root).unwrap();
+    let before = FactsStore::open_existing(&root)
+        .unwrap()
+        .unwrap()
+        .index_state();
+    assert_eq!(before.commits_indexed, 1, "{before:?}");
+    assert!(!before.fresh, "{before:?}");
+
+    let out = ok(
+        &mut service,
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: None,
+            read_only: true,
+        },
+    );
+    assert_eq!(out["index_state"]["commits_indexed"], 1, "{out}");
+    assert_eq!(out["index_state"]["fresh"], false, "{out}");
+    let lifecycle = ok(
+        &mut service,
+        Request::Lifecycle {
+            path: Some("login.rs".into()),
+            token: None,
+            read_only: true,
+        },
+    );
+    assert_eq!(
+        lifecycle["index_state"]["commits_indexed"], 1,
+        "{lifecycle}"
+    );
+    assert!(
+        !service.facts_warmer_started.load(Ordering::SeqCst),
+        "the read-only path never spawns the warmer"
+    );
+    // The db on disk is untouched by the reads: still the one commit.
+    let after = FactsStore::open_existing(&root)
+        .unwrap()
+        .unwrap()
+        .index_state();
+    assert_eq!(after.commits_indexed, 1, "{after:?}");
+
+    // Without the flag the same op catches up (lazy ingest in-band).
+    service.facts_warmer_started.store(true, Ordering::SeqCst); // no warm loop outliving the test
+    let caught_up = ok(
+        &mut service,
+        Request::History {
+            query: "login".into(),
+            facet: None,
+            limit: None,
+            read_only: false,
+        },
+    );
+    assert_eq!(
+        caught_up["index_state"]["commits_indexed"], 2,
+        "{caught_up}"
     );
 }
 
@@ -924,6 +1066,22 @@ fn status_should_report_a_graph_file_it_cannot_open() {
             .is_some_and(|e| !e.is_empty()),
         "{out}"
     );
+}
+
+/// `status.embedding` is the semantic code-search warmth probe: the
+/// code-search model's download marker, this repo's persisted vector rows,
+/// and whether the daemon holds a loaded embedder. `model_on_disk` reads
+/// the machine-wide model cache (`$HOME`), so only its type is pinned.
+#[test]
+fn status_should_report_the_embedding_warmth_probe() {
+    let root = fixture("status-embedding");
+    let mut service = Service::open(&root).unwrap();
+    let out = ok(&mut service, Request::Status {});
+    let embedding = &out["embedding"];
+    assert_eq!(embedding["embedder_resident"], false, "{out}");
+    assert_eq!(embedding["vectors_present"], false, "{out}");
+    assert_eq!(embedding["vectors_chunks"], 0, "{out}");
+    assert!(embedding["model_on_disk"].is_boolean(), "{out}");
 }
 
 #[test]

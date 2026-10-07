@@ -251,6 +251,16 @@ impl Store {
         Ok(())
     }
 
+    /// The rows the manifest names across every segment, `None` when the
+    /// store has no readable manifest. No lock is taken and no segment file
+    /// is opened: the manifest is replaced atomically, so a lock-free read
+    /// sees a whole one, old or new. Enough for a "is anything warm" probe,
+    /// not for a load that must count rows under a writer.
+    pub(crate) fn manifest_rows(&self) -> Option<u64> {
+        let manifest = self.read_manifest().ok()??;
+        Some(manifest.rows() as u64)
+    }
+
     /// The lock file, locked shared or `exclusive`; released when dropped.
     fn lock(&self, exclusive: bool) -> Result<File, String> {
         let path = self.dir.join(LOCK);

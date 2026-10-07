@@ -342,20 +342,15 @@ pub mod potion {
         }
     }
 
-    /// Refuse a load that may not download when `repo` was never set up.
-    /// Set up means its download finished, or a legacy marker exists at all:
-    /// that marker proved some model was set up and named only the last one,
-    /// so it keeps admitting every model as it did before per-repository
-    /// markers.
+    /// Refuse a load that may not download when `repo` was never set up
+    /// ([`crate::potion_set_up`]: its download finished, or a legacy marker
+    /// exists at all).
     pub(crate) fn require_set_up(
         cache_dir: &Path,
         repo: &str,
         download: bool,
     ) -> Result<(), String> {
-        if download
-            || crate::potion_cached(cache_dir, repo)
-            || cache_dir.join(crate::LEGACY_POTION_MARKER).is_file()
-        {
+        if download || crate::potion_set_up(cache_dir, repo) {
             Ok(())
         } else {
             Err("embedding model not present — run `pixel recall setup` first".to_string())

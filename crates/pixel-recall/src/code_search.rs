@@ -644,8 +644,68 @@ fn ask_opening(
     )
 }
 
+/// The Hugging Face repository [`open_code_embedder`] loads: one name for
+/// the opener and [`warm_probe`], which reads its download marker.
+const CODE_SEARCH_MODEL_REPO: &str = "minishlab/potion-code-16M-v2";
+
 fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>, String> {
-    crate::embed::open_embedder_with_potion_repo(download, Some("minishlab/potion-code-16M-v2"))
+    crate::embed::open_embedder_with_potion_repo(download, Some(CODE_SEARCH_MODEL_REPO))
+}
+
+/// Whether the semantic code-search path over a root is already warm: the
+/// embedding model downloaded and the chunk vectors persisted.
+///
+/// [`warm_probe`] fills this without touching the model or the vectors
+/// themselves, for a deadline-bounded caller deciding whether an embedding
+/// operation would pay a cold start. It reports presence, never freshness
+/// or completeness of the index.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WarmProbe {
+    /// The code-search model's download finished
+    /// ([`crate::potion_set_up`] on [`CODE_SEARCH_MODEL_REPO`]): opening it
+    /// without a download would not hit the network.
+    pub model_on_disk: bool,
+    /// `<root>/.pixel/code-vectors/` holds a readable manifest naming at
+    /// least one vector row.
+    pub vectors_present: bool,
+    /// Vector rows the store's manifest names, `0` when there is no
+    /// readable one.
+    pub vectors_chunks: u64,
+}
+
+/// Probe whether the semantic code-search path over `root` is already warm.
+///
+/// Strictly read-only and cheap: it never loads a model, never embeds,
+/// never downloads and never writes. `model_on_disk` reads the same
+/// download markers [`open_code_embedder`] checks ([`crate::potion_set_up`]
+/// on [`crate::models_dir`]), and `vectors_*` read only the store's
+/// manifest — a small JSON file, atomically replaced — so `vectors_chunks`
+/// counts the rows the manifest names rather than loading a single vector.
+/// A missing or unreadable manifest reports `vectors_present: false`, like
+/// a never-written store: [`Store::load`] would re-embed either way.
+///
+/// Intended for deadline-bounded callers deciding whether an embedding
+/// operation would pay a cold start.
+#[cfg_attr(test, mutants::skip)] // adapter reading $HOME; `warm_probe_in` holds the probe and is tested
+pub fn warm_probe(root: &Path) -> WarmProbe {
+    warm_probe_in(root, &crate::models_dir())
+}
+
+/// [`warm_probe`] with the model cache directory as a parameter, so a test
+/// does not read `$HOME`.
+fn warm_probe_in(root: &Path, models: &Path) -> WarmProbe {
+    let vectors_chunks = Store::at(
+        &root
+            .join(pixel_index::index::SHARD_DIR)
+            .join(crate::code_vectors::DIR),
+    )
+    .manifest_rows()
+    .unwrap_or(0);
+    WarmProbe {
+        model_on_disk: crate::potion_set_up(models, CODE_SEARCH_MODEL_REPO),
+        vectors_present: vectors_chunks > 0,
+        vectors_chunks,
+    }
 }
 
 /// Rank `files` for `query`: chunk them, take each chunk's vector from
@@ -3118,5 +3178,99 @@ mod tests {
         assert_ne!(paths, sorted, "the order is the scores', not the paths'");
         assert_eq!(ranking(&cold), ranking(&uncached));
         assert_eq!(ranking(&warm), ranking(&uncached));
+    }
+
+    /// A root with no `.pixel/code-vectors/` and a models dir without
+    /// markers is cold on both counts.
+    #[test]
+    fn warm_probe_should_report_a_never_used_root_cold() {
+        let root = tempfile::tempdir().unwrap();
+        let models = tempfile::tempdir().unwrap();
+        assert_eq!(
+            warm_probe_in(root.path(), models.path()),
+            WarmProbe {
+                model_on_disk: false,
+                vectors_present: false,
+                vectors_chunks: 0,
+            }
+        );
+    }
+
+    /// `model_on_disk` reads the markers `require_set_up` admits: the
+    /// code-search repository's own marker, or a legacy `potion.ok` at all
+    /// — never another repository's.
+    #[test]
+    fn warm_probe_should_read_the_same_markers_the_opener_admits() {
+        let root = tempfile::tempdir().unwrap();
+
+        let models = tempfile::tempdir().unwrap();
+        std::fs::write(
+            crate::potion_marker(models.path(), CODE_SEARCH_MODEL_REPO),
+            CODE_SEARCH_MODEL_REPO,
+        )
+        .unwrap();
+        let probe = warm_probe_in(root.path(), models.path());
+        assert!(probe.model_on_disk);
+        assert!(!probe.vectors_present && probe.vectors_chunks == 0);
+
+        let models = tempfile::tempdir().unwrap();
+        std::fs::write(
+            crate::potion_marker(models.path(), "minishlab/potion-code-64M-v2"),
+            "minishlab/potion-code-64M-v2",
+        )
+        .unwrap();
+        assert!(
+            !warm_probe_in(root.path(), models.path()).model_on_disk,
+            "another repository's marker admits nothing"
+        );
+
+        let models = tempfile::tempdir().unwrap();
+        std::fs::write(
+            models.path().join(crate::LEGACY_POTION_MARKER),
+            "minishlab/potion-multilingual-128M",
+        )
+        .unwrap();
+        assert!(
+            warm_probe_in(root.path(), models.path()).model_on_disk,
+            "a legacy marker admits every model, as require_set_up does"
+        );
+    }
+
+    /// `vectors_*` count the rows a store written through `Store::save`
+    /// names in its manifest — the real write path — without a segment
+    /// being opened.
+    #[test]
+    fn warm_probe_should_count_persisted_vector_rows() {
+        let root = indexed_tree();
+        let models = tempfile::tempdir().unwrap();
+        let store = Store::at(&store_dir(root.path()));
+        let namespace = Namespace::new("m", crate::embed::embedder_revision("m"), CHUNKER_VERSION);
+        let live: HashMap<ChunkKey, Vec<f32>> =
+            [1, 2, 3].map(|key| (key, vec![key as f32; 4])).into();
+        store
+            .save(&namespace, 4, &[1, 2, 3], &live, 0, false)
+            .unwrap();
+        let probe = warm_probe_in(root.path(), models.path());
+        assert!(!probe.model_on_disk);
+        assert!(probe.vectors_present);
+        assert_eq!(probe.vectors_chunks, 3);
+    }
+
+    /// A store directory whose manifest cannot be read reports cold, like
+    /// the `Store::load` that re-embeds on the same manifest.
+    #[test]
+    fn warm_probe_should_report_an_unreadable_store_cold() {
+        let root = indexed_tree();
+        let models = tempfile::tempdir().unwrap();
+        let store = Store::at(&store_dir(root.path()));
+        let namespace = Namespace::new("m", crate::embed::embedder_revision("m"), CHUNKER_VERSION);
+        let live: HashMap<ChunkKey, Vec<f32>> = [(1, vec![0.0f32; 4])].into();
+        store.save(&namespace, 4, &[1], &live, 0, false).unwrap();
+        assert!(warm_probe_in(root.path(), models.path()).vectors_present);
+        // The manifest file of the store layout, corrupted after the write.
+        std::fs::write(store_dir(root.path()).join("manifest.json"), "{not json").unwrap();
+        let probe = warm_probe_in(root.path(), models.path());
+        assert!(!probe.vectors_present);
+        assert_eq!(probe.vectors_chunks, 0);
     }
 }

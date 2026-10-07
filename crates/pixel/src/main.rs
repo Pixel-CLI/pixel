@@ -6422,6 +6422,7 @@ fn run_command(
                     query,
                     facet: Some(facet),
                     limit,
+                    read_only: false,
                 },
                 false,
             )?;
@@ -6433,7 +6434,15 @@ fn run_command(
             token,
             json,
         } => {
-            let data = execute(&path, Request::Lifecycle { path: file, token }, false)?;
+            let data = execute(
+                &path,
+                Request::Lifecycle {
+                    path: file,
+                    token,
+                    read_only: false,
+                },
+                false,
+            )?;
             print_data(&data, json)
         }
         Command::DigHistory {
@@ -6458,6 +6467,7 @@ fn run_command(
                     from,
                     to,
                     limit,
+                    read_only: false,
                 },
                 false,
             )?;
@@ -7235,6 +7245,7 @@ fn run_query(
                 from: None,
                 to: None,
                 limit: None,
+                read_only: false,
             },
             no_daemon,
         )?,
