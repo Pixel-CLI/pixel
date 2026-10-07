@@ -372,7 +372,7 @@
       {{/* The proofs an evaluator checks before running the script, last on the page now that the closing is gone. Signed releases: release.yml attests every archive and install.sh with SLSA build provenance, verified with gh attestation verify (SECURITY.md, "Verifying a release"). No telemetry beyond an optional release check: SECURITY.md. The changelog: a changelog.d fragment per user-facing change, cut at each release (CONTRIBUTING.md). */}}
       <ul class="badges" data-reveal="stagger">
         <li>{{ partial "icon.html" (dict "name" "lock" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md#verifying-a-release" target="_blank" rel="noopener">Signed releases</a></li>
-        <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">No telemetry</a></li>
+        <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">No telemetry beyond an optional release check</a></li>
         <li>{{ partial "icon.html" (dict "name" "user" "size" 18) }}No account</li>
         <li>{{ partial "icon.html" (dict "name" "scale" "size" 18) }}MIT</li>
         <li>{{ partial "icon.html" (dict "name" "doc" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>

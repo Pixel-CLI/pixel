@@ -1195,52 +1195,59 @@ const HARMONIZED_DOCS: &[&str] = &[
 ];
 
 /// Claims that are over-absolute and must not appear in the docs. Each entry
-/// is (pattern, why it is over-absolute).
-const OVER_ABSOLUTE_CLAIMS: &[(&str, &str)] = &[
-    ("zero commands to learn", "the product has many commands"),
+/// is (pattern, qualifier that makes it acceptable, why it is over-absolute).
+const OVER_ABSOLUTE_CLAIMS: &[(&str, &str, &str)] = &[
+    (
+        "zero commands to learn",
+        "a handful of commands",
+        "the product has many commands",
+    ),
     (
         "No account. No API key. No telemetry.",
+        "No account. No API key. No telemetry beyond an optional release check.",
         "the release check is a network call",
     ),
     (
         "Local and deterministic.",
+        "Local and mostly deterministic.",
         "pixel classify is model-backed and non-deterministic",
     ),
     (
         "never leaves the machine",
         "the machine could be a VM or cloud instance",
+        "the machine could be a VM or cloud instance",
     ),
     (
         "crash-safe",
+        "designed to be crash-safe",
         "crash-safety cannot be guaranteed in all scenarios",
     ),
-    ("Ship more.", "the product does not guarantee shipping more"),
-    ("sends no telemetry", "the release check is a network call"),
+    (
+        "Ship more.",
+        "Ship more responsibly",
+        "the product does not guarantee shipping more",
+    ),
+    (
+        "sends no telemetry",
+        "no telemetry beyond an optional release check",
+        "the release check is a network call",
+    ),
     (
         "never leave the machine",
+        "the machine could be a VM or cloud instance",
         "the machine could be a VM or cloud instance",
     ),
 ];
 
 /// Check that a doc does not contain an over-absolute claim. A claim is
-/// allowed when it is qualified (e.g. "no telemetry beyond an optional
-/// release check").
+/// allowed when its specific qualifier appears in the surrounding text.
 fn assert_no_over_absolute_claims(doc: &str, text: &str) {
-    for (pattern, why) in OVER_ABSOLUTE_CLAIMS {
+    for (pattern, qualifier, why) in OVER_ABSOLUTE_CLAIMS {
         if text.contains(pattern) {
-            // Check if the claim is qualified by looking at the surrounding
-            // context. A qualified claim includes "beyond an optional
-            // release check" or "designed to be" or "mostly".
-            let qualified = text.contains("beyond an optional release check")
-                || text.contains("designed to be crash-safe")
-                || text.contains("mostly deterministic")
-                || text.contains("stays on your machine")
-                || text.contains("stays in `.pixel/`")
-                || text.contains("stays in .pixel/");
             assert!(
-                qualified,
+                text.contains(qualifier),
                 "{doc}: over-absolute claim \"{pattern}\" — {why}. \
-                 Qualify it (e.g. \"beyond an optional release check\")."
+                 Qualify it with \"{qualifier}\"."
             );
         }
     }
@@ -1301,11 +1308,16 @@ fn og_card_does_not_claim_ship_more() {
 fn head_html_telemetry_claim_is_qualified() {
     let text =
         std::fs::read_to_string(repo_root().join("website/layouts/partials/head.html")).unwrap();
-    // The featureList must not claim "No telemetry" without qualification.
-    assert!(
-        !text.contains("\"No telemetry:"),
-        "head.html: 'No telemetry:' is over-absolute"
-    );
+    // The metadata value must qualify "No telemetry" with the release-check
+    // disclaimer, and must not appear as a standalone "No telemetry:" label.
+    for line in text.lines() {
+        if line.contains("\"No telemetry:") {
+            assert!(
+                line.contains("beyond an optional release check"),
+                "head.html: 'No telemetry' must be qualified with 'beyond an optional release check'"
+            );
+        }
+    }
 }
 
 #[test]
