@@ -531,6 +531,11 @@ impl HistoryTier {
         if self.store.is_empty() {
             return HistoryDecision::Abstain(AbstainReason::Empty);
         }
+        // Entries written under another schema version are ignored (the store
+        // doc promises a relabelled vocabulary cannot reuse stale answers), so
+        // a stale candidate must not block the current-version entries for the
+        // same rubric. SchemaMismatch is returned only when no candidate at the
+        // current version remains.
         let candidates: Vec<&HistoryEntry> = self
             .store
             .active()
@@ -540,14 +545,15 @@ impl HistoryTier {
         if candidates.is_empty() {
             return HistoryDecision::Abstain(AbstainReason::RubricMismatch);
         }
-        if candidates
-            .iter()
-            .any(|e| e.label_schema_version != LABEL_SCHEMA_VERSION)
-        {
+        let current: Vec<&HistoryEntry> = candidates
+            .into_iter()
+            .filter(|e| e.label_schema_version == LABEL_SCHEMA_VERSION)
+            .collect();
+        if current.is_empty() {
             return HistoryDecision::Abstain(AbstainReason::SchemaMismatch);
         }
 
-        let mut neighbours: Vec<Neighbour> = candidates
+        let mut neighbours: Vec<Neighbour> = current
             .into_iter()
             .map(|e| Neighbour {
                 id: e.id.clone(),
@@ -746,6 +752,52 @@ mod tests {
                 assert!(v.basis.contains("not a calibrated probability"));
             }
             other @ HistoryDecision::Abstain(_) => panic!("expected accept, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_schema_version_is_filtered_not_blocking() {
+        let mut store = store();
+        let s = spec("fix the login bug");
+        store.add(entry("fix the login bug", "yes", &s)).unwrap();
+        // A stale-version entry under the same rubric must not block the
+        // current-version entries: the store promises a relabelled vocabulary
+        // cannot reuse stale answers, i.e. they are ignored, not abstained on.
+        store.entries.push(HistoryEntry {
+            id: "stale-1".to_string(),
+            text: "fix the login bug the old way".to_string(),
+            label: "no".to_string(),
+            task_family: "task-intent".to_string(),
+            rubric_fingerprint: rubric_fingerprint(&s.context, &s.labels, &s.criteria),
+            label_schema_version: LABEL_SCHEMA_VERSION + 1,
+            source: "human-verified".to_string(),
+            corrections: Vec::new(),
+            superseded: false,
+            created_unix: 0,
+        });
+        let tier = HistoryTier::new(store);
+        match tier.evaluate(&spec("fix the login bug")) {
+            HistoryDecision::Accept(v) => assert_eq!(v.label, "yes"),
+            other @ HistoryDecision::Abstain(_) => {
+                panic!("a stale version must be filtered, not abstained on: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn only_stale_schema_version_abstains_schema_mismatch() {
+        let mut store = store();
+        let s = spec("fix the login bug");
+        store.add(entry("fix the login bug", "yes", &s)).unwrap();
+        // Bump every entry to a future schema version: no candidate at the
+        // current version remains, so the tier abstains with SchemaMismatch.
+        for e in store.entries.iter_mut() {
+            e.label_schema_version = LABEL_SCHEMA_VERSION + 1;
+        }
+        let tier = HistoryTier::new(store);
+        match tier.evaluate(&spec("fix the login bug")) {
+            HistoryDecision::Abstain(AbstainReason::SchemaMismatch) => {}
+            other => panic!("expected SchemaMismatch abstention, got {other:?}"),
         }
     }
 

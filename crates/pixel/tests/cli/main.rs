@@ -11,6 +11,7 @@ mod ai_cli_readify_cli;
 mod ask_contract;
 mod audit_cli;
 mod classify_cli;
+mod classify_eval_cli;
 mod config_cli;
 mod docs_drift;
 mod doctor_cli;

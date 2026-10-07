@@ -8,9 +8,14 @@
 //! test result is examined. The eval reports per-label precision/recall, macro
 //! scores, a confusion matrix, accepted-coverage vs error curves with Wilson
 //! confidence intervals, and system metrics (fallback rate, model calls
-//! avoided, p50/p95 latency, storage, error rate). A pre-registered error bound
-//! and minimum useful coverage determine the go/no-go verdict: insufficient
-//! data or no measured gain yields a published no-go result.
+//! avoided, measured tier and modeled end-to-end latency, storage, error rate).
+//! The evaluation never calls a model, so the fallback path is modeled from the
+//! `--model-error-rate` and `--model-latency-ms` assumptions and labelled as
+//! such. A pre-registered error bound and minimum useful coverage determine
+//! the go/no-go verdict, and even a tier that meets those absolute bounds is
+//! held to a no-go when the strongest frozen baseline already answers with
+//! lower error at equal or better coverage: insufficient data or no measured
+//! gain yields a published no-go result.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -264,6 +269,7 @@ pub static SPLIT_UNIX: u64 = 1_700_250_000;
 
 /// The pre-registered decision criteria, frozen before any test result is
 /// examined.
+#[derive(Debug, Clone, Copy)]
 pub struct DecisionCriteria {
     /// Maximum acceptable error rate on the test set (fraction wrong).
     pub max_error_rate: f64,
@@ -707,21 +713,52 @@ fn error_curve(accept_results: &mut [(f64, bool)], total: usize) -> Vec<CurvePoi
 // System metrics
 // ---------------------------------------------------------------------------
 
-/// System-level metrics for the tier.
+/// System-level metrics for the tier. Latency and error-after-fallback are
+/// reported twice: the history-tier decision values are *measured* during the
+/// evaluation, while the end-to-end values *model* the fallback by adding the
+/// assumed model latency and error rate to every abstention. The modeled
+/// values are estimates, not measurements, and are labelled as such.
 #[derive(Debug, Clone, Default)]
 pub struct SystemMetrics {
     /// Fraction of requests that fall through to the model.
     pub fallback_rate: f64,
     /// Number of model calls avoided (per 100 requests).
     pub model_calls_avoided_per_100: f64,
-    /// p50 end-to-end latency in milliseconds.
-    pub p50_latency_ms: f64,
-    /// p95 end-to-end latency in milliseconds.
-    pub p95_latency_ms: f64,
+    /// p50 measured history-tier decision latency in milliseconds.
+    pub p50_tier_latency_ms: f64,
+    /// p95 measured history-tier decision latency in milliseconds.
+    pub p95_tier_latency_ms: f64,
+    /// p50 modeled end-to-end latency in milliseconds (tier decision plus the
+    /// assumed model call on every fallback).
+    pub p50_e2e_latency_ms: f64,
+    /// p95 modeled end-to-end latency in milliseconds.
+    pub p95_e2e_latency_ms: f64,
     /// Storage footprint in bytes.
     pub storage_bytes: u64,
-    /// Error rate after fallback (fraction of all requests that are wrong).
+    /// Modeled error rate after fallback (fraction of all requests that are
+    /// wrong), blending measured tier errors with the assumed model error rate.
     pub error_rate_after_fallback: f64,
+}
+
+/// The modeled fallback assumptions. The offline evaluation never calls a
+/// model, so the fallback path is estimated from these values; they are
+/// surfaced in the report so a machine reader can tell the modeled result
+/// apart from measured runtime evidence.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelAssumptions {
+    /// Assumed model error rate for abstentions (fraction wrong).
+    pub error_rate: f64,
+    /// Assumed model latency for abstentions, in milliseconds.
+    pub latency_ms: f64,
+}
+
+/// A percentile of an already-sorted sample.
+fn percentile(sorted: &[f64], frac: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() as f64 * frac) as usize).min(sorted.len() - 1);
+    sorted[idx]
 }
 
 /// Compute system metrics for the tier.
@@ -729,18 +766,18 @@ pub fn compute_system_metrics(
     tier: &HistoryTier,
     test_set: &[&EvalExample],
     spec_fn: impl Fn(&str) -> crate::classify::Spec,
-    model_error_rate: f64,
+    assumptions: ModelAssumptions,
 ) -> SystemMetrics {
     let mut accepted = 0usize;
     let mut correct = 0usize;
-    let mut latencies_ms: Vec<f64> = Vec::new();
+    let mut tier_latencies_ms: Vec<f64> = Vec::new();
+    let mut e2e_latencies_ms: Vec<f64> = Vec::new();
 
     for ex in test_set {
         let start = Instant::now();
         let spec = spec_fn(ex.text);
         let decision = tier.evaluate(&spec);
         let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-        latencies_ms.push(elapsed);
 
         match decision {
             HistoryDecision::Accept(verdict) => {
@@ -748,9 +785,15 @@ pub fn compute_system_metrics(
                 if verdict.label == ex.label {
                     correct += 1;
                 }
+                // Accepted: no model call, so tier and end-to-end coincide.
+                tier_latencies_ms.push(elapsed);
+                e2e_latencies_ms.push(elapsed);
             }
             HistoryDecision::Abstain(_) => {
-                // Falls through to model; assume model error rate.
+                // Fallback: the model call is modeled, not measured, so the
+                // end-to-end latency adds the assumed model latency.
+                tier_latencies_ms.push(elapsed);
+                e2e_latencies_ms.push(elapsed + assumptions.latency_ms);
             }
         }
     }
@@ -767,25 +810,20 @@ pub fn compute_system_metrics(
         0.0
     };
     let error_rate_after_fallback = accepted as f64 / total as f64 * tier_error_rate
-        + (total - accepted) as f64 / total as f64 * model_error_rate;
+        + (total - accepted) as f64 / total as f64 * assumptions.error_rate;
 
-    latencies_ms.sort_by(f64::total_cmp);
-    let p50 = latencies_ms
-        .get(latencies_ms.len() / 2)
-        .copied()
-        .unwrap_or(0.0);
-    let p95 = latencies_ms
-        .get((latencies_ms.len() as f64 * 0.95) as usize)
-        .copied()
-        .unwrap_or(0.0);
+    tier_latencies_ms.sort_by(f64::total_cmp);
+    e2e_latencies_ms.sort_by(f64::total_cmp);
 
     let storage_bytes = tier.store_len() as u64 * 200; // Approximate bytes per entry.
 
     SystemMetrics {
         fallback_rate,
         model_calls_avoided_per_100: (1.0 - fallback_rate) * 100.0,
-        p50_latency_ms: p50,
-        p95_latency_ms: p95,
+        p50_tier_latency_ms: percentile(&tier_latencies_ms, 0.50),
+        p95_tier_latency_ms: percentile(&tier_latencies_ms, 0.95),
+        p50_e2e_latency_ms: percentile(&e2e_latencies_ms, 0.50),
+        p95_e2e_latency_ms: percentile(&e2e_latencies_ms, 0.95),
         storage_bytes,
         error_rate_after_fallback,
     }
@@ -811,8 +849,26 @@ impl Verdict {
     }
 }
 
-/// Make the go/no-go decision based on pre-registered criteria.
-pub fn decide(metrics: &EvalMetrics, criteria: &DecisionCriteria, n_test: usize) -> Verdict {
+/// The frozen comparator the tier must beat: the baseline with the lowest
+/// error rate (ties broken by higher coverage).
+pub fn strongest_baseline(baselines: &BTreeMap<String, EvalMetrics>) -> Option<&EvalMetrics> {
+    baselines.values().min_by(|a, b| {
+        a.error_rate
+            .total_cmp(&b.error_rate)
+            .then(b.coverage.total_cmp(&a.coverage))
+    })
+}
+
+/// Make the go/no-go decision based on pre-registered criteria. Even when the
+/// tier meets its absolute error and coverage bounds, a `Go` requires measured
+/// gain: if the strongest frozen baseline already answers with lower error at
+/// equal or better coverage, the tier adds nothing and the verdict is `NoGo`.
+pub fn decide(
+    metrics: &EvalMetrics,
+    best_baseline: Option<&EvalMetrics>,
+    criteria: &DecisionCriteria,
+    n_test: usize,
+) -> Verdict {
     if n_test < criteria.min_test_examples {
         return Verdict::NoGo;
     }
@@ -822,6 +878,12 @@ pub fn decide(metrics: &EvalMetrics, criteria: &DecisionCriteria, n_test: usize)
     if metrics.coverage < criteria.min_coverage {
         return Verdict::NoGo;
     }
+    if let Some(base) = best_baseline
+        && base.error_rate < metrics.error_rate
+        && base.coverage >= metrics.coverage
+    {
+        return Verdict::NoGo;
+    }
     Verdict::Go
 }
 
@@ -829,29 +891,57 @@ pub fn decide(metrics: &EvalMetrics, criteria: &DecisionCriteria, n_test: usize)
 // Report rendering
 // ---------------------------------------------------------------------------
 
+/// The frozen context a report is rendered under: the verdict, the
+/// pre-registered criteria, the split sizes and the modeled fallback
+/// assumptions. Bundled so the renderer signature stays small.
+#[derive(Debug, Clone, Copy)]
+pub struct ReportContext {
+    pub verdict: Verdict,
+    pub criteria: DecisionCriteria,
+    pub n_test: usize,
+    pub n_train: usize,
+    pub assumptions: ModelAssumptions,
+}
+
 /// Render the full evaluation report as a JSON value.
 pub fn render_report(
     tier_metrics: &EvalMetrics,
     baseline_metrics: &BTreeMap<String, EvalMetrics>,
     system: &SystemMetrics,
-    verdict: Verdict,
-    criteria: &DecisionCriteria,
-    n_test: usize,
+    ctx: &ReportContext,
 ) -> Value {
     let mut report = json!({
-        "verdict": verdict.as_str(),
-        "criteria": {
-            "max_error_rate": criteria.max_error_rate,
-            "min_coverage": criteria.min_coverage,
-            "min_test_examples": criteria.min_test_examples,
+        "verdict": ctx.verdict.as_str(),
+        "epistemics": {
+            "closed_world": true,
+            "lower_bound": false,
+            "basis": "synthetic frozen evaluation",
+            "confidence": "complete",
+            "modeled_fallback": true,
         },
-        "n_test": n_test,
+        "snapshot": {
+            "frozen": true,
+            "deterministic": true,
+            "n_train": ctx.n_train,
+            "n_test": ctx.n_test,
+            "split_unix": SPLIT_UNIX,
+            "model_error_rate_assumption": ctx.assumptions.error_rate,
+            "model_latency_ms_assumption": ctx.assumptions.latency_ms,
+        },
+        "criteria": {
+            "max_error_rate": ctx.criteria.max_error_rate,
+            "min_coverage": ctx.criteria.min_coverage,
+            "min_test_examples": ctx.criteria.min_test_examples,
+        },
+        "n_test": ctx.n_test,
         "tier": metrics_to_json(tier_metrics),
         "system": {
             "fallback_rate": system.fallback_rate,
             "model_calls_avoided_per_100": system.model_calls_avoided_per_100,
-            "p50_latency_ms": system.p50_latency_ms,
-            "p95_latency_ms": system.p95_latency_ms,
+            "p50_tier_latency_ms": system.p50_tier_latency_ms,
+            "p95_tier_latency_ms": system.p95_tier_latency_ms,
+            "p50_e2e_latency_ms": system.p50_e2e_latency_ms,
+            "p95_e2e_latency_ms": system.p95_e2e_latency_ms,
             "storage_bytes": system.storage_bytes,
             "error_rate_after_fallback": system.error_rate_after_fallback,
         },
@@ -906,6 +996,30 @@ fn metrics_to_json(m: &EvalMetrics) -> Value {
 #[derive(Debug, Clone)]
 pub struct ClassifyEvalOptions {
     pub json: bool,
+    /// Assumed model error rate for the modeled fallback (not measured).
+    pub model_error_rate: f64,
+    /// Assumed model latency in milliseconds for the modeled fallback.
+    pub model_latency_ms: f64,
+}
+
+/// Build the checked task-intent spec for an evaluation example, falling back
+/// to a minimal three-label spec if the built-in battery cannot check it.
+fn eval_spec(text: &str) -> crate::classify::Spec {
+    let spec = prompt_intent::spec(text).unwrap();
+    crate::classify::Spec::checked(spec.text, spec.context, spec.labels, spec.criteria)
+        .unwrap_or_else(|_| {
+            crate::classify::Spec::checked(
+                text.to_string(),
+                "".to_string(),
+                vec![
+                    "bugfix".to_string(),
+                    "feature".to_string(),
+                    "refactor".to_string(),
+                ],
+                Default::default(),
+            )
+            .unwrap()
+        })
 }
 
 /// Run the offline evaluation and return the exit code.
@@ -939,23 +1053,7 @@ pub fn run(opts: ClassifyEvalOptions) -> i32 {
     let tier = HistoryTier::new(store);
 
     // Evaluate the tier.
-    let tier_metrics = evaluate_tier(&tier, &test_set, |text| {
-        let spec = prompt_intent::spec(text).unwrap();
-        crate::classify::Spec::checked(spec.text, spec.context, spec.labels, spec.criteria)
-            .unwrap_or_else(|_| {
-                crate::classify::Spec::checked(
-                    text.to_string(),
-                    "".to_string(),
-                    vec![
-                        "bugfix".to_string(),
-                        "feature".to_string(),
-                        "refactor".to_string(),
-                    ],
-                    Default::default(),
-                )
-                .unwrap()
-            })
-    });
+    let tier_metrics = evaluate_tier(&tier, &test_set, eval_spec);
 
     // Evaluate baselines.
     let mut baseline_metrics = BTreeMap::new();
@@ -978,38 +1076,31 @@ pub fn run(opts: ClassifyEvalOptions) -> i32 {
     let nn = NnBaseline::new(&train_examples, 3);
     baseline_metrics.insert(nn.name().to_string(), evaluate_baseline(&nn, &test_set));
 
-    // System metrics: assume a model error rate of 0.20 for the fallback.
-    let system = compute_system_metrics(
-        &tier,
-        &test_set,
-        |text| {
-            let spec = prompt_intent::spec(text).unwrap();
-            crate::classify::Spec::checked(spec.text, spec.context, spec.labels, spec.criteria)
-                .unwrap_or_else(|_| {
-                    crate::classify::Spec::checked(
-                        text.to_string(),
-                        "".to_string(),
-                        vec![
-                            "bugfix".to_string(),
-                            "feature".to_string(),
-                            "refactor".to_string(),
-                        ],
-                        Default::default(),
-                    )
-                    .unwrap()
-                })
-        },
-        0.20,
-    );
+    // System metrics: the fallback model path is modeled, not measured.
+    let assumptions = ModelAssumptions {
+        error_rate: opts.model_error_rate,
+        latency_ms: opts.model_latency_ms,
+    };
+    let system = compute_system_metrics(&tier, &test_set, eval_spec, assumptions);
 
-    let verdict = decide(&tier_metrics, &criteria, test_set.len());
+    let best_baseline = strongest_baseline(&baseline_metrics).cloned();
+    let verdict = decide(
+        &tier_metrics,
+        best_baseline.as_ref(),
+        &criteria,
+        test_set.len(),
+    );
     let report = render_report(
         &tier_metrics,
         &baseline_metrics,
         &system,
-        verdict,
-        &criteria,
-        test_set.len(),
+        &ReportContext {
+            verdict,
+            criteria,
+            n_test: test_set.len(),
+            n_train: train_set.len(),
+            assumptions,
+        },
     );
 
     if opts.json {
@@ -1031,23 +1122,39 @@ fn print_human_report(report: &Value) {
     println!("  error:     {:.3}", report["tier"]["error_rate"]);
     println!("  macro_f1:  {:.3}", report["tier"]["macro_f1"]);
     println!();
-    println!("system metrics:");
+    println!("system metrics (fallback model path is modeled, not measured):");
+    println!(
+        "  assumed model error rate: {:.3}",
+        report["snapshot"]["model_error_rate_assumption"]
+    );
+    println!(
+        "  assumed model latency: {:.0} ms",
+        report["snapshot"]["model_latency_ms_assumption"]
+    );
     println!("  fallback rate:  {:.3}", report["system"]["fallback_rate"]);
     println!(
         "  model calls avoided per 100: {:.1}",
         report["system"]["model_calls_avoided_per_100"]
     );
     println!(
-        "  p50 latency: {:.2} ms ",
-        report["system"]["p50_latency_ms"]
+        "  p50 tier latency (measured): {:.2} ms ",
+        report["system"]["p50_tier_latency_ms"]
     );
     println!(
-        "  p95 latency: {:.2} ms ",
-        report["system"]["p95_latency_ms"]
+        "  p95 tier latency (measured): {:.2} ms ",
+        report["system"]["p95_tier_latency_ms"]
+    );
+    println!(
+        "  p50 end-to-end latency (modeled): {:.2} ms ",
+        report["system"]["p50_e2e_latency_ms"]
+    );
+    println!(
+        "  p95 end-to-end latency (modeled): {:.2} ms ",
+        report["system"]["p95_e2e_latency_ms"]
     );
     println!("  storage: {} bytes ", report["system"]["storage_bytes"]);
     println!(
-        "  error rate after fallback: {:.3}",
+        "  modeled error rate after fallback: {:.3}",
         report["system"]["error_rate_after_fallback"]
     );
     println!();
@@ -1233,7 +1340,7 @@ mod tests {
             ..Default::default()
         };
         let criteria = DecisionCriteria::default();
-        assert_eq!(decide(&metrics, &criteria, 20), Verdict::NoGo);
+        assert_eq!(decide(&metrics, None, &criteria, 20), Verdict::NoGo);
     }
 
     #[test]
@@ -1244,7 +1351,7 @@ mod tests {
             ..Default::default()
         };
         let criteria = DecisionCriteria::default();
-        assert_eq!(decide(&metrics, &criteria, 20), Verdict::NoGo);
+        assert_eq!(decide(&metrics, None, &criteria, 20), Verdict::NoGo);
     }
 
     #[test]
@@ -1255,7 +1362,7 @@ mod tests {
             ..Default::default()
         };
         let criteria = DecisionCriteria::default();
-        assert_eq!(decide(&metrics, &criteria, 5), Verdict::NoGo);
+        assert_eq!(decide(&metrics, None, &criteria, 5), Verdict::NoGo);
     }
 
     #[test]
@@ -1266,7 +1373,7 @@ mod tests {
             ..Default::default()
         };
         let criteria = DecisionCriteria::default();
-        assert_eq!(decide(&metrics, &criteria, 20), Verdict::Go);
+        assert_eq!(decide(&metrics, None, &criteria, 20), Verdict::Go);
     }
 
     #[test]
@@ -1302,7 +1409,15 @@ mod tests {
                 .unwrap();
         }
         let tier = HistoryTier::new(store);
-        let system = compute_system_metrics(&tier, &test_set, spec_for, 0.20);
+        let system = compute_system_metrics(
+            &tier,
+            &test_set,
+            spec_for,
+            ModelAssumptions {
+                error_rate: 0.20,
+                latency_ms: 1500.0,
+            },
+        );
 
         assert!(system.fallback_rate >= 0.0 && system.fallback_rate <= 1.0);
         assert!(system.error_rate_after_fallback >= 0.0 && system.error_rate_after_fallback <= 1.0);
@@ -1318,13 +1433,95 @@ mod tests {
             &EvalMetrics::default(),
             &baseline_metrics,
             &system,
-            Verdict::NoGo,
-            &criteria,
-            0,
+            &ReportContext {
+                verdict: Verdict::NoGo,
+                criteria,
+                n_test: 0,
+                n_train: 0,
+                assumptions: ModelAssumptions {
+                    error_rate: 0.20,
+                    latency_ms: 1500.0,
+                },
+            },
         );
         assert_eq!(report["verdict"], "no-go");
         assert!(report["tier"].is_object());
         assert!(report["baselines"].is_object());
         let _ = report["system"].is_object();
+        // The envelope marks this as a synthetic evaluation with a modeled
+        // fallback, so a machine reader can tell it apart from runtime evidence.
+        assert_eq!(report["epistemics"]["basis"], "synthetic frozen evaluation");
+        assert_eq!(report["epistemics"]["modeled_fallback"], true);
+        assert_eq!(report["snapshot"]["frozen"], true);
+        assert_eq!(report["snapshot"]["model_error_rate_assumption"], 0.20);
+    }
+
+    #[test]
+    fn decide_returns_no_go_when_a_baseline_is_stronger() {
+        // The tier clears its absolute bounds, but the keyword baseline answers
+        // with lower error at equal coverage: no measured gain, so no-go.
+        let metrics = EvalMetrics {
+            error_rate: 0.10,
+            coverage: 0.50,
+            ..Default::default()
+        };
+        let stronger = EvalMetrics {
+            error_rate: 0.05,
+            coverage: 0.50,
+            ..Default::default()
+        };
+        let criteria = DecisionCriteria::default();
+        assert_eq!(
+            decide(&metrics, Some(&stronger), &criteria, 20),
+            Verdict::NoGo
+        );
+        // A weaker baseline (higher error) does not block the go.
+        let weaker = EvalMetrics {
+            error_rate: 0.20,
+            coverage: 0.50,
+            ..Default::default()
+        };
+        assert_eq!(decide(&metrics, Some(&weaker), &criteria, 20), Verdict::Go);
+    }
+
+    #[test]
+    fn e2e_latency_models_the_fallback_call() {
+        // The measured tier latency is far below the modeled end-to-end latency
+        // because every abstention adds the assumed model call.
+        let train: Vec<&EvalExample> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix < SPLIT_UNIX)
+            .collect();
+        let test_set: Vec<&EvalExample> = FROZEN_DATASET
+            .iter()
+            .filter(|e| e.created_unix >= SPLIT_UNIX)
+            .collect();
+        let mut store = HistoryStore::empty();
+        for ex in &train {
+            let spec = prompt_intent::spec(ex.text).unwrap();
+            store
+                .add(NewEntry::for_spec(
+                    ex.text.to_string(),
+                    ex.label.to_string(),
+                    "task - intent".to_string(),
+                    "human - verified".to_string(),
+                    &spec,
+                ))
+                .unwrap();
+        }
+        let tier = HistoryTier::new(store);
+        let assumptions = ModelAssumptions {
+            error_rate: 0.20,
+            latency_ms: 1500.0,
+        };
+        let system = compute_system_metrics(&tier, &test_set, spec_for, assumptions);
+        assert!(
+            system.p95_tier_latency_ms < 100.0,
+            "tier is pure local compute"
+        );
+        assert!(
+            system.p95_e2e_latency_ms > assumptions.latency_ms,
+            "a fallback-dominated sample models the model call into e2e"
+        );
     }
 }

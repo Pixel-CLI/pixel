@@ -807,6 +807,14 @@ enum Command {
     ClassifyEval {
         #[arg(long)]
         json: bool,
+        /// Assumed model error rate (0-1) for the modeled fallback path. The
+        /// offline evaluation never calls a model, so this assumption is
+        /// disclosed in the report rather than presented as measured.
+        #[arg(long, default_value_t = 0.20)]
+        model_error_rate: f64,
+        /// Assumed model latency in milliseconds for the modeled fallback path.
+        #[arg(long, default_value_t = 1500.0)]
+        model_latency_ms: f64,
     },
     /// Manage the verified-history store: list, add, remove, correct, or
     /// clear stored examples. The store is a bounded project-local file
@@ -1538,6 +1546,13 @@ enum EvaluateCmd {
     },
 }
 
+/// Clap value parser for a stored-history label: rejects anything outside the
+/// built-in task-intent vocabulary at parse time, before the store is touched.
+fn label_in_vocabulary(label: &str) -> Result<String, String> {
+    classify_history_cmd::checked_label(label)?;
+    Ok(label.to_string())
+}
+
 #[derive(Subcommand)]
 enum ClassifyHistoryCmd {
     /// List all stored history entries.
@@ -1548,6 +1563,8 @@ enum ClassifyHistoryCmd {
     /// Add a verified example to the store.
     Add {
         text: String,
+        /// The label must be one of the built-in task-intent labels.
+        #[arg(value_parser = label_in_vocabulary)]
         label: String,
         #[arg(long, default_value = "human-verified")]
         source: String,
@@ -1557,6 +1574,8 @@ enum ClassifyHistoryCmd {
     /// Correct an entry's label (supersedes the old entry).
     Correct {
         id: String,
+        /// The label must be one of the built-in task-intent labels.
+        #[arg(value_parser = label_in_vocabulary)]
         label: String,
         #[arg(long, default_value = "human-verified")]
         source: String,
@@ -5958,11 +5977,19 @@ fn run_command(
         Command::Recall { cmd } => recall_cmd::run_recall(cmd),
         Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
         Command::Classify(options) => classify::run(options),
-        Command::ClassifyEval { json } => {
+        Command::ClassifyEval {
+            json,
+            model_error_rate,
+            model_latency_ms,
+        } => {
             // The evaluation's verdict is its exit code (0 Go, 1 NoGo); keep
             // it rather than returning success for a NoGo.
             owned_exit.set(Some(classify_eval::run(
-                classify_eval::ClassifyEvalOptions { json },
+                classify_eval::ClassifyEvalOptions {
+                    json,
+                    model_error_rate,
+                    model_latency_ms,
+                },
             )));
             Ok(())
         }

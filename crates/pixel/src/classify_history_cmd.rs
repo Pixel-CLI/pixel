@@ -83,7 +83,11 @@ fn list(json: bool) -> Result<(), String> {
 /// The task-intent vocabulary the classifier itself uses. A stored label
 /// outside it — a typo like `bugfiz` — would never be predicted and would
 /// skew the verified history, so it is refused at the boundary.
-fn checked_label(label: &str) -> Result<(), String> {
+/// A stored label must come from the built-in task-intent vocabulary, so a
+/// typo can never enter the verified store and later surface as a
+/// classification result. Shared by the CLI's parse-time value parser and the
+/// command handlers.
+pub(crate) fn checked_label(label: &str) -> Result<(), String> {
     let labels = prompt_intent::labels();
     if labels.iter().any(|known| known == label) {
         Ok(())
