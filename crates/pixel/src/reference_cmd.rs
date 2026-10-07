@@ -305,10 +305,11 @@ pub fn query(root: &Path, filter: Option<&str>) -> Result<Value, String> {
 
     for entry in &manifest.entries {
         // Apply filter if provided.
-        if let Some(f) = filter {
-            if !entry.id.contains(f) && !entry.repo.contains(f) {
-                continue;
-            }
+        if let Some(f) = filter
+            && !entry.id.contains(f)
+            && !entry.repo.contains(f)
+        {
+            continue;
         }
 
         let dest = source_path(root, entry);
@@ -341,8 +342,7 @@ pub fn query(root: &Path, filter: Option<&str>) -> Result<Value, String> {
                     // For tags/branches, resolve and compare.
                     runner
                         .run(&["rev-parse", "--verify", &entry.revision])
-                        .map(|r| String::from_utf8_lossy(&r).trim().to_string() == head)
-                        .unwrap_or(false)
+                        .is_ok_and(|r| String::from_utf8_lossy(&r).trim() == head)
                 };
 
                 if revision_matches {
@@ -394,6 +394,7 @@ pub fn query(root: &Path, filter: Option<&str>) -> Result<Value, String> {
 }
 
 /// Add a reference entry to the manifest.
+#[allow(clippy::too_many_arguments)]
 pub fn add(
     root: &Path,
     id: String,
@@ -418,8 +419,7 @@ pub fn add(
         .any(|e| e.id == id && e.revision == revision)
     {
         return Err(format!(
-            "reference: {} at {} already exists — use `pixel reference remove` first",
-            id, revision
+            "reference: {id} at {revision} already exists — use `pixel reference remove` first"
         ));
     }
 
