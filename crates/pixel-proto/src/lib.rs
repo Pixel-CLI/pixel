@@ -20,6 +20,7 @@ pub mod evidence;
 pub mod facts;
 pub mod op;
 pub mod query;
+pub mod recovery;
 pub mod snapshot;
 pub mod warning;
 
@@ -31,5 +32,8 @@ pub use evidence::{CapHit, EvidenceBasis, SourceCoverage, SourceEpistemics};
 pub use facts::{TargetsFactsInputs, TargetsFactsResult, TargetsFactsUnavailableReason};
 pub use op::Op;
 pub use query::{QueryKind, QueryPlan, QueryResult, QueryStatus, compile_query};
+pub use recovery::{
+    Continuation, NextCall, OnDrift, RecoveryCause, RecoveryHint, SideEffect, SnapshotBinding,
+};
 pub use snapshot::{Snapshot, SnapshotInfo, SnapshotToken};
 pub use warning::Warning;
