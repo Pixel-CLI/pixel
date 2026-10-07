@@ -886,7 +886,7 @@ fn unconfigured_task_should_accept_an_inline_contract_without_authorizing_a_file
     );
     assert_eq!(
         strengthened["contract"]["checks"],
-        json!([{"id":"content","argv":["/bin/sh","-c","test \"$(cat source.txt)\" = correct"],"cwd":".","timeout_ms":5000,"required":true}])
+        json!([{"id":"content","kind":"argv","argv":["/bin/sh","-c","test \"$(cat source.txt)\" = correct"],"cwd":".","timeout_ms":5000,"required":true}])
     );
     assert!(!root.join(".pixel/contract.json").exists());
     assert!(

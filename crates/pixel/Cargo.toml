@@ -44,6 +44,7 @@ pixel-flow = { path = "../pixel-flow" }
 pixel-ultraflow = { path = "../pixel-ultraflow" }
 pixel-release = { path = "../pixel-release" }
 pixel-task = { path = "../pixel-task" }
+rusqlite = { version = "0.40", features = ["bundled"] }
 fs2 = "0.4.3"
 clap = { version = "4.5", features = ["derive"] }
 serde = "1"

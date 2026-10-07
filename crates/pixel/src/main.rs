@@ -72,6 +72,7 @@ mod task_hook;
 mod task_prepare;
 mod task_route;
 mod task_runtime;
+mod task_verify;
 use task_commands::TaskCmd;
 mod ultraflow_cmd;
 

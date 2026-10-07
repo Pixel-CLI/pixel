@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use pixel_task::{Check, Criterion, Observation, ObservationKind, TaskContract};
+use pixel_task::{Check, CheckKind, Criterion, Observation, ObservationKind, TaskContract};
 use serde_json::json;
 
 pub fn git(root: &Path, args: &[&str]) {
@@ -40,6 +40,7 @@ pub fn contract(script: &str) -> TaskContract {
         objective: "source contains the correct value".into(),
         checks: vec![Check {
             id: "value".into(),
+            kind: CheckKind::Argv,
             argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: ".".into(),
             timeout_ms: 2000,
