@@ -2198,7 +2198,7 @@ mod tests {
         ));
         for (content, field, expected) in [
             (json!("string prompt"), "content", "string prompt"),
-            (json!(null), "text", "text prompt"),
+            (json!("text prompt"), "text", "text prompt"),
             (
                 json!([{"text":"first part"}, {"image":"ignored"}, {"text":"second part"}]),
                 "content",
@@ -2210,8 +2210,8 @@ mod tests {
             std::fs::write(
                 &path,
                 [
-                    json!({"role":"assistant","content":"assistant text"}).to_string(),
                     user.to_string(),
+                    json!({"role":"assistant","content":"assistant text"}).to_string(),
                 ]
                 .join("\n"),
             )

@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 //! The prompt-submit brief's optional verdict: when the heuristic gate finds
-//! a prompt only weakly about code, `pixel classify --task-intent` — the
-//! user's configured engine, Jev, local Ollaya or a remote preset — decides
-//! the intent instead of the stem table. The call runs as a child process on
+//! a prompt only weakly about code, `pixel classify` on the local Ollaya
+//! engine decides the intent instead of the stem table, but only when that
+//! server is already warm. The call runs as a child process on
 //! the brief's shared deadline: killed on timeout, absent, disabled or
 //! unconfident all fall back to the heuristics — a verdict is an upgrade,
 //! never a requirement.
@@ -38,6 +38,11 @@ fn judge_args(typed: &str) -> Vec<String> {
         "--json".to_string(),
         "--context".to_string(),
         INTENT_CONTEXT.to_string(),
+        "--if-warm".to_string(),
+        "--engine".to_string(),
+        "ollaya".to_string(),
+        "--ollaya-url".to_string(),
+        crate::decide_ollaya::DEFAULT_BASE.to_string(),
     ];
     for kind in INTENTS
         .iter()
@@ -52,20 +57,23 @@ fn judge_args(typed: &str) -> Vec<String> {
     args
 }
 
-fn stdout_reader(child: &mut Child) -> Option<JoinHandle<String>> {
+fn stdout_reader(child: &mut Child) -> Option<JoinHandle<Result<String, String>>> {
     child.stdout.take().map(|mut stdout| {
         std::thread::spawn(move || {
             let mut text = String::new();
-            let _ = stdout.read_to_string(&mut text);
-            text
+            stdout
+                .read_to_string(&mut text)
+                .map(|_| text)
+                .map_err(|error| format!("read classify stdout: {error}"))
         })
     })
 }
 
-fn join_stdout(reader: Option<JoinHandle<String>>) -> String {
+fn join_stdout(reader: Option<JoinHandle<Result<String, String>>>) -> Result<String, String> {
     reader
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default()
+        .ok_or_else(|| "classify stdout was unavailable".to_string())?
+        .join()
+        .map_err(|_| "classify stdout reader panicked".to_string())?
 }
 
 /// A decided intent: the winning label and its probability, used as the
@@ -98,16 +106,31 @@ impl Verdict {
 }
 
 /// The verdict of `pixel classify` run as a bounded child: the task-intent
-/// labels plus `none`, decided by the same engine the user configured
-/// (local Ollaya, Jev, a remote preset), never more time than the brief's
-/// deadline leaves. `none` is the only deny; every other label just steers
-/// the plan.
+/// labels plus `none`, decided only by an already-warm Ollaya server on the
+/// loopback default. It never inherits the user's configured remote engine or
+/// endpoint, and never starts the local server. `none` is the only deny; every
+/// other label just steers the plan.
 ///
 /// Any failure — classify disabled, engine unreachable, timeout, a killed
 /// child, unparseable output — is `None`, and the caller's heuristics decide
 /// as they always did.
 #[cfg_attr(test, mutants::skip)] // Runtime adapter: subprocess + deadline + parse; the verdict policy is tested on `Verdict`.
 pub(crate) fn judge(typed: &str, deadline: Instant) -> Option<Verdict> {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            if std::env::var_os("PIXEL_BRIEF_DEBUG").is_some() {
+                eprintln!("pixel-brief intent: current_exe: {error}");
+            }
+            return None;
+        }
+    };
+    let mut command = Command::new(exe);
+    command.args(judge_args(typed));
+    judge_with_command(command, deadline)
+}
+
+fn judge_with_command(mut command: Command, deadline: Instant) -> Option<Verdict> {
     let debug = std::env::var_os("PIXEL_BRIEF_DEBUG").is_some();
     macro_rules! bail {
         ($why:expr) => {{
@@ -118,14 +141,7 @@ pub(crate) fn judge(typed: &str, deadline: Instant) -> Option<Verdict> {
         }};
     }
     let deadline = deadline.min(Instant::now() + CLASSIFY_BUDGET);
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(e) => bail!(format!("current_exe: {e}")),
-    };
-    // `--task-intent` cannot express the extra `none` deny label.
-    let args = judge_args(typed);
-    let mut child = match Command::new(exe)
-        .args(&args)
+    let mut child = match command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -137,7 +153,10 @@ pub(crate) fn judge(typed: &str, deadline: Instant) -> Option<Verdict> {
     let mut reader = stdout_reader(&mut child);
     let output = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break join_stdout(reader.take()),
+            Ok(Some(_)) => match join_stdout(reader.take()) {
+                Ok(output) => break output,
+                Err(error) => bail!(error),
+            },
             Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
             Ok(None) => {
                 let _ = child.kill();
@@ -183,6 +202,11 @@ mod tests {
                 "--json",
                 "--context",
                 INTENT_CONTEXT,
+                "--if-warm",
+                "--engine",
+                "ollaya",
+                "--ollaya-url",
+                crate::decide_ollaya::DEFAULT_BASE,
                 "--label",
                 "bugfix",
                 "--criterion",
@@ -245,5 +269,41 @@ mod tests {
             assert!(!v.denies_brief(), "{label}");
             assert!(!v.change_intent(), "{label}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn judge_should_parse_a_valid_subprocess_json_verdict() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "printf '%s' '{\"predicted\":\"bugfix\",\"probs\":{\"bugfix\":0.91}}'",
+        ]);
+
+        assert_eq!(
+            judge_with_command(command, Instant::now() + Duration::from_secs(1)),
+            Some(Verdict {
+                label: "bugfix".to_string(),
+                confidence: 0.91,
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn judge_should_fall_back_when_subprocess_stdout_is_empty_or_unreadable() {
+        let mut empty = Command::new("sh");
+        empty.args(["-c", "exit 0"]);
+        assert_eq!(
+            judge_with_command(empty, Instant::now() + Duration::from_secs(1)),
+            None
+        );
+
+        let mut unreadable = Command::new("sh");
+        unreadable.args(["-c", "printf '\\377'"]);
+        assert_eq!(
+            judge_with_command(unreadable, Instant::now() + Duration::from_secs(1)),
+            None
+        );
     }
 }

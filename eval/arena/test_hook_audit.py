@@ -79,6 +79,29 @@ class HookAuditTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing or duplicating"):
             audit("pixel", self.home, self.repo, self.root / "pixel.json", "1", self.root / "no-system-config")
 
+    def test_pixel_rejects_zero_prompt_hooks(self):
+        hooks = pixel_hooks()
+        hooks["hooks"] = {
+            key: value for key, value in hooks["hooks"].items()
+            if "prompt-submit" not in value[0]["command"]
+        }
+        (self.home / "hooks.json").write_text(json.dumps(hooks))
+
+        with self.assertRaisesRegex(RuntimeError, "missing or duplicating"):
+            audit("pixel", self.home, self.repo, self.root / "pixel.json", "1", self.root / "no-system-config")
+
+    def test_pixel_rejects_duplicated_required_non_prompt_hook(self):
+        hooks = pixel_hooks()
+        duplicate = next(
+            value[0] for value in hooks["hooks"].values()
+            if "run-hook metrics" in value[0]["command"]
+        )
+        hooks["hooks"]["duplicate-metrics"] = [duplicate.copy()]
+        (self.home / "hooks.json").write_text(json.dumps(hooks))
+
+        with self.assertRaisesRegex(RuntimeError, "missing or duplicating"):
+            audit("pixel", self.home, self.repo, self.root / "pixel.json", "1", self.root / "no-system-config")
+
     def test_foreign_hook_fails_closed(self):
         (self.home / "hooks.json").write_text(json.dumps({"hooks": {"UserPromptSubmit": [
             {"type": "command", "command": "echo foreign"}

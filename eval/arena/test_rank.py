@@ -428,6 +428,23 @@ class RankResultsTests(unittest.TestCase):
         self.assertEqual(export_only, 0)
         self.assertEqual(definition, 10)
 
+    def test_lookup_rubrics_accept_multiline_citations_and_signatures(self):
+        scenarios = Path(__file__).parents[1] / "scenarios"
+        handle_error = json.loads((scenarios / "g7-lookup-handleerror.json").read_text())
+        custom_menu = json.loads((scenarios / "g8-lookup-custommenu.json").read_text())
+
+        multiline_signature, _, _ = score_answer(
+            "packages/ui/handleError.ts\nline 4\n"
+            "export const handleError =\n  (error: Error): string",
+            handle_error)
+        multiline_citation, _, _ = score_answer(
+            "packages/ui/CustomMenu.ts\nline 48\n"
+            "exports defineMultiStyleConfig",
+            custom_menu)
+
+        self.assertEqual(multiline_signature, 10)
+        self.assertEqual(multiline_citation, 10)
+
 
 if __name__ == "__main__":
     unittest.main()

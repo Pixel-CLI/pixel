@@ -9,6 +9,6 @@
   "must": [
     { "pattern": "packages/ui/CustomMenu\\.ts", "points": 4, "why": "definition file" },
     { "pattern": "defineMultiStyleConfig", "points": 3, "why": "what it exports" },
-    { "pattern": "packages/ui/CustomMenu\\.ts.{0,100}(?::48\\b|line\\s+48)", "points": 3, "why": "definition path and line 48" }
+    { "pattern": "packages/ui/CustomMenu\\.ts[\\s\\S]{0,100}(?::48\\b|line\\s+48)", "points": 3, "why": "definition path and line 48" }
   ]
 }
