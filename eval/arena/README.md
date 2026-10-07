@@ -46,12 +46,39 @@ into each container, including when reusing a pinned image; harness-only edits
 do not require an image rebuild. `harness-source.json` records SHA-256 values
 and container paths for the runner files used in that run.
 
+With `--watch`, Herdr panes run the normal interactive `codex` TUI, submit the
+same first scenario prompt, and use Codex's
+`--dangerously-bypass-approvals-and-sandbox` flag for YOLO mode. Do not use
+`codex exec` or `--full-auto` for the visible pane run. When launched outside a
+Herdr pane, the runner discovers the focused pane; set `HERDR_PANE_ID` when
+that is ambiguous. The pane waits for the arm's setup-ready marker, so Pixel's
+hooks are installed before the visible Codex session starts.
+The repeatable stale-pane/layout/prompt-submit drill is also recorded in the
+`codex/700-native-default` history and its follow-up `wip: arena watch
+prompt-submit edits` stash.
+
 Graph experiments use `--prepare-pixel-graph`; the saved setup receipt separates
 index preparation from model time. Retrieval routing stays native by default,
 including when a graph is prepared. A fresh Codex home may leave installed
 hooks untrusted: static context parity alone cannot establish hook delivery.
 `--assert-context-parity` additionally expects no Pixel calls and is intended
 for generic-question abstention controls.
+
+Every Pixel arm now runs a deterministic preflight after setup. It sends a
+fixed Codex `UserPromptSubmit` payload through `pixel run-hook prompt-submit`
+and requires a non-empty valid response. The result is saved as
+`pixel-brief-hook-<rep>.json`; `response_valid` is the pass/fail check and the
+receipt stores only context type, size, and hash, not the prompt. A valid
+prompt hook can return either `[PIXEL:BRIEF]` or `[PIXEL:EXECUTION_ROUTE]`;
+those are distinct context shapes and neither is inferred from a scenario name.
+The runner also prints the full returned context between explicit begin/end
+markers during preflight and after a live watched submission.
+Native-default installs intentionally do not register this retrieval hook.
+Use `--review-pixel-hooks` with a reviewed hook image to require the live
+Codex `UserPromptSubmit` wrapper receipt (`pixel-hook-<rep>.jsonl`) with a
+valid, forwarded, non-empty context.
+The default setup runs `pixel prepare-repo --no-daemon` so the brief gate sees
+the repository's Pixel shard before Codex starts.
 
 ### Explicit reviewed-hook experiment
 
@@ -62,9 +89,11 @@ records delivery; it does not enable experimental caller facts. Both containers
 must finish the audit before either model starts: raw must have no hooks; Pixel
 must have exactly the 11 known Pixel Codex commands under
 `/root/.codex/hooks.json`; project/global foreign hooks and plugin hook
-declarations stop the pair. Only after both audits pass does the runner apply
-the same Codex hook-trust bypass to both arms. It does not change host hook
-trust. The Pixel prompt-hook wrapper records its validated `UserPromptSubmit`
+declarations stop the pair. Only after both audits pass does the visible Pixel
+Codex session answer the normal hook-review dialog with `Trust all and
+continue`, confirms that the dialog disappeared, and only then submits the
+scenario prompt. The runner never passes Codex's hook-trust bypass flag. The
+Pixel prompt-hook wrapper records its validated `UserPromptSubmit`
 response, emitted context status and hook stderr in
 `pixel-hook-<rep>.jsonl`; task stderr is retained as
 `<arm>-<task>-<rep>.stderr`. Neither receipt stores prompt input or auth. A

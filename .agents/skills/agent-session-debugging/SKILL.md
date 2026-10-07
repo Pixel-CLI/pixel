@@ -51,6 +51,29 @@ Verify with `herdr pane layout` and `herdr pane list`; the main pane must remain
 left, the four cells right, and all four intended agent kinds present. Do not
 close the main pane or create another tab merely to make the layout fit.
 
+Run split and `agent start` commands sequentially, taking each new `pane_id`
+from the previous result. Parallel Herdr CLI calls race: two simultaneous
+`pane split` calls made both new panes vanish before `agent start` could use
+them, and a fresh pane is not immediately an "available shell" — if
+`agent start` fails with `agent_pane_busy`, wait a few seconds, close that
+pane, and split again.
+
+A newly started Codex in this repository opens Pixel's hook-review dialog
+("⚠ N hooks need review before they can run", footer `t trust all · esc close`)
+and Herdr classifies it `idle`, so the first `agent prompt` fails with
+`agent_prompt_stalled` while the dialog is up. Accept the hooks before the
+first prompt — the review is keyed by the `hooks.json` path, so every new
+worktree starts untrusted (the `repo.codex-hook-review` doctor check):
+
+```sh
+rtk env HERDR_ENV=1 herdr agent send-keys <codex-name> t   # mark reviews done: Review column drops to 0
+rtk env HERDR_ENV=1 herdr agent send-keys <codex-name> esc # close the dialog
+```
+
+`send-keys t` alone is not enough — the dialog stays up after `t` until `esc`.
+Only prompt after `herdr agent get` shows a changed `state_change_seq` and the
+dialog text is gone from `herdr agent read`.
+
 Start or address agents with Herdr's `agent` commands, for example:
 
 ```sh
