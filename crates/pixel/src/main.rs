@@ -36,6 +36,9 @@ mod ai_cli_readify;
 mod audit_cmd;
 mod call_guard;
 mod classify;
+mod classify_eval;
+mod classify_history;
+mod classify_history_cmd;
 mod classify_setup;
 mod config_cmd;
 mod config_file;
@@ -850,6 +853,29 @@ enum Command {
     /// network-bound; `--remote-preset` picks the provider. `--jsonl`
     /// serves one decision per stdin line.
     Classify(classify::ClassifyOptions),
+    /// Offline go/no-go evaluation of the verified-history retrieval tier
+    /// against frozen baselines. Reports per-label precision/recall, macro
+    /// scores, confusion matrix, coverage-vs-error curves with Wilson CIs,
+    /// and system metrics. Exits 0 on go, 1 on no-go.
+    ClassifyEval {
+        #[arg(long)]
+        json: bool,
+        /// Assumed model error rate (0-1) for the modeled fallback path. The
+        /// offline evaluation never calls a model, so this assumption is
+        /// disclosed in the report rather than presented as measured.
+        #[arg(long, default_value_t = 0.20)]
+        model_error_rate: f64,
+        /// Assumed model latency in milliseconds for the modeled fallback path.
+        #[arg(long, default_value_t = 1500.0)]
+        model_latency_ms: f64,
+    },
+    /// Manage the verified-history store: list, add, remove, correct, or
+    /// clear stored examples. The store is a bounded project-local file
+    /// under `.pixel/classify-history.jsonl`.
+    ClassifyHistory {
+        #[command(subcommand)]
+        cmd: ClassifyHistoryCmd,
+    },
     /// Deterministic web lookup for terms the index cannot know — the
     /// refine step of a gated `pixel plan`. No LLM, no daemon.
     WebSearch {
@@ -1571,6 +1597,44 @@ enum EvaluateCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Clap value parser for a stored-history label: rejects anything outside the
+/// built-in task-intent vocabulary at parse time, before the store is touched.
+fn label_in_vocabulary(label: &str) -> Result<String, String> {
+    classify_history_cmd::checked_label(label)?;
+    Ok(label.to_string())
+}
+
+#[derive(Subcommand)]
+enum ClassifyHistoryCmd {
+    /// List all stored history entries.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a verified example to the store.
+    Add {
+        text: String,
+        /// The label must be one of the built-in task-intent labels.
+        #[arg(value_parser = label_in_vocabulary)]
+        label: String,
+        #[arg(long, default_value = "human-verified")]
+        source: String,
+    },
+    /// Remove an entry by ID.
+    Remove { id: String },
+    /// Correct an entry's label (supersedes the old entry).
+    Correct {
+        id: String,
+        /// The label must be one of the built-in task-intent labels.
+        #[arg(value_parser = label_in_vocabulary)]
+        label: String,
+        #[arg(long, default_value = "human-verified")]
+        source: String,
+    },
+    /// Clear all entries from the store.
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -5998,6 +6062,23 @@ fn run_command(
         Command::Recall { cmd } => recall_cmd::run_recall(cmd),
         Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
         Command::Classify(options) => classify::run(options),
+        Command::ClassifyEval {
+            json,
+            model_error_rate,
+            model_latency_ms,
+        } => {
+            // The evaluation's verdict is its exit code (0 Go, 1 NoGo); keep
+            // it rather than returning success for a NoGo.
+            owned_exit.set(Some(classify_eval::run(
+                classify_eval::ClassifyEvalOptions {
+                    json,
+                    model_error_rate,
+                    model_latency_ms,
+                },
+            )));
+            Ok(())
+        }
+        Command::ClassifyHistory { cmd } => classify_history_cmd::run_classify_history(cmd),
         Command::WebSearch { query, limit, json } => {
             web_search::run(web_search::WebSearchOptions { query, limit, json })
         }

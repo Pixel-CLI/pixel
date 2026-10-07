@@ -105,12 +105,19 @@ pub(crate) fn spec(prompt: &str) -> Result<Spec, String> {
     Spec::checked(
         prompt.to_string(),
         INTENT_CONTEXT.to_string(),
-        INTENTS.iter().map(|kind| kind.label.to_string()).collect(),
+        labels(),
         INTENTS
             .iter()
             .map(|kind| (kind.label.to_string(), kind.criterion.to_string()))
             .collect(),
     )
+}
+
+/// The task-intent label vocabulary, exactly as [`spec`] ships it. A caller
+/// that stores a label validates against this, so a typo cannot enter the
+/// verified-history corpus as a label the classifier can never predict.
+pub(crate) fn labels() -> Vec<String> {
+    INTENTS.iter().map(|kind| kind.label.to_string()).collect()
 }
 
 #[cfg(test)]
