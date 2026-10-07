@@ -64,7 +64,10 @@ pub(crate) fn handle_hook(
     payload: &Value,
 ) -> Result<Value, String> {
     let started = Instant::now();
-    if !matches!(provider, "claude" | "codex" | "pi" | "devin") {
+    if !matches!(
+        provider,
+        "claude" | "codex" | "pi" | "devin" | "gemini" | "antigravity"
+    ) {
         return Err("unsupported task provider".into());
     }
     let mutation = payload["mutation"] == true;
@@ -989,52 +992,52 @@ mod tests {
     }
 
     #[test]
-    fn devin_hooks_should_enforce_edits_and_stop_with_a_separate_provider_session() {
+    fn provider_hooks_should_enforce_edits_and_stop_with_separate_provider_sessions() {
         let root = Scratch::new();
         init_repo(&root.0);
         let config = crate::config_file::preferred_path(&root.0.join(".pixel"));
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "task:\n  enforcement: enforce\n").unwrap();
-        let prompt = json!({
-            "session_id":"devin-session",
-            "prompt":"fix the parser bug in src/a.rs",
-            "mutation":false
-        });
-        let started = handle_hook(&root.0, "devin", "prompt-submit", &prompt).unwrap();
-        assert_eq!(started["decision"], "observe", "{started}");
-
         let store = Store::open(&root.0).unwrap();
-        let task = store
-            .find_session("devin", "devin-session")
-            .unwrap()
+        for (provider, session) in [
+            ("devin", "devin-session"),
+            ("gemini", "gemini-session"),
+            ("antigravity", "antigravity-session"),
+        ] {
+            let prompt = json!({
+                "session_id":session,
+                "prompt":"fix the parser bug in src/a.rs",
+                "mutation":false
+            });
+            let started = handle_hook(&root.0, provider, "prompt-submit", &prompt).unwrap();
+            assert_eq!(started["decision"], "observe", "{provider}: {started}");
+
+            let task = store.find_session(provider, session).unwrap().unwrap();
+            assert_eq!(task.provider, provider);
+
+            let edit = handle_hook(
+                &root.0,
+                provider,
+                "pre-tool-use",
+                &json!({"session_id":session,"mutation":true}),
+            )
             .unwrap();
-        assert_eq!(task.provider, "devin");
+            assert_eq!(edit["decision"], "deny", "{provider}: {edit}");
 
-        let edit = handle_hook(
-            &root.0,
-            "devin",
-            "pre-tool-use",
-            &json!({"session_id":"devin-session","mutation":true}),
-        )
-        .unwrap();
-        assert_eq!(edit["decision"], "deny", "{edit}");
-
-        let stopped = handle_hook(
-            &root.0,
-            "devin",
-            "stop",
-            &json!({"session_id":"devin-session","mutation":false}),
-        )
-        .unwrap();
-        assert_eq!(stopped["task_id"], task.task_id);
-        assert_eq!(stopped["decision"], "continue", "{stopped}");
-        assert!(
-            store
-                .find_session("claude", "devin-session")
-                .unwrap()
-                .is_none(),
-            "Devin lifecycle state must not alias Claude sessions"
-        );
+            let stopped = handle_hook(
+                &root.0,
+                provider,
+                "stop",
+                &json!({"session_id":session,"mutation":false}),
+            )
+            .unwrap();
+            assert_eq!(stopped["task_id"], task.task_id);
+            assert_eq!(stopped["decision"], "continue", "{provider}: {stopped}");
+            assert!(
+                store.find_session("claude", session).unwrap().is_none(),
+                "{provider} lifecycle state must not alias Claude sessions"
+            );
+        }
     }
 
     #[test]
