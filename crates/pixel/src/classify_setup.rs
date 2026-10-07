@@ -4,8 +4,9 @@
 //! The classify-engine install step and configuration.
 //!
 //! `pixel install` proposes the classify engine — local (the Ollaya decision
-//! daemon on this Mac), remote (a hosted LLM behind a key), or Jev
-//! (TypeSafe's hosted decision model behind `TYPESAFE_API_KEY`) — with each
+//! daemon on this Mac), remote (a hosted LLM behind a key), Jev
+//! (TypeSafe's hosted decision model behind `TYPESAFE_API_KEY`), or Clef-flash
+//! (Cloudflare's decision model, through Ollama or a Cloudflare API token) — with each
 //! option's measured accuracy in parentheses. Choosing local runs the
 //! auto-setup: the `ollaya` binary installed into a pixel-managed prefix,
 //! the recommended model pulled, and a recorded server launch that
@@ -17,8 +18,8 @@
 //!
 //! Everything interactive is gated on a TTY: a scripted install (CI, pipes)
 //! prints the choice it would have asked as a suggestion and moves on —
-//! `pixel config classify-engine <local|remote|jev|auto>` records the answer
-//! later. The stored preference is advisory: an explicit `--engine` flag on
+//! `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare|auto>`
+//! records the answer later. The stored preference is advisory: an explicit `--engine` flag on
 //! `pixel classify` always wins.
 
 use serde_json::{Value, json};
@@ -33,14 +34,17 @@ use std::path::{Path, PathBuf};
 pub const LOCAL_LABEL: &str = "Local — Ollaya winnow:e4b on this Mac (offline, $0 per call; 0.722 typed-decisions accuracy vs Jev's 0.738)";
 pub const REMOTE_LABEL: &str = "Remote — hosted LLM behind your key (DeepSeek-v4.1-flash: 100% on the 14-item public coding exam; ~$0.0001/call, needs network)";
 pub const JEV_LABEL: &str = "Jev — TypeSafe's hosted decision model behind your TYPESAFE_API_KEY (0.738 typed-decisions accuracy, needs network)";
+pub const CLEF_LABEL: &str = "Clef-flash — Cloudflare's 9B decision model via Ollama (local, no key) or Workers AI (your Cloudflare token); 39 ms median latency, BFCL 98.8 vs Jev's 95.8 (Cloudflare-published)";
 /// What one menu row launches: the local auto-setup, the remote-provider
-/// key flow (any chat preset), or the Jev flow (a TypeSafe or OpenCode Go
-/// key, then the model the source carries).
+/// key flow (any chat preset), the Jev flow (a TypeSafe or OpenCode Go
+/// key, then the model the source carries), or the Clef-flash flow (an
+/// Ollama server or a Cloudflare account id and token).
 #[derive(Clone, Copy, PartialEq)]
 enum SetupKind {
     Local,
     Remote,
     Jev,
+    Clef,
 }
 
 /// The install menu, in display order.
@@ -48,6 +52,7 @@ const MENU: &[(&str, SetupKind)] = &[
     (LOCAL_LABEL, SetupKind::Local),
     (REMOTE_LABEL, SetupKind::Remote),
     (JEV_LABEL, SetupKind::Jev),
+    (CLEF_LABEL, SetupKind::Clef),
 ];
 
 /// Everything Ollaya owns lives under one pixel-managed prefix (binary,
@@ -214,6 +219,7 @@ pub fn install_step(
         setup_local,
         propose_remote_key,
         propose_jev_key,
+        propose_clef_key,
         propose_classify_helpers,
         &mut crate::select::TermiosRaw::default(),
         std::io::stdin().is_terminal(),
@@ -221,7 +227,7 @@ pub fn install_step(
 }
 
 #[allow(clippy::too_many_arguments)] // the seams are the point: tests inject each collaborator
-fn install_step_with<FLocal, FRemote, FJev, FHelpers>(
+fn install_step_with<FLocal, FRemote, FJev, FClef, FHelpers>(
     tty: bool,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
@@ -229,6 +235,7 @@ fn install_step_with<FLocal, FRemote, FJev, FHelpers>(
     setup_local: FLocal,
     propose_remote_key: FRemote,
     propose_jev_key: FJev,
+    propose_clef_key: FClef,
     propose_helpers: FHelpers,
     raw: &mut dyn crate::select::RawMode,
     stdin_is_terminal: bool,
@@ -237,10 +244,11 @@ where
     FLocal: FnOnce(&mut dyn std::io::Write) -> Result<(), String>,
     FRemote: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
     FJev: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
+    FClef: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
     FHelpers: FnOnce(&mut dyn BufRead, &mut dyn std::io::Write) -> Result<(), String>,
 {
     if let Some(engine) = stored {
-        writeln!(stdout, "classify engine: already configured as {engine:?} (change with `pixel config classify-engine <local|remote|jev|auto>`)")
+        writeln!(stdout, "classify engine: already configured as {engine:?} (change with `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare|auto>`)")
             .map_err(|e| e.to_string())?;
         // An engine chosen on an earlier install still gets the helpers
         // offer — the proposal itself is a no-op once every file it
@@ -256,7 +264,7 @@ where
     writeln!(stdout, "Classify engine:").map_err(|e| e.to_string())?;
     if !tty {
         print_menu(stdout)?;
-        writeln!(stdout, "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote|jev>` or re-run `pixel install` in a terminal")
+        writeln!(stdout, "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare>` or re-run `pixel install` in a terminal")
             .map_err(|e| e.to_string())?;
         return Ok(());
     }
@@ -281,8 +289,9 @@ where
         Some(SetupKind::Local) => setup_local(stdout),
         Some(SetupKind::Remote) => propose_remote_key(stdin, stdout),
         Some(SetupKind::Jev) => propose_jev_key(stdin, stdout),
+        Some(SetupKind::Clef) => propose_clef_key(stdin, stdout),
         None => {
-            writeln!(stdout, "classify engine: skipped — run `pixel config classify-engine <local|remote|jev>` to choose later")
+            writeln!(stdout, "classify engine: skipped — run `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare>` to choose later")
                 .map_err(|e| e.to_string())?;
             return Ok(());
         }
@@ -463,12 +472,14 @@ fn propose_remote_key_with(
             "unknown provider {provider:?} (openrouter, ollama, deepseek, opencode-go, local)"
         ));
     };
-    if matches!(
-        preset,
-        crate::decide_remote::Preset::Jev | crate::decide_remote::Preset::Local
-    ) {
+    if preset.is_clef()
+        || matches!(
+            preset,
+            crate::decide_remote::Preset::Jev | crate::decide_remote::Preset::Local
+        )
+    {
         return Err(format!(
-            "{provider} is not a remote chat provider — pick Jev or Local at the top menu"
+            "{provider} is not a remote chat provider — pick Jev, Clef-flash or Local at the top menu"
         ));
     }
     propose_key_for(preset, None, None, None, stdin, stdout, store)
@@ -546,6 +557,140 @@ fn propose_jev_key_with(
         stdout,
         store,
     )
+}
+
+/// The Clef-flash path: Cloudflare's decision model through an Ollama server
+/// (local and keyless, or a remote host behind `OLLAMA_API_KEY`) or through
+/// Workers AI (a Cloudflare account id and API token). The account id is not
+/// a secret: it is stored in the preset's base URL, the token in the global
+/// config's `remote_keys` like every other key.
+#[cfg_attr(test, mutants::skip)] // Config adapter; prompt and persistence dispatch are tested with injected storage.
+fn propose_clef_key(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    propose_clef_key_with(stdin, stdout, |preset, key, model, base| {
+        if let Some(key) = key {
+            crate::config_cmd::run_remote_key(preset, Some(key.to_string()), false)?;
+        }
+        crate::config_cmd::set_classify_remote_model(preset, model, base)
+    })
+}
+
+/// One answered prompt line, trimmed; EOF reads as blank.
+fn prompt_line(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+    prompt: &str,
+) -> Result<String, String> {
+    write!(stdout, "{prompt}").map_err(|e| e.to_string())?;
+    stdout.flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    stdin
+        .read_line(&mut line)
+        .map_err(|e| format!("read answer: {e}"))?;
+    Ok(line.trim().to_string())
+}
+
+fn propose_clef_key_with(
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn std::io::Write,
+    store: impl FnOnce(
+        crate::decide_remote::Preset,
+        Option<&str>,
+        Option<String>,
+        Option<&str>,
+    ) -> Result<(), String>,
+) -> Result<(), String> {
+    use crate::decide_clef::{CLOUDFLARE_DEFAULT_BASE, DEFAULT_MODEL, OLLAMA_DEFAULT_BASE};
+    let io = |e: std::io::Error| e.to_string();
+    writeln!(stdout, "Clef-flash host:").map_err(io)?;
+    writeln!(
+        stdout,
+        "  [1] Ollama — a server you run (`ollama pull clef-flash`, Ollama 0.35.1 or later); no key for a local one"
+    )
+    .map_err(io)?;
+    writeln!(
+        stdout,
+        "  [2] Cloudflare — Workers AI behind your Cloudflare account id and API token"
+    )
+    .map_err(io)?;
+    let host = prompt_line(stdin, stdout, "Host [1]> ")?;
+    match host.as_str() {
+        "" | "1" => {
+            let base = prompt_line(
+                stdin,
+                stdout,
+                &format!("Ollama base URL [{OLLAMA_DEFAULT_BASE}]> "),
+            )?;
+            let base = (!base.is_empty() && base != OLLAMA_DEFAULT_BASE).then_some(base);
+            let key = prompt_line(
+                stdin,
+                stdout,
+                "OLLAMA_API_KEY (only for a remote Ollama host, stored in the global Pixel config, never printed; blank for none)> ",
+            )?;
+            let preset = crate::decide_remote::Preset::ClefOllama;
+            store(
+                preset,
+                (!key.is_empty()).then_some(key.as_str()),
+                None,
+                base.as_deref(),
+            )?;
+            writeln!(
+                stdout,
+                "classify engine: remote ({}) — model {DEFAULT_MODEL}{}; run `ollama pull {DEFAULT_MODEL}` if it is not pulled yet",
+                preset.display(),
+                if key.is_empty() { "" } else { ", key stored" }
+            )
+            .map_err(io)
+        }
+        "2" => {
+            let account = prompt_line(stdin, stdout, "Cloudflare account id> ")?;
+            if account.is_empty() || !account.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(
+                    "the Cloudflare account id is alphanumeric (dashboard → Workers AI → account id)"
+                        .to_string(),
+                );
+            }
+            writeln!(stdout, "Clef model:").map_err(io)?;
+            writeln!(stdout, "  [1] {DEFAULT_MODEL} — 9B, latency-first").map_err(io)?;
+            writeln!(stdout, "  [2] clef — 27B, more accurate").map_err(io)?;
+            let model = match prompt_line(stdin, stdout, "Model [1]> ")?.as_str() {
+                "" | "1" => DEFAULT_MODEL.to_string(),
+                "2" => "clef".to_string(),
+                custom => custom.to_string(),
+            };
+            let key = prompt_line(
+                stdin,
+                stdout,
+                "Cloudflare API token with Workers AI access (stored in the global Pixel config, never printed)> ",
+            )?;
+            let preset = crate::decide_remote::Preset::ClefCloudflare;
+            let base = format!("{CLOUDFLARE_DEFAULT_BASE}/accounts/{account}");
+            store(
+                preset,
+                (!key.is_empty()).then_some(key.as_str()),
+                Some(model),
+                Some(&base),
+            )?;
+            if key.is_empty() {
+                writeln!(
+                    stdout,
+                    "classify engine: remote ({}) selected, no token stored — set CLOUDFLARE_API_TOKEN or run `pixel config remote-key {} -` before classifying",
+                    preset.display(),
+                    preset.display()
+                )
+            } else {
+                writeln!(
+                    stdout,
+                    "classify engine: remote ({}) — token stored",
+                    preset.display()
+                )
+            }
+            .map_err(io)
+        }
+        other => Err(format!("unknown Clef-flash host {other:?} (1 or 2)")),
+    }
 }
 
 /// Where the OpenCode subscription serves Jev: the zen host, which proxies
@@ -1281,8 +1426,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_setup_rejects_jev_and_local_as_chat_providers() {
-        for provider in ["jev", "local"] {
+    fn remote_setup_rejects_jev_clef_and_local_as_chat_providers() {
+        for provider in ["jev", "local", "clef-ollama", "clef-cloudflare"] {
             let mut input = std::io::Cursor::new(format!("{provider}\n").into_bytes());
             let mut output = Vec::new();
             let error = propose_remote_key_with(&mut input, &mut output, |_, _, _, _| {
@@ -1330,6 +1475,112 @@ mod tests {
                 ))
             );
             assert!(!String::from_utf8(output).unwrap().contains("oc-key"));
+        }
+    }
+
+    type Stored = Option<(
+        crate::decide_remote::Preset,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>;
+
+    fn run_clef_setup(input: &str) -> (Result<(), String>, Stored, String) {
+        let mut stored: Stored = None;
+        let mut output = Vec::new();
+        let result = propose_clef_key_with(
+            &mut std::io::Cursor::new(input.as_bytes().to_vec()),
+            &mut output,
+            |preset, value, model, base| {
+                stored = Some((
+                    preset,
+                    value.map(str::to_string),
+                    model,
+                    base.map(str::to_string),
+                ));
+                Ok(())
+            },
+        );
+        (result, stored, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn clef_setup_stores_a_keyless_local_ollama_with_the_default_base() {
+        for input in ["\n\n\n", "1\nhttp://127.0.0.1:11434\n\n"] {
+            let (result, stored, output) = run_clef_setup(input);
+            result.unwrap();
+            assert_eq!(
+                stored,
+                Some((crate::decide_remote::Preset::ClefOllama, None, None, None))
+            );
+            assert!(output.contains("ollama pull clef-flash"), "{output}");
+            assert!(!output.contains("key stored"), "{output}");
+        }
+    }
+
+    #[test]
+    fn clef_setup_stores_a_remote_ollama_base_and_key_without_echoing_the_key() {
+        let (result, stored, output) = run_clef_setup("1\nhttps://ollama.example\n  ol-secret \n");
+        result.unwrap();
+        assert_eq!(
+            stored,
+            Some((
+                crate::decide_remote::Preset::ClefOllama,
+                Some("ol-secret".to_string()),
+                None,
+                Some("https://ollama.example".to_string())
+            ))
+        );
+        assert!(output.contains("key stored"), "{output}");
+        assert!(!output.contains("ol-secret"), "{output}");
+    }
+
+    #[test]
+    fn clef_setup_folds_the_cloudflare_account_into_the_stored_base() {
+        for (input, model) in [
+            ("2\nacct123\n\ncf-secret\n", "clef-flash"),
+            ("2\nacct123\n2\ncf-secret\n", "clef"),
+            (
+                "2\nacct123\n@cf/cloudflare/clef-flash\ncf-secret\n",
+                "@cf/cloudflare/clef-flash",
+            ),
+        ] {
+            let (result, stored, output) = run_clef_setup(input);
+            result.unwrap();
+            assert_eq!(
+                stored,
+                Some((
+                    crate::decide_remote::Preset::ClefCloudflare,
+                    Some("cf-secret".to_string()),
+                    Some(model.to_string()),
+                    Some("https://api.cloudflare.com/client/v4/accounts/acct123".to_string())
+                )),
+                "{input:?}"
+            );
+            assert!(output.contains("token stored"), "{output}");
+            assert!(!output.contains("cf-secret"), "{output}");
+        }
+    }
+
+    #[test]
+    fn clef_setup_without_a_cloudflare_token_says_which_variable_to_set() {
+        let (result, stored, output) = run_clef_setup("2\nacct123\n1\n\n");
+        result.unwrap();
+        assert_eq!(stored.unwrap().1, None);
+        assert!(output.contains("no token stored"), "{output}");
+        assert!(output.contains("CLOUDFLARE_API_TOKEN"), "{output}");
+    }
+
+    #[test]
+    fn clef_setup_refuses_a_bad_account_id_or_host_before_storing_anything() {
+        for (input, expected) in [
+            ("2\n\n", "alphanumeric"),
+            ("2\nacct/../x\n", "alphanumeric"),
+            ("3\n", "unknown Clef-flash host"),
+        ] {
+            let (result, stored, _) = run_clef_setup(input);
+            assert!(result.unwrap_err().contains(expected), "{input:?}");
+            assert_eq!(stored, None, "{input:?}");
         }
     }
 
@@ -1482,6 +1733,7 @@ mod tests {
             |_| panic!("stored setting must not start local setup"),
             |_, _| panic!("stored setting must not prompt for a key"),
             |_, _| panic!("stored setting must not prompt for a jev key"),
+            |_, _| panic!("stored setting must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
@@ -1501,6 +1753,7 @@ mod tests {
             |_| panic!("non-interactive install must not start local setup"),
             |_, _| panic!("non-interactive install must not prompt for a key"),
             |_, _| panic!("non-interactive install must not prompt for a jev key"),
+            |_, _| panic!("non-interactive install must not prompt for a clef key"),
             |_, _| panic!("non-interactive install must not offer helpers"),
             &mut FakeRaw,
             false,
@@ -1521,6 +1774,7 @@ mod tests {
             |stdout| writeln!(stdout, "local setup ran").map_err(|e| e.to_string()),
             |_, _| panic!("local choice must not prompt for a remote key"),
             |_, _| panic!("local choice must not prompt for a jev key"),
+            |_, _| panic!("local choice must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
@@ -1544,6 +1798,7 @@ mod tests {
                 writeln!(stdout, "remote key for {}", provider.trim()).map_err(|e| e.to_string())
             },
             |_, _| panic!("remote choice must not prompt for a jev key"),
+            |_, _| panic!("remote choice must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
@@ -1562,6 +1817,7 @@ mod tests {
             |_| panic!("jev choice must not start local setup"),
             |_, _| panic!("jev choice must not ask for a provider"),
             |_, stdout| writeln!(stdout, "jev key prompt ran").map_err(|e| e.to_string()),
+            |_, _| panic!("jev choice must not prompt for a clef key"),
             |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
             &mut FakeRaw,
             false,
@@ -1569,6 +1825,25 @@ mod tests {
         .unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("jev key prompt ran"));
+        assert!(output.contains("helpers proposed"));
+
+        let mut output = Vec::new();
+        install_step_with(
+            true,
+            &mut std::io::Cursor::new(b"4\n".to_vec()),
+            &mut output,
+            None,
+            |_| panic!("clef choice must not start local setup"),
+            |_, _| panic!("clef choice must not ask for a provider"),
+            |_, _| panic!("clef choice must not prompt for a jev key"),
+            |_, stdout| writeln!(stdout, "clef prompt ran").map_err(|e| e.to_string()),
+            |_, stdout| writeln!(stdout, "helpers proposed").map_err(|e| e.to_string()),
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("clef prompt ran"));
         assert!(output.contains("helpers proposed"));
 
         // Skipping the engine (EOF at both pickers) must not offer helpers.
@@ -1581,6 +1856,7 @@ mod tests {
             |_| panic!("a skipped engine must not start local setup"),
             |_, _| panic!("a skipped engine must not prompt for a key"),
             |_, _| panic!("a skipped engine must not prompt for a jev key"),
+            |_, _| panic!("a skipped engine must not prompt for a clef key"),
             |_, _| panic!("a skipped engine must not offer helpers"),
             &mut FakeRaw,
             false,

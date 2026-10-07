@@ -38,7 +38,7 @@ model providers, and the website under `website/`.
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
 | Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
-| User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project), `.env` values edited by `pixel edit-env` | credential theft, billing abuse |
+| User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project), `.env` values edited by `pixel edit-env` | credential theft, billing abuse |
 | Benchmark credentials | OAuth storage or an explicitly selected Claude gateway settings file read by `eval/claude_skill_pair.py` | credentials must reach only the selected model connection and stay out of benchmark receipts |
 | Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
 | CI | `.github/workflows/*.yml`, the `PROJECTS_TOKEN` secret, the self-hosted runner named by the `PIXEL_RUNNER_LABELS` repository variable | a foothold in CI is a step towards the release chain |
@@ -52,7 +52,7 @@ model providers, and the website under `website/`.
 | Repository content | untrusted when the repository is not the user's own: files, commit messages, branch names, a committed `.pixel/` or `.codex/`, git configuration that came with an archive | the walkers, tree-sitter, git, every sidecar reader |
 | Other processes of the same user | trusted by the operating system; not distinguished by Pixel | the daemon socket, every file Pixel writes |
 | Other local users | untrusted | file and socket permissions only |
-| Network services | untrusted for integrity, trusted with what is sent to them | Hugging Face, the classify endpoints (including `api.typesafe.ai`), a configured Infisical host (default `app.infisical.com`, sent the bearer token), the web-search endpoints, `github.com` release checks, `ollaya.dev` |
+| Network services | untrusted for integrity, trusted with what is sent to them | Hugging Face, the classify endpoints (including `api.typesafe.ai`, `api.cloudflare.com` for Clef-flash on Workers AI, and a user-configured Ollama host for Clef-flash through Ollama), a configured Infisical host (default `app.infisical.com`, sent the bearer token), the web-search endpoints, `github.com` release checks, `ollaya.dev` |
 | Contributors | untrusted until review | pull requests, which CI builds and tests |
 | Maintainers | trusted ([GOVERNANCE.md](../GOVERNANCE.md)) | merges, tags, repository secrets and settings |
 
@@ -190,6 +190,17 @@ repository file.
   `crates/pixel/src/decide_remote.rs` (`Preset::base`), over `ureq` with
   `rustls-webpki-roots`; the question and its context are sent, each capped
   at `TEXT_CAP_CHARS` (32 768). `PIXEL_REMOTE_BASE` overrides the endpoint.
+- `pixel classify` on the `clef-cloudflare` preset (`crates/pixel/src/decide_clef.rs`):
+  `POST https://api.cloudflare.com/client/v4/accounts/<account>/ai/run/@cf/cloudflare/<model>`
+  (Workers AI) with the API token as a Bearer `Authorization` header
+  (`CLOUDFLARE_API_TOKEN`, else `CLOUDFLARE_AUTH_TOKEN`, else `pixel config
+  remote-key clef-cloudflare`). The account id comes from `CLOUDFLARE_ACCOUNT_ID`
+  or a stored base ending `/accounts/<id>`; it becomes a URL path segment, so
+  `cloudflare_account_base` accepts only an alphanumeric one. The `clef-ollama`
+  preset posts the same typed-questions request to `<base>/v1/systemone` of an
+  Ollama server (default `http://127.0.0.1:11434`); a local host needs no key, a
+  remote one takes `OLLAMA_API_KEY` as a Bearer token. The state, context and
+  criteria are sent, capped like the other presets.
 - The prompt-submit brief's optional intent judge carries the full prompt
   only to `decide_ollaya::DEFAULT_BASE` (loopback), passed explicitly with
   `--if-warm --engine ollaya --ollaya-url`. It does not inherit the configured
@@ -503,6 +514,9 @@ hold.
   to a non-loopback host (`a_key_never_leaves_the_machine_over_cleartext_http`);
   TLS uses webpki roots and `ureq` does not forward `Authorization` across a
   redirect.
+  The Clef-flash presets (`decide_clef.rs`) apply the same cleartext refusal to a
+  stored Ollama or Cloudflare base; their key travels only in the
+  `Authorization` header, never in a URL, a log line, an error or a document.
 - **Status**: Mitigated for the repository layer.
 - **Residual**: `PIXEL_REMOTE_BASE` in the environment (direnv, a CI job)
   redirects the endpoint and the key to any HTTPS host.

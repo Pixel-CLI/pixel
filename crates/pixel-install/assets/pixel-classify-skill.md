@@ -25,14 +25,20 @@ straight onto an action.
 - Classify enabled once: `pixel config classify on`. If a call returns
   `classify is disabled`, run it.
 - Engine: `pixel config classify-engine` — `local`, `remote`, `jev`
-  (TypeSafe's hosted decision model), or `auto` (default) probes the
+  (TypeSafe's hosted decision model), `clef-ollama` or `clef-cloudflare`
+  (Cloudflare's Clef-flash decision model through Ollama, no key locally,
+  or Workers AI), or `auto` (default) probes the
   local Ollaya server (`http://127.0.0.1:11435`, TypeSafe-compatible
   `/v1/systemone`) and falls back to a remote preset. A remote preset's
   key resolves from (first hit wins): its own environment variable
-  (`TYPESAFE_API_KEY` for jev, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`,
+  (`TYPESAFE_API_KEY` for jev, `CLOUDFLARE_API_TOKEN` for
+  clef-cloudflare, `OLLAMA_API_KEY` for a remote clef-ollama host,
+  `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`,
   or the override named by `PIXEL_REMOTE_KEY_ENV`), a key stored via
   `pixel config remote-key <preset> <key>`, or a configured Infisical
   project (`INFISICAL_TOKEN` + `PIXEL_INFISICAL_PROJECT_ID`).
+  `clef-cloudflare` also needs `CLOUDFLARE_ACCOUNT_ID` (or a stored base
+  ending `/accounts/<id>`).
 - `pixel classify --if-warm` answers only from an already-listening local
   engine and fails otherwise — use it when the call must not hit the
   network.

@@ -229,6 +229,35 @@ impl DecisionEngine for crate::decide_jev::Jev {
     }
 }
 
+impl DecisionEngine for crate::decide_clef::Clef {
+    fn model_id(&self) -> String {
+        self.model_id().to_string()
+    }
+
+    fn provider(&self) -> Option<&'static str> {
+        Some(self.transport().label())
+    }
+
+    fn deterministic(&self) -> bool {
+        // One non-autoregressive pass is deterministic in principle; that is
+        // untested on either host, so disclose it as non-deterministic.
+        false
+    }
+
+    fn basis(&self) -> String {
+        self.transport().basis().to_string()
+    }
+
+    fn extra_snapshot(&self) -> Option<Value> {
+        self.last_meta()
+            .map(crate::decide_ollaya::AnswerMeta::snapshot)
+    }
+
+    fn decide(&mut self, spec: &Spec) -> Result<BTreeMap<String, f64>, String> {
+        crate::decide_clef::Clef::decide(self, spec)
+    }
+}
+
 /// The argmax label — first in the caller's label order on a tie
 /// (deterministic, never alphabetical accident).
 pub(crate) fn predicted<'a>(probs: &BTreeMap<String, f64>, labels: &'a [String]) -> &'a str {
@@ -507,6 +536,77 @@ fn jev_key_env(base: &str) -> Option<&'static str> {
         crate::decide_remote::Preset::OpencodeGo.key_env()
     } else {
         crate::decide_remote::Preset::Jev.key_env()
+    }
+}
+
+/// Open Cloudflare's Clef-flash engine for a `clef-*` preset from the same
+/// preset config the chat adapters resolve — base, model override and key —
+/// so `--remote-model`, `PIXEL_REMOTE_*`, `pixel config remote-key` and the
+/// Infisical source behave the same whichever preset is chosen.
+#[cfg_attr(test, mutants::skip)] // thin adapter over clef_config; the policy is decide_clef's
+fn open_clef_engine(
+    preset: crate::decide_remote::Preset,
+    model: Option<String>,
+    overrides: RemoteOverrides,
+) -> Result<crate::decide_clef::Clef, String> {
+    use crate::decide_clef::{CLOUDFLARE_ACCOUNT_ENV, Transport};
+    let config = clef_config(preset, model, overrides)?;
+    let key = config.key_value();
+    let (transport, base) = if preset == crate::decide_remote::Preset::ClefCloudflare {
+        let account = std::env::var(CLOUDFLARE_ACCOUNT_ENV).ok();
+        (
+            Transport::Cloudflare,
+            crate::decide_clef::cloudflare_account_base(&config.base, account.as_deref())?,
+        )
+    } else {
+        (Transport::Ollama, config.base)
+    };
+    Ok(crate::decide_clef::Clef::open(
+        crate::decide_clef::ClefConfig::new(transport, base, config.model, key),
+    ))
+}
+
+/// The resolved config of a `clef-*` preset: key, base and model, with the
+/// shared `PIXEL_REMOTE_*` overrides read only when `overrides` says they
+/// are this preset's. A Cloudflare token is read from the first of
+/// `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_AUTH_TOKEN` that is set; an Ollama
+/// key is optional (a local server takes none).
+fn clef_config(
+    preset: crate::decide_remote::Preset,
+    model: Option<String>,
+    overrides: RemoteOverrides,
+) -> Result<crate::decide_remote::Config, String> {
+    let key_env = if preset == crate::decide_remote::Preset::ClefCloudflare {
+        crate::decide_clef::cloudflare_key_env(|name| std::env::var(name).ok())
+    } else {
+        preset.key_env().unwrap_or("OLLAMA_API_KEY")
+    };
+    let mut config = crate::decide_remote::resolve_config_from(
+        preset,
+        model,
+        remote_key_value_from(preset, Some(key_env), overrides)?,
+        |name| overrides.var(name),
+    )?;
+    config.base = stored_base_when_unset(&config, overrides)?;
+    Ok(config)
+}
+
+/// The engine behind one remote preset: Jev and Clef-flash speak the typed
+/// decision wire (`/v1/systemone`), every other preset a chat completion.
+/// The one dispatch `open_resolved` and the `--debug` remote lane share.
+fn open_preset_engine(
+    preset: crate::decide_remote::Preset,
+    model: Option<String>,
+    overrides: RemoteOverrides,
+) -> Result<Box<dyn DecisionEngine>, String> {
+    match preset {
+        crate::decide_remote::Preset::Jev => {
+            open_jev_engine(model, overrides).map(|engine| Box::new(engine) as _)
+        }
+        crate::decide_remote::Preset::ClefOllama | crate::decide_remote::Preset::ClefCloudflare => {
+            open_clef_engine(preset, model, overrides).map(|engine| Box::new(engine) as _)
+        }
+        _ => open_engine(preset, model).map(|engine| Box::new(engine) as _),
     }
 }
 
@@ -1023,8 +1123,7 @@ fn debug_lanes(
         lanes.push((
             "remote",
             Box::new(move |spec: &Spec| {
-                let mut engine: Box<dyn DecisionEngine> =
-                    Box::new(open_engine(remote_preset, model)?);
+                let mut engine = open_preset_engine(remote_preset, model, RemoteOverrides::Shared)?;
                 let id = engine.model_id();
                 engine.decide(spec).map(|probs| (id, probs))
             }),
@@ -1301,14 +1400,12 @@ pub(crate) fn open_resolved(
     if_warm: bool,
 ) -> Result<Box<dyn DecisionEngine>, String> {
     match resolved {
-        crate::classify_setup::ResolvedEngine::Remote => match preset {
-            // Jev speaks TypeSafe's decision wire, not `/chat/completions`;
-            // it resolves its base/model/key through the same config.
-            crate::decide_remote::Preset::Jev => {
-                open_jev_engine(model, RemoteOverrides::Shared).map(|engine| Box::new(engine) as _)
-            }
-            _ => open_engine(preset, model).map(|engine| Box::new(engine) as _),
-        },
+        // Jev and Clef-flash speak the typed decision wire, not
+        // `/chat/completions`; each resolves base/model/key through the
+        // same preset config.
+        crate::classify_setup::ResolvedEngine::Remote => {
+            open_preset_engine(preset, model, RemoteOverrides::Shared)
+        }
         crate::classify_setup::ResolvedEngine::Local { base } => Ok(Box::new(
             crate::decide_ollaya::Ollaya::open(ollaya_config(base, if_warm)),
         ) as _),
@@ -3491,6 +3588,157 @@ mod tests {
                 (Some("jev-stored".into()), RemoteOverrides::Ignored)
             );
         }
+    }
+
+    /// Every variable the Clef key, base, account and model resolution
+    /// reads, so a test controls all of them.
+    fn clef_env(vars: &[(&'static str, Option<&'static str>)]) -> ScopedEnv {
+        let mut all = vec![
+            ("CLOUDFLARE_API_TOKEN", None),
+            ("CLOUDFLARE_AUTH_TOKEN", None),
+            ("CLOUDFLARE_ACCOUNT_ID", None),
+            ("OLLAMA_API_KEY", None),
+            ("PIXEL_REMOTE_BASE", None),
+            ("PIXEL_REMOTE_MODEL", None),
+            ("PIXEL_REMOTE_KEY_ENV", None),
+        ];
+        all.extend_from_slice(vars);
+        jev_env(&all)
+    }
+
+    /// The `clef-*` presets must dispatch to the Clef adapter, not the chat
+    /// one: each discloses its own provider and basis, so a routing mistake
+    /// is observable without any network.
+    #[test]
+    fn open_resolved_routes_the_clef_presets_to_the_clef_engine() {
+        let _env = clef_env(&[
+            ("CLOUDFLARE_API_TOKEN", Some("cf-routing-test")),
+            ("CLOUDFLARE_ACCOUNT_ID", Some("acct1")),
+            // A closed loopback port: the decide below fails fast without
+            // leaving the machine.
+            ("PIXEL_REMOTE_BASE", Some("http://127.0.0.1:9")),
+        ]);
+        let probe = spec("t", "", &["yes", "no"], &[]);
+        let open = |preset| {
+            open_resolved(
+                crate::classify_setup::ResolvedEngine::Remote,
+                preset,
+                None,
+                false,
+            )
+            .unwrap()
+        };
+        let mut cloudflare = open(crate::decide_remote::Preset::ClefCloudflare);
+        assert_eq!(cloudflare.provider(), Some("clef-cloudflare"));
+        assert_eq!(cloudflare.model_id(), "clef-flash");
+        assert_eq!(
+            cloudflare.basis(),
+            crate::decide_clef::CLEF_CLOUDFLARE_BASIS
+        );
+        assert!(!cloudflare.deterministic());
+        // Through the trait a refused connection must surface as an Err,
+        // never an invented answer.
+        let error = cloudflare.decide(&probe).unwrap_err();
+        assert!(
+            error.starts_with(
+                "clef-cloudflare http://127.0.0.1:9/accounts/acct1/ai/run/@cf/cloudflare/clef-flash"
+            ),
+            "{error}"
+        );
+        assert!(!error.contains("cf-routing-test"), "{error}");
+
+        // A local Ollama needs no key at all: the same path still opens it.
+        let mut ollama = open(crate::decide_remote::Preset::ClefOllama);
+        assert_eq!(ollama.provider(), Some("clef-ollama"));
+        assert_eq!(ollama.basis(), crate::decide_clef::CLEF_OLLAMA_BASIS);
+        let error = ollama.decide(&probe).unwrap_err();
+        assert!(
+            error.starts_with("clef-ollama http://127.0.0.1:9/v1/systemone"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn clef_cloudflare_needs_an_account_id_and_a_token_before_any_request() {
+        let open = || {
+            open_clef_engine(
+                crate::decide_remote::Preset::ClefCloudflare,
+                None,
+                RemoteOverrides::Shared,
+            )
+        };
+        {
+            // One scoped environment at a time: each holds the env lock.
+            let _env = clef_env(&[("CLOUDFLARE_API_TOKEN", Some("cf-token"))]);
+            let error = open().err().unwrap();
+            assert!(error.contains("CLOUDFLARE_ACCOUNT_ID"), "{error}");
+        }
+        let _env = clef_env(&[("CLOUDFLARE_ACCOUNT_ID", Some("acct1"))]);
+        let error = open().err().unwrap();
+        assert!(error.contains("CLOUDFLARE_API_TOKEN"), "{error}");
+    }
+
+    #[test]
+    fn clef_config_reads_the_cloudflare_token_from_either_documented_variable() {
+        let preset = crate::decide_remote::Preset::ClefCloudflare;
+        {
+            let _env = clef_env(&[("CLOUDFLARE_AUTH_TOKEN", Some("auth-token"))]);
+            let config = clef_config(preset, None, RemoteOverrides::Shared).unwrap();
+            assert_eq!(config.key_value().as_deref(), Some("auth-token"));
+            assert_eq!(config.base, crate::decide_clef::CLOUDFLARE_DEFAULT_BASE);
+            assert_eq!(config.model, "clef-flash");
+        }
+        let _env = clef_env(&[
+            ("CLOUDFLARE_AUTH_TOKEN", Some("auth-token")),
+            ("CLOUDFLARE_API_TOKEN", Some("api-token")),
+        ]);
+        let config = clef_config(preset, None, RemoteOverrides::Shared).unwrap();
+        assert_eq!(config.key_value().as_deref(), Some("api-token"));
+    }
+
+    #[test]
+    fn clef_config_uses_the_stored_account_base_and_model_of_its_own_preset() {
+        let env = clef_env(&[("CLOUDFLARE_API_TOKEN", Some("cf-token"))]);
+        env.write_config(
+            "classify: {remote_preset: clef-cloudflare, remote_model: clef, remote_base: 'https://api.cloudflare.com/client/v4/accounts/stored1'}\n",
+        );
+        let preset = crate::decide_remote::Preset::ClefCloudflare;
+        let config = clef_config(preset, None, RemoteOverrides::Shared).unwrap();
+        assert_eq!(
+            config.base,
+            "https://api.cloudflare.com/client/v4/accounts/stored1"
+        );
+        assert_eq!(
+            stored_remote_model_when_unset(preset, RemoteOverrides::Shared).as_deref(),
+            Some("clef")
+        );
+        // Another preset never inherits the stored Cloudflare account base:
+        // that would send its key to Cloudflare.
+        assert_eq!(
+            stored_base_for(
+                crate::decide_remote::Preset::ClefOllama,
+                RemoteOverrides::Shared
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn clef_ollama_takes_the_ollama_key_when_one_is_set_and_none_otherwise() {
+        let preset = crate::decide_remote::Preset::ClefOllama;
+        {
+            let _env = clef_env(&[]);
+            let config = clef_config(preset, None, RemoteOverrides::Shared).unwrap();
+            assert_eq!(config.key_value(), None);
+            assert_eq!(config.base, crate::decide_clef::OLLAMA_DEFAULT_BASE);
+        }
+        let _env = clef_env(&[
+            ("OLLAMA_API_KEY", Some("ol-key")),
+            ("PIXEL_REMOTE_BASE", Some("https://ollama.example")),
+        ]);
+        let config = clef_config(preset, None, RemoteOverrides::Shared).unwrap();
+        assert_eq!(config.key_value().as_deref(), Some("ol-key"));
+        assert_eq!(config.base, "https://ollama.example");
     }
 
     #[test]

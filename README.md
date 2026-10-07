@@ -77,6 +77,12 @@ label; `predicted:` is the top choice. This is Pixel's local Jev-style decision
 mode. In the published typed-decision benchmark, Ollaya's `winnow:e4b` scored
 0.722 accuracy; hosted TypeSafe Jev scored 0.738. [Benchmark details](https://pixel-cli.dev/benchmarks/#coding-decisions).
 
+Clef-flash, Cloudflare's 9B decision model, is a typed-decision engine too:
+`--remote-preset clef-ollama` runs it through Ollama (`ollama pull clef-flash`,
+no key) and `clef-cloudflare` through Workers AI (API token and account id).
+The 38.8 ms median latency and 98.76 case-exact on BFCL it reports against
+Jev's 524.1 ms and 95.75 are Cloudflare's own figures, not a Pixel measurement.
+
 Remote decisions (uses fast LLMs, not the System One model) can also return scores, through
 OpenRouter, Ollama Cloud, DeepSeek, OpenCode Go, or a local OpenAI-compatible
 endpoint (`--engine remote
