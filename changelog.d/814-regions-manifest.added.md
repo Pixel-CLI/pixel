@@ -1,0 +1,1 @@
+**graph:** `scope-task --regions` emits `.pixel/regions.json` beside `targets.json` — symbol-level regions with line ranges and context references, conflict pairs with reasons, merge-order layers from the condensed call graph, and shared files for safe parallel edits.

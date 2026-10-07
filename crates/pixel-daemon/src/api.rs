@@ -1008,6 +1008,7 @@ impl Service {
             }),
             Request::Targets { task, limit, max_tier, precision } => self.op_targets(&task, limit, max_tier.as_deref(), precision),
             Request::TargetsFacts { task, limit } => self.op_targets_facts(&task, limit),
+            Request::Regions { task, limit } => self.op_regions(&task, limit),
             Request::Symbol { name } => self.op_symbol(&name),
             Request::Skeleton { file } => self.op_skeleton(&file),
             Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
@@ -1744,6 +1745,101 @@ impl Service {
         }
         merge_build_info(&mut out, build_info);
         Ok(out)
+    }
+
+    /// Symbol-level regions manifest for safe parallel edits.
+    ///
+    /// Runs the targets computation to get P0 symbols, then gathers the
+    /// graph context (full symbol rows, edges between them, imports) and
+    /// calls the pure regions analysis in `pixel-graph`.
+    fn op_regions(&mut self, task: &str, limit: Option<usize>) -> Result<Value, String> {
+        use pixel_graph::regions::{compute_regions, RegionsInput};
+
+        // First, run the targets computation to get P0 targets.
+        let targets_out = self.op_targets_mode(task, limit, Some("P0"), false, false)?;
+
+        // Ensure the graph is built for gathering symbol/edge/import data.
+        let _ = self.ensure_graph()?;
+        let store = self.graph.as_ref().unwrap();
+
+        // Extract P0 symbols from the targets report.
+        let p0_symbols: Vec<String> = targets_out
+            .get("targets")
+            .and_then(Value::as_array)
+            .map(|targets| {
+                targets
+                    .iter()
+                    .filter(|t| t.get("tier").and_then(Value::as_str) == Some("P0"))
+                    .flat_map(|t| {
+                        t.get("symbols")
+                            .and_then(Value::as_array)
+                            .map(|syms| {
+                                syms.iter()
+                                    .filter_map(|s| s.get("uid").and_then(Value::as_str).map(String::from))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Look up full SymbolRow data for each P0 symbol.
+        let mut symbols = Vec::new();
+        for uid in &p0_symbols {
+            if let Some(sym) = store.symbol_by_uid(uid).map_err(|e| e.to_string())? {
+                symbols.push(sym);
+            }
+        }
+
+        // If no P0 symbols found, return an empty manifest.
+        if symbols.is_empty() {
+            let empty = compute_regions(&RegionsInput::default());
+            return serde_json::to_value(&empty).map_err(|e| e.to_string());
+        }
+
+        // Gather edges between P0 symbols.
+        let symbol_ids: HashSet<i64> = symbols.iter().map(|s| s.id).collect();
+        let mut edges = Vec::new();
+        for sym in &symbols {
+            for e in store.edges_from(sym.id, None).map_err(|e| e.to_string())? {
+                if symbol_ids.contains(&e.dst_id) {
+                    edges.push(e);
+                }
+            }
+            for e in store.edges_to(sym.id, None).map_err(|e| e.to_string())? {
+                if symbol_ids.contains(&e.src_id) {
+                    edges.push(e);
+                }
+            }
+        }
+
+        // Gather imports for P0 files.
+        let file_ids: HashSet<i64> = symbols.iter().map(|s| s.file_id).collect();
+        let mut imports = Vec::new();
+        for &fid in &file_ids {
+            for imp in store.imports_from(fid).map_err(|e| e.to_string())? {
+                imports.push(imp);
+            }
+        }
+
+        // Gather file metadata.
+        let mut files = Vec::new();
+        for &fid in &file_ids {
+            if let Some(f) = store.file_by_id(fid).map_err(|e| e.to_string())? {
+                files.push(f);
+            }
+        }
+
+        // Call the pure analysis.
+        let input = RegionsInput {
+            symbols,
+            edges,
+            imports,
+            files,
+        };
+        let manifest = compute_regions(&input);
+        serde_json::to_value(&manifest).map_err(|e| e.to_string())
     }
 
     fn op_symbol(&mut self, name: &str) -> Result<Value, String> {

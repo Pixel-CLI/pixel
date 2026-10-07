@@ -68,6 +68,13 @@ pub enum Op {
         #[serde(default)]
         precision: bool,
     },
+    /// Symbol-level regions manifest for safe parallel edits: P0 symbols in,
+    /// regions + conflicts + merge-order layers + shared files out.
+    Regions {
+        task: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     /// Deterministic prompt-start file facts from already-published indexes.
     /// This operation never builds or refreshes either index; unavailable or
     /// stale inputs are reported in a typed successful result.
@@ -393,6 +400,7 @@ impl Op {
             Op::Search { .. } => "search",
             Op::Targets { .. } => "targets",
             Op::TargetsFacts { .. } => "targets_facts",
+            Op::Regions { .. } => "regions",
             Op::Symbol { .. } => "symbol",
             Op::Skeleton { .. } => "skeleton",
             Op::Context { .. } => "context",
@@ -449,6 +457,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "search",
     "targets",
     "targets_facts",
+    "regions",
     "symbol",
     "skeleton",
     "context",
@@ -733,6 +742,13 @@ mod tests {
                 },
                 "targets_facts",
             ),
+            (
+                Op::Regions {
+                    task: "".into(),
+                    limit: None,
+                },
+                "regions",
+            ),
             (Op::Symbol { name: "".into() }, "symbol"),
             (Op::Skeleton { file: "".into() }, "skeleton"),
             (
@@ -980,6 +996,7 @@ mod tests {
             "search",
             "targets",
             "targets_facts",
+            "regions",
             "symbol",
             "skeleton",
             "context",

@@ -344,6 +344,11 @@ enum Command {
         /// score gap after P0. Improves precision on simple tasks.
         #[arg(long)]
         precision: bool,
+        /// Emit a symbol-level regions manifest (.pixel/regions.json) beside
+        /// targets.json: regions, conflict pairs, merge-order layers, and
+        /// shared files for safe parallel edits.
+        #[arg(long)]
+        regions: bool,
     },
     /// Build a deterministic, bounded execution brief from scope-task evidence.
     ExecutionBrief {
@@ -4951,6 +4956,7 @@ fn run_command(
             clear,
             max_tier,
             precision,
+            regions,
         } => {
             if clear {
                 // With --clear the sole positional (if any) is a path, not a
@@ -5022,6 +5028,33 @@ fn run_command(
                 eprintln!(
                     "targets manifest active: {} ({active} task(s)) — scoping enforced; run `pixel scope-task --clear` when the task ends",
                     manifest_path.display()
+                );
+            }
+            if regions && !read_only {
+                let regions_path = root
+                    .join(pixel_index::index::SHARD_DIR)
+                    .join("regions.json");
+                let regions_data = execute(
+                    &path,
+                    Request::Regions {
+                        task: task.clone(),
+                        limit,
+                    },
+                    false,
+                )?;
+                if let Some(parent) = regions_path.parent() {
+                    pixel_git::sidecar::private_dir(parent)
+                        .map_err(|e| format!("create {}: {e}", parent.display()))?;
+                }
+                pixel_git::nofollow::write_replace(
+                    &regions_path,
+                    &serde_json::to_vec_pretty(&regions_data).unwrap_or_default(),
+                    pixel_git::nofollow::PRIVATE_MODE,
+                )
+                .map_err(|e| format!("publish {}: {e}", regions_path.display()))?;
+                eprintln!(
+                    "regions manifest written: {}",
+                    regions_path.display()
                 );
             }
             Ok(())
@@ -7901,6 +7934,7 @@ mod tests {
             clear: false,
             max_tier: None,
             precision: false,
+            regions: false,
         };
 
         let reject = |read_only: bool, max_tier: Option<&str>, precision: bool| {

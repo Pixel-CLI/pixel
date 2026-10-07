@@ -214,3 +214,86 @@ fn named_test_file_leads_p0_over_generic_token_matches() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn regions_manifest_written_beside_targets() {
+    let dir = Scratch::for_test("gpx-targets-cli", "regions_written");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/login.rs"),
+        "pub fn login_user(name: &str) -> bool {\n    !name.is_empty()\n}\n",
+    )
+    .unwrap();
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "fixture"]);
+    let regions_path = dir.join(".pixel/regions.json");
+
+    // Run with --regions; both targets.json and regions.json must be written.
+    let out = gitpixel(
+        &dir,
+        &["scope-task", "fix `login_user` login flow", ".", "--regions", "--json"],
+    );
+    assert!(out.status.success(), "scope-task --regions failed: {out:?}");
+
+    assert!(regions_path.exists(), "regions manifest not written");
+    let m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&regions_path).unwrap()).unwrap();
+
+    // The manifest must carry the four required sections.
+    assert!(m.get("regions").is_some(), "missing regions");
+    assert!(m.get("conflicts").is_some(), "missing conflicts");
+    assert!(m.get("layers").is_some(), "missing layers");
+    assert!(m.get("shared_files").is_some(), "missing shared_files");
+    assert!(m.get("envelope").is_some(), "missing envelope");
+
+    // Regions must be non-empty (login_user is a P0 symbol).
+    let regions = m["regions"].as_array().unwrap();
+    assert!(!regions.is_empty(), "regions must not be empty");
+
+    // Each region must carry a line range and context reference.
+    for r in regions {
+        assert!(r.get("start_line").is_some(), "region missing start_line");
+        assert!(r.get("end_line").is_some(), "region missing end_line");
+        assert!(r.get("context_ref").is_some(), "region missing context_ref");
+        assert!(r.get("file_path").is_some(), "region missing file_path");
+    }
+
+    // Layers must be non-empty and ordered.
+    let layers = m["layers"].as_array().unwrap();
+    assert!(!layers.is_empty(), "layers must not be empty");
+    for (i, layer) in layers.iter().enumerate() {
+        assert_eq!(layer["level"].as_u64().unwrap(), i as u64);
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn regions_manifest_not_written_without_flag() {
+    let dir = Scratch::for_test("gpx-targets-cli", "regions_not_written");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/login.rs"),
+        "pub fn login_user(name: &str) -> bool {\n    !name.is_empty()\n}\n",
+    )
+    .unwrap();
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "fixture"]);
+    let regions_path = dir.join(".pixel/regions.json");
+
+    // Run without --regions; regions.json must NOT be written.
+    let out = gitpixel(
+        &dir,
+        &["scope-task", "fix `login_user` login flow", ".", "--json"],
+    );
+    assert!(out.status.success(), "scope-task failed: {out:?}");
+
+    assert!(
+        !regions_path.exists(),
+        "regions manifest should not be written without --regions"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

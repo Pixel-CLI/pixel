@@ -24,6 +24,7 @@ pub mod imports;
 pub mod plan;
 pub mod predicate;
 pub mod process;
+pub mod regions;
 pub mod rename;
 pub mod resolve;
 pub mod review;
