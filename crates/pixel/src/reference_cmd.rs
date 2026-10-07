@@ -155,12 +155,7 @@ fn fetch_corpus(root: &Path, entry: &ReferenceEntry) -> Result<String, String> {
 
     let runner = pixel_git::GitRunner::new(root);
     runner
-        .run(&[
-            "clone",
-            "--quiet",
-            &entry.repo,
-            dest.to_str().unwrap_or(""),
-        ])
+        .run(&["clone", "--quiet", &entry.repo, dest.to_str().unwrap_or("")])
         .map_err(|e| format!("reference setup: {}: clone: {e}", entry.id))?;
 
     // Checkout the exact revision.
@@ -225,7 +220,9 @@ fn verify_corpus(root: &Path, entry: &ReferenceEntry) -> Result<(), String> {
 pub fn setup(root: &Path) -> Result<Value, String> {
     let manifest = load_manifest(root)?;
     if manifest.entries.is_empty() {
-        return Err("reference setup: no entries in manifest — `pixel reference add` first".to_string());
+        return Err(
+            "reference setup: no entries in manifest — `pixel reference add` first".to_string(),
+        );
     }
 
     let mut results = Vec::new();
@@ -408,9 +405,8 @@ pub fn add(
     let mut manifest = load_manifest(root)?;
 
     // Compute the source path.
-    let source = source.unwrap_or_else(|| {
-        PathBuf::from(format!(".pixel/references/{id}/{revision}"))
-    });
+    let source =
+        source.unwrap_or_else(|| PathBuf::from(format!(".pixel/references/{id}/{revision}")));
 
     // Check for duplicate ID + revision combination.
     if manifest
@@ -517,16 +513,19 @@ pub fn run(cmd: ReferenceCmd) -> Result<(), String> {
             path,
         } => {
             add(
-                &path, id.clone(), repo, revision, source, licence, provenance, Role::from(role),
+                &path,
+                id.clone(),
+                repo,
+                revision,
+                source,
+                licence,
+                provenance,
+                Role::from(role),
             )?;
             println!("reference: added {id}");
             Ok(())
         }
-        ReferenceCmd::Remove {
-            id,
-            revision,
-            path,
-        } => {
+        ReferenceCmd::Remove { id, revision, path } => {
             remove(&path, &id, revision.as_deref())?;
             println!("reference: removed {id}");
             Ok(())
@@ -689,7 +688,20 @@ mod tests {
 
     fn init_repo(dir: &Path) {
         git(dir, &["init", "-q"]);
-        git(dir, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        git(
+            dir,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
     }
 
     fn make_entry(id: &str, revision: &str, role: Role) -> ReferenceEntry {
@@ -871,14 +883,20 @@ mod tests {
         let _ = query(&root, None).unwrap();
 
         let manifest_after = std::fs::read(&manifest_path).unwrap();
-        assert_eq!(manifest_before, manifest_after, "cold query modified the manifest");
+        assert_eq!(
+            manifest_before, manifest_after,
+            "cold query modified the manifest"
+        );
 
         // Query must not create any new directories.
         let dest = source_path(&root, &entry);
         assert!(!dest.exists(), "cold query created the corpus directory");
 
         // Query must not create a .git directory.
-        assert!(!dest.join(".git").exists(), "cold query created a .git directory");
+        assert!(
+            !dest.join(".git").exists(),
+            "cold query created a .git directory"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
