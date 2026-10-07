@@ -67,6 +67,9 @@ pub struct RegionsInputs {
     /// Caps the CALLER fired while gathering these inputs. Any entry forces
     /// `lower_bound` on the report envelope.
     pub caps: Vec<String>,
+    /// Files imported by multiple region files that are NOT themselves P0.
+    /// Non-zero means the manifest is a lower bound over integration points.
+    pub external_shared_file_count: u64,
 }
 
 /// Why two regions cannot be edited in parallel. The reason is the witness:
@@ -236,6 +239,13 @@ pub fn compute_regions(inputs: RegionsInputs) -> RegionsReport {
             inputs.unresolved_same_name
         ));
     }
+    if inputs.external_shared_file_count > 0 {
+        caps.push(format!(
+            "{} shared file(s) imported by multiple regions are outside the P0 set; the manifest \
+             is a lower bound over these integration points",
+            inputs.external_shared_file_count
+        ));
+    }
     let unknown_ranges = regions
         .iter()
         .filter(|r| range_unknown(r.start_line, r.end_line))
@@ -371,7 +381,8 @@ fn assign_layers(regions: &[Region], inputs: &RegionsInputs) -> Vec<Layer> {
         .map(|(layer, mut regions)| {
             regions.sort();
             // Build a concrete witness: name the regions in this layer and
-            // the call edges that place them here.
+            // the call edges that place them here. Group edges by caller
+            // region so each region's incoming ordering evidence is explicit.
             let region_list = regions.join(", ");
             let witness = if layer == 0 {
                 format!(
@@ -381,7 +392,8 @@ fn assign_layers(regions: &[Region], inputs: &RegionsInputs) -> Vec<Layer> {
             } else {
                 // Find the call edges from this layer to lower layers —
                 // these are the outgoing edges that place regions here.
-                let mut edges: Vec<String> = Vec::new();
+                // Group by caller so each region's evidence is explicit.
+                let mut by_caller: BTreeMap<&str, Vec<String>> = BTreeMap::new();
                 for e in &inputs.call_edges {
                     let (Some(&ca), Some(&cb)) = (
                         comp_of.get(e.caller.as_str()),
@@ -395,18 +407,35 @@ fn assign_layers(regions: &[Region], inputs: &RegionsInputs) -> Vec<Layer> {
                     let caller_layer = memo[ca].unwrap();
                     let callee_layer = memo[cb].unwrap();
                     if caller_layer == layer && callee_layer < layer {
-                        edges.push(format!("{} -> {}", e.caller, e.callee));
+                        by_caller
+                            .entry(e.caller.as_str())
+                            .or_default()
+                            .push(format!("{} -> {}", e.caller, e.callee));
                     }
                 }
-                if edges.is_empty() {
+                let mut edge_groups: Vec<String> = Vec::new();
+                for (region, edges) in &by_caller {
+                    edge_groups.push(format!(
+                        "{} [{}]: {}",
+                        region,
+                        memo[comp_of
+                            .get(*region)
+                            .copied()
+                            .expect("caller must be in component map")]
+                        .unwrap(),
+                        edges.join(", ")
+                    ));
+                }
+                if edge_groups.is_empty() {
                     format!(
                         "layer {layer} — regions [{region_list}]; longest call-edge path to \
                          sink = {layer}"
                     )
                 } else {
                     format!(
-                        "layer {layer} — regions [{region_list}]; call edges to lower layers: {}",
-                        edges.join(", ")
+                        "layer {layer} — regions [{region_list}]; call edges to lower layers: \
+                         {}",
+                        edge_groups.join("; ")
                     )
                 }
             };

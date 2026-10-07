@@ -1861,6 +1861,10 @@ impl Service {
         let file_id_to_path: HashMap<i64, &str> =
             file_rows.iter().map(|(id, p)| (*id, p.as_str())).collect();
         let mut import_edges: Vec<ImportEdge> = Vec::new();
+        // Track non-P0 files imported by multiple region files for the
+        // epistemics cap. Keys are owned Strings since the file row is
+        // dropped at the end of each loop iteration.
+        let mut non_p0_importers: BTreeMap<String, usize> = BTreeMap::new();
         for (file_id, path) in &file_rows {
             for imp in store.imports_from(*file_id).map_err(|e| e.to_string())? {
                 if let Some(resolved) = imp.resolved_file_id {
@@ -1877,8 +1881,9 @@ impl Service {
                         if let Ok(Some(f)) = store.file_by_id(resolved) {
                             import_edges.push(ImportEdge {
                                 importer: path.clone(),
-                                imported: f.path,
+                                imported: f.path.clone(),
                             });
+                            *non_p0_importers.entry(f.path.clone()).or_default() += 1;
                         }
                     }
                 }
@@ -1892,6 +1897,10 @@ impl Service {
                 }
             }
         }
+        let external_shared_file_count = non_p0_importers
+            .values()
+            .filter(|&&count| count >= 2)
+            .count() as u64;
 
         let inputs = RegionsInputs {
             regions,
@@ -1900,6 +1909,7 @@ impl Service {
             graph_available: true,
             unresolved_same_name,
             caps,
+            external_shared_file_count,
         };
         let rep = pixel_rank::regions::compute_regions(inputs);
         serde_json::to_value(rep).map_err(|e| e.to_string())

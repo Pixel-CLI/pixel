@@ -38,6 +38,7 @@ fn mk_inputs(
         graph_available: true,
         unresolved_same_name: 0,
         caps: Vec::new(),
+        external_shared_file_count: 0,
     }
 }
 
@@ -441,12 +442,12 @@ fn layer_witness_should_name_regions_and_call_edges_when_ordered() {
             Layer {
                 layer: 1,
                 regions: vec!["b.rs#beta#function".into()],
-                witness: "layer 1 — regions [b.rs#beta#function]; call edges to lower layers: b.rs#beta#function -> c.rs#gamma#function".to_string(),
+                witness: "layer 1 — regions [b.rs#beta#function]; call edges to lower layers: b.rs#beta#function [1]: b.rs#beta#function -> c.rs#gamma#function".to_string(),
             },
             Layer {
                 layer: 2,
                 regions: vec!["a.rs#alpha#function".into()],
-                witness: "layer 2 — regions [a.rs#alpha#function]; call edges to lower layers: a.rs#alpha#function -> b.rs#beta#function".to_string(),
+                witness: "layer 2 — regions [a.rs#alpha#function]; call edges to lower layers: a.rs#alpha#function [2]: a.rs#alpha#function -> b.rs#beta#function".to_string(),
             },
         ],
         "each layer's witness must exactly match its regions and call edges"
