@@ -213,6 +213,7 @@ fn bench_targets_service_time(c: &mut Criterion) {
         limit: Some(20),
         max_tier: None,
         precision: false,
+        regions: false,
     };
 
     // Warm up the graph (first targets builds it).

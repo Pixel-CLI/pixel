@@ -43,7 +43,9 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// (`cap_hits`), which the CLI reads instead of matching the cap sentences.
 /// 13: `search` takes `globs` and `types` and filters candidate files
 /// itself; an older daemon would ignore them and answer unfiltered.
-pub const PROTOCOL_VERSION: u64 = 13;
+/// 14: `targets` takes `regions` and attaches the symbol-level regions
+/// manifest; an older daemon would ignore the flag and answer without it.
+pub const PROTOCOL_VERSION: u64 = 14;
 
 /// Rows a `search` returns when the request names no `limit`.
 pub const SEARCH_DEFAULT_ROWS: usize = 100;
@@ -455,7 +457,7 @@ impl Service {
             return (*state, Err(error.to_string()));
         }
         let result = match kind {
-            "execution_brief" => self.op_targets(query, Some(limit), Some("P1"), false),
+            "execution_brief" => self.op_targets(query, Some(limit), Some("P1"), false, false),
             "search" => self.op_search(query, Some(limit), None, None, None, None),
             "resolve" => self.op_resolve(query, Some(limit)),
             "impact" => self.op_impact(query, "upstream", Some(2)),
@@ -1006,7 +1008,7 @@ impl Service {
                     filter.as_ref(),
                 )
             }),
-            Request::Targets { task, limit, max_tier, precision } => self.op_targets(&task, limit, max_tier.as_deref(), precision),
+            Request::Targets { task, limit, max_tier, precision, regions } => self.op_targets(&task, limit, max_tier.as_deref(), precision, regions),
             Request::TargetsFacts { task, limit } => self.op_targets_facts(&task, limit),
             Request::Symbol { name } => self.op_symbol(&name),
             Request::Skeleton { file } => self.op_skeleton(&file),
@@ -1420,8 +1422,9 @@ impl Service {
         limit: Option<usize>,
         max_tier: Option<&str>,
         precision: bool,
+        regions: bool,
     ) -> Result<Value, String> {
-        self.op_targets_mode(task, limit, max_tier, precision, false)
+        self.op_targets_mode(task, limit, max_tier, precision, false, regions)
     }
 
     /// Serve deterministic targets facts only from a fresh published snapshot.
@@ -1486,7 +1489,7 @@ impl Service {
             semantic_fallback: false,
         };
         self.graph = Some(graph);
-        let facts = self.op_targets_mode(task, Some(limit), None, false, true)?;
+        let facts = self.op_targets_mode(task, Some(limit), None, false, true, false)?;
         serde_json::to_value(TargetsFactsResult::Available { inputs, facts })
             .map_err(|error| error.to_string())
     }
@@ -1498,6 +1501,7 @@ impl Service {
         max_tier: Option<&str>,
         precision: bool,
         fact_mode: bool,
+        regions_mode: bool,
     ) -> Result<Value, String> {
         use pixel_graph::targets as graph_targets;
         use pixel_rank as engine;
@@ -1742,8 +1746,173 @@ impl Service {
         if fact_mode && let Some(object) = out.as_object_mut() {
             object.remove("closed_world");
         }
+        // Issue #814: the symbol-level regions manifest. The daemon gathers
+        // the P0 symbols and the call/import edges between them; the analysis
+        // is pure (pixel_rank::regions). The manifest is evidence for a
+        // harness, never an action recommendation.
+        if regions_mode && !fact_mode {
+            match self.regions_manifest(&report) {
+                Ok(regions) => {
+                    out["regions"] = regions;
+                }
+                Err(e) => {
+                    out["regions"] = json!({ "error": e });
+                }
+            }
+        }
         merge_build_info(&mut out, build_info);
         Ok(out)
+    }
+
+    /// Issue #814: gather the P0 symbols and the call/import edges between
+    /// them from the graph store, then run the pure regions analysis. With
+    /// no graph the analysis takes its conservative floor (every pair of
+    /// regions conflicts).
+    fn regions_manifest(&self, report: &pixel_rank::TargetsReport) -> Result<Value, String> {
+        use pixel_graph::store::EdgeKind;
+        use pixel_rank::regions::{CallEdge, ImportEdge, RegionInput, RegionsInputs};
+
+        let unresolved_same_name = report
+            .envelope
+            .get("unresolved_same_name")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let caps: Vec<String> = report
+            .envelope
+            .get("caps")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| c.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let Some(store) = self.graph.as_ref() else {
+            let inputs = RegionsInputs {
+                graph_available: false,
+                unresolved_same_name,
+                caps,
+                ..Default::default()
+            };
+            let rep = pixel_rank::regions::compute_regions(inputs);
+            return serde_json::to_value(rep).map_err(|e| e.to_string());
+        };
+
+        // P0 symbols with full line ranges (the report carries start_line
+        // only; the region territory needs both ends).
+        let mut syms: Vec<SymbolRow> = Vec::new();
+        for target in report.targets.iter().filter(|t| t.tier == "P0") {
+            for sym in &target.symbols {
+                let Some(uid) = sym.get("uid").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Ok(Some(row)) = store.symbol_by_uid(uid) {
+                    syms.push(row);
+                }
+            }
+        }
+        let regions: Vec<RegionInput> = syms
+            .iter()
+            .map(|r| RegionInput {
+                uid: r.uid.clone(),
+                name: r.name.clone(),
+                kind: r.kind.as_str().to_string(),
+                file: store
+                    .file_by_id(r.file_id)
+                    .ok()
+                    .flatten()
+                    .map(|f| f.path)
+                    .unwrap_or_default(),
+                start_line: r.start_line,
+                end_line: r.end_line,
+            })
+            .collect();
+
+        // Call edges between region symbols: outgoing edges only, so each
+        // edge is collected exactly once.
+        let id_to_uid: HashMap<i64, &str> = syms.iter().map(|s| (s.id, s.uid.as_str())).collect();
+        let mut call_edges: Vec<CallEdge> = Vec::new();
+        for s in &syms {
+            let outgoing = store
+                .edges_from(s.id, Some(EdgeKind::Calls))
+                .map_err(|e| e.to_string())?;
+            for edge in outgoing {
+                if let Some(callee) = id_to_uid.get(&edge.dst_id) {
+                    call_edges.push(CallEdge {
+                        caller: s.uid.clone(),
+                        callee: callee.to_string(),
+                    });
+                }
+            }
+        }
+
+        // Import edges: region-to-region (both directions) and
+        // region-to-external (imports_from only, so shared-file detection
+        // finds files imported by multiple region files even when the
+        // imported file is not itself P0).
+        let mut file_rows: Vec<(i64, String)> = Vec::new();
+        for target in report.targets.iter().filter(|t| t.tier == "P0") {
+            if let Ok(Some(f)) = store.file_by_path(&target.path) {
+                file_rows.push((f.id, target.path.clone()));
+            }
+        }
+        let file_id_set: HashSet<i64> = file_rows.iter().map(|(id, _)| *id).collect();
+        let file_id_to_path: HashMap<i64, &str> =
+            file_rows.iter().map(|(id, p)| (*id, p.as_str())).collect();
+        let mut import_edges: Vec<ImportEdge> = Vec::new();
+        // Track non-P0 files imported by multiple region files for the
+        // epistemics cap. Keys are owned Strings since the file row is
+        // dropped at the end of each loop iteration.
+        let mut non_p0_importers: BTreeMap<String, usize> = BTreeMap::new();
+        for (file_id, path) in &file_rows {
+            for imp in store.imports_from(*file_id).map_err(|e| e.to_string())? {
+                if let Some(resolved) = imp.resolved_file_id {
+                    if file_id_set.contains(&resolved) {
+                        // Region-to-region: both files are P0.
+                        import_edges.push(ImportEdge {
+                            importer: path.clone(),
+                            imported: file_id_to_path[&resolved].to_string(),
+                        });
+                    } else {
+                        // Region-to-external: the imported file is not P0,
+                        // but a second region file importing it makes it
+                        // shared. Resolve its path for the witness.
+                        if let Ok(Some(f)) = store.file_by_id(resolved) {
+                            import_edges.push(ImportEdge {
+                                importer: path.clone(),
+                                imported: f.path.clone(),
+                            });
+                            *non_p0_importers.entry(f.path.clone()).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            for imp in store.imports_to_file(*file_id).map_err(|e| e.to_string())? {
+                if file_id_set.contains(&imp.file_id) {
+                    import_edges.push(ImportEdge {
+                        importer: file_id_to_path[&imp.file_id].to_string(),
+                        imported: path.clone(),
+                    });
+                }
+            }
+        }
+        let external_shared_file_count = non_p0_importers
+            .values()
+            .filter(|&&count| count >= 2)
+            .count() as u64;
+
+        let inputs = RegionsInputs {
+            regions,
+            call_edges,
+            import_edges,
+            graph_available: true,
+            unresolved_same_name,
+            caps,
+            external_shared_file_count,
+        };
+        let rep = pixel_rank::regions::compute_regions(inputs);
+        serde_json::to_value(rep).map_err(|e| e.to_string())
     }
 
     fn op_symbol(&mut self, name: &str) -> Result<Value, String> {
@@ -6639,6 +6808,7 @@ mod tests {
             limit: Some(5),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(targets.ok, "targets: {:?}", targets.error);
 
@@ -6742,6 +6912,7 @@ mod tests {
             limit: Some(5),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let targets = resp
@@ -6789,6 +6960,7 @@ mod tests {
             limit: Some(5),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let targets = resp
@@ -6833,6 +7005,7 @@ mod tests {
                 limit: Some(5),
                 max_tier: None,
                 precision: false,
+                regions: false,
             });
             assert!(resp.ok, "targets({task}): {:?}", resp.error);
             resp.data()
@@ -6903,6 +7076,7 @@ mod tests {
             limit: Some(8),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(built.ok, "fixture graph build: {built:?}");
         let graph_path = service.graph_db_path();
@@ -6939,6 +7113,7 @@ mod tests {
             limit: Some(8),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(built.ok, "fixture graph build: {built:?}");
         let graph_path = service.graph_db_path();
@@ -6981,6 +7156,7 @@ mod tests {
             limit: Some(8),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(built.ok, "fixture graph build: {built:?}");
         let graph_path = service.graph_db_path();
@@ -7128,6 +7304,7 @@ mod tests {
                     limit: Some(5),
                     max_tier: None,
                     precision: false,
+                    regions: false,
                 },
             ),
             (
@@ -7576,6 +7753,7 @@ mod tests {
             limit: Some(20),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let envelope = &resp.data()["envelope"];
@@ -7637,6 +7815,7 @@ mod tests {
             limit: Some(10),
             max_tier: None,
             precision: false,
+            regions: false,
         });
         assert!(resp.ok, "targets: {:?}", resp.error);
         let targets = resp.data()["targets"].as_array().unwrap();

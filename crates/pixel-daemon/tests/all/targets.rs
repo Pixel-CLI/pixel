@@ -56,6 +56,7 @@ fn run_targets(dir: &Path, task: &str) -> serde_json::Value {
         limit: Some(10),
         max_tier: None,
         precision: false,
+        regions: false,
     });
     assert!(resp.ok, "targets op failed: {:?}", resp.error);
     resp.into_data()
@@ -130,6 +131,7 @@ fn targets_rejects_empty_task() {
         limit: None,
         max_tier: None,
         precision: false,
+        regions: false,
     });
     assert!(!resp.ok);
     assert!(
@@ -175,6 +177,7 @@ fn targets_no_git_builds_graphless() {
         limit: Some(10),
         max_tier: None,
         precision: false,
+        regions: false,
     });
     assert!(
         resp.ok,

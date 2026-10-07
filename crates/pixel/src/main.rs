@@ -315,6 +315,10 @@ enum Command {
     /// Sniper target list: task description in, closed prioritized file list
     /// out (P0 = start here, P1 = likely, P2 = droppable). Writes the
     /// enforcement manifest .pixel/targets.json unless --no-manifest.
+    /// With --regions, also writes .pixel/regions.json: symbol-level edit
+    /// territories with conservative conflict pairs, merge-order layers, and
+    /// declared shared files (evidence for a parallel-edit harness, never an
+    /// action recommendation).
     #[command(alias = "targets")]
     ScopeTask {
         /// Task/feature description (omit with --clear).
@@ -329,6 +333,11 @@ enum Command {
         /// Skip writing the enforcement manifest.
         #[arg(long)]
         no_manifest: bool,
+        /// Also write .pixel/regions.json: symbol line ranges, conservative
+        /// conflict pairs, merge-order layers, and shared files. Suppressed
+        /// by --no-manifest and --read-only.
+        #[arg(long)]
+        regions: bool,
         /// Serve only already-published deterministic facts from a compatible
         /// running daemon. Never starts a daemon or builds/refreshes indexes.
         /// This mode never writes a targets manifest.
@@ -2936,6 +2945,67 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
     Ok(active)
 }
 
+/// Issue #814: write `.pixel/regions.json` beside `targets.json`. The
+/// manifest is single-task (each `--regions` run replaces it): it describes
+/// the symbol territories of the CURRENT task's P0 set, and a harness mixing
+/// two tasks' regions would lose the association. It is evidence for
+/// orchestration — agent count, scheduling and merging stay with the harness.
+fn write_regions_manifest(root: &Path, task: &str, data: &Value) -> Result<(), String> {
+    let report = data.get("regions").cloned().unwrap_or(Value::Null);
+    if report.is_null() {
+        return Err("the daemon returned no regions manifest".to_string());
+    }
+    // A regions generation failure arrives as {"error": "..."} — reject it
+    // rather than publishing a manifest with null regions/conflicts/layers.
+    if let Some(err) = report.get("error").and_then(Value::as_str) {
+        return Err(format!("regions generation failed: {err}"));
+    }
+    let created_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let manifest = serde_json::json!({
+        "version": 1,
+        "kind": "evidence",
+        "note": "evidence for orchestration (agent count, scheduling, merging); not an action recommendation",
+        "task": task,
+        "created_unix": created_unix,
+        "head_oid": data
+            .get("stats")
+            .and_then(|s| s.get("commit_oid"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "regions": report.get("regions").cloned().unwrap_or(Value::Null),
+        "conflicts": report.get("conflicts").cloned().unwrap_or(Value::Null),
+        "merge_order": {
+            "layers": report.get("layers").cloned().unwrap_or(Value::Null),
+        },
+        "shared_files": report.get("shared_files").cloned().unwrap_or(Value::Null),
+        "epistemics": {
+            "lower_bound": report.get("lower_bound").cloned().unwrap_or(Value::Null),
+            "caps": report.get("caps").cloned().unwrap_or(Value::Null),
+        },
+    });
+    let regions_path = root
+        .join(pixel_index::index::SHARD_DIR)
+        .join("regions.json");
+    if let Some(parent) = regions_path.parent() {
+        pixel_git::sidecar::private_dir(parent)
+            .map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    // A fresh temporary file renamed over the name, as for targets.json.
+    pixel_git::nofollow::write_replace(
+        &regions_path,
+        &serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+        pixel_git::nofollow::PRIVATE_MODE,
+    )
+    .map_err(|e| format!("publish {}: {e}", regions_path.display()))?;
+    eprintln!(
+        "regions manifest active: {} — evidence for orchestration, not an action recommendation",
+        regions_path.display()
+    );
+    Ok(())
+}
+
 /// Circuit-breaker guard for retrieval commands. Call at the top of
 /// each guarded command handler. If the breaker fires, prints the
 /// guidance message to stderr and returns `true` (caller should return
@@ -4963,6 +5033,7 @@ fn run_command(
             clear,
             max_tier,
             precision,
+            regions,
         } => {
             if clear {
                 // With --clear the sole positional (if any) is a path, not a
@@ -4979,15 +5050,22 @@ fn run_command(
                     None => path,
                 };
                 let root = discover_root(&clear_path)?;
-                let manifest_path = root
-                    .join(pixel_index::index::SHARD_DIR)
-                    .join("targets.json");
+                let shard_dir = root.join(pixel_index::index::SHARD_DIR);
+                let manifest_path = shard_dir.join("targets.json");
+                let regions_path = shard_dir.join("regions.json");
                 if manifest_path.exists() {
                     std::fs::remove_file(&manifest_path)
                         .map_err(|e| format!("remove {}: {e}", manifest_path.display()))?;
                     println!("targets manifest cleared");
                 } else {
                     println!("no active targets manifest");
+                }
+                // The regions manifest is single-task evidence — clear it
+                // alongside targets.json so a stale task's regions never
+                // outlives its enforcement manifest.
+                if regions_path.exists() {
+                    std::fs::remove_file(&regions_path)
+                        .map_err(|e| format!("remove {}: {e}", regions_path.display()))?;
                 }
                 return Ok(());
             }
@@ -5016,6 +5094,7 @@ fn run_command(
                         limit,
                         max_tier: max_tier.clone(),
                         precision,
+                        regions,
                     },
                     false,
                 )?
@@ -5025,6 +5104,22 @@ fn run_command(
             } else {
                 Some(write_targets_manifest(&manifest_path, &task, &data)?)
             };
+            // Issue #814: the regions manifest rides beside targets.json.
+            // --no-manifest and --read-only suppress it with the enforcement
+            // manifest; the JSON output still carries the regions either way.
+            // A new targets.json without --regions removes any stale
+            // regions.json so the two files stay coherent.
+            if regions && !no_manifest && !read_only {
+                write_regions_manifest(&root, &task, &data)?;
+            } else if !no_manifest && !read_only {
+                let regions_path = root
+                    .join(pixel_index::index::SHARD_DIR)
+                    .join("regions.json");
+                if regions_path.exists() {
+                    std::fs::remove_file(&regions_path)
+                        .map_err(|e| format!("remove stale {}: {e}", regions_path.display()))?;
+                }
+            }
             if read_only {
                 print_data(&data, true)?;
             } else {
@@ -5065,6 +5160,7 @@ fn run_command(
                     limit,
                     max_tier,
                     precision,
+                    regions: false,
                 },
                 no_daemon,
             )?;
@@ -5129,6 +5225,7 @@ fn run_command(
                         limit: Some(10),
                         max_tier: None,
                         precision: false,
+                        regions: false,
                     },
                     false,
                 )?;
@@ -6964,6 +7061,7 @@ fn run_query(
                 limit: None,
                 max_tier: None,
                 precision: false,
+                regions: false,
             },
             no_daemon,
         )?,
@@ -7158,6 +7256,7 @@ fn run_locate(
                 limit: Some(5),
                 max_tier: None,
                 precision: false,
+                regions: false,
             },
             no_daemon,
         )?;
@@ -7923,6 +8022,7 @@ mod tests {
             clear: false,
             max_tier: None,
             precision: false,
+            regions: false,
         };
 
         let reject = |read_only: bool, max_tier: Option<&str>, precision: bool| {
