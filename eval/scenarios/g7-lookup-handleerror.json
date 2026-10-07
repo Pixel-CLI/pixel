@@ -1,7 +1,7 @@
 {
   "id": "g7-lookup-handleerror",
   "suite": "generic",
-  "task_class": "literal-lookup",
+  "task_class": "exact-identifier",
   "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
   "mode": "answer",
   "max_turns": 30,
