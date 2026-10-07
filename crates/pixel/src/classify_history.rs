@@ -130,6 +130,27 @@ impl HistoryStore {
         Ok(Self { path, entries })
     }
 
+    /// Open the repository's store for reading: refuse a tracked or linked
+    /// `.pixel/` rather than read a store a repository shipped. Never creates
+    /// the directory.
+    pub fn open_checked(root: &Path) -> Result<Self, String> {
+        pixel_git::sidecar::check(root).map_err(|e| format!("history store: {e}"))?;
+        Self::open(Self::repo_path(root))
+    }
+
+    /// Open the repository's store under `<root>/.pixel/` for writing.
+    ///
+    /// Runs the tracked-sidecar check first, so a repository that ships a
+    /// `.pixel/` (or a link in its place) is refused rather than written
+    /// through, and creates `.pixel/` owner-only when it is absent — which is
+    /// what makes the first `add` work on a fresh repository.
+    pub fn open_in(root: &Path) -> Result<Self, String> {
+        pixel_git::sidecar::check(root).map_err(|e| format!("history store: {e}"))?;
+        pixel_git::sidecar::private_dir(&root.join(".pixel"))
+            .map_err(|e| format!("history store dir: {e}"))?;
+        Self::open(Self::repo_path(root))
+    }
+
     #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
@@ -313,10 +334,14 @@ impl HistoryStore {
             text.push_str(&line);
             text.push('\n');
         }
-        let tmp = self.path.with_extension("jsonl.tmp");
-        std::fs::write(&tmp, text).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| format!("cannot store {}: {e}", self.path.display()))?;
+        // Replace through a no-follow temp file in the same directory, so a
+        // pre-planted `.tmp` symlink cannot redirect the write to another file.
+        pixel_git::nofollow::write_replace(
+            &self.path,
+            text.as_bytes(),
+            pixel_git::nofollow::PRIVATE_MODE,
+        )
+        .map_err(|e| format!("cannot store {}: {e}", self.path.display()))?;
         Ok(())
     }
 }
@@ -644,6 +669,56 @@ mod tests {
             "human-verified".to_string(),
             spec_,
         )
+    }
+
+    /// `open_in` creates `.pixel/` owner-only, so the first `add` on a fresh
+    /// repository persists instead of failing on a missing directory.
+    #[test]
+    fn open_in_creates_the_pixel_dir_and_persists_a_first_add() {
+        let root =
+            std::env::temp_dir().join(format!("pixel-history-open-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut store = HistoryStore::open_in(&root).unwrap();
+        assert!(root.join(".pixel").is_dir(), "open_in creates .pixel/");
+        store
+            .add(entry(
+                "fix the login bug",
+                "yes",
+                &spec("fix the login bug"),
+            ))
+            .unwrap();
+        store.save().unwrap();
+        assert!(
+            HistoryStore::repo_path(&root).is_file(),
+            "the first entry persists"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A linked `.pixel/` is refused rather than read or written through.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_pixel_dir_is_refused_by_both_openers() {
+        let root = std::env::temp_dir().join(format!("pixel-history-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join(".pixel")).unwrap();
+
+        assert!(
+            HistoryStore::open_checked(&root).is_err(),
+            "a linked .pixel must be refused for reading"
+        );
+        assert!(
+            HistoryStore::open_in(&root).is_err(),
+            "a linked .pixel must be refused for writing"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -32,8 +32,7 @@ fn open_store() -> Result<HistoryStore, String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("cannot determine current directory: {e}"))?;
     let root = crate::discover_root(&cwd).map_err(|e| format!("cannot discover repo root: {e}"))?;
-    let path = HistoryStore::repo_path(&root);
-    HistoryStore::open(path)
+    HistoryStore::open_in(&root)
 }
 
 fn list(json: bool) -> Result<(), String> {

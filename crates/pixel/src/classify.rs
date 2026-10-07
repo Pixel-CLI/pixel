@@ -1286,8 +1286,7 @@ fn open_history_tier() -> crate::classify_history::HistoryTier {
     let store = std::env::current_dir()
         .ok()
         .and_then(|cwd| crate::discover_root(&cwd).ok())
-        .map(|root| crate::classify_history::HistoryStore::repo_path(&root))
-        .and_then(|path| crate::classify_history::HistoryStore::open(path).ok())
+        .and_then(|root| crate::classify_history::HistoryStore::open_checked(&root).ok())
         .unwrap_or_else(crate::classify_history::HistoryStore::empty);
     crate::classify_history::HistoryTier::new(store)
 }

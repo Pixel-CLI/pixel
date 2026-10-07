@@ -135,6 +135,13 @@ under it are written without following links (`pixel_git::nofollow`,
 `SQLITE_OPEN_NOFOLLOW`), and a path read from a shard or the graph is used only
 inside the repository (`pixel_git::repo_path::confine`); see T6.
 
+The verified-history store (`.pixel/classify-history.jsonl`,
+`classify_history::HistoryStore`) follows the same rules: both openers run
+`sidecar::check` first, so a tracked or linked `.pixel/` is refused rather
+than read; the write path creates `.pixel/` with `sidecar::private_dir`; and
+`save` replaces the file through `nofollow::write_replace`, so a pre-planted
+`.tmp` symlink cannot redirect the write.
+
 ### 3.6 Git operations (B1, B2)
 
 `pixel-git::GitRunner` is the only git spawner
