@@ -1,0 +1,232 @@
+{
+  "_comment": [
+    "Worked example: register a LOCAL DEV Notion public connection (OAuth) and capture its client id/secret.",
+    "Built from a real hand-driven agent-browser session (comet profile, CDP 127.0.0.1:9222, --session comet).",
+    "",
+    "Keys starting with '_' are ignored by pixel (not part of the Flow schema); they are documentation for humans.",
+    "",
+    "HOW TO RUN",
+    "  pixel flow save notion-oauth-app --from-file crates/pixel-flow/examples/notion-oauth-app.json",
+    "  pixel flow run notion-oauth-app --var accept_terms=true [--var app_name='My Local Dev App'] [--var callback_url=http://localhost:3000/oauth/notion/callback]",
+    "  OAUTH_ENV_OUT=./.env.oauth crates/pixel-flow/examples/oauth-env.py capture notion",
+    "",
+    "TERMS: accept_terms defaults to false. Creating a Notion connection implies accepting Notion's Developer Terms, so the",
+    "'Create connection' click is gated behind --var accept_terms=true. Without it the flow stops with the form filled and nothing created.",
+    "",
+    "THE SECRET IS SHOWN ONCE in a dialog opened by 'Show client secret'. The flow ends with that dialog open; run the capture",
+    "command immediately and do not close the dialog first. pixel-flow cannot write files and `pixel flow run` discards `eval`",
+    "output, so oauth-env.py reads the dialog straight into $OAUTH_ENV_OUT (mode 600) and prints only lengths.",
+    "There is no credential sanity check for Notion in oauth-env.py (none was established in the recorded session).",
+    "",
+    "LOGIN IS OUT OF SCOPE. The comet session must already be signed in to Notion. A login page makes the flow STOP on purpose",
+    "(a `click` whose ref_hint can never match). It never types credentials. Sign in by hand, then re-run.",
+    "",
+    "NOT IDEMPOTENT: every run creates a NEW connection. Delete stale local-dev connections by hand in the console.",
+    "",
+    "AFTER THE FLOW (manual follow-up): your backend/app reads OAUTH_NOTION_CLIENT_ID / OAUTH_NOTION_CLIENT_SECRET from its",
+    "process environment. `source` the env file written to $OAUTH_ENV_OUT before starting the API. Never commit that file.",
+    "",
+    "NEVER put real client ids or secrets in this file."
+  ],
+  "name": "notion-oauth-app",
+  "title": "Register a local-dev Notion OAuth connection and capture client id/secret",
+  "description": "Creates a Notion OAuth connection (default name 'My Local Dev App', installable in any workspace, default capabilities) with the local callback as redirect URI, then reveals the one-time client secret and stops with the dialog open. Follow immediately with `oauth-env.py capture notion` to write OAUTH_NOTION_CLIENT_ID / OAUTH_NOTION_CLIENT_SECRET to $OAUTH_ENV_OUT (mode 600). Create is gated behind --var accept_terms=true (default false). Login is out of scope; the flow stops if signed out. Not idempotent.",
+  "tags": [
+    "oauth",
+    "config",
+    "notion",
+    "local-dev",
+    "example"
+  ],
+  "tab": "notion",
+  "success_url_contains": [
+    "developers/connections/"
+  ],
+  "success_url_excludes": [
+    "/login"
+  ],
+  "mfa_keywords": [
+    "Continue with Google",
+    "Enter your email"
+  ],
+  "preconditions": [
+    "Verify comet-cdp is up (port 9222) and `agent-browser --session comet tab list` answers",
+    "The comet browser profile is ALREADY signed in to Notion (this flow never types credentials)",
+    "Read Notion's Developer Terms yourself; pass --var accept_terms=true only if you accept them (default false: the flow stops before creating anything)",
+    "Export OAUTH_ENV_OUT=<path> before the capture step (the file receives secrets: keep it out of git, mode 600 is enforced)"
+  ],
+  "vars": [
+    {
+      "name": "app_name",
+      "description": "Connection name",
+      "required": false,
+      "default": "My Local Dev App"
+    },
+    {
+      "name": "homepage_url",
+      "description": "Accepted for a uniform interface with the other oauth-app flows; the recorded Notion creation form needed no homepage, so it is unused",
+      "required": false,
+      "default": "http://localhost:3000"
+    },
+    {
+      "name": "callback_url",
+      "description": "Redirect URI your local app's OAuth callback route listens on",
+      "required": false,
+      "default": "http://localhost:3000/oauth/notion/callback"
+    },
+    {
+      "name": "accept_terms",
+      "description": "'true' lets the flow click 'Create connection', which implies accepting Notion's Developer Terms. Anything else (including omitted) stops the flow before creating. Must be passed with --var; it has no effective default",
+      "required": false,
+      "default": "false"
+    }
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "rationale": "Open the integrations page. It redirects to https://app.notion.com/developers/connections. Already-authenticated profile expected.",
+      "url": "https://www.notion.so/profile/integrations",
+      "on_failure": "If the open times out, re-run `agent-browser --session comet tab list` and retry once",
+      "max_retries": 2
+    },
+    {
+      "action": "wait",
+      "rationale": "PITFALL: the cross-domain redirect to app.notion.com takes a moment; do not snapshot the pre-redirect page",
+      "wait": "4s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Login is out of scope. A signed-out profile lands on the Notion login page; stop instead of touching credentials.",
+      "condition": "page shows 'Continue with Google' or 'Continue with email' or 'Enter your email' or 'Log in to Notion'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "STOP: not signed in to Notion in the comet session. Sign in by hand in Comet, then re-run this flow. (Fails on purpose: the ref_hint can never match, so the flow aborts with this message.)",
+          "ref_hint": "STOP - Notion login required in the comet session - a human must sign in, then re-run the flow",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Capture the connections list; look for the 'New connection' button",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Start a new connection",
+      "ref_hint": "button containing 'New connection'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the creation form render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Capture the form: Connection name, type radios (OAuth / API token), Installable in, Redirect URIs, Create connection",
+      "max_retries": 1
+    },
+    {
+      "action": "fill",
+      "rationale": "Connection name",
+      "ref_hint": "textbox matching 'Connection name'",
+      "value_var": "app_name",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Choose the 'OAuth' connection type (NOT 'API token', which has no client id/secret). The two quoted terms make the matcher require a radio line that also says OAuth.",
+      "ref_hint": "radio matching 'radio' 'OAuth'",
+      "on_failure": "Re-snapshot; if the type picker is cards or tabs instead of radios, click the one labelled OAuth.",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Installable in: leave the default 'Any workspace'. The Redirect URIs field should now be visible.",
+      "max_retries": 1
+    },
+    {
+      "action": "type",
+      "rationale": "PITFALL: Redirect URIs is a token/chip input. Type the callback URL (real key events), then press Enter in the next step to commit it as a chip.",
+      "ref_hint": "textbox matching 'Redirect'",
+      "value_var": "callback_url",
+      "max_retries": 1
+    },
+    {
+      "action": "press",
+      "rationale": "PITFALL: Enter commits the URL as a chip. Until then a suggestions dropdown COVERS the Create connection button and the click would land on a suggestion instead.",
+      "key": "Enter",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the chip render and the dropdown close",
+      "wait": "1s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Verify the redirect URI chip, the name and OAuth type before creating",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "TERMS GATE: creating a connection implies accepting Notion's Developer Terms. Click 'Create connection' ONLY when --var accept_terms=true was passed. Unset or any other value does NOT click (fail-closed: {{accept_terms}} is not defaulted, so an omitted var stays a literal and never equals 'true'). Passing accept_terms=true means the human accepts the terms.",
+      "value": "(()=>{if('{{accept_terms}}'!=='true')return 'create-NOT-clicked (accept_terms is not true)';const b=[...document.querySelectorAll('button')].find(x=>/^create connection$/i.test(x.innerText.trim())&&!x.disabled);if(!b)return 'create-button-not-found-or-disabled';b.click();return 'create-clicked'})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Creation redirects to https://app.notion.com/developers/connections/<uuid>",
+      "wait": "4s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Still on the form means Create did not fire: accept_terms was not true, or a required field is missing. Nothing was created. Stop.",
+      "condition": "page shows 'Create connection'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "STOP: the creation form is still open. Either accept_terms was not true (re-run with --var accept_terms=true after reading Notion's Developer Terms) or a required field is missing. Nothing was created. (Fails on purpose.)",
+          "ref_hint": "STOP - Notion connection was not created - accept_terms must be true and name, OAuth type and redirect URI must be set",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Confirm the connection page. Its URL ends in the connection uuid, which IS the OAuth client id. Default capabilities (read, update, insert content) are enough; leave them.",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Reveal the secret. PITFALL: it appears ONCE in a dialog; the capture command must run before the dialog is closed or the page reloads (the secret can only be regenerated, not re-read).",
+      "ref_hint": "button containing 'Show client secret'",
+      "on_failure": "Never click twice or press Escape: closing the dialog loses the one-time view.",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the dialog render",
+      "wait": "1s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "FLOW ENDS HERE with the one-time secret dialog open (secret starts with secret_ or ntn_; client id = uuid in the URL). DO NOT CLOSE THE DIALOG. NEXT: OAUTH_ENV_OUT=<path> crates/pixel-flow/examples/oauth-env.py capture notion",
+      "max_retries": 1
+    }
+  ],
+  "success_signal": "page text contains 'client secret' (the one-time secret dialog is open). Then immediately run: OAUTH_ENV_OUT=<path> oauth-env.py capture notion",
+  "created_unix": 0,
+  "revised_unix": 0,
+  "revision": 1,
+  "proven": false
+}
