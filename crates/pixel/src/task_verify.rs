@@ -149,6 +149,9 @@ type GraphFacts = (Vec<CallEdge>, Vec<CallEdge>);
 /// graph exists — the check cannot attest anything then. A failure to open,
 /// snapshot or re-extract the graph is an `Err`, so it is reported as a
 /// gather failure rather than silently read as "no graph".
+///
+/// The after snapshot is taken from a scratch copy of the graph database
+/// so that the shared graph is never mutated during fact gathering.
 fn graph_facts(root: &Path, changed: &[String]) -> Result<Option<GraphFacts>, String> {
     let db = root
         .join(pixel_index::index::SHARD_DIR)
@@ -156,16 +159,19 @@ fn graph_facts(root: &Path, changed: &[String]) -> Result<Option<GraphFacts>, St
     if !db.exists() {
         return Ok(None);
     }
-    let before = snapshot_edges(
-        &GraphStore::open(&db).map_err(|error| format!("graph open: {error}"))?,
-        changed,
-    )?;
-    let files: Vec<(&str, bool)> = changed.iter().map(|path| (path.as_str(), false)).collect();
-    update_files(root, &db, &files).map_err(|error| format!("graph update: {error}"))?;
+    let store = GraphStore::open(&db).map_err(|error| format!("graph open: {error}"))?;
+    let before = snapshot_edges(&store, changed)?;
+    // Work on a scratch copy so update_files never mutates the shared graph.
+    let scratch = std::env::temp_dir().join("pixel-graph-scratch.sqlite");
+    std::fs::copy(&db, &scratch).map_err(|error| format!("scratch copy: {error}"))?;
+    let files: Vec<(&str, bool)> = changed.iter().map(|p| (p.as_str(), false)).collect();
+    update_files(root, &scratch, &files).map_err(|error| format!("graph update: {error}"))?;
     let after = snapshot_edges(
-        &GraphStore::open(&db).map_err(|error| format!("graph open: {error}"))?,
+        &GraphStore::open(&scratch).map_err(|error| format!("scratch open: {error}"))?,
         changed,
     )?;
+    // Clean up the scratch copy.
+    let _ = std::fs::remove_file(&scratch);
     Ok(Some((before, after)))
 }
 

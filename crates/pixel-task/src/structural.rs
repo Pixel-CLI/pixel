@@ -172,7 +172,7 @@ pub fn diff_in_scope(diff_paths: &[String], manifest_paths: &[String]) -> Struct
 /// previously-resolved call edge may have become unresolved. Witness: each
 /// dropped edge, named with both endpoints.
 pub fn graph_resolves(before: &[CallEdge], after: &[CallEdge]) -> StructuralResult {
-    let capped = before.len() > MAX_GRAPH_EDGES || after.len() > MAX_GRAPH_EDGES;
+    let before_capped = before.len() > MAX_GRAPH_EDGES;
     // Count (src, dst) endpoints from the full after input so a line-number
     // change in a resolved edge does not produce a false dropped-edge witness.
     let mut after_counts: HashMap<(&str, &str), usize> = HashMap::new();
@@ -201,12 +201,15 @@ pub fn graph_resolves(before: &[CallEdge], after: &[CallEdge]) -> StructuralResu
     dropped.sort();
     let dropped_total = dropped.len();
     let witness_truncated = dropped_total > MAX_WITNESSES;
-    let complete = !capped && !witness_truncated;
+    // The check is complete only when no before-edge is left unexamined and
+    // witnesses fit: a large after graph is fully scanned so it does not
+    // itself cause incompleteness.
+    let complete = !before_capped && !witness_truncated;
     if witness_truncated {
         dropped.truncate(MAX_WITNESSES);
     }
     let mut notes: Vec<String> = Vec::new();
-    if capped {
+    if before_capped {
         notes.push(format!(
             "edge comparison capped at {MAX_GRAPH_EDGES}; {} before edges compared against all {} after edges",
             before.len().min(MAX_GRAPH_EDGES),
@@ -434,6 +437,43 @@ mod tests {
         let result = graph_resolves(&before, &[]);
         assert!(!result.passed);
         assert!(!result.complete);
+    }
+
+    #[test]
+    fn graph_resolves_decrements_multiplicity_on_shared_endpoints() {
+        // Two before edges share (src, dst); one matching after edge leaves
+        // exactly one dropped-edge witness.
+        let before = vec![
+            edge("src/a.rs::foo", "src/b.rs::bar", 12),
+            edge("src/a.rs::foo", "src/b.rs::bar", 34),
+        ];
+        let after = vec![edge("src/a.rs::foo", "src/b.rs::bar", 12)];
+        let result = graph_resolves(&before, &after);
+        assert!(!result.passed);
+        assert!(result.complete);
+        assert_eq!(result.witnesses.len(), 1);
+    }
+
+    #[test]
+    fn graph_resolves_large_after_graph_stays_complete() {
+        // More than 5,000 after edges but all before edges are covered:
+        // no before edge is left unexamined, so complete stays true.
+        let before: Vec<CallEdge> = (0..10)
+            .map(|i| edge(&format!("a{i}::f"), "b::g", i as u32))
+            .collect();
+        let after: Vec<CallEdge> = (0..(MAX_GRAPH_EDGES + 500))
+            .map(|i| {
+                if i < 10 {
+                    edge(&format!("a{i}::f"), "b::g", (i + 1) as u32)
+                } else {
+                    edge(&format!("c{i}::f"), "d::g", i as u32)
+                }
+            })
+            .collect();
+        let result = graph_resolves(&before, &after);
+        assert!(result.passed);
+        assert!(result.complete);
+        assert!(result.witnesses.is_empty());
     }
 
     #[test]
