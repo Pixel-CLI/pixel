@@ -81,10 +81,10 @@ throughput, memory ceiling, and index-build speed.
 
 | # | Sub-check | Pass condition | How to measure |
 | --- | --- | --- | --- |
-| 2.1 | **Cold start** — process spawn to first stdout byte | ≤ 150% of Rust baseline | `hyperfine --warmup 3 '<binary> --version'` (or equivalent) |
-| 2.2 | **Warm daemon p50** — median round-trip on a cached request | ≤ 120% of Rust baseline | `hyperfine --warmup 10 '<binary> search-content foo'` against a warm daemon |
+| 2.1 | **Cold start** — process spawn to first stdout byte | ≤ 150% of Rust baseline | `hyperfine --warmup 3 --prepare 'kill %1 2>/dev/null || true' '<binary> --version'` (measure spawn → first byte only) |
+| 2.2 | **Warm daemon p50** — median round-trip on a cached request | ≤ 120% of Rust baseline | `hyperfine --warmup 10 -N --prepare 'true' -m 200 'curl -sf http://127.0.0.1:<port>/api/search?q=foo'` against an already-running daemon |
 | 2.3 | **Warm daemon p95** — 95th percentile round-trip | ≤ 150% of Rust baseline | Collect 200 samples, sort, take 190th |
-| 2.4 | **Peak RSS during build-index** — max resident set size | ≤ 200% of Rust baseline | `/usr/bin/time -v '<binary> build-index .'` (or `peak_alloc` equivalent) |
+| 2.4 | **Peak RSS during build-index** — max resident set size | ≤ 200% of Rust baseline | `/usr/bin/time -v <binary> build-index .` (binary and arguments as separate tokens) |
 | 2.5 | **Binary size** — release, stripped | ≤ 300% of Rust baseline | `ls -la` on the shipped binary |
 | 2.6 | **Index-build throughput** — files/second on a 5k-file repo | ≥ 50% of Rust baseline | Time `build-index` on a fixed corpus, count files |
 

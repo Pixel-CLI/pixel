@@ -31,12 +31,42 @@ fn audit_prompt_exists_and_is_committed() {
         "audit prompt must exist at {}",
         path.display()
     );
-    // The .gitignore must not ignore the prompt file itself.
+    // The .gitignore must not ignore the prompt file itself; verify with
+    // Git's own ignore evaluation rather than a naive string search.
     let gitignore = repo_root().join(GITIGNORE_REL);
-    let ignore = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    let gitignore_text = std::fs::read_to_string(&gitignore).unwrap_or_default();
     assert!(
-        ignore.contains("!language-alternatives.md"),
+        gitignore_text.contains("!language-alternatives.md"),
         "docs/audit/.gitignore must un-ignore the prompt file"
+    );
+    // A dated audit artifact (e.g. 2026-01-01-results.md) must be ignored.
+    let artifact = repo_root().join("docs/audit/2026-01-01-results.md");
+    std::fs::write(&artifact, "placeholder").unwrap();
+    let output = std::process::Command::new("git")
+        .arg("check-ignore")
+        .arg("-v")
+        .arg("docs/audit/2026-01-01-results.md")
+        .current_dir(repo_root())
+        .output()
+        .expect("git must be available");
+    let _ = std::fs::remove_file(&artifact);
+    assert!(
+        output.status.success(),
+        "audit artifacts must be ignored; `git check-ignore` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The prompt itself must NOT be ignored.
+    let output = std::process::Command::new("git")
+        .arg("check-ignore")
+        .arg("-v")
+        .arg("docs/audit/language-alternatives.md")
+        .current_dir(repo_root())
+        .output()
+        .expect("git must be available");
+    assert!(
+        !output.status.success(),
+        "the prompt must not be ignored; `git check-ignore` succeeded unexpectedly: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
