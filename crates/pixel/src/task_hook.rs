@@ -2035,6 +2035,7 @@ mod tests {
             },
             Duration::from_secs(5),
             |_| Box::new(OneFile),
+            |_, _| None,
         )
         .expect("a code prompt in an open gate starts a brief")
     }

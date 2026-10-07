@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use regex::Regex;
 
-use super::{SOURCE_EXTENSIONS, names_code, retrieval_request};
+use super::intent::Verdict;
+use super::{SOURCE_EXTENSIONS, Signal, code_signal, names_code};
 
 /// Opening line of the block; a host and a test find the brief by it.
 pub(crate) const BRIEF_TAG: &str = "[PIXEL:BRIEF]";
@@ -252,16 +253,25 @@ pub(crate) struct Plan {
 impl Plan {
     /// `None` for a prompt that does not ask about code, pasted text aside, and
     /// for a continuation or a harness envelope, which are not the user's task.
+    /// Tests plan a chain directly; the hook splits this into `code_signal`
+    /// plus `from_typed` so a verdict can sit between them.
+    #[cfg(test)]
     pub(crate) fn from_prompt(prompt: &str) -> Option<Self> {
         if crate::prompt_continuation::is_trivial_continuation(prompt) {
             return None;
         }
-        let typed = retrieval_request(prompt)?;
-        Some(Self {
-            anchors: Anchors::from_text(&typed),
-            change_intent: has_change_intent(&typed),
-            concept: concept_phrase(&typed),
-        })
+        let (typed, _) = code_signal(prompt)?;
+        Some(Self::from_typed(&typed, has_change_intent(&typed)))
+    }
+
+    /// The plan of typed text already judged about-code: `change_intent`
+    /// comes from a verdict when one answered, else from the stem table.
+    fn from_typed(typed: &str, change_intent: bool) -> Self {
+        Self {
+            anchors: Anchors::from_text(typed),
+            change_intent,
+            concept: concept_phrase(typed),
+        }
     }
 }
 
@@ -375,6 +385,8 @@ pub(crate) fn pick_uid<'a>(
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Brief {
     anchors: Vec<String>,
+    /// The intent a warm local verdict decided, when one drove the plan.
+    intent: Option<String>,
     files: Vec<FileHit>,
     defined: Vec<SymbolHit>,
     /// First source line of the picked definition, when it was read.
@@ -577,20 +589,36 @@ impl Pending {
 /// start no thread and run no lookup.
 pub(crate) fn start(prompt: &str, root: &Path) -> Option<Pending> {
     let root = root.to_path_buf();
-    start_with(prompt, Gate::read(&root), BRIEF_WINDOW, move |deadline| {
-        super::evidence::open(&root, deadline)
-    })
+    start_with(
+        prompt,
+        Gate::read(&root),
+        BRIEF_WINDOW,
+        move |deadline| super::evidence::open(&root, deadline),
+        super::intent::judge,
+    )
 }
 
-/// [`start`] with its gate, window and evidence source given.
-pub(crate) fn start_with<F>(prompt: &str, gate: Gate, window: Duration, open: F) -> Option<Pending>
+/// [`start`] with its gate, window, evidence source and intent judge given.
+/// `judge` runs only on a weakly code-shaped prompt; a denying verdict ends
+/// the brief before any lookup, and no verdict means the heuristic plan.
+pub(crate) fn start_with<F, J>(
+    prompt: &str,
+    gate: Gate,
+    window: Duration,
+    open: F,
+    judge: J,
+) -> Option<Pending>
 where
     F: FnOnce(Instant) -> Box<dyn Evidence> + Send + 'static,
+    J: Fn(&str, Instant) -> Option<Verdict> + Send + 'static,
 {
     if !gate.open() {
         return None;
     }
-    let plan = Plan::from_prompt(prompt)?;
+    if crate::prompt_continuation::is_trivial_continuation(prompt) {
+        return None;
+    }
+    let (typed, signal) = code_signal(prompt)?;
     let deadline = Instant::now() + window;
     let state = Arc::new(Mutex::new(Brief::default()));
     let (finished, done) = mpsc::channel();
@@ -598,6 +626,25 @@ where
     std::thread::Builder::new()
         .name("pixel-brief".into())
         .spawn(move || {
+            let plan = match signal {
+                Signal::Strong => Plan::from_typed(&typed, has_change_intent(&typed)),
+                Signal::Weak => match judge(&typed, deadline) {
+                    Some(verdict) if verdict.denies_brief() => {
+                        edit(&worker, |brief| brief.finished = true);
+                        let _ = finished.send(());
+                        return;
+                    }
+                    Some(verdict) => {
+                        let change_intent = verdict.change_intent();
+                        edit(&worker, |brief| {
+                            brief.intent =
+                                Some(format!("{} ({:.2})", verdict.label, verdict.confidence));
+                        });
+                        Plan::from_typed(&typed, change_intent)
+                    }
+                    None => Plan::from_typed(&typed, has_change_intent(&typed)),
+                },
+            };
             let evidence = open(deadline);
             run(&plan, evidence.as_ref(), &worker, deadline);
             let _ = finished.send(());
@@ -680,6 +727,9 @@ pub(crate) fn render(brief: &Brief) -> Option<String> {
 
 fn render_with(brief: &Brief, shown: Shown) -> String {
     let mut lines = vec![BRIEF_TAG.to_string()];
+    if let Some(intent) = &brief.intent {
+        lines.push(format!("intent: {}", clean(intent)));
+    }
     if !brief.anchors.is_empty() {
         let anchors: Vec<String> = brief.anchors.iter().map(|a| clean(a)).collect();
         lines.push(format!("anchors: {}", anchors.join(", ")));
@@ -848,6 +898,22 @@ mod tests {
             path: path.into(),
             via: via.into(),
             line,
+        }
+    }
+
+    /// The judge of a hook without a warm daemon: never a verdict, so the
+    /// heuristic plan runs exactly as before verdicts existed.
+    fn no_verdict(_: &str, _: Instant) -> Option<Verdict> {
+        None
+    }
+
+    /// A canned verdict: `start_with`'s `judge` for one label.
+    fn verdict(label: &'static str) -> impl Fn(&str, Instant) -> Option<Verdict> {
+        move |_, _| {
+            Some(Verdict {
+                label: label.to_string(),
+                confidence: 0.9,
+            })
         }
     }
 
@@ -1299,6 +1365,7 @@ mod tests {
             OPEN,
             Duration::from_millis(150),
             move |_| Box::new(fake),
+            no_verdict,
         )
         .unwrap();
         assert_eq!(pending.finish(), None);
@@ -1333,6 +1400,7 @@ mod tests {
             OPEN,
             Duration::from_millis(200),
             |_| Box::new(Slow),
+            no_verdict,
         )
         .unwrap();
         let text = pending.finish().unwrap();
@@ -1352,7 +1420,7 @@ mod tests {
     #[test]
     fn start_should_decline_when_switched_off_unindexed_or_not_about_code() {
         let open = |_: Instant| -> Box<dyn Evidence> { Box::new(Fake::new()) };
-        assert!(start_with("callers of `fetchUser`", OPEN, SECOND, open).is_some());
+        assert!(start_with("callers of `fetchUser`", OPEN, SECOND, open, no_verdict).is_some());
         for (prompt, gate) in [
             (
                 "callers of `fetchUser`",
@@ -1371,7 +1439,10 @@ mod tests {
             ("thanks, that works", OPEN),
             ("commit this and push", OPEN),
         ] {
-            assert!(start_with(prompt, gate, SECOND, open).is_none(), "{prompt}");
+            assert!(
+                start_with(prompt, gate, SECOND, open, no_verdict).is_none(),
+                "{prompt}"
+            );
         }
     }
 
@@ -1401,6 +1472,7 @@ mod tests {
     fn full_brief() -> Brief {
         Brief {
             anchors: vec!["handleError".into(), "src/handleError.ts".into()],
+            intent: None,
             files: vec![hit("apps/web/page.tsx", 4), hit("apps/web/other.tsx", 9)],
             defined: vec![symbol("src/handleError.ts", "handleError")],
             def_head: Some("export function handleError(e: Error): string {".into()),
@@ -1652,5 +1724,65 @@ mod tests {
         assert_eq!(brief.confidence(), "medium");
         brief.callers = vec![caller("b.ts", "f", 1)];
         assert_eq!(brief.confidence(), "high");
+    }
+
+    #[test]
+    fn a_weak_prompt_denied_by_a_verdict_should_finish_with_no_brief() {
+        let pending = start_with(
+            "how does the login flow work",
+            OPEN,
+            SECOND,
+            |_| Box::new(Fake::new()),
+            verdict("none"),
+        )
+        .expect("a weak prompt still starts a pending brief");
+        assert_eq!(pending.finish(), None);
+    }
+
+    #[test]
+    fn a_weak_prompt_without_a_verdict_should_keep_the_heuristic_plan() {
+        let mut fake = Fake::new();
+        fake.concept = Ok(found(vec![hit("src/login.ts", 3)]));
+        let pending = start_with(
+            "how does the login flow work",
+            OPEN,
+            SECOND,
+            move |_| Box::new(fake),
+            no_verdict,
+        )
+        .unwrap();
+        let text = pending.finish().unwrap();
+        assert!(text.contains("src/login.ts:3"), "{text}");
+        assert!(!text.contains("intent:"), "{text}");
+    }
+
+    #[test]
+    fn a_verdict_should_be_rendered_as_the_plan_intent() {
+        let mut fake = Fake::new();
+        fake.concept = Ok(found(vec![hit("src/login.ts", 3)]));
+        let pending = start_with(
+            "how does the login flow work",
+            OPEN,
+            SECOND,
+            move |_| Box::new(fake),
+            verdict("investigate"),
+        )
+        .unwrap();
+        let text = pending.finish().unwrap();
+        assert!(text.contains("intent: investigate (0.90)"), "{text}");
+        assert!(text.contains("src/login.ts:3"), "{text}");
+    }
+
+    #[test]
+    fn a_strong_prompt_should_never_ask_the_judge() {
+        let pending = start_with(
+            "where is `fetchUser` used",
+            OPEN,
+            SECOND,
+            |_| Box::new(Fake::new()),
+            |_, _| panic!("a strong prompt must not reach the judge"),
+        )
+        .unwrap();
+        let _ = pending.finish();
     }
 }

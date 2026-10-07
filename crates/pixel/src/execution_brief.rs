@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 pub(crate) mod chain;
 mod evidence;
+pub(crate) mod intent;
 
 const MAX_CAPS: usize = 32;
 const MAX_EVIDENCE_PER_TARGET: usize = 8;
@@ -402,21 +403,31 @@ fn names_code(token: &str) -> bool {
     token.contains("::") || inner('_') || inner('/') || camel || extension
 }
 
-/// The text to route when `prompt` asks about code, `None` when it asks for
-/// something else. Only the typed text counts: a backticked identifier, a
-/// token that names code, a code word or a code question opening the prompt
-/// or any clause after a break (`.`, `?`, `!`, `:`, `;`, `,`, a newline,
-/// so "Hey, where is…" and "Context:\nwhy does…" count). Everything else
-/// (git and release requests, pasted chat threads, discussion) gets no route.
-pub fn retrieval_request(prompt: &str) -> Option<String> {
+/// How clearly the typed text of a prompt asks about code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// A backticked identifier or a code-shaped token (`a::b`, `snake_case`,
+    /// `camelCase`, a path, a source file): no model needed to say so.
+    Strong,
+    /// Only a code word or a code-question opener matched: close enough to
+    /// ask, ambiguous enough that a model verdict can help.
+    Weak,
+}
+
+/// The typed text of `prompt` and how strongly it asks about code, or `None`
+/// when it asks for something else (git and release requests, pasted chat
+/// threads, discussion). Only the typed text counts; pasted blocks never
+/// steer the search.
+pub fn code_signal(prompt: &str) -> Option<(String, Signal)> {
     let typed = typed_text(prompt);
     let typed = typed.trim();
+    if explicit_identifier(typed).is_some() || typed.split_whitespace().any(names_code) {
+        return Some((typed.to_string(), Signal::Strong));
+    }
     let lower = typed.to_lowercase();
-    let asks = explicit_identifier(typed).is_some()
-        || typed.split_whitespace().any(names_code)
-        || lower
-            .split(|ch: char| !ch.is_alphanumeric())
-            .any(|word| CODE_WORDS.contains(&word))
+    let weak = lower
+        .split(|ch: char| !ch.is_alphanumeric())
+        .any(|word| CODE_WORDS.contains(&word))
         || lower
             .split(['.', '?', '!', ':', ';', ',', '\n'])
             .map(str::trim_start)
@@ -425,7 +436,13 @@ pub fn retrieval_request(prompt: &str) -> Option<String> {
                     .iter()
                     .any(|opening| clause.starts_with(opening))
             });
-    asks.then(|| typed.to_string())
+    weak.then(|| (typed.to_string(), Signal::Weak))
+}
+
+/// The text to route when `prompt` asks about code, `None` when it asks for
+/// something else. The typed text of [`code_signal`], whichever strength.
+pub fn retrieval_request(prompt: &str) -> Option<String> {
+    code_signal(prompt).map(|(typed, _)| typed)
 }
 
 fn route_command(subcommand: &str, args: &[String]) -> String {
