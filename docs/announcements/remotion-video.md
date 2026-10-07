@@ -14,7 +14,7 @@
 
 **Visual**: Pixel logo animates in. Terminal shows `pixel classify --json`.
 
-**Text overlay**: "Pixel: deterministic AI development. One tool. Verifiable results."
+**Text overlay**: "Pixel: structured, verifiable AI development. One tool. Transparent results."
 
 **Code shown**:
 ```bash
@@ -22,8 +22,7 @@ $ pixel classify "fix the login bug" --json
 {
   "predicted": "bugfix",
   "probs": { "bugfix": 0.95, "feature": 0.03 },
-  "deterministic": false,
-  "provider": "local"
+  "snapshot": { "deterministic": true, "provider": "ollaya" }
 }
 ```
 
@@ -31,18 +30,13 @@ $ pixel classify "fix the login bug" --json
 
 **Visual**: Split screen showing Pixel's key features.
 
-**Text overlay**: "Verified history. Structural analysis. Cross-agent guidance."
+**Text overlay**: "Local classification. Graph answers. Agent hooks."
 
 **Code shown**:
 ```bash
-$ pixel classify-history list
-# Human-verified labels improve accuracy
-
-$ pixel structural --check
-# Pre-review checks catch issues early
-
-$ pixel guard --check
-# Cross-agent guidance for Claude, Cursor, Codex
+$ pixel classify "refactor auth" --labels bugfix --labels feature --engine ollaya
+$ pixel list-signatures src/main.rs
+$ pixel hook guard --provider claude
 ```
 
 ### Scene 4: Call to Action (25-30s)
@@ -53,7 +47,7 @@ $ pixel guard --check
 
 **Code shown**:
 ```bash
-$ curl -fsSL https://pixel.dev | sh
+$ curl -fsSL https://raw.githubusercontent.com/Pixel-CLI/pixel/main/install.sh | sh
 ```
 
 **Audio**: Music fades out.
@@ -88,6 +82,5 @@ remotion-pixel/
 All code examples in the video are verifiable:
 
 - `pixel classify --json` — see `crates/pixel/src/classify.rs`
-- `pixel classify-history list` — see `crates/pixel/src/classify_history.rs`
-- `pixel structural --check` — see `crates/pixel/src/structural.rs`
-- `pixel guard --check` — see `crates/pixel/src/guard.rs`
+- `pixel list-signatures` — see `crates/pixel/src/list_signatures.rs`
+- `pixel hook guard` — see `crates/pixel/src/guard.rs`
