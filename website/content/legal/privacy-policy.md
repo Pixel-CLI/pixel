@@ -1,6 +1,6 @@
 ---
 title: "Privacy Policy"
-description: "What this site and the pixel binary do with your data: the site uses no cookies, and four providers see your IP address when you visit. The binary sends no telemetry."
+description: "What this site and the pixel binary do with your data: the site uses no cookies, and four providers see your IP address when you visit. The binary sends no telemetry beyond an optional release check."
 ---
 
 <!-- This page restates what the templates load: the Google Fonts request in layouts/partials/head.html, the GitHub API call, the Cloudflare beacon and the sessionStorage keys in layouts/partials/footer.html, head.html and splash.html, and the network access SECURITY.md lists. Change it when they change. -->
@@ -37,7 +37,7 @@ The [savings estimate](/savings/) calculates everything inside the page. The val
 
 ## The pixel binary
 
-This policy covers the website. The `pixel` command-line tool runs on your machine and sends no telemetry or usage data. The index it builds and its sidecar files never leave your machine. It connects to the network only for the actions [SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md) lists:
+This policy covers the website. The `pixel` command-line tool runs on your machine and sends no telemetry or usage data beyond an optional release check. The index it builds and its sidecar files stay on your machine. It connects to the network only for the actions [SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md) lists:
 
 - first-use model downloads from Hugging Face;
 - Git remote operations you ask for;

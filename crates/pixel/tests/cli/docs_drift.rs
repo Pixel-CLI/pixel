@@ -1173,6 +1173,191 @@ fn llms_txt_should_link_every_answer_page_under_its_question() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Over-absolute claims: the docs must not promise what the binary cannot
+// guarantee. A claim that is too absolute ("zero commands", "no telemetry",
+// "never leaves the machine", "crash-safe", "ship more") contradicts the
+// product's own behaviour (a release check, a model-backed classifier, Git
+// remotes) and erodes trust when a user finds the boundary.
+// ---------------------------------------------------------------------------
+
+/// Files whose claims are checked for over-absolute language.
+const HARMONIZED_DOCS: &[&str] = &[
+    "README.md",
+    "website/layouts/partials/head.html",
+    "website/layouts/index.html",
+    "website/content/teams.md",
+    "website/content/about.md",
+    "website/content/docs.md",
+    "website/content/legal/privacy-policy.md",
+    "website/static/llms.txt",
+    "website/og/card.html",
+];
+
+/// Claims that are over-absolute and must not appear in the docs. Each entry
+/// is (pattern, qualifier that makes it acceptable, why it is over-absolute).
+const OVER_ABSOLUTE_CLAIMS: &[(&str, &str, &str)] = &[
+    (
+        "zero commands to learn",
+        "a handful of commands",
+        "the product has many commands",
+    ),
+    (
+        "No account. No API key. No telemetry.",
+        "No account. No API key. No telemetry beyond an optional release check.",
+        "the release check is a network call",
+    ),
+    (
+        "Local and deterministic.",
+        "Local and mostly deterministic.",
+        "pixel classify is model-backed and non-deterministic",
+    ),
+    (
+        "never leaves the machine",
+        "the machine could be a VM or cloud instance",
+        "the machine could be a VM or cloud instance",
+    ),
+    (
+        "crash-safe",
+        "designed to be crash-safe",
+        "crash-safety cannot be guaranteed in all scenarios",
+    ),
+    (
+        "Ship more.",
+        "Ship more responsibly",
+        "the product does not guarantee shipping more",
+    ),
+    (
+        "sends no telemetry",
+        "no telemetry beyond an optional release check",
+        "the release check is a network call",
+    ),
+    (
+        "never leave the machine",
+        "the machine could be a VM or cloud instance",
+        "the machine could be a VM or cloud instance",
+    ),
+];
+
+/// Check that a doc does not contain an over-absolute claim. A claim is
+/// allowed when its specific qualifier appears in the surrounding text.
+fn assert_no_over_absolute_claims(doc: &str, text: &str) {
+    for (pattern, qualifier, why) in OVER_ABSOLUTE_CLAIMS {
+        if text.contains(pattern) {
+            assert!(
+                text.contains(qualifier),
+                "{doc}: over-absolute claim \"{pattern}\" — {why}. \
+                 Qualify it with \"{qualifier}\"."
+            );
+        }
+    }
+}
+
+#[test]
+fn docs_do_not_make_over_absolute_claims() {
+    let root = repo_root();
+    for doc in HARMONIZED_DOCS {
+        let text = std::fs::read_to_string(root.join(doc)).unwrap_or_else(|e| panic!("{doc}: {e}"));
+        assert_no_over_absolute_claims(doc, &text);
+    }
+}
+
+#[test]
+fn readme_claims_are_qualified() {
+    let text = std::fs::read_to_string(repo_root().join("README.md")).unwrap();
+    // The README must not claim "zero commands to learn".
+    assert!(
+        !text.contains("zero commands to learn"),
+        "README: 'zero commands to learn' is over-absolute"
+    );
+    // The README must not claim "No account. No API key. No telemetry."
+    // without qualification.
+    assert!(
+        !text.contains("No account. No API key. No telemetry."),
+        "README: 'No account. No API key. No telemetry.' is over-absolute"
+    );
+    // The README must not claim "Local and deterministic." without
+    // acknowledging that classify is non-deterministic.
+    assert!(
+        !text.contains("Local and deterministic."),
+        "README: 'Local and deterministic.' is over-absolute (classify is model-backed)"
+    );
+    // The README must not claim "never leaves the machine".
+    assert!(
+        !text.contains("never leaves the machine"),
+        "README: 'never leaves the machine' is over-absolute"
+    );
+    // The README must not claim "crash-safe" without qualification.
+    // The qualified form "designed to be crash-safe" is acceptable.
+    assert!(
+        !text.contains("crash-safe `pixel commit-and-push`"),
+        "README: 'crash-safe `pixel commit-and-push`' is over-absolute"
+    );
+}
+
+#[test]
+fn og_card_does_not_claim_ship_more() {
+    let text = std::fs::read_to_string(repo_root().join("website/og/card.html")).unwrap();
+    assert!(
+        !text.contains("Ship more."),
+        "og card: 'Ship more.' is over-absolute"
+    );
+}
+
+#[test]
+fn head_html_telemetry_claim_is_qualified() {
+    let text =
+        std::fs::read_to_string(repo_root().join("website/layouts/partials/head.html")).unwrap();
+    // The metadata value must qualify "No telemetry" with the release-check
+    // disclaimer, and must not appear as a standalone "No telemetry:" label.
+    for line in text.lines() {
+        if line.contains("\"No telemetry:") {
+            assert!(
+                line.contains("beyond an optional release check"),
+                "head.html: 'No telemetry' must be qualified with 'beyond an optional release check'"
+            );
+        }
+    }
+}
+
+#[test]
+fn website_content_telemetry_claims_are_qualified() {
+    let root = repo_root();
+    for doc in [
+        "website/content/teams.md",
+        "website/content/about.md",
+        "website/content/docs.md",
+        "website/content/legal/privacy-policy.md",
+    ] {
+        let text = std::fs::read_to_string(root.join(doc)).unwrap_or_else(|e| panic!("{doc}: {e}"));
+        // The claim "no telemetry" must be qualified with "beyond an optional
+        // release check" or similar.
+        if text.contains("no telemetry") || text.contains("No telemetry") {
+            assert!(
+                text.contains("beyond an optional release check"),
+                "{doc}: 'no telemetry' must be qualified with 'beyond an optional release check'"
+            );
+        }
+    }
+}
+
+#[test]
+fn llms_txt_claims_are_qualified() {
+    let text = std::fs::read_to_string(repo_root().join("website/static/llms.txt")).unwrap();
+    // llms.txt must not claim "never leaves the machine".
+    assert!(
+        !text.contains("never leaves the machine"),
+        "llms.txt: 'never leaves the machine' is over-absolute"
+    );
+    // llms.txt must not claim "no telemetry" without qualification.
+    if text.contains("no telemetry") || text.contains("No telemetry") {
+        assert!(
+            text.contains("beyond an optional release check"),
+            "llms.txt: 'no telemetry' must be qualified"
+        );
+    }
+}
+
 /// Every `checks` id is a `pixel doctor` check, and every agent check of the
 /// doctor belongs to an agent: a page cannot send a reader to `--only` a
 /// check that does not exist, nor leave out one that judges its agent.

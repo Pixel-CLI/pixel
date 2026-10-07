@@ -18,7 +18,7 @@
 {{/* The share card, 1200x630 (the 1.91:1 X, LinkedIn and Slack draw): og/render.sh renders it from data/read_savings.toml. Its alt states the card's figures. Fingerprinted, because every unfurler caches the image by its URL: a new card gets a new one. */}}
 {{ $og := resources.Get "og.png" | fingerprint }}
 {{ $big := partial "wall-row.html" . }}
-{{ $alt := printf "Pixel. Read less, ship more: %s estimated tokens for %s %s whole, %s for signatures, %v%% less volume (UTF-8 bytes / 4)." (lang.FormatNumberCustom 0 $big.full) $big.owner (path.Base $big.path) (lang.FormatNumberCustom 0 $big.pixel) (math.Floor $big.saved) }}
+{{ $alt := printf "Pixel. Read less, code more: %s estimated tokens for %s %s whole, %s for signatures, %v%% less volume (UTF-8 bytes / 4)." (lang.FormatNumberCustom 0 $big.full) $big.owner (path.Base $big.path) (lang.FormatNumberCustom 0 $big.pixel) (math.Floor $big.saved) }}
 <meta property="og:image" content="{{ $og.Permalink }}">
 <meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="{{ $og.Width }}">
@@ -100,7 +100,7 @@
       "Answers fitted to a token budget, with a marker saying whether they are complete"
       "Call graph, blast radius and Git history search from the shell"
       "Wired into Claude Code, Codex, Cursor and other agents by pixel install: a CLI plus hooks, not an MCP server"
-      "No telemetry: the index stays in .pixel/ on your machine")
+      "No telemetry beyond an optional release check: the index stays in .pixel/ on your machine")
     "sameAs" (slice site.Params.github_url "https://github.com/LivioGama/homebrew-tap/blob/main/Formula/pixel.rb")
     "offers" (dict "@type" "Offer" "price" "0" "priceCurrency" "USD"))
   (dict

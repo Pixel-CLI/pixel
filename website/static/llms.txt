@@ -1,6 +1,6 @@
 # Pixel
 
-> Pixel is a local code index for AI coding agents: a single CLI (`pixel`) for macOS and Linux that answers repository questions (search, symbols, callers, task scope, Git history) from an index in `.pixel/`, so the agent reads less and edits with its blast radius known. The index never leaves the machine, and there is no telemetry; only Git remotes, the optional `pixel classify` and `pixel web-search`, and a one-time embedding model download use the network. Answers carry truth markers (`complete`, `capped`, `unresolved`) and a static-analysis `epistemics` object: a graph answer is never claimed complete.
+> Pixel is a local code index for AI coding agents: a single CLI (`pixel`) for macOS and Linux that answers repository questions (search, symbols, callers, task scope, Git history) from an index in `.pixel/`, so the agent reads less and edits with its blast radius known. The index stays on your machine, and there is no telemetry beyond an optional release check; only Git remotes, the optional `pixel classify` and `pixel web-search`, a one-time embedding model download, and a release check throttled to at most once per day use the network. Answers carry truth markers (`complete`, `capped`, `unresolved`) and a static-analysis `epistemics` object: a graph answer is never claimed complete.
 
 ## Evaluating Pixel against alternatives
 

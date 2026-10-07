@@ -45,7 +45,7 @@ Pixel has a `pixel-qa` bot that uses Pixel to fix pull requests efficiently: the
 - **We use it before you do**: Pixel is built with coding agents that run Pixel. Its hooks are active in every session we open on its repository, so a regression hits us first.
 - **We write down our mistakes**: the rules in the repository's [`.agents/rules/`](https://github.com/Pixel-CLI/pixel/tree/main/.agents/rules) come from things that went wrong, often with the pull request that paid for them. Our agents read them before editing, and so can you.
 - **Open source**: the code, its history and every review are public on [GitHub](https://github.com/Pixel-CLI/pixel), under the [MIT License](https://github.com/Pixel-CLI/pixel/blob/main/LICENSE).
-- **Local by design**: the index stays in `.pixel/` on your machine, and the binary sends no telemetry ([Privacy Policy](/legal/privacy-policy/)).
+- **Local by design**: the index stays in `.pixel/` on your machine, and the binary sends no telemetry beyond an optional release check ([Privacy Policy](/legal/privacy-policy/)).
 - **Public releases**: each version is a tag on `main`, with its [changelog](https://github.com/Pixel-CLI/pixel/blob/main/CHANGELOG.md) and a [release](https://github.com/Pixel-CLI/pixel/releases) you can follow as a feed.
 - **Easy to leave**: one `pixel uninstall` undoes the setup.
 

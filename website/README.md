@@ -60,8 +60,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `pixel audit` (`#your-number`) in one row. Every command has its own
   Copy, never a chained one. On phones the variant tabs scroll on one line
   and commands wrap. The chapter ends on the proofs an evaluator checks
-  before running the script (signed releases, no telemetry, no account, MIT,
-  changelog). No Pixel version appears in the home's copy: the data files
+  before running the script (signed releases, no telemetry beyond an optional
+  release check, no account, MIT, changelog). No Pixel version appears in the home's copy: the data files
   and the method pages each figure links carry it; the footer's version is
   read from `data/cli.toml`. Keep
   `$agentPrompt` in step with the root README. The inspected script remains

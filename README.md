@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <b>−94.5% median read volume for outline questions</b> on 8 large files · one install, zero commands to learn · no account, no API key, no telemetry.
+  <b>−94.5% median read volume for outline questions</b> on 8 large files · one install, a handful of commands · no account, no API key, no telemetry beyond an optional release check.
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@ The animation illustrates a workflow; it is not a timed agent comparison.
 
 - **A local index of signatures and callers that your agent queries before it greps**: 94.5% less read volume (median) for outline questions using `pixel list-signatures` than whole-file reads on 8 large open-source files. [How we measure](https://pixel-cli.dev/benchmarks/#well-known-files)
 - **Native tools stay available**: Claude and Codex get a bounded evidence brief with each code prompt; Pi offers an explicit `/pixel-impact` command. Other agent integrations retain their existing policies.
-- **No account. No API key. No telemetry.** Your code stays on your machine.
+- **No account. No API key. No telemetry beyond an optional release check.** Your code stays on your machine.
 - **13 languages, MIT**, macOS (Apple Silicon) and Linux, signed releases.
 
 ## Why
@@ -45,8 +45,8 @@ The animation illustrates a workflow; it is not a timed agent comparison.
 - **79.7 to 97.2% less read volume** (median 94.5%): whole files versus signatures on eight pinned large files with Pixel 0.5.0; tokens estimated as UTF-8 bytes ÷ 4, not session cost. Files: Hugging Face Transformers, FastAPI, Next.js, LangChain, Django, CPython, VS Code and Tokio; no second model reading on the agent's behalf. [The files](https://pixel-cli.dev/benchmarks/#well-known-files)
 - **Measured against GitNexus** on the same 29 blast-radius cases and machine: callers found at a tie (0.86 against 0.84), a 153 ms median answer against 432 ms, and ~4,160 tokens of context per turn against ~19,700. GitNexus wins on Cypher queries, taint analysis and Ruby callers. Pixel is MIT; GitNexus is PolyForm Noncommercial. [The cases](docs/bench/vs-gitnexus.md)
 - **Evidence with boundaries.** Every answer says whether it is complete, capped or stale; a static call graph never claims it saw every caller.
-- **Local and deterministic.** The index lives in `.pixel/` at the repository root and never leaves the machine; no telemetry. Only Git remotes, the optional `pixel classify` (the one model-backed command) and `pixel web-search`, a one-time embedding model download, and a once-a-day release check made only for a person at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) use the network.
-- **Safe Git.** `pixel impact` before an edit, crash-safe `pixel commit-and-push` after it, never a raw `--force`.
+- **Local and mostly deterministic.** The index lives in `.pixel/` at the repository root and stays on your machine; no telemetry beyond an optional release check. Index queries are deterministic; the optional `pixel classify` (the one model-backed command) is not. Only Git remotes, `pixel classify` and `pixel web-search`, a one-time embedding model download, and a release check throttled to at most once per day when a person is at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) use the network.
+- **Safer Git.** `pixel impact` before an edit, `pixel commit-and-push` designed to be crash-safe after it, never a raw `--force`.
 
 ## `pixel classify`: your local Jev
 
