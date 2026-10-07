@@ -141,25 +141,32 @@ fn snapshot_edges(store: &GraphStore, changed: &[String]) -> Result<Vec<CallEdge
     Ok(edges)
 }
 
+/// The before/after call-edge snapshots a `graph-resolves` check compares.
+type GraphFacts = (Vec<CallEdge>, Vec<CallEdge>);
+
 /// Graph facts for `graph-resolves`: the edges touching the changed files
-/// before and after the changed files are re-extracted. `None` when no
-/// graph exists — the check cannot attest anything then.
-fn graph_facts(root: &Path, changed: &[String]) -> Option<(Vec<CallEdge>, Vec<CallEdge>)> {
+/// before and after the changed files are re-extracted. `Ok(None)` when no
+/// graph exists — the check cannot attest anything then. A failure to open,
+/// snapshot or re-extract the graph is an `Err`, so it is reported as a
+/// gather failure rather than silently read as "no graph".
+fn graph_facts(root: &Path, changed: &[String]) -> Result<Option<GraphFacts>, String> {
     let db = root
         .join(pixel_index::index::SHARD_DIR)
         .join(pixel_daemon::api::GRAPH_DB_FILE);
     if !db.exists() {
-        return None;
+        return Ok(None);
     }
-    let before = GraphStore::open(&db)
-        .ok()
-        .and_then(|store| snapshot_edges(&store, changed).ok())?;
+    let before = snapshot_edges(
+        &GraphStore::open(&db).map_err(|error| format!("graph open: {error}"))?,
+        changed,
+    )?;
     let files: Vec<(&str, bool)> = changed.iter().map(|path| (path.as_str(), false)).collect();
-    update_files(root, &db, &files).ok()?;
-    let after = GraphStore::open(&db)
-        .ok()
-        .and_then(|store| snapshot_edges(&store, changed).ok())?;
-    Some((before, after))
+    update_files(root, &db, &files).map_err(|error| format!("graph update: {error}"))?;
+    let after = snapshot_edges(
+        &GraphStore::open(&db).map_err(|error| format!("graph open: {error}"))?,
+        changed,
+    )?;
+    Ok(Some((before, after)))
 }
 
 /// Gather the structural facts the selected checks need. Only the kinds
@@ -189,7 +196,7 @@ pub(crate) fn gather(
         None
     };
     let (graph_before, graph_after) = if needs_graph {
-        match graph_facts(root, &diff_paths) {
+        match graph_facts(root, &diff_paths)? {
             Some((before, after)) => (Some(before), Some(after)),
             None => (None, None),
         }
