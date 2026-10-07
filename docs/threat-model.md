@@ -141,6 +141,12 @@ the same way, but its entries carry revisions that become git argv in
 both when an entry is added and when the manifest is loaded, so a
 hand-edited manifest cannot smuggle a flag-shaped revision into `git fetch`
 (see T8).
+The verified-history store (`.pixel/classify-history.jsonl`,
+`classify_history::HistoryStore`) follows the same rules: both openers run
+`sidecar::check` first, so a tracked or linked `.pixel/` is refused rather
+than read; the write path creates `.pixel/` with `sidecar::private_dir`; and
+`save` replaces the file through `nofollow::write_replace`, so a pre-planted
+`.tmp` symlink cannot redirect the write.
 
 ### 3.6 Git operations (B1, B2)
 
