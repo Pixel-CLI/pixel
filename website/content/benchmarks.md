@@ -5,7 +5,7 @@ description: "Every number on the home page, with its method, its sample size an
 
 <!-- Figures come from docs/bench/; every section links its source. crates/pixel/tests/cli/docs_drift.rs reads this page, so every `pixel <command>` quoted here must exist. -->
 
-Figures below link to their available evidence and protocols. The Opus trial is a documented summary without archived raw runs; losses sit next to wins.
+Figures below link to their available evidence and protocols. The Opus trial's raw runs are not archived; its known setup and limits are stated alongside the result. Losses sit next to wins.
 
 <!-- Each command in this box was run on a fresh clone of a third-party repository (psf/requests) before it was written here: `pixel audit` and `pixel list-signatures` at requests 611c616 with pixel 0.5.1, the others with pixel 0.5.0. Re-run them when an output or a prerequisite changes. -->
 <aside class="measure" aria-labelledby="measure-it-on-your-own-code">
@@ -99,13 +99,26 @@ Recall is a tie at this sample size: Pixel finds every caller in Rust and TypeSc
 
 ## On whole agent tasks
 
-An Opus medium trial with install hooks on one scoping task reported these medians:
+An Opus 5.5 medium-effort trial compared 11 runs without Pixel with 11 runs
+using Pixel install hooks on the same low-research scoping task:
 
-| Duration | Without Pixel | With Pixel |
-| --- | --- | --- |
-| Wall time | 42.9 s | 47.6 s |
+| Metric | Without Pixel | With Pixel hooks | Change |
+| --- | ---: | ---: | ---: |
+| Duration | 42.9 s | 47.6 s | +11% |
+| Tokens read | 11,945 | 13,350 | +12% |
+| Provider-reported API cost | $0.283 | $0.372 | +31% |
+| Pixel calls per run | 0 | 0–4 observed | — |
 
-No speed gain on this task. This does not establish a general slowdown or speedup, or a token or cost result. The raw runs are held outside the repository; their date, exact model and Pixel versions, sample size and cost are not archived here. [Available protocol note](https://github.com/Pixel-CLI/pixel/blob/main/docs/motion/README.md#the-agent-demo)
+No speed gain on this task; the hooks arm was slower and had more read volume
+and higher provider-reported cost. Pixel calls ranged from zero to four per
+hooked run; that range is not a median. This single low-research task does not
+establish a general slowdown, speedup, token or cost result. The raw runs are
+held outside the repository and are not archived, so their date, exact model
+and Pixel versions, sample size and cost, the per-run distributions, the
+exact CLI/harness versions beyond the `v0.5.0` worktree tag, and the
+token-counting method cannot be independently checked. The reported API cost
+is not invoice-verified, and the token count is not necessarily billed-token
+usage. [Known setup and provenance limits](https://github.com/Pixel-CLI/pixel/blob/main/docs/bench/opus-install-hook-trial.md) and the [available protocol note](https://github.com/Pixel-CLI/pixel/blob/main/docs/motion/README.md#the-agent-demo)
 
 Read volume, estimated tokens, elapsed duration and provider-reported cost are different quantities. Adoption rates with the current install hooks are not quantified here; inspect `pixel action-log` on your own sessions.
 
