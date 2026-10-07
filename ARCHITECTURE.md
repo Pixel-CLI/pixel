@@ -43,7 +43,7 @@ MCP server. `pixel install` registers no MCP server with any agent.
 | `pixel-daemon` | Transport-agnostic `Service` (`api.rs`) and the Unix-socket NDJSON daemon with filesystem watching (`daemon.rs`). Dispatches each `Op` to the right library, attaches snapshot and epistemics metadata, and is the one place a retrieval envelope is built. Also hosts the recall daemon service. | index, graph, context, rank, proto, ops, facts, session, recall, git |
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
 | `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. | git, index |
-| `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db`: commit metadata, diff text, and contentless FTS5 trigram indexes over the diffs and paths. Demand-driven: the daemon never ingests at startup, and `status` and `doctor` never create the db — the first history query runs a bounded catch-up (`PIXEL_FACTS_QUERY_BUDGET_MS`, default 3 s) and spawns the low-priority keep-fresh loop that never blocks queries. Bounded: diff text is kept for the last 365 days (`PIXEL_HISTORY_WINDOW_DAYS`, `0` for all) within 256 MiB of used pages (`PIXEL_HISTORY_BUDGET_MB`), newest first; older diffs are evicted, metadata never is. `build-index --history` remains the explicit full build. Backs `excavate`, `lifecycle`, `history-search` and `rescue` discovery (`resolve` is the graph's concept index). | git |
+| `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db`: commit metadata, diff text, and contentless FTS5 trigram indexes over the diffs and paths. Demand-driven: the daemon never ingests at startup, and `status` and `doctor` never create the db — the first history query runs a bounded catch-up (`PIXEL_FACTS_QUERY_BUDGET_MS`, default 3 s) and spawns the low-priority keep-fresh loop that never blocks queries. The daemon `history`, `dig-history` and `lifecycle` ops take `read_only: true` (protocol 15), under which an absent db answers `unavailable` and a stale one answers from existing rows — ingest and catch-up are skipped; the prompt hook sends only this form. Bounded: diff text is kept for the last 365 days (`PIXEL_HISTORY_WINDOW_DAYS`, `0` for all) within 256 MiB of used pages (`PIXEL_HISTORY_BUDGET_MB`), newest first; older diffs are evicted, metadata never is. `build-index --history` remains the explicit full build. Backs `excavate`, `lifecycle`, `history-search` and `rescue` discovery (`resolve` is the graph's concept index). | git |
 | `pixel-rank` | Fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. The scoring is pure; `compute_signals` gathers the activity channel itself (git log churn when facts have none, and a failed or capped scan is reported as unavailable rather than as an empty map) and takes the session and error-sink channels from its caller — the daemon feeds neither of those. Also hosts `regions`: the pure symbol-level regions analysis for `scope-task --regions` (P0 symbols + call/import edges in, regions manifest out — line ranges, conservative conflict pairs, merge-order layers, shared files). | graph, git, session |
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
 | `pixel-ops` | Safe git mutation infrastructure ported from usable-git: snapshot store, repository lock, operation journal, recovery keys. Implements `inspect`, `review`, `history`, `diff`, `publish`, `push`, `ship`, `branch`, `update`, `sync`, `reconcile`, `rewrite`, `provenance`, `branches`, `env`. | git |
@@ -611,21 +611,29 @@ old install left in an agent's settings cannot block or fail a host. `pixel
 install` and `pixel uninstall` remove those registrations from every agent
 file above; `crates/pixel-install/src/routing.rs` recognises them by verb.
 
-The brief (`execution_brief/chain.rs`, `execution_brief/evidence.rs`) is built
+The brief (`execution_brief/chain.rs`, `execution_brief/evidence.rs`,
+`execution_brief/routes.rs`) is built
 on every Claude Code and Codex `prompt-submit` task event for a code-shaped
 prompt. Pi gets none (`start_brief` in
 `task_hook.rs` skips `TaskProvider::Pi`), and no other host registers a prompt
-hook. It runs at most four ops under one 750 ms deadline: `search-content -F
+hook. It runs at most six ops under one 750 ms deadline: `search-content -F
 -l` on the first anchor, `find-symbol` to resolve a uid, `impact <uid>` only
-for change or caller intent, and `find-code` when no anchor found a file. It
-reads a warm daemon if one answers this protocol and otherwise the index and
+for change or caller intent, `find-code` when no anchor found a file, then
+one evidence op the question kind picks (`evaluate`/`trace` for a path,
+`uses` for covering tests, `skeleton` for a file's shape, `history` for
+rationale, `context` for a defect's definition, `targets_facts` for a
+feature) plus a bounded `line_at` or context read for the `defined:` line.
+A `status` probe (facts freshness, embedding warmth) rides along uncounted.
+It reads a warm daemon if one answers this protocol and otherwise the index and
 graph read-only in process; it never starts a daemon and never builds an
-index or graph. A repository without an index yields no brief. A missing or
+index or graph. Its history request sends `read_only: true`, which only a
+version-15 daemon honours, so the hook can never be the request that opens
+the facts warmer. A repository without an index yields no brief. A missing or
 stale graph still yields the text evidence (`files:`), with the reason under
 `unresolved:` (`the graph is not built`, `the graph is stale`) and no callers.
-Output is capped at 2 KiB and says how many ops ran (`ops: n/4`,
-`partial: budget` when cut short). `PIXEL_BRIEF=0|false|off` or `brief: false`
-in `.pixel/config.yaml` switches it off.
+Output is capped at 2 KiB and says how many ops answered (`coverage: n/m`,
+`packet partial` when the budget cut short). `PIXEL_BRIEF=0|false|off` or
+`brief: false` in `.pixel/config.yaml` switches it off.
 
 `pixel doctor` checks current installation artifacts and distinguishes configured
 or protocol-checked hooks from observed live execution.

@@ -40,35 +40,88 @@ pub(crate) enum QuestionKind {
 }
 
 /// `find-code`-style words that ask how one symbol reaches another.
-const FLOW_WORDS: &[&str] = &["reach", "flow", "path", "through", "call"];
+const FLOW_WORDS: &[&str] = &[
+    "reach", "reaches", "reached", "reaching", "flow", "flows", "path", "paths", "through", "call",
+    "calls", "called", "calling", "caller", "callers", "callee", "callees",
+];
 /// Words that ask about test coverage.
-const TEST_WORDS: &[&str] = &["test", "spec", "assert"];
+const TEST_WORDS: &[&str] = &[
+    "test",
+    "tests",
+    "tested",
+    "testing",
+    "spec",
+    "specs",
+    "assert",
+    "asserts",
+    "asserted",
+    "assertion",
+    "assertions",
+];
 /// Words that ask about configuration, installation or hooks.
-const CONFIG_WORDS: &[&str] = &["config", "install", "hook", "setting", "setup", "env"];
+const CONFIG_WORDS: &[&str] = &[
+    "config",
+    "configs",
+    "configure",
+    "configured",
+    "configures",
+    "configuring",
+    "configuration",
+    "install",
+    "installs",
+    "installed",
+    "installing",
+    "installation",
+    "hook",
+    "hooks",
+    "setting",
+    "settings",
+    "setup",
+    "env",
+    "environment",
+];
 /// Words that ask why code exists or when it arrived.
 const RATIONALE_WORDS: &[&str] = &[
     "why",
     "history",
     "decision",
+    "decisions",
     "introduced",
+    "introduces",
     "when",
     "commit",
+    "commits",
     "changelog",
     "removed",
+    "removes",
 ];
 /// Words that report a defect: a strong prompt names its symbol, so a
 /// bugfix brief can come from the heuristic too, not only from a verdict.
 const BUGFIX_WORDS: &[&str] = &[
     "fix",
+    "fixes",
+    "fixed",
+    "fixing",
     "bug",
+    "bugs",
     "crash",
+    "crashes",
+    "crashed",
     "error",
+    "errors",
     "panic",
+    "panics",
     "broken",
+    "fail",
     "fails",
+    "failed",
     "failing",
+    "failure",
+    "failures",
     "regression",
+    "regressions",
     "exception",
+    "exceptions",
 ];
 
 impl QuestionKind {
@@ -83,21 +136,21 @@ impl QuestionKind {
         }
     }
 
-    /// The kind the typed text asks for when no verdict routed it. Word
-    /// stems are matched as prefixes of whole words (the `call` stem takes
-    /// `calls` and `caller` but not `scallop`); precedence is the order
+    /// The kind the typed text asks for when no verdict routed it. Words
+    /// match exactly — the lists name each inflection, so `spec` does not
+    /// take `specific` nor `env` take `envelope`; precedence is the order
     /// the kinds are checked below. Words that are segments of an anchor —
     /// `decisions` inside `build_decisions_request` — name the target of
     /// the question, not its shape, and never route it.
     pub(crate) fn heuristic(typed: &str, anchors: &Anchors) -> Self {
         let anchored = anchors.segment_words();
         let symbol_anchors = anchors.names().count();
-        let asks = |stems: &[&str]| {
+        let asks = |words: &[&str]| {
             typed
                 .split(|ch: char| !ch.is_alphanumeric())
                 .map(str::to_lowercase)
                 .filter(|word| !anchored.contains(word))
-                .any(|word| stems.iter().any(|stem| word.starts_with(stem)))
+                .any(|word| words.contains(&word.as_str()))
         };
         // Two named endpoints make a from→to question. One anchor with a
         // flow word is still a reach question — the route derives the
@@ -134,11 +187,11 @@ impl QuestionKind {
     }
 }
 
-/// Whether `word` carries a flow stem (matched as a prefix): the chain
-/// uses it to find the destination a one-anchor flow prompt names in
-/// prose after the flow word.
+/// Whether `word` is a flow word (exact match): the chain uses it to
+/// find the destination a one-anchor flow prompt names in prose after
+/// the flow word.
 pub(crate) fn asks_flow(word: &str) -> bool {
-    FLOW_WORDS.iter().any(|stem| word.starts_with(stem))
+    FLOW_WORDS.contains(&word)
 }
 
 /// `text` as one single-quoted shell word, for the `next:` command.
@@ -235,6 +288,22 @@ mod tests {
         // Tests and config outrank rationale.
         assert_eq!(kind_of("which tests were added when"), QuestionKind::Tests);
         assert_eq!(kind_of("where is fetchUser defined"), QuestionKind::Lookup);
+    }
+
+    #[test]
+    fn heuristic_should_not_route_words_that_only_contain_a_word() {
+        // Prefix stems took `specific` for `spec`, `envelope` for `env`,
+        // `fixture` for `fix` and `whenever` for `when`; whole-word
+        // matching keeps each in its own meaning.
+        for prompt in [
+            "which specific function parses the input",
+            "how is the envelope built",
+            "the fixture in main.rs returns empty",
+            "whenever the watcher fires the graph updates",
+            "the callback path is pathological",
+        ] {
+            assert_eq!(kind_of(prompt), QuestionKind::Lookup, "{prompt}");
+        }
     }
 
     #[test]

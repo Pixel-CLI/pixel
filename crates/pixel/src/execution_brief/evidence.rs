@@ -28,13 +28,14 @@ use pixel_index::{GramExtractor, TrigramExtractor, gitsync};
 use serde_json::Value;
 
 use super::chain::{
-    CONCEPT_ROWS, CallerHit, Evidence, Flow, Found, HistoryHit, RichFound, RichHit, SEARCH_ROWS,
-    SYMBOL_ROWS, StatusProbe, SymbolHit,
+    CONCEPT_ROWS, CallerHit, Evidence, Flow, Found, HistoryHit, MAX_TARGETS, RichFound, RichHit,
+    SEARCH_ROWS, SYMBOL_ROWS, StatusProbe, SymbolHit,
 };
 
-/// The path search's bound: `evaluate`'s own default when the field is
-/// unset, named here for `trace`'s required `max_depth`.
-const FLOW_DEPTH: u32 = 6;
+/// The path search's bound: the daemon's `evaluate` default and its
+/// `trace` depth, so the local route searches the same radius the
+/// daemon's does.
+const FLOW_DEPTH: u32 = 8;
 
 /// Where the facts come from, decided once per brief.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -286,6 +287,15 @@ impl Live {
                 notes: vec![format!("evaluate: {reason}")],
             });
         }
+        // `trace` resolves names first and answers `{candidates}` on an
+        // ambiguous endpoint: that is a naming problem, not a negative.
+        if data
+            .get("candidates")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| !rows.is_empty())
+        {
+            return Err(format!("evaluate: {reason}; trace: ambiguous name"));
+        }
         Err(format!(
             "evaluate: {reason}; trace found no path within depth {FLOW_DEPTH}"
         ))
@@ -468,13 +478,16 @@ impl Evidence for Live {
                 let data = self.ask(
                     &Request::TargetsFacts {
                         task: task.to_string(),
-                        limit: Some(1),
+                        limit: Some(MAX_TARGETS),
                     },
                     deadline,
                 )?;
-                let targets =
-                    targets_of(&data).ok_or_else(|| "facts did not name targets".to_string())?;
-                Ok(targets)
+                targets_of(&data).ok_or_else(|| {
+                    data.get("reason").and_then(Value::as_str).map_or_else(
+                        || "facts did not name targets".to_string(),
+                        |reason| format!("facts: {reason}"),
+                    )
+                })
             }
             Route::Local => Err("task facts need a running daemon".into()),
         }
@@ -746,10 +759,16 @@ enum Verdict {
     Unreadable,
 }
 
-/// `evaluate` replies are an `EvaluateAnswer`: `{kind:"path"|"none"|"error"}`.
-/// `none` is an honest negative; `error` and `unknown` are not answers.
+/// `evaluate` replies serialize `pixel_proto::evaluate::Output`: an
+/// `evaluation` envelope flattens `Outcome` into the `status`, `witness`,
+/// `reason` and `next_actions` fields; `error` carries `code` +
+/// `message`. `absent_in_snapshot` is an honest negative, `established`
+/// carries the path witness, `unknown` and `error` hand the question to
+/// `trace`. The `path`/`none`/`unknown` shapes the first fakes wrote stay
+/// readable so a hand-built fixture still parses.
 fn evaluate_flow(data: &Value) -> Verdict {
     match data.get("kind").and_then(Value::as_str) {
+        Some("evaluation") => evaluation_flow(data),
         Some("path") => {
             let hops: Vec<String> = data
                 .get("path")
@@ -782,12 +801,86 @@ fn evaluate_flow(data: &Value) -> Verdict {
                 .to_string(),
         ),
         Some("error") => Verdict::Unknown(
-            data.get("reason")
+            data.get("message")
+                .or_else(|| data.get("reason"))
                 .and_then(Value::as_str)
                 .unwrap_or("error")
                 .to_string(),
         ),
         _ => Verdict::Unreadable,
+    }
+}
+
+/// The `status` of a `{"kind":"evaluation"}` envelope. `absent_in_snapshot`
+/// is a real answer — the relation was exhausted, so no `trace` round-trip
+/// is spent confirming it.
+fn evaluation_flow(data: &Value) -> Verdict {
+    match data.get("status").and_then(Value::as_str) {
+        Some("established") => Verdict::Answer(Flow::Path {
+            hops: witness_hops(data.get("witness")),
+            notes: Vec::new(),
+        }),
+        Some("absent_in_snapshot") => Verdict::Answer(Flow::Absent),
+        Some("unknown") => Verdict::Unknown(evaluation_reason(data)),
+        _ => Verdict::Unreadable,
+    }
+}
+
+/// The witness a `path`/`identity` evaluation carries. Each `SymbolRef`
+/// renders as the qualified segment of its `path#qualified#kind` uid —
+/// first the `from` of the first edge, then every edge's `to`. `identity`
+/// is a zero-length path: the target is itself the source.
+fn witness_hops(witness: Option<&Value>) -> Vec<String> {
+    let Some(witness) = witness else {
+        return Vec::new();
+    };
+    let name = |symbol: &Value| {
+        symbol
+            .get("uid")
+            .and_then(Value::as_str)
+            .map(|uid| uid.split('#').nth(1).unwrap_or(uid).to_string())
+    };
+    match witness.get("kind").and_then(Value::as_str) {
+        Some("path") => {
+            let mut hops = Vec::new();
+            for (i, edge) in witness
+                .get("edges")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                if i == 0
+                    && let Some(from) = edge.get("from").and_then(name)
+                {
+                    hops.push(from);
+                }
+                if let Some(to) = edge.get("to").and_then(name) {
+                    hops.push(to);
+                }
+            }
+            hops
+        }
+        Some("identity") => witness.get("symbol").and_then(name).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `reason.code` names why the predicate could not be evaluated —
+/// `graph_stale`, `ambiguous_symbol`, `symbol_not_found` and friends —
+/// humanised for the `unresolved:` line, with the argument appended when
+/// the reason names one.
+fn evaluation_reason(data: &Value) -> String {
+    let reason = data.get("reason");
+    let Some(code) = reason.and_then(|r| r.get("code")).and_then(Value::as_str) else {
+        return "unknown".to_string();
+    };
+    match reason
+        .and_then(|r| r.get("argument"))
+        .and_then(Value::as_str)
+    {
+        Some(argument) => format!("{}: {argument}", code.replace('_', " ")),
+        None => code.replace('_', " "),
     }
 }
 
@@ -1073,9 +1166,17 @@ mod tests {
                             {"symbol": {"path": "tests/a_test.rs"}}
                         ]}),
                         Some("context") => json!({"body": "fn go() {\n  go_body();\n}"}),
-                        Some("evaluate") => json!({"kind": "path",
-                            "path": [{"name": "go"}, {"name": "mid"}, {"name": "stop"}],
-                            "notes": ["2 hops"]}),
+                        Some("evaluate") => json!({"kind": "evaluation",
+                            "predicate": "path", "status": "established",
+                            "answer": true,
+                            "witness": {"kind": "path", "probable_edges": 0,
+                                "edges": [
+                                    {"from": {"uid": "src/a.ts#go#function"},
+                                     "to": {"uid": "src/a.ts#mid#function"}},
+                                    {"from": {"uid": "src/a.ts#mid#function"},
+                                     "to": {"uid": "src/b.ts#stop#function"}}
+                                ]},
+                            "reason": null, "next_actions": []}),
                         Some("trace") => json!({"found": true, "hops": [
                             {"name": "go"}, {"name": "stop"}
                         ]}),
@@ -1393,7 +1494,7 @@ mod tests {
             live.flow("go", "stop", 100, deadline).unwrap(),
             Flow::Path {
                 hops: vec!["go".into(), "mid".into(), "stop".into()],
-                notes: vec!["2 hops".into()]
+                notes: vec![]
             }
         );
         assert_eq!(
@@ -1464,12 +1565,50 @@ mod tests {
             evaluate_flow(&none),
             Verdict::Answer(Flow::Absent)
         ));
-        let err = json!({"kind": "error", "reason": "no uid"});
-        assert!(matches!(evaluate_flow(&err), Verdict::Unknown(_)));
+        let err = json!({"kind": "error", "message": "no uid"});
+        assert!(matches!(evaluate_flow(&err), Verdict::Unknown(r) if r == "no uid"));
         assert!(matches!(
             evaluate_flow(&json!({"unexpected": true})),
             Verdict::Unreadable
         ));
+    }
+
+    #[test]
+    fn evaluate_flow_should_read_the_real_evaluation_envelope() {
+        // The daemon serializes `evaluate::Output`: `established` carries
+        // the witness edges, `absent_in_snapshot` is a final answer that
+        // needs no trace, `unknown` carries the structured reason.
+        let established = json!({"kind": "evaluation", "status": "established",
+        "answer": true, "predicate": "path",
+        "witness": {"kind": "path", "probable_edges": 0, "edges": [
+            {"from": {"uid": "a.ts#go#function"}, "to": {"uid": "a.ts#mid#function"}},
+            {"from": {"uid": "a.ts#mid#function"}, "to": {"uid": "b.ts#stop#function"}}
+        ]}});
+        assert!(
+            matches!(evaluate_flow(&established), Verdict::Answer(Flow::Path { hops, .. }) if hops == ["go", "mid", "stop"])
+        );
+        let identity = json!({"kind": "evaluation", "status": "established",
+            "witness": {"kind": "identity", "symbol": {"uid": "a.ts#go#function"}}});
+        assert!(
+            matches!(evaluate_flow(&identity), Verdict::Answer(Flow::Path { hops, .. }) if hops == ["go"])
+        );
+        let absent = json!({"kind": "evaluation", "status": "absent_in_snapshot",
+            "answer": false});
+        assert!(matches!(
+            evaluate_flow(&absent),
+            Verdict::Answer(Flow::Absent)
+        ));
+        let unknown = json!({"kind": "evaluation", "status": "unknown",
+            "answer": null, "reason": {"code": "graph_stale"}});
+        assert!(matches!(evaluate_flow(&unknown), Verdict::Unknown(r) if r == "graph stale"));
+        let ambiguous = json!({"kind": "evaluation", "status": "unknown",
+            "reason": {"code": "ambiguous_symbol", "argument": "go",
+                       "candidates": []}});
+        assert!(
+            matches!(evaluate_flow(&ambiguous), Verdict::Unknown(r) if r == "ambiguous symbol: go")
+        );
+        let no_status = json!({"kind": "evaluation"});
+        assert!(matches!(evaluate_flow(&no_status), Verdict::Unreadable));
     }
 
     #[test]

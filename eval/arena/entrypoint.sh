@@ -74,13 +74,22 @@ output_path, receipt_path, rep = sys.argv[1:]
 try:
     raw_response = Path(output_path).read_text().strip()
     response = json.loads(raw_response) if raw_response else {}
-    hook_output = response.get("hookSpecificOutput") or {}
+    # Valid JSON of the wrong shape (`[]`, `{"hookSpecificOutput": 1}`) must
+    # still write a receipt: only dicts are walked; anything else is
+    # `response_valid: false`, not an exception.
+    shaped = isinstance(response, dict)
+    hook_output = response.get("hookSpecificOutput") if shaped else None
+    if hook_output is not None and not isinstance(hook_output, dict):
+        shaped = False
+        hook_output = None
+    hook_output = hook_output or {}
     context = hook_output.get("additionalContext", "")
     # Same validity contract as hook_audit.py's run_hook: an absent
     # hookSpecificOutput is Codex's valid abstention shape (`{}`), so the hook
     # plumbing is verified separately from whether this prompt found evidence.
     valid = (
         bool(raw_response)
+        and shaped
         and (
             "hookSpecificOutput" not in response
             or (

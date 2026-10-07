@@ -60,6 +60,9 @@ const MIN_CASED_CHARS: usize = 5;
 const MAX_FILES: usize = 8;
 const MAX_DEFINED: usize = 3;
 const MAX_CALLERS: usize = 10;
+/// Files a feature brief asks `targets_facts` for and shows; the request
+/// bound is the render bound so no fetched row is silently dropped.
+pub(crate) const MAX_TARGETS: usize = 4;
 /// Longest concept phrase: all the significant words the prompt carries,
 /// bounded by characters rather than a word count.
 const MAX_CONCEPT_CHARS: usize = 200;
@@ -1323,7 +1326,7 @@ impl Shown {
             tests: brief.tests.len().min(MAX_FILES),
             skeleton: brief.skeleton.len().min(MAX_FILES),
             history: brief.history.len().min(HISTORY_ROWS),
-            targets: brief.targets.len().min(MAX_FILES),
+            targets: brief.targets.len().min(MAX_TARGETS),
             excluded: brief.excluded.len(),
             caps: brief.caps.len(),
             unresolved: brief.unresolved.len(),

@@ -46,7 +46,11 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// itself; an older daemon would ignore them and answer unfiltered.
 /// 14: `targets` takes `regions` and attaches the symbol-level regions
 /// manifest; an older daemon would ignore the flag and answer without it.
-pub const PROTOCOL_VERSION: u64 = 14;
+/// 15: `history`, `excavate`/`dig-history` and `lifecycle` take
+/// `read_only`, and `status` reports `embedding`; an older daemon would
+/// drop the flag and run the facts-ingest path a prompt hook must never
+/// start.
+pub const PROTOCOL_VERSION: u64 = 15;
 
 /// Rows a `search` returns when the request names no `limit`.
 pub const SEARCH_DEFAULT_ROWS: usize = 100;
