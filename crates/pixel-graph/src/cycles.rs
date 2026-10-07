@@ -763,7 +763,7 @@ mod tests {
                 assert_eq!(edges.len(), 1);
                 assert_eq!(edges[0].from.uid, edges[0].to.uid);
             }
-            _ => panic!("expected cycle witness"),
+            Witness::None => panic!("expected cycle witness"),
         }
     }
 
@@ -780,7 +780,7 @@ mod tests {
         assert_eq!(result.components.len(), 1);
         match &result.components[0].witness {
             Witness::Cycle { probable_edges, .. } => assert_eq!(*probable_edges, 1),
-            _ => panic!("expected cycle witness"),
+            Witness::None => panic!("expected cycle witness"),
         }
     }
 
@@ -807,7 +807,7 @@ mod tests {
                 assert_eq!(edges[0].from.uid, edges[1].to.uid);
                 assert_eq!(edges[0].to.uid, edges[1].from.uid);
             }
-            _ => panic!("expected cycle witness"),
+            Witness::None => panic!("expected cycle witness"),
         }
     }
 
@@ -826,7 +826,7 @@ mod tests {
             Witness::Cycle { edges, .. } => {
                 assert_eq!(edges.len(), 3);
             }
-            _ => panic!("expected cycle witness"),
+            Witness::None => panic!("expected cycle witness"),
         }
     }
 
@@ -1093,8 +1093,7 @@ mod tests {
                             fx.store
                                 .symbol_by_uid(src)
                                 .unwrap()
-                                .map(|s| s.id == id)
-                                .unwrap_or(false)
+                                .is_some_and(|s| s.id == id)
                         })
                         .unwrap();
                     let dst_id = fx
@@ -1104,8 +1103,7 @@ mod tests {
                             fx.store
                                 .symbol_by_uid(dst)
                                 .unwrap()
-                                .map(|s| s.id == id)
-                                .unwrap_or(false)
+                                .is_some_and(|s| s.id == id)
                         })
                         .unwrap();
                     let found = fx
@@ -1117,7 +1115,7 @@ mod tests {
                     assert!(found, "witness edge {src} -> {dst} not found in store");
                 }
             }
-            _ => panic!("expected cycle witness"),
+            Witness::None => panic!("expected cycle witness"),
         }
     }
 
