@@ -547,7 +547,13 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
             && let Ok(head) = evidence.line_at(&path, line, deadline)
         {
             edit(state, |brief| {
-                brief.likely_def = Some(format!("{path}:{line} — {head}"));
+                // A hit with no line of its own reads line 1, so it is named
+                // by bare path rather than by a `:0` that points nowhere.
+                brief.likely_def = Some(if line == 0 {
+                    format!("{path} — {head}")
+                } else {
+                    format!("{path}:{line} — {head}")
+                });
             });
         }
     }
@@ -764,10 +770,15 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
     }
     if let Some(line) = list_line(
         "files",
-        brief
-            .files
-            .iter()
-            .map(|hit| format!("{}:{}", clean(&hit.path), hit.line)),
+        brief.files.iter().map(|hit| {
+            // A file row the search answered without a line number is a
+            // bare path: `path:0` reads as a hit on line 0 of the file.
+            if hit.line == 0 {
+                clean(&hit.path)
+            } else {
+                format!("{}:{}", clean(&hit.path), hit.line)
+            }
+        }),
         shown.files,
         " ",
         brief.searched,
@@ -1150,6 +1161,9 @@ mod tests {
         concept: Result<Found, String>,
         symbols: Result<Vec<SymbolHit>, String>,
         callers: Result<Vec<CallerHit>, String>,
+        /// Source line a `line_at` read answers with, when the fake models
+        /// source at all.
+        source: Option<String>,
         pause: Duration,
         log: Mutex<Vec<String>>,
     }
@@ -1161,6 +1175,7 @@ mod tests {
                 concept: Ok(Found::default()),
                 symbols: Ok(Vec::new()),
                 callers: Ok(Vec::new()),
+                source: None,
                 pause: Duration::ZERO,
                 log: Mutex::new(Vec::new()),
             }
@@ -1193,6 +1208,10 @@ mod tests {
             self.note(format!("callers {target}"));
             self.callers.clone()
         }
+        fn line_at(&self, path: &str, line: u64, _: Instant) -> Result<String, String> {
+            self.note(format!("line_at {path}:{line}"));
+            self.source.clone().ok_or_else(|| "no source".to_string())
+        }
     }
 
     fn chain(prompt: &str, fake: &Fake, window: Duration) -> Brief {
@@ -1200,6 +1219,45 @@ mod tests {
         let state = Mutex::new(Brief::default());
         run(&plan, fake, &state, Instant::now() + window);
         state.into_inner().unwrap()
+    }
+
+    #[test]
+    fn likely_def_should_name_a_line_less_hit_by_its_path_alone() {
+        let mut fake = Fake::new();
+        // No symbol resolves, so the file whose stem matches the anchor is
+        // quoted as the likely definition — with no line number of its own.
+        fake.files = Ok(found(vec![hit("src/handleError.ts", 0)]));
+        fake.symbols = Ok(Vec::new());
+        fake.source = Some("export const handleError = (e) => e".to_string());
+        let brief = chain("where is `handleError` defined?", &fake, SECOND);
+        assert_eq!(
+            brief.likely_def.as_deref(),
+            Some("src/handleError.ts — export const handleError = (e) => e")
+        );
+        assert_eq!(fake.calls().last().unwrap(), "line_at src/handleError.ts:0");
+        let text = render(&brief).unwrap();
+        assert!(
+            text.contains("\nlikely definition: src/handleError.ts — export const handleError"),
+            "{text}"
+        );
+        assert!(!text.contains(":0"), "{text}");
+    }
+
+    #[test]
+    fn likely_def_should_keep_the_line_of_a_hit_that_has_one() {
+        let mut fake = Fake::new();
+        fake.files = Ok(found(vec![hit("src/handleError.ts", 7)]));
+        fake.symbols = Ok(Vec::new());
+        fake.source = Some("export const handleError = (e) => e".to_string());
+        let brief = chain("where is `handleError` defined?", &fake, SECOND);
+        assert!(
+            brief
+                .likely_def
+                .as_deref()
+                .is_some_and(|head| head.starts_with("src/handleError.ts:7 — ")),
+            "{:?}",
+            brief.likely_def
+        );
     }
 
     #[test]
@@ -1221,7 +1279,8 @@ mod tests {
             [
                 "files_with handleError",
                 "symbols handleError",
-                "callers packages/ui/handleError.ts#handleError#function"
+                "callers packages/ui/handleError.ts#handleError#function",
+                "line_at packages/ui/handleError.ts:3"
             ]
         );
         assert_eq!(brief.files, [hit("apps/web/page.tsx", 4)]);
@@ -1238,7 +1297,14 @@ mod tests {
         fake.files = Ok(found(vec![hit("src/a.ts", 2)]));
         fake.symbols = Ok(vec![symbol("src/a.ts", "fetchUser")]);
         let brief = chain("where is fetchUser defined", &fake, SECOND);
-        assert_eq!(fake.calls(), ["files_with fetchUser", "symbols fetchUser"]);
+        assert_eq!(
+            fake.calls(),
+            [
+                "files_with fetchUser",
+                "symbols fetchUser",
+                "line_at src/a.ts:3"
+            ]
+        );
         assert_eq!(brief.ops, 2);
         assert!(brief.callers.is_empty());
         assert!(!brief.impacted);
@@ -1517,6 +1583,23 @@ mod tests {
                 .unwrap()
                 .contains("\ncallers (impact d1): apps/web/page.tsx -> Page\n")
         );
+    }
+
+    #[test]
+    fn render_should_omit_the_line_number_of_a_file_without_one() {
+        let mut brief = full_brief();
+        brief.files = vec![
+            hit("apps/web/page.tsx", 0),
+            hit("packages/ui/handleError.ts", 1),
+        ];
+        let text = render(&brief).unwrap();
+        assert!(
+            text.contains("\nfiles: apps/web/page.tsx packages/ui/handleError.ts:1\n"),
+            "{text}"
+        );
+        // Every shape a `path:0` could take: the bare hit, and the pair with
+        // a real line beside it.
+        assert!(!text.contains(":0"), "{text}");
     }
 
     #[test]

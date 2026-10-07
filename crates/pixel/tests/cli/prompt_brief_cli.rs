@@ -223,6 +223,41 @@ fn a_stale_graph_should_be_named_and_never_rebuilt_by_the_hook() {
 }
 
 #[test]
+fn no_file_anchor_in_a_hook_brief_should_carry_a_zero_line() {
+    let root = indexed("no-zero-line");
+    for provider in ["claude", "codex"] {
+        let text = context(&hook(&root, provider, RENAME, &[])).to_string();
+        // Every `path:line` and `via:line` the block renders, in either list
+        // it can appear in. A row the search answered without a line number
+        // has to render as a bare path.
+        for anchor in anchors(&text) {
+            let line = anchor
+                .rsplit_once(':')
+                .unwrap_or_else(|| panic!("no line on {anchor:?} in\n{text}"));
+            assert_ne!(line.1, "0", "a zero line anchor {anchor:?} in\n{text}");
+            assert!(
+                line.1.chars().all(|ch| ch.is_ascii_digit()),
+                "a non-numeric line {anchor:?} in\n{text}"
+            );
+        }
+    }
+}
+
+/// The `path:line` and `via:line` tokens of a rendered brief.
+fn anchors(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.split_once(": "))
+        .find(|(label, _)| matches!(*label, "files" | "callers (impact d1)"))
+        .map(|(_, body)| body)
+        .unwrap_or_default()
+        .split([' ', ';'])
+        .map(str::trim)
+        .filter(|token| token.contains('.') && token.contains(':'))
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[test]
 fn a_missing_graph_should_leave_the_text_evidence_and_build_nothing() {
     let root = fixture("no-graph");
     let search = pixel_command()

@@ -14,8 +14,9 @@
 #                      [--results-dir DIR] [--reuse-pixel-image] [--watch]
 #                      [--assert-context-parity] [--prepare-pixel-graph]
 #                      [--review-pixel-hooks] [--skill-candidate-dir DIR]
-#   --watch opens one Herdr pane per arm container (when inside Herdr)
-#   streaming the measured agent output; falls back to a tmux session otherwise.
+#   --watch opens one Herdr pane per isolated watch container (when inside Herdr)
+#   running `docker exec -it <watch-c> codex` — interactive codex with and
+#   without pixel side by side; falls back to a tmux session otherwise.
 # Results: <results-dir>/<arm>-<task>-<rep>.jsonl + rank table.
 set -euo pipefail
 ARENA_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -88,6 +89,10 @@ if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
     echo "--review-pixel-hooks requires exactly one task so its receipt is unambiguous" >&2
     exit 2
   fi
+fi
+
+if [ "$REVIEWED_PIXEL_HOOKS" != "1" ] && [ " $ARMS " = " raw pixel " ]; then
+  echo "WARNING: live Pixel brief evidence is disabled; rerun with --review-pixel-hooks and a reviewed hook image" >&2
 fi
 SKILL_PILOT=0
 if [ -n "$SKILL_CANDIDATE_DIR" ]; then
@@ -171,75 +176,7 @@ receipt = {
 PY
 : > "$RESULTS/.watch-panes"
 
-
-# --- --watch helpers (defined here; invoked per rep-1 container at launch) ---
-# The pane follows the measured Codex task output; it never starts a second
-# agent or submits another prompt against the measured repository.
-open_watch_pane() {  # container arm
-  local c="$1" arm="$2" wp task log_path monitor_cmd
-  wp=$(herdr pane split --current --direction right --no-focus \
-    | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['pane']['pane_id'])" 2>/dev/null || true)
-  if [ -z "$wp" ]; then
-    echo "WARNING: herdr pane split failed; $c logs via 'docker logs -f $c'" >&2
-    return 0
-  fi
-  echo "$wp" >> "$RESULTS/.watch-panes"
-  herdr pane rename "$wp" "arena-$RUN_ID-$arm" >/dev/null 2>&1
-  task="${TASKS%% *}"
-  log_path="/out/${arm}-${task}-1.jsonl"
-  printf -v monitor_cmd 'docker exec -it %q sh -c %q sh %q' "$c" \
-    'while [ ! -f "$1" ]; do sleep 1; done; tail -n +1 -f "$1"' "$log_path"
-  herdr pane run "$wp" "$monitor_cmd" >/dev/null 2>&1
-}
-
-# Equalize all panes in the tab to identical column widths: probe the layout
-# with a zero-delta resize (returns geometry, moves nothing), then drag each
-# column boundary to i/N of the row width until every column matches.
-equalize_watch_panes() {
-  python3 - <<'PYEQ' 2>/dev/null || true
-import json, subprocess, time
-
-def herdr(*a):
-    try:
-        return json.loads(subprocess.run(
-            ["herdr", *a], capture_output=True, text=True, timeout=15).stdout)
-    except Exception:
-        return None
-
-def layout(pane):
-    r = herdr("pane", "resize", "--pane", pane, "--direction", "left",
-              "--amount", "0")
-    try:
-        return r["result"]["resize"]["layout"]
-    except (TypeError, KeyError):
-        return {}
-
-panes = herdr("pane", "list")
-anchor = next((p["pane_id"] for p in (panes or {}).get("result", {}).get("panes", [])), "")
-for _ in range(12):
-    lay = layout(anchor)
-    cols = sorted(lay.get("panes", []), key=lambda p: p["rect"]["x"])
-    if len(cols) < 2:
-        break
-    width = lay["area"]["width"]
-    moved = False
-    for k in range(len(cols) - 1):
-        gap = cols[k + 1]["rect"]["x"] - round(width * (k + 1) / len(cols))
-        if abs(gap) <= 1:
-            continue
-        herdr("pane", "resize", "--pane", cols[k + 1]["pane_id"],
-              "--direction", "left" if gap > 0 else "right",
-              "--amount", str(round(abs(gap) / width, 3)))
-        moved = True
-        break
-    if not moved:
-        break
-    time.sleep(0.1)
-PYEQ
-}
-
 prompt_for() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "$SCENARIOS_DIR/$1.json"; }
-
 
 scrub_pixel_lines() {
   local path="$1" temp="${1}.scrubbed" status
@@ -329,6 +266,17 @@ launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
         return 1
       fi
     fi
+    if [ "$arm" = "pixel" ]; then
+      # Reviewed hook experiments must not inherit a repo-local Codex hook
+      # file from the source checkout; the disposable user-level registry is
+      # the only hook surface under audit.
+      rm -f "$snap/.codex/hooks.json" "$snap/.codex/pixel-composed-guard-backup.json"
+    fi
+  fi
+  if [ "$WATCH" = "1" ]; then
+    rm -rf "$RESULTS/watch-snapshot-$arm-$rep" "$RESULTS/watch-out-$arm-$rep"
+    cp -a "$snap" "$RESULTS/watch-snapshot-$arm-$rep"
+    mkdir -p "$RESULTS/watch-out-$arm-$rep"
   fi
   local missing=0
   for task in $TASKS; do
@@ -346,6 +294,7 @@ launch_arm() {  # arm rep immutable-image-id — one container runs all tasks
     -v "$RESULTS":/out \
     -e ARM_TOOL="$arm" -e REP="$rep" -e TASKS="$TASKS" -e ARENA_RUN_ID="$RUN_ID" \
     -e PIXEL_ARENA_PREP_GRAPH="$PREPARE_PIXEL_GRAPH" \
+    -e PIXEL_ARENA_REUSE_INDEX="${PIXEL_ARENA_REUSE_INDEX:-1}" \
     -e ARENA_SKILL_PILOT="$SKILL_PILOT" \
     -e ARENA_REVIEWED_PIXEL_HOOKS="$REVIEWED_PIXEL_HOOKS" \
     -e CODEX_MODEL="${CODEX_MODEL:-}" -e CODEX_EFFORT="${CODEX_EFFORT:-}" \
@@ -384,11 +333,6 @@ PY
     return 1
   fi
   echo "launched arm=$arm container=$container image=$actual_image"
-  # panes open the moment the container exists — never wait for reps to finish
-  if [ "$rep" = "1" ] && [ "$WATCH" = "1" ] && [ -n "${HERDR_ENV:-}" ] \
-    && command -v herdr >/dev/null 2>&1; then
-    open_watch_pane "$container" "$arm"
-  fi
 }
 
 ARM_IMAGE_IDS=()
@@ -463,30 +407,181 @@ for arm in $ARMS; do
   CODEX_VERSION="$image_codex_version"
 done
 
+# --review-pixel-hooks requires the pixel image's install to write the full
+# audited 11-command Codex hook set. Pixel main's native-default install
+# writes task-event hooks only (no `run-hook prompt-submit`, no metrics), which
+# the paired audit rejects after containers have already spent minutes on
+# preparation. Probe the image once here, so the failure is immediate.
+if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
+  case " $ARMS " in *" pixel "*) ;;
+    *) echo "--review-pixel-hooks needs a pixel arm" >&2; exit 2 ;;
+  esac
+  pixel_image="${PIXEL_IMAGE_ID:-${PIXEL_IMAGE_REF:-pixel-arena:pixel}}"
+  if ! "$DOCKER_BIN" run --rm \
+      -v "$ARENA_DIR/arena/hook_audit.py":/usr/local/lib/arena-hook-audit.py:ro \
+      --entrypoint sh "$pixel_image" -c '
+        pixel install >/dev/null 2>&1 || exit 1
+        python3 /usr/local/lib/arena-hook-audit.py audit \
+          --arm pixel --codex-home "$HOME/.codex" \
+          --repo /tmp/preflight-repo --receipt /tmp/preflight.json
+      ' >/dev/null 2>&1; then
+    echo "ERROR: --review-pixel-hooks: the pixel image writes the native-default hook set (task-event only), which the paired audit rejects; this mode needs a pixel install that also writes the Codex prompt-submit and metrics hooks" >&2
+    exit 2
+  fi
+fi
+
+# --watch: open one Herdr pane per still-running container (inside Herdr,
+# splitting the current pane right — side by side). Must happen before `docker
+# wait`: after it, the containers have exited and `docker exec -it` fails with
+# "container is not running". The tmux fallback stays after that wait —
+# `docker logs -f` streams even for exited containers.
+launch_watch_panes() {  # <container>...
+  local watch_rep="$1"
+  shift
+  local c watch_c watch_pane watch_arm watch_owner watch_image watch_snap watch_out
+  submit_codex_prompt() {
+    local pane_id="$1" prompt="$2" attempt screen
+    herdr pane send-text "$pane_id" "$prompt" >/dev/null 2>&1
+    sleep 1
+    for attempt in 1 2 3; do
+      herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1
+      sleep 1
+      screen=$(herdr pane read "$pane_id" 2>/dev/null | tail -20)
+      case "$screen" in
+        *"Working"*|*"Explored"*|*"•"*) return 0 ;;
+      esac
+    done
+    echo "WARNING: Codex prompt was not visibly submitted in pane $pane_id" >&2
+    return 1
+  }
+  watch_owner="${HERDR_PANE_ID:-}"
+  if [ -z "$watch_owner" ]; then
+    watch_owner=$(herdr pane list | python3 -c \
+      "import json,sys; panes=json.load(sys.stdin)['result']['panes']; print(next((p['pane_id'] for p in panes if p.get('focused')), ''))" \
+      2>/dev/null || true)
+  fi
+  if [ -z "$watch_owner" ]; then
+    echo "WARNING: --watch could not identify the Herdr owner pane; set HERDR_PANE_ID" >&2
+    return 1
+  fi
+  local ready=1
+  for c in "$@"; do
+    watch_arm=${c#arena-}; watch_arm=${watch_arm%%-*}
+    watch_snap="$RESULTS/watch-snapshot-$watch_arm-$watch_rep"
+    watch_out="$RESULTS/watch-out-$watch_arm-$watch_rep"
+    watch_c="arena-watch-$watch_arm-$RUN_ID-$watch_rep"
+    watch_image=$("$DOCKER_BIN" inspect -f '{{.Image}}' "$c")
+    # A same-named leftover from an earlier run with this RUN_ID wedges
+    # `create`; the arena-watch-* name belongs to this harness, so removing
+    # the stale one first is safe.
+    "$DOCKER_BIN" rm -f "$watch_c" >/dev/null 2>&1 || true
+    if ! "$DOCKER_BIN" create --name "$watch_c" \
+      -v "$watch_snap":/repo \
+      -v "$AUTH":/root/.codex/auth.json:ro \
+      -v "$ARENA_DIR/arena/entrypoint.sh":/usr/local/bin/arena-entrypoint:ro \
+      -v "$ARENA_DIR/arena/context_manifest.py":/usr/local/lib/arena-context-manifest.py:ro \
+      -v "$ARENA_DIR/arena/hook_audit.py":/usr/local/lib/arena-hook-audit.py:ro \
+      -v "$ARENA_DIR/arena/skill_candidate.py":/usr/local/lib/arena-skill-candidate.py:ro \
+      -v "$SCENARIOS_DIR":/prompts:ro \
+      -v "$watch_out":/out \
+      -e ARM_TOOL="$watch_arm" -e REP="$watch_rep" -e TASKS="$TASKS" -e ARENA_RUN_ID="$RUN_ID" \
+      -e ARENA_WATCH_ONLY=1 -e ARENA_REVIEWED_PIXEL_HOOKS=0 \
+      -e PIXEL_ARENA_PREP_GRAPH="$PREPARE_PIXEL_GRAPH" \
+      -e PIXEL_ARENA_REUSE_INDEX="${PIXEL_ARENA_REUSE_INDEX:-1}" \
+      -e ARENA_SKILL_PILOT="$SKILL_PILOT" \
+      -e CODEX_MODEL="${CODEX_MODEL:-}" -e CODEX_EFFORT="${CODEX_EFFORT:-}" \
+      "$watch_image" >/dev/null; then
+      echo "WARNING: $watch_c create failed" >&2
+      ready=0
+      continue
+    fi
+    if ! "$DOCKER_BIN" start "$watch_c" >/dev/null; then
+      echo "WARNING: $watch_c start failed" >&2
+      "$DOCKER_BIN" rm -f "$watch_c" >/dev/null 2>&1 || true
+      ready=0
+      continue
+    fi
+    WATCH_CONTAINERS+=("$watch_c")
+    for _ in $(seq 1 120); do
+      if "$DOCKER_BIN" exec "$watch_c" test -e "/out/arena-ready-${watch_arm}-${watch_rep}" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+    if ! "$DOCKER_BIN" exec "$watch_c" test -e "/out/arena-ready-${watch_arm}-${watch_rep}" >/dev/null 2>&1; then
+      echo "WARNING: $watch_c did not finish setup before pane launch" >&2
+      ready=0
+    fi
+  done
+  [ "$ready" -eq 1 ] || return 1
+  for c in "$@"; do
+    watch_arm=${c#arena-}; watch_arm=${watch_arm%%-*}
+    watch_c="arena-watch-$watch_arm-$RUN_ID-$watch_rep"
+    watch_out="$RESULTS/watch-out-$watch_arm-$watch_rep"
+    watch_pane=$(HERDR_PANE_ID="$watch_owner" herdr pane split --current --direction right \
+      | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['pane']['pane_id'])" 2>/dev/null || true)
+    if [ -n "$watch_pane" ]; then
+      echo "$watch_pane" >> "$RESULTS/.watch-panes"
+      herdr pane rename "$watch_pane" "arena-$watch_arm" >/dev/null 2>&1
+      # Interactive Codex runs in its isolated watch-only container. The task is sent
+      # through the normal TUI after it reaches its input prompt.
+      local prompt
+      prompt=$(prompt_for "${TASKS%% *}")
+      herdr pane run "$watch_pane" \
+        "docker exec -it $watch_c codex -m $CODEX_MODEL -c model_reasoning_effort=$CODEX_EFFORT --dangerously-bypass-approvals-and-sandbox"
+      # Codex may ask to trust /repo. Hook definitions require an explicit
+      # human review in /hooks before the prompt is submitted.
+      (
+        pane_id="$watch_pane"
+        for _ in $(seq 1 45); do
+          screen=$(herdr pane read "$pane_id" 2>/dev/null | tail -20)
+          case "$screen" in
+            *"Hooks need review"*|*"Trust all and continue"*)
+              echo "WARNING: review hooks in /hooks for pane $pane_id, then resume the pane" >&2
+              herdr pane send-keys "$pane_id" esc >/dev/null 2>&1
+              exit 1 ;;
+            *"Trust and continue"*)
+              herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
+            *"Ask Codex"*)
+              submit_codex_prompt "$pane_id" "$prompt" || true
+              if [ "$watch_arm" = "pixel" ]; then
+                for _ in $(seq 1 90); do
+                  [ -s "$watch_out/pixel-hook-${watch_rep}.jsonl" ] && break
+                  sleep 1
+                done
+              fi
+              exit 0 ;;
+          esac
+          sleep 2
+        done
+      ) &
+    else
+      echo "WARNING: herdr pane split failed; $c logs via 'docker logs -f $c'" >&2
+    fi
+  done
+  echo "watching: herdr panes running interactive codex ($# containers)"
+}
+
+launch_watch_tmux() {  # <container>... — tiled tmux fallback
+  local c
+  WATCH_SESSION="arena-$$"
+  tmux new-session -d -s "$WATCH_SESSION" -x 220 -y 50 \
+    "docker logs -f $1; echo; echo 'container exited'; exec \${SHELL:-sh}"
+  for c in "${@:2}"; do
+    tmux split-window -t "$WATCH_SESSION" \
+      "docker logs -f $c; echo; echo 'container exited'; exec \${SHELL:-sh}"
+    tmux select-layout -t "$WATCH_SESSION" tiled >/dev/null
+  done
+  tmux select-layout -t "$WATCH_SESSION" tiled >/dev/null
+  echo "watching: tmux attach -t $WATCH_SESSION"
+}
+
 # all arms in parallel: one container each, all tasks inside
 CONTAINERS=()
 CONTAINER_ARMS=()
 CONTAINER_REPS=()
+WATCH_CONTAINERS=()
 LAUNCH_FAIL=0
-if [ "$WATCH" = "1" ] && [ -n "${HERDR_ENV:-}" ] && command -v herdr >/dev/null 2>&1; then
-  # close prior arena/ab panes first — even ones this run did not create —
-  # then each new rep-1 container opens its own pane as soon as it starts
-  if [ -f "$RESULTS/.watch-panes" ]; then
-    while IFS= read -r old_pane; do
-      [ -n "$old_pane" ] && herdr pane close "$old_pane" >/dev/null 2>&1
-    done < "$RESULTS/.watch-panes"
-  fi
-  for stale_pane in $(herdr pane list 2>/dev/null | python3 -c \
-    "import json,sys
-run_prefix = 'arena-' + sys.argv[1] + '-'
-for p in json.load(sys.stdin)['result']['panes']:
-    label = p.get('label') or ''
-    if label.startswith(run_prefix):
-        print(p['pane_id'])" "$RUN_ID" 2>/dev/null); do
-    herdr pane close "$stale_pane" >/dev/null 2>&1
-  done
-fi
-
 for rep in $(seq 1 "$REPS"); do
   # fresh snapshot per rep: prior reps' index artifacts and tool edits must
   # not leak into the next rep's starting state. Rep-scoped names —
@@ -508,42 +603,23 @@ for rep in $(seq 1 "$REPS"); do
     CONTAINER_REPS+=("$rep")
     rep_containers+=("arena-$arm-$RUN_ID-$rep")
   done
-  if [ "$rep" = "1" ] && [ "$WATCH" = "1" ] && [ -n "${HERDR_ENV:-}" ]; then
-    # all rep-1 panes exist — flatten to equal columns and label the tab
-    # immediately, before the serialized wait
-    equalize_watch_panes
-    herdr tab rename "$(herdr pane list 2>/dev/null | python3 -c \
-      "import json,sys;print(json.load(sys.stdin)['result']['panes'][0]['tab_id'])" 2>/dev/null)" \
-      "arena: $(echo "$ARMS" | tr ' ' '|')" >/dev/null 2>&1 || true
-  fi
   # serialize reps: waiting here keeps rep N+1 from racing rep N's still
   # running containers for CPU — wall times stay comparable across reps
   if [ "${#rep_containers[@]}" -gt 0 ]; then
+    # The Watch panes must open while the containers are still running: after
+    # `docker wait` they have exited and `docker exec -it` cannot attach.
+    if [ "$WATCH" = "1" ]; then
+      if [ -n "${HERDR_ENV:-}" ] && command -v herdr >/dev/null 2>&1; then
+        launch_watch_panes "$rep" "${rep_containers[@]}"
+      elif command -v tmux >/dev/null 2>&1; then
+        launch_watch_tmux "${rep_containers[@]}"
+      else
+        echo "WARNING: --watch needs herdr (HERDR_ENV) or tmux; neither found" >&2
+      fi
+    fi
     "$DOCKER_BIN" wait "${rep_containers[@]}" >/dev/null 2>&1 || true
   fi
 done
-
-# --watch: one pane per container streaming `docker logs -f`. Inside Herdr
-# (HERDR_ENV=1) splits the current pane right, side by side with this one;
-# otherwise falls back to a tiled tmux session you attach separately.
-if [ "$WATCH" = "1" ]; then
-  if [ -n "${HERDR_ENV:-}" ] && command -v herdr >/dev/null 2>&1; then
-    echo "watching: herdr panes opened at launch (${#CONTAINERS[@]} containers)"
-  elif ! command -v tmux >/dev/null 2>&1; then
-    echo "WARNING: --watch needs herdr (HERDR_ENV) or tmux; neither found" >&2
-  elif [ "${#CONTAINERS[@]}" -gt 0 ]; then
-    WATCH_SESSION="arena-$$"
-    tmux new-session -d -s "$WATCH_SESSION" -x 220 -y 50 \
-      "docker logs -f ${CONTAINERS[0]}; echo; echo 'container exited'; exec \${SHELL:-sh}"
-    for c in "${CONTAINERS[@]:1}"; do
-      tmux split-window -t "$WATCH_SESSION" \
-        "docker logs -f $c; echo; echo 'container exited'; exec \${SHELL:-sh}"
-      tmux select-layout -t "$WATCH_SESSION" tiled >/dev/null
-    done
-    tmux select-layout -t "$WATCH_SESSION" tiled >/dev/null
-    echo "watching: tmux attach -t $WATCH_SESSION"
-  fi
-fi
 
 FAIL="$LAUNCH_FAIL"
 for i in "${!CONTAINERS[@]}"; do
@@ -560,6 +636,12 @@ for i in "${!CONTAINERS[@]}"; do
   fi
   docker rm "$c" >/dev/null 2>&1
 done
+# Sweep watch containers that already exited; ones still running belong to
+# panes the operator may still be using, so they are left for docker to reap.
+for watch_c in "${WATCH_CONTAINERS[@]:-}"; do
+  [ -n "$watch_c" ] && "$DOCKER_BIN" rm "$watch_c" >/dev/null 2>&1 || true
+done
+[ -z "$(find "$RESULTS" -maxdepth 1 \( -name 'pixel-hook-live-*.failed' -o -name 'pixel-hook-trust-*.failed' \) -print -quit 2>/dev/null)" ] || FAIL=1
 [ "$FAIL" -ne 0 ] && echo "WARNING: some arm containers failed (see above)"
 
 echo "=== ranking"

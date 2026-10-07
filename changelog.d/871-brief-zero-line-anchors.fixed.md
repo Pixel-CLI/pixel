@@ -1,0 +1,1 @@
+**evidence brief:** a file the search answered without a line number no longer renders as `path:0` in the `[PIXEL:BRIEF]` block — both the `files` list and the `likely definition` line name it by its bare path, the way a caller without a site already was. A `0` read as "line 0 of this file" and pointed an agent at a region the index never answered. Task #871.

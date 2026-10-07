@@ -327,8 +327,13 @@ fn unwrap_response_folds_envelope_warnings_only_when_there_are_some() {
 #[test]
 fn only_a_missing_or_refusing_socket_reads_as_no_daemon_to_upgrade() {
     let root = scratch_root("upgrade-absent");
+    // On macOS /tmp is a symlink to /private/tmp, and canonicalize() resolves
+    // it into a path that already eats ~44 of sockaddr_un's ~104 usable bytes;
+    // keep the fixture socket short enough to stay under SUN_LEN.
+    let short = PathBuf::from("/tmp").join(format!("px-upg-{}", std::process::id()));
+    let _ = std::fs::remove_file(&short);
     assert_eq!(
-        upgrade_daemon_request(&root.join("absent.sock"), &Request::Shutdown).map(|r| r.is_none()),
+        upgrade_daemon_request(&short, &Request::Shutdown).map(|r| r.is_none()),
         Ok(true)
     );
     std::fs::write(root.join("file"), b"").unwrap();

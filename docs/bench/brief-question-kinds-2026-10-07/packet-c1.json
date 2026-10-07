@@ -1,0 +1,880 @@
+{
+  "experiment": "brief question preturn packet pilot C1",
+  "run_id": "brief-packet-20261007191415920-76724c64",
+  "provenance": {
+    "fixture_name": "architech-t",
+    "source_commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+    "source_worktree_status_sha256": "21d4ab7912f0fade578fb5e4e90fcb74066cc44133b239da76b0d20cf6c9691d",
+    "source_status_unchanged_after_run": true,
+    "source_status_check_provenance": "inferred from the archived original runner, which checked source status after each task",
+    "pinned_container_image_id": "sha256:1426219784d53f6e86e4a305a96544a2baf5a648d12e894801ef8461b7f4ebd7",
+    "pixel_cli_version": "pixel 0.7.1\ncommit: unknown\ntarget: aarch64-unknown-linux-gnu\nrustc: rustc 1.99.0 (b940084d7 2026-09-28)\nbuilt: 2026-10-06",
+    "prepared_graph_sha256": "4d681ea7cf9f05771371c205d9591796b3cabe4cfdf5a1e87dff874bfc0be0b2",
+    "prepared_graph_bytes": 1896448,
+    "prepared_graph_setup_ms": 492,
+    "codex_cli_version": "codex-cli 0.160.0",
+    "codex_cli_version_probe": {
+      "command": [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "codex",
+        "<pinned-image>",
+        "--version"
+      ],
+      "exit_code": 0,
+      "wall_ms": 380.130084,
+      "stdout": "codex-cli 0.160.0"
+    },
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "medium",
+    "experimental_runner_sha256_at_run": "85d5592b95fbbeb6549e632314108821f9eee9119ef47d54fa9861d59a4ef8d9",
+    "archived_runner_sha256": "85d5592b95fbbeb6549e632314108821f9eee9119ef47d54fa9861d59a4ef8d9",
+    "historical_runner_identity": "archived original C runner hash verified",
+    "replay_runner_sha256_after_portability_fixes": "483f35b968d7c999c7524f47290e6660e7d57ec9ac0004a3b80d909deb6f4ca4",
+    "portability_changes_after_frozen_run": [
+      "Added explicit repo/auth/results/optional graph inputs and a fresh run-id default output directory.",
+      "Each clone now checks out and verifies the pinned fixture commit.",
+      "Captured the actual Codex CLI version separately from Pixel version.",
+      "Added safe source-path resolution and explicit parser scope limitations; no model invocation is performed in export mode."
+    ],
+    "setup_note": "A prepared graph was supplied for the frozen run; setup duration was not included in per-question timing. The packet query wall time includes the full host-side RTK/Docker invocation for Pixel and RTK/rg invocation for native.",
+    "model_invocation_shape": [
+      "docker",
+      "run",
+      "--rm",
+      "--volume",
+      "<snapshot>:/repo",
+      "<read-only-auth-mount; path and value omitted>",
+      "--workdir",
+      "/repo",
+      "--entrypoint",
+      "codex",
+      "<pinned-image>",
+      "exec",
+      "--json",
+      "--sandbox",
+      "danger-full-access",
+      "--skip-git-repo-check",
+      "-m",
+      "gpt-5.6-terra",
+      "-c",
+      "model_reasoning_effort=medium",
+      "<prompt>"
+    ]
+  },
+  "design": {
+    "tasks": [
+      "g7-lookup-handleerror",
+      "g8-lookup-custommenu"
+    ],
+    "reps": 2,
+    "arms": [
+      "native-agent",
+      "native-packet",
+      "pixel-packet"
+    ],
+    "interleaving": [
+      {
+        "task": "g7-lookup-handleerror",
+        "rep": 1,
+        "order": [
+          "native-agent",
+          "native-packet",
+          "pixel-packet"
+        ]
+      },
+      {
+        "task": "g7-lookup-handleerror",
+        "rep": 2,
+        "order": [
+          "native-packet",
+          "pixel-packet",
+          "native-agent"
+        ]
+      },
+      {
+        "task": "g8-lookup-custommenu",
+        "rep": 1,
+        "order": [
+          "native-packet",
+          "pixel-packet",
+          "native-agent"
+        ]
+      },
+      {
+        "task": "g8-lookup-custommenu",
+        "rep": 2,
+        "order": [
+          "pixel-packet",
+          "native-agent",
+          "native-packet"
+        ]
+      }
+    ],
+    "packet_limit_bytes": 2048,
+    "aggregate_rule": "For each arm, take the median of its two repetitions within each task, then arithmetic-mean the two task medians. No pooled median is reported.",
+    "timing_interpretation": "Charged workflow wall time = Codex invocation wall time + measured precompute query and packing wall time. Pixel query wall time includes Docker startup and is not an intrinsic Pixel-versus-rg speed comparison.",
+    "limitations": [
+      "The packet parser takes the first identifier inside backticks; multiple identifiers or non-backticked names are not disambiguated.",
+      "Declaration discovery uses regular expressions for variable/function declarations and a lightweight delimiter scan; it is not a TypeScript parser and does not safely model comments, regex literals, or complex template literals.",
+      "The frozen evaluation covers only the two exact-lookup fixtures g7 and g8. It makes no completeness claim for other languages, question kinds, or repositories."
+    ]
+  },
+  "prompts": [
+    {
+      "task": "g7-lookup-handleerror",
+      "scenario_file": "eval/scenarios/g7-lookup-handleerror.json",
+      "scenario_sha256": "7a8f0500cee4865219435bcd4f1b624cd388427f599a36ab2639899baf61eeab",
+      "prompt": "Where is `handleError` defined in this repository? Give the file path, the line, and the exact signature.",
+      "prompt_sha256": "e9c600b5f20a269170f430b5f37dfc016b904f73ba2cb98847536879d5a96bec",
+      "rubric": [
+        {
+          "pattern": "packages/ui/handleError\\.ts",
+          "points": 4,
+          "why": "definition file"
+        },
+        {
+          "pattern": "packages/ui/handleError\\.ts[\\s\\S]{0,100}(?::4\\b|line\\s+4)",
+          "points": 3,
+          "why": "definition path and line 4"
+        },
+        {
+          "pattern": "(?:const|function)\\s+handleError[\\s\\S]{0,120}(?:Error|string)",
+          "points": 3,
+          "why": "handleError signature mentions param or return type"
+        }
+      ]
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "scenario_file": "eval/scenarios/g8-lookup-custommenu.json",
+      "scenario_sha256": "ab299e8ad91e48cefe057f9d9092a041d35e81e348becc68ee3867f382b821df",
+      "prompt": "Where is `CustomMenu` defined in this repository, and what does it export?",
+      "prompt_sha256": "20abc25943d14a41dfe5e7321be6d895d3bc7847ab3448c055d490eb2fc099f4",
+      "rubric": [
+        {
+          "pattern": "packages/ui/CustomMenu\\.ts",
+          "points": 4,
+          "why": "definition file"
+        },
+        {
+          "pattern": "defineMultiStyleConfig",
+          "points": 3,
+          "why": "what it exports"
+        },
+        {
+          "pattern": "packages/ui/CustomMenu\\.ts[\\s\\S]{0,100}(?::48\\b|line\\s+48)",
+          "points": 3,
+          "why": "definition path and line 48"
+        }
+      ]
+    }
+  ],
+  "packet_queries_and_contents": [
+    {
+      "task": "g7-lookup-handleerror",
+      "rep": 1,
+      "backend": "native",
+      "packet_bytes": 1025,
+      "packet_sha256": "eca280bff9ff49568f2382dcf517783bb9dadb89315f24689802143435a18355",
+      "complete": true,
+      "query_ms": 19.63333399999999,
+      "packing_ms": 10.29525000000001,
+      "workflow_wall_ms": 29.928584,
+      "command": {
+        "command": [
+          "rtk",
+          "rg",
+          "-l",
+          "-F",
+          "handleError",
+          "--glob",
+          "*.ts",
+          "--glob",
+          "*.tsx",
+          "--glob",
+          "*.mts",
+          "--glob",
+          "*.cts",
+          "<local-path>"
+        ],
+        "exit_code": 0,
+        "wall_ms": 19.63333399999999,
+        "stdout": "packages/login/SignOnComponent.tsx\npackages/ui/handleError.ts\napps/project/components/Business.tsx\napps/site/components/Chatbot.tsx\napps/project/components/Contact.tsx\napps/feedback/components/home/AnswerForm.tsx\napps/feedback/components/home/SuggestForm.tsx\napps/feedback/app/(root)/playground/page.tsx\napps/site/components/Contact.tsx\n",
+        "stderr": ""
+      },
+      "packet": "Identifier: handleError\nMatching TypeScript files (9):\n- apps/feedback/app/(root)/playground/page.tsx\n- apps/feedback/components/home/AnswerForm.tsx\n- apps/feedback/components/home/SuggestForm.tsx\n- apps/project/components/Business.tsx\n- apps/project/components/Contact.tsx\n- apps/site/components/Chatbot.tsx\n- apps/site/components/Contact.tsx\n- packages/login/SignOnComponent.tsx\n- packages/ui/handleError.ts\nDeclaration evidence:\npackages/ui/handleError.ts:4\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n  process.env.NODE_ENV === 'development' && console.error(e)\n  let message = description || 'Oops! Something went wrong.'\n  if (e && !description) {\n    if (e.response) {\n      message = e.response.message\n    } else if (e.message) {\n      message = e.message\n    }\n  }\n  standaloneToast({\n    title: 'Error',\n    description: message,\n    status: 'error',\n    duration: 10000,\n    isClosable: true,\n  })\n  if (callback) callback()\n}"
+    },
+    {
+      "task": "g7-lookup-handleerror",
+      "rep": 1,
+      "backend": "pixel",
+      "packet_bytes": 1025,
+      "packet_sha256": "eca280bff9ff49568f2382dcf517783bb9dadb89315f24689802143435a18355",
+      "complete": true,
+      "query_ms": 622.162666,
+      "packing_ms": 7.734083000000055,
+      "workflow_wall_ms": 629.896749,
+      "command": {
+        "command": [
+          "rtk",
+          "docker",
+          "run",
+          "--rm",
+          "--volume",
+          "<snapshot>:/repo",
+          "--env",
+          "PIXEL_OUTPUT_CAP_BYTES=1900",
+          "--entrypoint",
+          "pixel",
+          "sha256:1426219784d53f6e86e4a305a96544a2baf5a648d12e894801ef8461b7f4ebd7",
+          "search-content",
+          "-F",
+          "handleError",
+          "--type",
+          "ts",
+          "--files-with-matches",
+          "--limit",
+          "100",
+          "/repo"
+        ],
+        "exit_code": 0,
+        "wall_ms": 622.162666,
+        "stdout": "apps/feedback/app/(root)/playground/page.tsx\napps/feedback/components/home/AnswerForm.tsx\napps/feedback/components/home/SuggestForm.tsx\napps/project/components/Business.tsx\napps/project/components/Contact.tsx\napps/site/components/Chatbot.tsx\napps/site/components/Contact.tsx\npackages/login/SignOnComponent.tsx\npackages/ui/handleError.ts\n",
+        "stderr": "onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0\n\n🟩 pixel search-content ❀ 358.9ms ❀ #bac4ac\n  │\n  ├─ ⏱ 98% faster, 358.9ms against ~18000ms estimated\n  ├─ § estimated LLM context saved: ~9388 tok (99%) against ~9472 tok estimated\n  │\n  └────────────────────────────────────────────────────────\n"
+      },
+      "packet": "Identifier: handleError\nMatching TypeScript files (9):\n- apps/feedback/app/(root)/playground/page.tsx\n- apps/feedback/components/home/AnswerForm.tsx\n- apps/feedback/components/home/SuggestForm.tsx\n- apps/project/components/Business.tsx\n- apps/project/components/Contact.tsx\n- apps/site/components/Chatbot.tsx\n- apps/site/components/Contact.tsx\n- packages/login/SignOnComponent.tsx\n- packages/ui/handleError.ts\nDeclaration evidence:\npackages/ui/handleError.ts:4\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n  process.env.NODE_ENV === 'development' && console.error(e)\n  let message = description || 'Oops! Something went wrong.'\n  if (e && !description) {\n    if (e.response) {\n      message = e.response.message\n    } else if (e.message) {\n      message = e.message\n    }\n  }\n  standaloneToast({\n    title: 'Error',\n    description: message,\n    status: 'error',\n    duration: 10000,\n    isClosable: true,\n  })\n  if (callback) callback()\n}"
+    },
+    {
+      "task": "g7-lookup-handleerror",
+      "rep": 2,
+      "backend": "native",
+      "packet_bytes": 1025,
+      "packet_sha256": "eca280bff9ff49568f2382dcf517783bb9dadb89315f24689802143435a18355",
+      "complete": true,
+      "query_ms": 18.635166000000027,
+      "packing_ms": 6.990083000000595,
+      "workflow_wall_ms": 25.625249000000622,
+      "command": {
+        "command": [
+          "rtk",
+          "rg",
+          "-l",
+          "-F",
+          "handleError",
+          "--glob",
+          "*.ts",
+          "--glob",
+          "*.tsx",
+          "--glob",
+          "*.mts",
+          "--glob",
+          "*.cts",
+          "<local-path>"
+        ],
+        "exit_code": 0,
+        "wall_ms": 18.635166000000027,
+        "stdout": "packages/login/SignOnComponent.tsx\npackages/ui/handleError.ts\napps/project/components/Business.tsx\napps/project/components/Contact.tsx\napps/feedback/components/home/AnswerForm.tsx\napps/site/components/Contact.tsx\napps/feedback/components/home/SuggestForm.tsx\napps/site/components/Chatbot.tsx\napps/feedback/app/(root)/playground/page.tsx\n",
+        "stderr": ""
+      },
+      "packet": "Identifier: handleError\nMatching TypeScript files (9):\n- apps/feedback/app/(root)/playground/page.tsx\n- apps/feedback/components/home/AnswerForm.tsx\n- apps/feedback/components/home/SuggestForm.tsx\n- apps/project/components/Business.tsx\n- apps/project/components/Contact.tsx\n- apps/site/components/Chatbot.tsx\n- apps/site/components/Contact.tsx\n- packages/login/SignOnComponent.tsx\n- packages/ui/handleError.ts\nDeclaration evidence:\npackages/ui/handleError.ts:4\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n  process.env.NODE_ENV === 'development' && console.error(e)\n  let message = description || 'Oops! Something went wrong.'\n  if (e && !description) {\n    if (e.response) {\n      message = e.response.message\n    } else if (e.message) {\n      message = e.message\n    }\n  }\n  standaloneToast({\n    title: 'Error',\n    description: message,\n    status: 'error',\n    duration: 10000,\n    isClosable: true,\n  })\n  if (callback) callback()\n}"
+    },
+    {
+      "task": "g7-lookup-handleerror",
+      "rep": 2,
+      "backend": "pixel",
+      "packet_bytes": 1025,
+      "packet_sha256": "eca280bff9ff49568f2382dcf517783bb9dadb89315f24689802143435a18355",
+      "complete": true,
+      "query_ms": 506.51024999999936,
+      "packing_ms": 8.231624999996711,
+      "workflow_wall_ms": 514.7418749999961,
+      "command": {
+        "command": [
+          "rtk",
+          "docker",
+          "run",
+          "--rm",
+          "--volume",
+          "<snapshot>:/repo",
+          "--env",
+          "PIXEL_OUTPUT_CAP_BYTES=1900",
+          "--entrypoint",
+          "pixel",
+          "sha256:1426219784d53f6e86e4a305a96544a2baf5a648d12e894801ef8461b7f4ebd7",
+          "search-content",
+          "-F",
+          "handleError",
+          "--type",
+          "ts",
+          "--files-with-matches",
+          "--limit",
+          "100",
+          "/repo"
+        ],
+        "exit_code": 0,
+        "wall_ms": 506.51024999999936,
+        "stdout": "apps/feedback/app/(root)/playground/page.tsx\napps/feedback/components/home/AnswerForm.tsx\napps/feedback/components/home/SuggestForm.tsx\napps/project/components/Business.tsx\napps/project/components/Contact.tsx\napps/site/components/Chatbot.tsx\napps/site/components/Contact.tsx\npackages/login/SignOnComponent.tsx\npackages/ui/handleError.ts\n",
+        "stderr": "onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0\n\n🟩 pixel search-content ❀ 262.8ms ❀ #3cbefd\n  │\n  ├─ ⏱ 99% faster, 262.8ms against ~18000ms estimated\n  ├─ § estimated LLM context saved: ~9388 tok (99%) against ~9472 tok estimated\n  │\n  └────────────────────────────────────────────────────────\n"
+      },
+      "packet": "Identifier: handleError\nMatching TypeScript files (9):\n- apps/feedback/app/(root)/playground/page.tsx\n- apps/feedback/components/home/AnswerForm.tsx\n- apps/feedback/components/home/SuggestForm.tsx\n- apps/project/components/Business.tsx\n- apps/project/components/Contact.tsx\n- apps/site/components/Chatbot.tsx\n- apps/site/components/Contact.tsx\n- packages/login/SignOnComponent.tsx\n- packages/ui/handleError.ts\nDeclaration evidence:\npackages/ui/handleError.ts:4\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n  process.env.NODE_ENV === 'development' && console.error(e)\n  let message = description || 'Oops! Something went wrong.'\n  if (e && !description) {\n    if (e.response) {\n      message = e.response.message\n    } else if (e.message) {\n      message = e.message\n    }\n  }\n  standaloneToast({\n    title: 'Error',\n    description: message,\n    status: 'error',\n    duration: 10000,\n    isClosable: true,\n  })\n  if (callback) callback()\n}"
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "rep": 1,
+      "backend": "native",
+      "packet_bytes": 1045,
+      "packet_sha256": "4f1bd871563b06c6c66cedd873645ad007c08151280fecfcda2c860909ec64c0",
+      "complete": true,
+      "query_ms": 17.880417000000307,
+      "packing_ms": 1.4144579999992857,
+      "workflow_wall_ms": 19.294874999999593,
+      "command": {
+        "command": [
+          "rtk",
+          "rg",
+          "-l",
+          "-F",
+          "CustomMenu",
+          "--glob",
+          "*.ts",
+          "--glob",
+          "*.tsx",
+          "--glob",
+          "*.mts",
+          "--glob",
+          "*.cts",
+          "<local-path>"
+        ],
+        "exit_code": 0,
+        "wall_ms": 17.880417000000307,
+        "stdout": "packages/ui/themes.tsx\npackages/ui/CustomMenu.ts\n",
+        "stderr": ""
+      },
+      "packet": "Identifier: CustomMenu\nMatching TypeScript files (2):\n- packages/ui/CustomMenu.ts\n- packages/ui/themes.tsx\nDeclaration evidence:\npackages/ui/CustomMenu.ts:48\nexport const CustomMenu = defineMultiStyleConfig({variants})\nLocal dependency packages/ui/CustomMenu.ts:6\nconst variants = {\n  sidebar: {\n    item: {\n      color: 'white',\n      fontWeight: 'normal',\n      bg: 'transparent',\n      _focus: {\n        bg: 'transparent',\n        fontWeight: 'bold',\n      },\n      _hover: {\n        bg: 'brand.accent',\n      },\n      _active: {\n        bg: 'brand.accent',\n        fontWeight: 'bold',\n      },\n    },\n  },\n  navbar: {\n    item: {\n      color: 'white',\n      fontWeight: 'bold',\n      border: 'solid 1px',\n      borderColor: 'white',\n      bg: 'transparent',\n      _focus: {\n        bg: 'transparent',\n        borderColor: 'brand.accent',\n      },\n      _hover: {\n        bg: 'brand.accent',\n        borderColor: 'brand.accent',\n      },\n      _active: {\n        bg: 'brand.accent',\n        borderColor: 'brand.accent',\n      },\n    },\n  },\n}"
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "rep": 1,
+      "backend": "pixel",
+      "packet_bytes": 1045,
+      "packet_sha256": "4f1bd871563b06c6c66cedd873645ad007c08151280fecfcda2c860909ec64c0",
+      "complete": true,
+      "query_ms": 546.9035000000003,
+      "packing_ms": 0.5823749999981374,
+      "workflow_wall_ms": 547.4858749999985,
+      "command": {
+        "command": [
+          "rtk",
+          "docker",
+          "run",
+          "--rm",
+          "--volume",
+          "<snapshot>:/repo",
+          "--env",
+          "PIXEL_OUTPUT_CAP_BYTES=1900",
+          "--entrypoint",
+          "pixel",
+          "sha256:1426219784d53f6e86e4a305a96544a2baf5a648d12e894801ef8461b7f4ebd7",
+          "search-content",
+          "-F",
+          "CustomMenu",
+          "--type",
+          "ts",
+          "--files-with-matches",
+          "--limit",
+          "100",
+          "/repo"
+        ],
+        "exit_code": 0,
+        "wall_ms": 546.9035000000003,
+        "stdout": "packages/ui/CustomMenu.ts\npackages/ui/themes.tsx\n",
+        "stderr": "onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0\n\n🟩 pixel search-content ❀ 265.9ms ❀ #38f2ec\n  │\n  ├─ ⏱ 93% faster, 265.9ms against ~4000ms estimated\n  ├─ § estimated LLM context saved: ~2292 tok (99%) against ~2304 tok estimated\n  │\n  └────────────────────────────────────────────────────────\n"
+      },
+      "packet": "Identifier: CustomMenu\nMatching TypeScript files (2):\n- packages/ui/CustomMenu.ts\n- packages/ui/themes.tsx\nDeclaration evidence:\npackages/ui/CustomMenu.ts:48\nexport const CustomMenu = defineMultiStyleConfig({variants})\nLocal dependency packages/ui/CustomMenu.ts:6\nconst variants = {\n  sidebar: {\n    item: {\n      color: 'white',\n      fontWeight: 'normal',\n      bg: 'transparent',\n      _focus: {\n        bg: 'transparent',\n        fontWeight: 'bold',\n      },\n      _hover: {\n        bg: 'brand.accent',\n      },\n      _active: {\n        bg: 'brand.accent',\n        fontWeight: 'bold',\n      },\n    },\n  },\n  navbar: {\n    item: {\n      color: 'white',\n      fontWeight: 'bold',\n      border: 'solid 1px',\n      borderColor: 'white',\n      bg: 'transparent',\n      _focus: {\n        bg: 'transparent',\n        borderColor: 'brand.accent',\n      },\n      _hover: {\n        bg: 'brand.accent',\n        borderColor: 'brand.accent',\n      },\n      _active: {\n        bg: 'brand.accent',\n        borderColor: 'brand.accent',\n      },\n    },\n  },\n}"
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "rep": 2,
+      "backend": "native",
+      "packet_bytes": 1045,
+      "packet_sha256": "4f1bd871563b06c6c66cedd873645ad007c08151280fecfcda2c860909ec64c0",
+      "complete": true,
+      "query_ms": 19.097374999997555,
+      "packing_ms": 0.44675000000279397,
+      "workflow_wall_ms": 19.54412500000035,
+      "command": {
+        "command": [
+          "rtk",
+          "rg",
+          "-l",
+          "-F",
+          "CustomMenu",
+          "--glob",
+          "*.ts",
+          "--glob",
+          "*.tsx",
+          "--glob",
+          "*.mts",
+          "--glob",
+          "*.cts",
+          "<local-path>"
+        ],
+        "exit_code": 0,
+        "wall_ms": 19.097374999997555,
+        "stdout": "packages/ui/CustomMenu.ts\npackages/ui/themes.tsx\n",
+        "stderr": ""
+      },
+      "packet": "Identifier: CustomMenu\nMatching TypeScript files (2):\n- packages/ui/CustomMenu.ts\n- packages/ui/themes.tsx\nDeclaration evidence:\npackages/ui/CustomMenu.ts:48\nexport const CustomMenu = defineMultiStyleConfig({variants})\nLocal dependency packages/ui/CustomMenu.ts:6\nconst variants = {\n  sidebar: {\n    item: {\n      color: 'white',\n      fontWeight: 'normal',\n      bg: 'transparent',\n      _focus: {\n        bg: 'transparent',\n        fontWeight: 'bold',\n      },\n      _hover: {\n        bg: 'brand.accent',\n      },\n      _active: {\n        bg: 'brand.accent',\n        fontWeight: 'bold',\n      },\n    },\n  },\n  navbar: {\n    item: {\n      color: 'white',\n      fontWeight: 'bold',\n      border: 'solid 1px',\n      borderColor: 'white',\n      bg: 'transparent',\n      _focus: {\n        bg: 'transparent',\n        borderColor: 'brand.accent',\n      },\n      _hover: {\n        bg: 'brand.accent',\n        borderColor: 'brand.accent',\n      },\n      _active: {\n        bg: 'brand.accent',\n        borderColor: 'brand.accent',\n      },\n    },\n  },\n}"
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "rep": 2,
+      "backend": "pixel",
+      "packet_bytes": 1045,
+      "packet_sha256": "4f1bd871563b06c6c66cedd873645ad007c08151280fecfcda2c860909ec64c0",
+      "complete": true,
+      "query_ms": 945.7080409999908,
+      "packing_ms": 0.6255420000088634,
+      "workflow_wall_ms": 946.3335829999996,
+      "command": {
+        "command": [
+          "rtk",
+          "docker",
+          "run",
+          "--rm",
+          "--volume",
+          "<snapshot>:/repo",
+          "--env",
+          "PIXEL_OUTPUT_CAP_BYTES=1900",
+          "--entrypoint",
+          "pixel",
+          "sha256:1426219784d53f6e86e4a305a96544a2baf5a648d12e894801ef8461b7f4ebd7",
+          "search-content",
+          "-F",
+          "CustomMenu",
+          "--type",
+          "ts",
+          "--files-with-matches",
+          "--limit",
+          "100",
+          "/repo"
+        ],
+        "exit_code": 0,
+        "wall_ms": 945.7080409999908,
+        "stdout": "packages/ui/CustomMenu.ts\npackages/ui/themes.tsx\n",
+        "stderr": "onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0\n\n🟩 pixel search-content ❀ 672.9ms ❀ #a608c4\n  │\n  ├─ ⏱ 83% faster, 672.9ms against ~4000ms estimated\n  ├─ § estimated LLM context saved: ~2292 tok (99%) against ~2304 tok estimated\n  │\n  └────────────────────────────────────────────────────────\n"
+      },
+      "packet": "Identifier: CustomMenu\nMatching TypeScript files (2):\n- packages/ui/CustomMenu.ts\n- packages/ui/themes.tsx\nDeclaration evidence:\npackages/ui/CustomMenu.ts:48\nexport const CustomMenu = defineMultiStyleConfig({variants})\nLocal dependency packages/ui/CustomMenu.ts:6\nconst variants = {\n  sidebar: {\n    item: {\n      color: 'white',\n      fontWeight: 'normal',\n      bg: 'transparent',\n      _focus: {\n        bg: 'transparent',\n        fontWeight: 'bold',\n      },\n      _hover: {\n        bg: 'brand.accent',\n      },\n      _active: {\n        bg: 'brand.accent',\n        fontWeight: 'bold',\n      },\n    },\n  },\n  navbar: {\n    item: {\n      color: 'white',\n      fontWeight: 'bold',\n      border: 'solid 1px',\n      borderColor: 'white',\n      bg: 'transparent',\n      _focus: {\n        bg: 'transparent',\n        borderColor: 'brand.accent',\n      },\n      _hover: {\n        bg: 'brand.accent',\n        borderColor: 'brand.accent',\n      },\n      _active: {\n        bg: 'brand.accent',\n        borderColor: 'brand.accent',\n      },\n    },\n  },\n}"
+    }
+  ],
+  "answers": [
+    {
+      "task": "g7-lookup-handleerror",
+      "arm": "native-agent",
+      "rep": 1,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 41412,
+      "cached_input_tokens": 36096,
+      "output_tokens": 218,
+      "total_tokens": 41630,
+      "cost_usd": null,
+      "tool_calls": 2,
+      "pixel_calls": 0,
+      "native_search_calls": 1,
+      "seconds_model_only": 10.753088291,
+      "transcript_sha256": "75b277313105f4d1237338926afe6a348c37b5194f36aa7f7cfd0eba9cc86d67",
+      "final_answer": "[`packages/ui/handleError.ts`](/repo/packages/ui/handleError.ts:4), line 4:\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+    },
+    {
+      "task": "g7-lookup-handleerror",
+      "arm": "native-packet",
+      "rep": 1,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 13324,
+      "cached_input_tokens": 11008,
+      "output_tokens": 76,
+      "total_tokens": 13400,
+      "cost_usd": null,
+      "tool_calls": 0,
+      "pixel_calls": 0,
+      "native_search_calls": 0,
+      "seconds_model_only": 8.079153666999998,
+      "transcript_sha256": "01d41f1975e5763fb2ae06168696f78990a9a545733df8fbb1e17d559fc6c670",
+      "final_answer": "`handleError` is defined in [`packages/ui/handleError.ts`](/repo/packages/ui/handleError.ts:4), line 4.\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+    },
+    {
+      "task": "g7-lookup-handleerror",
+      "arm": "pixel-packet",
+      "rep": 1,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 13324,
+      "cached_input_tokens": 11008,
+      "output_tokens": 75,
+      "total_tokens": 13399,
+      "cost_usd": null,
+      "tool_calls": 0,
+      "pixel_calls": 0,
+      "native_search_calls": 0,
+      "seconds_model_only": 6.435397083,
+      "transcript_sha256": "3e6b4fe6778f15fa677197b49836bd7ffbd40d549a7bbcf65ceb2e2b67ca8735",
+      "final_answer": "`handleError` is defined at [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4).\n\nExact signature:\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+    },
+    {
+      "task": "g7-lookup-handleerror",
+      "arm": "native-agent",
+      "rep": 2,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 41600,
+      "cached_input_tokens": 36096,
+      "output_tokens": 240,
+      "total_tokens": 41840,
+      "cost_usd": null,
+      "tool_calls": 2,
+      "pixel_calls": 0,
+      "native_search_calls": 1,
+      "seconds_model_only": 14.614827499999999,
+      "transcript_sha256": "567337764e1e9917a2a67330777cd59ebaa5e5a38ede71b206791f3fb6a23d8c",
+      "final_answer": "`handleError` is defined at [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4).\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+    },
+    {
+      "task": "g7-lookup-handleerror",
+      "arm": "native-packet",
+      "rep": 2,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 13324,
+      "cached_input_tokens": 11008,
+      "output_tokens": 75,
+      "total_tokens": 13399,
+      "cost_usd": null,
+      "tool_calls": 0,
+      "pixel_calls": 0,
+      "native_search_calls": 0,
+      "seconds_model_only": 7.039715375,
+      "transcript_sha256": "bedc840ec672ff97a58af244b7646668d9c825f98f7ed540235ace9ddbd77c79",
+      "final_answer": "`handleError` is defined in [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4).\n\nExact signature:\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+    },
+    {
+      "task": "g7-lookup-handleerror",
+      "arm": "pixel-packet",
+      "rep": 2,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 13324,
+      "cached_input_tokens": 11008,
+      "output_tokens": 76,
+      "total_tokens": 13400,
+      "cost_usd": null,
+      "tool_calls": 0,
+      "pixel_calls": 0,
+      "native_search_calls": 0,
+      "seconds_model_only": 8.156959708000002,
+      "transcript_sha256": "f0805ac607bea0c06484a9f3df156c5c1f41275c608b33a29954ae36a2e6798a",
+      "final_answer": "`handleError` is defined in [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4), line 4.\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "arm": "native-agent",
+      "rep": 1,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 40596,
+      "cached_input_tokens": 36096,
+      "output_tokens": 320,
+      "total_tokens": 40916,
+      "cost_usd": null,
+      "tool_calls": 2,
+      "pixel_calls": 0,
+      "native_search_calls": 2,
+      "seconds_model_only": 12.260913042,
+      "transcript_sha256": "78270866339cb5410aac78f7f897772a42d24fea211fc18647a78a04c17cffec",
+      "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt has a named export:\n\n```ts\nexport const CustomMenu = defineMultiStyleConfig({variants})\n```\n\nIt exports a Chakra UI multi-style Menu theme configuration with `sidebar` and `navbar` variants. It is registered as the `Menu` component theme in [packages/ui/themes.tsx](/repo/packages/ui/themes.tsx:32)."
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "arm": "native-packet",
+      "rep": 1,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 13321,
+      "cached_input_tokens": 11008,
+      "output_tokens": 72,
+      "total_tokens": 13393,
+      "cost_usd": null,
+      "tool_calls": 0,
+      "pixel_calls": 0,
+      "native_search_calls": 0,
+      "seconds_model_only": 6.416034458000002,
+      "transcript_sha256": "02b0ccaa7d52328a21b5928e963560a47efa8670f330c9ac8288e46b6d284da9",
+      "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports:\n\n```ts\nexport const CustomMenu = defineMultiStyleConfig({ variants })\n```\n\nThe configuration provides two menu variants: `sidebar` and `navbar`, each styling its `item` part."
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "arm": "pixel-packet",
+      "rep": 1,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 13321,
+      "cached_input_tokens": 11008,
+      "output_tokens": 69,
+      "total_tokens": 13390,
+      "cost_usd": null,
+      "tool_calls": 0,
+      "pixel_calls": 0,
+      "native_search_calls": 0,
+      "seconds_model_only": 6.616915208000006,
+      "transcript_sha256": "1190956e601a1076b14a0a7808de74790fb470f62136bcde6e7d74116e00d59b",
+      "final_answer": "`CustomMenu` is defined in [`packages/ui/CustomMenu.ts`](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports:\n\n```ts\nexport const CustomMenu = defineMultiStyleConfig({ variants })\n```\n\nThe config provides `sidebar` and `navbar` variants, each styling a menu `item`."
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "arm": "native-agent",
+      "rep": 2,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 40742,
+      "cached_input_tokens": 36096,
+      "output_tokens": 275,
+      "total_tokens": 41017,
+      "cost_usd": null,
+      "tool_calls": 2,
+      "pixel_calls": 0,
+      "native_search_calls": 1,
+      "seconds_model_only": 14.035245249999992,
+      "transcript_sha256": "9f4a6098e74b3101c4db9f5a7eef7b3ab90e39390b8cd47ea90a41820d087c3d",
+      "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt has a named export:\n\n```ts\nexport const CustomMenu = defineMultiStyleConfig({variants})\n```\n\nThis is a Chakra UI multi-style Menu theme configuration, with `sidebar` and `navbar` variants. It’s imported into [packages/ui/themes.tsx](/repo/packages/ui/themes.tsx:8) and registered as the theme’s `Menu` component."
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "arm": "native-packet",
+      "rep": 2,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 13321,
+      "cached_input_tokens": 11008,
+      "output_tokens": 78,
+      "total_tokens": 13399,
+      "cost_usd": null,
+      "tool_calls": 0,
+      "pixel_calls": 0,
+      "native_search_calls": 0,
+      "seconds_model_only": 6.0073605840000095,
+      "transcript_sha256": "a6229ad88f8e8bdafdaa01a9d9d0782ed489ab9ca640d9f6a8abe7d9fca6d6ae",
+      "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports:\n\n```ts\nexport const CustomMenu = defineMultiStyleConfig({ variants })\n```\n\nThis is a Chakra UI multi-style configuration with two variants: `sidebar` and `navbar`, each defining styles for menu `item`s."
+    },
+    {
+      "task": "g8-lookup-custommenu",
+      "arm": "pixel-packet",
+      "rep": 2,
+      "score": 10,
+      "max_score": 10,
+      "score_pct": 100,
+      "input_tokens": 13321,
+      "cached_input_tokens": 11008,
+      "output_tokens": 78,
+      "total_tokens": 13399,
+      "cost_usd": null,
+      "tool_calls": 0,
+      "pixel_calls": 0,
+      "native_search_calls": 0,
+      "seconds_model_only": 7.392248500000002,
+      "transcript_sha256": "7c6cb42577a0acb2373e70c6ef1eabe7f12856326766580b1ba2ff6445c9bf32",
+      "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports:\n\n```ts\nexport const CustomMenu = defineMultiStyleConfig({ variants })\n```\n\nThis is a Chakra UI multi-style configuration with two variants: `sidebar` and `navbar`, each defining styles for menu `item`s."
+    }
+  ],
+  "task_metrics": {
+    "g7-lookup-handleerror": {
+      "native-agent": {
+        "n": 2,
+        "model_seconds": [
+          10.753088291,
+          14.614827499999999
+        ],
+        "retrieval_and_pack_seconds": [
+          0,
+          0
+        ],
+        "end_to_end_seconds": [
+          10.753088291,
+          14.614827499999999
+        ],
+        "median_end_to_end_seconds": 12.683957895499999,
+        "tokens": [
+          41630,
+          41840
+        ],
+        "median_tokens": 41735,
+        "score_pct": [
+          100,
+          100
+        ]
+      },
+      "native-packet": {
+        "n": 2,
+        "model_seconds": [
+          8.079153666999998,
+          7.039715375
+        ],
+        "retrieval_and_pack_seconds": [
+          0.029928584,
+          0.02562524900000062
+        ],
+        "end_to_end_seconds": [
+          8.109082250999998,
+          7.065340624000001
+        ],
+        "median_end_to_end_seconds": 7.5872114375,
+        "tokens": [
+          13400,
+          13399
+        ],
+        "median_tokens": 13399.5,
+        "score_pct": [
+          100,
+          100
+        ]
+      },
+      "pixel-packet": {
+        "n": 2,
+        "model_seconds": [
+          6.435397083,
+          8.156959708000002
+        ],
+        "retrieval_and_pack_seconds": [
+          0.629896749,
+          0.514741874999996
+        ],
+        "end_to_end_seconds": [
+          7.065293832,
+          8.671701582999999
+        ],
+        "median_end_to_end_seconds": 7.8684977074999995,
+        "tokens": [
+          13399,
+          13400
+        ],
+        "median_tokens": 13399.5,
+        "score_pct": [
+          100,
+          100
+        ]
+      }
+    },
+    "g8-lookup-custommenu": {
+      "native-agent": {
+        "n": 2,
+        "model_seconds": [
+          12.260913042,
+          14.035245249999992
+        ],
+        "retrieval_and_pack_seconds": [
+          0,
+          0
+        ],
+        "end_to_end_seconds": [
+          12.260913042,
+          14.035245249999992
+        ],
+        "median_end_to_end_seconds": 13.148079145999997,
+        "tokens": [
+          40916,
+          41017
+        ],
+        "median_tokens": 40966.5,
+        "score_pct": [
+          100,
+          100
+        ]
+      },
+      "native-packet": {
+        "n": 2,
+        "model_seconds": [
+          6.416034458000002,
+          6.0073605840000095
+        ],
+        "retrieval_and_pack_seconds": [
+          0.019294874999999594,
+          0.01954412500000035
+        ],
+        "end_to_end_seconds": [
+          6.435329333000002,
+          6.02690470900001
+        ],
+        "median_end_to_end_seconds": 6.231117021000006,
+        "tokens": [
+          13393,
+          13399
+        ],
+        "median_tokens": 13396,
+        "score_pct": [
+          100,
+          100
+        ]
+      },
+      "pixel-packet": {
+        "n": 2,
+        "model_seconds": [
+          6.616915208000006,
+          7.392248500000002
+        ],
+        "retrieval_and_pack_seconds": [
+          0.5474858749999985,
+          0.9463335829999996
+        ],
+        "end_to_end_seconds": [
+          7.164401083000005,
+          8.338582083000002
+        ],
+        "median_end_to_end_seconds": 7.7514915830000035,
+        "tokens": [
+          13390,
+          13399
+        ],
+        "median_tokens": 13394.5,
+        "score_pct": [
+          100,
+          100
+        ]
+      }
+    }
+  },
+  "aggregate_metrics": {
+    "native-agent": {
+      "mean_task_median_end_to_end_seconds": 12.916018520749997,
+      "mean_task_median_tokens": 41350.75,
+      "quality_pct": 100
+    },
+    "native-packet": {
+      "mean_task_median_end_to_end_seconds": 6.909164229250003,
+      "mean_task_median_tokens": 13397.75,
+      "quality_pct": 100,
+      "end_to_end_time_savings_pct_vs_native_agent": 46.507012062964996,
+      "token_savings_pct_vs_native_agent": 67.59974123806703
+    },
+    "pixel-packet": {
+      "mean_task_median_end_to_end_seconds": 7.8099946452500015,
+      "mean_task_median_tokens": 13397,
+      "quality_pct": 100,
+      "end_to_end_time_savings_pct_vs_native_agent": 39.53249112562826,
+      "token_savings_pct_vs_native_agent": 67.60155498993367
+    }
+  }
+}

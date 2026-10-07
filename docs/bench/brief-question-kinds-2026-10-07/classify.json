@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-07",
+  "source_sha": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+  "binary": "target/debug/pixel",
+  "provider": "jev",
+  "model": "jev-latest",
+  "deterministic": false,
+  "oneShotWallSeconds": 0.236564375,
+  "batchWallSeconds": 2.575425959,
+  "context": "Choose the single Pixel evidence route that best serves the question. Use mixed_or_other only when two or more evidence kinds are explicitly required, no single kind dominates, or none of the eight kinds applies.",
+  "criteria": {
+    "lookup": "Find a specific identifier, declaration, value, or location.",
+    "impact": "Find callers, dependents, affected code, or blast radius.",
+    "flow": "Trace an ordered execution or data path across components.",
+    "diagnosis": "Explain a failure, guard, fallback, or observed behavior.",
+    "configuration": "Find settings, config sources, install destinations, or precedence.",
+    "tests": "Find tests, assertions, validation commands, or coverage.",
+    "history": "Find recorded prior decisions, changes, issue notes, or provenance; do not infer undocumented rationale.",
+    "architecture": "Map component boundaries, responsibilities, or dependencies.",
+    "mixed_or_other": "The request explicitly needs at least two distinct evidence kinds, has no dominant kind, or falls outside these kinds."
+  },
+  "cases": [
+    [
+      "What is constant MAX_ANCHORS and where is it defined?",
+      "lookup",
+      "lookup",
+      1,
+      1
+    ],
+    [
+      "What directly depends on build_decisions_request, and what code may change if it is renamed?",
+      "impact",
+      "impact",
+      1,
+      1
+    ],
+    [
+      "Trace prompt-submit from task-event through brief retrieval and rendering to host additionalContext.",
+      "flow",
+      "flow",
+      1,
+      1
+    ],
+    [
+      "Why can a stale code graph still leave text-search evidence in a prompt brief?",
+      "diagnosis",
+      "history",
+      0.66,
+      0.62
+    ],
+    [
+      "Where is the prompt brief enabled, and which config or environment setting controls it?",
+      "configuration",
+      "configuration",
+      0.98,
+      0.98
+    ],
+    [
+      "Which focused tests or commands cover no-line evidence rendering and prompt brief behavior?",
+      "tests",
+      "tests",
+      0.92,
+      0.91
+    ],
+    [
+      "What recorded rationale explains excluding Pi from the prompt-brief path? If none is recorded, what can be stated safely?",
+      "history",
+      "history",
+      1,
+      1
+    ],
+    [
+      "Which components own the task_hook, execution_brief, retrieval, and host adapter boundaries?",
+      "architecture",
+      "architecture",
+      1,
+      1
+    ],
+    [
+      "Rename build_decisions_request and find its direct tests.",
+      "mixed_or_other",
+      "tests",
+      0.83,
+      0.81
+    ]
+  ],
+  "limits": "One-shot plus 8 batch decisions; no repetitions; human expected route labels; no deterministic classifier benchmark; no latency guarantee, usage/cost unknown; synthetic public prompt references need not exist for this routing-only test; task-intent labels not eight-kind evidence labels"
+}

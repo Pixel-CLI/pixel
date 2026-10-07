@@ -1,0 +1,958 @@
+{
+  "schema_version": 1,
+  "token_definition": "input_tokens + generation_tokens; cached input is already included",
+  "time_definition": "Codex command wall seconds, including live hooks; excludes image/index/install/setup",
+  "quality_definition": "required-pattern score, not semantic adjudication",
+  "runs": [
+    {
+      "results_directory_name": "brief-hooks-g4-rename-impact",
+      "run": {
+        "run_id": "20261007012217-55234",
+        "model": "gpt-5.6-terra",
+        "effort": "medium",
+        "codex_version": "codex-cli 0.160.0",
+        "pixel_image_id": "sha256:6c713ea2d70fbb80f5dd927615ce3aacf780669f656e5a02bad81df190cbdf86",
+        "pixel_source_id": "local",
+        "skill_candidate_name": null,
+        "skill_source_sha256": null,
+        "fixture_repository": "architech-t",
+        "fixture_commits_from_scenarios": [
+          "5c47874700c23a6c9e976de3f553ffe75bac39d8"
+        ],
+        "tasks": [
+          "g4-rename-impact"
+        ],
+        "arms": [
+          "raw",
+          "pixel"
+        ],
+        "reps": 3
+      },
+      "scenario_provenance": "Scenario content and hashes read at export from the run's recorded scenario directory; scenario.commit identifies the fixture revision.",
+      "scenarios": [
+        {
+          "sha256": "d042c43b76d2671037b00e48371d9652da022ce3b2b09b78be005d6b3430630d",
+          "scenario": {
+            "id": "g4-rename-impact",
+            "suite": "generic",
+            "task_class": "rename",
+            "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+            "mode": "answer",
+            "max_turns": 30,
+            "prompt": "The shared helper handleError in packages/ui/handleError.ts is being renamed to reportError. List every file that would need to change because it imports or calls handleError — do not modify anything, just produce the complete list of affected files with the importing symbol or component for each.",
+            "must": [
+              {
+                "pattern": "(?im)^(?=.*packages/login/)(?=.*SignOnComponent).*$",
+                "points": 2,
+                "why": "login path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/feedback/)(?=.*SuggestForm).*$",
+                "points": 2,
+                "why": "feedback path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/feedback/)(?=.*AnswerForm).*$",
+                "points": 2,
+                "why": "feedback path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/feedback/)(?=.*playground).*$",
+                "points": 1,
+                "why": "feedback playground path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/project/)(?=.*Business).*$",
+                "points": 1,
+                "why": "project path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/site/)(?=.*Chatbot).*$",
+                "points": 1,
+                "why": "site path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*apps/(?:site|project)/)(?=.*Contact).*$",
+                "points": 1,
+                "why": "site or project path and caller"
+              },
+              {
+                "pattern": "(?im)^(?=.*packages/ui/)(?=.*handleError).*$",
+                "points": 2,
+                "why": "definition path and symbol"
+              }
+            ],
+            "never": [
+              {
+                "pattern": "modified|edited|updated the file",
+                "why": "answer-only task"
+              }
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "arm": "raw",
+          "task": "g4-rename-impact",
+          "rep": "1",
+          "status": "complete",
+          "score": 12,
+          "max_score": 12,
+          "score_pct": 100,
+          "input_tokens": 57316,
+          "generation_tokens": 905,
+          "cache_read_tokens": 50176,
+          "cache_creation_tokens": null,
+          "tokens": 58221,
+          "cost_usd": null,
+          "tool_calls": 3,
+          "pixel_calls": 0,
+          "native_search_calls": 3,
+          "native_command_count": 5,
+          "native_command_counts": {
+            "rg": 4,
+            "printf": 1
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 29,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g4-rename-impact",
+          "rep": "1",
+          "status": "complete",
+          "score": 12,
+          "max_score": 12,
+          "score_pct": 100,
+          "input_tokens": 27194,
+          "generation_tokens": 443,
+          "cache_read_tokens": 24064,
+          "cache_creation_tokens": null,
+          "tokens": 27637,
+          "cost_usd": null,
+          "tool_calls": 1,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 1,
+          "native_command_counts": {
+            "rg": 1
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 15,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g4-rename-impact",
+          "rep": "2",
+          "status": "complete",
+          "score": 12,
+          "max_score": 12,
+          "score_pct": 100,
+          "input_tokens": 42087,
+          "generation_tokens": 761,
+          "cache_read_tokens": 35072,
+          "cache_creation_tokens": null,
+          "tokens": 42848,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 2,
+          "native_command_count": 3,
+          "native_command_counts": {
+            "rg": 3
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 24,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g4-rename-impact",
+          "rep": "2",
+          "status": "complete",
+          "score": 12,
+          "max_score": 12,
+          "score_pct": 100,
+          "input_tokens": 27400,
+          "generation_tokens": 307,
+          "cache_read_tokens": 24064,
+          "cache_creation_tokens": null,
+          "tokens": 27707,
+          "cost_usd": null,
+          "tool_calls": 1,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 1,
+          "native_command_counts": {
+            "rg": 1
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 12,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g4-rename-impact",
+          "rep": "3",
+          "status": "complete",
+          "score": 12,
+          "max_score": 12,
+          "score_pct": 100,
+          "input_tokens": 61471,
+          "generation_tokens": 1080,
+          "cache_read_tokens": 53248,
+          "cache_creation_tokens": null,
+          "tokens": 62551,
+          "cost_usd": null,
+          "tool_calls": 3,
+          "pixel_calls": 0,
+          "native_search_calls": 3,
+          "native_command_count": 7,
+          "native_command_counts": {
+            "rg": 4,
+            "for": 1,
+            "do": 1,
+            "done": 1
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 26,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g4-rename-impact",
+          "rep": "3",
+          "status": "complete",
+          "score": 12,
+          "max_score": 12,
+          "score_pct": 100,
+          "input_tokens": 42070,
+          "generation_tokens": 623,
+          "cache_read_tokens": 37120,
+          "cache_creation_tokens": null,
+          "tokens": 42693,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 2,
+          "native_command_count": 5,
+          "native_command_counts": {
+            "rg": 2,
+            "for": 1,
+            "do": 1,
+            "done": 1
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 17,
+          "reason": null
+        }
+      ],
+      "answers": [
+        {
+          "arm": "raw",
+          "task": "g4-rename-impact",
+          "rep": "1",
+          "final_answer": "9 files import and call `handleError` from `ui/handleError`:\n\n- [packages/login/SignOnComponent.tsx](/repo/packages/login/SignOnComponent.tsx:18) — `SignOnComponent`\n- [apps/project/components/Business.tsx](/repo/apps/project/components/Business.tsx:45) — `Business`\n- [apps/project/components/Contact.tsx](/repo/apps/project/components/Contact.tsx:16) — `Contact`\n- [apps/feedback/app/(root)/playground/page.tsx](/repo/apps/feedback/app/(root)/playground/page.tsx:30) — `Home`\n- [apps/feedback/components/home/AnswerForm.tsx](/repo/apps/feedback/components/home/AnswerForm.tsx:11) — `AnswerForm`\n- [apps/feedback/components/home/SuggestForm.tsx](/repo/apps/feedback/components/home/SuggestForm.tsx:7) — `SuggestForm`\n- [apps/site/components/Contact.tsx](/repo/apps/site/components/Contact.tsx:16) — `Contact`\n- [apps/site/components/Chatbot.tsx](/repo/apps/site/components/Chatbot.tsx:40) — `Chatbot`\n- [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4) — the exported helper declaration itself (`handleError` → `reportError`)\n\nI excluded generated analyzer JSON references, which are not imports or call sites."
+        },
+        {
+          "arm": "pixel",
+          "task": "g4-rename-impact",
+          "rep": "1",
+          "final_answer": "Affected consumer files (all import `handleError` and call it):\n\n- `apps/feedback/app/(root)/playground/page.tsx` — `Playground` page\n- `apps/feedback/components/home/AnswerForm.tsx` — `AnswerForm`\n- `apps/feedback/components/home/SuggestForm.tsx` — `SuggestForm`\n- `apps/project/components/Business.tsx` — `Business`\n- `apps/project/components/Contact.tsx` — `Contact`\n- `apps/site/components/Chatbot.tsx` — `Chatbot`\n- `apps/site/components/Contact.tsx` — `Contact`\n- `packages/login/SignOnComponent.tsx` — `SignOnComponent`\n\nThe helper definition itself also changes: `packages/ui/handleError.ts` (export `handleError`; likely renamed to `reportError.ts` as part of the rename)."
+        },
+        {
+          "arm": "raw",
+          "task": "g4-rename-impact",
+          "rep": "2",
+          "final_answer": "8 consumer files import and call `handleError`:\n\n| File | Importing component/symbol |\n|---|---|\n| `packages/login/SignOnComponent.tsx` | `SignOnComponent` |\n| `apps/feedback/components/home/AnswerForm.tsx` | `AnswerForm` |\n| `apps/feedback/components/home/SuggestForm.tsx` | `SuggestForm` |\n| `apps/feedback/app/(root)/playground/page.tsx` | `Home` |\n| `apps/project/components/Business.tsx` | `Business` |\n| `apps/project/components/Contact.tsx` | `Contact` |\n| `apps/site/components/Chatbot.tsx` | `Chatbot` |\n| `apps/site/components/Contact.tsx` | `Contact` |\n\nThe helper definition itself also needs renaming: `packages/ui/handleError.ts`. No other source imports/calls were found; remaining matches are generated playground metadata or unrelated filenames."
+        },
+        {
+          "arm": "pixel",
+          "task": "g4-rename-impact",
+          "rep": "2",
+          "final_answer": "Affected callers of `handleError`:\n\n- `apps/feedback/app/(root)/playground/page.tsx` — `PlaygroundPage`\n- `apps/feedback/components/home/AnswerForm.tsx` — `AnswerForm`\n- `apps/feedback/components/home/SuggestForm.tsx` — `SuggestForm`\n- `apps/project/components/Business.tsx` — `Business`\n- `apps/project/components/Contact.tsx` — `Contact`\n- `apps/site/components/Chatbot.tsx` — `Chatbot`\n- `apps/site/components/Contact.tsx` — `Contact`\n- `packages/login/SignOnComponent.tsx` — `SignOnComponent`\n\nAdditionally, the defining file itself must change:\n\n- `packages/ui/handleError.ts` — exported symbol `handleError` (and likely its filename, if the module is renamed too)"
+        },
+        {
+          "arm": "raw",
+          "task": "g4-rename-impact",
+          "rep": "3",
+          "final_answer": "Affected call-site files (9):\n\n- [packages/login/SignOnComponent.tsx](/repo/packages/login/SignOnComponent.tsx:18) — `SignOnComponent` imports `{handleError}` and calls it.\n- [apps/feedback/app/(root)/playground/page.tsx](/repo/apps/feedback/app/(root)/playground/page.tsx:30) — `Home` imports and calls it.\n- [apps/feedback/components/home/AnswerForm.tsx](/repo/apps/feedback/components/home/AnswerForm.tsx:11) — `AnswerForm` imports and calls it.\n- [apps/feedback/components/home/SuggestForm.tsx](/repo/apps/feedback/components/home/SuggestForm.tsx:7) — `SuggestForm` imports and calls it.\n- [apps/project/components/Business.tsx](/repo/apps/project/components/Business.tsx:45) — `Business` imports and calls it.\n- [apps/project/components/Contact.tsx](/repo/apps/project/components/Contact.tsx:16) — `Contact` imports and calls it.\n- [apps/site/components/Chatbot.tsx](/repo/apps/site/components/Chatbot.tsx:40) — `Chatbot` imports and calls it.\n- [apps/site/components/Contact.tsx](/repo/apps/site/components/Contact.tsx:16) — `Contact` imports and calls it.\n- [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4) — defines/exports `handleError`; needs its exported symbol renamed to `reportError`.\n\nI excluded generated/build artifacts (`.next` and a playground JSON output)."
+        },
+        {
+          "arm": "pixel",
+          "task": "g4-rename-impact",
+          "rep": "3",
+          "final_answer": "Eight consuming files need their `handleError` import and calls renamed:\n\n- [packages/login/SignOnComponent.tsx](/repo/packages/login/SignOnComponent.tsx:18) — `SignOnComponent`\n- [apps/project/components/Business.tsx](/repo/apps/project/components/Business.tsx:45) — `Business`\n- [apps/project/components/Contact.tsx](/repo/apps/project/components/Contact.tsx:16) — `Contact`\n- [apps/feedback/app/(root)/playground/page.tsx](/repo/apps/feedback/app/(root)/playground/page.tsx:30) — `Home`\n- [apps/site/components/Chatbot.tsx](/repo/apps/site/components/Chatbot.tsx:40) — `Chatbot`\n- [apps/feedback/components/home/AnswerForm.tsx](/repo/apps/feedback/components/home/AnswerForm.tsx:11) — `AnswerForm`\n- [apps/site/components/Contact.tsx](/repo/apps/site/components/Contact.tsx:16) — `Contact`\n- [apps/feedback/components/home/SuggestForm.tsx](/repo/apps/feedback/components/home/SuggestForm.tsx:7) — `SuggestForm`\n\nThe helper’s own export also needs renaming in [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4)."
+        }
+      ],
+      "paired": [
+        {
+          "task": "g4-rename-impact",
+          "complete_pairs": 3,
+          "token_pairs": 3,
+          "median_paired_token_saving_percent": 35.33653846153846,
+          "raw_median_seconds": 26,
+          "pixel_median_seconds": 15
+        }
+      ],
+      "receipts": [
+        {
+          "rep": 1,
+          "returncode": 0,
+          "response_valid": true,
+          "forwarded_to_codex": true,
+          "emitted_context": true,
+          "hook_event_name": "UserPromptSubmit",
+          "additional_context": "[PIXEL:BRIEF]\nanchors: handleError, reportError, packages/ui/handleError.ts\nfiles: apps/feedback/app/(root)/playground/page.tsx:30 apps/feedback/components/home/AnswerForm.tsx:11 apps/feedback/components/home/SuggestForm.tsx:7 apps/project/components/Business.tsx:45 apps/project/components/Contact.tsx:16 apps/site/components/Chatbot.tsx:40 apps/site/components/Contact.tsx:16 packages/login/SignOnComponent.tsx:18 (+1 more)\nexcluded (generated): playground/dev-time-analyzerr/output/data.json\nunresolved: find-symbol handleError: the graph is not built\nconfidence: medium | ops: 2/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+          "additional_context_bytes": 706,
+          "additional_context_sha256": "9b6c4dad0a5e8cebd8a817731b64f8327add8b0d274d927456c2c86b646cf56c"
+        },
+        {
+          "rep": 2,
+          "returncode": 0,
+          "response_valid": true,
+          "forwarded_to_codex": true,
+          "emitted_context": true,
+          "hook_event_name": "UserPromptSubmit",
+          "additional_context": "[PIXEL:BRIEF]\nanchors: handleError, reportError, packages/ui/handleError.ts\nfiles: apps/feedback/app/(root)/playground/page.tsx:30 apps/feedback/components/home/AnswerForm.tsx:11 apps/feedback/components/home/SuggestForm.tsx:7 apps/project/components/Business.tsx:45 apps/project/components/Contact.tsx:16 apps/site/components/Chatbot.tsx:40 apps/site/components/Contact.tsx:16 packages/login/SignOnComponent.tsx:18 (+1 more)\nexcluded (generated): playground/dev-time-analyzerr/output/data.json\nunresolved: find-symbol handleError: the graph is not built\nconfidence: medium | ops: 2/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+          "additional_context_bytes": 706,
+          "additional_context_sha256": "9b6c4dad0a5e8cebd8a817731b64f8327add8b0d274d927456c2c86b646cf56c"
+        },
+        {
+          "rep": 3,
+          "returncode": 0,
+          "response_valid": true,
+          "forwarded_to_codex": true,
+          "emitted_context": true,
+          "hook_event_name": "UserPromptSubmit",
+          "additional_context": "[PIXEL:BRIEF]\nanchors: handleError, reportError, packages/ui/handleError.ts\nfiles: apps/feedback/app/(root)/playground/page.tsx:30 apps/feedback/components/home/AnswerForm.tsx:11 apps/feedback/components/home/SuggestForm.tsx:7 apps/project/components/Business.tsx:45 apps/project/components/Contact.tsx:16 apps/site/components/Chatbot.tsx:40 apps/site/components/Contact.tsx:16 packages/login/SignOnComponent.tsx:18 (+1 more)\nexcluded (generated): playground/dev-time-analyzerr/output/data.json\nunresolved: find-symbol handleError: the graph is not built\nconfidence: medium | ops: 2/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+          "additional_context_bytes": 706,
+          "additional_context_sha256": "9b6c4dad0a5e8cebd8a817731b64f8327add8b0d274d927456c2c86b646cf56c"
+        }
+      ],
+      "sha256": {
+        "ranking.json": "0d2f1066f6eebbb26683a755b0ce0bcdcd8269e6e45928e4f1e9bb870d664300",
+        "pixel-hook-1.jsonl": "44699545d689ca54e5d971aff0cba612e41df7940e88da1c8e0a0c5abe699e59",
+        "pixel-hook-2.jsonl": "44699545d689ca54e5d971aff0cba612e41df7940e88da1c8e0a0c5abe699e59",
+        "pixel-hook-3.jsonl": "44699545d689ca54e5d971aff0cba612e41df7940e88da1c8e0a0c5abe699e59",
+        "raw-g4-rename-impact-1.jsonl": "f4a840d76ee2a434123ffc60d831d19c9d437b21c6bc83f1f36437428ea69304",
+        "pixel-g4-rename-impact-1.jsonl": "173dd4682a35c48765043759fa92528d9884f7187356abcd54fcad3f1893241d",
+        "raw-g4-rename-impact-2.jsonl": "59a6e2fb09e47340a068da915cdac4ef34c377c12a0ac8f0b99cdd49f0f1dfbd",
+        "pixel-g4-rename-impact-2.jsonl": "6cba4cd00289894fb89037e02ecefb7afb33fa06f1171212ada898e2b35a28af",
+        "raw-g4-rename-impact-3.jsonl": "5bd7c58130a1a51da284412967693f78f8ba68aae9c9bb18b66e515afccee5db",
+        "pixel-g4-rename-impact-3.jsonl": "bcdba035e380c15126aef3440f6f975b04be0492eed5ae3f42e6101035764514"
+      }
+    },
+    {
+      "results_directory_name": "brief-hooks-g7-lookup-handleerror",
+      "run": {
+        "run_id": "20261007012441-8237",
+        "model": "gpt-5.6-terra",
+        "effort": "medium",
+        "codex_version": "codex-cli 0.160.0",
+        "pixel_image_id": "sha256:6c713ea2d70fbb80f5dd927615ce3aacf780669f656e5a02bad81df190cbdf86",
+        "pixel_source_id": "local",
+        "skill_candidate_name": null,
+        "skill_source_sha256": null,
+        "fixture_repository": "architech-t",
+        "fixture_commits_from_scenarios": [
+          "5c47874700c23a6c9e976de3f553ffe75bac39d8"
+        ],
+        "tasks": [
+          "g7-lookup-handleerror"
+        ],
+        "arms": [
+          "raw",
+          "pixel"
+        ],
+        "reps": 3
+      },
+      "scenario_provenance": "Scenario content and hashes read at export from the run's recorded scenario directory; scenario.commit identifies the fixture revision.",
+      "scenarios": [
+        {
+          "sha256": "7a8f0500cee4865219435bcd4f1b624cd388427f599a36ab2639899baf61eeab",
+          "scenario": {
+            "id": "g7-lookup-handleerror",
+            "suite": "generic",
+            "task_class": "exact-identifier",
+            "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+            "mode": "answer",
+            "max_turns": 30,
+            "prompt": "Where is `handleError` defined in this repository? Give the file path, the line, and the exact signature.",
+            "must": [
+              {
+                "pattern": "packages/ui/handleError\\.ts",
+                "points": 4,
+                "why": "definition file"
+              },
+              {
+                "pattern": "packages/ui/handleError\\.ts[\\s\\S]{0,100}(?::4\\b|line\\s+4)",
+                "points": 3,
+                "why": "definition path and line 4"
+              },
+              {
+                "pattern": "(?:const|function)\\s+handleError[\\s\\S]{0,120}(?:Error|string)",
+                "points": 3,
+                "why": "handleError signature mentions param or return type"
+              }
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "arm": "raw",
+          "task": "g7-lookup-handleerror",
+          "rep": "1",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 41572,
+          "generation_tokens": 232,
+          "cache_read_tokens": 36096,
+          "cache_creation_tokens": null,
+          "tokens": 41804,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 2,
+          "native_command_counts": {
+            "rg": 1,
+            "nl": 1
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 11,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g7-lookup-handleerror",
+          "rep": "1",
+          "status": "complete",
+          "score": 3,
+          "max_score": 10,
+          "score_pct": 30,
+          "input_tokens": 13218,
+          "generation_tokens": 300,
+          "cache_read_tokens": 11008,
+          "cache_creation_tokens": null,
+          "tokens": 13518,
+          "cost_usd": null,
+          "tool_calls": 0,
+          "pixel_calls": 0,
+          "native_search_calls": 0,
+          "native_command_count": 0,
+          "native_command_counts": {},
+          "candidate_skill_file_reads": null,
+          "seconds": 8,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g7-lookup-handleerror",
+          "rep": "2",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 41364,
+          "generation_tokens": 222,
+          "cache_read_tokens": 36096,
+          "cache_creation_tokens": null,
+          "tokens": 41586,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 2,
+          "native_command_counts": {
+            "rg": 1,
+            "nl": 1
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 8,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g7-lookup-handleerror",
+          "rep": "2",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 40743,
+          "generation_tokens": 266,
+          "cache_read_tokens": 39168,
+          "cache_creation_tokens": null,
+          "tokens": 41009,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 2,
+          "native_command_counts": {
+            "rg": 1,
+            "nl": 1
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 13,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g7-lookup-handleerror",
+          "rep": "3",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 41765,
+          "generation_tokens": 220,
+          "cache_read_tokens": 34048,
+          "cache_creation_tokens": null,
+          "tokens": 41985,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 2,
+          "native_command_counts": {
+            "rg": 1,
+            "nl": 1
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 14,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g7-lookup-handleerror",
+          "rep": "3",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 40697,
+          "generation_tokens": 285,
+          "cache_read_tokens": 37120,
+          "cache_creation_tokens": null,
+          "tokens": 40982,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 2,
+          "native_command_counts": {
+            "rg": 1,
+            "sed": 1
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 13,
+          "reason": null
+        }
+      ],
+      "answers": [
+        {
+          "arm": "raw",
+          "task": "g7-lookup-handleerror",
+          "rep": "1",
+          "final_answer": "[`packages/ui/handleError.ts`](/repo/packages/ui/handleError.ts:4), line 4:\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+        },
+        {
+          "arm": "pixel",
+          "task": "g7-lookup-handleerror",
+          "rep": "1",
+          "final_answer": "`handleError` is defined in several files:\n\n- [apps/feedback/app/(root)/playground/page.tsx](/repo/apps/feedback/app/(root)/playground/page.tsx:30): `const handleError = (error: Error) => {`\n- [apps/feedback/components/home/AnswerForm.tsx](/repo/apps/feedback/components/home/AnswerForm.tsx:11): `const handleError = (error: Error) => {`\n- [apps/feedback/components/home/SuggestForm.tsx](/repo/apps/feedback/components/home/SuggestForm.tsx:7): `const handleError = (error: Error) => {`\n- [apps/project/components/Business.tsx](/repo/apps/project/components/Business.tsx:45): `const handleError = (error: Error) => {`\n- [apps/project/components/Contact.tsx](/repo/apps/project/components/Contact.tsx:16): `const handleError = (error: Error) => {`\n- [apps/site/components/Chatbot.tsx](/repo/apps/site/components/Chatbot.tsx:40): `const handleError = (error: Error) => {`\n- [apps/site/components/Contact.tsx](/repo/apps/site/components/Contact.tsx:16): `const handleError = (error: Error) => {`"
+        },
+        {
+          "arm": "raw",
+          "task": "g7-lookup-handleerror",
+          "rep": "2",
+          "final_answer": "`handleError` is defined in [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4), line 4:\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+        },
+        {
+          "arm": "pixel",
+          "task": "g7-lookup-handleerror",
+          "rep": "2",
+          "final_answer": "[`handleError` is defined in `packages/ui/handleError.ts` line 4](/repo/packages/ui/handleError.ts:4).\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+        },
+        {
+          "arm": "raw",
+          "task": "g7-lookup-handleerror",
+          "rep": "3",
+          "final_answer": "Defined at [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4).\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+        },
+        {
+          "arm": "pixel",
+          "task": "g7-lookup-handleerror",
+          "rep": "3",
+          "final_answer": "Defined in [packages/ui/handleError.ts](/repo/packages/ui/handleError.ts:4).\n\n```ts\nexport const handleError = (\n  e: any,\n  description: string | null | any[] = null,\n  callback: (() => void) | null = null,\n) => {\n```"
+        }
+      ],
+      "paired": [
+        {
+          "task": "g7-lookup-handleerror",
+          "complete_pairs": 3,
+          "token_pairs": 3,
+          "median_paired_token_saving_percent": 2.388948433964511,
+          "raw_median_seconds": 11,
+          "pixel_median_seconds": 13
+        }
+      ],
+      "receipts": [
+        {
+          "rep": 1,
+          "returncode": 0,
+          "response_valid": true,
+          "forwarded_to_codex": true,
+          "emitted_context": true,
+          "hook_event_name": "UserPromptSubmit",
+          "additional_context": "[PIXEL:BRIEF]\nanchors: handleError\nfiles: apps/feedback/app/(root)/playground/page.tsx:30 apps/feedback/components/home/AnswerForm.tsx:11 apps/feedback/components/home/SuggestForm.tsx:7 apps/project/components/Business.tsx:45 apps/project/components/Contact.tsx:16 apps/site/components/Chatbot.tsx:40 apps/site/components/Contact.tsx:16 packages/login/SignOnComponent.tsx:18 (+1 more)\nexcluded (generated): playground/dev-time-analyzerr/output/data.json\nunresolved: find-symbol handleError: the graph is not built\nconfidence: medium | ops: 2/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+          "additional_context_bytes": 665,
+          "additional_context_sha256": "f32c895b357fe1b00b573d49cd09f728c1a873bdf09bb2da1364bf976b687649"
+        },
+        {
+          "rep": 2,
+          "returncode": 0,
+          "response_valid": true,
+          "forwarded_to_codex": true,
+          "emitted_context": true,
+          "hook_event_name": "UserPromptSubmit",
+          "additional_context": "[PIXEL:BRIEF]\nanchors: handleError\nfiles: apps/feedback/app/(root)/playground/page.tsx:30 apps/feedback/components/home/AnswerForm.tsx:11 apps/feedback/components/home/SuggestForm.tsx:7 apps/project/components/Business.tsx:45 apps/project/components/Contact.tsx:16 apps/site/components/Chatbot.tsx:40 apps/site/components/Contact.tsx:16 packages/login/SignOnComponent.tsx:18 (+1 more)\nexcluded (generated): playground/dev-time-analyzerr/output/data.json\nunresolved: find-symbol handleError: the graph is not built\nconfidence: medium | ops: 2/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+          "additional_context_bytes": 665,
+          "additional_context_sha256": "f32c895b357fe1b00b573d49cd09f728c1a873bdf09bb2da1364bf976b687649"
+        },
+        {
+          "rep": 3,
+          "returncode": 0,
+          "response_valid": true,
+          "forwarded_to_codex": true,
+          "emitted_context": true,
+          "hook_event_name": "UserPromptSubmit",
+          "additional_context": "[PIXEL:BRIEF]\nanchors: handleError\nfiles: apps/feedback/app/(root)/playground/page.tsx:30 apps/feedback/components/home/AnswerForm.tsx:11 apps/feedback/components/home/SuggestForm.tsx:7 apps/project/components/Business.tsx:45 apps/project/components/Contact.tsx:16 apps/site/components/Chatbot.tsx:40 apps/site/components/Contact.tsx:16 packages/login/SignOnComponent.tsx:18 (+1 more)\nexcluded (generated): playground/dev-time-analyzerr/output/data.json\nunresolved: find-symbol handleError: the graph is not built\nconfidence: medium | ops: 2/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+          "additional_context_bytes": 665,
+          "additional_context_sha256": "f32c895b357fe1b00b573d49cd09f728c1a873bdf09bb2da1364bf976b687649"
+        }
+      ],
+      "sha256": {
+        "ranking.json": "e80f3252b9d08a186b0569ac1822851dc72b695cfd0ad58d2082b2c6f8e359f2",
+        "pixel-hook-1.jsonl": "e45670d1b611c8a2a6aa8df8c414d5df904f849dfe51ee656100f4bda1278e77",
+        "pixel-hook-2.jsonl": "e45670d1b611c8a2a6aa8df8c414d5df904f849dfe51ee656100f4bda1278e77",
+        "pixel-hook-3.jsonl": "e45670d1b611c8a2a6aa8df8c414d5df904f849dfe51ee656100f4bda1278e77",
+        "raw-g7-lookup-handleerror-1.jsonl": "f05e6a682f780155aa16b1c2d2ee866dc9ed5391fdbd94852c6717151c06f5bc",
+        "pixel-g7-lookup-handleerror-1.jsonl": "2e85985b8c831555fff005d60ae7496e3d786bcbbe8873ed9754974fa36e8602",
+        "raw-g7-lookup-handleerror-2.jsonl": "87350a1076e36b1dfb260dfa1530208318fb0b0a9f59badb9a8deff85feb10ff",
+        "pixel-g7-lookup-handleerror-2.jsonl": "572cfb0cc67bcc4a97d7c5c330452c34651c3e60c0cb1654a3131b853c2f4c8c",
+        "raw-g7-lookup-handleerror-3.jsonl": "48010e2e3b348bdd27b787d407bcc9ca63cf62b8cea141bc7540742dc1f485d8",
+        "pixel-g7-lookup-handleerror-3.jsonl": "f538044ebb3480bb79c9b1321865ce7641122f26d5bdec0ca7290898f85482c2"
+      }
+    },
+    {
+      "results_directory_name": "brief-hooks-g8-lookup-custommenu",
+      "run": {
+        "run_id": "20261007012623-44210",
+        "model": "gpt-5.6-terra",
+        "effort": "medium",
+        "codex_version": "codex-cli 0.160.0",
+        "pixel_image_id": "sha256:6c713ea2d70fbb80f5dd927615ce3aacf780669f656e5a02bad81df190cbdf86",
+        "pixel_source_id": "local",
+        "skill_candidate_name": null,
+        "skill_source_sha256": null,
+        "fixture_repository": "architech-t",
+        "fixture_commits_from_scenarios": [
+          "5c47874700c23a6c9e976de3f553ffe75bac39d8"
+        ],
+        "tasks": [
+          "g8-lookup-custommenu"
+        ],
+        "arms": [
+          "raw",
+          "pixel"
+        ],
+        "reps": 3
+      },
+      "scenario_provenance": "Scenario content and hashes read at export from the run's recorded scenario directory; scenario.commit identifies the fixture revision.",
+      "scenarios": [
+        {
+          "sha256": "ab299e8ad91e48cefe057f9d9092a041d35e81e348becc68ee3867f382b821df",
+          "scenario": {
+            "id": "g8-lookup-custommenu",
+            "suite": "generic",
+            "task_class": "exact-identifier",
+            "commit": "5c47874700c23a6c9e976de3f553ffe75bac39d8",
+            "mode": "answer",
+            "max_turns": 30,
+            "prompt": "Where is `CustomMenu` defined in this repository, and what does it export?",
+            "must": [
+              {
+                "pattern": "packages/ui/CustomMenu\\.ts",
+                "points": 4,
+                "why": "definition file"
+              },
+              {
+                "pattern": "defineMultiStyleConfig",
+                "points": 3,
+                "why": "what it exports"
+              },
+              {
+                "pattern": "packages/ui/CustomMenu\\.ts[\\s\\S]{0,100}(?::48\\b|line\\s+48)",
+                "points": 3,
+                "why": "definition path and line 48"
+              }
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "arm": "raw",
+          "task": "g8-lookup-custommenu",
+          "rep": "1",
+          "status": "complete",
+          "score": 7,
+          "max_score": 10,
+          "score_pct": 70,
+          "input_tokens": 40963,
+          "generation_tokens": 261,
+          "cache_read_tokens": 36096,
+          "cache_creation_tokens": null,
+          "tokens": 41224,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 3,
+          "native_command_counts": {
+            "rg": 1,
+            "sed": 2
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 12,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g8-lookup-custommenu",
+          "rep": "1",
+          "status": "complete",
+          "score": 7,
+          "max_score": 10,
+          "score_pct": 70,
+          "input_tokens": 13138,
+          "generation_tokens": 82,
+          "cache_read_tokens": 11008,
+          "cache_creation_tokens": null,
+          "tokens": 13220,
+          "cost_usd": null,
+          "tool_calls": 0,
+          "pixel_calls": 0,
+          "native_search_calls": 0,
+          "native_command_count": 0,
+          "native_command_counts": {},
+          "candidate_skill_file_reads": null,
+          "seconds": 6,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g8-lookup-custommenu",
+          "rep": "2",
+          "status": "complete",
+          "score": 7,
+          "max_score": 10,
+          "score_pct": 70,
+          "input_tokens": 40529,
+          "generation_tokens": 255,
+          "cache_read_tokens": 36096,
+          "cache_creation_tokens": null,
+          "tokens": 40784,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 3,
+          "native_command_counts": {
+            "rg": 1,
+            "sed": 2
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 8,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g8-lookup-custommenu",
+          "rep": "2",
+          "status": "complete",
+          "score": 7,
+          "max_score": 10,
+          "score_pct": 70,
+          "input_tokens": 13138,
+          "generation_tokens": 102,
+          "cache_read_tokens": 11008,
+          "cache_creation_tokens": null,
+          "tokens": 13240,
+          "cost_usd": null,
+          "tool_calls": 0,
+          "pixel_calls": 0,
+          "native_search_calls": 0,
+          "native_command_count": 0,
+          "native_command_counts": {},
+          "candidate_skill_file_reads": null,
+          "seconds": 6,
+          "reason": null
+        },
+        {
+          "arm": "raw",
+          "task": "g8-lookup-custommenu",
+          "rep": "3",
+          "status": "complete",
+          "score": 10,
+          "max_score": 10,
+          "score_pct": 100,
+          "input_tokens": 40537,
+          "generation_tokens": 280,
+          "cache_read_tokens": 36096,
+          "cache_creation_tokens": null,
+          "tokens": 40817,
+          "cost_usd": null,
+          "tool_calls": 2,
+          "pixel_calls": 0,
+          "native_search_calls": 1,
+          "native_command_count": 3,
+          "native_command_counts": {
+            "rg": 1,
+            "sed": 2
+          },
+          "candidate_skill_file_reads": null,
+          "seconds": 8,
+          "reason": null
+        },
+        {
+          "arm": "pixel",
+          "task": "g8-lookup-custommenu",
+          "rep": "3",
+          "status": "complete",
+          "score": 7,
+          "max_score": 10,
+          "score_pct": 70,
+          "input_tokens": 13138,
+          "generation_tokens": 78,
+          "cache_read_tokens": 11008,
+          "cache_creation_tokens": null,
+          "tokens": 13216,
+          "cost_usd": null,
+          "tool_calls": 0,
+          "pixel_calls": 0,
+          "native_search_calls": 0,
+          "native_command_count": 0,
+          "native_command_counts": {},
+          "candidate_skill_file_reads": null,
+          "seconds": 5,
+          "reason": null
+        }
+      ],
+      "answers": [
+        {
+          "arm": "raw",
+          "task": "g8-lookup-custommenu",
+          "rep": "1",
+          "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports a named `CustomMenu` Chakra UI multi-style configuration, with `sidebar` and `navbar` variants for `Menu` items. It is registered as the theme’s `Menu` component in [packages/ui/themes.tsx](/repo/packages/ui/themes.tsx:32)."
+        },
+        {
+          "arm": "pixel",
+          "task": "g8-lookup-custommenu",
+          "rep": "1",
+          "final_answer": "`CustomMenu` is defined in [`packages/ui/CustomMenu.ts`](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports the `CustomMenu` component. It is also referenced by [`packages/ui/themes.tsx`](/repo/packages/ui/themes.tsx:8)."
+        },
+        {
+          "arm": "raw",
+          "task": "g8-lookup-custommenu",
+          "rep": "2",
+          "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports a named `CustomMenu` Chakra UI multi-style configuration, with `sidebar` and `navbar` variants for menu items. It’s registered as the theme’s `Menu` component in [packages/ui/themes.tsx](/repo/packages/ui/themes.tsx:32)."
+        },
+        {
+          "arm": "pixel",
+          "task": "g8-lookup-custommenu",
+          "rep": "2",
+          "final_answer": "`CustomMenu` is defined in [`packages/ui/CustomMenu.ts`](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports the `CustomMenu` component (as the module’s default export). It is also referenced by [`packages/ui/themes.tsx`](/repo/packages/ui/themes.tsx:8)."
+        },
+        {
+          "arm": "raw",
+          "task": "g8-lookup-custommenu",
+          "rep": "3",
+          "final_answer": "`CustomMenu` is defined in [packages/ui/CustomMenu.ts](/repo/packages/ui/CustomMenu.ts:48).\n\nIt exports a named constant:\n\n```ts\nexport const CustomMenu = defineMultiStyleConfig({variants})\n```\n\nIt is a Chakra UI multi-style menu configuration with `sidebar` and `navbar` variants, and is registered as the theme’s `Menu` component in [packages/ui/themes.tsx](/repo/packages/ui/themes.tsx:32)."
+        },
+        {
+          "arm": "pixel",
+          "task": "g8-lookup-custommenu",
+          "rep": "3",
+          "final_answer": "`CustomMenu` is defined in [`packages/ui/CustomMenu.ts`](/repo/packages/ui/CustomMenu.ts:48). It exports the `CustomMenu` component."
+        }
+      ],
+      "paired": [
+        {
+          "task": "g8-lookup-custommenu",
+          "complete_pairs": 3,
+          "token_pairs": 3,
+          "median_paired_token_saving_percent": 67.6213342479849,
+          "raw_median_seconds": 8,
+          "pixel_median_seconds": 6
+        }
+      ],
+      "receipts": [
+        {
+          "rep": 1,
+          "returncode": 0,
+          "response_valid": true,
+          "forwarded_to_codex": true,
+          "emitted_context": true,
+          "hook_event_name": "UserPromptSubmit",
+          "additional_context": "[PIXEL:BRIEF]\nanchors: CustomMenu\nfiles: packages/ui/CustomMenu.ts:48 packages/ui/themes.tsx:8\nexcluded (generated): playground/dev-time-analyzerr/output/data.json\nunresolved: find-symbol CustomMenu: the graph is not built\nconfidence: medium | ops: 2/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+          "additional_context_bytes": 374,
+          "additional_context_sha256": "9685e3a547170c940ee5ec6389500c682a9307de4b55250236bde297f3991514"
+        },
+        {
+          "rep": 2,
+          "returncode": 0,
+          "response_valid": true,
+          "forwarded_to_codex": true,
+          "emitted_context": true,
+          "hook_event_name": "UserPromptSubmit",
+          "additional_context": "[PIXEL:BRIEF]\nanchors: CustomMenu\nfiles: packages/ui/CustomMenu.ts:48 packages/ui/themes.tsx:8\nexcluded (generated): playground/dev-time-analyzerr/output/data.json\nunresolved: find-symbol CustomMenu: the graph is not built\nconfidence: medium | ops: 2/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+          "additional_context_bytes": 374,
+          "additional_context_sha256": "9685e3a547170c940ee5ec6389500c682a9307de4b55250236bde297f3991514"
+        },
+        {
+          "rep": 3,
+          "returncode": 0,
+          "response_valid": true,
+          "forwarded_to_codex": true,
+          "emitted_context": true,
+          "hook_event_name": "UserPromptSubmit",
+          "additional_context": "[PIXEL:BRIEF]\nanchors: CustomMenu\nfiles: packages/ui/CustomMenu.ts:48 packages/ui/themes.tsx:8\nexcluded (generated): playground/dev-time-analyzerr/output/data.json\nunresolved: find-symbol CustomMenu: the graph is not built\nconfidence: medium | ops: 2/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+          "additional_context_bytes": 374,
+          "additional_context_sha256": "9685e3a547170c940ee5ec6389500c682a9307de4b55250236bde297f3991514"
+        }
+      ],
+      "sha256": {
+        "ranking.json": "4c9da0fe0f92914e4a264c5a3796d4b23ba5e859f7ab5f582ae63d667afaefaa",
+        "pixel-hook-1.jsonl": "562bdc4fb2d4644366f71a8eb1db59fbb8b0223c57dbb0e204a0811aac180fee",
+        "pixel-hook-2.jsonl": "562bdc4fb2d4644366f71a8eb1db59fbb8b0223c57dbb0e204a0811aac180fee",
+        "pixel-hook-3.jsonl": "562bdc4fb2d4644366f71a8eb1db59fbb8b0223c57dbb0e204a0811aac180fee",
+        "raw-g8-lookup-custommenu-1.jsonl": "fc24a1eb8271cc2fb2b145bb1b0ee1a01de2e098b0a8e784e4dfba613d97c203",
+        "pixel-g8-lookup-custommenu-1.jsonl": "da00b1feb092322217147ddf7de4dd054906fb9b71e3bdea39917ccc33bc655f",
+        "raw-g8-lookup-custommenu-2.jsonl": "924bfe29e17bf97ea81b1e77e04c466807f8f6702dc6df2fe13ad27c8f9ed9e9",
+        "pixel-g8-lookup-custommenu-2.jsonl": "c3ca430bc5d26f449aeecb68b0d799dd30862d7b9dd4e53e911793b6286f7069",
+        "raw-g8-lookup-custommenu-3.jsonl": "bbe820b23e059e4c8aea102773a49b2a125a70f32dbf0ad9d9173f4791c9ee97",
+        "pixel-g8-lookup-custommenu-3.jsonl": "60814933112da078fc692c9331ab724cdf1a6362adce56888da97f95c5635ee4"
+      }
+    }
+  ]
+}

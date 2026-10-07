@@ -1,0 +1,75 @@
+{
+  "id": "qk-flow",
+  "suite": "brief-question-kinds",
+  "task_class": "explanation",
+  "mode": "answer",
+  "commit": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+  "max_turns": 30,
+  "prompt": "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+  "must": [
+    {
+      "pattern": "(?i)(?:codex_config|codex config)",
+      "points": 1,
+      "why": "identifies the Codex installation/configuration boundary"
+    },
+    {
+      "pattern": "(?i)UserPromptSubmit",
+      "points": 1,
+      "why": "names the Codex host event"
+    },
+    {
+      "pattern": "(?i)task-event",
+      "points": 1,
+      "why": "names the installed hook entrypoint"
+    },
+    {
+      "pattern": "(?i)--provider\\s+codex",
+      "points": 1,
+      "why": "names the provider argument"
+    },
+    {
+      "pattern": "(?i)(?:--event\\s+prompt-submit|prompt-submit)",
+      "points": 1,
+      "why": "maps the host event to the prompt-submit verb"
+    },
+    {
+      "pattern": "(?i)task_hook",
+      "points": 1,
+      "why": "identifies the host hook module"
+    },
+    {
+      "pattern": "(?is)(?=.*process)(?=.*start_brief)(?=.*with_brief)",
+      "points": 2,
+      "why": "names ordered prompt processing handoffs"
+    },
+    {
+      "pattern": "(?i)execution_brief.{0,80}chain|chain.{0,80}execution_brief",
+      "points": 1,
+      "why": "identifies the retrieval chain module"
+    },
+    {
+      "pattern": "(?i)(?:additionalContext|additional context)",
+      "points": 1,
+      "why": "names the host context field"
+    }
+  ],
+  "never": [
+    {
+      "pattern": "(?im)^(?!.*(?:legacy|retired|removed|old|former|marker|test fixture)).*(?:installs?|registers?|live command).{0,100}pixel run-hook prompt-submit --provider codex",
+      "penalty": 2,
+      "why": "the active Codex registration is task-event; the older prompt-submit verb is retained only as a legacy marker/fixture"
+    },
+    {
+      "pattern": "(?i)(?<!\\bnot\\s)(?<!\\bnever\\s)(?<!\\bdoesn't\\s)(?<!\\bdoes\\snot\\s)(?<!\\bwithout\\s)(?<!\\bno\\s)(?<!\\bcannot\\s)(?<!\\bcan't\\s)(?:starts?|builds?|rebuilds?)\\s+(?:a\\s+)?(?:daemon|index|graph)",
+      "penalty": 2,
+      "why": "the hook brief does not start daemons or build indexes"
+    }
+  ],
+  "semantic_review": {
+    "criteria": [
+      "Codex UserPromptSubmit maps to the prompt-submit task-event verb and the installed command includes task-event plus --provider codex.",
+      "The ordered flow is supported by source handoffs; it does not prove a live host forwarded or used the context.",
+      "task_hook::process starts the brief, start_brief calls execution_brief::chain::start, with_brief attaches completed text, and envelope returns it as additionalContext."
+    ]
+  }
+}

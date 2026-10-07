@@ -48,18 +48,107 @@ prep_gortex()  {
   done
   codex mcp add gortex -- gortex mcp
 }
+verify_pixel_brief() {
+  local output_file receipt_file
+  output_file=$(mktemp)
+  receipt_file="/out/pixel-brief-hook-${REP:-1}.json"
+  if ! printf '%s' '{"session_id":"arena-brief-'"${REP:-1}"'","prompt":"How should a contributor approach this repository'"'"'"s setup and tests?","cwd":"'"$REPO_DIR"'","hook_event_name":"UserPromptSubmit"}' \
+    | pixel run-hook prompt-submit --provider codex > "$output_file"; then
+    rm -f "$output_file"
+    echo "Pixel prompt-submit hook invocation failed" >&2
+    return 1
+  fi
+  python3 - "$output_file" "$receipt_file" "${REP:-1}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+output_path, receipt_path, rep = sys.argv[1:]
+try:
+    raw_response = Path(output_path).read_text().strip()
+    response = json.loads(raw_response) if raw_response else {}
+    hook_output = response.get("hookSpecificOutput", {})
+    context = hook_output.get("additionalContext", "")
+    valid = (
+        hook_output.get("hookEventName") == "UserPromptSubmit"
+        and isinstance(context, str)
+        and bool(context)
+    )
+    receipt = {
+        "arm": "pixel",
+        "rep": rep,
+        "provider": "codex",
+        "event": "prompt-submit",
+        "response_valid": valid,
+        "hook_event_name": hook_output.get("hookEventName"),
+        "brief_present": "[PIXEL:BRIEF]" in context if isinstance(context, str) else False,
+        "execution_route_present": "[PIXEL:EXECUTION_ROUTE]" in context if isinstance(context, str) else False,
+        "context_bytes": len(context.encode()) if isinstance(context, str) else 0,
+        "context_sha256": hashlib.sha256(context.encode()).hexdigest() if isinstance(context, str) else None,
+    }
+except (OSError, ValueError, TypeError):
+    receipt = {
+        "arm": "pixel",
+        "rep": rep,
+        "provider": "codex",
+        "event": "prompt-submit",
+        "response_valid": False,
+        "hook_event_name": None,
+        "brief_present": False,
+        "context_bytes": 0,
+        "context_sha256": None,
+    }
+Path(receipt_path).write_text(json.dumps(receipt, indent=2) + "\n")
+if not receipt["response_valid"]:
+    raise SystemExit("Pixel prompt-submit hook did not return valid context")
+print("=== Pixel prompt-submit context ===")
+print(context)
+print("=== End Pixel prompt-submit context ===")
+PY
+  rm -f "$output_file"
+}
+install_live_brief_hook() {
+  local codex_home hook_file receipt_file
+  codex_home="${CODEX_HOME:-$HOME/.codex}"
+  hook_file="$codex_home/hooks.json"
+  receipt_file="/out/pixel-hook-${REP:-1}.jsonl"
+  mkdir -p "$codex_home"
+  python3 - "$hook_file" "$receipt_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+hook_path, receipt_path = map(Path, sys.argv[1:])
+try:
+    config = json.loads(hook_path.read_text()) if hook_path.exists() else {}
+except (OSError, ValueError):
+    config = {}
+hooks = config.setdefault("hooks", {})
+groups = hooks.setdefault("UserPromptSubmit", [])
+command = (
+    "python3 /usr/local/lib/arena-hook-audit.py --receipt "
+    + str(receipt_path)
+    + " -- /usr/local/bin/pixel run-hook prompt-submit --provider codex"
+)
+if not any(command in json.dumps(group) for group in groups):
+    groups.append({"hooks": [{"type": "command", "command": command}]})
+hook_path.write_text(json.dumps(config, indent=2) + "\n")
+PY
+}
 prep_pixel() {
   local prep_start_ms prep_end_ms graph_db setup_receipt
   if [ "${PIXEL_ARENA_PREP_GRAPH:-0}" = "1" ]; then
     prep_start_ms=$(date +%s%3N) || return $?
   fi
   pixel install || return $?
-  # the classify skill is the conditional-routing surface Codex sees;
-  # non-interactive installs skip the wizard, so deploy it explicitly —
-  # without this the pixel arm has pixel installed but undiscoverable
-  # optional on older binaries: ignore unknown-subcommand failures
+ if [ "${ARENA_REVIEWED_PIXEL_HOOKS:-0}" != "1" ]; then
+   pixel install --repo "$REPO_DIR" || return $?
+ fi
+  # The classify skill is the conditional-routing surface Codex sees;
+  # non-interactive installs skip the wizard, so deploy it explicitly.
   pixel config install-helpers 2>/dev/null || true
-  if [ "${PIXEL_ARENA_PREP_GRAPH:-0}" = "1" ]; then
+ if [ "${PIXEL_ARENA_PREP_GRAPH:-0}" = "1" ]; then
     graph_db="$REPO_DIR/.pixel/graph.v2.db"
     setup_receipt="/out/setup-pixel-${REP:-1}.json"
     pixel prepare-repo --no-daemon "$REPO_DIR" || return $?
@@ -68,11 +157,20 @@ prep_pixel() {
       return 1
     fi
     prep_end_ms=$(date +%s%3N) || return $?
-    python3 -c 'import json,sys; graph=sys.argv[1]; json.dump({"arm":"pixel","rep":sys.argv[4],"prepare_commands":["pixel install","pixel prepare-repo --no-daemon /repo"],"duration_ms":int(sys.argv[2])-int(sys.argv[3]),"graph_db":graph,"graph_db_bytes":__import__("pathlib").Path(graph).stat().st_size},open(sys.argv[5],"w"),indent=2); open(sys.argv[5],"a").write("\n")' \
-      "$graph_db" "$prep_end_ms" "$prep_start_ms" "${REP:-1}" "$setup_receipt"
+    prepare_commands='["pixel install"]'
+    if [ "${ARENA_REVIEWED_PIXEL_HOOKS:-0}" != "1" ]; then
+      prepare_commands='["pixel install", "pixel install --repo /repo"]'
+    fi
+    prepare_commands="${prepare_commands%]}, \"pixel prepare-repo --no-daemon /repo\"]"
+    python3 -c 'import json,sys; graph=sys.argv[1]; json.dump({"arm":"pixel","rep":sys.argv[4],"prepare_commands":json.loads(sys.argv[6]),"duration_ms":int(sys.argv[2])-int(sys.argv[3]),"graph_db":graph,"graph_db_bytes":__import__("pathlib").Path(graph).stat().st_size},open(sys.argv[5],"w"),indent=2); open(sys.argv[5],"a").write("\n")' \
+      "$graph_db" "$prep_end_ms" "$prep_start_ms" "${REP:-1}" "$setup_receipt" "$prepare_commands"
   else
-    pixel build-index --history "$REPO_DIR"
+    pixel prepare-repo --no-daemon "$REPO_DIR" || return $?
   fi
+  if [ "${ARENA_REVIEWED_PIXEL_HOOKS:-0}" != "1" ]; then
+    install_live_brief_hook
+  fi
+  verify_pixel_brief
 }
 
 prep_skill_pilot() {
@@ -95,7 +193,6 @@ if [ "$SKILL_PILOT" = "1" ]; then
   prep_rc=$?
 else
 case "${ARM_TOOL:-raw}" in
-  pixel-chain) prep_pixel ;;
   raw)      : ;;
   semble)   prep_semble ;;
   graft)    prep_graft ;;
@@ -119,7 +216,7 @@ if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
     exit 1
   fi
   touch "$HOOK_AUDIT_READY"
-  for _ in $(seq 1 90); do
+  for _ in $(seq 1 240); do
     if [ -e "/out/hook-audit-raw-${HOOK_AUDIT_KEY}.failed" ] || \
        [ -e "/out/hook-audit-pixel-${HOOK_AUDIT_KEY}.failed" ]; then
       touch "/out/hook-audit-${ARM_TOOL:-raw}-${HOOK_AUDIT_KEY}.failed"
@@ -144,6 +241,7 @@ fi
 python3 /usr/local/lib/arena-context-manifest.py \
   --repo "$REPO_DIR" --codex-home "${CODEX_HOME:-$HOME/.codex}" \
   > "/out/context-${ARM_TOOL:-raw}-${REP:-1}.json"
+touch "/out/arena-ready-${ARM_TOOL:-raw}-${REP:-1}"
 
 # MCP arms: register the tool's stdio server with codex
 case "${ARM_TOOL:-raw}" in
@@ -155,35 +253,23 @@ case "${ARM_TOOL:-raw}" in
   pixel)    : ;;   # pixel wires itself via pixel install
 esac
 
+if [ "${ARENA_WATCH_ONLY:-0}" = "1" ]; then
+  while :; do sleep 3600; done
+fi
+
 IFS=' ' read -r -a TASK_LIST <<< "${TASKS:-s1-hook-install s2-vector-recall s3-rename-impact}"
 MODEL_ARGS=()
 [ -n "${CODEX_MODEL:-}" ] && MODEL_ARGS+=(-m "$CODEX_MODEL")
 [ -n "${CODEX_EFFORT:-}" ] && MODEL_ARGS+=(-c model_reasoning_effort="$CODEX_EFFORT")
-HOOK_TRUST_ARGS=()
-if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
-  # Both paired arms use the same bypass; the allowlist was audited above.
-  HOOK_TRUST_ARGS+=(--dangerously-bypass-hook-trust)
-fi
-
 overall_rc=0
 for task in "${TASK_LIST[@]}"; do
   prompt=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "/prompts/$task.json")
-  t0=$(date +%s)
-  if [ "${ARM_TOOL:-raw}" = "pixel-chain" ]; then
-    # the evidence chain runs first; the agent gets the compact brief, not
-    # raw command output — chain cost lands inside this task's wall time
-    brief=$(python3 /usr/local/bin/arena-brief.py "$prompt" 2>/dev/null || true)
-    if [ -n "$brief" ]; then
-      prompt="$prompt
-
-$brief"
-    fi
-  fi
   tag="${ARM_TOOL}-${task}-${REP}"
+  t0=$(date +%s)
   # The container is the sandbox: docker's default seccomp blocks codex's
   # bubblewrap namespaces, so read-only mode would fail every command.
   codex exec --json --sandbox danger-full-access --skip-git-repo-check \
-    "${HOOK_TRUST_ARGS[@]}" "${MODEL_ARGS[@]}" "$prompt" \
+    "${MODEL_ARGS[@]}" "$prompt" \
     > "/out/$tag.jsonl" 2> "/out/$tag.stderr"
   rc=$?
   t1=$(date +%s)
@@ -206,7 +292,11 @@ try:
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 except (OSError, ValueError):
     rows = []
-if not rows or any(row.get("response_valid") is not True for row in rows):
+if not rows or any(
+    row.get("response_valid") is not True
+    or row.get("emitted_context") is not True
+    for row in rows
+):
     sys.exit(1)
 PY
   then

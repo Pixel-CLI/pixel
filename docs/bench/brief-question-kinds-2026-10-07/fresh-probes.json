@@ -1,0 +1,1617 @@
+{
+  "schema_version": 1,
+  "run_id": "brief-question-kinds-20261007-freshprobe-a1-v3",
+  "binary": {
+    "version": "0.7.1",
+    "commit": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+    "sha256": "a1b87d4e8de80c380958aa43d65365a8e0f5e22c0c3ffa076379a5fa9417d6e8"
+  },
+  "normalization": "PIXEL_BIN and SNAPSHOT replace absolute host paths before stream hashes are computed; hashes identify normalized content.",
+  "measurement": "Wall milliseconds include each CLI subprocess, summed per route; no model/hook delivery measured. Routes selected with prior source knowledge. v1/v2 rehearsals excluded.",
+  "inputs": {
+    "snapshot": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+    "binary": "${PIXEL_BIN}",
+    "prompts": [
+      {
+        "kind": "lookup",
+        "prompt": "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+        "required_evidence": [
+          "BRIEF_BYTES constant",
+          "MAX_OPS constant",
+          "BRIEF_WINDOW 750 ms"
+        ],
+        "candidate_route": [
+          "search-content for constants/deadline in execution_brief/chain.rs with source context"
+        ]
+      },
+      {
+        "kind": "impact",
+        "prompt": "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+        "required_evidence": [
+          "start_brief definition",
+          "process production call",
+          "same-file test name",
+          "Claude/Codex prompt, non-prompt events, Pi, missing prompt, and missing repository cases"
+        ],
+        "candidate_route": [
+          "search-content start_brief call sites and the named test in task_hook.rs with bounded source context"
+        ]
+      },
+      {
+        "kind": "flow",
+        "prompt": "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+        "required_evidence": [
+          "installed task-event hook",
+          "prompt-submit event",
+          "task_hook process/start_brief/with_brief",
+          "additionalContext envelope"
+        ],
+        "candidate_route": [
+          "search-content registration/event, start_brief, with_brief, and additionalContext in hook/config sources with context"
+        ]
+      },
+      {
+        "kind": "diagnosis",
+        "prompt": "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+        "required_evidence": [
+          "text evidence remains",
+          "graph issue is reported",
+          "stale/missing graph tests",
+          "hook does not rebuild indexes/graph"
+        ],
+        "candidate_route": [
+          "search-content the stale-graph and missing-graph CLI tests plus relevant chain fallback with bounded context"
+        ]
+      },
+      {
+        "kind": "configuration",
+        "prompt": "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+        "required_evidence": [
+          "run-hook task-event",
+          "--provider codex",
+          "--event prompt-submit",
+          "Codex UserPromptSubmit registration"
+        ],
+        "candidate_route": [
+          "search-content UserPromptSubmit and task-event event commands in codex_config.rs/install.rs with context"
+        ]
+      },
+      {
+        "kind": "tests",
+        "prompt": "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+        "required_evidence": [
+          "Pi returns no brief",
+          "named start_brief provider test",
+          "named envelope test",
+          "hookEventName and additionalContext fields/assertions"
+        ],
+        "candidate_route": [
+          "search-content the named start_brief and envelope tests in task_hook.rs plus CLI Pi test with bounded context"
+        ]
+      },
+      {
+        "kind": "history",
+        "prompt": "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+        "required_evidence": [
+          "four ops",
+          "750 ms",
+          "2 KiB",
+          "read-only/no daemon or index build",
+          "Claude/Codex, Pi excluded",
+          "stale graph fallback"
+        ],
+        "candidate_route": [
+          "pixel commit-history for the specified commit with full details, limit 1 and a 4096-byte cap"
+        ]
+      },
+      {
+        "kind": "architecture",
+        "prompt": "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+        "required_evidence": [
+          "task_hook receives/dispatches host event",
+          "execution_brief chain owns retrieval and render",
+          "task_hook applies brief and creates host envelope"
+        ],
+        "candidate_route": [
+          "list-signatures for task_hook.rs and execution_brief/chain.rs using indexed relative paths, then source search for handoff functions"
+        ]
+      }
+    ]
+  },
+  "setup": {
+    "command": [
+      "rtk",
+      "${PIXEL_BIN}",
+      "prepare-repo",
+      "${SNAPSHOT}",
+      "--no-daemon",
+      "--json"
+    ],
+    "exit": 0,
+    "wall_ms": 8001,
+    "stdout": "{\"daemon\":\"skipped\",\"dirty_count\":0,\"graph\":{\"edges\":21525,\"elapsed_ms\":6220,\"files\":539,\"symbols\":8887,\"unresolved\":44654},\"index\":{\"base_files\":1133,\"commit_oid\":\"8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1\",\"delta_files\":0,\"overlay_files\":0,\"tombstones\":0},\"root\":\"${SNAPSHOT}\",\"timings\":{\"graph\":{\"build\":{\"mode\":\"full\",\"reason\":\"missing\"},\"elapsed_ms\":6220,\"phases\":{\"check_ms\":14,\"collect_ms\":59,\"concepts_ms\":4260,\"extract_ms\":539,\"imports_ms\":92,\"publish_ms\":1,\"resolve_calls_ms\":449,\"resolve_references_ms\":76,\"store_ms\":4914,\"verify_ms\":38}},\"index\":{\"base\":\"built_from_git\",\"base_ms\":1501,\"delta\":\"none\",\"delta_ms\":0,\"overlay_files\":0,\"overlay_ms\":159},\"total_ms\":7996}}",
+    "stderr": "🟩 pixel prepare-repo ❀ 8001.3ms ❀ #488ef0",
+    "snapshot": "8fe6e10cedd2ebecd3bde78ba84c910cd1cd62e1",
+    "setup_only": true,
+    "no_daemon": true
+  },
+  "trials": [
+    {
+      "arm": "current_brief",
+      "kind": "lookup",
+      "rep": 1,
+      "prompt": "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 265.888,
+          "stdout_bytes": 272,
+          "stdout_sha256": "23b6aeb9c4f8c86469436886513ec91f9f6ed8238a95849e472b1258d879df85",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "lookup",
+      "rep": 1,
+      "prompt": "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "BRIEF_BYTES|MAX_OPS|from_millis\\(750\\)|millis\\(750\\)",
+            "${SNAPSHOT}/crates/pixel/src/execution_brief/chain.rs",
+            "--context",
+            "1",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 146.95,
+          "stdout_bytes": 3338,
+          "stdout_sha256": "2c3229f528c2334b6efe6df7b104f9a0d68527b43891044fee5356b978f8ec31",
+          "stderr_sha256": "18a172f41abb45e13063e92a7af9a6e73aa77bf1ff5af2114299a2ac8545e8e9"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "lookup",
+      "rep": 2,
+      "prompt": "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 86.297,
+          "stdout_bytes": 272,
+          "stdout_sha256": "23b6aeb9c4f8c86469436886513ec91f9f6ed8238a95849e472b1258d879df85",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "lookup",
+      "rep": 2,
+      "prompt": "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "BRIEF_BYTES|MAX_OPS|from_millis\\(750\\)|millis\\(750\\)",
+            "${SNAPSHOT}/crates/pixel/src/execution_brief/chain.rs",
+            "--context",
+            "1",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 137.26,
+          "stdout_bytes": 3338,
+          "stdout_sha256": "2c3229f528c2334b6efe6df7b104f9a0d68527b43891044fee5356b978f8ec31",
+          "stderr_sha256": "a4217d682a92d196bad79e6e6a27861a312da3536a7b7332c68abc71f065a90d"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "lookup",
+      "rep": 3,
+      "prompt": "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 88.461,
+          "stdout_bytes": 272,
+          "stdout_sha256": "23b6aeb9c4f8c86469436886513ec91f9f6ed8238a95849e472b1258d879df85",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "lookup",
+      "rep": 3,
+      "prompt": "What is the maximum rendered byte budget for the prompt-submitted Pixel execution brief, and what operation/time limits does it enforce?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "BRIEF_BYTES|MAX_OPS|from_millis\\(750\\)|millis\\(750\\)",
+            "${SNAPSHOT}/crates/pixel/src/execution_brief/chain.rs",
+            "--context",
+            "1",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 137.021,
+          "stdout_bytes": 3338,
+          "stdout_sha256": "2c3229f528c2334b6efe6df7b104f9a0d68527b43891044fee5356b978f8ec31",
+          "stderr_sha256": "6bd745ec65c96740d25e2726a9926817ca5244830b9b11798ab47e893fca7208"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "impact",
+      "rep": 1,
+      "prompt": "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 89.182,
+          "stdout_bytes": 381,
+          "stdout_sha256": "90d6f8825ce9fda552035034fbd1dd0f0081b5ee89af5b05aecb49813a0c7d2d",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "impact",
+      "rep": 1,
+      "prompt": "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "start_brief\\(|a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "--context",
+            "3",
+            "--limit",
+            "60",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 149.992,
+          "stdout_bytes": 3315,
+          "stdout_sha256": "72e2204ae29c69626d48775aabebab7170545bd2bbbd8dc497f87956e1197da4",
+          "stderr_sha256": "20d859e468f86388984343101cc7bbdd05c969cd572e1e5cd4bb967322c615af"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "impact",
+      "rep": 2,
+      "prompt": "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 124.819,
+          "stdout_bytes": 381,
+          "stdout_sha256": "90d6f8825ce9fda552035034fbd1dd0f0081b5ee89af5b05aecb49813a0c7d2d",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "impact",
+      "rep": 2,
+      "prompt": "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "start_brief\\(|a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "--context",
+            "3",
+            "--limit",
+            "60",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 130.85,
+          "stdout_bytes": 3315,
+          "stdout_sha256": "72e2204ae29c69626d48775aabebab7170545bd2bbbd8dc497f87956e1197da4",
+          "stderr_sha256": "e8461b3a3e5ace55fa6c8937719e3aa4721386649f5f77d04dbd8c451106264a"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "impact",
+      "rep": 3,
+      "prompt": "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 71.242,
+          "stdout_bytes": 381,
+          "stdout_sha256": "90d6f8825ce9fda552035034fbd1dd0f0081b5ee89af5b05aecb49813a0c7d2d",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "impact",
+      "rep": 3,
+      "prompt": "Trace start_brief: where is it defined, where is it called in production, and which same-file test exercises its provider/event behavior? Name the test and the cases it checks.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "start_brief\\(|a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "--context",
+            "3",
+            "--limit",
+            "60",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 140.899,
+          "stdout_bytes": 3315,
+          "stdout_sha256": "72e2204ae29c69626d48775aabebab7170545bd2bbbd8dc497f87956e1197da4",
+          "stderr_sha256": "9ef67b541a249e238fbf96eadb62ea30a36c4f3f7a36592358940c4861cc581d"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "flow",
+      "rep": 1,
+      "prompt": "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 100.689,
+          "stdout_bytes": 251,
+          "stdout_sha256": "ecaae4523a52e814b1a532129e492a9a0d56d30bfc33b3480792ab6322d0c445",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "flow",
+      "rep": 1,
+      "prompt": "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "UserPromptSubmit|run-hook task-event --provider codex --event prompt-submit|start_brief|with_brief|additionalContext",
+            "${SNAPSHOT}/crates/pixel-install/src/codex_config.rs",
+            "${SNAPSHOT}/crates/pixel-install/src/install.rs",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "--context",
+            "12",
+            "--limit",
+            "100",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 150.213,
+          "stdout_bytes": 36228,
+          "stdout_sha256": "d4c5e6325e1e4442bb1525436fd82e0b6d7d06481f39d5c4295e4c77b4741f98",
+          "stderr_sha256": "20d859e468f86388984343101cc7bbdd05c969cd572e1e5cd4bb967322c615af"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "flow",
+      "rep": 2,
+      "prompt": "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 101.704,
+          "stdout_bytes": 251,
+          "stdout_sha256": "ecaae4523a52e814b1a532129e492a9a0d56d30bfc33b3480792ab6322d0c445",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "flow",
+      "rep": 2,
+      "prompt": "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "UserPromptSubmit|run-hook task-event --provider codex --event prompt-submit|start_brief|with_brief|additionalContext",
+            "${SNAPSHOT}/crates/pixel-install/src/codex_config.rs",
+            "${SNAPSHOT}/crates/pixel-install/src/install.rs",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "--context",
+            "12",
+            "--limit",
+            "100",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 150.912,
+          "stdout_bytes": 36228,
+          "stdout_sha256": "d4c5e6325e1e4442bb1525436fd82e0b6d7d06481f39d5c4295e4c77b4741f98",
+          "stderr_sha256": "e8461b3a3e5ace55fa6c8937719e3aa4721386649f5f77d04dbd8c451106264a"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "flow",
+      "rep": 3,
+      "prompt": "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 96.308,
+          "stdout_bytes": 251,
+          "stdout_sha256": "ecaae4523a52e814b1a532129e492a9a0d56d30bfc33b3480792ab6322d0c445",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "flow",
+      "rep": 3,
+      "prompt": "Trace a Codex prompt from the installed hook through prompt-submit to the context returned to the host. Name the modules and the key handoff functions/fields in order.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "UserPromptSubmit|run-hook task-event --provider codex --event prompt-submit|start_brief|with_brief|additionalContext",
+            "${SNAPSHOT}/crates/pixel-install/src/codex_config.rs",
+            "${SNAPSHOT}/crates/pixel-install/src/install.rs",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "--context",
+            "12",
+            "--limit",
+            "100",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 136.137,
+          "stdout_bytes": 36228,
+          "stdout_sha256": "d4c5e6325e1e4442bb1525436fd82e0b6d7d06481f39d5c4295e4c77b4741f98",
+          "stderr_sha256": "9ef67b541a249e238fbf96eadb62ea30a36c4f3f7a36592358940c4861cc581d"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "diagnosis",
+      "rep": 1,
+      "prompt": "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 523.599,
+          "stdout_bytes": 259,
+          "stdout_sha256": "3de2971c8afb782de4fc92e8e25c9a1fd568bb5182807e3f260f16917444915b",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "diagnosis",
+      "rep": 1,
+      "prompt": "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "a_stale_graph_should_be_named_and_never_rebuilt_by_the_hook|a_missing_graph_should_leave_the_text_evidence_and_build_nothing|stale|unresolved|graph",
+            "${SNAPSHOT}/crates/pixel/tests/cli/prompt_brief_cli.rs",
+            "${SNAPSHOT}/crates/pixel/src/execution_brief/chain.rs",
+            "--context",
+            "2",
+            "--limit",
+            "100",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 148.262,
+          "stdout_bytes": 14055,
+          "stdout_sha256": "496fb34e5dfaaeae33de5d722facc48823d1f581b0ddd219b90c2784d67ea56e",
+          "stderr_sha256": "20d859e468f86388984343101cc7bbdd05c969cd572e1e5cd4bb967322c615af"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "diagnosis",
+      "rep": 2,
+      "prompt": "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 385.721,
+          "stdout_bytes": 283,
+          "stdout_sha256": "52d539148ef08e0ef9217d87a57b258af2b56404b7cba08838a00194d396787a",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "diagnosis",
+      "rep": 2,
+      "prompt": "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "a_stale_graph_should_be_named_and_never_rebuilt_by_the_hook|a_missing_graph_should_leave_the_text_evidence_and_build_nothing|stale|unresolved|graph",
+            "${SNAPSHOT}/crates/pixel/tests/cli/prompt_brief_cli.rs",
+            "${SNAPSHOT}/crates/pixel/src/execution_brief/chain.rs",
+            "--context",
+            "2",
+            "--limit",
+            "100",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 131.479,
+          "stdout_bytes": 14055,
+          "stdout_sha256": "496fb34e5dfaaeae33de5d722facc48823d1f581b0ddd219b90c2784d67ea56e",
+          "stderr_sha256": "e8461b3a3e5ace55fa6c8937719e3aa4721386649f5f77d04dbd8c451106264a"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "diagnosis",
+      "rep": 3,
+      "prompt": "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 408.599,
+          "stdout_bytes": 283,
+          "stdout_sha256": "52d539148ef08e0ef9217d87a57b258af2b56404b7cba08838a00194d396787a",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "diagnosis",
+      "rep": 3,
+      "prompt": "If the code graph is stale or unavailable but a text index exists, does the prompt brief disappear? Explain the fallback, where its reason is reported, and whether the hook rebuilds anything.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "a_stale_graph_should_be_named_and_never_rebuilt_by_the_hook|a_missing_graph_should_leave_the_text_evidence_and_build_nothing|stale|unresolved|graph",
+            "${SNAPSHOT}/crates/pixel/tests/cli/prompt_brief_cli.rs",
+            "${SNAPSHOT}/crates/pixel/src/execution_brief/chain.rs",
+            "--context",
+            "2",
+            "--limit",
+            "100",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 152.346,
+          "stdout_bytes": 14055,
+          "stdout_sha256": "496fb34e5dfaaeae33de5d722facc48823d1f581b0ddd219b90c2784d67ea56e",
+          "stderr_sha256": "9ef67b541a249e238fbf96eadb62ea30a36c4f3f7a36592358940c4861cc581d"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "configuration",
+      "rep": 1,
+      "prompt": "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 497.95,
+          "stdout_bytes": 276,
+          "stdout_sha256": "b1ca2e9dccd2659696eeb4312a205af1fd5c36301fc1b494cc32a675bfbde635",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "configuration",
+      "rep": 1,
+      "prompt": "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "UserPromptSubmit|run-hook task-event --provider codex --event",
+            "${SNAPSHOT}/crates/pixel-install/src/codex_config.rs",
+            "${SNAPSHOT}/crates/pixel-install/src/install.rs",
+            "--context",
+            "8",
+            "--limit",
+            "100",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 148.01,
+          "stdout_bytes": 15106,
+          "stdout_sha256": "fb5d596028620fca8237b84c9edf21d5bc517064ce2cad5640b2bfb9b289c3b6",
+          "stderr_sha256": "20d859e468f86388984343101cc7bbdd05c969cd572e1e5cd4bb967322c615af"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "configuration",
+      "rep": 2,
+      "prompt": "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 456.915,
+          "stdout_bytes": 276,
+          "stdout_sha256": "b1ca2e9dccd2659696eeb4312a205af1fd5c36301fc1b494cc32a675bfbde635",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "configuration",
+      "rep": 2,
+      "prompt": "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "UserPromptSubmit|run-hook task-event --provider codex --event",
+            "${SNAPSHOT}/crates/pixel-install/src/codex_config.rs",
+            "${SNAPSHOT}/crates/pixel-install/src/install.rs",
+            "--context",
+            "8",
+            "--limit",
+            "100",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 134.228,
+          "stdout_bytes": 15106,
+          "stdout_sha256": "fb5d596028620fca8237b84c9edf21d5bc517064ce2cad5640b2bfb9b289c3b6",
+          "stderr_sha256": "e8461b3a3e5ace55fa6c8937719e3aa4721386649f5f77d04dbd8c451106264a"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "configuration",
+      "rep": 3,
+      "prompt": "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 397.611,
+          "stdout_bytes": 276,
+          "stdout_sha256": "b1ca2e9dccd2659696eeb4312a205af1fd5c36301fc1b494cc32a675bfbde635",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "configuration",
+      "rep": 3,
+      "prompt": "Which exact hook command does Pixel install for Codex prompt context, and what host event and provider flags does it pass?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "UserPromptSubmit|run-hook task-event --provider codex --event",
+            "${SNAPSHOT}/crates/pixel-install/src/codex_config.rs",
+            "${SNAPSHOT}/crates/pixel-install/src/install.rs",
+            "--context",
+            "8",
+            "--limit",
+            "100",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 148.148,
+          "stdout_bytes": 15106,
+          "stdout_sha256": "fb5d596028620fca8237b84c9edf21d5bc517064ce2cad5640b2bfb9b289c3b6",
+          "stderr_sha256": "9ef67b541a249e238fbf96eadb62ea30a36c4f3f7a36592358940c4861cc581d"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "tests",
+      "rep": 1,
+      "prompt": "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 73.436,
+          "stdout_bytes": 381,
+          "stdout_sha256": "90d6f8825ce9fda552035034fbd1dd0f0081b5ee89af5b05aecb49813a0c7d2d",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "tests",
+      "rep": 1,
+      "prompt": "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository|TaskProvider::Pi|a_brief_should_become_the_context_the_envelope_delivers_to_the_host|hookEventName|additionalContext",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "--context",
+            "5",
+            "--limit",
+            "80",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 137.158,
+          "stdout_bytes": 8801,
+          "stdout_sha256": "363b514ed375c49394ccf75de15eaa4b1c47bc2b4c6b69bd30bd7e34537eff26",
+          "stderr_sha256": "95e39197f5452f366a765da37dd02306612809bd92eca7f0543d8b931f67cc68"
+        },
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "pi_should_keep_its_own_decision_without_a_brief|UserPromptSubmit|additionalContext",
+            "${SNAPSHOT}/crates/pixel/tests/cli/prompt_brief_cli.rs",
+            "--context",
+            "5",
+            "--limit",
+            "40",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 133.573,
+          "stdout_bytes": 2146,
+          "stdout_sha256": "8c1150db42ba9bdd7486bd1012fba0c9780fc3635ca0a55fc864ddf1dbb11115",
+          "stderr_sha256": "20d859e468f86388984343101cc7bbdd05c969cd572e1e5cd4bb967322c615af"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "tests",
+      "rep": 2,
+      "prompt": "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 118.94,
+          "stdout_bytes": 381,
+          "stdout_sha256": "90d6f8825ce9fda552035034fbd1dd0f0081b5ee89af5b05aecb49813a0c7d2d",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "tests",
+      "rep": 2,
+      "prompt": "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository|TaskProvider::Pi|a_brief_should_become_the_context_the_envelope_delivers_to_the_host|hookEventName|additionalContext",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "--context",
+            "5",
+            "--limit",
+            "80",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 150.183,
+          "stdout_bytes": 8801,
+          "stdout_sha256": "363b514ed375c49394ccf75de15eaa4b1c47bc2b4c6b69bd30bd7e34537eff26",
+          "stderr_sha256": "85854109a233ac9197dc9d491aa6c6f68b15861c6ba0acdd84438eeb108113bd"
+        },
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "pi_should_keep_its_own_decision_without_a_brief|UserPromptSubmit|additionalContext",
+            "${SNAPSHOT}/crates/pixel/tests/cli/prompt_brief_cli.rs",
+            "--context",
+            "5",
+            "--limit",
+            "40",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 142.987,
+          "stdout_bytes": 2146,
+          "stdout_sha256": "8c1150db42ba9bdd7486bd1012fba0c9780fc3635ca0a55fc864ddf1dbb11115",
+          "stderr_sha256": "e8461b3a3e5ace55fa6c8937719e3aa4721386649f5f77d04dbd8c451106264a"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "tests",
+      "rep": 3,
+      "prompt": "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 70.09,
+          "stdout_bytes": 381,
+          "stdout_sha256": "90d6f8825ce9fda552035034fbd1dd0f0081b5ee89af5b05aecb49813a0c7d2d",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "tests",
+      "rep": 3,
+      "prompt": "Is Pi included in start_brief, and which tests prove the Pi exclusion and Codex host envelope shape? Give test names and the important assertions/fields.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository|TaskProvider::Pi|a_brief_should_become_the_context_the_envelope_delivers_to_the_host|hookEventName|additionalContext",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "--context",
+            "5",
+            "--limit",
+            "80",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 130.302,
+          "stdout_bytes": 8801,
+          "stdout_sha256": "363b514ed375c49394ccf75de15eaa4b1c47bc2b4c6b69bd30bd7e34537eff26",
+          "stderr_sha256": "efcb4a6a83bbee3b85f6f6d29988c0d14cf193fb8df05a96f640f7301524a333"
+        },
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "pi_should_keep_its_own_decision_without_a_brief|UserPromptSubmit|additionalContext",
+            "${SNAPSHOT}/crates/pixel/tests/cli/prompt_brief_cli.rs",
+            "--context",
+            "5",
+            "--limit",
+            "40",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 158.376,
+          "stdout_bytes": 2146,
+          "stdout_sha256": "8c1150db42ba9bdd7486bd1012fba0c9780fc3635ca0a55fc864ddf1dbb11115",
+          "stderr_sha256": "9ef67b541a249e238fbf96eadb62ea30a36c4f3f7a36592358940c4861cc581d"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "history",
+      "rep": 1,
+      "prompt": "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 29.559,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "history",
+      "rep": 1,
+      "prompt": "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "commit-history",
+            "--ref",
+            "14feba456b479be165ab40ec14dde3958a865368",
+            "--detail",
+            "full",
+            "--limit",
+            "1",
+            "--byte-cap",
+            "4096",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 48.214,
+          "stdout_bytes": 4229,
+          "stdout_sha256": "729e104b69ad9e9d98cdb12ccc937fa4d6188d47c0172d9cc58760d8e2eb5088",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "history",
+      "rep": 2,
+      "prompt": "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 34.249,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "history",
+      "rep": 2,
+      "prompt": "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "commit-history",
+            "--ref",
+            "14feba456b479be165ab40ec14dde3958a865368",
+            "--detail",
+            "full",
+            "--limit",
+            "1",
+            "--byte-cap",
+            "4096",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 45.332,
+          "stdout_bytes": 4229,
+          "stdout_sha256": "729e104b69ad9e9d98cdb12ccc937fa4d6188d47c0172d9cc58760d8e2eb5088",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "history",
+      "rep": 3,
+      "prompt": "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 28.77,
+          "stdout_bytes": 0,
+          "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "history",
+      "rep": 3,
+      "prompt": "What design constraints did commit 14feba456b479be165ab40ec14dde3958a865368 record for the prompt brief? Separate its limits, read-only behavior, and host coverage.",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "commit-history",
+            "--ref",
+            "14feba456b479be165ab40ec14dde3958a865368",
+            "--detail",
+            "full",
+            "--limit",
+            "1",
+            "--byte-cap",
+            "4096",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 51.537,
+          "stdout_bytes": 4229,
+          "stdout_sha256": "729e104b69ad9e9d98cdb12ccc937fa4d6188d47c0172d9cc58760d8e2eb5088",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "architecture",
+      "rep": 1,
+      "prompt": "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 509.786,
+          "stdout_bytes": 285,
+          "stdout_sha256": "9aed604266f8dbaf82be74e9054fec08c95acb2890de530d0ee55e4f7c97bc58",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "architecture",
+      "rep": 1,
+      "prompt": "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "list-signatures",
+            "crates/pixel/src/task_hook.rs",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 30.793,
+          "stdout_bytes": 4211,
+          "stdout_sha256": "765efc8adab648ce4d0f8f095d30a288b9cf7e65a3cea19918f535b75c0e257d",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "list-signatures",
+            "crates/pixel/src/execution_brief/chain.rs",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 30.591,
+          "stdout_bytes": 4475,
+          "stdout_sha256": "0f0fd4543f8ee8622a0a8394fcda0daf294c58204f32b8f6adec3f0a600b27e5",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "fn process\\(|fn start_brief\\(|fn with_brief\\(|fn render\\(",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "${SNAPSHOT}/crates/pixel/src/execution_brief/chain.rs",
+            "--context",
+            "2",
+            "--limit",
+            "30",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 141.488,
+          "stdout_bytes": 1370,
+          "stdout_sha256": "cd5cd8ca7a3fb9ff26e77a4eb92da4615e4c9044ff2db50eb880219493cb709f",
+          "stderr_sha256": "20d859e468f86388984343101cc7bbdd05c969cd572e1e5cd4bb967322c615af"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "architecture",
+      "rep": 2,
+      "prompt": "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 315.369,
+          "stdout_bytes": 309,
+          "stdout_sha256": "913257d27cfbc5cffcdc5a0335795255a4032913a5add4838cba6222bc735706",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "architecture",
+      "rep": 2,
+      "prompt": "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "list-signatures",
+            "crates/pixel/src/task_hook.rs",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 33.2,
+          "stdout_bytes": 4211,
+          "stdout_sha256": "765efc8adab648ce4d0f8f095d30a288b9cf7e65a3cea19918f535b75c0e257d",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "list-signatures",
+            "crates/pixel/src/execution_brief/chain.rs",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 38.506,
+          "stdout_bytes": 4475,
+          "stdout_sha256": "0f0fd4543f8ee8622a0a8394fcda0daf294c58204f32b8f6adec3f0a600b27e5",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "fn process\\(|fn start_brief\\(|fn with_brief\\(|fn render\\(",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "${SNAPSHOT}/crates/pixel/src/execution_brief/chain.rs",
+            "--context",
+            "2",
+            "--limit",
+            "30",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 151.949,
+          "stdout_bytes": 1370,
+          "stdout_sha256": "cd5cd8ca7a3fb9ff26e77a4eb92da4615e4c9044ff2db50eb880219493cb709f",
+          "stderr_sha256": "e8461b3a3e5ace55fa6c8937719e3aa4721386649f5f77d04dbd8c451106264a"
+        }
+      ]
+    },
+    {
+      "arm": "current_brief",
+      "kind": "architecture",
+      "rep": 3,
+      "prompt": "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "brief",
+            "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 372.851,
+          "stdout_bytes": 309,
+          "stdout_sha256": "913257d27cfbc5cffcdc5a0335795255a4032913a5add4838cba6222bc735706",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "arm": "selective_route",
+      "kind": "architecture",
+      "rep": 3,
+      "prompt": "Describe the code boundary for the prompt brief from host hook receipt to rendered evidence context. Which module owns retrieval and which owns the host envelope?",
+      "tools": [
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "list-signatures",
+            "crates/pixel/src/task_hook.rs",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 35.472,
+          "stdout_bytes": 4211,
+          "stdout_sha256": "765efc8adab648ce4d0f8f095d30a288b9cf7e65a3cea19918f535b75c0e257d",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "list-signatures",
+            "crates/pixel/src/execution_brief/chain.rs",
+            "${SNAPSHOT}",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 28.909,
+          "stdout_bytes": 4475,
+          "stdout_sha256": "0f0fd4543f8ee8622a0a8394fcda0daf294c58204f32b8f6adec3f0a600b27e5",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "argv": [
+            "${PIXEL_BIN}",
+            "search-content",
+            "fn process\\(|fn start_brief\\(|fn with_brief\\(|fn render\\(",
+            "${SNAPSHOT}/crates/pixel/src/task_hook.rs",
+            "${SNAPSHOT}/crates/pixel/src/execution_brief/chain.rs",
+            "--context",
+            "2",
+            "--limit",
+            "30",
+            "--no-daemon",
+            "--metrics",
+            "off"
+          ],
+          "cwd": "${SNAPSHOT}",
+          "returncode": 0,
+          "wall_ms": 153.238,
+          "stdout_bytes": 1370,
+          "stdout_sha256": "cd5cd8ca7a3fb9ff26e77a4eb92da4615e4c9044ff2db50eb880219493cb709f",
+          "stderr_sha256": "9ef67b541a249e238fbf96eadb62ea30a36c4f3f7a36592358940c4861cc581d"
+        }
+      ]
+    }
+  ],
+  "streams": {
+    "23b6aeb9c4f8c86469436886513ec91f9f6ed8238a95849e472b1258d879df85": "[PIXEL:BRIEF]\nfiles: crates/pixel/src/prompt_intent.rs:22 crates/pixel-install/src/install/pi_prompt_content_tests.rs:11\nconfidence: medium | ops: 1/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": "",
+    "2c3229f528c2334b6efe6df7b104f9a0d68527b43891044fee5356b978f8ec31": "--- crates/pixel/src/execution_brief/chain.rs:10 ---\n       9: //! prompt asks about a change or its callers. It shares one deadline and at\n>>    10: //! most [`MAX_OPS`] operations, runs on its own thread, and renders whatever\n      11: //! it has when the deadline passes, so it never holds the prompt back. The\n--- crates/pixel/src/execution_brief/chain.rs:33 ---\n      32: /// moment the hook receives the prompt.\n>>    33: pub(crate) const BRIEF_WINDOW: Duration = Duration::from_millis(750);\n      34: /// Operations one brief may start, whatever they answer.\n--- crates/pixel/src/execution_brief/chain.rs:35 ---\n      34: /// Operations one brief may start, whatever they answer.\n>>    35: pub(crate) const MAX_OPS: usize = 4;\n      36: /// Rendered size cap; lists give way before a line is cut.\n--- crates/pixel/src/execution_brief/chain.rs:37 ---\n      36: /// Rendered size cap; lists give way before a line is cut.\n>>    37: pub(crate) const BRIEF_BYTES: usize = 2048;\n      38: /// Match rows one text search pulls before its files are grouped.\n--- crates/pixel/src/execution_brief/chain.rs:445 ---\n     444:     edit(state, |brief| {\n>>   445:         if brief.ops >= MAX_OPS || Instant::now() >= deadline {\n     446:             brief.cut = true;\n--- crates/pixel/src/execution_brief/chain.rs:720 ---\n     719: \n>>   720: /// The block, at most [`BRIEF_BYTES`], or `None` when nothing answered.\n     721: /// A list that does not fit loses entries and says how many.\n--- crates/pixel/src/execution_brief/chain.rs:728 ---\n     727:     let mut text = render_with(brief, shown);\n>>   728:     while text.len() > BRIEF_BYTES && shown.shrink() {\n     729:         text = render_with(brief, shown);\n--- crates/pixel/src/execution_brief/chain.rs:828 ---\n     827:     lines.push(format!(\n>>   828:         \"confidence: {} | ops: {}/{MAX_OPS}{partial}\",\n     829:         brief.confidence(),\n--- crates/pixel/src/execution_brief/chain.rs:1331 ---\n    1330:         );\n>>  1331:         assert_eq!(brief.ops, MAX_OPS);\n    1332:         assert_eq!(brief.confidence(), \"low\");\n--- crates/pixel/src/execution_brief/chain.rs:1394 ---\n    1393:         let later = Instant::now() + SECOND;\n>>  1394:         for _ in 0..MAX_OPS {\n    1395:             assert!(spend(&state, later));\n--- crates/pixel/src/execution_brief/chain.rs:1399 ---\n    1398:         let brief = edit(&state, |brief| brief.clone());\n>>  1399:         assert_eq!((brief.ops, brief.cut), (MAX_OPS, true));\n    1400: \n--- crates/pixel/src/execution_brief/chain.rs:1661 ---\n    1660:         let text = render(&brief).unwrap();\n>>  1661:         assert!(text.len() <= BRIEF_BYTES, \"{} bytes: {text}\", text.len());\n    1662:         assert!(text.contains(\"component_7.tsx:7 (+22 more)\"), \"{text}\");\n--- crates/pixel/src/execution_brief/chain.rs:1691 ---\n    1690:         let text = render(&brief).unwrap();\n>>  1691:         assert!(text.len() <= BRIEF_BYTES, \"{} bytes\", text.len());\n    1692:         assert!(text.len() > BRIEF_BYTES - 200, \"{} bytes\", text.len());\n--- crates/pixel/src/execution_brief/chain.rs:1692 ---\n    1691:         assert!(text.len() <= BRIEF_BYTES, \"{} bytes\", text.len());\n>>  1692:         assert!(text.len() > BRIEF_BYTES - 200, \"{} bytes\", text.len());\n    1693:         assert!(text.contains(\"confidence: high | ops: 3/4\"), \"{text}\");\n",
+    "18a172f41abb45e13063e92a7af9a6e73aa77bf1ff5af2114299a2ac8545e8e9": "note: `pixel search-content` has 6 prior calls with identical arguments in 10 minutes; repository state may have changed. Continuing retrieval.\n",
+    "a4217d682a92d196bad79e6e6a27861a312da3536a7b7332c68abc71f065a90d": "note: `pixel search-content` has 7 prior calls with identical arguments in 10 minutes; repository state may have changed. Continuing retrieval.\n",
+    "6bd745ec65c96740d25e2726a9926817ca5244830b9b11798ab47e893fca7208": "note: `pixel search-content` has 8 prior calls with identical arguments in 10 minutes; repository state may have changed. Continuing retrieval.\n",
+    "90d6f8825ce9fda552035034fbd1dd0f0081b5ee89af5b05aecb49813a0c7d2d": "[PIXEL:BRIEF]\nanchors: start_brief\ndefined: function start_brief crates/pixel/src/task_hook.rs:1097-1105 — fn start_brief(\nfiles: ARCHITECTURE.md:616 crates/pixel/src/task_hook.rs:1068 docs/brief-question-kinds-experiment.md:32\nconfidence: medium | ops: 2/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+    "72e2204ae29c69626d48775aabebab7170545bd2bbbd8dc497f87956e1197da4": "--- crates/pixel/src/task_hook.rs:1068 ---\n    1065:     };\n    1066:     // The brief runs beside the ledger: it needs neither, and a slow ledger\n    1067:     // must not use up its window.\n>>  1068:     let brief = start_brief(provider, event, &payload);\n    1069:     let decision =\n    1070:         handle_at(&payload_cwd(&payload), provider, event, &payload).unwrap_or_else(|_| {\n    1071:             unavailable(\n--- crates/pixel/src/task_hook.rs:1097 ---\n    1094: \n    1095: /// Start the evidence brief for a Claude or Codex prompt; Pi, every other\n    1096: /// event and a prompt outside a repository start none.\n>>  1097: fn start_brief(\n    1098:     provider: TaskProvider,\n    1099:     event: TaskHookEvent,\n    1100:     payload: &Value,\n--- crates/pixel/src/task_hook.rs:2153 ---\n    2150:     }\n    2151: \n    2152:     #[test]\n>>  2153:     fn a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository() {\n    2154:         let root = std::env::temp_dir().join(format!(\"pixel-hook-brief-{}\", std::process::id()));\n    2155:         let shard_dir = root.join(pixel_index::index::SHARD_DIR);\n    2156:         std::fs::create_dir_all(&shard_dir).unwrap();\n--- crates/pixel/src/task_hook.rs:2161 ---\n    2158:         let root = root.canonicalize().unwrap();\n    2159:         let prompt = json!({\"prompt\":\"callers of `fetchUser`\",\"cwd\":root});\n    2160:         for provider in [TaskProvider::Claude, TaskProvider::Codex] {\n>>  2161:             assert!(start_brief(provider, TaskHookEvent::PromptSubmit, &prompt).is_some());\n    2162:             for event in [\n    2163:                 TaskHookEvent::PreToolUse,\n    2164:                 TaskHookEvent::PostToolUse,\n--- crates/pixel/src/task_hook.rs:2168 ---\n    2165:                 TaskHookEvent::Stop,\n    2166:                 TaskHookEvent::SessionStart,\n    2167:             ] {\n>>  2168:                 assert!(start_brief(provider, event, &prompt).is_none(), \"{event:?}\");\n    2169:             }\n    2170:         }\n    2171:         assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());\n--- crates/pixel/src/task_hook.rs:2171 ---\n    2168:                 assert!(start_brief(provider, event, &prompt).is_none(), \"{event:?}\");\n    2169:             }\n    2170:         }\n>>  2171:         assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());\n    2172:         let no_prompt = json!({\"cwd\":root});\n    2173:         assert!(\n    2174:             start_brief(\n--- crates/pixel/src/task_hook.rs:2174 ---\n    2171:         assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());\n    2172:         let no_prompt = json!({\"cwd\":root});\n    2173:         assert!(\n>>  2174:             start_brief(\n    2175:                 TaskProvider::Claude,\n    2176:                 TaskHookEvent::PromptSubmit,\n    2177:                 &no_prompt\n--- crates/pixel/src/task_hook.rs:2183 ---\n    2180:         );\n    2181:         let elsewhere = json!({\"prompt\":\"callers of `fetchUser`\",\"cwd\":root.join(\"missing\")});\n    2182:         assert!(\n>>  2183:             start_brief(\n    2184:                 TaskProvider::Claude,\n    2185:                 TaskHookEvent::PromptSubmit,\n    2186:                 &elsewhere\n",
+    "20d859e468f86388984343101cc7bbdd05c969cd572e1e5cd4bb967322c615af": "note: `pixel search-content` has 3 prior calls with identical arguments in 10 minutes; repository state may have changed. Continuing retrieval.\n",
+    "e8461b3a3e5ace55fa6c8937719e3aa4721386649f5f77d04dbd8c451106264a": "note: `pixel search-content` has 4 prior calls with identical arguments in 10 minutes; repository state may have changed. Continuing retrieval.\n",
+    "9ef67b541a249e238fbf96eadb62ea30a36c4f3f7a36592358940c4861cc581d": "note: `pixel search-content` has 5 prior calls with identical arguments in 10 minutes; repository state may have changed. Continuing retrieval.\n",
+    "ecaae4523a52e814b1a532129e492a9a0d56d30bfc33b3480792ab6322d0c445": "[PIXEL:BRIEF]\nfiles: crates/pixel-install/src/codex_config.rs:43 crates/pixel/src/task_hook.rs:2118\nconfidence: medium | ops: 1/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+    "d4c5e6325e1e4442bb1525436fd82e0b6d7d06481f39d5c4295e4c77b4741f98": "--- crates/pixel-install/src/codex_config.rs:275 ---\n     263: }\n     264: \n     265: /// `pixel doctor` check: task-event hooks are registered without automatic\n     266: /// retrieval or metrics hooks.\n     267: pub(crate) fn check_task_hooks(\n     268:     codex_home: &Path,\n     269:     exe: &Path,\n     270: ) -> std::result::Result<(String, serde_json::Value), String> {\n     271:     let path = codex_home.join(HOOKS_FILE);\n     272:     let detail = serde_json::json!({\n     273:         \"path\": path.display().to_string(),\n     274:         \"events\": [\n>>   275:             \"SessionStart\", \"UserPromptSubmit\", \"PreToolUse\", \"PostToolUse\",\n     276:             \"Stop\", \"SessionEnd\", \"SubagentStart\", \"SubagentStop\", \"Interrupt\"\n     277:         ],\n     278:         \"retired_markers\": [METRICS_HOOK_MARKER, PROMPT_SUBMIT_HOOK_MARKER],\n     279:     });\n     280:     let value = read_hooks(&path)?;\n     281:     let mut has_retired_pixel_hook = false;\n     282:     if let Some(events) = value.get(\"hooks\").and_then(serde_json::Value::as_object) {\n     283:         for entries in events.values().filter_map(serde_json::Value::as_array) {\n     284:             for entry in entries {\n     285:                 for hook in entry\n     286:                     .get(\"hooks\")\n     287:                     .and_then(serde_json::Value::as_array)\n--- crates/pixel-install/src/codex_config.rs:484 ---\n     472: \n     473: /// The label Codex spells an event with in a `hooks.state` key\n     474: /// (`hook_event_key_label` in codex-rs `hooks/src/lib.rs`).\n     475: pub(crate) fn hook_event_label(event: &str) -> Option<&'static str> {\n     476:     Some(match event {\n     477:         \"PreToolUse\" => \"pre_tool_use\",\n     478:         \"PermissionRequest\" => \"permission_request\",\n     479:         \"PostToolUse\" => \"post_tool_use\",\n     480:         \"PreCompact\" => \"pre_compact\",\n     481:         \"PostCompact\" => \"post_compact\",\n     482:         \"SessionStart\" => \"session_start\",\n     483:         \"SessionEnd\" => \"session_end\",\n>>   484:         \"UserPromptSubmit\" => \"user_prompt_submit\",\n     485:         \"SubagentStart\" => \"subagent_start\",\n     486:         \"SubagentStop\" => \"subagent_stop\",\n     487:         \"Stop\" => \"stop\",\n     488:         \"Interrupt\" => \"interrupt\",\n     489:         _ => return None,\n     490:     })\n     491: }\n     492: \n     493: /// Pixel's hooks in one Codex `hooks.json`, and those Codex has not reviewed.\n     494: #[derive(Debug, Clone, PartialEq, Eq)]\n     495: pub(crate) struct HookReview {\n     496:     /// Pixel hook handlers in the file, as `Event #group.handler`.\n--- crates/pixel-install/src/codex_config.rs:980 ---\n     968:     /// (`hook_event_key_label`); a wrong or missing label reads every\n     969:     /// review of that event as absent, or hides the event's Pixel hooks.\n     970:     #[test]\n     971:     fn hook_event_label_should_spell_every_event_as_codex_keys_it() {\n     972:         let table = [\n     973:             (\"PreToolUse\", \"pre_tool_use\"),\n     974:             (\"PermissionRequest\", \"permission_request\"),\n     975:             (\"PostToolUse\", \"post_tool_use\"),\n     976:             (\"PreCompact\", \"pre_compact\"),\n     977:             (\"PostCompact\", \"post_compact\"),\n     978:             (\"SessionStart\", \"session_start\"),\n     979:             (\"SessionEnd\", \"session_end\"),\n>>   980:             (\"UserPromptSubmit\", \"user_prompt_submit\"),\n     981:             (\"SubagentStart\", \"subagent_start\"),\n     982:             (\"SubagentStop\", \"subagent_stop\"),\n     983:             (\"Stop\", \"stop\"),\n     984:             (\"Interrupt\", \"interrupt\"),\n     985:         ];\n     986:         for (event, label) in table {\n     987:             assert_eq!(hook_event_label(event), Some(label), \"{event}\");\n     988:         }\n     989:         assert_eq!(hook_event_label(\"NotAnEvent\"), None);\n     990:     }\n     991: \n     992:     #[test]\n--- crates/pixel-install/src/codex_config.rs:1044 ---\n    1032:                 \"SubagentStart\",\n    1033:                 \"subagent-start\",\n    1034:                 10,\n    1035:                 \"sha256:226885cf987ba4c08cd94d411e055c9d9f23984042099f943559af79daf350b8\",\n    1036:             ),\n    1037:             (\n    1038:                 \"SubagentStop\",\n    1039:                 \"subagent-stop\",\n    1040:                 10,\n    1041:                 \"sha256:9bb4267598af13529d2948086891f50b76bee7728e618358a3aa08d7bdf6da2c\",\n    1042:             ),\n    1043:             (\n>>  1044:                 \"UserPromptSubmit\",\n    1045:                 \"prompt-submit\",\n    1046:                 10,\n    1047:                 \"sha256:72f75c5ee09194fa84fdab917b746b99b0941db9241d660bee579d6048676037\",\n    1048:             ),\n    1049:         ];\n    1050:         for (event, verb, timeout, expected) in vectors {\n    1051:             let group = serde_json::json!({\n    1052:                 \"hooks\": [{\n    1053:                     \"type\": \"command\",\n    1054:                     \"command\": format!(\"/usr/local/bin/pixel run-hook task-event --provider codex --event {verb}\"),\n    1055:                     \"timeout\": timeout,\n    1056:                 }]\n--- crates/pixel-install/src/codex_config.rs:1458 ---\n    1446:                     \"PostToolUse\": [\n    1447:                         {\"hooks\": [{\"type\": \"command\", \"command\": \"cmux-feed\"}]},\n    1448:                         {\n    1449:                             \"matcher\": \"Bash\",\n    1450:                             \"timeout\": 9,\n    1451:                             \"hooks\": [\n    1452:                                 {\"type\": \"command\", \"command\": \"metrics-proxy --label 'run-hook metrics --provider codex'\"},\n    1453:                                 {\"type\": \"command\", \"command\": \"pixel run-hook metrics --provider codex\"}\n    1454:                             ]\n    1455:                         },\n    1456:                         {\"hooks\": [{\"type\": \"command\", \"command\": \"pixel run-hook metrics --provider codex\"}]}\n    1457:                     ],\n>>  1458:                     \"UserPromptSubmit\": [\n    1459:                         {\"hooks\": [{\"type\": \"command\", \"command\": \"prompt-audit --label 'run-hook prompt-submit --provider codex'\"}]},\n    1460:                         {\"hooks\": [{\"type\": \"command\", \"command\": \"pixel run-hook prompt-submit --provider codex\"}]}\n    1461:                     ]\n    1462:                 }}\n    1463:             ))\n    1464:             .unwrap(),\n    1465:         )\n    1466:         .unwrap();\n    1467: \n    1468:         install_task_hooks(&home, exe, false).unwrap();\n    1469:         let hooks = hook_events(&home);\n    1470:         let post_tool_use = hooks[\"PostToolUse\"].as_array().unwrap();\n--- crates/pixel-install/src/codex_config.rs:1501 ---\n    1489:             serde_json::json!([{\n    1490:                 \"type\": \"command\",\n    1491:                 \"command\": \"metrics-proxy --label 'run-hook metrics --provider codex'\"\n    1492:             }]),\n    1493:             \"foreign marker mention survives beside removed Pixel callback\"\n    1494:         );\n    1495:         assert!(post_tool_use.iter().any(|entry| {\n    1496:             entry[\"hooks\"][0][\"command\"]\n    1497:                 .as_str()\n    1498:                 .is_some_and(|command| command.contains(\"task-event --provider codex\"))\n    1499:         }));\n    1500:         assert!(\n>>  1501:             hooks[\"UserPromptSubmit\"].is_array(),\n    1502:             \"task-event prompt stays\"\n    1503:         );\n    1504:         let prompt_hooks = hooks[\"UserPromptSubmit\"].as_array().unwrap();\n    1505:         assert_eq!(\n    1506:             prompt_hooks.len(),\n    1507:             2,\n    1508:             \"foreign prompt hook and lifecycle survive\"\n    1509:         );\n    1510:         assert_eq!(\n    1511:             prompt_hooks[0][\"hooks\"][0][\"command\"],\n    1512:             \"prompt-audit --label 'run-hook prompt-submit --provider codex'\"\n    1513:         );\n--- crates/pixel-install/src/codex_config.rs:1504 ---\n    1492:             }]),\n    1493:             \"foreign marker mention survives beside removed Pixel callback\"\n    1494:         );\n    1495:         assert!(post_tool_use.iter().any(|entry| {\n    1496:             entry[\"hooks\"][0][\"command\"]\n    1497:                 .as_str()\n    1498:                 .is_some_and(|command| command.contains(\"task-event --provider codex\"))\n    1499:         }));\n    1500:         assert!(\n    1501:             hooks[\"UserPromptSubmit\"].is_array(),\n    1502:             \"task-event prompt stays\"\n    1503:         );\n>>  1504:         let prompt_hooks = hooks[\"UserPromptSubmit\"].as_array().unwrap();\n    1505:         assert_eq!(\n    1506:             prompt_hooks.len(),\n    1507:             2,\n    1508:             \"foreign prompt hook and lifecycle survive\"\n    1509:         );\n    1510:         assert_eq!(\n    1511:             prompt_hooks[0][\"hooks\"][0][\"command\"],\n    1512:             \"prompt-audit --label 'run-hook prompt-submit --provider codex'\"\n    1513:         );\n    1514:         assert!(\n    1515:             check_task_hooks(&home, exe).is_ok(),\n    1516:             \"doctor check sees task hooks\"\n--- crates/pixel-install/src/codex_config.rs:1728 ---\n    1716:             \"legacy automatic metric entry is rejected\"\n    1717:         );\n    1718:         let _ = fs::remove_dir_all(&home);\n    1719:     }\n    1720: \n    1721:     #[test]\n    1722:     fn task_hook_install_keeps_the_task_prompt_event_but_removes_pixel_guidance() {\n    1723:         let home = scratch_codex_home(\"half-registered\");\n    1724:         install_task_hooks(&home, Path::new(\"pixel\"), false).unwrap();\n    1725:         assert!(check_task_hooks(&home, Path::new(\"pixel\")).is_ok());\n    1726:         let mut value: serde_json::Value =\n    1727:             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();\n>>  1728:         value[\"hooks\"][\"UserPromptSubmit\"]\n    1729:             .as_array_mut()\n    1730:             .unwrap()\n    1731:             .retain(|entry| !entry[\"hooks\"].to_string().contains(\"run-hook task-event\"));\n    1732:         fs::write(\n    1733:             home.join(HOOKS_FILE),\n    1734:             serde_json::to_string_pretty(&value).unwrap(),\n    1735:         )\n    1736:         .unwrap();\n    1737:         assert!(\n    1738:             check_task_hooks(&home, Path::new(\"pixel\")).is_err(),\n    1739:             \"removing the task prompt event breaks the registered lifecycle\"\n    1740:         );\n--- crates/pixel/src/task_hook.rs:48 ---\n      36:         match self {\n      37:             Self::Claude => \"claude\",\n      38:             Self::Codex => \"codex\",\n      39:             Self::Pi => \"pi\",\n      40:             Self::Devin => \"devin\",\n      41:             Self::Gemini => \"gemini\",\n      42:             Self::Antigravity => \"antigravity\",\n      43:         }\n      44:     }\n      45: \n      46:     /// The host's name for the prompt-submission event: Gemini calls it\n      47:     /// `BeforeAgent`; Antigravity's closest event is `PreInvocation`, gated\n>>    48:     /// on `invocationNum == 0`. The rest share Claude's `UserPromptSubmit`.\n      49:     fn prompt_event_name(self) -> &'static str {\n      50:         match self {\n      51:             Self::Gemini => \"BeforeAgent\",\n      52:             Self::Antigravity => \"PreInvocation\",\n      53:             _ => \"UserPromptSubmit\",\n      54:         }\n      55:     }\n      56: }\n      57: \n      58: /// Host lifecycle boundaries translated to the shared task bridge.\n      59: #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]\n      60: pub enum TaskHookEvent {\n--- crates/pixel/src/task_hook.rs:53 ---\n      41:             Self::Gemini => \"gemini\",\n      42:             Self::Antigravity => \"antigravity\",\n      43:         }\n      44:     }\n      45: \n      46:     /// The host's name for the prompt-submission event: Gemini calls it\n      47:     /// `BeforeAgent`; Antigravity's closest event is `PreInvocation`, gated\n      48:     /// on `invocationNum == 0`. The rest share Claude's `UserPromptSubmit`.\n      49:     fn prompt_event_name(self) -> &'static str {\n      50:         match self {\n      51:             Self::Gemini => \"BeforeAgent\",\n      52:             Self::Antigravity => \"PreInvocation\",\n>>    53:             _ => \"UserPromptSubmit\",\n      54:         }\n      55:     }\n      56: }\n      57: \n      58: /// Host lifecycle boundaries translated to the shared task bridge.\n      59: #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]\n      60: pub enum TaskHookEvent {\n      61:     SessionStart,\n      62:     PromptSubmit,\n      63:     PreToolUse,\n      64:     PostToolUse,\n      65:     ToolFailure,\n--- crates/pixel/src/task_hook.rs:96 ---\n      84:             Self::SessionEnd => \"session-end\",\n      85:             Self::Interrupt => \"interrupt\",\n      86:             Self::SubagentStart => \"subagent-start\",\n      87:             Self::SubagentStop => \"subagent-stop\",\n      88:             Self::ModelResponse => \"model-response\",\n      89:             Self::UserBash => \"user-bash\",\n      90:         }\n      91:     }\n      92: \n      93:     fn host_name(self) -> &'static str {\n      94:         match self {\n      95:             Self::SessionStart => \"SessionStart\",\n>>    96:             Self::PromptSubmit => \"UserPromptSubmit\",\n      97:             Self::PreToolUse => \"PreToolUse\",\n      98:             Self::PostToolUse => \"PostToolUse\",\n      99:             Self::ToolFailure => \"PostToolUseFailure\",\n     100:             Self::Stop => \"Stop\",\n     101:             Self::SessionEnd => \"SessionEnd\",\n     102:             Self::Interrupt => \"Interrupt\",\n     103:             Self::SubagentStart => \"SubagentStart\",\n     104:             Self::SubagentStop => \"SubagentStop\",\n     105:             Self::ModelResponse => \"ModelResponse\",\n     106:             Self::UserBash => \"UserBash\",\n     107:         }\n     108:     }\n--- crates/pixel/src/task_hook.rs:1015 ---\n    1003:             // Antigravity injects steps into the trajectory, not a\n    1004:             // hookSpecificOutput block; every other provider shares the\n    1005:             // Claude contract, with Gemini naming the event BeforeAgent.\n    1006:             if provider == TaskProvider::Antigravity && event == TaskHookEvent::PromptSubmit {\n    1007:                 return json!({\"injectSteps\": [{\"ephemeralMessage\": decision[\"context\"]}]});\n    1008:             }\n    1009:             let event_name = if event == TaskHookEvent::PromptSubmit {\n    1010:                 provider.prompt_event_name()\n    1011:             } else {\n    1012:                 event.host_name()\n    1013:             };\n    1014:             json!({\"hookSpecificOutput\": {\n>>  1015:                 \"hookEventName\": event_name, \"additionalContext\": decision[\"context\"]\n    1016:             }})\n    1017:         }\n    1018:         _ => json!({}),\n    1019:     }\n    1020: }\n    1021: \n    1022: /// The decision when the ledger cannot answer. It never blocks more than an\n    1023: /// answering ledger would: an unenforced session only observes, as in\n    1024: /// `task_bridge::handle_hook`; an enforced one keeps edits and completion gated.\n    1025: fn unavailable(event: TaskHookEvent, payload: Option<&Value>, enforced: bool) -> Value {\n    1026:     let blocks = enforced\n    1027:         && match event {\n--- crates/pixel/src/task_hook.rs:1068 ---\n    1056:                 provider.as_str(),\n    1057:                 string(payload, &[\"session_id\", \"sessionId\"]),\n    1058:             )\n    1059:         })\n    1060: }\n    1061: \n    1062: fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {\n    1063:     let Ok(payload) = serde_json::from_str::<Value>(raw) else {\n    1064:         return envelope(provider, event, &unavailable(event, None, true));\n    1065:     };\n    1066:     // The brief runs beside the ledger: it needs neither, and a slow ledger\n    1067:     // must not use up its window.\n>>  1068:     let brief = start_brief(provider, event, &payload);\n    1069:     let decision =\n    1070:         handle_at(&payload_cwd(&payload), provider, event, &payload).unwrap_or_else(|_| {\n    1071:             unavailable(\n    1072:                 event,\n    1073:                 Some(&payload),\n    1074:                 enforcement_applies(provider, Some(&payload)),\n    1075:             )\n    1076:         });\n    1077:     envelope(provider, event, &with_brief(decision, brief))\n    1078: }\n    1079: \n    1080: fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -> Option<String> {\n--- crates/pixel/src/task_hook.rs:1077 ---\n    1065:     };\n    1066:     // The brief runs beside the ledger: it needs neither, and a slow ledger\n    1067:     // must not use up its window.\n    1068:     let brief = start_brief(provider, event, &payload);\n    1069:     let decision =\n    1070:         handle_at(&payload_cwd(&payload), provider, event, &payload).unwrap_or_else(|_| {\n    1071:             unavailable(\n    1072:                 event,\n    1073:                 Some(&payload),\n    1074:                 enforcement_applies(provider, Some(&payload)),\n    1075:             )\n    1076:         });\n>>  1077:     envelope(provider, event, &with_brief(decision, brief))\n    1078: }\n    1079: \n    1080: fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -> Option<String> {\n    1081:     if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {\n    1082:         return None;\n    1083:     }\n    1084:     match provider {\n    1085:         TaskProvider::Antigravity => {\n    1086:             if payload.get(\"invocationNum\").and_then(Value::as_u64) != Some(0) {\n    1087:                 return None;\n    1088:             }\n    1089:             antigravity_prompt(payload)\n--- crates/pixel/src/task_hook.rs:1097 ---\n    1085:         TaskProvider::Antigravity => {\n    1086:             if payload.get(\"invocationNum\").and_then(Value::as_u64) != Some(0) {\n    1087:                 return None;\n    1088:             }\n    1089:             antigravity_prompt(payload)\n    1090:         }\n    1091:         _ => string(payload, &[\"prompt\"]).map(str::to_string),\n    1092:     }\n    1093: }\n    1094: \n    1095: /// Start the evidence brief for a Claude or Codex prompt; Pi, every other\n    1096: /// event and a prompt outside a repository start none.\n>>  1097: fn start_brief(\n    1098:     provider: TaskProvider,\n    1099:     event: TaskHookEvent,\n    1100:     payload: &Value,\n    1101: ) -> Option<crate::execution_brief::chain::Pending> {\n    1102:     let prompt = brief_prompt(provider, event, payload)?;\n    1103:     let root = crate::discover_root(&payload_cwd(payload)).ok()?;\n    1104:     crate::execution_brief::chain::start(&prompt, &root)\n    1105: }\n    1106: \n    1107: /// The latest user turn in the transcript `transcriptPath` points at. The\n    1108: /// file is JSONL; a turn is any entry whose role reads \"user\", its text the\n    1109: /// `content`/`text` field (string or a parts array of `{\"text\": ...}`).\n--- crates/pixel/src/task_hook.rs:1148 ---\n    1136:             |text| Some(text.to_string()),\n    1137:         );\n    1138:         if let Some(content) = content.filter(|text| !text.trim().is_empty()) {\n    1139:             last = Some(content);\n    1140:         }\n    1141:     }\n    1142:     last\n    1143: }\n    1144: \n    1145: /// `decision` with the brief as its `context`, which the envelope delivers as\n    1146: /// the host's additional context. A decision that already carries a context\n    1147: /// keeps it.\n>>  1148: fn with_brief(mut decision: Value, brief: Option<crate::execution_brief::chain::Pending>) -> Value {\n    1149:     if decision.get(\"context\").is_none()\n    1150:         && let Some(text) = brief.and_then(crate::execution_brief::chain::Pending::finish)\n    1151:     {\n    1152:         decision[\"context\"] = Value::String(text);\n    1153:     }\n    1154:     decision\n    1155: }\n    1156: \n    1157: fn handle_at(\n    1158:     cwd: &Path,\n    1159:     provider: TaskProvider,\n    1160:     event: TaskHookEvent,\n--- crates/pixel/src/task_hook.rs:1288 ---\n    1276:         for (provider, name) in [\n    1277:             (TaskProvider::Claude, \"claude\"),\n    1278:             (TaskProvider::Codex, \"codex\"),\n    1279:             (TaskProvider::Pi, \"pi\"),\n    1280:         ] {\n    1281:             assert_eq!(provider.as_str(), name);\n    1282:         }\n    1283:         for (event, cli, host) in [\n    1284:             (TaskHookEvent::SessionStart, \"session-start\", \"SessionStart\"),\n    1285:             (\n    1286:                 TaskHookEvent::PromptSubmit,\n    1287:                 \"prompt-submit\",\n>>  1288:                 \"UserPromptSubmit\",\n    1289:             ),\n    1290:             (TaskHookEvent::PreToolUse, \"pre-tool-use\", \"PreToolUse\"),\n    1291:             (TaskHookEvent::PostToolUse, \"post-tool-use\", \"PostToolUse\"),\n    1292:             (\n    1293:                 TaskHookEvent::ToolFailure,\n    1294:                 \"tool-failure\",\n    1295:                 \"PostToolUseFailure\",\n    1296:             ),\n    1297:             (TaskHookEvent::Stop, \"stop\", \"Stop\"),\n    1298:             (TaskHookEvent::SessionEnd, \"session-end\", \"SessionEnd\"),\n    1299:             (TaskHookEvent::Interrupt, \"interrupt\", \"Interrupt\"),\n    1300:             (\n--- crates/pixel/src/task_hook.rs:1317 ---\n    1305:             (TaskHookEvent::SubagentStop, \"subagent-stop\", \"SubagentStop\"),\n    1306:             (\n    1307:                 TaskHookEvent::ModelResponse,\n    1308:                 \"model-response\",\n    1309:                 \"ModelResponse\",\n    1310:             ),\n    1311:             (TaskHookEvent::UserBash, \"user-bash\", \"UserBash\"),\n    1312:         ] {\n    1313:             assert_eq!(event.as_str(), cli);\n    1314:             for provider in [TaskProvider::Claude, TaskProvider::Codex] {\n    1315:                 assert_eq!(\n    1316:                     envelope(provider, event, &json!({\"context\":\"prepare task-1\"})),\n>>  1317:                     json!({\"hookSpecificOutput\":{\"hookEventName\":host,\"additionalContext\":\"prepare task-1\"}})\n    1318:                 );\n    1319:                 assert_eq!(envelope(provider, event, &json!({\"context\":42})), json!({}));\n    1320:             }\n    1321:         }\n    1322:     }\n    1323: \n    1324:     #[test]\n    1325:     fn normalization_should_preserve_each_cancellation_and_success_signal() {\n    1326:         for (event, payload) in [\n    1327:             (TaskHookEvent::Interrupt, json!({})),\n    1328:             (TaskHookEvent::Stop, json!({\"cancelled\":true})),\n    1329:             (TaskHookEvent::Stop, json!({\"is_interrupt\":true})),\n--- crates/pixel/src/task_hook.rs:2123 ---\n    2111:                 enabled: true,\n    2112:                 indexed: true,\n    2113:             },\n    2114:             Duration::from_secs(5),\n    2115:             |_| Box::new(OneFile),\n    2116:             |_, _| None,\n    2117:         )\n    2118:         .expect(\"a code prompt in an open gate starts a brief\")\n    2119:     }\n    2120: \n    2121:     #[test]\n    2122:     fn a_brief_should_become_the_context_the_envelope_delivers_to_the_host() {\n>>  2123:         let decision = with_brief(\n    2124:             json!({\"decision\":\"observe\",\"coverage\":\"partial\"}),\n    2125:             Some(pending_brief()),\n    2126:         );\n    2127:         let context = decision[\"context\"].as_str().unwrap().to_string();\n    2128:         assert!(context.starts_with(\"[PIXEL:BRIEF]\\n\"), \"{context}\");\n    2129:         assert!(context.contains(\"\\nfiles: src/a.ts:2\\n\"), \"{context}\");\n    2130:         for provider in [TaskProvider::Claude, TaskProvider::Codex] {\n    2131:             assert_eq!(\n    2132:                 envelope(provider, TaskHookEvent::PromptSubmit, &decision),\n    2133:                 json!({\"hookSpecificOutput\":{\n    2134:                     \"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":context\n    2135:                 }})\n--- crates/pixel/src/task_hook.rs:2134 ---\n    2122:     fn a_brief_should_become_the_context_the_envelope_delivers_to_the_host() {\n    2123:         let decision = with_brief(\n    2124:             json!({\"decision\":\"observe\",\"coverage\":\"partial\"}),\n    2125:             Some(pending_brief()),\n    2126:         );\n    2127:         let context = decision[\"context\"].as_str().unwrap().to_string();\n    2128:         assert!(context.starts_with(\"[PIXEL:BRIEF]\\n\"), \"{context}\");\n    2129:         assert!(context.contains(\"\\nfiles: src/a.ts:2\\n\"), \"{context}\");\n    2130:         for provider in [TaskProvider::Claude, TaskProvider::Codex] {\n    2131:             assert_eq!(\n    2132:                 envelope(provider, TaskHookEvent::PromptSubmit, &decision),\n    2133:                 json!({\"hookSpecificOutput\":{\n>>  2134:                     \"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":context\n    2135:                 }})\n    2136:             );\n    2137:         }\n    2138:     }\n    2139: \n    2140:     #[test]\n    2141:     fn a_decision_should_keep_its_own_context_and_stay_unchanged_without_a_brief() {\n    2142:         let own = json!({\"decision\":\"observe\",\"context\":\"ledger note\"});\n    2143:         assert_eq!(with_brief(own.clone(), Some(pending_brief())), own);\n    2144:         let plain = json!({\"decision\":\"observe\",\"coverage\":\"partial\"});\n    2145:         assert_eq!(with_brief(plain.clone(), None), plain);\n    2146:         assert_eq!(\n--- crates/pixel/src/task_hook.rs:2143 ---\n    2131:             assert_eq!(\n    2132:                 envelope(provider, TaskHookEvent::PromptSubmit, &decision),\n    2133:                 json!({\"hookSpecificOutput\":{\n    2134:                     \"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":context\n    2135:                 }})\n    2136:             );\n    2137:         }\n    2138:     }\n    2139: \n    2140:     #[test]\n    2141:     fn a_decision_should_keep_its_own_context_and_stay_unchanged_without_a_brief() {\n    2142:         let own = json!({\"decision\":\"observe\",\"context\":\"ledger note\"});\n>>  2143:         assert_eq!(with_brief(own.clone(), Some(pending_brief())), own);\n    2144:         let plain = json!({\"decision\":\"observe\",\"coverage\":\"partial\"});\n    2145:         assert_eq!(with_brief(plain.clone(), None), plain);\n    2146:         assert_eq!(\n    2147:             envelope(TaskProvider::Claude, TaskHookEvent::PromptSubmit, &plain),\n    2148:             json!({})\n    2149:         );\n    2150:     }\n    2151: \n    2152:     #[test]\n    2153:     fn a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository() {\n    2154:         let root = std::env::temp_dir().join(format!(\"pixel-hook-brief-{}\", std::process::id()));\n    2155:         let shard_dir = root.join(pixel_index::index::SHARD_DIR);\n--- crates/pixel/src/task_hook.rs:2145 ---\n    2133:                 json!({\"hookSpecificOutput\":{\n    2134:                     \"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":context\n    2135:                 }})\n    2136:             );\n    2137:         }\n    2138:     }\n    2139: \n    2140:     #[test]\n    2141:     fn a_decision_should_keep_its_own_context_and_stay_unchanged_without_a_brief() {\n    2142:         let own = json!({\"decision\":\"observe\",\"context\":\"ledger note\"});\n    2143:         assert_eq!(with_brief(own.clone(), Some(pending_brief())), own);\n    2144:         let plain = json!({\"decision\":\"observe\",\"coverage\":\"partial\"});\n>>  2145:         assert_eq!(with_brief(plain.clone(), None), plain);\n    2146:         assert_eq!(\n    2147:             envelope(TaskProvider::Claude, TaskHookEvent::PromptSubmit, &plain),\n    2148:             json!({})\n    2149:         );\n    2150:     }\n    2151: \n    2152:     #[test]\n    2153:     fn a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository() {\n    2154:         let root = std::env::temp_dir().join(format!(\"pixel-hook-brief-{}\", std::process::id()));\n    2155:         let shard_dir = root.join(pixel_index::index::SHARD_DIR);\n    2156:         std::fs::create_dir_all(&shard_dir).unwrap();\n    2157:         std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b\"x\").unwrap();\n--- crates/pixel/src/task_hook.rs:2161 ---\n    2149:         );\n    2150:     }\n    2151: \n    2152:     #[test]\n    2153:     fn a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository() {\n    2154:         let root = std::env::temp_dir().join(format!(\"pixel-hook-brief-{}\", std::process::id()));\n    2155:         let shard_dir = root.join(pixel_index::index::SHARD_DIR);\n    2156:         std::fs::create_dir_all(&shard_dir).unwrap();\n    2157:         std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b\"x\").unwrap();\n    2158:         let root = root.canonicalize().unwrap();\n    2159:         let prompt = json!({\"prompt\":\"callers of `fetchUser`\",\"cwd\":root});\n    2160:         for provider in [TaskProvider::Claude, TaskProvider::Codex] {\n>>  2161:             assert!(start_brief(provider, TaskHookEvent::PromptSubmit, &prompt).is_some());\n    2162:             for event in [\n    2163:                 TaskHookEvent::PreToolUse,\n    2164:                 TaskHookEvent::PostToolUse,\n    2165:                 TaskHookEvent::Stop,\n    2166:                 TaskHookEvent::SessionStart,\n    2167:             ] {\n    2168:                 assert!(start_brief(provider, event, &prompt).is_none(), \"{event:?}\");\n    2169:             }\n    2170:         }\n    2171:         assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());\n    2172:         let no_prompt = json!({\"cwd\":root});\n    2173:         assert!(\n--- crates/pixel/src/task_hook.rs:2168 ---\n    2156:         std::fs::create_dir_all(&shard_dir).unwrap();\n    2157:         std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b\"x\").unwrap();\n    2158:         let root = root.canonicalize().unwrap();\n    2159:         let prompt = json!({\"prompt\":\"callers of `fetchUser`\",\"cwd\":root});\n    2160:         for provider in [TaskProvider::Claude, TaskProvider::Codex] {\n    2161:             assert!(start_brief(provider, TaskHookEvent::PromptSubmit, &prompt).is_some());\n    2162:             for event in [\n    2163:                 TaskHookEvent::PreToolUse,\n    2164:                 TaskHookEvent::PostToolUse,\n    2165:                 TaskHookEvent::Stop,\n    2166:                 TaskHookEvent::SessionStart,\n    2167:             ] {\n>>  2168:                 assert!(start_brief(provider, event, &prompt).is_none(), \"{event:?}\");\n    2169:             }\n    2170:         }\n    2171:         assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());\n    2172:         let no_prompt = json!({\"cwd\":root});\n    2173:         assert!(\n    2174:             start_brief(\n    2175:                 TaskProvider::Claude,\n    2176:                 TaskHookEvent::PromptSubmit,\n    2177:                 &no_prompt\n    2178:             )\n    2179:             .is_none()\n    2180:         );\n--- crates/pixel/src/task_hook.rs:2171 ---\n    2159:         let prompt = json!({\"prompt\":\"callers of `fetchUser`\",\"cwd\":root});\n    2160:         for provider in [TaskProvider::Claude, TaskProvider::Codex] {\n    2161:             assert!(start_brief(provider, TaskHookEvent::PromptSubmit, &prompt).is_some());\n    2162:             for event in [\n    2163:                 TaskHookEvent::PreToolUse,\n    2164:                 TaskHookEvent::PostToolUse,\n    2165:                 TaskHookEvent::Stop,\n    2166:                 TaskHookEvent::SessionStart,\n    2167:             ] {\n    2168:                 assert!(start_brief(provider, event, &prompt).is_none(), \"{event:?}\");\n    2169:             }\n    2170:         }\n>>  2171:         assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());\n    2172:         let no_prompt = json!({\"cwd\":root});\n    2173:         assert!(\n    2174:             start_brief(\n    2175:                 TaskProvider::Claude,\n    2176:                 TaskHookEvent::PromptSubmit,\n    2177:                 &no_prompt\n    2178:             )\n    2179:             .is_none()\n    2180:         );\n    2181:         let elsewhere = json!({\"prompt\":\"callers of `fetchUser`\",\"cwd\":root.join(\"missing\")});\n    2182:         assert!(\n    2183:             start_brief(\n--- crates/pixel/src/task_hook.rs:2174 ---\n    2162:             for event in [\n    2163:                 TaskHookEvent::PreToolUse,\n    2164:                 TaskHookEvent::PostToolUse,\n    2165:                 TaskHookEvent::Stop,\n    2166:                 TaskHookEvent::SessionStart,\n    2167:             ] {\n    2168:                 assert!(start_brief(provider, event, &prompt).is_none(), \"{event:?}\");\n    2169:             }\n    2170:         }\n    2171:         assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());\n    2172:         let no_prompt = json!({\"cwd\":root});\n    2173:         assert!(\n>>  2174:             start_brief(\n    2175:                 TaskProvider::Claude,\n    2176:                 TaskHookEvent::PromptSubmit,\n    2177:                 &no_prompt\n    2178:             )\n    2179:             .is_none()\n    2180:         );\n    2181:         let elsewhere = json!({\"prompt\":\"callers of `fetchUser`\",\"cwd\":root.join(\"missing\")});\n    2182:         assert!(\n    2183:             start_brief(\n    2184:                 TaskProvider::Claude,\n    2185:                 TaskHookEvent::PromptSubmit,\n    2186:                 &elsewhere\n--- crates/pixel/src/task_hook.rs:2183 ---\n    2171:         assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());\n    2172:         let no_prompt = json!({\"cwd\":root});\n    2173:         assert!(\n    2174:             start_brief(\n    2175:                 TaskProvider::Claude,\n    2176:                 TaskHookEvent::PromptSubmit,\n    2177:                 &no_prompt\n    2178:             )\n    2179:             .is_none()\n    2180:         );\n    2181:         let elsewhere = json!({\"prompt\":\"callers of `fetchUser`\",\"cwd\":root.join(\"missing\")});\n    2182:         assert!(\n>>  2183:             start_brief(\n    2184:                 TaskProvider::Claude,\n    2185:                 TaskHookEvent::PromptSubmit,\n    2186:                 &elsewhere\n    2187:             )\n    2188:             .is_none()\n    2189:         );\n    2190:         std::fs::remove_dir_all(&root).unwrap();\n    2191:     }\n    2192: \n    2193:     #[test]\n    2194:     fn antigravity_prompt_should_parse_user_text_and_ignore_other_roles() {\n    2195:         let path = std::env::temp_dir().join(format!(\n--- crates/pixel/src/task_hook.rs:2281 ---\n    2269:             .is_none()\n    2270:         );\n    2271:         std::fs::remove_file(path).unwrap();\n    2272:     }\n    2273: \n    2274:     #[test]\n    2275:     fn gemini_and_antigravity_should_receive_their_prompt_context_envelopes() {\n    2276:         let decision = json!({\"decision\":\"observe\",\"context\":\"[PIXEL:BRIEF]\\nfiles: src/a.ts:2\"});\n    2277:         assert_eq!(\n    2278:             envelope(TaskProvider::Gemini, TaskHookEvent::PromptSubmit, &decision),\n    2279:             json!({\"hookSpecificOutput\":{\n    2280:                 \"hookEventName\":\"BeforeAgent\",\n>>  2281:                 \"additionalContext\":\"[PIXEL:BRIEF]\\nfiles: src/a.ts:2\"\n    2282:             }})\n    2283:         );\n    2284:         assert_eq!(\n    2285:             envelope(\n    2286:                 TaskProvider::Antigravity,\n    2287:                 TaskHookEvent::PromptSubmit,\n    2288:                 &decision\n    2289:             ),\n    2290:             json!({\"injectSteps\":[{\"ephemeralMessage\":\"[PIXEL:BRIEF]\\nfiles: src/a.ts:2\"}]})\n    2291:         );\n    2292:     }\n    2293: }\n",
+    "3de2971c8afb782de4fc92e8e25c9a1fd568bb5182807e3f260f16917444915b": "[PIXEL:BRIEF]\nfiles: crates/pixel-daemon/src/api.rs:3024 crates/pixel-daemon/src/api/contract_tests.rs:1118\nconfidence: medium | ops: 1/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+    "496fb34e5dfaaeae33de5d722facc48823d1f581b0ddd219b90c2784d67ea56e": "--- crates/pixel/src/execution_brief/chain.rs:395 ---\n     393:     def_head: Option<String>,\n     394:     /// `path:line — source` for the most likely definition site when no\n>>   395:     /// symbol resolved (`export const` bindings the graph does not index).\n     396:     likely_def: Option<String>,\n     397:     callers: Vec<CallerHit>,\n--- crates/pixel/src/execution_brief/chain.rs:399 ---\n     397:     callers: Vec<CallerHit>,\n     398:     excluded: Vec<String>,\n>>   399:     unresolved: Vec<String>,\n     400:     ops: usize,\n     401:     answered: usize,\n--- crates/pixel/src/execution_brief/chain.rs:420 ---\n     418:         }\n     419:         if found.capped {\n>>   420:             self.unresolved.push(format!(\n     421:                 \"search stopped at {SEARCH_ROWS} rows, the file list is a prefix\"\n     422:             ));\n--- crates/pixel/src/execution_brief/chain.rs:469 ---\n     467:             }),\n     468:             Err(reason) => edit(state, |brief| {\n>>   469:                 brief.unresolved.push(format!(\"search {term}: {reason}\"));\n     470:             }),\n     471:         }\n--- crates/pixel/src/execution_brief/chain.rs:484 ---\n     482:             }),\n     483:             Err(reason) => edit(state, |brief| {\n>>   484:                 brief.unresolved.push(format!(\"find-code: {reason}\"));\n     485:             }),\n     486:         }\n--- crates/pixel/src/execution_brief/chain.rs:498 ---\n     496:                     brief.answered += 1;\n     497:                     brief.defined = ordered(&hits, pick);\n>>   498:                     brief.unresolved.extend(note);\n     499:                 });\n     500:                 if plan.change_intent && spend(state, deadline) {\n--- crates/pixel/src/execution_brief/chain.rs:508 ---\n     506:                         }),\n     507:                         Err(reason) => edit(state, |brief| {\n>>   508:                             brief.unresolved.push(format!(\"impact {name}: {reason}\"));\n     509:                         }),\n     510:                     }\n--- crates/pixel/src/execution_brief/chain.rs:515 ---\n     513:             Err(reason) => edit(state, |brief| {\n     514:                 brief\n>>   515:                     .unresolved\n     516:                     .push(format!(\"find-symbol {name}: {reason}\"));\n     517:             }),\n--- crates/pixel/src/execution_brief/chain.rs:528 ---\n     526:         edit(state, |brief| brief.def_head = Some(head));\n     527:     }\n>>   528:     // The graph may not resolve a binding (`export const X = f(...)`); when no\n     529:     // symbol resolved, the file hit whose stem matches the anchor is the most\n     530:     // likely definition site — quote its line so the answer names what it is.\n--- crates/pixel/src/execution_brief/chain.rs:673 ---\n     671:     callers: usize,\n     672:     excluded: usize,\n>>   673:     unresolved: usize,\n     674: }\n     675: \n--- crates/pixel/src/execution_brief/chain.rs:683 ---\n     681:             callers: brief.callers.len().min(MAX_CALLERS),\n     682:             excluded: brief.excluded.len(),\n>>   683:             unresolved: brief.unresolved.len(),\n     684:         }\n     685:     }\n--- crates/pixel/src/execution_brief/chain.rs:688 ---\n     686: \n     687:     /// Drop one entry from the longest list (the earlier of equals in the\n>>   688:     /// order excluded, files, callers, defined, unresolved); `false` when\n     689:     /// every list is already empty.\n     690:     fn shrink(&mut self) -> bool {\n--- crates/pixel/src/execution_brief/chain.rs:696 ---\n     694:             self.callers,\n     695:             self.defined,\n>>   696:             self.unresolved,\n     697:         ]\n     698:         .into_iter()\n--- crates/pixel/src/execution_brief/chain.rs:709 ---\n     707:             &mut self.callers,\n     708:             &mut self.defined,\n>>   709:             &mut self.unresolved,\n     710:         ] {\n     711:             if *slot == widest {\n--- crates/pixel/src/execution_brief/chain.rs:814 ---\n     812:     }\n     813:     if let Some(line) = list_line(\n>>   814:         \"unresolved\",\n     815:         brief.unresolved.iter().map(|note| clean(note)),\n     816:         shown.unresolved,\n--- crates/pixel/src/execution_brief/chain.rs:815 ---\n     813:     if let Some(line) = list_line(\n     814:         \"unresolved\",\n>>   815:         brief.unresolved.iter().map(|note| clean(note)),\n     816:         shown.unresolved,\n     817:         \"; \",\n--- crates/pixel/src/execution_brief/chain.rs:816 ---\n     814:         \"unresolved\",\n     815:         brief.unresolved.iter().map(|note| clean(note)),\n>>   816:         shown.unresolved,\n     817:         \"; \",\n     818:         false,\n--- crates/pixel/src/execution_brief/chain.rs:1065 ---\n    1063:     fn concept_phrase_should_skip_short_and_common_words_and_cap_the_count() {\n    1064:         assert_eq!(\n>>  1065:             concept_phrase(\"how does the session cache expire stale entries after logout today\"),\n    1066:             Some(\"session cache expire stale entries after\".to_string())\n    1067:         );\n--- crates/pixel/src/execution_brief/chain.rs:1066 ---\n    1064:         assert_eq!(\n    1065:             concept_phrase(\"how does the session cache expire stale entries after logout today\"),\n>>  1066:             Some(\"session cache expire stale entries after\".to_string())\n    1067:         );\n    1068:         assert_eq!(concept_phrase(\"it is a to do\"), None);\n--- crates/pixel/src/execution_brief/chain.rs:1328 ---\n    1326:         );\n    1327:         assert_eq!(\n>>  1328:             brief.unresolved,\n    1329:             [\"find-symbol fetchUser: no uid, bare name used\"]\n    1330:         );\n--- crates/pixel/src/execution_brief/chain.rs:1354 ---\n    1352:         fake.files = Err(\"text index is not current\".into());\n    1353:         fake.concept = Err(\"needs a running daemon\".into());\n>>  1354:         fake.symbols = Err(\"graph is stale\".into());\n    1355:         let brief = chain(\"callers of `fetchUser`\", &fake, SECOND);\n    1356:         assert_eq!(brief.answered, 0);\n--- crates/pixel/src/execution_brief/chain.rs:1359 ---\n    1357:         assert_eq!(brief.ops, 3);\n    1358:         assert_eq!(\n>>  1359:             brief.unresolved,\n    1360:             [\n    1361:                 \"search fetchUser: text index is not current\",\n--- crates/pixel/src/execution_brief/chain.rs:1363 ---\n    1361:                 \"search fetchUser: text index is not current\",\n    1362:                 \"find-code: needs a running daemon\",\n>>  1363:                 \"find-symbol fetchUser: graph is stale\"\n    1364:             ]\n    1365:         );\n--- crates/pixel/src/execution_brief/chain.rs:1371 ---\n    1369: \n    1370:     #[test]\n>>  1371:     fn chain_should_report_an_ambiguous_impact_as_unresolved() {\n    1372:         let mut fake = Fake::new();\n    1373:         fake.symbols = Ok(vec![symbol(\"a.ts\", \"go_now\"), symbol(\"b.ts\", \"go_now\")]);\n--- crates/pixel/src/execution_brief/chain.rs:1381 ---\n    1379:         );\n    1380:         assert_eq!(\n>>  1381:             brief.unresolved,\n    1382:             [\n    1383:                 \"find-symbol go_now: 2 candidates, took first\",\n--- crates/pixel/src/execution_brief/chain.rs:1548 ---\n    1546:             callers: vec![caller(\"apps/web/page.tsx\", \"Page\", 12)],\n    1547:             excluded: vec![\"data/out.json\".into()],\n>>  1548:             unresolved: vec![\"find-symbol handleError: 2 candidates, took first\".into()],\n    1549:             ops: 3,\n    1550:             answered: 3,\n--- crates/pixel/src/execution_brief/chain.rs:1569 ---\n    1567:                 \"callers (impact d1): apps/web/page.tsx -> Page:12\",\n    1568:                 \"excluded (generated): data/out.json\",\n>>  1569:                 \"unresolved: find-symbol handleError: 2 candidates, took first\",\n    1570:                 \"confidence: high | ops: 3/4\",\n    1571:                 FOOTER,\n--- crates/pixel/src/execution_brief/chain.rs:1636 ---\n    1634:         let failed = Brief {\n    1635:             ops: 2,\n>>  1636:             unresolved: vec![\"search x: down\".into()],\n    1637:             ..Brief::default()\n    1638:         };\n--- crates/pixel/src/execution_brief/chain.rs:1687 ---\n    1685:             })\n    1686:             .collect();\n>>  1687:         brief.unresolved = (0..10)\n    1688:             .map(|n| format!(\"{}{n}\", \"u\".repeat(MAX_ITEM_CHARS)))\n    1689:             .collect();\n--- crates/pixel/src/execution_brief/chain.rs:1695 ---\n    1693:         assert!(text.contains(\"confidence: high | ops: 3/4\"), \"{text}\");\n    1694:         assert!(text.ends_with(FOOTER), \"{text}\");\n>>  1695:         for label in [\"files:\", \"callers (impact d1):\", \"unresolved:\"] {\n    1696:             let line = text.lines().find(|line| line.starts_with(label));\n    1697:             assert!(\n--- crates/pixel/src/execution_brief/chain.rs:1711 ---\n    1709:             callers: 1,\n    1710:             excluded: 1,\n>>  1711:             unresolved: 1,\n    1712:         };\n    1713:         let mut order = Vec::new();\n--- crates/pixel/src/execution_brief/chain.rs:1720 ---\n    1718:                 shown.callers,\n    1719:                 shown.defined,\n>>  1720:                 shown.unresolved,\n    1721:             ));\n    1722:         }\n--- crates/pixel/src/execution_brief/chain.rs:1738 ---\n    1736:             callers: 5,\n    1737:             excluded: 0,\n>>  1738:             unresolved: 3,\n    1739:         };\n    1740:         assert!(uneven.shrink());\n--- crates/pixel/src/execution_brief/chain.rs:1741 ---\n    1739:         };\n    1740:         assert!(uneven.shrink());\n>>  1741:         assert_eq!((uneven.files, uneven.callers, uneven.unresolved), (2, 4, 3));\n    1742:     }\n    1743: \n--- crates/pixel/src/execution_brief/chain.rs:1794 ---\n    1792:         assert_eq!(brief.excluded, [\"package.json\"]);\n    1793:         assert_eq!(\n>>  1794:             brief.unresolved,\n    1795:             [\"search stopped at 200 rows, the file list is a prefix\"]\n    1796:         );\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:50 ---\n      48: }\n      49: \n>>    50: /// A fixture with the text index and the graph built, as a repository that\n      51: /// has been used with Pixel before.\n      52: fn indexed(tag: &str) -> Scratch {\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:61 ---\n      59:         .unwrap();\n      60:     assert!(search.status.success(), \"{search:?}\");\n>>    61:     let graph = pixel_command()\n      62:         .args([\"rebuild-graph\", \"--metrics\", \"off\"])\n      63:         .arg(&*root)\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:62 ---\n      60:     assert!(search.status.success(), \"{search:?}\");\n      61:     let graph = pixel_command()\n>>    62:         .args([\"rebuild-graph\", \"--metrics\", \"off\"])\n      63:         .arg(&*root)\n      64:         .output()\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:66 ---\n      64:         .output()\n      65:         .unwrap();\n>>    66:     assert!(graph.status.success(), \"{graph:?}\");\n      67:     root\n      68: }\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:166 ---\n     164:     assert_eq!(output, json!({}));\n     165:     assert!(!root.join(\".pixel/base.shard\").exists());\n>>   166:     assert!(!root.join(\".pixel/graph.v2.db\").exists());\n     167: }\n     168: \n--- crates/pixel/tests/cli/prompt_brief_cli.rs:204 ---\n     202: \n     203: #[test]\n>>   204: fn a_stale_graph_should_be_named_and_never_rebuilt_by_the_hook() {\n     205:     let root = indexed(\"stale\");\n     206:     std::fs::write(\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:205 ---\n     203: #[test]\n     204: fn a_stale_graph_should_be_named_and_never_rebuilt_by_the_hook() {\n>>   205:     let root = indexed(\"stale\");\n     206:     std::fs::write(\n     207:         root.join(\"apps/web/page.tsx\"),\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:211 ---\n     209:     )\n     210:     .unwrap();\n>>   211:     let graph = root.join(\".pixel/graph.v2.db\");\n     212:     let shard = root.join(\".pixel/base.shard\");\n     213:     let before = (stamp(&graph), stamp(&shard));\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:213 ---\n     211:     let graph = root.join(\".pixel/graph.v2.db\");\n     212:     let shard = root.join(\".pixel/base.shard\");\n>>   213:     let before = (stamp(&graph), stamp(&shard));\n     214:     let output = hook(&root, \"claude\", RENAME, &[]);\n     215:     let text = context(&output);\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:217 ---\n     215:     let text = context(&output);\n     216:     assert!(\n>>   217:         text.contains(\"\\nunresolved: find-symbol handleError: the graph is stale\\n\"),\n     218:         \"{text}\"\n     219:     );\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:222 ---\n     220:     assert!(!text.contains(\"callers (impact\"), \"{text}\");\n     221:     assert!(text.contains(\"\\nconfidence: medium | ops: 2/4\\n\"), \"{text}\");\n>>   222:     assert_eq!(before, (stamp(&graph), stamp(&shard)));\n     223: }\n     224: \n--- crates/pixel/tests/cli/prompt_brief_cli.rs:261 ---\n     259: \n     260: #[test]\n>>   261: fn a_missing_graph_should_leave_the_text_evidence_and_build_nothing() {\n     262:     let root = fixture(\"no-graph\");\n     263:     let search = pixel_command()\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:262 ---\n     260: #[test]\n     261: fn a_missing_graph_should_leave_the_text_evidence_and_build_nothing() {\n>>   262:     let root = fixture(\"no-graph\");\n     263:     let search = pixel_command()\n     264:         .args([\"search-content\", \"-F\", \"handleError\", \"-l\", \"--no-daemon\"])\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:277 ---\n     275:     );\n     276:     assert!(\n>>   277:         text.contains(\"\\nunresolved: find-symbol handleError: the graph is not built\\n\"),\n     278:         \"{text}\"\n     279:     );\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:280 ---\n     278:         \"{text}\"\n     279:     );\n>>   280:     assert!(!root.join(\".pixel/graph.v2.db\").exists());\n     281: }\n     282: \n",
+    "52d539148ef08e0ef9217d87a57b258af2b56404b7cba08838a00194d396787a": "[PIXEL:BRIEF]\nintent: question (0.45)\nfiles: crates/pixel-daemon/src/api.rs:3024 crates/pixel-daemon/src/api/contract_tests.rs:1118\nconfidence: medium | ops: 1/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+    "b1ca2e9dccd2659696eeb4312a205af1fd5c36301fc1b494cc32a675bfbde635": "[PIXEL:BRIEF]\nintent: none (0.27)\nfiles: crates/pixel-install/src/codex_config.rs:301 crates/pixel-install/src/doctor.rs:615\nconfidence: medium | ops: 1/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+    "fb5d596028620fca8237b84c9edf21d5bc517064ce2cad5640b2bfb9b289c3b6": "--- crates/pixel-install/src/codex_config.rs:275 ---\n     267: pub(crate) fn check_task_hooks(\n     268:     codex_home: &Path,\n     269:     exe: &Path,\n     270: ) -> std::result::Result<(String, serde_json::Value), String> {\n     271:     let path = codex_home.join(HOOKS_FILE);\n     272:     let detail = serde_json::json!({\n     273:         \"path\": path.display().to_string(),\n     274:         \"events\": [\n>>   275:             \"SessionStart\", \"UserPromptSubmit\", \"PreToolUse\", \"PostToolUse\",\n     276:             \"Stop\", \"SessionEnd\", \"SubagentStart\", \"SubagentStop\", \"Interrupt\"\n     277:         ],\n     278:         \"retired_markers\": [METRICS_HOOK_MARKER, PROMPT_SUBMIT_HOOK_MARKER],\n     279:     });\n     280:     let value = read_hooks(&path)?;\n     281:     let mut has_retired_pixel_hook = false;\n     282:     if let Some(events) = value.get(\"hooks\").and_then(serde_json::Value::as_object) {\n     283:         for entries in events.values().filter_map(serde_json::Value::as_array) {\n--- crates/pixel-install/src/codex_config.rs:484 ---\n     476:     Some(match event {\n     477:         \"PreToolUse\" => \"pre_tool_use\",\n     478:         \"PermissionRequest\" => \"permission_request\",\n     479:         \"PostToolUse\" => \"post_tool_use\",\n     480:         \"PreCompact\" => \"pre_compact\",\n     481:         \"PostCompact\" => \"post_compact\",\n     482:         \"SessionStart\" => \"session_start\",\n     483:         \"SessionEnd\" => \"session_end\",\n>>   484:         \"UserPromptSubmit\" => \"user_prompt_submit\",\n     485:         \"SubagentStart\" => \"subagent_start\",\n     486:         \"SubagentStop\" => \"subagent_stop\",\n     487:         \"Stop\" => \"stop\",\n     488:         \"Interrupt\" => \"interrupt\",\n     489:         _ => return None,\n     490:     })\n     491: }\n     492: \n--- crates/pixel-install/src/codex_config.rs:980 ---\n     972:         let table = [\n     973:             (\"PreToolUse\", \"pre_tool_use\"),\n     974:             (\"PermissionRequest\", \"permission_request\"),\n     975:             (\"PostToolUse\", \"post_tool_use\"),\n     976:             (\"PreCompact\", \"pre_compact\"),\n     977:             (\"PostCompact\", \"post_compact\"),\n     978:             (\"SessionStart\", \"session_start\"),\n     979:             (\"SessionEnd\", \"session_end\"),\n>>   980:             (\"UserPromptSubmit\", \"user_prompt_submit\"),\n     981:             (\"SubagentStart\", \"subagent_start\"),\n     982:             (\"SubagentStop\", \"subagent_stop\"),\n     983:             (\"Stop\", \"stop\"),\n     984:             (\"Interrupt\", \"interrupt\"),\n     985:         ];\n     986:         for (event, label) in table {\n     987:             assert_eq!(hook_event_label(event), Some(label), \"{event}\");\n     988:         }\n--- crates/pixel-install/src/codex_config.rs:1044 ---\n    1036:             ),\n    1037:             (\n    1038:                 \"SubagentStop\",\n    1039:                 \"subagent-stop\",\n    1040:                 10,\n    1041:                 \"sha256:9bb4267598af13529d2948086891f50b76bee7728e618358a3aa08d7bdf6da2c\",\n    1042:             ),\n    1043:             (\n>>  1044:                 \"UserPromptSubmit\",\n    1045:                 \"prompt-submit\",\n    1046:                 10,\n    1047:                 \"sha256:72f75c5ee09194fa84fdab917b746b99b0941db9241d660bee579d6048676037\",\n    1048:             ),\n    1049:         ];\n    1050:         for (event, verb, timeout, expected) in vectors {\n    1051:             let group = serde_json::json!({\n    1052:                 \"hooks\": [{\n--- crates/pixel-install/src/codex_config.rs:1054 ---\n    1046:                 10,\n    1047:                 \"sha256:72f75c5ee09194fa84fdab917b746b99b0941db9241d660bee579d6048676037\",\n    1048:             ),\n    1049:         ];\n    1050:         for (event, verb, timeout, expected) in vectors {\n    1051:             let group = serde_json::json!({\n    1052:                 \"hooks\": [{\n    1053:                     \"type\": \"command\",\n>>  1054:                     \"command\": format!(\"/usr/local/bin/pixel run-hook task-event --provider codex --event {verb}\"),\n    1055:                     \"timeout\": timeout,\n    1056:                 }]\n    1057:             });\n    1058:             assert_eq!(\n    1059:                 codex_hook_hash(event, &group, &group[\"hooks\"][0]).as_deref(),\n    1060:                 Some(expected),\n    1061:                 \"Codex currentHash for {event}\"\n    1062:             );\n--- crates/pixel-install/src/codex_config.rs:1065 ---\n    1057:             });\n    1058:             assert_eq!(\n    1059:                 codex_hook_hash(event, &group, &group[\"hooks\"][0]).as_deref(),\n    1060:                 Some(expected),\n    1061:                 \"Codex currentHash for {event}\"\n    1062:             );\n    1063:         }\n    1064: \n>>  1065:         let command = \"/usr/local/bin/pixel run-hook task-event --provider codex --event stop\";\n    1066:         let absent_timeout = serde_json::json!({\"hooks\":[{\"type\":\"command\",\"command\":command}]});\n    1067:         let default_timeout =\n    1068:             serde_json::json!({\"hooks\":[{\"type\":\"command\",\"command\":command,\"timeout\":600}]});\n    1069:         assert_eq!(\n    1070:             codex_hook_hash(\"Stop\", &absent_timeout, &absent_timeout[\"hooks\"][0]),\n    1071:             codex_hook_hash(\"Stop\", &default_timeout, &default_timeout[\"hooks\"][0]),\n    1072:             \"Codex normalizes an absent regular-event timeout to 600 seconds\"\n    1073:         );\n--- crates/pixel-install/src/codex_config.rs:1140 ---\n    1132:         for (event, name) in crate::routing::TASK_HOOK_EVENTS\n    1133:             .iter()\n    1134:             .copied()\n    1135:             .chain(std::iter::once((\"Interrupt\", \"interrupt\")))\n    1136:         {\n    1137:             let mut handler = serde_json::json!({\n    1138:                 \"type\": \"command\",\n    1139:                 \"command\": format!(\n>>  1140:                     \"/usr/local/bin/pixel run-hook task-event --provider codex --event {name}\"\n    1141:                 ),\n    1142:                 \"timeout\": if matches!(event, \"SessionEnd\" | \"Interrupt\") {\n    1143:                     3\n    1144:                 } else {\n    1145:                     10\n    1146:                 },\n    1147:             });\n    1148:             if event == \"SessionStart\" {\n--- crates/pixel-install/src/codex_config.rs:1214 ---\n    1206: \n    1207:     #[test]\n    1208:     fn hook_approval_requires_exact_source_enabled_state_and_current_hash() {\n    1209:         let home = tempfile::tempdir().unwrap();\n    1210:         let hooks_path = home.path().join(\"hooks.json\");\n    1211:         let group = serde_json::json!({\n    1212:             \"hooks\": [{\n    1213:                 \"type\": \"command\",\n>>  1214:                 \"command\": \"/usr/local/bin/pixel run-hook task-event --provider codex --event session-start\",\n    1215:                 \"timeout\": 10,\n    1216:             }]\n    1217:         });\n    1218:         let handler = &group[\"hooks\"][0];\n    1219:         let hash = codex_hook_hash(\"SessionStart\", &group, handler).unwrap();\n    1220:         let state_key = format!(\"{}:session_start:0:0\", hooks_path.display());\n    1221:         let config_path = home.path().join(CODEX_CONFIG_FILE);\n    1222:         fs::write(\n--- crates/pixel-install/src/codex_config.rs:1301 ---\n    1293:     #[test]\n    1294:     fn pixel_hook_review_accepts_only_the_current_enabled_identity() {\n    1295:         let home = tempfile::tempdir().unwrap();\n    1296:         let hooks_path = home.path().join(\"hooks.json\");\n    1297:         let exe = Path::new(\"/tmp/pixel\");\n    1298:         let group = serde_json::json!({\n    1299:             \"hooks\": [{\n    1300:                 \"type\": \"command\",\n>>  1301:                 \"command\": \"'/tmp/pixel' run-hook task-event --provider codex --event session-start\",\n    1302:                 \"timeout\": 10,\n    1303:             }]\n    1304:         });\n    1305:         let hooks = serde_json::json!({\"hooks\":{\"SessionStart\":[group.clone()]}});\n    1306:         fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();\n    1307:         let hash = codex_hook_hash(\"SessionStart\", &group, &group[\"hooks\"][0]).unwrap();\n    1308:         let state_key = format!(\"{}:session_start:0:0\", hooks_path.display());\n    1309:         let config_path = home.path().join(CODEX_CONFIG_FILE);\n--- crates/pixel-install/src/codex_config.rs:1458 ---\n    1450:                             \"timeout\": 9,\n    1451:                             \"hooks\": [\n    1452:                                 {\"type\": \"command\", \"command\": \"metrics-proxy --label 'run-hook metrics --provider codex'\"},\n    1453:                                 {\"type\": \"command\", \"command\": \"pixel run-hook metrics --provider codex\"}\n    1454:                             ]\n    1455:                         },\n    1456:                         {\"hooks\": [{\"type\": \"command\", \"command\": \"pixel run-hook metrics --provider codex\"}]}\n    1457:                     ],\n>>  1458:                     \"UserPromptSubmit\": [\n    1459:                         {\"hooks\": [{\"type\": \"command\", \"command\": \"prompt-audit --label 'run-hook prompt-submit --provider codex'\"}]},\n    1460:                         {\"hooks\": [{\"type\": \"command\", \"command\": \"pixel run-hook prompt-submit --provider codex\"}]}\n    1461:                     ]\n    1462:                 }}\n    1463:             ))\n    1464:             .unwrap(),\n    1465:         )\n    1466:         .unwrap();\n--- crates/pixel-install/src/codex_config.rs:1501 ---\n    1493:             \"foreign marker mention survives beside removed Pixel callback\"\n    1494:         );\n    1495:         assert!(post_tool_use.iter().any(|entry| {\n    1496:             entry[\"hooks\"][0][\"command\"]\n    1497:                 .as_str()\n    1498:                 .is_some_and(|command| command.contains(\"task-event --provider codex\"))\n    1499:         }));\n    1500:         assert!(\n>>  1501:             hooks[\"UserPromptSubmit\"].is_array(),\n    1502:             \"task-event prompt stays\"\n    1503:         );\n    1504:         let prompt_hooks = hooks[\"UserPromptSubmit\"].as_array().unwrap();\n    1505:         assert_eq!(\n    1506:             prompt_hooks.len(),\n    1507:             2,\n    1508:             \"foreign prompt hook and lifecycle survive\"\n    1509:         );\n--- crates/pixel-install/src/codex_config.rs:1504 ---\n    1496:             entry[\"hooks\"][0][\"command\"]\n    1497:                 .as_str()\n    1498:                 .is_some_and(|command| command.contains(\"task-event --provider codex\"))\n    1499:         }));\n    1500:         assert!(\n    1501:             hooks[\"UserPromptSubmit\"].is_array(),\n    1502:             \"task-event prompt stays\"\n    1503:         );\n>>  1504:         let prompt_hooks = hooks[\"UserPromptSubmit\"].as_array().unwrap();\n    1505:         assert_eq!(\n    1506:             prompt_hooks.len(),\n    1507:             2,\n    1508:             \"foreign prompt hook and lifecycle survive\"\n    1509:         );\n    1510:         assert_eq!(\n    1511:             prompt_hooks[0][\"hooks\"][0][\"command\"],\n    1512:             \"prompt-audit --label 'run-hook prompt-submit --provider codex'\"\n--- crates/pixel-install/src/codex_config.rs:1621 ---\n    1613:     fn task_hook_install_should_remove_renamed_pixel_callbacks_only() {\n    1614:         let home = scratch_codex_home(\"renamed\");\n    1615:         let exe = Path::new(\"/opt/pixel custom/pixel-next\");\n    1616:         install_task_hooks(&home, exe, false).unwrap();\n    1617:         let mut value: serde_json::Value =\n    1618:             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();\n    1619:         value[\"hooks\"][\"PostToolUse\"] = serde_json::json!([\n    1620:             {\"hooks\": [{\"type\": \"command\", \"command\": \"pixel-next run-hook metrics --provider codex\"}]},\n>>  1621:             {\"hooks\": [{\"type\": \"command\", \"command\": \"pixel run-hook task-event --provider codex --event post-tool-use\"}]}\n    1622:         ]);\n    1623:         fs::write(\n    1624:             home.join(HOOKS_FILE),\n    1625:             serde_json::to_string_pretty(&value).unwrap(),\n    1626:         )\n    1627:         .unwrap();\n    1628: \n    1629:         install_task_hooks(&home, exe, false).unwrap();\n--- crates/pixel-install/src/codex_config.rs:1635 ---\n    1627:         .unwrap();\n    1628: \n    1629:         install_task_hooks(&home, exe, false).unwrap();\n    1630:         let hooks = hook_events(&home);\n    1631:         let post = hooks[\"PostToolUse\"].as_array().unwrap();\n    1632:         assert_eq!(post.len(), 1, \"renamed Pixel callback is removed\");\n    1633:         assert_eq!(\n    1634:             post[0][\"hooks\"][0][\"command\"],\n>>  1635:             \"'/opt/pixel custom/pixel-next' run-hook task-event --provider codex --event post-tool-use\",\n    1636:             \"task lifecycle command is preserved\"\n    1637:         );\n    1638:         assert!(check_task_hooks(&home, exe).is_ok());\n    1639:         let _ = fs::remove_dir_all(&home);\n    1640:     }\n    1641: \n    1642:     #[test]\n    1643:     fn task_hook_install_refuses_unparseable_hooks_json() {\n--- crates/pixel-install/src/codex_config.rs:1692 ---\n    1684:         assert!(\n    1685:             check_task_hooks(&home, Path::new(\"pixel\")).is_err(),\n    1686:             \"empty hooks object has no task lifecycle\"\n    1687:         );\n    1688:         fs::write(\n    1689:             home.join(HOOKS_FILE),\n    1690:             serde_json::to_string_pretty(&serde_json::json!({\n    1691:                 \"hooks\": {\"SessionStart\": [\n>>  1692:                     {\"hooks\": [{\"type\": \"command\", \"command\": \"pixel run-hook task-event --provider codex --event session-start\"}]}\n    1693:                 ]}}\n    1694:             ))\n    1695:             .unwrap(),\n    1696:         )\n    1697:         .unwrap();\n    1698:         assert!(\n    1699:             check_task_hooks(&home, Path::new(\"pixel\")).is_err(),\n    1700:             \"a partial task lifecycle is not registered\"\n--- crates/pixel-install/src/codex_config.rs:1728 ---\n    1720: \n    1721:     #[test]\n    1722:     fn task_hook_install_keeps_the_task_prompt_event_but_removes_pixel_guidance() {\n    1723:         let home = scratch_codex_home(\"half-registered\");\n    1724:         install_task_hooks(&home, Path::new(\"pixel\"), false).unwrap();\n    1725:         assert!(check_task_hooks(&home, Path::new(\"pixel\")).is_ok());\n    1726:         let mut value: serde_json::Value =\n    1727:             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();\n>>  1728:         value[\"hooks\"][\"UserPromptSubmit\"]\n    1729:             .as_array_mut()\n    1730:             .unwrap()\n    1731:             .retain(|entry| !entry[\"hooks\"].to_string().contains(\"run-hook task-event\"));\n    1732:         fs::write(\n    1733:             home.join(HOOKS_FILE),\n    1734:             serde_json::to_string_pretty(&value).unwrap(),\n    1735:         )\n    1736:         .unwrap();\n",
+    "363b514ed375c49394ccf75de15eaa4b1c47bc2b4c6b69bd30bd7e34537eff26": "--- crates/pixel/src/task_hook.rs:981 ---\n     976:         \"coverage\": { \"native_hooks\": true, \"model_requests_complete\": coverage_complete, \"call_identity\": call.is_some() },\n     977:     })\n     978: }\n     979: \n     980: fn envelope(provider: TaskProvider, event: TaskHookEvent, decision: &Value) -> Value {\n>>   981:     if provider == TaskProvider::Pi {\n     982:         return decision.clone();\n     983:     }\n     984:     let action = decision\n     985:         .get(\"decision\")\n     986:         .and_then(Value::as_str)\n--- crates/pixel/src/task_hook.rs:994 ---\n     989:         .get(\"reason\")\n     990:         .and_then(Value::as_str)\n     991:         .unwrap_or(UNAVAILABLE);\n     992:     match (event, action) {\n     993:         (TaskHookEvent::PreToolUse, \"deny\") => json!({\"hookSpecificOutput\": {\n>>   994:             \"hookEventName\": \"PreToolUse\", \"permissionDecision\": \"deny\", \"permissionDecisionReason\": reason\n     995:         }}),\n     996:         (TaskHookEvent::Stop | TaskHookEvent::SubagentStop, \"continue\") => {\n     997:             json!({\"decision\": \"block\", \"reason\": reason})\n     998:         }\n     999:         (TaskHookEvent::Stop | TaskHookEvent::SubagentStop, \"deny\") => {\n--- crates/pixel/src/task_hook.rs:1015 ---\n    1010:                 provider.prompt_event_name()\n    1011:             } else {\n    1012:                 event.host_name()\n    1013:             };\n    1014:             json!({\"hookSpecificOutput\": {\n>>  1015:                 \"hookEventName\": event_name, \"additionalContext\": decision[\"context\"]\n    1016:             }})\n    1017:         }\n    1018:         _ => json!({}),\n    1019:     }\n    1020: }\n--- crates/pixel/src/task_hook.rs:1081 ---\n    1076:         });\n    1077:     envelope(provider, event, &with_brief(decision, brief))\n    1078: }\n    1079: \n    1080: fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -> Option<String> {\n>>  1081:     if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {\n    1082:         return None;\n    1083:     }\n    1084:     match provider {\n    1085:         TaskProvider::Antigravity => {\n    1086:             if payload.get(\"invocationNum\").and_then(Value::as_u64) != Some(0) {\n--- crates/pixel/src/task_hook.rs:1279 ---\n    1274:     #[test]\n    1275:     fn contextual_envelopes_should_name_every_native_event_exactly() {\n    1276:         for (provider, name) in [\n    1277:             (TaskProvider::Claude, \"claude\"),\n    1278:             (TaskProvider::Codex, \"codex\"),\n>>  1279:             (TaskProvider::Pi, \"pi\"),\n    1280:         ] {\n    1281:             assert_eq!(provider.as_str(), name);\n    1282:         }\n    1283:         for (event, cli, host) in [\n    1284:             (TaskHookEvent::SessionStart, \"session-start\", \"SessionStart\"),\n--- crates/pixel/src/task_hook.rs:1317 ---\n    1312:         ] {\n    1313:             assert_eq!(event.as_str(), cli);\n    1314:             for provider in [TaskProvider::Claude, TaskProvider::Codex] {\n    1315:                 assert_eq!(\n    1316:                     envelope(provider, event, &json!({\"context\":\"prepare task-1\"})),\n>>  1317:                     json!({\"hookSpecificOutput\":{\"hookEventName\":host,\"additionalContext\":\"prepare task-1\"}})\n    1318:                 );\n    1319:                 assert_eq!(envelope(provider, event, &json!({\"context\":42})), json!({}));\n    1320:             }\n    1321:         }\n    1322:     }\n--- crates/pixel/src/task_hook.rs:1421 ---\n    1416:         assert!(shell_mutates(\"uniq --unknown\"));\n    1417:     }\n    1418: \n    1419:     #[test]\n    1420:     fn deadline_should_deny_edits_and_completion_but_preserve_proven_reads() {\n>>  1421:         for provider in [TaskProvider::Claude, TaskProvider::Codex, TaskProvider::Pi] {\n    1422:             for (event, payload) in [\n    1423:                 (TaskHookEvent::PreToolUse, json!({\"tool_name\":\"Edit\"})),\n    1424:                 (TaskHookEvent::PreToolUse, json!({\"tool_name\":\"Read\"})),\n    1425:                 (TaskHookEvent::Stop, json!({})),\n    1426:             ] {\n--- crates/pixel/src/task_hook.rs:1897 ---\n    1892:                 TaskHookEvent::PreToolUse,\n    1893:                 &json!({\"decision\":\"deny\",\"reason\":\"prepare first\"}),\n    1894:             );\n    1895:             assert_eq!(\n    1896:                 denied,\n>>  1897:                 json!({\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"prepare first\"}})\n    1898:             );\n    1899:             assert_eq!(\n    1900:                 envelope(\n    1901:                     provider,\n    1902:                     TaskHookEvent::Stop,\n--- crates/pixel/src/task_hook.rs:1926 ---\n    1921:                 json!({})\n    1922:             );\n    1923:         }\n    1924:         let decision = json!({\"decision\":\"deny\",\"reason\":\"verify\"});\n    1925:         assert_eq!(\n>>  1926:             envelope(TaskProvider::Pi, TaskHookEvent::Stop, &decision),\n    1927:             decision\n    1928:         );\n    1929:     }\n    1930: \n    1931:     #[test]\n--- crates/pixel/src/task_hook.rs:2122 ---\n    2117:         )\n    2118:         .expect(\"a code prompt in an open gate starts a brief\")\n    2119:     }\n    2120: \n    2121:     #[test]\n>>  2122:     fn a_brief_should_become_the_context_the_envelope_delivers_to_the_host() {\n    2123:         let decision = with_brief(\n    2124:             json!({\"decision\":\"observe\",\"coverage\":\"partial\"}),\n    2125:             Some(pending_brief()),\n    2126:         );\n    2127:         let context = decision[\"context\"].as_str().unwrap().to_string();\n--- crates/pixel/src/task_hook.rs:2134 ---\n    2129:         assert!(context.contains(\"\\nfiles: src/a.ts:2\\n\"), \"{context}\");\n    2130:         for provider in [TaskProvider::Claude, TaskProvider::Codex] {\n    2131:             assert_eq!(\n    2132:                 envelope(provider, TaskHookEvent::PromptSubmit, &decision),\n    2133:                 json!({\"hookSpecificOutput\":{\n>>  2134:                     \"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":context\n    2135:                 }})\n    2136:             );\n    2137:         }\n    2138:     }\n    2139: \n--- crates/pixel/src/task_hook.rs:2153 ---\n    2148:             json!({})\n    2149:         );\n    2150:     }\n    2151: \n    2152:     #[test]\n>>  2153:     fn a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository() {\n    2154:         let root = std::env::temp_dir().join(format!(\"pixel-hook-brief-{}\", std::process::id()));\n    2155:         let shard_dir = root.join(pixel_index::index::SHARD_DIR);\n    2156:         std::fs::create_dir_all(&shard_dir).unwrap();\n    2157:         std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b\"x\").unwrap();\n    2158:         let root = root.canonicalize().unwrap();\n--- crates/pixel/src/task_hook.rs:2171 ---\n    2166:                 TaskHookEvent::SessionStart,\n    2167:             ] {\n    2168:                 assert!(start_brief(provider, event, &prompt).is_none(), \"{event:?}\");\n    2169:             }\n    2170:         }\n>>  2171:         assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());\n    2172:         let no_prompt = json!({\"cwd\":root});\n    2173:         assert!(\n    2174:             start_brief(\n    2175:                 TaskProvider::Claude,\n    2176:                 TaskHookEvent::PromptSubmit,\n--- crates/pixel/src/task_hook.rs:2280 ---\n    2275:     fn gemini_and_antigravity_should_receive_their_prompt_context_envelopes() {\n    2276:         let decision = json!({\"decision\":\"observe\",\"context\":\"[PIXEL:BRIEF]\\nfiles: src/a.ts:2\"});\n    2277:         assert_eq!(\n    2278:             envelope(TaskProvider::Gemini, TaskHookEvent::PromptSubmit, &decision),\n    2279:             json!({\"hookSpecificOutput\":{\n>>  2280:                 \"hookEventName\":\"BeforeAgent\",\n    2281:                 \"additionalContext\":\"[PIXEL:BRIEF]\\nfiles: src/a.ts:2\"\n    2282:             }})\n    2283:         );\n    2284:         assert_eq!(\n    2285:             envelope(\n--- crates/pixel/src/task_hook.rs:2281 ---\n    2276:         let decision = json!({\"decision\":\"observe\",\"context\":\"[PIXEL:BRIEF]\\nfiles: src/a.ts:2\"});\n    2277:         assert_eq!(\n    2278:             envelope(TaskProvider::Gemini, TaskHookEvent::PromptSubmit, &decision),\n    2279:             json!({\"hookSpecificOutput\":{\n    2280:                 \"hookEventName\":\"BeforeAgent\",\n>>  2281:                 \"additionalContext\":\"[PIXEL:BRIEF]\\nfiles: src/a.ts:2\"\n    2282:             }})\n    2283:         );\n    2284:         assert_eq!(\n    2285:             envelope(\n    2286:                 TaskProvider::Antigravity,\n",
+    "95e39197f5452f366a765da37dd02306612809bd92eca7f0543d8b931f67cc68": "note: `pixel search-content` has 60 prior calls in 10 minutes; counts alone do not establish a loop. Continuing retrieval.\n",
+    "8c1150db42ba9bdd7486bd1012fba0c9780fc3635ca0a55fc864ddf1dbb11115": "--- crates/pixel/tests/cli/prompt_brief_cli.rs:75 ---\n      70: fn hook(root: &Path, provider: &str, prompt: &str, env: &[(&str, &str)]) -> Value {\n      71:     let payload = json!({\n      72:         \"session_id\": \"brief-session\",\n      73:         \"prompt\": prompt,\n      74:         \"cwd\": root,\n>>    75:         \"hook_event_name\": \"UserPromptSubmit\",\n      76:     });\n      77:     let mut command = pixel_command();\n      78:     command\n      79:         .current_dir(root)\n      80:         .env(\"PIXEL_METRICS\", \"0\")\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:113 ---\n     108:     );\n     109:     serde_json::from_slice(&output.stdout).unwrap()\n     110: }\n     111: \n     112: fn context(output: &Value) -> &str {\n>>   113:     output[\"hookSpecificOutput\"][\"additionalContext\"]\n     114:         .as_str()\n     115:         .unwrap_or_else(|| panic!(\"no additional context in {output}\"))\n     116: }\n     117: \n     118: fn stamp(path: &Path) -> (u64, SystemTime) {\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:129 ---\n     124: fn rename_prompt_should_carry_files_definition_and_callers_in_the_hook_context() {\n     125:     let root = indexed(\"rename\");\n     126:     for provider in [\"claude\", \"codex\"] {\n     127:         let output = hook(&root, provider, RENAME, &[]);\n     128:         assert_eq!(\n>>   129:             output[\"hookSpecificOutput\"][\"hookEventName\"], \"UserPromptSubmit\",\n     130:             \"{provider}\"\n     131:         );\n     132:         assert_eq!(\n     133:             context(&output),\n     134:             [\n--- crates/pixel/tests/cli/prompt_brief_cli.rs:196 ---\n     191:     std::fs::write(root.join(\".pixel/config.yaml\"), \"brief: false\\n\").unwrap();\n     192:     assert_eq!(hook(&root, \"claude\", RENAME, &[]), json!({}));\n     193: }\n     194: \n     195: #[test]\n>>   196: fn pi_should_keep_its_own_decision_without_a_brief() {\n     197:     let root = indexed(\"pi\");\n     198:     let output = hook(&root, \"pi\", RENAME, &[]);\n     199:     assert!(output.get(\"context\").is_none(), \"{output}\");\n     200:     assert!(output.get(\"hookSpecificOutput\").is_none(), \"{output}\");\n     201: }\n",
+    "85854109a233ac9197dc9d491aa6c6f68b15861c6ba0acdd84438eeb108113bd": "note: `pixel search-content` has 62 prior calls in 10 minutes; counts alone do not establish a loop. Continuing retrieval.\n",
+    "efcb4a6a83bbee3b85f6f6d29988c0d14cf193fb8df05a96f640f7301524a333": "note: `pixel search-content` has 2 prior calls with identical arguments in 10 minutes; repository state may have changed. Continuing retrieval.\n",
+    "729e104b69ad9e9d98cdb12ccc937fa4d6188d47c0172d9cc58760d8e2eb5088": "{\n  \"byte_cap\": 4096,\n  \"commits\": [\n    {\n      \"author\": \"Livio Gamassia\",\n      \"body\": \"* feat(brief): run a bounded evidence brief on every code prompt, simplify the agent prompt\\n\\nThe prompt-submit task-event hook (the only prompt hook `pixel install`\\nregisters, for Claude Code and Codex) now returns a [PIXEL:BRIEF] block as\\nadditional context: anchors, files, the symbol definition and, for rename or\\ncaller intent, its direct callers. It runs at most four ops (search-content,\\nfind-symbol, impact <uid>, find-code) under one 750 ms deadline, caps output\\nat 2 KiB, reads a warm daemon or the index and graph read-only, and never\\nstarts a daemon or builds an index. PIXEL_BRIEF=0 or `brief: false` in\\n.pixel/config.yaml turns it off.\\n\\nThe agent prompt drops the flat command table for the brief paragraph plus\\none chain per case, 4430 -> 1782 bytes; the sub-agent prompt 1764 -> 869.\\n\\nRefs #865\\n\\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\\n\\n* docs(architecture): correct the brief paragraph (Pi gets none, stale graph keeps text evidence)\\n\\nPi is skipped by start_brief, and a missing or stale graph still yields the\\nfiles: evidence with the reason under unresolved:; only a repository with no\\nindex gets no brief. Review feedback on #866.\\n\\nRefs #865\\n\\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\\n\\n* refactor(hooks): retire the guard, rewrite and retrieval hook handlers (#867)\\n\\n* refactor(hooks): retire the guard, rewrite and retrieval hook handlers\\n\\n`pixel install` registers only `run-hook task-event` for Claude and Codex,\\nand PR #866 delivers retrieval context through its prompt-submit event, so\\nthe other hook handlers no longer have a registration path.\\n\\nDeleted: the guard (rewrite/deny/advisory arms and the AGY pre-invocation\\npath), composed-guard, post-tool-use, metrics, session-start,\\npost-compaction and the legacy prompt-submit handlers with their modules\\nand ~5,300 lines of tests; the plugin hook script and plugin-hooks.json;\\nthe OpenCode plugin asset. `search-like-rg`, `execution-brief` and\\n`squash-branch` (alias `rewrite`) are untouched.\\n\\nKept so an upgrade cannot break a host: every retired verb stays accepted,\\nwith its old flags, as a hidden silent no-op that exits 0 (a PreToolUse hook\\nthat exits 2 blocks the host's tool call), and the install and uninstall\\nrecognisers that retire old registrations. `pixel config policy` now\\ncontrols nothing; its key and wording stay.\\n\\nRefs #865\\n\\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\\n\\n* refactor(plugin): remove the pixel-impact skill, the per-prompt brief replaces it\\n\\nThe Claude, Codex and Qoder plugins no longer ship the pixel-impact skill:\\nthe [PIXEL:BRIEF] from the prompt-submit task event runs find-symbol and\\nimpact <uid> itself. The three old skill copies join RETIRED_FILES so a repo\\nthat still has them gets them cleaned. The Pi /pixel-impact command, the\\npixel-classify skill and the `pixel impact` command stay.\\n\\nRefs #865\\n\\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\\n\\n---------\\n\\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>\\n\\n* feat(brief): quote the definition source line in the evidence brief\\n\\nfind-symbol resolves the declaration site but not what the symbol is — for `export const X = defineMultiStyleConfig(...)` a bare `defined:` entry let the agent describe the symbol wrongly. When a symbol resolves, append its first source line to the defined entry; when none resolves (const bindings the extractor does not index), quote the file hit whose stem matches the anchor as `likely definition:`. Arena on architech-t (3 reps): literal-lookup quality 21/30 -> 30/30 at 0 commands and ~13K input tokens.\\n\\n* fix(ci): guard the native rg spawn and inline the format args\\n\\n---------\\n\\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>\",\n      \"date\": \"1791332775\",\n      \"email\": \"livio.gamassia@gmail.com\",\n      \"oid\": \"14feba456b479be165ab40ec14dde3958a865368\",\n      \"subject\": \"feat(brief): run a bounded evidence brief on every code prompt, simplify the agent prompt (#866)\"\n    }\n  ],\n  \"count\": 1,\n  \"cursor\": null,\n  \"limit\": 1,\n  \"next_cursor\": \"1\",\n  \"truncated\": true\n}\n",
+    "9aed604266f8dbaf82be74e9054fec08c95acb2890de530d0ee55e4f7c97bc58": "[PIXEL:BRIEF]\nfiles: crates/pixel/src/task_hook.rs:2118 crates/pixel-recall/src/code_search.rs crates/pixel/src/execution_brief.rs:59\nconfidence: medium | ops: 1/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+    "765efc8adab648ce4d0f8f095d30a288b9cf7e65a3cea19918f535b75c0e257d": "// crates/pixel/src/task_hook.rs [rust]\n  L   17  const  pub(crate) const MAX_INPUT: u64 = crate::hook_input::MAX_HOOK_INPUT;\n  L   20  const  const DECISION_TIMEOUT: Duration = Duration::from_secs(6);\n  L   21  const  const UNAVAILABLE: &str = \"Pixel task state is unavailable. Reads and recovery remain available; edits and completion require a working task ledger.\";\n  L   25  enum  pub enum TaskProvider {\n  L   26  variant  Claude\n  L   27  variant  Codex\n  L   28  variant  Pi\n  L   29  variant  Devin\n  L   30  variant  Gemini\n  L   31  variant  Antigravity\n  L   35  method  pub fn as_str(self) -> &'static str {\n  L   49  method  fn prompt_event_name(self) -> &'static str {\n  L   60  enum  pub enum TaskHookEvent {\n  L   61  variant  SessionStart\n  L   62  variant  PromptSubmit\n  L   63  variant  PreToolUse\n  L   64  variant  PostToolUse\n  L   65  variant  ToolFailure\n  L   66  variant  Stop\n  L   67  variant  SessionEnd\n  L   68  variant  Interrupt\n  L   69  variant  SubagentStart\n  L   70  variant  SubagentStop\n  L   71  variant  ModelResponse\n  L   72  variant  UserBash\n  L   76  method  pub fn as_str(self) -> &'static str {\n  L   93  method  fn host_name(self) -> &'static str {\n  L  111  function  fn string<'a>(payload: &'a Value, names: &[&str]) -> Option<&'a str> {\n  L  117  function  fn basename(path: &str) -> &str {\n  L  121  function  fn tool_label(value: &str) -> Option<&str> {\n  L  130  function  fn bounded_count(value: &Value, maximum: u64) -> Option<u64> {\n  L  134  function  fn usage(payload: &Value) -> Value {\n  L  149  function  fn read_flags(args: &[String], allowed: &[&str], prefixes: &[&str]) -> bool {\n  L  159  function  fn git_read(args: &[String]) -> bool {\n  L  242  function  fn search_read(args: &[String]) -> bool {\n  L  317  function  fn pixel_read_or_recovery(args: &[String]) -> bool {\n  L  373  function  fn task_argv(command: &str) -> Option<Vec<String>> {\n  L  423  function  fn sort_read(args: &[String]) -> bool {\n  L  453  function  fn uniq_read(args: &[String]) -> bool {\n  L  491  function  fn sed_read(args: &[String]) -> bool {\n  L  532  function  fn sed_scripts(args: &[String]) -> impl Iterator<Item = &str> {\n  L  594  function  fn sed_script_writes(script: &str) -> bool {\n  L  622  function  fn skip_separators(chars: &mut Peekable<Chars<'_>>) -> bool {\n  L  651  function  fn skip_addresses(chars: &mut Peekable<Chars<'_>>) -> bool {\n  L  691  function  fn skip_regex_flags(chars: &mut Peekable<Chars<'_>>) {\n  L  700  function  fn skip_delimited(chars: &mut Peekable<Chars<'_>>, delim: char) {\n  L  718  function  fn substitution_writes(chars: &mut Peekable<Chars<'_>>) -> bool {\n  L  756  const  const IMPORTED_CLAUDE_CONFIG_MARKERS: &[&str] = &[\"DEVIN_PROJECT_DIR\"];\n  L  759  function  fn imported_config_host() -> Option<&'static str> {\n  L  769  function  fn split_segments(text: &str) -> Option<Vec<(&str, bool)>> {\n  L  805  function  fn shell_mutates(command: &str) -> bool {\n  L  814  function  fn shell_leaf_mutates(command: &str, recovery: bool) -> bool {\n  L  852  function  fn mutation(tool: &str, input: &Value) -> bool {\n  L  888  function  pub(crate) fn normalize(event: TaskHookEvent, payload: &Value) -> Value {\n  L  980  function  fn envelope(provider: TaskProvider, event: TaskHookEvent, decision: &Value) -> Value {\n  L 1025  function  fn unavailable(event: TaskHookEvent, payload: Option<&Value>, enforced: bool) -> Value {\n  L 1038  function  fn payload_cwd(payload: &Value) -> std::path::PathBuf {\n  L 1047  function  fn enforcement_applies(provider: TaskProvider, payload: Option<&Value>) -> bool {\n  L 1062  function  fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {\n  L 1080  function  fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -> Option<String> {\n  L 1097  function  fn start_brief(\n  L 1112  function  fn antigravity_prompt(payload: &Value) -> Option<String> {\n  L 1148  function  fn with_brief(mut decision: Value, brief: Option<crate::execution_brief::chain::Pending>) -> Value {\n  L 1157  function  fn handle_at(\n  L 1172  function  fn bounded_decision(\n  L 1201  function  pub fn run(provider: TaskProvider, event: TaskHookEvent) -> ! {\n",
+    "0f0fd4543f8ee8622a0a8394fcda0daf294c58204f32b8f6adec3f0a600b27e5": "// crates/pixel/src/execution_brief/chain.rs [rust]\n  L   26  const  pub(crate) const BRIEF_TAG: &str = \"[PIXEL:BRIEF]\";\n  L   28  const  pub(crate) const BRIEF_FEATURE: &str = \"brief\";\n  L   30  const  pub(crate) const BRIEF_ENV: &str = \"PIXEL_BRIEF\";\n  L   33  const  pub(crate) const BRIEF_WINDOW: Duration = Duration::from_millis(750);\n  L   35  const  pub(crate) const MAX_OPS: usize = 4;\n  L   37  const  pub(crate) const BRIEF_BYTES: usize = 2048;\n  L   39  const  pub(crate) const SEARCH_ROWS: usize = 200;\n  L   41  const  pub(crate) const CONCEPT_ROWS: usize = 8;\n  L   43  const  pub(crate) const SYMBOL_ROWS: u32 = 50;\n  L   45  const  const MAX_ANCHORS: usize = 4;\n  L   46  const  const MAX_ANCHOR_CHARS: usize = 80;\n  L   48  const  const MIN_CASED_CHARS: usize = 5;\n  L   49  const  const MAX_FILES: usize = 8;\n  L   50  const  const MAX_DEFINED: usize = 3;\n  L   51  const  const MAX_CALLERS: usize = 10;\n  L   52  const  const MAX_CONCEPT_WORDS: usize = 6;\n  L   53  const  const MIN_CONCEPT_WORD_CHARS: usize = 4;\n  L   54  const  const MAX_ITEM_CHARS: usize = 120;\n  L   58  const  const CHANGE_STEMS: &[&str] = &[\n  L   63  const  const CONCEPT_STOPWORDS: &[&str] = &[\n  L   69  const  const GENERATED_EXTENSIONS: &[&str] = &[\"json\", \"lock\"];\n  L   71  const  const GENERATED_DIRS: &[&str] = &[\"output\", \"dist\", \"node_modules\"];\n  L   72  const  const FOOTER: &str = \"Answer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.\";\n  L   74  const  static QUOTED: LazyLock<Regex> = LazyLock::new(|| {\n  L   78  const  static PATHLIKE: LazyLock<Regex> = LazyLock::new(|| {\n  L   81  const  static CASED: LazyLock<Regex> = LazyLock::new(|| {\n  L   85  const  static WORD: LazyLock<Regex> =\n  L   90  struct  pub(crate) struct FileHit {\n  L   97  struct  pub(crate) struct Found {\n  L  105  struct  pub(crate) struct SymbolHit {\n  L  116  struct  pub(crate) struct CallerHit {\n  L  124  trait  pub(crate) trait Evidence {\n  L  137  method  fn line_at(&self, path: &str, line: u64, _deadline: Instant) -> Result<String, String> {\n  L  145  struct  pub(crate) struct Gate {\n  L  151  method  pub(crate) fn read(root: &Path) -> Self {\n  L  161  method  const fn open(self) -> bool {\n  L  169  struct  pub(crate) struct Anchors(Vec<String>);\n  L  175  method  pub(crate) fn from_text(typed: &str) -> Self {\n  L  212  method  fn names(&self) -> impl Iterator<Item = &str> {\n  L  219  method  fn paths(&self) -> Vec<&str> {\n  L  229  method  fn search_term(&self) -> Option<String> {\n  L  237  method  fn symbol_name(&self) -> Option<String> {\n  L  247  struct  pub(crate) struct Plan {\n  L  259  method  pub(crate) fn from_prompt(prompt: &str) -> Option<Self> {\n  L  269  method  fn from_typed(typed: &str, change_intent: bool) -> Self {\n  L  279  function  pub(crate) fn has_change_intent(typed: &str) -> bool {\n  L  285  function  fn concept_phrase(typed: &str) -> Option<String> {\n  L  300  function  fn tidy(token: &str) -> &str {\n  L  306  function  fn is_path(anchor: &str) -> bool {\n  L  310  function  fn has_source_extension(token: &str) -> bool {\n  L  320  function  fn file_stem(path: &str) -> String {\n  L  328  function  pub(crate) fn is_generated(path: &str) -> bool {\n  L  348  function  pub(crate) fn pick_uid<'a>(\n  L  386  struct  pub(crate) struct Brief {\n  L  409  method  fn absorb(&mut self, found: Found) {\n  L  426  method  fn confidence(&self) -> &'static str {\n  L  437  function  fn edit<T>(state: &Mutex<Brief>, change: impl FnOnce(&mut Brief) -> T) -> T {\n  L  443  function  fn spend(state: &Mutex<Brief>, deadline: Instant) -> bool {\n  L  457  function  pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Instant) {\n  L  564  function  fn ordered(hits: &[SymbolHit], pick: Option<&SymbolHit>) -> Vec<SymbolHit> {\n  L  575  struct  pub(crate) struct Pending {\n  L  584  method  pub(crate) fn finish(self) -> Option<String> {\n  L  596  function  pub(crate) fn start(prompt: &str, root: &Path) -> Option<Pending> {\n  L  610  function  pub(crate) fn start_with<F, J>(\n  L  668  struct  struct Shown {\n  L  677  method  fn of(brief: &Brief) -> Self {\n  L  690  method  fn shrink(&mut self) -> bool {\n  L  722  function  pub(crate) fn render(brief: &Brief) -> Option<String> {\n  L  734  function  fn render_with(brief: &Brief, shown: Shown) -> String {\n  L  838  function  fn list_line(\n  L  864  function  fn clean(text: &str) -> String {\n",
+    "cd5cd8ca7a3fb9ff26e77a4eb92da4615e4c9044ff2db50eb880219493cb709f": "--- crates/pixel/src/execution_brief/chain.rs:722 ---\n     720: /// The block, at most [`BRIEF_BYTES`], or `None` when nothing answered.\n     721: /// A list that does not fit loses entries and says how many.\n>>   722: pub(crate) fn render(brief: &Brief) -> Option<String> {\n     723:     if brief.answered == 0 {\n     724:         return None;\n--- crates/pixel/src/task_hook.rs:1062 ---\n    1060: }\n    1061: \n>>  1062: fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {\n    1063:     let Ok(payload) = serde_json::from_str::<Value>(raw) else {\n    1064:         return envelope(provider, event, &unavailable(event, None, true));\n--- crates/pixel/src/task_hook.rs:1097 ---\n    1095: /// Start the evidence brief for a Claude or Codex prompt; Pi, every other\n    1096: /// event and a prompt outside a repository start none.\n>>  1097: fn start_brief(\n    1098:     provider: TaskProvider,\n    1099:     event: TaskHookEvent,\n--- crates/pixel/src/task_hook.rs:1148 ---\n    1146: /// the host's additional context. A decision that already carries a context\n    1147: /// keeps it.\n>>  1148: fn with_brief(mut decision: Value, brief: Option<crate::execution_brief::chain::Pending>) -> Value {\n    1149:     if decision.get(\"context\").is_none()\n    1150:         && let Some(text) = brief.and_then(crate::execution_brief::chain::Pending::finish)\n",
+    "913257d27cfbc5cffcdc5a0335795255a4032913a5add4838cba6222bc735706": "[PIXEL:BRIEF]\nintent: question (0.50)\nfiles: crates/pixel/src/task_hook.rs:2118 crates/pixel-recall/src/code_search.rs crates/pixel/src/execution_brief.rs:59\nconfidence: medium | ops: 1/4\nAnswer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding."
+  }
+}
