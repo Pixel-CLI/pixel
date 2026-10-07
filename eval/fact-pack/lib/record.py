@@ -81,8 +81,7 @@ def repo_signature(root: str) -> dict:
         for path in paths:
             full = Path(root) / path
             if full.is_file():
-                content_hashes[path] = _sha256_text(
-                    full.read_text(encoding="utf-8", errors="replace"))
+                content_hashes[path] = _sha256_bytes(full.read_bytes())
             else:
                 content_hashes[path] = None  # deleted or missing
         entries.append({"status": status_code, "paths": paths,
@@ -96,6 +95,12 @@ def repo_signature(root: str) -> dict:
 def _sha256_text(text: str) -> str:
     import hashlib
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sha256_bytes(data: bytes) -> str:
+    """Hash raw bytes so distinct invalid-UTF-8 sequences produce distinct signatures."""
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
 
 
 def append_jsonl(path: Path, record: dict) -> None:

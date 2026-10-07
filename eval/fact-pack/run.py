@@ -107,7 +107,8 @@ def run_experiment(families_dir: str, out_dir: str, pixel_bin: str,
             pinned = task.get("commit")
             if pinned and pinned != repo["commit"]:
                 raise RuntimeError(
-                    f"task {task['id']} pinned to {pinned} but checkout is {repo['commit']}")
+                    f"task {task['id']} pinned to {pinned} but checkout is {repo['commit']}; "
+                    f"run from a worktree at the task's pinned commit")
             truth = task.get("ground_truth")
             if truth:
                 ground_truth_by_pair[task["id"]] = set(truth)

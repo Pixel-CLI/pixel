@@ -171,6 +171,14 @@ def evaluate_candidate(candidate_id, trajectories_by_arm, packets_by_arm,
             if key in base_by_pair:
                 paired_cand.append(t)
                 paired_base.append(base_by_pair[key])
+        # Retain only aligned runs that both succeeded before collecting elapsed
+        # times; disjoint success sets produce no paired observations.
+        aligned = [
+            (cc, cb) for cc, cb in zip(paired_cand, paired_base)
+            if cc["verified"] == "success" and cb["verified"] == "success"
+        ]
+        paired_cand = [cc for cc, _ in aligned]
+        paired_base = [cb for _, cb in aligned]
         cand_succ = [1 if t["verified"] == "success" else 0 for t in paired_cand]
         base_succ = [1 if t["verified"] == "success" else 0 for t in paired_base]
         diff, lower, ok = non_inferiority(cand_succ, base_succ)
