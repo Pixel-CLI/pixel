@@ -69,7 +69,6 @@ on:
       # gen-plugin-assets.sh --check:
       - "PIXEL.md"
       - "PIXEL-SUBAGENT.md"
-      - "skills/**"
       - ".agents/skills/pixel/**"
       - ".openclaw/**"
       - ".clinerules/**"
@@ -221,7 +220,6 @@ jobs:
           ^docs/manual-setup\.md$
           ^website/
           ^\.agents/(rules|skills/(rust-guidelines|release|pixel))/
-          ^skills/
           ^\.(openclaw|clinerules|kiro|qoder|windsurf)/
           ^scripts/gen-plugin-assets\.sh$
           ^\.github/workflows/ci\.yml$

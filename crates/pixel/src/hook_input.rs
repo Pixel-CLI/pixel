@@ -5,27 +5,19 @@
 //!
 //! A coding agent writes the hook payload on stdin and waits for the verdict.
 //! Reading the pipe to EOF means a host that emits an oversized payload makes
-//! Pixel allocate it in full before any decision, so `guard`, `prompt-submit`,
-//! `post-tool-use`, `metrics` and `task-event` read through [`read_bounded`]
-//! and stop at [`MAX_HOOK_INPUT`] instead. What the cap bounds is that
+//! Pixel allocate it in full before any decision, so `task-event` and the
+//! retired verbs (which only drain the pipe) read through [`read_bounded`] and
+//! stop at [`MAX_HOOK_INPUT`] instead. What the cap bounds is that
 //! *allocation*: a payload past the cap is refused after `cap + 1` bytes and
 //! the rest is never drained. It does not bound the *wait* — a writer that
 //! sends fewer than `cap + 1` bytes and holds the pipe open still stalls the
 //! read exactly as before, and only the host's own hook timeout
-//! (`HOOK_TIMEOUT`, 10 s, registered by `pixel install`) ends that wait. Every
-//! entry point here already fails open — a payload it cannot use is a silent
-//! exit 0 that leaves the native tool untouched — so an over-cap payload takes
-//! exactly the path a malformed one takes, and no new decision is introduced.
-//! `task-event` is the exception: it has no silent path, so an over-cap payload
-//! takes its unavailable envelope, which denies `PreToolUse` on an enforced
-//! session rather than leaving the tool untouched.
+//! (`HOOK_TIMEOUT`, 10 s, registered by `pixel install`) ends that wait.
+//! `task-event` has no silent path, so an over-cap payload takes its
+//! unavailable envelope, which denies `PreToolUse` on an enforced session.
 //!
 //! The cap is the task-event cap, [`MAX_HOOK_INPUT`]: the largest hook payload
-//! an installed host is expected to emit. Two entry points keep their own
-//! bound: `composed-guard` uses `COMPOSED_MAX_INPUT`, and `post-compaction`
-//! the smaller [`MANIFEST_MAX_BYTES`], because that entry point also bounds the
-//! manifest *file* it reads back with the same constant and changing it would
-//! widen that path too.
+//! an installed host is expected to emit.
 
 use std::io::Read;
 
@@ -115,7 +107,7 @@ mod tests {
     }
 
     /// The shared cap is the task-event cap, so the two spellings cannot
-    /// drift apart: a payload `task-event` accepts is one `guard` accepts.
+    /// drift apart: a payload `task-event` accepts is one the retired verbs drain.
     #[test]
     fn the_shared_cap_should_equal_the_task_event_cap() {
         assert_eq!(MAX_HOOK_INPUT, crate::task_hook::MAX_INPUT);

@@ -47,9 +47,9 @@ try {
     assert.deepEqual(h.events, [], "no lifecycle handler: nothing runs until the user types the command");
   });
 
-  await check("package includes both Claude skills and the distributed Pi command", () => {
+  await check("package includes the distributed Pi command and no skill directory", () => {
     const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-    assert.ok(pkg.files.includes("claude-skills/"));
+    assert.ok(!pkg.files.includes("claude-skills/") && !pkg.files.includes("skills/"));
     assert.ok(pkg.files.includes("pi/"));
     assert.deepEqual(pkg.pi.extensions, ["./pi/extensions/pixel-impact.ts"]);
     assert.deepEqual(pkg.pi.skills, [], "Pi must not auto-discover root skill packages");

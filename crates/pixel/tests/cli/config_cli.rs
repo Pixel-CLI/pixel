@@ -4,9 +4,8 @@
 //! User configuration contracts through the real CLI, with isolated home directories.
 use crate::support::{Scratch, pixel_command};
 use std::fs;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Output, Stdio};
+use std::process::Output;
 
 fn run(home: &Path, cwd: &Path, args: &[&str]) -> Output {
     pixel_command()
@@ -123,108 +122,6 @@ fn editor_should_receive_one_path_preserve_legacy_values_and_report_bad_edits() 
     let out = invoke(&["config", "edit"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("editor exited"));
-}
-
-#[test]
-fn disabled_prompt_features_should_leave_no_handoff_or_context() {
-    let home = Scratch::for_test("config", "hook-home");
-    let repo = Scratch::for_test("config", "hook-repo");
-    fs::create_dir_all(repo.join(".pixel")).unwrap();
-    fs::write(
-        repo.join(".pixel/config.yaml"),
-        "task_context: false\ntask_boundary: false\n",
-    )
-    .unwrap();
-    let mut child = pixel_command()
-        .env("HOME", &*home)
-        .env_remove("PIXEL_TASK_CONTEXT")
-        .env_remove("PIXEL_TASK_BOUNDARY")
-        .current_dir(&*repo)
-        .args(["run-hook", "prompt-submit", "--provider", "claude"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let payload = serde_json::json!({"cwd": repo.to_str().unwrap(), "prompt": "Implement a configuration editor with YAML support", "session_id": "config-disabled"});
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(payload.to_string().as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert_eq!(stdout(&out), "");
-    assert_eq!(out.stderr, b"");
-    assert!(!repo.join(".pixel/tasks").exists());
-}
-
-/// Runs the Claude prompt hook on `prompt` in `repo`, with `env` on top.
-fn claude_prompt_hook(home: &Path, repo: &Path, prompt: &str, env: &[(&str, &str)]) -> Output {
-    let mut command = pixel_command();
-    command
-        .env("HOME", home)
-        .env_remove("PIXEL_TASK_CONTEXT")
-        .env_remove("PIXEL_TASK_BOUNDARY")
-        .env_remove("DEVIN_PROJECT_DIR")
-        .current_dir(repo)
-        .args(["run-hook", "prompt-submit", "--provider", "claude"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    let mut child = command.spawn().unwrap();
-    let payload = serde_json::json!({"cwd": repo.to_str().unwrap(), "prompt": prompt, "session_id": "no-handoff"});
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(payload.to_string().as_bytes())
-        .unwrap();
-    child.wait_with_output().unwrap()
-}
-
-#[cfg(unix)]
-#[test]
-fn claude_prompt_hook_should_never_reject_an_imperative_prompt() {
-    // A fresh `pixel install` on a Linux box: "Add the \"story\" feature" was
-    // rejected twice with "foreground prompt handed off" while two hidden
-    // workers ran. The automatic handoff is gone: the prompt always stays in
-    // Claude, even where a config written for 0.6.x still says
-    // `auto_handoff: true`.
-    let home = Scratch::for_test("config", "no-handoff-home");
-    let repo = Scratch::for_test("config", "no-handoff-repo");
-    fs::write(repo.join("lib.rs"), "pub fn seed() {}\n").unwrap();
-    crate::support::git(&repo, &["init", "-q"]);
-    crate::support::git(&repo, &["add", "."]);
-    crate::support::git(&repo, &["commit", "-q", "-m", "seed"]);
-    let sandboxes = repo.parent().unwrap().join(".pixel-sandboxes");
-    let prompt = "Add the \"story\" feature";
-
-    let run = |env: &[(&str, &str)]| {
-        let out = claude_prompt_hook(&home, &repo, prompt, env);
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert_eq!(out.status.code(), Some(0), "{env:?}: {stderr}");
-        assert!(!stderr.contains("handed off"), "{env:?}: {stderr}");
-        assert!(
-            !sandboxes.join(repo.file_name().unwrap()).exists(),
-            "{env:?}: no sandbox"
-        );
-        let workers = fs::read_dir(repo.join(".pixel/tasks"))
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter(|task| task.path().join("workers").exists())
-            .count();
-        assert_eq!(workers, 0, "{env:?}: no worker record");
-    };
-    run(&[]);
-    fs::create_dir_all(repo.join(".pixel")).unwrap();
-    fs::write(repo.join(".pixel/config.yaml"), "auto_handoff: true\n").unwrap();
-    run(&[]);
-    run(&[("PIXEL_AUTO_HANDOFF", "1")]);
 }
 
 #[cfg(unix)]

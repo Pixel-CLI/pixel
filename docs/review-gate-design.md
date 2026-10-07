@@ -130,7 +130,7 @@ pass starts from — the rule name, the anchor, the evidence, the fix hint — a
 the clap docstring promises exactly that ("each finding carrying the witness
 that established it. Feed the output to a real review as the narrowed context
 it starts from"). `--json` is the machine-addressable rendering of the same
-findings; a prompt-submit hook can prepend the `--json` array plus the
+findings; a prompt hook can prepend the `--json` array plus the
 `caps`/`basis` line so the model starts pre-oriented on *what the harness
 already proved*, and spends its budget on the semantic half. No new op: the
 human CLI rendering and the prompt prefix are two projections of the one

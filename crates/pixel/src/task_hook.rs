@@ -729,11 +729,64 @@ fn substitution_writes(chars: &mut Peekable<Chars<'_>>) -> bool {
     false
 }
 
+/// Environment markers set by a harness that loads Claude Code's configuration
+/// rather than being Claude Code. Devin reads `~/.claude/settings.json` by
+/// default (its `read_config_from.claude`) and runs the hook commands it finds
+/// there unchanged, so `--provider claude` on a hook names the install, not
+/// the host that invoked it. Such an entry must not act on Claude's behalf:
+/// the host's own protocol carries the behavior, and the imported copy
+/// double-runs beside it.
+const IMPORTED_CLAUDE_CONFIG_MARKERS: &[&str] = &["DEVIN_PROJECT_DIR"];
+
+/// The imported-config marker set in this process, if any.
+fn imported_config_host() -> Option<&'static str> {
+    IMPORTED_CLAUDE_CONFIG_MARKERS
+        .iter()
+        .copied()
+        .find(|marker| std::env::var_os(marker).is_some())
+}
+
+/// Split only unquoted pipeline/sequence operators, retaining stdin provenance.
+/// `None` when a quote is unbalanced or a segment is empty, which the caller
+/// treats as a mutating command.
+fn split_segments(text: &str) -> Option<Vec<(&str, bool)>> {
+    let mut segments = Vec::new();
+    let mut quote = None;
+    let mut start = 0;
+    let mut piped = false;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, c)) = chars.next() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if matches!(c, '\'' | '"') => quote = Some(c),
+            None if matches!(c, '|' | ';' | '&' | '\n') => {
+                let segment = text[start..index].trim();
+                if segment.is_empty() {
+                    return None;
+                }
+                segments.push((segment, piped));
+                let doubled =
+                    matches!(c, '|' | '&') && chars.peek().is_some_and(|(_, next)| *next == c);
+                let end = if doubled { chars.next()?.0 } else { index };
+                piped = c == '|' && !doubled;
+                start = end + c.len_utf8();
+            }
+            None => {}
+        }
+    }
+    if quote.is_some() || text[start..].trim().is_empty() {
+        return None;
+    }
+    segments.push((text[start..].trim(), piped));
+    Some(segments)
+}
+
 /// Proven reads, alone, piped or sequenced, and single-command recovery bypass
 /// the edit gate. Every leaf of a sequence is judged, so `a; b` reads only
 /// when both do; recovery stays single-command.
 fn shell_mutates(command: &str) -> bool {
-    let Some(segments) = crate::guard::split_segments(command) else {
+    let Some(segments) = split_segments(command) else {
         return true;
     };
     segments
@@ -982,6 +1035,9 @@ fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
     let Ok(payload) = serde_json::from_str::<Value>(raw) else {
         return envelope(provider, event, &unavailable(event, None, true));
     };
+    // The brief runs beside the ledger: it needs neither, and a slow ledger
+    // must not use up its window.
+    let brief = start_brief(provider, event, &payload);
     let decision =
         handle_at(&payload_cwd(&payload), provider, event, &payload).unwrap_or_else(|_| {
             unavailable(
@@ -990,7 +1046,34 @@ fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
                 enforcement_applies(provider, Some(&payload)),
             )
         });
-    envelope(provider, event, &decision)
+    envelope(provider, event, &with_brief(decision, brief))
+}
+
+/// Start the evidence brief for a Claude or Codex prompt; Pi, every other
+/// event and a prompt outside a repository start none.
+fn start_brief(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    payload: &Value,
+) -> Option<crate::execution_brief::chain::Pending> {
+    if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {
+        return None;
+    }
+    let prompt = string(payload, &["prompt"])?;
+    let root = crate::discover_root(&payload_cwd(payload)).ok()?;
+    crate::execution_brief::chain::start(prompt, &root)
+}
+
+/// `decision` with the brief as its `context`, which the envelope delivers as
+/// the host's additional context. A decision that already carries a context
+/// keeps it.
+fn with_brief(mut decision: Value, brief: Option<crate::execution_brief::chain::Pending>) -> Value {
+    if decision.get("context").is_none()
+        && let Some(text) = brief.and_then(crate::execution_brief::chain::Pending::finish)
+    {
+        decision["context"] = Value::String(text);
+    }
+    decision
 }
 
 fn handle_at(
@@ -1038,9 +1121,7 @@ fn bounded_decision(
 
 /// Read one bounded host event, dispatch it, and emit only the host's schema.
 pub fn run(provider: TaskProvider, event: TaskHookEvent) -> ! {
-    if provider == TaskProvider::Claude
-        && crate::prompt_submit::imported_claude_entry(Some(crate::guard::Provider::Claude))
-    {
+    if provider == TaskProvider::Claude && imported_config_host().is_some() {
         std::process::exit(0);
     }
     let output =
@@ -1067,6 +1148,50 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Claude-argued `task-event` inside a host that imports Claude's
+    /// configuration must exit without acting: the marker names the real host.
+    #[test]
+    fn imported_config_host_is_the_marker_set_in_the_process() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("DEVIN_PROJECT_DIR");
+        // SAFETY: DEVIN_PROJECT_DIR is only changed under ENV_LOCK.
+        unsafe { std::env::set_var("DEVIN_PROJECT_DIR", "/tmp/devin-repo") };
+        assert_eq!(imported_config_host(), Some("DEVIN_PROJECT_DIR"));
+        // SAFETY: same lock as above.
+        unsafe { std::env::remove_var("DEVIN_PROJECT_DIR") };
+        assert_eq!(imported_config_host(), None);
+        if let Some(restored) = saved {
+            // SAFETY: same lock as above.
+            unsafe { std::env::set_var("DEVIN_PROJECT_DIR", restored) };
+        }
+    }
+
+    /// A single `|` marks the NEXT segment as piped; `&&`, `||` and a lone
+    /// `&` are separators that carry no such flag. Quotes protect operators.
+    #[test]
+    fn split_segments_marks_pipes_quotes_and_doubles() {
+        assert_eq!(
+            split_segments("a | b"),
+            Some(vec![("a", false), ("b", true)])
+        );
+        assert_eq!(
+            split_segments("a && b"),
+            Some(vec![("a", false), ("b", false)])
+        );
+        assert_eq!(
+            split_segments("a & b"),
+            Some(vec![("a", false), ("b", false)])
+        );
+        assert_eq!(
+            split_segments("a || b"),
+            Some(vec![("a", false), ("b", false)])
+        );
+        assert_eq!(
+            split_segments("echo 'a|b' && git status"),
+            Some(vec![("echo 'a|b'", false), ("git status", false)])
+        );
+    }
 
     #[test]
     fn contextual_envelopes_should_name_every_native_event_exactly() {
@@ -1859,5 +1984,130 @@ mod tests {
                 json!({})
             );
         }
+    }
+
+    /// A source that answers one file for every search, so a brief exists.
+    struct OneFile;
+
+    impl crate::execution_brief::chain::Evidence for OneFile {
+        fn files_with(
+            &self,
+            _: &str,
+            _: std::time::Instant,
+        ) -> Result<crate::execution_brief::chain::Found, String> {
+            Ok(crate::execution_brief::chain::Found {
+                hits: vec![crate::execution_brief::chain::FileHit {
+                    path: "src/a.ts".into(),
+                    line: 2,
+                }],
+                capped: false,
+            })
+        }
+        fn concept(
+            &self,
+            _: &str,
+            _: std::time::Instant,
+        ) -> Result<crate::execution_brief::chain::Found, String> {
+            Err("unused".into())
+        }
+        fn symbols(
+            &self,
+            _: &str,
+            _: std::time::Instant,
+        ) -> Result<Vec<crate::execution_brief::chain::SymbolHit>, String> {
+            Err("unused".into())
+        }
+        fn callers(
+            &self,
+            _: &str,
+            _: std::time::Instant,
+        ) -> Result<Vec<crate::execution_brief::chain::CallerHit>, String> {
+            Err("unused".into())
+        }
+    }
+
+    fn pending_brief() -> crate::execution_brief::chain::Pending {
+        crate::execution_brief::chain::start_with(
+            "where is `fetchUser` used",
+            crate::execution_brief::chain::Gate {
+                enabled: true,
+                indexed: true,
+            },
+            Duration::from_secs(5),
+            |_| Box::new(OneFile),
+        )
+        .expect("a code prompt in an open gate starts a brief")
+    }
+
+    #[test]
+    fn a_brief_should_become_the_context_the_envelope_delivers_to_the_host() {
+        let decision = with_brief(
+            json!({"decision":"observe","coverage":"partial"}),
+            Some(pending_brief()),
+        );
+        let context = decision["context"].as_str().unwrap().to_string();
+        assert!(context.starts_with("[PIXEL:BRIEF]\n"), "{context}");
+        assert!(context.contains("\nfiles: src/a.ts:2\n"), "{context}");
+        for provider in [TaskProvider::Claude, TaskProvider::Codex] {
+            assert_eq!(
+                envelope(provider, TaskHookEvent::PromptSubmit, &decision),
+                json!({"hookSpecificOutput":{
+                    "hookEventName":"UserPromptSubmit","additionalContext":context
+                }})
+            );
+        }
+    }
+
+    #[test]
+    fn a_decision_should_keep_its_own_context_and_stay_unchanged_without_a_brief() {
+        let own = json!({"decision":"observe","context":"ledger note"});
+        assert_eq!(with_brief(own.clone(), Some(pending_brief())), own);
+        let plain = json!({"decision":"observe","coverage":"partial"});
+        assert_eq!(with_brief(plain.clone(), None), plain);
+        assert_eq!(
+            envelope(TaskProvider::Claude, TaskHookEvent::PromptSubmit, &plain),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn a_brief_should_start_only_for_a_claude_or_codex_prompt_in_an_indexed_repository() {
+        let root = std::env::temp_dir().join(format!("pixel-hook-brief-{}", std::process::id()));
+        let shard_dir = root.join(pixel_index::index::SHARD_DIR);
+        std::fs::create_dir_all(&shard_dir).unwrap();
+        std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b"x").unwrap();
+        let root = root.canonicalize().unwrap();
+        let prompt = json!({"prompt":"callers of `fetchUser`","cwd":root});
+        for provider in [TaskProvider::Claude, TaskProvider::Codex] {
+            assert!(start_brief(provider, TaskHookEvent::PromptSubmit, &prompt).is_some());
+            for event in [
+                TaskHookEvent::PreToolUse,
+                TaskHookEvent::PostToolUse,
+                TaskHookEvent::Stop,
+                TaskHookEvent::SessionStart,
+            ] {
+                assert!(start_brief(provider, event, &prompt).is_none(), "{event:?}");
+            }
+        }
+        assert!(start_brief(TaskProvider::Pi, TaskHookEvent::PromptSubmit, &prompt).is_none());
+        let no_prompt = json!({"cwd":root});
+        assert!(
+            start_brief(
+                TaskProvider::Claude,
+                TaskHookEvent::PromptSubmit,
+                &no_prompt
+            )
+            .is_none()
+        );
+        let elsewhere = json!({"prompt":"callers of `fetchUser`","cwd":root.join("missing")});
+        assert!(
+            start_brief(
+                TaskProvider::Claude,
+                TaskHookEvent::PromptSubmit,
+                &elsewhere
+            )
+            .is_none()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

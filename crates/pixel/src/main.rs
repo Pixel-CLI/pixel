@@ -46,20 +46,17 @@ mod decide_ollaya;
 mod decide_remote;
 mod evaluate_cmd;
 mod execution_brief;
-mod guard;
 mod hook_input;
 mod impact_read;
 mod index_cmd;
 mod install_intro;
 mod operation_metrics;
 mod overview_intent;
-mod pixel_question;
 mod plan_cmd;
 mod plan_state;
-mod post_compaction;
+mod prompt_continuation;
 mod prompt_intent;
 mod prompt_key;
-mod prompt_submit;
 mod recall_cmd;
 mod rescue_cmd;
 mod search_compat;
@@ -1292,7 +1289,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Hook entrypoints (guard, session-start) invoked by Claude hooks.
+    /// Host hook entry points (task-event) registered by `pixel install`.
     #[command(alias = "hook")]
     RunHook {
         #[command(subcommand)]
@@ -1745,76 +1742,47 @@ enum HookCmd {
         #[arg(long, value_enum)]
         event: task_hook::TaskHookEvent,
     },
-    /// `pixel hook guard "$@"` — targets enforcement guard.
-    Guard {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Use the provider's verified hook response contract.
-        #[arg(long, value_enum)]
-        provider: Option<guard::Provider>,
-        /// Claude only: delegate unchanged calls to the adopted RTK hook.
-        #[arg(long)]
-        delegate_rtk: bool,
-    },
-    /// `pixel hook composed-guard --provider codex --backup <path>` — run a
-    /// sealed install-time foreign-hook snapshot before Pixel's Codex rewrite.
-    ComposedGuard {
-        /// Currently only Codex has a composable PreToolUse contract.
-        #[arg(long, value_enum, default_value = "codex")]
-        provider: guard::Provider,
-        /// 0600 JSON snapshot of pre-existing foreign PreToolUse groups.
-        #[arg(long)]
-        backup: PathBuf,
-    },
-    /// `pixel hook session-start` — emit capability block from op registry.
-    SessionStart {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Provider whose hook-response contract to emit. Codex rejects
-        /// unknown fields, so its response omits the top-level `pixel` block.
-        #[arg(long, value_enum)]
-        provider: Option<guard::Provider>,
-    },
-    /// `pixel hook prompt-submit "$@"` — task boundary detector.
-    /// Reads the UserPromptSubmit payload from stdin, embeds the prompt
-    /// and recent context, and emits a `[PIXEL:TASK_BOUNDARY]` advisory
-    /// when a task boundary is detected.
-    PromptSubmit {
-        /// Select the provider-specific task-runtime contract. Omit to
-        /// preserve the legacy provider-neutral prompt context behavior.
-        #[arg(long, value_enum)]
-        provider: Option<guard::Provider>,
-    },
-    /// `pixel hook post-compaction` — re-inject targets manifest after
-    /// context compaction. Reads the PostCompaction payload from stdin,
-    /// finds the active `.pixel/targets.json`, and emits it as
-    /// `additionalContext` so the agent resumes with its retrieval state.
-    PostCompaction {
-        /// Select the provider-specific task-runtime contract. Omit to
-        /// preserve the legacy provider-neutral compact restoration behavior.
-        #[arg(long, value_enum)]
-        provider: Option<guard::Provider>,
-    },
-    /// `pixel hook post-tool-use` — P0·3 blast-radius: after an edit, emit
-    /// the dependants of what was just changed (unsolicited). Unlike \[`run`\]
-    /// which infers the event from the payload, this *forces* `PostToolUse` —
-    /// PostToolUse hook files are per-event,so `hook_event_name` is often absent.
-    PostToolUse {
-        /// Provider whose hook-response contract to emit under.
-        #[arg(long, value_enum)]
-        provider: Option<guard::Provider>,
-    },
-    /// `pixel hook metrics` — PostToolUse relay for the rare host whose tool
-    /// result drops the merged stderr Codex's exec layer normally carries.
-    /// Reads the payload, matches the pixel invocation to its finalized
-    /// action record, and emits that record's 🟩 metrics line as
-    /// `additionalContext` (the dedupe drops a 🟩 block already in the tool
-    /// result). Honors `pixel config metrics`.
-    Metrics {
-        /// Provider whose hook-response contract to emit under.
-        #[arg(long, value_enum)]
-        provider: Option<guard::Provider>,
-    },
+    #[command(flatten)]
+    Retired(RetiredHookCmd),
+}
+
+/// Hook verbs that older releases registered in agent settings. Each one is
+/// accepted and does nothing; the per-prompt brief and the task gates replaced
+/// them.
+#[derive(Subcommand)]
+enum RetiredHookCmd {
+    /// Retired: the guard.
+    #[command(hide = true)]
+    Guard(RetiredHook),
+    /// Retired: the sealed foreign-hook composition of the Codex guard.
+    #[command(hide = true)]
+    ComposedGuard(RetiredHook),
+    /// Retired: the capability block, replaced by the installed agent prompt.
+    #[command(hide = true)]
+    SessionStart(RetiredHook),
+    /// Retired: the prompt-time task context, replaced by the per-prompt brief.
+    #[command(hide = true)]
+    PromptSubmit(RetiredHook),
+    /// Retired: the targets re-injection after context compaction.
+    #[command(hide = true)]
+    PostCompaction(RetiredHook),
+    /// Retired: the blast-radius note after an edit.
+    #[command(hide = true)]
+    PostToolUse(RetiredHook),
+    /// Retired: the hook relay of the metrics line.
+    #[command(hide = true)]
+    Metrics(RetiredHook),
+}
+
+/// The arguments of a retired hook verb: whatever an older release wrote into
+/// a settings file (`--provider`, `--backup`, `--delegate-rtk`, a path) is
+/// accepted and ignored. A verb that stopped parsing would exit 2, and a host
+/// treats a `PreToolUse` hook that exits 2 as a block on the tool call.
+#[derive(clap::Args)]
+#[command(disable_help_flag = true)]
+struct RetiredHook {
+    #[arg(num_args = 0.., allow_hyphen_values = true, trailing_var_arg = true)]
+    _ignored: Vec<std::ffi::OsString>,
 }
 
 #[derive(Subcommand)]
@@ -1847,11 +1815,11 @@ enum ConfigCmd {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Retrieval policy for coding agents: `pixel config policy` reports the
-    /// effective setting and the layer that set it (environment, repository,
-    /// global, or the advisory default); `advisory`, `enforce` or `off`
-    /// persists it to `<root>/.pixel/config.yaml` — or `~/.pixel/config.yaml`
-    /// with `--global`. `PIXEL_POLICY` still overrides one environment.
+    /// Retired retrieval policy: no hook reads it any more. `pixel config
+    /// policy` reports the effective setting and the layer that set it
+    /// (environment, repository, global, or the advisory default); `advisory`,
+    /// `enforce` or `off` persists it to `<root>/.pixel/config.yaml` — or
+    /// `~/.pixel/config.yaml` with `--global`.
     Policy {
         /// New value; omit to report the effective setting.
         #[arg(value_enum)]
@@ -3000,11 +2968,6 @@ fn envelope_note(data: &Value) {
 /// `.pixel` index or a `.git` dir/file (worktrees). Falls back to the
 /// starting directory. This lets every command accept a subdirectory or file
 /// where an LLM would naturally point it, instead of requiring the repo root.
-/// Hard deadline for the SessionStart per-repo freshness probe. The
-/// capability block must reach the agent even when the probe cannot
-/// complete, so the probe is bounded rather than trusted.
-const SESSION_STATUS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-
 pub(crate) fn discover_root(path: &Path) -> Result<PathBuf, String> {
     let abs = path
         .canonicalize()
@@ -4681,14 +4644,15 @@ fn run() -> Result<(), String> {
     // Compatibility fallback must exec the original before any logging changes
     // its search corpus; its successful Pixel branch retains existing logging.
     let mut logger = match &root {
-        // The guard exits through its own path before any event is logged;
-        // spawning the writer would only create `.pixel` in unindexed repos,
-        // which the guard then mistakes for an index.
+        // The compatibility search and the retired hook verbs exit through
+        // their own path before any event is logged; spawning the writer
+        // would only create `.pixel` in unindexed repos, which the search
+        // then mistakes for an index.
         _ if matches!(
             &cli.command,
             Command::SearchLikeRg { .. }
                 | Command::RunHook {
-                    cmd: HookCmd::Guard { .. } | HookCmd::ComposedGuard { .. },
+                    cmd: HookCmd::Retired(_)
                 }
         ) =>
         {
@@ -6595,123 +6559,11 @@ fn run_command(
             Ok(())
         }
         Command::RunHook { cmd } => match cmd {
-            HookCmd::Guard {
-                path: _,
-                provider,
-                delegate_rtk,
-            } => {
-                guard::run(provider, delegate_rtk);
-            }
-            HookCmd::ComposedGuard { provider, backup } => {
-                if provider == guard::Provider::Codex {
-                    guard::run_composed_codex(&backup);
-                }
-                std::process::exit(0);
-            }
-            HookCmd::SessionStart { path, provider } => {
-                let root = discover_root(&path)?;
-                // Advertise the commands the agent types, read from the
-                // parser itself so the block cannot name one that does not
-                // exist. The daemon's wire op tags (`targets`, `update`,
-                // `sync`) are not commands: `pixel update` is fast-forward,
-                // `pixel sync` is fetch.
-                let ops = session_commands();
-                // The usage note is a shared constant beside the op registry
-                // (pixel-proto): it describes Pixel without directing the
-                // agent away from its native tools.
-                let mut pixel = serde_json::json!({
-                    "capabilities": ops,
-                    "protocol_version": PROTOCOL_VERSION,
-                    "usage": pixel_proto::op::SESSION_USAGE,
-                });
-                // Per-repo freshness: index commit, graph presence, facts
-                // phase/fresh. Best-effort — if status can't be read (not a
-                // git repo, index not built), the capability block still
-                // stands and the repo field is simply omitted.
-                //
-                // The probe is hard-bounded by a deadline. "Best-effort"
-                // has to mean it, because `Status` on a root that is not a
-                // git repo and has no shards walks the entire tree: a
-                // session started in a plain directory (a home directory,
-                // `/tmp`) would otherwise hang the hook forever and the
-                // agent would receive no capability block at all — the exact
-                // failure this hook exists to prevent. A presence check on
-                // `.git`/`.pixel` is not enough of a guard: a bare
-                // `.pixel/history.db` left in a home directory by any
-                // history op makes that directory look indexed.
-                //
-                // On timeout the block is emitted without `repo` and the
-                // still-running probe dies with the process.
-                let probe = {
-                    let root = root.clone();
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    std::thread::spawn(move || {
-                        let _ = tx.send(execute(&root, Request::Status {}, true));
-                    });
-                    rx.recv_timeout(SESSION_STATUS_PROBE_TIMEOUT).ok()
-                };
-                if let Some(Ok(data)) = probe {
-                    let mut repo = serde_json::Map::new();
-                    if let Some(i) = data.get("index") {
-                        repo.insert(
-                            "index_commit".into(),
-                            i.get("commit_oid").cloned().unwrap_or(Value::Null),
-                        );
-                    }
-                    let graph_present = data
-                        .get("graph")
-                        .and_then(|g| g.get("present"))
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    repo.insert("graph_present".into(), Value::Bool(graph_present));
-                    if let Some(f) = present_facts(&data) {
-                        repo.insert(
-                            "facts_phase".into(),
-                            f.get("phase").cloned().unwrap_or(Value::Null),
-                        );
-                        repo.insert(
-                            "facts_fresh".into(),
-                            f.get("fresh").cloned().unwrap_or(Value::Bool(false)),
-                        );
-                    }
-                    pixel["repo"] = Value::Object(repo);
-                }
-                let block = serde_json::json!({ "pixel": pixel });
-                // Claude's SessionStart contract: wrap the block so the hook
-                // injects the deployed agent prompt itself as
-                // hookSpecificOutput.additionalContext — the doctrine reaches
-                // every `claude` process, not just wrapper-launched shells.
-                write_stdout(
-                    &serde_json::to_string_pretty(&guard::session_start_output(&block, provider))
-                        .map_err(|e| e.to_string())?,
-                )?;
-                Ok(())
-            }
             HookCmd::TaskEvent { provider, event } => task_hook::run(provider, event),
-            HookCmd::PromptSubmit { provider } => {
-                // Task boundary detector — reads UserPromptSubmit payload
-                // from stdin, embeds prompt + context, emits advisory if a
-                // boundary is detected. Never returns (exits 0 or via the
-                // emit function).
-                prompt_submit::run(provider);
-            }
-            HookCmd::PostCompaction { provider } => {
-                // Post-compaction re-injection — reads PostCompaction
-                // payload from stdin, finds the active targets manifest,
-                // and emits it as additionalContext. Never returns.
-                post_compaction::run(provider);
-            }
-            HookCmd::PostToolUse { provider } => {
-                // P0·3 blast-radius — reads stdin, forces the `PostToolUse`
-                // event, and emits a NON-BLOCKING advisory listing what was just
-                // changed's dependants. Never returns.
-                guard::run_post_tool_use(provider);
-            }
-            HookCmd::Metrics { provider } => {
-                // PostToolUse relay for hosts whose tool results drop stderr
-                // (Codex): re-emits the finalized invocation's 🟩 line as
-                // additionalContext. Never returns.
-                guard::run_metrics_hook(provider);
+            // Retired verbs: drain the payload the host wrote, answer nothing.
+            HookCmd::Retired(_) => {
+                let _ = hook_input::read_hook_payload();
+                std::process::exit(0);
             }
         },
         Command::Config { cmd } => match cmd {
@@ -7039,16 +6891,6 @@ fn should_offer_classify_setup(
     stderr_tty: bool,
 ) -> bool {
     is_global_install && !json && stdin_tty && stderr_tty
-}
-
-/// The subcommands `pixel --help` lists (hidden aliases and commands
-/// excluded), in declaration order: what the session-start block advertises.
-fn session_commands() -> Vec<String> {
-    Cli::command()
-        .get_subcommands()
-        .filter(|c| !c.is_hide_set())
-        .map(|c| c.get_name().to_string())
-        .collect()
 }
 
 fn run_query(

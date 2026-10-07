@@ -36,7 +36,7 @@ The animation illustrates a workflow; it is not a timed agent comparison.
 [Agent trials and their limits](https://pixel-cli.dev/benchmarks/#on-whole-agent-tasks) include a newer Opus trial with hooks that found no speed gain on one task.
 
 - **A local index of signatures and callers that your agent queries before it greps**: 94.5% less read volume (median) for outline questions using `pixel list-signatures` than whole-file reads on 8 large open-source files. [How we measure](https://pixel-cli.dev/benchmarks/#well-known-files)
-- **Native tools stay available**: Codex and Claude use an optional impact skill; Pi offers an explicit impact command. Other agent integrations retain their existing policies.
+- **Native tools stay available**: Claude and Codex get a bounded evidence brief with each code prompt; Pi offers an explicit `/pixel-impact` command. Other agent integrations retain their existing policies.
 - **No account. No API key. No telemetry.** Your code stays on your machine.
 - **13 languages, MIT**, macOS (Apple Silicon) and Linux, signed releases.
 
@@ -116,17 +116,17 @@ Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the
 whether `pixel doctor .` is green.
 ```
 
-If you are that agent: run the Install one-liner, tell the user it writes to their home configuration, then run `pixel install` (idempotent) and `pixel doctor . --json` — report every check that is not green, do not claim success otherwise. Restart the session to load updated integrations. Codex and Claude keep native retrieval; their optional plugins expose the focused impact skill. Pi exposes `/pixel-impact <symbol>`. [Manual setup](docs/manual-setup.md) explains each surface.
+If you are that agent: run the Install one-liner, tell the user it writes to their home configuration, then run `pixel install` (idempotent) and `pixel doctor . --json` — report every check that is not green, do not claim success otherwise. Restart the session to load updated integrations. Codex and Claude keep native retrieval and receive a bounded evidence brief on each code prompt (`PIXEL_BRIEF=0` turns it off). Pi exposes `/pixel-impact <symbol>`. [Manual setup](docs/manual-setup.md) explains each surface.
 
 ## Now build this harness
 
-Codex and Claude keep ordinary search native. Invoke the focused impact skill when a known symbol's callers or blast radius matter; Pi provides `/pixel-impact <symbol>`. The bounded query uses an existing fresh graph and falls back without rebuilding it. Task lifecycle controls remain independent. Automatic skill selection is an arena experiment, not the shipped default.
+Codex and Claude keep ordinary search native; the per-prompt brief resolves a named symbol and its callers from an existing graph without rebuilding it. Run `pixel impact <symbol> --no-refresh` yourself when a known symbol's callers or blast radius matter; Pi provides `/pixel-impact <symbol>`. Task lifecycle controls remain independent.
 
 **Ask about the code** — "find callers of X", "explain this flow":
 
 ```mermaid
 flowchart TD
-    U["USER · callers or impact of a known symbol"] --> L["Agent · explicit impact skill or Pi command"]
+    U["USER · callers or impact of a known symbol"] --> L["Agent · pixel impact or Pi command"]
     L --> P["pixel impact SYMBOL --no-refresh"]
     P --> E{"Useful existing graph?"}
     E -->|yes| A["Inspect cited source and verify caller coverage"]

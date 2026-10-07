@@ -7,6 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
+pub(crate) mod chain;
+mod evidence;
+
 const MAX_CAPS: usize = 32;
 const MAX_EVIDENCE_PER_TARGET: usize = 8;
 const MAX_SYMBOLS_PER_TARGET: usize = 32;
@@ -160,9 +163,9 @@ pub fn from_scope_task(task: &str, data: &Value) -> Value {
         validation.push("Review uncertainty.caps before relying on this brief.".to_string());
     }
 
-    // The same typed text the hooks route (a pasted block never steers the
-    // search); a task that asks nothing about code still gets a route from
-    // its whole text, since `execution-brief` was asked for one.
+    // The typed text only (a pasted block never steers the search); a task
+    // that asks nothing about code still gets a route from its whole text,
+    // since `execution-brief` was asked for one.
     let request = retrieval_request(task);
     let route = retrieval_route(request.as_deref().unwrap_or(task));
     json!({
@@ -190,8 +193,7 @@ pub fn from_scope_task(task: &str, data: &Value) -> Value {
 /// Pixel query, then a bounded native fallback. Search warnings and call-count
 /// notices are informational; only the result itself advances the route.
 /// Commands are bare (`pixel`, `rg`, `sed`): the route must run where rtk is
-/// not installed, an installed rtk hook adds its own prefix, and the guard
-/// reads `rtk X` and `X` alike.
+/// not installed, and an installed rtk hook adds its own prefix.
 pub fn retrieval_route(task: &str) -> Value {
     let task = truncate_chars(task.trim(), MAX_ROUTE_TASK_CHARS);
     let identifier = explicit_identifier(&task);
@@ -1154,7 +1156,7 @@ mod tests {
             ops["retrieval_route"],
             retrieval_route("go to branch main and pull")
         );
-        // A pasted block never reaches the brief's route: it matches the hooks'.
+        // A pasted block never reaches the brief's route: it is not typed text.
         let pasted = from_scope_task(
             "<pasted_content id=\"1\">\nthread about grep\n</pasted_content id=\"1\">\nWhy does the parser panic?",
             &json!({"targets": []}),

@@ -2,17 +2,14 @@
 // SPDX-License-Identifier: MIT
 
 //! Differential checks against the actual native executables, not snapshots
-//! of Pixel's own formatting. Hook payload tests never execute their input.
+//! of Pixel's own formatting.
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const PIXEL: &str = env!("CARGO_BIN_EXE_pixel");
-/// The opt-in policy under which Devin's guard rewrites and denies; the
-/// default policy leaves every native search untouched.
-const ENFORCE: [(&str, &str); 1] = [("PIXEL_POLICY", "enforce")];
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture(PathBuf);
@@ -77,53 +74,6 @@ impl Fixture {
             );
         }
     }
-
-    fn guard(&self, provider: &str, command: &str, delegate: bool, path: Option<&Path>) -> Output {
-        self.guard_with(provider, command, delegate, path, &[])
-    }
-
-    /// [`Fixture::guard`] with extra environment variables (the policy).
-    fn guard_with(
-        &self,
-        provider: &str,
-        command: &str,
-        delegate: bool,
-        path: Option<&Path>,
-        envs: &[(&str, &str)],
-    ) -> Output {
-        let payload = serde_json::json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": if provider == "devin" { "exec" } else { "Bash" },
-            "cwd": self.0,
-            "tool_input": {"command": command, "timeout_ms": 1234, "extra": {"keep": true}}
-        });
-        let mut cmd = self.command(PIXEL);
-        cmd.args(["run-hook", "guard", "--provider", provider]);
-        if delegate {
-            cmd.arg("--delegate-rtk");
-        }
-        if let Some(path) = path {
-            cmd.env("PATH", path);
-        }
-        cmd.envs(envs.iter().copied());
-        run_hook(cmd, &payload)
-    }
-}
-
-fn run_hook(mut command: Command, payload: &serde_json::Value) -> Output {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(payload.to_string().as_bytes())
-        .unwrap();
-    child.wait_with_output().unwrap()
 }
 
 impl Drop for Fixture {
@@ -253,187 +203,6 @@ fn repeated_search_keeps_executing_and_reports_changed_file() {
         );
         if attempt >= 2 {
             assert!(String::from_utf8_lossy(&output.stderr).contains("Continuing retrieval."));
-        }
-    }
-}
-
-/// Steering is opt-in: under the default policy (and an explicit `advisory`)
-/// every host keeps its native search, Devin included; only `enforce` makes
-/// Devin's guard rewrite it.
-#[test]
-fn claude_and_codex_keep_native_search_while_devin_rewrites_only_under_enforce() {
-    for policy in [&[][..], &[("PIXEL_POLICY", "advisory")][..]] {
-        for provider in ["claude", "codex", "devin"] {
-            let fixture = Fixture::new(b"needle\n");
-            let out =
-                fixture.guard_with(provider, "grep -n needle 'a file.rs'", false, None, policy);
-            assert!(out.status.success(), "{provider} {policy:?}: {out:?}");
-            assert!(out.stdout.is_empty(), "{provider} {policy:?}: {out:?}");
-            assert!(out.stderr.is_empty(), "{provider} {policy:?}: {out:?}");
-        }
-    }
-    for provider in ["claude", "codex", "devin"] {
-        let fixture = Fixture::new(b"needle\n");
-        let out = fixture.guard_with(
-            provider,
-            "grep -n needle 'a file.rs'",
-            false,
-            None,
-            &ENFORCE,
-        );
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        if provider != "devin" {
-            assert!(
-                out.stdout.is_empty(),
-                "{provider} native search must pass through: {out:?}"
-            );
-            continue;
-        }
-        let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        let output = &response["hookSpecificOutput"];
-        assert!(
-            output["updatedInput"]["command"]
-                .as_str()
-                .unwrap()
-                .starts_with("pixel search-like-rg grep --")
-        );
-        assert_eq!(output["updatedInput"]["timeout_ms"], 1234);
-        assert_eq!(output["updatedInput"]["extra"]["keep"], true);
-        assert!(output.get("permissionDecision").is_none());
-    }
-}
-
-#[test]
-fn codex_argv_shell_events_keep_the_native_search_command() {
-    let fixture = Fixture::new(b"needle\n");
-    let payload = serde_json::json!({
-        "hook_event_name": "PreToolUse",
-        "tool_name": "shell",
-        "cwd": fixture.0,
-        "tool_input": {
-            "command": ["bash", "-lc", "grep -n needle 'a file.rs'"],
-            "timeout_ms": 1234,
-            "extra": {"keep": true}
-        }
-    });
-    let mut cmd = fixture.command(PIXEL);
-    cmd.args(["run-hook", "guard", "--provider", "codex"]);
-    let out = run_hook(cmd, &payload);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    assert!(
-        out.stdout.is_empty(),
-        "Codex native argv must pass through: {out:?}"
-    );
-}
-
-#[test]
-fn unsupported_provider_commands_never_get_authorized_or_rewritten() {
-    let fixture = Fixture::new(b"needle\n");
-    std::fs::write(fixture.0.join("#file"), b"needle\n").unwrap();
-    for provider in ["claude", "codex"] {
-        for command in [
-            "grep -rln needle . | wc -l",
-            "grep -A20 needle 'a file.rs'",
-            "git reset --hard HEAD",
-            "env LC_ALL=C grep needle 'a file.rs'",
-            "rtk grep needle 'a file.rs'",
-            "grep -F needle #file",
-        ] {
-            let out = fixture.guard(provider, command, false, None);
-            assert!(out.status.success(), "{provider}: {command}");
-            assert!(out.stdout.is_empty(), "{provider}: {command}");
-            assert!(out.stderr.is_empty(), "{provider}: {command}");
-        }
-    }
-    // Devin's rewrite is opt-in; even under `enforce` these shapes are not
-    // rewritable and stay native.
-    for command in [
-        "grep -rln needle . | wc -l",
-        "grep -A20 needle 'a file.rs'",
-        "git reset --hard HEAD",
-        "env LC_ALL=C grep needle 'a file.rs'",
-        "grep -F needle #file",
-    ] {
-        let out = fixture.guard_with("devin", command, false, None, &ENFORCE);
-        assert!(out.status.success(), "devin: {command}");
-        assert!(out.stdout.is_empty(), "devin: {command}");
-        assert!(out.stderr.is_empty(), "devin: {command}");
-    }
-    let rtk_grep = fixture.guard_with(
-        "devin",
-        "rtk grep needle 'a file.rs'",
-        false,
-        None,
-        &ENFORCE,
-    );
-    assert!(rtk_grep.status.success());
-    let response: serde_json::Value = serde_json::from_slice(&rtk_grep.stdout).unwrap();
-    assert_eq!(
-        response["hookSpecificOutput"]["updatedInput"]["command"],
-        "pixel search-like-rg grep -- 'needle' 'a file.rs'"
-    );
-    assert!(response.get("decision").is_none(), "{response}");
-    // The default policy leaves the same rewritable command native.
-    let native = fixture.guard("devin", "rtk grep needle 'a file.rs'", false, None);
-    assert!(native.status.success(), "{native:?}");
-    assert!(native.stdout.is_empty(), "{native:?}");
-    assert!(native.stderr.is_empty(), "{native:?}");
-
-    for provider in ["claude", "codex", "devin"] {
-        let quoted = fixture.guard_with(provider, "grep -F needle '#file'", false, None, &ENFORCE);
-        if provider != "devin" {
-            assert!(
-                quoted.status.success(),
-                "{provider}: {}",
-                String::from_utf8_lossy(&quoted.stderr)
-            );
-            assert!(
-                quoted.stdout.is_empty(),
-                "{provider} native search must pass through: {quoted:?}"
-            );
-            assert!(quoted.stderr.is_empty(), "{provider}: {quoted:?}");
-            continue;
-        }
-        let response: serde_json::Value = serde_json::from_slice(&quoted.stdout).unwrap();
-        assert!(response["hookSpecificOutput"].get("updatedInput").is_some());
-    }
-}
-
-#[test]
-fn credential_shaped_paths_keep_native_permission_boundaries() {
-    let fixture = Fixture::new(b"needle\n");
-    std::fs::create_dir(fixture.0.join("secrets")).unwrap();
-    for path in [
-        ".env",
-        ".env.local",
-        "credentials.json",
-        "test.pem",
-        "id_ed25519",
-        "serviceAccountKey.json",
-        "secrets/fake.rs",
-    ] {
-        // Synthetic, nonsensitive fixture bytes only. The guard examines
-        // path metadata, never the contents of credential-shaped files.
-        std::fs::write(fixture.0.join(path), b"fake fixture\n").unwrap();
-        // Under the default policy and under `enforce`, where Devin's guard
-        // would otherwise rewrite a `grep`.
-        for policy in [&[][..], &ENFORCE[..]] {
-            for provider in ["claude", "codex", "devin"] {
-                let command = format!("grep needle '{path}'");
-                let out = fixture.guard_with(provider, &command, false, None, policy);
-                assert!(out.status.success(), "{provider} {policy:?}: {path}");
-                assert!(out.stdout.is_empty(), "{provider} {policy:?}: {path}");
-                assert!(out.stderr.is_empty(), "{provider} {policy:?}: {path}");
-            }
         }
     }
 }
@@ -661,112 +430,41 @@ impl Drop for TrackedFixture {
     }
 }
 
+/// Credential-shaped paths never qualify for the pixel backend: the search
+/// runs natively and leaves no action record in the tree it searches.
 #[test]
-fn native_configuration_and_environment_overrides_never_get_autoauthorized() {
+fn credential_shaped_paths_keep_native_permission_boundaries() {
     let fixture = Fixture::new(b"needle\n");
-    // `enforce` is the policy under which Devin's guard rewrites a search.
-    for provider in ["claude", "codex", "devin"] {
-        for (tool, key) in [
-            ("rg", "RIPGREP_CONFIG_PATH"),
-            ("grep", "GREP_OPTIONS"),
-            ("rg", "env"),
-            ("rg", "environment"),
-        ] {
-            let mut payload = serde_json::json!({
-                "hook_event_name": "PreToolUse",
-                "tool_name": if provider == "devin" { "exec" } else { "Bash" },
-                "cwd": fixture.0,
-                "tool_input": {"command": format!("{tool} needle 'a file.rs'")}
-            });
-            let mut command = fixture.command(PIXEL);
-            command
-                .args(["run-hook", "guard", "--provider", provider])
-                .envs(ENFORCE);
-            if matches!(key, "env" | "environment") {
-                payload["tool_input"][key] =
-                    serde_json::json!({"RIPGREP_CONFIG_PATH": "fake-native-config"});
-            } else {
-                command.env(key, "fake-native-config");
-            }
-            let output = run_hook(command, &payload);
-            assert!(output.status.success(), "{provider}: {tool} {key}");
-            assert!(output.stdout.is_empty(), "{provider}: {tool} {key}");
-            assert!(output.stderr.is_empty(), "{provider}: {tool} {key}");
+    std::fs::create_dir(fixture.0.join("secrets")).unwrap();
+    // GitHub's runners ship no `rg` (see the premise note on the piped-stdin
+    // test below); the rg case runs wherever ripgrep is installed.
+    let rg_installed = Command::new("rg").arg("--version").output().is_ok();
+    for path in [
+        ".env",
+        ".env.local",
+        "credentials.json",
+        "test.pem",
+        "id_ed25519",
+        "serviceAccountKey.json",
+        "secrets/fake.rs",
+    ] {
+        // Synthetic, nonsensitive fixture bytes only. The search examines
+        // path metadata, never the contents of credential-shaped files.
+        std::fs::write(fixture.0.join(path), b"fake fixture\n").unwrap();
+        fixture.compare("grep", &["needle", path], "native");
+        if rg_installed {
+            fixture.compare("rg", &["needle", path], "native");
         }
     }
 }
 
 /// A configuration for the OTHER tool changes nothing about the command
-/// being rewritten: an exported `RIPGREP_CONFIG_PATH` (every ripgrep user
-/// with an rgrc) must not turn every `grep` rewrite off, and `GREP_OPTIONS`
-/// must not turn `rg` rewrites off. Two of the guard tests failed on such a
-/// machine while CI, with a bare environment, passed them.
+/// being emulated: an exported `RIPGREP_CONFIG_PATH` (every ripgrep user
+/// with an rgrc) must not turn every `grep` emulation off. Execution applies
+/// the same per-tool rule: `grep` still runs on the pixel backend under an rg
+/// configuration, and stays native under its own `GREP_OPTIONS`.
 #[test]
 fn the_other_tools_configuration_does_not_keep_a_search_native() {
-    for (tool, foreign_key) in [("grep", "RIPGREP_CONFIG_PATH"), ("rg", "GREP_OPTIONS")] {
-        let fixture = Fixture::new(b"needle\n");
-        let payload = serde_json::json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "exec",
-            "cwd": fixture.0,
-            "tool_input": {"command": format!("{tool} -n needle 'a file.rs'")}
-        });
-        let mut command = fixture.command(PIXEL);
-        command
-            .args(["run-hook", "guard", "--provider", "devin"])
-            .envs(ENFORCE)
-            .env(foreign_key, "fake-native-config");
-        let output = run_hook(command, &payload);
-        assert!(output.status.success(), "devin: {tool} with {foreign_key}");
-        let response: serde_json::Value =
-            serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
-                panic!(
-                    "devin: `{tool}` must be rewritten despite {foreign_key}: {:?}",
-                    String::from_utf8_lossy(&output.stdout)
-                )
-            });
-        let rewritten = response["hookSpecificOutput"]["updatedInput"]["command"]
-            .as_str()
-            .unwrap_or_default();
-        assert!(
-            rewritten.starts_with(&format!("pixel search-like-rg {tool} --")),
-            "devin: {tool} with {foreign_key}: {rewritten}"
-        );
-    }
-    // Claude and Codex leave searches to their native permission/execution
-    // flows, regardless of which ripgrep configuration is present.
-    for provider in ["claude", "codex"] {
-        for (tool, foreign_key) in [("grep", "RIPGREP_CONFIG_PATH"), ("rg", "GREP_OPTIONS")] {
-            let fixture = Fixture::new(b"needle\n");
-            let payload = serde_json::json!({
-                "hook_event_name": "PreToolUse",
-                "tool_name": if provider == "codex" { "shell" } else { "Bash" },
-                "cwd": fixture.0,
-                "tool_input": {"command": format!("{tool} -n needle 'a file.rs'")}
-            });
-            let mut command = fixture.command(PIXEL);
-            command
-                .args(["run-hook", "guard", "--provider", provider])
-                .env(foreign_key, "fake-native-config");
-            let output = run_hook(command, &payload);
-            assert!(
-                output.status.success(),
-                "{provider}: {tool} with {foreign_key}"
-            );
-            assert!(
-                output.stdout.is_empty(),
-                "{provider} must preserve native {tool} under {foreign_key}: {:?}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-            assert!(
-                output.stderr.is_empty(),
-                "{provider}: {tool} with {foreign_key}"
-            );
-        }
-    }
-    // Execution applies the same per-tool rule: `grep` still runs on the
-    // pixel backend under an rg configuration, and stays native under its
-    // own `GREP_OPTIONS`.
     Fixture::new(b"first needle\nplain\n").compare_with_env(
         "grep",
         &["-n", "needle", "a file.rs"],
@@ -779,48 +477,6 @@ fn the_other_tools_configuration_does_not_keep_a_search_native() {
         "native",
         &[("GREP_OPTIONS", "")],
     );
-}
-
-#[test]
-fn claude_coordinator_delegates_adopted_rtk_once_for_native_commands() {
-    let fixture = Fixture::new(b"needle\n");
-    let bin = fixture.0.join("bin");
-    std::fs::create_dir(&bin).unwrap();
-    let script = bin.join("rtk");
-    std::fs::write(&script, "#!/bin/sh\n/bin/cat >> rtk-input.jsonl\nprintf '\\n' >> rtk-input.jsonl\nprintf 'rtk-response'\nprintf 'rtk-diagnostic' >&2\nexit 7\n").unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let supported = fixture.guard("claude", "grep -n needle 'a file.rs'", true, Some(&bin));
-    assert_eq!(supported.status.code(), Some(7));
-    assert_eq!(supported.stdout, b"rtk-response");
-    assert_eq!(supported.stderr, b"rtk-diagnostic");
-    let capture = fixture.0.join("rtk-input.jsonl");
-    let first: serde_json::Value = serde_json::from_slice(
-        std::fs::read_to_string(&capture)
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap()
-            .as_bytes(),
-    )
-    .unwrap();
-    assert_eq!(first["tool_input"]["command"], "grep -n needle 'a file.rs'");
-    let fallback = fixture.guard("claude", "printf hello", true, Some(&bin));
-    assert_eq!(fallback.status.code(), Some(7));
-    assert_eq!(fallback.stdout, b"rtk-response");
-    assert_eq!(fallback.stderr, b"rtk-diagnostic");
-    let records = std::fs::read_to_string(capture).unwrap();
-    let delegated: Vec<serde_json::Value> = records
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(delegated.len(), 2, "one RTK invocation per native command");
-    assert_eq!(
-        delegated[0]["tool_input"]["command"],
-        "grep -n needle 'a file.rs'"
-    );
-    assert_eq!(delegated[0]["tool_input"]["timeout_ms"], 1234);
-    assert_eq!(delegated[1]["tool_input"]["command"], "printf hello");
-    assert_eq!(delegated[1]["tool_input"]["timeout_ms"], 1234);
 }
 
 /// Runs `command` with `input` on a pipe for stdin, the way an agent's shell
