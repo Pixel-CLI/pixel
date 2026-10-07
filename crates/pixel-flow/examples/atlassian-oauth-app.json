@@ -1,0 +1,492 @@
+{
+  "_comment": [
+    "Worked example: register a LOCAL DEV Atlassian OAuth 2.0 (3LO) app in the developer console and capture its client id/secret.",
+    "Built from a real hand-driven agent-browser session (comet profile, CDP 127.0.0.1:9222, --session comet).",
+    "",
+    "Keys starting with '_' are ignored by pixel (not part of the Flow schema); they are documentation for humans.",
+    "",
+    "HOW TO RUN",
+    "  pixel flow save atlassian-oauth-app --from-file crates/pixel-flow/examples/atlassian-oauth-app.json",
+    "  pixel flow run atlassian-oauth-app --var accept_terms=true [--var app_name='My Local Dev App'] [--var callback_url=http://localhost:3000/oauth/atlassian/callback]",
+    "  OAUTH_ENV_OUT=./.env.oauth crates/pixel-flow/examples/oauth-env.py capture atlassian",
+    "  OAUTH_CALLBACK_URL=<the callback_url you used> OAUTH_ENV_OUT=./.env.oauth crates/pixel-flow/examples/oauth-env.py check atlassian",
+    "",
+    "TERMS: accept_terms defaults to false. Only accept_terms=true ticks 'I agree to be bound by Atlassian's developer terms'.",
+    "Without it the flow stops after the form (Create stays disabled, nothing is created).",
+    "",
+    "WHY THE LAST TWO COMMANDS ARE NOT FLOW STEPS: pixel-flow cannot write files, read env vars or call curl, and `pixel flow run`",
+    "discards `eval` output. oauth-env.py reads the secret straight from the page into $OAUTH_ENV_OUT (mode 600) and prints only lengths.",
+    "",
+    "LOGIN IS OUT OF SCOPE. The comet session must already be signed in. A login or 'Verify it's you' page makes the flow STOP on",
+    "purpose (a `click` whose ref_hint can never match). It never types credentials. Sign in by hand, then re-run.",
+    "",
+    "SCOPES are vars: --var atlassian_jira_scopes=a,b  --var atlassian_confluence_scopes=c,d (comma-separated scope codes; defaults",
+    "read:jira-work,read:jira-user and read:confluence-content.all). The flow ticks each code on the Jira / Confluence API scope pages. Only those two",
+    "APIs are added; to add another API, copy the Add / Configure / Edit Scopes / tick / Save step group. Callback URL is set under Authorization > OAuth 2.0 (3LO).",
+    "NOT IDEMPOTENT: every run creates a NEW app. Delete stale local-dev apps by hand in the console.",
+    "",
+    "AFTER THE FLOW (manual follow-up): your backend/app reads OAUTH_ATLASSIAN_CLIENT_ID / OAUTH_ATLASSIAN_CLIENT_SECRET from its",
+    "process environment. `source` the env file written to $OAUTH_ENV_OUT before starting the API. Never commit that file.",
+    "",
+    "NEVER put real client ids or secrets in this file."
+  ],
+  "name": "atlassian-oauth-app",
+  "title": "Register a local-dev Atlassian OAuth 2.0 (3LO) app and capture client id/secret",
+  "description": "Creates an Atlassian developer-console OAuth 2.0 integration (default name 'My Local Dev App', Resource-level access), adds Jira API + Confluence API with the scopes from atlassian_jira_scopes / atlassian_confluence_scopes (defaults: 2 Jira + 1 Confluence read scopes), adds the 3LO callback URL, and ends on the Settings page. Follow with `oauth-env.py capture atlassian` to write OAUTH_ATLASSIAN_CLIENT_ID / OAUTH_ATLASSIAN_CLIENT_SECRET to $OAUTH_ENV_OUT (mode 600), then `oauth-env.py check atlassian`. Terms checkbox is gated behind --var accept_terms=true (default false). Login is out of scope; the flow stops if signed out. Not idempotent.",
+  "tags": [
+    "oauth",
+    "config",
+    "atlassian",
+    "jira",
+    "confluence",
+    "local-dev",
+    "example"
+  ],
+  "tab": "developer.atlassian.com",
+  "success_url_contains": [
+    "developer.atlassian.com/console/myapps/"
+  ],
+  "success_url_excludes": [
+    "/login"
+  ],
+  "mfa_keywords": [
+    "Log in to continue",
+    "Verify it",
+    "Two-step verification"
+  ],
+  "preconditions": [
+    "Verify comet-cdp is up (port 9222) and `agent-browser --session comet tab list` answers",
+    "The comet browser profile is ALREADY signed in to developer.atlassian.com (this flow never types credentials)",
+    "Read Atlassian's developer terms yourself; pass --var accept_terms=true only if you accept them (default false: the flow stops before creating anything)",
+    "Export OAUTH_ENV_OUT=<path> before the capture step (the file receives secrets: keep it out of git, mode 600 is enforced)"
+  ],
+  "vars": [
+    {
+      "name": "app_name",
+      "description": "Name of the OAuth 2.0 integration",
+      "required": false,
+      "default": "My Local Dev App"
+    },
+    {
+      "name": "homepage_url",
+      "description": "Accepted for a uniform interface with the other oauth-app flows; the Atlassian creation form has no homepage field, so it is unused",
+      "required": false,
+      "default": "http://localhost:3000"
+    },
+    {
+      "name": "callback_url",
+      "description": "3LO callback URL your local app's OAuth callback route listens on",
+      "required": false,
+      "default": "http://localhost:3000/oauth/atlassian/callback"
+    },
+    {
+      "name": "atlassian_jira_scopes",
+      "description": "Comma-separated Jira API scope codes to tick (changeable). Page JS repeats this default for an omitted var",
+      "required": false,
+      "default": "read:jira-work,read:jira-user"
+    },
+    {
+      "name": "atlassian_confluence_scopes",
+      "description": "Comma-separated Confluence API scope codes to tick (changeable). Page JS repeats this default for an omitted var",
+      "required": false,
+      "default": "read:confluence-content.all"
+    },
+    {
+      "name": "accept_terms",
+      "description": "'true' ticks the Atlassian developer-terms checkbox on your behalf. Anything else (including omitted) leaves it unticked and the flow stops before creating the app. Must be passed with --var; it has no effective default",
+      "required": false,
+      "default": "false"
+    }
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "rationale": "Open the developer console app list. Already-authenticated profile expected; Atlassian redirects to a login page when signed out.",
+      "url": "https://developer.atlassian.com/console/myapps/",
+      "on_failure": "If the open times out, re-run `agent-browser --session comet tab list` and retry once",
+      "max_retries": 2
+    },
+    {
+      "action": "wait",
+      "rationale": "The console is a slow SPA; let the app list (or a login redirect) render",
+      "wait": "3s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Login is out of scope. Signed-out or re-verify ('Verify it's you') pages stop the flow; never type credentials.",
+      "condition": "page shows 'Log in to continue' or 'Verify it' or 'Enter your email'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "STOP: not signed in to Atlassian (or a re-verification prompt is showing). Sign in by hand in Comet, then re-run this flow. (Fails on purpose: the ref_hint can never match, so the flow aborts with this message.)",
+          "ref_hint": "STOP - Atlassian login or Verify-its-you required in the comet session - a human must sign in, then re-run the flow",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Capture the app list page; the header has a 'Create' menu button",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Open the Create menu",
+      "ref_hint": "button containing 'Create'",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Choose 'OAuth 2.0 integration' (not 'Forge app' or 'Connect app')",
+      "ref_hint": "menu item containing 'OAuth 2.0 integration'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the creation form render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Capture the form: Name textbox, Access type checkbox(es), developer-terms checkbox, Create button (disabled)",
+      "max_retries": 1
+    },
+    {
+      "action": "fill",
+      "rationale": "PITFALL (append): the Name box may be PREFILLED and a real 'type' APPENDS to it, so use `fill` (replaces), then verify the value below. PITFALL (events): a value set from page JS does not fire real input events and leaves Create disabled; agent-browser `fill` does fire them.",
+      "ref_hint": "textbox matching 'Name'",
+      "value_var": "app_name",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Re-snapshot so the Name textbox shows its current value",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Verify the Name value took. NOTE: {{app_name}} only substitutes when passed with --var; with the default this check reads as not met and the fallback below re-enters the name, which is harmless.",
+      "condition": "page shows '{{app_name}}'",
+      "otherwise": [
+        {
+          "action": "click",
+          "rationale": "Focus the Name textbox",
+          "ref_hint": "textbox matching 'Name'",
+          "max_retries": 1
+        },
+        {
+          "action": "press",
+          "rationale": "Select all existing text so the typed name REPLACES it (macOS shortcut; use Control+a elsewhere)",
+          "key": "Meta+a",
+          "max_retries": 1
+        },
+        {
+          "action": "type",
+          "rationale": "Real key typing (fires real input events) over the selected text",
+          "ref_hint": "textbox matching 'Name'",
+          "value_var": "app_name",
+          "max_retries": 1
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "REQUIRED 'Access type': choose 'Resource-level'. Create stays disabled until name, access type AND the developer-terms checkbox are all set.",
+      "ref_hint": "checkbox containing 'Resource-level'",
+      "on_failure": "Re-snapshot; the option may be a radio or a labelled row. Pick 'Resource-level' only.",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "TERMS GATE: tick 'I agree to be bound by Atlassian's developer terms' ONLY when --var accept_terms=true was passed. Unset or any other value leaves it unchecked and Create disabled (fail-closed: {{accept_terms}} is not defaulted, so an omitted var stays a literal and never equals 'true'). By passing accept_terms=true the human accepts the terms.",
+      "value": "(()=>{const txt=c=>[...c.labels].map(l=>l.innerText).join(' ')+' '+((c.closest('label')||c.parentElement||{}).innerText||'');const cb=[...document.querySelectorAll('input[type=checkbox]')].find(c=>/bound by/i.test(txt(c)));if(!cb)return 'terms-checkbox-not-found';if('{{accept_terms}}'!=='true')return 'terms-NOT-accepted (accept_terms is not true): left unchecked';if(!cb.checked)cb.click();return 'terms-checked='+cb.checked})()",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Verify Name, Access type and terms state before Create",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Click the form's Create (the LAST 'Create' button inside the dialog/form: the header 'Create' menu button must not be hit). Reports DISABLED instead of clicking when the form is incomplete.",
+      "value": "(()=>{const root=document.querySelector('[role=dialog],form')||document;const bs=[...root.querySelectorAll('button')].filter(b=>b.innerText.trim()==='Create');const b=bs[bs.length-1];if(!b)return 'create-button-not-found';if(b.disabled||b.getAttribute('aria-disabled')==='true')return 'create-DISABLED (name, access type or terms incomplete)';b.click();return 'create-clicked'})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "App creation redirects to /console/myapps/<uuid>/overview",
+      "wait": "4s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Still on the creation form means Create did not fire: terms not accepted (accept_terms != true) or the form is incomplete. Stop.",
+      "condition": "page shows 'I agree to be bound'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "STOP: the creation form is still open. Either accept_terms was not true (re-run with --var accept_terms=true after reading Atlassian's developer terms) or a required field is missing. Nothing was created. (Fails on purpose.)",
+          "ref_hint": "STOP - Atlassian app was not created - accept_terms must be true and name and access type must be set",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Confirm the app overview page (/console/myapps/<uuid>/overview) is showing",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Open the Permissions section in the app sidebar",
+      "ref_hint": "link containing 'Permissions'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the API list render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Add 'Jira API'. Row-scoped DOM click because every row has an identical 'Add' button, so a text match on 'Add' alone is ambiguous.",
+      "value": "(()=>{const lab='Add',want='Jira API',other='Confluence API';const b=[...document.querySelectorAll('button')].filter(x=>x.innerText.trim()===lab).find(x=>{let n=x.parentElement;for(let i=0;n&&i<8;i++,n=n.parentElement){const t=n.innerText||'';if(other&&t.includes(other))return false;if(t.includes(want))return true}return false});return b?(b.click(),'clicked '+lab+' in row '+want):'not-found '+lab+' in row '+want})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the row flip from 'Add' to 'Configure'",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "PITFALL: refs shift after each Add. Re-snapshot between the two clicks.",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Add 'Confluence API' (same row-scoped approach)",
+      "value": "(()=>{const lab='Add',want='Confluence API',other='Jira API';const b=[...document.querySelectorAll('button')].filter(x=>x.innerText.trim()===lab).find(x=>{let n=x.parentElement;for(let i=0;n&&i<8;i++,n=n.parentElement){const t=n.innerText||'';if(other&&t.includes(other))return false;if(t.includes(want))return true}return false});return b?(b.click(),'clicked '+lab+' in row '+want):'not-found '+lab+' in row '+want})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the row flip from 'Add' to 'Configure'",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Both APIs should now show 'Configure'",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Configure Jira API (row-scoped: both rows have 'Configure')",
+      "value": "(()=>{const lab='Configure',want='Jira API',other='Confluence API';const b=[...document.querySelectorAll('button')].filter(x=>x.innerText.trim()===lab).find(x=>{let n=x.parentElement;for(let i=0;n&&i<8;i++,n=n.parentElement){const t=n.innerText||'';if(other&&t.includes(other))return false;if(t.includes(want))return true}return false});return b?(b.click(),'clicked '+lab+' in row '+want):'not-found '+lab+' in row '+want})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Navigates to the Jira API configuration page",
+      "wait": "3s",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Open the scope editor",
+      "ref_hint": "button containing 'Edit Scopes'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the scope table render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "PITFALL: scope checkboxes have NO labels. Map each wanted scope code to the checkbox in the SAME table row via the DOM (leaf element whose text equals the code; the nearest ancestor holding exactly one checkbox). Throws if any wanted scope was not ticked, so a wrong row cannot be saved silently. Scope list comes from --var atlassian_jira_scopes (comma-separated, default read:jira-work,read:jira-user).",
+      "value": "(()=>{const raw='{{atlassian_jira_scopes}}';const want=(raw.startsWith('{{')?'read:jira-work,read:jira-user':raw).split(',').map(x=>x.trim()).filter(Boolean);const out={};for(const code of want){const cell=[...document.querySelectorAll('*')].find(e=>e.children.length===0&&e.textContent.trim()===code);let n=cell,cb=null;while(n&&!cb){const l=n.querySelectorAll?n.querySelectorAll('input[type=checkbox]'):[];if(l.length===1)cb=l[0];else if(l.length>1)break;n=n.parentElement}if(cb&&!cb.checked)cb.click();out[code]=!!(cb&&cb.checked)}if(!want.length||Object.values(out).some(v=>!v))throw new Error('scope-tick-failed '+JSON.stringify(out));return JSON.stringify(out)})()",
+      "on_failure": "Re-snapshot, find each scope's row by its code text and tick its checkbox by hand-written eval; do not tick by position.",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Verify every Jira scope in atlassian_jira_scopes is ticked before saving",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Save the Jira scopes",
+      "ref_hint": "button containing 'Save'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the save settle",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Back to the Permissions list",
+      "ref_hint": "link containing 'Permissions'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the API list render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Configure Confluence API (row-scoped)",
+      "value": "(()=>{const lab='Configure',want='Confluence API',other='Jira API';const b=[...document.querySelectorAll('button')].filter(x=>x.innerText.trim()===lab).find(x=>{let n=x.parentElement;for(let i=0;n&&i<8;i++,n=n.parentElement){const t=n.innerText||'';if(other&&t.includes(other))return false;if(t.includes(want))return true}return false});return b?(b.click(),'clicked '+lab+' in row '+want):'not-found '+lab+' in row '+want})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Navigates to the Confluence API configuration page",
+      "wait": "3s",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Open the scope editor",
+      "ref_hint": "button containing 'Edit Scopes'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the scope table render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Tick the Confluence scopes (same unlabeled-checkbox mapping) from --var atlassian_confluence_scopes (comma-separated, default read:confluence-content.all). Exact text match, so '.all' never ticks '.summary'.",
+      "value": "(()=>{const raw='{{atlassian_confluence_scopes}}';const want=(raw.startsWith('{{')?'read:confluence-content.all':raw).split(',').map(x=>x.trim()).filter(Boolean);const out={};for(const code of want){const cell=[...document.querySelectorAll('*')].find(e=>e.children.length===0&&e.textContent.trim()===code);let n=cell,cb=null;while(n&&!cb){const l=n.querySelectorAll?n.querySelectorAll('input[type=checkbox]'):[];if(l.length===1)cb=l[0];else if(l.length>1)break;n=n.parentElement}if(cb&&!cb.checked)cb.click();out[code]=!!(cb&&cb.checked)}if(!want.length||Object.values(out).some(v=>!v))throw new Error('scope-tick-failed '+JSON.stringify(out));return JSON.stringify(out)})()",
+      "on_failure": "Re-snapshot, find each scope's row by its code text and tick its checkbox by hand-written eval; do not tick by position.",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Verify every Confluence scope in atlassian_confluence_scopes is ticked before saving",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Save the Confluence scopes",
+      "ref_hint": "button containing 'Save'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the save settle",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Back to the Permissions list",
+      "ref_hint": "link containing 'Permissions'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the list render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "CHECK: the Permissions page should now report as many scopes in use as the two scope vars list in total (default 3). If not, stop and fix by hand.",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Open the Authorization section",
+      "ref_hint": "link containing 'Authorization'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the authorization types render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Add 'OAuth 2.0 (3LO)' (row-scoped Add; the page may list other authorization types)",
+      "value": "(()=>{const lab='Add',want='OAuth 2.0 (3LO)',other=null;const b=[...document.querySelectorAll('button')].filter(x=>x.innerText.trim()===lab).find(x=>{let n=x.parentElement;for(let i=0;n&&i<8;i++,n=n.parentElement){const t=n.innerText||'';if(other&&t.includes(other))return false;if(t.includes(want))return true}return false});return b?(b.click(),'clicked '+lab+' in row '+want):'not-found '+lab+' in row '+want})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the Callback URLs field render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Capture the 3LO configuration with the 'Callback URLs' textbox",
+      "max_retries": 1
+    },
+    {
+      "action": "type",
+      "rationale": "PITFALL: REAL key typing is required here. `fill` leaves 'Save changes' disabled because the form never sees real input events.",
+      "ref_hint": "textbox matching 'Callback'",
+      "value_var": "callback_url",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Verify the callback URL is in the box and 'Save changes' is enabled",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Save the callback URL",
+      "ref_hint": "button containing 'Save changes'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the save settle",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Open the Settings page, which shows the Client ID and Secret",
+      "ref_hint": "link containing 'Settings'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the settings render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "FLOW ENDS HERE on /console/myapps/<uuid>/settings. 'Client ID' is a textbox value; 'Secret' is a MASKED password input whose .value holds the real secret (never read it from the snapshot). NEXT: OAUTH_ENV_OUT=<path> crates/pixel-flow/examples/oauth-env.py capture atlassian   then   ... check atlassian",
+      "max_retries": 1
+    }
+  ],
+  "success_signal": "page text contains 'Client ID' and 'Secret'. Then run: OAUTH_ENV_OUT=<path> oauth-env.py capture atlassian && oauth-env.py check atlassian (a bogus code must NOT come back invalid_client)",
+  "created_unix": 0,
+  "revised_unix": 0,
+  "revision": 1,
+  "proven": false
+}

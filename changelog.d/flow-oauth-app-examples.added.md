@@ -1,0 +1,1 @@
+**flow:** four example flows (GitHub, Atlassian, Notion, Google) register a local-dev OAuth app in the provider console through a signed-in browser, and `oauth-env.py` captures the credentials into a mode-600 env file without printing them.

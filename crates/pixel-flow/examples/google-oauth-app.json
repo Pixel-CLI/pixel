@@ -1,0 +1,707 @@
+{
+  "_comment": [
+    "Worked example: register a LOCAL DEV Google OAuth client (Google OAuth) in an isolated Cloud project and capture its client id/secret.",
+    "Built from a real hand-driven agent-browser session (comet profile, CDP 127.0.0.1:9222, --session comet).",
+    "",
+    "Keys starting with '_' are ignored by pixel (not part of the Flow schema); they are documentation for humans.",
+    "",
+    "HOW TO RUN",
+    "  pixel flow save google-oauth-app --from-file crates/pixel-flow/examples/google-oauth-app.json",
+    "  pixel flow run google-oauth-app --var accept_terms=true --var test_user_email=<test-user-address> --var contact_email=<contact-address> [--var project_id=my-local-dev-app] [--var google_api=drive.googleapis.com] [--var app_name='My Local Dev App']",
+    "  OAUTH_ENV_OUT=./.env.oauth crates/pixel-flow/examples/oauth-env.py capture google",
+    "  OAUTH_CALLBACK_URL=<the callback_url you used> OAUTH_ENV_OUT=./.env.oauth crates/pixel-flow/examples/oauth-env.py check google",
+    "",
+    "WHAT IT DOES: (create project if missing) > enable the API in google_api (default Drive) > consent screen wizard (External) > add test user >",
+    "create Web-application OAuth client with redirect URI callback_url (default http://localhost:3000/oauth/google/callback).",
+    "SCOPE: google_scope (default https://www.googleapis.com/auth/drive.readonly) is INFORMATIONAL. A Google OAuth client has no scopes; your app",
+    "requests them at authorize time. Change google_scope and google_api together if you need a different API (e.g. calendar-json.googleapis.com).",
+    "",
+    "SAFETY: this creates an ISOLATED dev project (default id my-local-dev-app) and never touches an app that is under Google verification",
+    "or published. It stops if the audience page shows a 'Back to testing' button (production).",
+    "TESTING MODE: External apps in Testing publishing status issue refresh tokens that EXPIRE AFTER 7 DAYS, and only the listed test users can authorize.",
+    "Re-authorize weekly, or move to verified production separately (out of scope here).",
+    "",
+    "TERMS: accept_terms defaults to false. Only accept_terms=true ticks 'I agree to the Google API Services: User Data Policy'.",
+    "Without it the flow stops at the wizard's Finish step and nothing is configured.",
+    "",
+    "THE SECRET: the 'OAuth client created' dialog shows client id + secret. Newer consoles may NOT let you view the secret again after",
+    "closing the dialog, so capture before closing it. Do NOT click 'Download JSON'. pixel-flow cannot write files and `pixel flow run`",
+    "discards `eval` output, so oauth-env.py reads the dialog straight into $OAUTH_ENV_OUT (mode 600) and prints only lengths.",
+    "It writes OAUTH_GOOGLE_CLIENT_ID / OAUTH_GOOGLE_CLIENT_SECRET. `check google` POSTs a bogus code to oauth2.googleapis.com/token:",
+    "anything except invalid_client (normally invalid_grant) means the client credentials are accepted.",
+    "",
+    "LOGIN IS OUT OF SCOPE. The comet session must already be signed in to Google. A redirect to accounts.google.com (confirmidentifier) or a",
+    "'Verify it's you' prompt makes the flow STOP on purpose (a `click` whose ref_hint can never match). It never clicks Next or types credentials.",
+    "",
+    "EMAILS: test_user_email and contact_email are REQUIRED vars with no default; the flow never embeds an email. NOTE pixel's `flow run` log echoes",
+    "typed values, so the addresses you pass appear in that local log. The 'User support email' is the first combobox option (the signed-in account).",
+    "",
+    "PARAMETER QUIRK: project-scoped URLs are built in page JS because only value_var resolves declared defaults; the JS repeats the default",
+    "project id (my-local-dev-app). If you change the var default, change it in the nav eval steps too, or always pass --var project_id.",
+    "NOT IDEMPOTENT: re-running adds another OAuth client (the project, API and consent screen steps are skipped when already done).",
+    "",
+    "AFTER THE FLOW (manual follow-up): your backend/app reads OAUTH_GOOGLE_CLIENT_ID / OAUTH_GOOGLE_CLIENT_SECRET from its",
+    "process environment. `source` the env file written to $OAUTH_ENV_OUT before starting the API. Never commit that file.",
+    "",
+    "NEVER put real client ids or secrets in this file."
+  ],
+  "name": "google-oauth-app",
+  "title": "Create a local-dev Google OAuth client and capture client id/secret",
+  "description": "In an isolated Cloud project (default my-local-dev-app): creates it if missing, enables the API in google_api (default Drive), configures an External consent screen in Testing mode, adds a test user, and creates a Web-application OAuth client (default name 'My Local Dev App') with the local callback_url, ending on the one-time 'OAuth client created' dialog. Follow immediately with `oauth-env.py capture google` to write OAUTH_GOOGLE_CLIENT_ID / OAUTH_GOOGLE_CLIENT_SECRET to $OAUTH_ENV_OUT (mode 600), then `oauth-env.py check google`. The User Data Policy checkbox is gated behind --var accept_terms=true (default false). Testing-mode refresh tokens expire after 7 days. Login is out of scope; the flow stops if signed out. Not idempotent for the client.",
+  "tags": [
+    "oauth",
+    "config",
+    "google",
+    "local-dev",
+    "example"
+  ],
+  "tab": "console.cloud.google.com",
+  "success_url_contains": [
+    "console.cloud.google.com/auth/clients"
+  ],
+  "success_url_excludes": [
+    "accounts.google.com"
+  ],
+  "mfa_keywords": [
+    "Verify it",
+    "Choose an account",
+    "2-Step Verification"
+  ],
+  "preconditions": [
+    "Verify comet-cdp is up (port 9222) and `agent-browser --session comet tab list` answers",
+    "The comet browser profile is ALREADY signed in to the Google account that should own the dev project (this flow never types credentials or clicks Next on sign-in pages)",
+    "Read the Google API Services User Data Policy yourself; pass --var accept_terms=true only if you accept it (default false: the flow stops at the consent wizard's Finish step)",
+    "Pass --var test_user_email and --var contact_email as real addresses (required, no default; the flow stops if they are empty or malformed)",
+    "Export OAUTH_ENV_OUT=<path> before the capture step (the file receives secrets: keep it out of git, mode 600 is enforced)"
+  ],
+  "vars": [
+    {
+      "name": "app_name",
+      "description": "Consent-screen app name and OAuth client name",
+      "required": false,
+      "default": "My Local Dev App"
+    },
+    {
+      "name": "homepage_url",
+      "description": "Accepted for a uniform interface with the other oauth-app flows; the recorded Google flow needed no homepage, so it is unused",
+      "required": false,
+      "default": "http://localhost:3000"
+    },
+    {
+      "name": "callback_url",
+      "description": "Authorized redirect URI your local app's OAuth callback route listens on",
+      "required": false,
+      "default": "http://localhost:3000/oauth/google/callback"
+    },
+    {
+      "name": "project_id",
+      "description": "Cloud project id/name to create or reuse (the id is the slug of the name). Project-scoped URLs are built in page JS that repeats this default",
+      "required": false,
+      "default": "my-local-dev-app"
+    },
+    {
+      "name": "google_api",
+      "description": "API service name to enable (changeable, e.g. calendar-json.googleapis.com). Page JS repeats this default for an omitted var",
+      "required": false,
+      "default": "drive.googleapis.com"
+    },
+    {
+      "name": "google_scope",
+      "description": "INFORMATIONAL, changeable: the scope your app will request at authorize time. A Google OAuth client does not declare scopes, so the flow does not type it anywhere",
+      "required": false,
+      "default": "https://www.googleapis.com/auth/drive.readonly"
+    },
+    {
+      "name": "test_user_email",
+      "description": "Email added as a Testing-mode test user (only listed users can authorize while the app is in Testing)",
+      "required": true
+    },
+    {
+      "name": "contact_email",
+      "description": "Developer contact email for the consent-screen wizard (step 3)",
+      "required": true
+    },
+    {
+      "name": "accept_terms",
+      "description": "'true' ticks 'I agree to the Google API Services: User Data Policy' on your behalf. Anything else (including omitted) leaves it unticked and the flow stops at the Finish step. Must be passed with --var; it has no effective default",
+      "required": false,
+      "default": "false"
+    }
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "rationale": "Open the Cloud console credentials page (no project param yet). May redirect to accounts.google.com when signed out.",
+      "url": "https://console.cloud.google.com/apis/credentials",
+      "on_failure": "If the open times out, re-run `agent-browser --session comet tab list` and retry once",
+      "max_retries": 2
+    },
+    {
+      "action": "wait",
+      "rationale": "The console is a heavy SPA; let it (or a login redirect) settle",
+      "wait": "5s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Login is out of scope. A redirect to accounts.google.com (confirmidentifier) means signed out: stop before touching any Next button or field.",
+      "condition": "URL contains 'accounts.google.com'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "STOP: redirected to accounts.google.com. Sign in by hand in Comet, then re-run this flow. Never click Next or type here. (Fails on purpose: the ref_hint can never match, so the flow aborts with this message.)",
+          "ref_hint": "STOP - Google sign-in required in the comet session - a human must sign in, then re-run the flow",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Re-verification page rendered inside the console (Verify its you). Same rule: stop.",
+      "condition": "page shows 'Verify it' or 'Choose an account' or 'Enter your email'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "STOP: Google is asking to verify the account. A human must complete it in Comet, then re-run this flow.",
+          "ref_hint": "STOP - Google Verify-its-you prompt in the comet session - a human must complete it, then re-run the flow",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "GUARD: test_user_email and contact_email are REQUIRED with no default. An omitted var is rejected by pixel; an empty or malformed one is caught here and flagged for the next step.",
+      "value": "(()=>{const at=String.fromCharCode(64);const vals=['{{test_user_email}}','{{contact_email}}'];const bad=vals.some(v=>v.startsWith('{{')||!v.includes(at)||v.startsWith(at)||v.endsWith(at));if(bad){const b=document.createElement('button');b.textContent='EMAIL_VARS_INVALID';document.body.prepend(b)}return bad?'email-vars-invalid':'email-vars-ok'})()",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Stop with a clear message if an email var is empty or malformed, BEFORE anything is created.",
+      "condition": "page shows 'EMAIL_VARS_INVALID'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "STOP: test_user_email and contact_email must be passed as real email addresses (--var test_user_email=<address> --var contact_email=<address>). Nothing was created.",
+          "ref_hint": "STOP - set test_user_email and contact_email to real addresses with --var, then re-run the flow",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Go to the credentials page of the TARGET project (project_id, default my-local-dev-app). If that project does not exist the console falls back to /projectselector2/..., handled next. Unverified: how the console reacts to a nonexistent ?project= value.",
+      "value": "(()=>{const raw='{{project_id}}';const id=raw.startsWith('{{')?'my-local-dev-app':raw;setTimeout(()=>{location.href='https://console.cloud.google.com/apis/credentials?project='+encodeURIComponent(id)},50);return 'navigating to /apis/credentials for project '+id})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the page load",
+      "wait": "5s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "CREATE PROJECT only if it does not exist: with no usable project the console shows /projectselector2/... with a 'Create project' button.",
+      "condition": "URL contains 'projectselector'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "Open the new-project form",
+          "ref_hint": "button containing 'Create project'",
+          "max_retries": 1
+        },
+        {
+          "action": "wait",
+          "rationale": "Let the New Project form render",
+          "wait": "3s",
+          "max_retries": 1
+        },
+        {
+          "action": "snapshot",
+          "rationale": "Capture the form: 'Project name' textbox (prefilled like 'My Project 12345'), Organization/Location, Create",
+          "max_retries": 1
+        },
+        {
+          "action": "fill",
+          "rationale": "PITFALL (append): the name is PREFILLED and real typing APPENDS to it, so use `fill` (replaces) and verify. The project ID is derived from the name as a slug (my-local-dev-app).",
+          "ref_hint": "textbox matching 'Project name'",
+          "value_var": "project_id",
+          "max_retries": 1
+        },
+        {
+          "action": "snapshot",
+          "rationale": "Verify the name AND the generated Project ID line before creating",
+          "max_retries": 1
+        },
+        {
+          "action": "conditional",
+          "rationale": "Verify the name took. NOTE: {{project_id}} only substitutes when passed with --var; with the default this reads as not met and the fallback re-enters it, which is harmless.",
+          "condition": "page shows '{{project_id}}'",
+          "otherwise": [
+            {
+              "action": "click",
+              "rationale": "Focus the name box",
+              "ref_hint": "textbox matching 'Project name'",
+              "max_retries": 1
+            },
+            {
+              "action": "press",
+              "rationale": "Select all so typing REPLACES the prefill (macOS shortcut)",
+              "key": "Meta+a",
+              "max_retries": 1
+            },
+            {
+              "action": "type",
+              "rationale": "Real key typing over the selection",
+              "ref_hint": "textbox matching 'Project name'",
+              "value_var": "project_id",
+              "max_retries": 1
+            }
+          ],
+          "max_retries": 1
+        },
+        {
+          "action": "click",
+          "rationale": "Create the project. The default Organization is fine.",
+          "ref_hint": "button containing 'Create'",
+          "max_retries": 1
+        },
+        {
+          "action": "wait",
+          "rationale": "Project creation takes a while; the id then appears as ?project=<id> in the URL",
+          "wait": "12s",
+          "max_retries": 1
+        },
+        {
+          "action": "eval",
+          "rationale": "Reload the credentials page scoped to the new project",
+          "value": "(()=>{const raw='{{project_id}}';const id=raw.startsWith('{{')?'my-local-dev-app':raw;setTimeout(()=>{location.href='https://console.cloud.google.com/apis/credentials?project='+encodeURIComponent(id)},50);return 'navigating to /apis/credentials for project '+id})()",
+          "max_retries": 1
+        },
+        {
+          "action": "wait",
+          "rationale": "Let the page load",
+          "wait": "5s",
+          "max_retries": 1
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Confirm the credentials page of the target project is showing (URL has ?project=<id>)",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Open the API library page for google_api (default drive.googleapis.com) in the project",
+      "value": "(()=>{const raw='{{project_id}}';const id=raw.startsWith('{{')?'my-local-dev-app':raw;const a='{{google_api}}';const api=a.startsWith('{{')?'drive.googleapis.com':a;setTimeout(()=>{location.href='https://console.cloud.google.com/apis/library/'+encodeURIComponent(api)+'?project='+encodeURIComponent(id)},50);return 'navigating to API library page for '+api+' in project '+id})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the API page load",
+      "wait": "5s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Enable the API only if it is not enabled yet (an enabled API no longer shows the enable button).",
+      "condition": "page shows 'enable this API'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "Enable the API. Lands on /apis/api/<api>/metrics with a 'Disable API' button.",
+          "ref_hint": "button containing 'enable this API'",
+          "max_retries": 1
+        },
+        {
+          "action": "wait",
+          "rationale": "Enabling takes a few seconds",
+          "wait": "8s",
+          "max_retries": 1
+        },
+        {
+          "action": "snapshot",
+          "rationale": "Expect the metrics page with a 'Disable API' button (proof the API is enabled)",
+          "max_retries": 1
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Open the consent-screen wizard directly. PITFALL: the 'Get started' link on the overview points here but clicking the link itself did not navigate.",
+      "value": "(()=>{const raw='{{project_id}}';const id=raw.startsWith('{{')?'my-local-dev-app':raw;setTimeout(()=>{location.href='https://console.cloud.google.com/auth/overview/create?project='+encodeURIComponent(id)},50);return 'navigating to /auth/overview/create for project '+id})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the wizard load",
+      "wait": "5s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Run the 4-step wizard only when it is showing (already-configured projects skip straight to Audience).",
+      "condition": "page shows 'App name'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "Focus 'App name' (click+type works here; fill does not register)",
+          "ref_hint": "textbox matching 'App name'",
+          "max_retries": 1
+        },
+        {
+          "action": "type",
+          "rationale": "Type the app name",
+          "ref_hint": "textbox matching 'App name'",
+          "value_var": "app_name",
+          "max_retries": 1
+        },
+        {
+          "action": "click",
+          "rationale": "Open the 'User support email' combobox. PITFALL: its listbox does NOT appear in the accessibility tree.",
+          "ref_hint": "combobox matching 'User support email'",
+          "max_retries": 1
+        },
+        {
+          "action": "press",
+          "rationale": "Enter takes the FIRST option, which is the signed-in account. Do not try to click an option: it is not in the snapshot.",
+          "key": "Enter",
+          "max_retries": 1
+        },
+        {
+          "action": "snapshot",
+          "rationale": "Verify the 'User support email' combobox now shows an account",
+          "max_retries": 1
+        },
+        {
+          "action": "eval",
+          "rationale": "Best-effort verification that the combobox holds an email (throws if empty, which aborts the flow when agent-browser reports the exception; the email itself is not returned or logged). If it fails: reopen the combobox, press ArrowDown, then Enter, and re-run from the wizard.",
+          "value": "(()=>{const at=String.fromCharCode(64);const el=[...document.querySelectorAll('input,[role=combobox]')].find(e=>/user support email/i.test((e.getAttribute('aria-label')||'')+' '+((e.labels&&e.labels[0])?e.labels[0].innerText:'')+' '+(e.closest('mat-form-field,label,div')||{innerText:''}).innerText));const v=el?((el.value||el.innerText||'')+''):'';if(!v.includes(at))throw new Error('support-email-combobox-empty');return 'support-email-selected'})()",
+          "on_failure": "Reopen the combobox, press ArrowDown, then Enter; verify the combobox value by eye (do not copy it anywhere)",
+          "max_retries": 1
+        },
+        {
+          "action": "click",
+          "rationale": "Wizard step 1 -> 2 (Audience)",
+          "ref_hint": "button containing 'Next'",
+          "max_retries": 1
+        },
+        {
+          "action": "wait",
+          "rationale": "Let step 2 render",
+          "wait": "2s",
+          "max_retries": 1
+        },
+        {
+          "action": "click",
+          "rationale": "Audience: choose External. The project org differs from the user's Workspace domain; External + Testing needs no Google verification. (Internal would be rejected.) The two quoted terms require a radio line that also says External.",
+          "ref_hint": "radio matching 'radio' 'External'",
+          "max_retries": 1
+        },
+        {
+          "action": "click",
+          "rationale": "Wizard step 2 -> 3 (Contact Information)",
+          "ref_hint": "button containing 'Next'",
+          "max_retries": 1
+        },
+        {
+          "action": "wait",
+          "rationale": "Let step 3 render",
+          "wait": "2s",
+          "max_retries": 1
+        },
+        {
+          "action": "type",
+          "rationale": "PITFALL: 'Text field for emails' is a CHIP input. Type the contact email (real key events), then press Enter to commit the chip.",
+          "ref_hint": "textbox matching 'Text field for emails'",
+          "value_var": "contact_email",
+          "max_retries": 1
+        },
+        {
+          "action": "press",
+          "rationale": "Enter commits the typed email as a chip; without it Next stays disabled",
+          "key": "Enter",
+          "max_retries": 1
+        },
+        {
+          "action": "click",
+          "rationale": "Wizard step 3 -> 4 (Finish)",
+          "ref_hint": "button containing 'Next'",
+          "max_retries": 1
+        },
+        {
+          "action": "wait",
+          "rationale": "Let step 4 render",
+          "wait": "2s",
+          "max_retries": 1
+        },
+        {
+          "action": "eval",
+          "rationale": "TERMS GATE: tick 'I agree to the Google API Services: User Data Policy' ONLY when --var accept_terms=true was passed. Unset or any other value leaves it unchecked and Continue disabled (fail-closed: {{accept_terms}} is not defaulted, so an omitted var stays a literal and never equals 'true'). Passing accept_terms=true means the human accepts the policy.",
+          "value": "(()=>{const txt=c=>[...(c.labels||[])].map(l=>l.innerText).join(' ')+' '+((c.closest('label')||c.parentElement||{}).innerText||'');const cb=[...document.querySelectorAll('input[type=checkbox]')].find(c=>/user data policy/i.test(txt(c)));if(!cb)return 'terms-checkbox-not-found';if('{{accept_terms}}'!=='true')return 'terms-NOT-accepted (accept_terms is not true): left unchecked';if(!cb.checked)cb.click();return 'terms-checked='+cb.checked})()",
+          "max_retries": 1
+        },
+        {
+          "action": "eval",
+          "rationale": "Click Continue (reports not-found-or-disabled instead of failing when the policy box is unticked)",
+          "value": "(()=>{const b=[...document.querySelectorAll('button')].find(x=>/^continue$/i.test(x.innerText.trim())&&!x.disabled&&x.getAttribute('aria-disabled')!=='true');return b?(b.click(),'clicked continue'):'continue-not-found-or-disabled'})()",
+          "max_retries": 1
+        },
+        {
+          "action": "wait",
+          "rationale": "Let the Create button appear",
+          "wait": "2s",
+          "max_retries": 1
+        },
+        {
+          "action": "eval",
+          "rationale": "Click Create to finish the consent-screen wizard",
+          "value": "(()=>{const b=[...document.querySelectorAll('button')].find(x=>/^create$/i.test(x.innerText.trim())&&!x.disabled&&x.getAttribute('aria-disabled')!=='true');return b?(b.click(),'clicked create'):'create-not-found-or-disabled'})()",
+          "max_retries": 1
+        },
+        {
+          "action": "wait",
+          "rationale": "Branding/audience config is saved server-side; give it time",
+          "wait": "6s",
+          "max_retries": 1
+        },
+        {
+          "action": "conditional",
+          "rationale": "Still on the Finish step means the policy was not accepted (accept_terms != true) or Create did not fire. Nothing was configured. Stop.",
+          "condition": "page shows 'User Data Policy'",
+          "then": [
+            {
+              "action": "click",
+              "rationale": "STOP: the consent-screen wizard is still open on the Finish step. Either accept_terms was not true (re-run with --var accept_terms=true after reading the Google API Services User Data Policy) or a required field is missing. (Fails on purpose.)",
+              "ref_hint": "STOP - Google consent screen was not created - accept_terms must be true and every wizard step must be complete",
+              "max_retries": 0
+            }
+          ],
+          "max_retries": 1
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Open Audience (test users, publishing status)",
+      "value": "(()=>{const raw='{{project_id}}';const id=raw.startsWith('{{')?'my-local-dev-app':raw;setTimeout(()=>{location.href='https://console.cloud.google.com/auth/audience?project='+encodeURIComponent(id)},50);return 'navigating to /auth/audience for project '+id})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the page load",
+      "wait": "5s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Publishing status must read 'Testing'. (In production the page shows a 'Back to testing' button.)",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Never alter an app that is already published: a 'Back to testing' button means production. Stop.",
+      "condition": "page shows 'Back to testing'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "STOP: publishing status is not Testing (a 'Back to testing' button is showing). This flow only works on a Testing-mode dev project and never publishes or edits a production app.",
+          "ref_hint": "STOP - Google app is not in Testing mode - this flow only works on a Testing-mode dev project",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Open the test-user dialog",
+      "ref_hint": "button containing 'Add users'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the dialog render",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "type",
+      "rationale": "PITFALL: 'Text field for emails' is a CHIP input: type the email (real key events), then Enter to commit it",
+      "ref_hint": "textbox matching 'Text field for emails'",
+      "value_var": "test_user_email",
+      "max_retries": 1
+    },
+    {
+      "action": "press",
+      "rationale": "Enter commits the chip",
+      "key": "Enter",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Save the test user",
+      "ref_hint": "button containing 'Save'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the save settle",
+      "wait": "3s",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Open the OAuth client creation form",
+      "value": "(()=>{const raw='{{project_id}}';const id=raw.startsWith('{{')?'my-local-dev-app':raw;setTimeout(()=>{location.href='https://console.cloud.google.com/auth/clients/create?project='+encodeURIComponent(id)},50);return 'navigating to /auth/clients/create for project '+id})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the form load",
+      "wait": "5s",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Open the 'Application type' combobox. PITFALL: its listbox options are NOT in the plain snapshot.",
+      "ref_hint": "combobox matching 'Application type'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the listbox open",
+      "wait": "1s",
+      "max_retries": 1
+    },
+    {
+      "action": "press",
+      "rationale": "'Web application' is the first option; Home then Enter selects it by keyboard (alternative: `agent-browser screenshot --annotate` refs)",
+      "key": "Home",
+      "max_retries": 1
+    },
+    {
+      "action": "press",
+      "rationale": "Select the focused option",
+      "key": "Enter",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the Web-application fields render",
+      "wait": "1s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Only the Web application type shows the 'Add URI' buttons (JavaScript origins, redirect URIs). If they are absent, the type was not selected: stop for a human.",
+      "condition": "page shows 'Add URI'",
+      "otherwise": [
+        {
+          "action": "click",
+          "rationale": "STOP: 'Web application' could not be selected by keyboard. Pick it by hand in Comet (or use `agent-browser screenshot --annotate`), then continue manually from the Name box.",
+          "ref_hint": "STOP - Google OAuth client type Web application not selected - a human must choose it",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "fill",
+      "rationale": "PITFALL: Name is PREFILLED ('Web client 1'); use `fill` to replace it, then verify",
+      "ref_hint": "textbox matching 'Name'",
+      "value_var": "app_name",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Re-snapshot so the Name textbox shows its value",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Verify the Name value took. NOTE: {{app_name}} only substitutes when passed with --var; with the default this reads as not met and the fallback re-enters it, which is harmless.",
+      "condition": "page shows '{{app_name}}'",
+      "otherwise": [
+        {
+          "action": "click",
+          "rationale": "Focus the box",
+          "ref_hint": "textbox matching 'Name'",
+          "max_retries": 1
+        },
+        {
+          "action": "press",
+          "rationale": "Select all existing text so typing REPLACES it (macOS shortcut; use Control+a elsewhere)",
+          "key": "Meta+a",
+          "max_retries": 1
+        },
+        {
+          "action": "type",
+          "rationale": "Real key typing over the selection",
+          "ref_hint": "textbox matching 'Name'",
+          "value_var": "app_name",
+          "max_retries": 1
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "Add a redirect URI row: click the SECOND 'Add URI' button (the first belongs to Authorized JavaScript origins, which stay empty).",
+      "value": "(()=>{const bs=[...document.querySelectorAll('button')].filter(b=>/add uri/i.test(b.innerText));if(bs.length<2)return 'add-uri-buttons='+bs.length+' (expected 2: JavaScript origins, then Authorized redirect URIs)';bs[1].click();return 'clicked 2nd Add URI (redirect URIs)'})()",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the 'URIs 1' textbox render",
+      "wait": "1s",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Focus the redirect-URI box",
+      "ref_hint": "textbox matching 'URIs 1'",
+      "max_retries": 1
+    },
+    {
+      "action": "type",
+      "rationale": "PITFALL: REAL key typing is required; otherwise Create stays disabled",
+      "ref_hint": "textbox matching 'URIs 1'",
+      "value_var": "callback_url",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Verify the redirect URI is in the box and Create is enabled",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Create the OAuth client. Opens an 'OAuth client created' dialog.",
+      "ref_hint": "button containing 'Create'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the dialog render",
+      "wait": "4s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "FLOW ENDS HERE with the 'OAuth client created' dialog open (client id like <digits>-<hash>.apps.googleusercontent.com, secret GOCSPX-...). Do NOT click 'Download JSON' and do NOT close the dialog: newer consoles may not show the secret again. NEXT: OAUTH_ENV_OUT=<path> crates/pixel-flow/examples/oauth-env.py capture google",
+      "max_retries": 1
+    }
+  ],
+  "success_signal": "page text contains 'OAuth client created' (the one-time dialog is open). Then immediately run: OAUTH_ENV_OUT=<path> oauth-env.py capture google && oauth-env.py check google",
+  "created_unix": 0,
+  "revised_unix": 0,
+  "revision": 1,
+  "proven": false
+}

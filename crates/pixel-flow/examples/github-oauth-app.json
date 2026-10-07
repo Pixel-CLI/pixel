@@ -1,0 +1,215 @@
+{
+  "_comment": [
+    "Worked example: register a LOCAL DEV GitHub OAuth app in the web console and capture its client id/secret.",
+    "Built from a real hand-driven agent-browser session (comet profile, CDP 127.0.0.1:9222, --session comet).",
+    "",
+    "Keys starting with '_' are ignored by pixel (not part of the Flow schema); they are documentation for humans.",
+    "",
+    "HOW TO RUN",
+    "  pixel flow save github-oauth-app --from-file crates/pixel-flow/examples/github-oauth-app.json",
+    "  pixel flow run github-oauth-app [--var app_name='My Local Dev App'] [--var callback_url=http://localhost:3000/oauth/github/callback]",
+    "  OAUTH_ENV_OUT=./.env.oauth crates/pixel-flow/examples/oauth-env.py capture github",
+    "  OAUTH_ENV_OUT=./.env.oauth crates/pixel-flow/examples/oauth-env.py check github",
+    "",
+    "WHY THE LAST TWO COMMANDS ARE NOT FLOW STEPS",
+    "  pixel-flow can click/fill/type/press/wait/scroll/eval, but `eval` output is discarded by `pixel flow run`, and a flow",
+    "  cannot write files, read env vars or call curl. So the flow drives the browser until the one-time secret is ON SCREEN,",
+    "  then oauth-env.py reads it straight from the page into $OAUTH_ENV_OUT (mode 600) and prints only lengths. Nothing",
+    "  secret passes through the flow log, the agent transcript, or argv.",
+    "",
+    "LOGIN IS OUT OF SCOPE. The comet session must already be signed in to GitHub. If a login or sudo-mode page shows up the",
+    "flow STOPS on purpose (a `click` whose ref_hint can never match; the engine aborts with that text as the error). It never",
+    "types credentials. Sign in by hand in Comet, then re-run.",
+    "",
+    "NOT IDEMPOTENT: every run registers a NEW app. Delete stale local-dev apps by hand in the console.",
+    "No terms-of-service checkbox exists on this form, so there is no accept_terms var here (the Atlassian and Notion flows have one).",
+    "",
+    "AFTER THE FLOW (manual follow-up): your backend/app reads OAUTH_GITHUB_CLIENT_ID / OAUTH_GITHUB_CLIENT_SECRET from its",
+    "process environment. `source` the env file written to $OAUTH_ENV_OUT before starting the API. Never commit that file.",
+    "",
+    "NEVER put real client ids or secrets in this file."
+  ],
+  "name": "github-oauth-app",
+  "title": "Register a local-dev GitHub OAuth app and capture client id/secret",
+  "description": "Registers a local-dev GitHub OAuth app (default name 'My Local Dev App') at github.com/settings/applications/new with non-expiring user tokens, generates a client secret, and stops with the one-time secret visible on screen. Follow with `oauth-env.py capture github` to write OAUTH_GITHUB_CLIENT_ID / OAUTH_GITHUB_CLIENT_SECRET to $OAUTH_ENV_OUT (mode 600), then `oauth-env.py check github`. Login is out of scope; the flow stops if signed out. Not idempotent.",
+  "tags": [
+    "oauth",
+    "config",
+    "github",
+    "local-dev",
+    "example"
+  ],
+  "tab": "github.com",
+  "success_url_contains": [
+    "github.com/settings/applications/"
+  ],
+  "success_url_excludes": [
+    "/settings/applications/new",
+    "/login"
+  ],
+  "mfa_keywords": [
+    "Confirm access",
+    "Username or email address",
+    "Two-factor",
+    "Verify it"
+  ],
+  "preconditions": [
+    "Verify comet-cdp is up (port 9222) and `agent-browser --session comet tab list` answers",
+    "The comet browser profile is ALREADY signed in to github.com (this flow never types credentials)",
+    "Export OAUTH_ENV_OUT=<path> before the capture step (the file receives secrets: keep it out of git, mode 600 is enforced)"
+  ],
+  "vars": [
+    {
+      "name": "app_name",
+      "description": "Application name shown on GitHub's consent screen",
+      "required": false,
+      "default": "My Local Dev App"
+    },
+    {
+      "name": "homepage_url",
+      "description": "Homepage URL of the local app",
+      "required": false,
+      "default": "http://localhost:3000"
+    },
+    {
+      "name": "callback_url",
+      "description": "Redirect URI your local app's OAuth callback route listens on",
+      "required": false,
+      "default": "http://localhost:3000/oauth/github/callback"
+    },
+    {
+      "name": "app_description",
+      "description": "Free-text application description",
+      "required": false,
+      "default": "Local development OAuth app"
+    }
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "rationale": "Open the new-OAuth-app form. Already-authenticated profile expected; GitHub redirects to /login when signed out.",
+      "url": "https://github.com/settings/applications/new",
+      "on_failure": "If the open times out, re-run `agent-browser --session comet tab list` and retry once",
+      "max_retries": 2
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the form (or a login redirect) finish rendering before the signed-in check",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "Login is out of scope. Signed-out sessions land on the sign-in form; stop instead of touching credentials.",
+      "condition": "page shows 'Username or email address' or 'Sign in to GitHub'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "STOP: not signed in to GitHub in the comet session. Sign in by hand in Comet, then re-run this flow. (This step fails on purpose; its ref_hint can never match, so the flow aborts with this message.)",
+          "ref_hint": "STOP - GitHub login required in the comet session - a human must sign in, then re-run the flow",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Capture the form: textboxes Application name, Homepage URL, Application description, Redirect URI",
+      "max_retries": 1
+    },
+    {
+      "action": "fill",
+      "rationale": "Application name (shown to users on the consent screen)",
+      "ref_hint": "textbox matching 'Application name'",
+      "value_var": "app_name",
+      "max_retries": 1
+    },
+    {
+      "action": "fill",
+      "rationale": "Homepage URL",
+      "ref_hint": "textbox matching 'Homepage URL'",
+      "value_var": "homepage_url",
+      "max_retries": 1
+    },
+    {
+      "action": "fill",
+      "rationale": "Application description",
+      "ref_hint": "textbox matching 'Application description'",
+      "value_var": "app_description",
+      "max_retries": 1
+    },
+    {
+      "action": "fill",
+      "rationale": "Redirect URI = the backend callback. Must match exactly, including scheme and port.",
+      "ref_hint": "textbox matching 'Redirect URI'",
+      "value_var": "callback_url",
+      "max_retries": 1
+    },
+    {
+      "action": "eval",
+      "rationale": "PITFALL: 'Expire user access tokens' is checked by default and token handling that assumes NON-expiring gho_ tokens, so it must be UNCHECKED. Idempotent: clicks only when currently checked. Wrapped in an IIFE because the page context keeps top-level const/let between evals, so a second eval declaring the same name would throw.",
+      "value": "(()=>{const cb=[...document.querySelectorAll('input[type=checkbox]')].find(c=>[...c.labels].some(l=>/expire user access tokens/i.test(l.innerText)));return cb?((cb.checked&&cb.click()),'expire-user-tokens checked='+cb.checked):'expire-checkbox-not-found'})()",
+      "on_failure": "If the checkbox is not found, re-snapshot and click the checkbox labelled 'Expire user access tokens' ONLY if it is checked. Do not submit with it checked.",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Verify the filled values and that 'Expire user access tokens' is now unchecked before submitting (the registration is not undoable except by deleting the app)",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Submit the form. GitHub redirects to https://github.com/settings/applications/<id>.",
+      "ref_hint": "button containing 'Register application'",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "PITFALL: the redirect to the app page can lag the click; give it time before looking for the secret button",
+      "wait": "3s",
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "Confirm we are on the new app's settings page (URL /settings/applications/<id>), not still on /new with a validation error",
+      "max_retries": 1
+    },
+    {
+      "action": "click",
+      "rationale": "Generate the client secret. GitHub shows it ONCE; the next step must not reload or navigate away.",
+      "ref_hint": "button containing 'Generate a new client secret'",
+      "on_failure": "If the button is missing the app page may not have loaded; wait 2s, re-snapshot, retry. Never click twice: each click mints another secret.",
+      "max_retries": 1
+    },
+    {
+      "action": "wait",
+      "rationale": "Let the secret render. A sudo-mode 'Confirm access' page may appear instead (handled by the next step).",
+      "wait": "2s",
+      "max_retries": 1
+    },
+    {
+      "action": "conditional",
+      "rationale": "GitHub sudo mode asks to re-verify the account before minting a secret. That is a credential prompt: stop and ask the human.",
+      "condition": "page shows 'Confirm access' or 'Verify it' or 'Use your passkey'",
+      "then": [
+        {
+          "action": "click",
+          "rationale": "STOP: GitHub is asking to re-verify the account (sudo mode). A human must confirm in Comet, then click 'Generate a new client secret' by hand (do not re-run the whole flow: that would register a second app).",
+          "ref_hint": "STOP - GitHub sudo-mode confirmation required - a human must confirm in Comet before the secret is generated",
+          "max_retries": 0
+        }
+      ],
+      "max_retries": 1
+    },
+    {
+      "action": "snapshot",
+      "rationale": "FLOW ENDS HERE with the one-time secret visible on the page (client id = 20 alphanumerics after the 'Client ID' label; secret = first 40-hex string in the page HTML). DO NOT RELOAD. NEXT: OAUTH_ENV_OUT=<path> crates/pixel-flow/examples/oauth-env.py capture github   then   ... check github",
+      "max_retries": 1
+    }
+  ],
+  "success_signal": "page text contains 'Client ID' and 'Client secrets'. Then run: OAUTH_ENV_OUT=<path> oauth-env.py capture github && oauth-env.py check github (a 404 from GitHub means the credentials are valid, 401 means invalid)",
+  "created_unix": 0,
+  "revised_unix": 0,
+  "revision": 1,
+  "proven": false
+}
