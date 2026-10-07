@@ -535,7 +535,7 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
             && let Ok(head) = evidence.line_at(&path, line, deadline)
         {
             edit(state, |brief| {
-                brief.likely_def = Some(format!("{}:{} — {}", path, line, head));
+                brief.likely_def = Some(format!("{path}:{line} — {head}"));
             });
         }
     }

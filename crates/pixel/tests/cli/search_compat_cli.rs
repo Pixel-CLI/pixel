@@ -436,6 +436,9 @@ impl Drop for TrackedFixture {
 fn credential_shaped_paths_keep_native_permission_boundaries() {
     let fixture = Fixture::new(b"needle\n");
     std::fs::create_dir(fixture.0.join("secrets")).unwrap();
+    // GitHub's runners ship no `rg` (see the premise note on the piped-stdin
+    // test below); the rg case runs wherever ripgrep is installed.
+    let rg_installed = Command::new("rg").arg("--version").output().is_ok();
     for path in [
         ".env",
         ".env.local",
@@ -448,8 +451,9 @@ fn credential_shaped_paths_keep_native_permission_boundaries() {
         // Synthetic, nonsensitive fixture bytes only. The search examines
         // path metadata, never the contents of credential-shaped files.
         std::fs::write(fixture.0.join(path), b"fake fixture\n").unwrap();
-        for tool in ["grep", "rg"] {
-            fixture.compare(tool, &["needle", path], "native");
+        fixture.compare("grep", &["needle", path], "native");
+        if rg_installed {
+            fixture.compare("rg", &["needle", path], "native");
         }
     }
 }
