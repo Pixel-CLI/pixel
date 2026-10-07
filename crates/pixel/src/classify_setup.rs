@@ -618,6 +618,9 @@ pub fn setup_local(stdout: &mut dyn std::io::Write) -> Result<(), String> {
 trait LocalSetupRuntime {
     fn local_root(&mut self) -> Result<PathBuf, String>;
     fn exists(&self, path: &std::path::Path) -> bool;
+    /// Create a directory (and parents) that the setup needs but the ollaya
+    /// installer does not make — the model store `ollaya pull` writes into.
+    fn create_dir(&mut self, path: &std::path::Path) -> Result<(), String>;
     /// The unpack support the ollaya installer needs, observed on this
     /// machine: `zstd (command present?)`, the platform, and the parsed
     /// `/etc/os-release` when the platform ships one.
@@ -653,6 +656,11 @@ impl LocalSetupRuntime for SystemLocalSetup {
     #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
     fn exists(&self, path: &std::path::Path) -> bool {
         path.exists()
+    }
+
+    #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
+    fn create_dir(&mut self, path: &std::path::Path) -> Result<(), String> {
+        std::fs::create_dir_all(path).map_err(|e| format!("create {}: {e}", path.display()))
     }
 
     #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
@@ -748,6 +756,13 @@ fn setup_local_with(
         crate::decide_ollaya::DEFAULT_MODEL
     )
     .map_err(|e| e.to_string())?;
+    // `ollaya pull` writes into `OLLAYA_MODELS` but does not create it, and
+    // the ollaya installer does not make it either — on a fresh environment
+    // the pull fails with "No such file or directory" without this. The pull
+    // also expects the `blobs/` and `manifests/` subdirectories to exist.
+    runtime.create_dir(&models)?;
+    runtime.create_dir(&models.join("blobs"))?;
+    runtime.create_dir(&models.join("manifests"))?;
     let bin_str = bin.to_string_lossy().into_owned();
     runtime.run(
         &bin_str,
@@ -755,8 +770,25 @@ fn setup_local_with(
             "pull".to_string(),
             crate::decide_ollaya::DEFAULT_MODEL.to_string(),
         ],
-        &[("OLLAYA_MODELS".to_string(), models_str.clone())],
+        &[
+            ("OLLAYA_MODELS".to_string(), models_str.clone()),
+            ("OLLAYA_HOST".to_string(), "127.0.0.1:11435".to_string()),
+        ],
     )?;
+
+    // Verify the pull wrote the model into the managed store, not into some
+    // other location picked up by a pre-existing Ollaya server. If the model
+    // is missing, recording the launch would silently select a local engine
+    // that has nothing to serve.
+    let model_dir = models.join(crate::decide_ollaya::DEFAULT_MODEL);
+    if !runtime.exists(&model_dir) {
+        return Err(format!(
+            "ollaya pull reported success but the model directory {} was not found under {}; \
+             the pull may have written to a different store",
+            model_dir.display(),
+            models.display(),
+        ));
+    }
 
     let launch = json!({
         "base": crate::decide_ollaya::DEFAULT_BASE,
@@ -1036,6 +1068,13 @@ mod tests {
         runs: Vec<RunInvocation>,
         launch: Option<Value>,
         engine_set: bool,
+        created_dirs: Vec<PathBuf>,
+        /// When set, `create_dir` fails with this message — the failure path.
+        create_dir_error: Option<String>,
+        /// Snapshot of `created_dirs` captured when the pull command runs,
+        /// so the test can assert the three required paths existed at pull
+        /// time (issue #407).
+        pull_snapshot: Option<Vec<PathBuf>>,
     }
 
     impl LocalSetupRuntime for FakeLocalSetup {
@@ -1044,7 +1083,26 @@ mod tests {
         }
 
         fn exists(&self, path: &std::path::Path) -> bool {
-            path == self.root.join("bin").join("ollaya") && self.binary_exists
+            let bin_path = self.root.join("bin").join("ollaya");
+            // Recognise the model store and its known subdirectories so the
+            // post-pull verification passes (issue #407).
+            if path == bin_path && self.binary_exists {
+                return true;
+            }
+            self.created_dirs
+                .iter()
+                .any(|d| d == path || path.starts_with(d))
+        }
+
+        fn create_dir(&mut self, path: &std::path::Path) -> Result<(), String> {
+            // The fake does not run a real `ollaya pull`, so the model store only
+            // needs to be recorded: the policy under test is that the directory
+            // is created before the pull is invoked.
+            if let Some(error) = &self.create_dir_error {
+                return Err(error.clone());
+            }
+            self.created_dirs.push(path.to_path_buf());
+            Ok(())
         }
 
         fn unpack_environment(&self) -> UnpackEnvironment {
@@ -1061,6 +1119,12 @@ mod tests {
             args: &[String],
             env: &[(String, String)],
         ) -> Result<(), String> {
+            // Snapshot `created_dirs` when the pull command runs so the test
+            // verifies the three model-store paths existed at pull time
+            // (issue #407).
+            if args.first().is_some_and(|a| a == "pull") {
+                self.pull_snapshot = Some(self.created_dirs.clone());
+            }
             self.runs
                 .push((program.to_string(), args.to_vec(), env.to_vec()));
             self.install_done = true;
@@ -1818,6 +1882,9 @@ mod tests {
             runs: Vec::new(),
             launch: None,
             engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
         };
         let mut output = Vec::new();
 
@@ -1845,6 +1912,13 @@ mod tests {
                 crate::decide_ollaya::DEFAULT_MODEL.to_string()
             ]
         );
+        assert!(
+            runtime.runs[2]
+                .2
+                .iter()
+                .any(|(k, v)| k == "OLLAYA_HOST" && v == "127.0.0.1:11435"),
+            "pull must set OLLAYA_HOST to target the managed server"
+        );
         let launch = runtime.launch.unwrap();
         assert_eq!(
             launch["argv"],
@@ -1856,6 +1930,118 @@ mod tests {
         );
         assert!(runtime.engine_set);
         assert!(String::from_utf8(output).unwrap().contains("auto-start"));
+    }
+
+    /// The model store must exist before `ollaya pull` runs: the ollaya
+    /// installer does not create it and `ollaya pull` does not either, so on
+    /// a fresh environment the pull fails with "No such file or directory"
+    /// unless the setup creates it first (issue #407).
+    #[test]
+    fn local_setup_creates_the_model_store_before_the_pull() {
+        let root = PathBuf::from("/pixel-test/ollaya");
+        let mut runtime = FakeLocalSetup {
+            root: root.clone(),
+            binary_exists: false,
+            installer_creates_binary: true,
+            unpack: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            unpack_after: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            install_done: false,
+            runs: Vec::new(),
+            launch: None,
+            engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
+        };
+        let mut output = Vec::new();
+
+        setup_local_with(&mut runtime, &mut output).unwrap();
+
+        // The model store is created, with the exact path the recorded
+        // launch's OLLAYA_MODELS points at, plus the blobs/ and manifests/
+        // subdirectories that `ollaya pull` expects to already exist.
+        assert_eq!(
+            runtime.created_dirs,
+            vec![
+                root.join("models"),
+                root.join("models/blobs"),
+                root.join("models/manifests")
+            ]
+        );
+        // The pull runs after the create_dir call (the pull is the third
+        // run: curl, sh, pull).
+        assert_eq!(runtime.runs.len(), 3);
+        assert_eq!(runtime.runs[2].1[0], "pull");
+        // Snapshot of created_dirs at pull time must contain the three
+        // required model-store paths (issue #407).
+        let snapshot = runtime
+            .pull_snapshot
+            .as_ref()
+            .expect("pull_snapshot must be set");
+        assert!(
+            snapshot.contains(&root.join("models")),
+            "pull must see models/ created"
+        );
+        assert!(
+            snapshot.contains(&root.join("models/blobs")),
+            "pull must see models/blobs/ created"
+        );
+        assert!(
+            snapshot.contains(&root.join("models/manifests")),
+            "pull must see models/manifests/ created"
+        );
+        let launch = runtime.launch.unwrap();
+        assert_eq!(
+            launch["env"]["OLLAYA_MODELS"],
+            json!(root.join("models").display().to_string())
+        );
+    }
+
+    /// A create_dir failure stops the flow before the pull: a model store
+    /// that cannot be created must not silently produce a broken install.
+    #[test]
+    fn local_setup_reports_a_model_store_that_cannot_be_created() {
+        let root = PathBuf::from("/pixel-test/ollaya");
+        let mut runtime = FakeLocalSetup {
+            root: root.clone(),
+            binary_exists: true,
+            installer_creates_binary: false,
+            unpack: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            unpack_after: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            install_done: false,
+            runs: Vec::new(),
+            launch: None,
+            engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: Some(
+                "create /pixel-test/ollaya/models: Permission denied".to_string(),
+            ),
+            pull_snapshot: None,
+        };
+
+        let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
+
+        assert!(error.contains("create"), "{error}");
+        // The failing create_dir stops the flow: no pull, no launch recorded.
+        assert!(runtime.runs.is_empty());
+        assert!(runtime.launch.is_none());
+        assert!(!runtime.engine_set);
     }
 
     #[test]
@@ -1878,6 +2064,9 @@ mod tests {
             runs: Vec::new(),
             launch: None,
             engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
         };
 
         let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
@@ -1978,6 +2167,9 @@ mod tests {
             runs: Vec::new(),
             launch: None,
             engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
         };
         let mut output = Vec::new();
 
@@ -2016,6 +2208,9 @@ mod tests {
             runs: Vec::new(),
             launch: None,
             engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
         };
 
         let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
@@ -2040,6 +2235,9 @@ mod tests {
             runs: Vec::new(),
             launch: None,
             engine_set: false,
+            created_dirs: Vec::new(),
+            create_dir_error: None,
+            pull_snapshot: None,
         };
 
         let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
