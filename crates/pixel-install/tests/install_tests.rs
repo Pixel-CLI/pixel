@@ -803,7 +803,7 @@ fn global_install_removes_the_cursor_zcode_and_antigravity_integrations_an_earli
                 "enabled": true,
                 "PreInvocation": [{
                     "type": "command",
-                    "command": format!("{exe_path} run-hook task-event --provider antigravity --event prompt-submit"),
+                    "command": format!("'{exe_path}' run-hook task-event --provider antigravity --event prompt-submit"),
                     "timeout": 10
                 }]
             }

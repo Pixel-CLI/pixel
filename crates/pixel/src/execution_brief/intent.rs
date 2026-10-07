@@ -10,7 +10,8 @@
 //! never a requirement.
 
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -29,6 +30,43 @@ const POLL: Duration = Duration::from_millis(10);
 /// most this much, so an on-time verdict always leaves room for the evidence
 /// ops that follow.
 const CLASSIFY_BUDGET: Duration = Duration::from_millis(400);
+
+fn judge_args(typed: &str) -> Vec<String> {
+    let mut args = vec![
+        "classify".to_string(),
+        typed.to_string(),
+        "--json".to_string(),
+        "--context".to_string(),
+        INTENT_CONTEXT.to_string(),
+    ];
+    for kind in INTENTS
+        .iter()
+        .map(|kind| (kind.label, kind.criterion))
+        .chain([(NONE_LABEL, NONE_CRITERION)])
+    {
+        args.push("--label".to_string());
+        args.push(kind.0.to_string());
+        args.push("--criterion".to_string());
+        args.push(format!("{}={}", kind.0, kind.1));
+    }
+    args
+}
+
+fn stdout_reader(child: &mut Child) -> Option<JoinHandle<String>> {
+    child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stdout.read_to_string(&mut text);
+            text
+        })
+    })
+}
+
+fn join_stdout(reader: Option<JoinHandle<String>>) -> String {
+    reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default()
+}
 
 /// A decided intent: the winning label and its probability, used as the
 /// confidence a deny needs.
@@ -84,26 +122,8 @@ pub(crate) fn judge(typed: &str, deadline: Instant) -> Option<Verdict> {
         Ok(exe) => exe,
         Err(e) => bail!(format!("current_exe: {e}")),
     };
-    // `classify <text> --json` with the task-intent labels plus `none`,
-    // criteria carried as `label=description` pairs — `--task-intent` itself
-    // cannot express the extra deny label.
-    let mut args = vec![
-        "classify".to_string(),
-        typed.to_string(),
-        "--json".to_string(),
-        "--context".to_string(),
-        INTENT_CONTEXT.to_string(),
-    ];
-    for kind in INTENTS
-        .iter()
-        .map(|k| (k.label, k.criterion))
-        .chain([(NONE_LABEL, NONE_CRITERION)])
-    {
-        args.push("--label".to_string());
-        args.push(kind.0.to_string());
-        args.push("--criterion".to_string());
-        args.push(format!("{}={}", kind.0, kind.1));
-    }
+    // `--task-intent` cannot express the extra `none` deny label.
+    let args = judge_args(typed);
     let mut child = match Command::new(exe)
         .args(&args)
         .stdin(Stdio::null())
@@ -114,25 +134,21 @@ pub(crate) fn judge(typed: &str, deadline: Instant) -> Option<Verdict> {
         Ok(child) => child,
         Err(e) => bail!(format!("spawn classify: {e}")),
     };
+    let mut reader = stdout_reader(&mut child);
     let output = loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                let mut text = String::new();
-                let _ = child
-                    .stdout
-                    .take()
-                    .map(|mut out| out.read_to_string(&mut text));
-                break text;
-            }
+            Ok(Some(_)) => break join_stdout(reader.take()),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = join_stdout(reader.take());
                 bail!("classify outlived the brief deadline");
             }
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = join_stdout(reader.take());
                 bail!(format!("wait: {e}"));
             }
         }
@@ -157,11 +173,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_hook_labels_are_the_intent_table_plus_none() {
-        let mut labels: Vec<&str> = INTENTS.iter().map(|kind| kind.label).collect();
-        labels.push(NONE_LABEL);
-        assert_eq!(labels.len(), 8);
-        assert!(labels.contains(&"none"));
+    fn labels_should_build_exact_classifier_arguments_including_none() {
+        let args = judge_args("typed prompt");
+        assert_eq!(
+            args,
+            [
+                "classify",
+                "typed prompt",
+                "--json",
+                "--context",
+                INTENT_CONTEXT,
+                "--label",
+                "bugfix",
+                "--criterion",
+                "bugfix=something that used to work or should work is broken; the prompt asks to find and fix the defect",
+                "--label",
+                "feature",
+                "--criterion",
+                "feature=add new behaviour, a command, an option or an integration that does not exist yet",
+                "--label",
+                "refactor",
+                "--criterion",
+                "refactor=restructure, rename, move or clean up existing code without changing what it does",
+                "--label",
+                "investigate",
+                "--criterion",
+                "investigate=understand how something works or why it behaves as it does before any change; no edit asked yet",
+                "--label",
+                "question",
+                "--criterion",
+                "question=a direct question to answer in prose, about the code, a tool or a concept; no change asked",
+                "--label",
+                "review",
+                "--criterion",
+                "review=review, audit or critique existing changes, a diff or a pull request",
+                "--label",
+                "ops",
+                "--criterion",
+                "ops=operate the repository or its tooling: git state, branches, installs, CI, releases, environment",
+                "--label",
+                "none",
+                "--criterion",
+                "none=not a coding task: chat, a git or release request, prose, or anything the other labels do not cover",
+            ]
+        );
     }
 
     #[test]

@@ -23,6 +23,8 @@ unavailable, continue normally.
 
 ## Retrieval commands
 
+`pixel brief '<prompt>' [path]` prints the bounded `[PIXEL:BRIEF]` evidence context for a code-related prompt in an indexed repository; omit `[path]` to use the current directory. No applicable brief prints nothing.
+
 No brief, or it falls short. Carry the uid (`path#name#kind`) from
 `find-symbol` forward; a bare name gives "0 callers". An ambiguous name prints
 candidate uids: re-run with one.

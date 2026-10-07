@@ -168,6 +168,7 @@ fi
 overall_rc=0
 for task in "${TASK_LIST[@]}"; do
   prompt=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "/prompts/$task.json")
+  t0=$(date +%s)
   if [ "${ARM_TOOL:-raw}" = "pixel-chain" ]; then
     # the evidence chain runs first; the agent gets the compact brief, not
     # raw command output — chain cost lands inside this task's wall time
@@ -179,7 +180,6 @@ $brief"
     fi
   fi
   tag="${ARM_TOOL}-${task}-${REP}"
-  t0=$(date +%s)
   # The container is the sandbox: docker's default seccomp blocks codex's
   # bubblewrap namespaces, so read-only mode would fail every command.
   codex exec --json --sandbox danger-full-access --skip-git-repo-check \

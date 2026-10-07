@@ -184,12 +184,13 @@ fn is_retired_global_guard(entry: &Value, exe: &Path) -> bool {
 /// Whether a global `hooks.json` entry would run Pixel's Antigravity guard
 /// beside the plugin's: enabled, with a guard handler under `PreToolUse` or
 /// `PreInvocation` (Antigravity runs the two events independently).
-fn runs_global_guard(entry: &Value) -> bool {
+fn runs_global_guard(entry: &Value, exe: &Path) -> bool {
     entry.get("enabled") != Some(&Value::Bool(false))
         && global_entry_commands(entry).is_some_and(|commands| {
             commands.iter().any(|(event, command)| {
                 matches!(*event, "PreToolUse" | "PreInvocation")
-                    && command.contains("run-hook guard --provider antigravity")
+                    && crate::routing::pixel_run_hook_verb(command, exe)
+                        == Some("guard --provider antigravity")
             })
         })
 }
@@ -249,7 +250,7 @@ pub fn remove_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<Ins
             ));
         }
         Some(entry) if !is_retired_global_guard(entry, exe) => {
-            let (status, note) = if runs_global_guard(entry) {
+            let (status, note) = if runs_global_guard(entry, exe) {
                 (
                     CheckStatus::Yellow,
                     "; it still runs Pixel's guard beside the plugin, remove it by hand",
@@ -317,7 +318,7 @@ pub fn install_gemini_brief(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         })?;
     let command = format!(
         "{} run-hook task-event --provider gemini --event prompt-submit",
-        shell_quote(exe)
+        crate::routing::quoted_executable(exe)
     );
     let groups = hooks
         .entry("BeforeAgent")
@@ -333,7 +334,10 @@ pub fn install_gemini_brief(home: &Path, exe: &Path, dry_run: bool) -> Result<In
                 !hook
                     .get("command")
                     .and_then(Value::as_str)
-                    .is_some_and(|cmd| cmd.contains("task-event --provider gemini"))
+                    .is_some_and(|cmd| {
+                        crate::routing::pixel_run_hook_verb(cmd, exe)
+                            == Some("task-event --provider gemini --event prompt-submit")
+                    })
             });
         }
     }
@@ -402,7 +406,7 @@ pub fn install_antigravity_brief(home: &Path, exe: &Path, dry_run: bool) -> Resu
         "enabled": true,
         "PreInvocation": [{
             "type": "command",
-            "command": format!("{} run-hook task-event --provider antigravity --event prompt-submit", shell_quote(exe)),
+            "command": format!("{} run-hook task-event --provider antigravity --event prompt-submit", crate::routing::quoted_executable(exe)),
             "timeout": 10
         }]
     });
@@ -411,16 +415,6 @@ pub fn install_antigravity_brief(home: &Path, exe: &Path, dry_run: bool) -> Resu
         CheckStatus::Green,
         "registered the prompt brief hook for Antigravity".into(),
     ))
-}
-
-/// An executable path inside a hooks.json command line.
-fn shell_quote(exe: &Path) -> String {
-    let text = exe.display().to_string();
-    if text.chars().any(char::is_whitespace) {
-        format!("'{text}'")
-    } else {
-        text
-    }
 }
 
 /// `pixel doctor` check: Antigravity keeps its native tools, so no Pixel
@@ -696,7 +690,7 @@ mod tests {
             (
                 "another program's run-hook guard",
                 retired_global_guard("/usr/local/bin/notpixel"),
-                CheckStatus::Yellow,
+                CheckStatus::Green,
             ),
             (
                 "a key pixel never wrote",
@@ -732,17 +726,60 @@ mod tests {
         let guard = json!({"type": "command",
             "command": "'/usr/local/bin/pixel' run-hook guard --provider antigravity"});
         let pre_invocation_only = json!({"enabled": true, "PreInvocation": [guard.clone()]});
-        assert!(runs_global_guard(&pre_invocation_only));
+        let exe = Path::new("/usr/local/bin/pixel");
+        assert!(runs_global_guard(&pre_invocation_only, exe));
         // Not first in its group, behind a user's own handler.
         let pre_tool_second = json!({"PreToolUse": [{"matcher": "*", "hooks": [
             {"type": "command", "command": "user-audit"}, guard.clone()]}]});
-        assert!(runs_global_guard(&pre_tool_second));
+        assert!(runs_global_guard(&pre_tool_second, exe));
         let disabled = json!({"enabled": false, "PreInvocation": [guard.clone()]});
-        assert!(!runs_global_guard(&disabled));
+        assert!(!runs_global_guard(&disabled, exe));
         let metrics_only = json!({"PostToolUse": [{"matcher": "*", "hooks": [
             {"type": "command",
              "command": "'/usr/local/bin/pixel' run-hook metrics --provider antigravity"}]}]});
-        assert!(!runs_global_guard(&metrics_only));
+        assert!(!runs_global_guard(&metrics_only, exe));
+        let foreign_guard = json!({"enabled": true, "PreInvocation": [{
+            "type": "command",
+            "command": "/opt/notpixel run-hook guard --provider antigravity"
+        }]});
+        assert!(!runs_global_guard(&foreign_guard, exe));
+    }
+
+    #[test]
+    fn gemini_brief_should_replace_only_pixel_owned_hooks_and_quote_executable() {
+        let home = tempfile::tempdir().unwrap();
+        let settings = home.path().join(".gemini/settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            serde_json::to_vec(&json!({
+                "hooks": {
+                    "BeforeAgent": [{
+                        "matcher": "*",
+                        "hooks": [
+                            {"type": "command", "command": "'/opt/pixel/pixel' run-hook task-event --provider gemini --event prompt-submit"},
+                            {"type": "command", "command": "/opt/notpixel run-hook task-event --provider gemini --event prompt-submit"}
+                        ]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        install_gemini_brief(home.path(), Path::new("/opt/pixel's tools/pixel"), false).unwrap();
+
+        let installed: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+        let groups = installed["hooks"]["BeforeAgent"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups[0]["hooks"][0]["command"],
+            "/opt/notpixel run-hook task-event --provider gemini --event prompt-submit"
+        );
+        assert_eq!(
+            groups[1]["hooks"][0]["command"],
+            "'/opt/pixel'\\''s tools/pixel' run-hook task-event --provider gemini --event prompt-submit"
+        );
     }
 
     #[cfg(unix)]

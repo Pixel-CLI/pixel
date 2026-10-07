@@ -624,6 +624,23 @@ mod tests {
     }
 
     #[test]
+    fn install_should_generate_the_managed_pi_brief_hook() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = configure_pi(home.path(), &json!({}));
+        let exe = Path::new("/opt/pixel tools/pixel");
+
+        install(&paths, exe, false, false).unwrap();
+
+        let brief =
+            fs::read_to_string(paths.package_dir.join("extensions/pixel-brief.ts")).unwrap();
+        assert!(brief.contains("const PIXEL_BIN = \"/opt/pixel tools/pixel\";"));
+        assert!(brief.contains("pi.on(\"before_agent_start\""));
+        assert!(brief.contains("\"brief\", prompt"));
+        assert!(brief.contains(config::MANAGED_BEGIN));
+        assert!(brief.contains(config::MANAGED_END));
+    }
+
+    #[test]
     fn resolve_should_honour_the_agent_dir_variable_only_for_the_real_home() {
         let home = Path::new("/home/someone");
         let variable = Some("/srv/pi-agent".into());

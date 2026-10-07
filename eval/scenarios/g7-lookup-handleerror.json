@@ -8,7 +8,7 @@
   "prompt": "Where is `handleError` defined in this repository? Give the file path, the line, and the exact signature.",
   "must": [
     { "pattern": "packages/ui/handleError\\.ts", "points": 4, "why": "definition file" },
-    { "pattern": "export const handleError|: *4\\b|line 4", "points": 3, "why": "definition site line 4" },
-    { "pattern": "Error|string", "points": 3, "why": "signature mentions param/return" }
+    { "pattern": "packages/ui/handleError\\.ts.{0,100}(?::4\\b|line\\s+4)", "points": 3, "why": "definition path and line 4" },
+    { "pattern": "(?:const|function)\\s+handleError.{0,120}(?:Error|string)", "points": 3, "why": "handleError signature mentions param or return type" }
   ]
 }

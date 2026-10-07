@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
 # Bounded Pixel evidence chain: prompt -> anchors -> conditional ops -> brief.
 # Each later step only runs if the prior evidence narrowed the task. Hard
 # budget: 4 pixel ops. Never forces pixel, never blocks native tools.
@@ -9,8 +11,22 @@ import sys
 
 BUDGET_OPS = 4
 ops: list[dict] = []
-brief: dict = {"anchors": [], "files": [], "symbols": [], "callers": [],
+brief: dict = {"anchors": [], "files": [], "symbols": [], "symbol_candidates": [], "callers": [],
                "exclusions": [], "unresolved": [], "ops": ops}
+
+
+def resolve_symbol_uid(data: dict, name: str, path_anchors: list[str]) -> str | None:
+    symbols = [item for item in data.get("symbols", [])
+               if item.get("name") == name and item.get("uid")]
+    if not symbols:
+        return None
+    anchored = [item for item in symbols
+                if any(item.get("path", "").endswith(path) for path in path_anchors)]
+    if len(anchored) == 1:
+        return anchored[0]["uid"]
+    if len(symbols) == 1 and not path_anchors:
+        return symbols[0]["uid"]
+    return None
 
 
 def px(*args: str) -> str:
@@ -66,11 +82,38 @@ def main(prompt: str) -> None:
     brief["files"] = files
 
     # --- step 2: change/caller intent -> graph evidence on resolved symbol ---
-    symbol = anchors[0].split("/")[-1].rsplit(".", 1)[0] if anchors else ""
+    path_anchors = [anchor for anchor in anchors if "/" in anchor]
+    symbol = next((anchor for anchor in anchors if "/" not in anchor), "")
+    symbol = symbol.split("::")[-1] if symbol else ""
+    if not symbol and path_anchors:
+        symbol = path_anchors[0].rsplit("/", 1)[-1].rsplit(".", 1)[0]
     if change_intent and symbol:
-        out = px("impact", symbol, "--json")
+        symbol_data = {}
+        try:
+            symbol_data = json.loads(px("find-symbol", "--json", symbol))
+        except ValueError:
+            brief["unresolved"].append(f"find-symbol {symbol} returned invalid JSON")
+        uid = resolve_symbol_uid(symbol_data, symbol, path_anchors)
+        rows = [item for item in symbol_data.get("symbols", [])
+                if item.get("name") == symbol and item.get("uid")]
+        if uid:
+            selected = next(item for item in rows if item["uid"] == uid)
+            brief["symbols"].append(selected)
+        elif len(rows) > 1:
+            brief["unresolved"].append(
+                f"find-symbol {symbol}: {len(rows)} candidates, no unique path match; "
+                "impact queried by name for candidates")
+        out = px("impact", uid or symbol, "--json")
         try:
             d = json.loads(out)
+            for candidate in d.get("candidates", []):
+                brief["symbol_candidates"].append({
+                    "uid": candidate.get("uid"),
+                    "path": candidate.get("path"),
+                    "name": candidate.get("name"),
+                    "kind": candidate.get("kind"),
+                    "start_line": candidate.get("start_line", candidate.get("line")),
+                })
             seen: set[str] = set()
             for x in d.get("d1_will_break", []):
                 key = f"{x['path']}#{x['name']}"
@@ -85,9 +128,15 @@ def main(prompt: str) -> None:
     brief["budget"] = {"ops_used": len(ops), "ops_max": BUDGET_OPS}
     brief["confidence"] = "high" if brief["callers"] else (
         "medium" if files else "low")
+    has_citations = any(item.get("path") and item.get("start_line")
+                        for item in brief["symbols"] + brief["symbol_candidates"]) or any(
+                            item.get("file") and item.get("line")
+                            for item in brief["callers"])
     brief["native_fallback"] = (
-        "the cited evidence is current and indexed — answer from it directly; "
-        "open a cited region only if it contradicts the claim you would make")
+        "this brief includes path:line citations; answer only from the cited evidence, "
+        "opening a cited region only to check a contradiction" if has_citations else
+        "this brief has no path:line citations; use native repository search before "
+        "making claims")
 
 
 def render(b: dict) -> str:
@@ -99,7 +148,16 @@ def render(b: dict) -> str:
         lines += [f"  {f}" for f in b["files"]]
     if b["callers"]:
         lines.append("callers via import graph (impact):")
-        lines += [f"  {c['file']} -> {c['via']}" for c in b["callers"]]
+        lines += [f"  {c['file']}:{c['line']} -> {c['via']}" if c.get("line")
+                  else f"  {c['file']} -> {c['via']}" for c in b["callers"]]
+    if b["symbols"]:
+        lines.append("resolved symbols:")
+        lines += [f"  {s['path']}:{s['start_line']} {s['name']} [{s['kind']}]"
+                  for s in b["symbols"] if s.get("path") and s.get("start_line")]
+    if b["symbol_candidates"]:
+        lines.append("impact candidates (unresolved):")
+        lines += [f"  {s['path']}:{s['start_line']} {s['name']} [{s['kind']}] {s['uid']}"
+                  for s in b["symbol_candidates"] if s.get("path") and s.get("start_line")]
     site = next((a for a in b["anchors"] if "/" in a), "")
     if site:
         lines.append(f"definition site (also changes): {site}")

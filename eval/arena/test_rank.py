@@ -11,7 +11,7 @@ from pathlib import Path
 
 from rank import rank_results
 from context_manifest import collect_manifest
-from score import load_result
+from score import load_result, score_answer
 
 
 def write_scenario(folder, name, patterns):
@@ -396,6 +396,37 @@ class RankResultsTests(unittest.TestCase):
                               if expected_input is not None and expected_output is not None
                               else None)
             self.assertEqual(raw_row["tokens"], expected_total, name)
+
+
+    def test_rename_rubric_requires_each_expected_path_and_caller_together(self):
+        scenario = json.loads((Path(__file__).parents[1] / "scenarios" /
+                               "g4-rename-impact.json").read_text())
+        names_only, _, _ = score_answer("SignOnComponent SuggestForm Contact", scenario)
+        path_and_caller, _, _ = score_answer(
+            "packages/login/SignOn.tsx SignOnComponent\n"
+            "apps/feedback/Suggest.tsx SuggestForm\n"
+            "apps/site/Contact.tsx Contact", scenario)
+
+        self.assertEqual(names_only, 0)
+        self.assertEqual(path_and_caller, 5)
+
+    def test_lookup_rubrics_require_definition_line_and_signature(self):
+        scenarios = Path(__file__).parents[1] / "scenarios"
+        handle_error = json.loads((scenarios / "g7-lookup-handleerror.json").read_text())
+        custom_menu = json.loads((scenarios / "g8-lookup-custommenu.json").read_text())
+
+        path_only, _, _ = score_answer("packages/ui/handleError.ts Error", handle_error)
+        signature, _, _ = score_answer(
+            "packages/ui/handleError.ts:4 export const handleError = "
+            "(error: Error): string", handle_error)
+        export_only, _, _ = score_answer("export const CustomMenu", custom_menu)
+        definition, _, _ = score_answer(
+            "packages/ui/CustomMenu.ts:48 exports defineMultiStyleConfig", custom_menu)
+
+        self.assertEqual(path_only, 4)
+        self.assertEqual(signature, 10)
+        self.assertEqual(export_only, 0)
+        self.assertEqual(definition, 10)
 
 
 if __name__ == "__main__":

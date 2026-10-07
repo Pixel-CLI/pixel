@@ -7,14 +7,14 @@
   "max_turns": 30,
   "prompt": "The shared helper handleError in packages/ui/handleError.ts is being renamed to reportError. List every file that would need to change because it imports or calls handleError — do not modify anything, just produce the complete list of affected files with the importing symbol or component for each.",
   "must": [
-    {"pattern": "SignOnComponent", "points": 2, "why": "packages/login caller"},
-    {"pattern": "SuggestForm", "points": 2, "why": "apps/feedback caller"},
-    {"pattern": "AnswerForm", "points": 2, "why": "apps/feedback caller"},
-    {"pattern": "playground", "points": 1, "why": "apps/feedback playground caller"},
-    {"pattern": "Business", "points": 1, "why": "apps/project caller"},
-    {"pattern": "Chatbot", "points": 1, "why": "apps/site caller"},
-    {"pattern": "Contact", "points": 1, "why": "apps/site + apps/project callers"},
-    {"pattern": "packages/ui", "points": 2, "why": "definition package"}
+    {"pattern": "(?im)^(?=.*packages/login/)(?=.*SignOnComponent).*$", "points": 2, "why": "login path and caller"},
+    {"pattern": "(?im)^(?=.*apps/feedback/)(?=.*SuggestForm).*$", "points": 2, "why": "feedback path and caller"},
+    {"pattern": "(?im)^(?=.*apps/feedback/)(?=.*AnswerForm).*$", "points": 2, "why": "feedback path and caller"},
+    {"pattern": "(?im)^(?=.*apps/feedback/)(?=.*playground).*$", "points": 1, "why": "feedback playground path and caller"},
+    {"pattern": "(?im)^(?=.*apps/project/)(?=.*Business).*$", "points": 1, "why": "project path and caller"},
+    {"pattern": "(?im)^(?=.*apps/site/)(?=.*Chatbot).*$", "points": 1, "why": "site path and caller"},
+    {"pattern": "(?im)^(?=.*apps/(?:site|project)/)(?=.*Contact).*$", "points": 1, "why": "site or project path and caller"},
+    {"pattern": "(?im)^(?=.*packages/ui/)(?=.*handleError).*$", "points": 2, "why": "definition path and symbol"}
   ],
   "never": [
     {"pattern": "modified|edited|updated the file", "why": "answer-only task"}

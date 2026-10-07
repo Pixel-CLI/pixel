@@ -1077,6 +1077,21 @@ fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
     envelope(provider, event, &with_brief(decision, brief))
 }
 
+fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -> Option<String> {
+    if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {
+        return None;
+    }
+    match provider {
+        TaskProvider::Antigravity => {
+            if payload.get("invocationNum").and_then(Value::as_u64) != Some(0) {
+                return None;
+            }
+            antigravity_prompt(payload)
+        }
+        _ => string(payload, &["prompt"]).map(str::to_string),
+    }
+}
+
 /// Start the evidence brief for a Claude or Codex prompt; Pi, every other
 /// event and a prompt outside a repository start none.
 fn start_brief(
@@ -1084,22 +1099,7 @@ fn start_brief(
     event: TaskHookEvent,
     payload: &Value,
 ) -> Option<crate::execution_brief::chain::Pending> {
-    if provider == TaskProvider::Pi || event != TaskHookEvent::PromptSubmit {
-        return None;
-    }
-    let prompt = match provider {
-        // Antigravity's PreInvocation payload carries no prompt; it points
-        // at the session transcript. `invocationNum == 0` is the first model
-        // call of a turn — the prompt-submit equivalent; later calls get
-        // nothing.
-        TaskProvider::Antigravity => {
-            if payload.get("invocationNum").and_then(Value::as_u64) != Some(0) {
-                return None;
-            }
-            antigravity_prompt(payload)?
-        }
-        _ => string(payload, &["prompt"])?.to_string(),
-    };
+    let prompt = brief_prompt(provider, event, payload)?;
     let root = crate::discover_root(&payload_cwd(payload)).ok()?;
     crate::execution_brief::chain::start(&prompt, &root)
 }
@@ -2188,5 +2188,106 @@ mod tests {
             .is_none()
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn antigravity_prompt_should_parse_user_text_and_ignore_other_roles() {
+        let path = std::env::temp_dir().join(format!(
+            "pixel-antigravity-transcript-{}",
+            std::process::id()
+        ));
+        for (content, field, expected) in [
+            (json!("string prompt"), "content", "string prompt"),
+            (json!(null), "text", "text prompt"),
+            (
+                json!([{"text":"first part"}, {"image":"ignored"}, {"text":"second part"}]),
+                "content",
+                "first part\nsecond part",
+            ),
+        ] {
+            let mut user = json!({"role":"user"});
+            user[field] = content;
+            std::fs::write(
+                &path,
+                [
+                    json!({"role":"assistant","content":"assistant text"}).to_string(),
+                    user.to_string(),
+                ]
+                .join("\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                antigravity_prompt(&json!({"transcriptPath":path})).as_deref(),
+                Some(expected)
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn prompt_dispatch_should_gate_antigravity_and_accept_gemini_before_agent() {
+        let path =
+            std::env::temp_dir().join(format!("pixel-antigravity-dispatch-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            json!({"role":"user","content":"where is fetchUser defined?"}).to_string(),
+        )
+        .unwrap();
+        let antigravity = json!({"invocationNum":0,"transcriptPath":path});
+        assert_eq!(
+            brief_prompt(
+                TaskProvider::Antigravity,
+                TaskHookEvent::PromptSubmit,
+                &antigravity
+            )
+            .as_deref(),
+            Some("where is fetchUser defined?")
+        );
+        assert!(
+            brief_prompt(
+                TaskProvider::Antigravity,
+                TaskHookEvent::PromptSubmit,
+                &json!({"invocationNum":1,"transcriptPath":path})
+            )
+            .is_none()
+        );
+        assert_eq!(
+            brief_prompt(
+                TaskProvider::Gemini,
+                TaskHookEvent::PromptSubmit,
+                &json!({"prompt":"where is fetchUser defined?"})
+            )
+            .as_deref(),
+            Some("where is fetchUser defined?")
+        );
+        assert!(
+            brief_prompt(
+                TaskProvider::Gemini,
+                TaskHookEvent::SessionStart,
+                &json!({"prompt":"where is fetchUser defined?"})
+            )
+            .is_none()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn gemini_and_antigravity_should_receive_their_prompt_context_envelopes() {
+        let decision = json!({"decision":"observe","context":"[PIXEL:BRIEF]\nfiles: src/a.ts:2"});
+        assert_eq!(
+            envelope(TaskProvider::Gemini, TaskHookEvent::PromptSubmit, &decision),
+            json!({"hookSpecificOutput":{
+                "hookEventName":"BeforeAgent",
+                "additionalContext":"[PIXEL:BRIEF]\nfiles: src/a.ts:2"
+            }})
+        );
+        assert_eq!(
+            envelope(
+                TaskProvider::Antigravity,
+                TaskHookEvent::PromptSubmit,
+                &decision
+            ),
+            json!({"injectSteps":[{"ephemeralMessage":"[PIXEL:BRIEF]\nfiles: src/a.ts:2"}]})
+        );
     }
 }

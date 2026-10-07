@@ -15,8 +15,7 @@
 #                      [--assert-context-parity] [--prepare-pixel-graph]
 #                      [--review-pixel-hooks] [--skill-candidate-dir DIR]
 #   --watch opens one Herdr pane per arm container (when inside Herdr)
-#   running `docker exec -it <c> codex` — interactive codex with and
-#   without pixel side by side; falls back to a tmux session otherwise.
+#   streaming the measured agent output; falls back to a tmux session otherwise.
 # Results: <results-dir>/<arm>-<task>-<rep>.jsonl + rank table.
 set -euo pipefail
 ARENA_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -174,11 +173,10 @@ PY
 
 
 # --- --watch helpers (defined here; invoked per rep-1 container at launch) ---
-# The drill, deterministic: split opens the moment the container starts, the
-# pane is renamed, codex launches pinned to the arena model, trust dialogs
-# are auto-answered, then the first task prompt is pasted and submitted.
+# The pane follows the measured Codex task output; it never starts a second
+# agent or submits another prompt against the measured repository.
 open_watch_pane() {  # container arm
-  local c="$1" arm="$2" wp
+  local c="$1" arm="$2" wp task log_path monitor_cmd
   wp=$(herdr pane split --current --direction right --no-focus \
     | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['pane']['pane_id'])" 2>/dev/null || true)
   if [ -z "$wp" ]; then
@@ -186,41 +184,12 @@ open_watch_pane() {  # container arm
     return 0
   fi
   echo "$wp" >> "$RESULTS/.watch-panes"
-  herdr pane rename "$wp" "arena-$arm" >/dev/null 2>&1
-  # YOLO: no approvals, no sandbox (docker is the sandbox), and hook trust
-  # bypassed so the pixel arm never parks on its hooks dialog
-  herdr pane run "$wp" \
-    "docker exec -it $c codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -m $CODEX_MODEL -c model_reasoning_effort=$CODEX_EFFORT" >/dev/null 2>&1
-  local prompt
-  prompt="$(prompt_for "$(echo "$TASKS" | cut -d' ' -f1)")"
-  (
-    pane_id="$wp"
-    for _ in $(seq 1 90); do
-      screen=$(herdr pane read "$pane_id" 2>/dev/null | tail -20)
-      case "$screen" in
-        *"Trust and continue"*)
-          herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
-        *"Trust all and continue"*)
-          # hooks dialog: default row is per-hook; pick "trust all"
-          herdr pane send-keys "$pane_id" Down >/dev/null 2>&1
-          sleep 1
-          herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
-        *"Usage limit"*"1. Close"*)
-          herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
-        *"enter continue"*"esc quit"*)
-          # codex startup notice — acknowledge and proceed
-          herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
-        *"Ask Codex"*)
-          if [ -n "$prompt" ]; then
-            herdr pane send-text "$pane_id" "$prompt" >/dev/null 2>&1
-            sleep 2   # Enter must land after the paste, never before
-            herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1
-          fi
-          exit 0 ;;
-      esac
-      sleep 2
-    done
-  ) &
+  herdr pane rename "$wp" "arena-$RUN_ID-$arm" >/dev/null 2>&1
+  task="${TASKS%% *}"
+  log_path="/out/${arm}-${task}-1.jsonl"
+  printf -v monitor_cmd 'docker exec -it %q sh -c %q sh %q' "$c" \
+    'while [ ! -f "$1" ]; do sleep 1; done; tail -n +1 -f "$1"' "$log_path"
+  herdr pane run "$wp" "$monitor_cmd" >/dev/null 2>&1
 }
 
 # Equalize all panes in the tab to identical column widths: probe the layout
@@ -509,10 +478,11 @@ if [ "$WATCH" = "1" ] && [ -n "${HERDR_ENV:-}" ] && command -v herdr >/dev/null 
   fi
   for stale_pane in $(herdr pane list 2>/dev/null | python3 -c \
     "import json,sys
+run_prefix = 'arena-' + sys.argv[1] + '-'
 for p in json.load(sys.stdin)['result']['panes']:
     label = p.get('label') or ''
-    if label.startswith(('arena-', 'ab-')):
-        print(p['pane_id'])" 2>/dev/null); do
+    if label.startswith(run_prefix):
+        print(p['pane_id'])" "$RUN_ID" 2>/dev/null); do
     herdr pane close "$stale_pane" >/dev/null 2>&1
   done
 fi
