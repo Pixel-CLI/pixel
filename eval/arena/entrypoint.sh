@@ -54,6 +54,11 @@ prep_pixel() {
     prep_start_ms=$(date +%s%3N) || return $?
   fi
   pixel install || return $?
+  # the classify skill is the conditional-routing surface Codex sees;
+  # non-interactive installs skip the wizard, so deploy it explicitly —
+  # without this the pixel arm has pixel installed but undiscoverable
+  # optional on older binaries: ignore unknown-subcommand failures
+  pixel config install-helpers 2>/dev/null || true
   if [ "${PIXEL_ARENA_PREP_GRAPH:-0}" = "1" ]; then
     graph_db="$REPO_DIR/.pixel/graph.v2.db"
     setup_receipt="/out/setup-pixel-${REP:-1}.json"
@@ -90,6 +95,7 @@ if [ "$SKILL_PILOT" = "1" ]; then
   prep_rc=$?
 else
 case "${ARM_TOOL:-raw}" in
+  pixel-chain) prep_pixel ;;
   raw)      : ;;
   semble)   prep_semble ;;
   graft)    prep_graft ;;
@@ -162,6 +168,16 @@ fi
 overall_rc=0
 for task in "${TASK_LIST[@]}"; do
   prompt=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "/prompts/$task.json")
+  if [ "${ARM_TOOL:-raw}" = "pixel-chain" ]; then
+    # the evidence chain runs first; the agent gets the compact brief, not
+    # raw command output — chain cost lands inside this task's wall time
+    brief=$(python3 /usr/local/bin/arena-brief.py "$prompt" 2>/dev/null || true)
+    if [ -n "$brief" ]; then
+      prompt="$prompt
+
+$brief"
+    fi
+  fi
   tag="${ARM_TOOL}-${task}-${REP}"
   t0=$(date +%s)
   # The container is the sandbox: docker's default seccomp blocks codex's

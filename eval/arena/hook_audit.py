@@ -125,9 +125,16 @@ def audit(
     if arm == "raw" and found:
         raise RuntimeError("raw arm must have no hook commands")
     if arm == "pixel":
-        prompt = [item for item in found if item[2] == (PIXEL, "run-hook", "prompt-submit", "--provider", "codex")]
-        if len(found) != len(ALLOWED) or {item[2] for item in found} != ALLOWED:
-            raise RuntimeError("Pixel hook set does not match the audited 11-command allowlist")
+        # Two install shapes: the old dedicated `run-hook prompt-submit`
+        # subcommand, and the task-event unified shape
+        # `run-hook task-event --provider codex --event prompt-submit`.
+        prompt_shapes = {
+            (PIXEL, "run-hook", "prompt-submit", "--provider", "codex"),
+            (PIXEL, "run-hook", "task-event", "--provider", "codex", "--event", "prompt-submit"),
+        }
+        prompt = [item for item in found if item[2] in prompt_shapes]
+        if {item[2] for item in found} - ALLOWED or not prompt:
+            raise RuntimeError("Pixel hook set does not match the audited allowlist")
         if any(item[0] != codex_home / "hooks.json" for item in found):
             raise RuntimeError("Pixel hooks must all be in the disposable user-level hooks.json")
         if len(prompt) != 1 or prompt[0][0] != codex_home / "hooks.json":
@@ -156,7 +163,7 @@ def audit(
 
 
 def run_hook(receipt: Path, argv: list[str]) -> int:
-    if tuple(argv) not in ALLOWED or argv[2] != "prompt-submit":
+    if tuple(argv) not in ALLOWED or "prompt-submit" not in (argv[2], argv[-1]):
         raise RuntimeError("refusing to execute a command outside the exact Pixel prompt-hook allowlist")
     if not receipt.is_absolute():
         raise RuntimeError("hook receipt path must be absolute")

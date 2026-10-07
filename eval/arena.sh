@@ -172,7 +172,105 @@ receipt = {
 PY
 : > "$RESULTS/.watch-panes"
 
+
+# --- --watch helpers (defined here; invoked per rep-1 container at launch) ---
+# The drill, deterministic: split opens the moment the container starts, the
+# pane is renamed, codex launches pinned to the arena model, trust dialogs
+# are auto-answered, then the first task prompt is pasted and submitted.
+open_watch_pane() {  # container arm
+  local c="$1" arm="$2" wp
+  wp=$(herdr pane split --current --direction right --no-focus \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['pane']['pane_id'])" 2>/dev/null || true)
+  if [ -z "$wp" ]; then
+    echo "WARNING: herdr pane split failed; $c logs via 'docker logs -f $c'" >&2
+    return 0
+  fi
+  echo "$wp" >> "$RESULTS/.watch-panes"
+  herdr pane rename "$wp" "arena-$arm" >/dev/null 2>&1
+  # YOLO: no approvals, no sandbox (docker is the sandbox), and hook trust
+  # bypassed so the pixel arm never parks on its hooks dialog
+  herdr pane run "$wp" \
+    "docker exec -it $c codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -m $CODEX_MODEL -c model_reasoning_effort=$CODEX_EFFORT" >/dev/null 2>&1
+  local prompt
+  prompt="$(prompt_for "$(echo "$TASKS" | cut -d' ' -f1)")"
+  (
+    pane_id="$wp"
+    for _ in $(seq 1 90); do
+      screen=$(herdr pane read "$pane_id" 2>/dev/null | tail -20)
+      case "$screen" in
+        *"Trust and continue"*)
+          herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
+        *"Trust all and continue"*)
+          # hooks dialog: default row is per-hook; pick "trust all"
+          herdr pane send-keys "$pane_id" Down >/dev/null 2>&1
+          sleep 1
+          herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
+        *"Usage limit"*"1. Close"*)
+          herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
+        *"enter continue"*"esc quit"*)
+          # codex startup notice — acknowledge and proceed
+          herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
+        *"Ask Codex"*)
+          if [ -n "$prompt" ]; then
+            herdr pane send-text "$pane_id" "$prompt" >/dev/null 2>&1
+            sleep 2   # Enter must land after the paste, never before
+            herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1
+          fi
+          exit 0 ;;
+      esac
+      sleep 2
+    done
+  ) &
+}
+
+# Equalize all panes in the tab to identical column widths: probe the layout
+# with a zero-delta resize (returns geometry, moves nothing), then drag each
+# column boundary to i/N of the row width until every column matches.
+equalize_watch_panes() {
+  python3 - <<'PYEQ' 2>/dev/null || true
+import json, subprocess, time
+
+def herdr(*a):
+    try:
+        return json.loads(subprocess.run(
+            ["herdr", *a], capture_output=True, text=True, timeout=15).stdout)
+    except Exception:
+        return None
+
+def layout(pane):
+    r = herdr("pane", "resize", "--pane", pane, "--direction", "left",
+              "--amount", "0")
+    try:
+        return r["result"]["resize"]["layout"]
+    except (TypeError, KeyError):
+        return {}
+
+panes = herdr("pane", "list")
+anchor = next((p["pane_id"] for p in (panes or {}).get("result", {}).get("panes", [])), "")
+for _ in range(12):
+    lay = layout(anchor)
+    cols = sorted(lay.get("panes", []), key=lambda p: p["rect"]["x"])
+    if len(cols) < 2:
+        break
+    width = lay["area"]["width"]
+    moved = False
+    for k in range(len(cols) - 1):
+        gap = cols[k + 1]["rect"]["x"] - round(width * (k + 1) / len(cols))
+        if abs(gap) <= 1:
+            continue
+        herdr("pane", "resize", "--pane", cols[k + 1]["pane_id"],
+              "--direction", "left" if gap > 0 else "right",
+              "--amount", str(round(abs(gap) / width, 3)))
+        moved = True
+        break
+    if not moved:
+        break
+    time.sleep(0.1)
+PYEQ
+}
+
 prompt_for() { python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "$SCENARIOS_DIR/$1.json"; }
+
 
 scrub_pixel_lines() {
   local path="$1" temp="${1}.scrubbed" status
@@ -317,6 +415,11 @@ PY
     return 1
   fi
   echo "launched arm=$arm container=$container image=$actual_image"
+  # panes open the moment the container exists — never wait for reps to finish
+  if [ "$rep" = "1" ] && [ "$WATCH" = "1" ] && [ -n "${HERDR_ENV:-}" ] \
+    && command -v herdr >/dev/null 2>&1; then
+    open_watch_pane "$container" "$arm"
+  fi
 }
 
 ARM_IMAGE_IDS=()
@@ -396,6 +499,24 @@ CONTAINERS=()
 CONTAINER_ARMS=()
 CONTAINER_REPS=()
 LAUNCH_FAIL=0
+if [ "$WATCH" = "1" ] && [ -n "${HERDR_ENV:-}" ] && command -v herdr >/dev/null 2>&1; then
+  # close prior arena/ab panes first — even ones this run did not create —
+  # then each new rep-1 container opens its own pane as soon as it starts
+  if [ -f "$RESULTS/.watch-panes" ]; then
+    while IFS= read -r old_pane; do
+      [ -n "$old_pane" ] && herdr pane close "$old_pane" >/dev/null 2>&1
+    done < "$RESULTS/.watch-panes"
+  fi
+  for stale_pane in $(herdr pane list 2>/dev/null | python3 -c \
+    "import json,sys
+for p in json.load(sys.stdin)['result']['panes']:
+    label = p.get('label') or ''
+    if label.startswith(('arena-', 'ab-')):
+        print(p['pane_id'])" 2>/dev/null); do
+    herdr pane close "$stale_pane" >/dev/null 2>&1
+  done
+fi
+
 for rep in $(seq 1 "$REPS"); do
   # fresh snapshot per rep: prior reps' index artifacts and tool edits must
   # not leak into the next rep's starting state. Rep-scoped names —
@@ -417,6 +538,14 @@ for rep in $(seq 1 "$REPS"); do
     CONTAINER_REPS+=("$rep")
     rep_containers+=("arena-$arm-$RUN_ID-$rep")
   done
+  if [ "$rep" = "1" ] && [ "$WATCH" = "1" ] && [ -n "${HERDR_ENV:-}" ]; then
+    # all rep-1 panes exist — flatten to equal columns and label the tab
+    # immediately, before the serialized wait
+    equalize_watch_panes
+    herdr tab rename "$(herdr pane list 2>/dev/null | python3 -c \
+      "import json,sys;print(json.load(sys.stdin)['result']['panes'][0]['tab_id'])" 2>/dev/null)" \
+      "arena: $(echo "$ARMS" | tr ' ' '|')" >/dev/null 2>&1 || true
+  fi
   # serialize reps: waiting here keeps rep N+1 from racing rep N's still
   # running containers for CPU — wall times stay comparable across reps
   if [ "${#rep_containers[@]}" -gt 0 ]; then
@@ -429,41 +558,7 @@ done
 # otherwise falls back to a tiled tmux session you attach separately.
 if [ "$WATCH" = "1" ]; then
   if [ -n "${HERDR_ENV:-}" ] && command -v herdr >/dev/null 2>&1; then
-    for c in "${CONTAINERS[@]}"; do
-      watch_pane=$(herdr pane split --current --direction right \
-        | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['pane']['pane_id'])" 2>/dev/null || true)
-      if [ -n "$watch_pane" ]; then
-        echo "$watch_pane" >> "$RESULTS/.watch-panes"
-        watch_arm=${c#arena-}; watch_arm=${watch_arm%%-*}
-        herdr pane rename "$watch_pane" "arena-$watch_arm" >/dev/null 2>&1
-        # interactive codex inside the arm's container: raw pane is bare
-        # codex, pixel pane has pixel installed+indexed by the entrypoint.
-        herdr pane run "$watch_pane" \
-          "docker exec -it $c codex -m $CODEX_MODEL -c model_reasoning_effort=$CODEX_EFFORT"
-        # codex asks to trust /repo, then to trust installed hooks (pixel
-        # arm): answer both so the pane lands on the prompt, unattended.
-        (
-          pane_id="$watch_pane"
-          for _ in $(seq 1 45); do
-            screen=$(herdr pane read "$pane_id" 2>/dev/null | tail -20)
-            case "$screen" in
-              *"Trust and continue"*)
-                herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1 ;;
-              *"Trust all and continue"*)
-                herdr pane send-keys "$pane_id" Down >/dev/null 2>&1
-                sleep 1
-                herdr pane send-keys "$pane_id" Enter >/dev/null 2>&1
-                exit 0 ;;
-              *"Ask Codex"*) exit 0 ;;
-            esac
-            sleep 2
-          done
-        ) &
-      else
-        echo "WARNING: herdr pane split failed; $c logs via 'docker logs -f $c'" >&2
-      fi
-    done
-    echo "watching: herdr panes running interactive codex (${#CONTAINERS[@]} containers)"
+    echo "watching: herdr panes opened at launch (${#CONTAINERS[@]} containers)"
   elif ! command -v tmux >/dev/null 2>&1; then
     echo "WARNING: --watch needs herdr (HERDR_ENV) or tmux; neither found" >&2
   elif [ "${#CONTAINERS[@]}" -gt 0 ]; then
