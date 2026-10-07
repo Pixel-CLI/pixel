@@ -5959,7 +5959,11 @@ fn run_command(
         Command::ListErrors { cmd } => sniper_cmd::run_sniper(cmd),
         Command::Classify(options) => classify::run(options),
         Command::ClassifyEval { json } => {
-            classify_eval::run(classify_eval::ClassifyEvalOptions { json });
+            // The evaluation's verdict is its exit code (0 Go, 1 NoGo); keep
+            // it rather than returning success for a NoGo.
+            owned_exit.set(Some(classify_eval::run(
+                classify_eval::ClassifyEvalOptions { json },
+            )));
             Ok(())
         }
         Command::ClassifyHistory { cmd } => classify_history_cmd::run_classify_history(cmd),

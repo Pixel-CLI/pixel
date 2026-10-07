@@ -495,19 +495,15 @@ pub fn evaluate_baseline(baseline: &dyn Baseline, test_set: &[&EvalExample]) -> 
             } else {
                 *label_fp.entry(pred.clone()).or_insert(0) += 1;
                 *label_fn.entry(ex.label.to_string()).or_insert(0) += 1;
-                metrics
-                    .confusion
-                    .entry(ex.label.to_string())
-                    .or_default()
-                    .entry(pred.clone())
-                    .or_insert(0);
-                metrics
-                    .confusion
-                    .get_mut(ex.label)
-                    .unwrap()
-                    .entry(pred.clone())
-                    .and_modify(|c| *c += 1);
             }
+            // Every prediction fills its cell, including the diagonal: a
+            // matrix that records only misses cannot be summed per class.
+            *metrics
+                .confusion
+                .entry(ex.label.to_string())
+                .or_default()
+                .entry(pred.clone())
+                .or_insert(0) += 1;
         } else {
             *label_fn.entry(ex.label.to_string()).or_insert(0) += 1;
         }
@@ -583,7 +579,9 @@ pub fn evaluate_tier(
     let mut label_fp: BTreeMap<String, usize> = BTreeMap::new();
     let mut label_fn: BTreeMap<String, usize> = BTreeMap::new();
     let mut label_support: BTreeMap<String, usize> = BTreeMap::new();
-    let mut accept_confidences: Vec<f64> = Vec::new();
+    // One (confidence, correct) pair per accepted example: the coverage-vs-error
+    // curve needs per-example correctness, not only the aggregate.
+    let mut accept_results: Vec<(f64, bool)> = Vec::new();
 
     for ex in test_set {
         *label_support.entry(ex.label.to_string()).or_insert(0) += 1;
@@ -591,20 +589,23 @@ pub fn evaluate_tier(
         match tier.evaluate(&spec) {
             HistoryDecision::Accept(verdict) => {
                 answered += 1;
-                accept_confidences.push(verdict.confidence);
-                if verdict.label == ex.label {
+                let is_correct = verdict.label == ex.label;
+                accept_results.push((verdict.confidence, is_correct));
+                if is_correct {
                     correct += 1;
                     *label_tp.entry(ex.label.to_string()).or_insert(0) += 1;
                 } else {
                     *label_fp.entry(verdict.label.clone()).or_insert(0) += 1;
                     *label_fn.entry(ex.label.to_string()).or_insert(0) += 1;
-                    *metrics
-                        .confusion
-                        .entry(ex.label.to_string())
-                        .or_default()
-                        .entry(verdict.label.clone())
-                        .or_insert(0) += 1;
                 }
+                // Every accepted prediction fills its cell, including the
+                // diagonal, so each row sums to that class's accepted count.
+                *metrics
+                    .confusion
+                    .entry(ex.label.to_string())
+                    .or_default()
+                    .entry(verdict.label.clone())
+                    .or_insert(0) += 1;
             }
             HistoryDecision::Abstain(_) => {
                 *label_fn.entry(ex.label.to_string()).or_insert(0) += 1;
@@ -666,24 +667,32 @@ pub fn evaluate_tier(
         metrics.per_label.values().map(|m| m.recall).sum::<f64>() / n_labels as f64;
     metrics.macro_f1 = metrics.per_label.values().map(|m| m.f1).sum::<f64>() / n_labels as f64;
 
-    // Coverage-vs-error curve: sort accepted by confidence descending, then
-    // compute cumulative error at each coverage level.
-    accept_confidences.sort_by(|a, b| b.total_cmp(a));
-    let cumulative_wrong = 0usize;
-    for (i, _) in accept_confidences.iter().enumerate() {
+    // Coverage-vs-error curve over the accepted examples, highest confidence
+    // first, so every point is a real operating point of the tier's own order.
+    metrics.curve = error_curve(&mut accept_results, total);
+
+    metrics
+}
+
+/// Coverage-vs-error curve over accepted examples.
+///
+/// `accept_results` is one `(confidence, correct)` pair per accepted example;
+/// it is sorted in place by confidence descending. The error count at each
+/// prefix is the number of wrong answers seen so far — a curve that only
+/// repeated the aggregate could not show where the errors actually sit.
+fn error_curve(accept_results: &mut [(f64, bool)], total: usize) -> Vec<CurvePoint> {
+    accept_results.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut cumulative_wrong = 0usize;
+    let mut curve = Vec::with_capacity(accept_results.len());
+    for (i, (_, correct)) in accept_results.iter().enumerate() {
         let n_accepted = i + 1;
-        // We need to track which were wrong; re-derive from the confusion.
-        // For simplicity, compute error rate at each prefix.
+        if !correct {
+            cumulative_wrong += 1;
+        }
         let coverage = n_accepted as f64 / total as f64;
-        // Approximate: use overall error rate scaled by coverage.
-        // A precise curve requires per-example correctness tracking.
-        let error_rate = if n_accepted > 0 {
-            cumulative_wrong as f64 / n_accepted as f64
-        } else {
-            0.0
-        };
+        let error_rate = cumulative_wrong as f64 / n_accepted as f64;
         let (ci_low, ci_high) = wilson_interval(n_accepted - cumulative_wrong, n_accepted, 1.96);
-        metrics.curve.push(CurvePoint {
+        curve.push(CurvePoint {
             coverage,
             error_rate,
             ci_low,
@@ -691,8 +700,7 @@ pub fn evaluate_tier(
             n_accepted,
         });
     }
-
-    metrics
+    curve
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,6 +1160,69 @@ mod tests {
         assert!(metrics.coverage >= 0.0 && metrics.coverage <= 1.0);
         assert!(metrics.error_rate >= 0.0 && metrics.error_rate <= 1.0);
         assert!(metrics.macro_f1 >= 0.0 && metrics.macro_f1 <= 1.0);
+    }
+
+    /// A confusion row must carry the correct prediction on its diagonal, not
+    /// only the misses: `ExactLookupBaseline` answers one example right and one
+    /// wrong, so the row has two filled cells.
+    #[test]
+    fn a_confusion_row_counts_the_correct_prediction_too() {
+        let correct = EvalExample {
+            text: "alpha",
+            label: "bugfix",
+            family: "bugfix",
+            created_unix: 0,
+        };
+        let wrong = EvalExample {
+            text: "beta",
+            label: "bugfix",
+            family: "bugfix",
+            created_unix: 0,
+        };
+        let baseline = ExactLookupBaseline::new(&[
+            ("alpha".to_string(), "bugfix".to_string()),
+            ("beta".to_string(), "feature".to_string()),
+        ]);
+        let test_set = vec![&correct, &wrong];
+
+        let metrics = evaluate_baseline(&baseline, &test_set);
+        let row = metrics
+            .confusion
+            .get("bugfix")
+            .expect("the true label has a matrix row");
+        assert_eq!(
+            row.get("bugfix"),
+            Some(&1),
+            "the diagonal counts the correct answer"
+        );
+        assert_eq!(
+            row.get("feature"),
+            Some(&1),
+            "the off-diagonal counts the miss"
+        );
+        let cells: usize = metrics.confusion.values().flat_map(|r| r.values()).sum();
+        assert_eq!(cells, 2, "every prediction fills a cell");
+    }
+
+    /// The curve counts real errors in confidence order: the first point is
+    /// the single most-confident (wrong) answer, not a constant zero.
+    #[test]
+    fn the_error_curve_counts_errors_in_confidence_order() {
+        // Confidences deliberately not in correctness order.
+        let mut accepted = vec![(0.9, false), (0.8, true), (0.7, false)];
+        let curve = error_curve(&mut accepted, 6);
+
+        assert_eq!(curve.len(), 3);
+        assert_eq!(curve[0].n_accepted, 1);
+        assert!(
+            (curve[0].error_rate - 1.0).abs() < 1e-9,
+            "the first accepted example is wrong, so its prefix is fully wrong"
+        );
+        assert!(
+            (curve[2].error_rate - 2.0 / 3.0).abs() < 1e-9,
+            "two of three accepted examples are wrong at the last point"
+        );
+        assert!((curve[2].coverage - 0.5).abs() < 1e-9, "3 of 6 accepted");
     }
 
     #[test]

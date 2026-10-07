@@ -81,8 +81,24 @@ fn list(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The task-intent vocabulary the classifier itself uses. A stored label
+/// outside it — a typo like `bugfiz` — would never be predicted and would
+/// skew the verified history, so it is refused at the boundary.
+fn checked_label(label: &str) -> Result<(), String> {
+    let labels = prompt_intent::labels();
+    if labels.iter().any(|known| known == label) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unknown label {label:?}: the task-intent vocabulary is {}",
+            labels.join(", ")
+        ))
+    }
+}
+
 fn add(text: String, label: String, source: String) -> Result<(), String> {
     let mut store = open_store()?;
+    checked_label(&label)?;
     let spec = prompt_intent::spec(&text).unwrap();
     let entry = NewEntry::for_spec(
         text,
@@ -108,6 +124,7 @@ fn remove(id: String) -> Result<(), String> {
 
 fn correct(id: String, label: String, source: String) -> Result<(), String> {
     let mut store = open_store()?;
+    checked_label(&label)?;
     store.correct(&id, &label, &source)?;
     store.save()?;
     println!("corrected {id} -> {label}");
@@ -120,4 +137,32 @@ fn clear() -> Result<(), String> {
     store.save()?;
     println!("cleared");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_label;
+
+    #[test]
+    fn a_label_in_the_task_intent_vocabulary_is_accepted() {
+        for label in [
+            "bugfix",
+            "feature",
+            "refactor",
+            "investigate",
+            "question",
+            "review",
+            "ops",
+        ] {
+            assert!(checked_label(label).is_ok(), "{label} should be accepted");
+        }
+    }
+
+    #[test]
+    fn a_label_outside_the_vocabulary_is_refused_with_the_vocabulary() {
+        let err = checked_label("bugfiz").unwrap_err();
+        assert!(err.contains("unknown label"), "{err}");
+        // The message names the real vocabulary so the typo is obvious.
+        assert!(err.contains("bugfix"), "{err}");
+    }
 }
