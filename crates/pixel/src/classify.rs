@@ -3125,6 +3125,9 @@ mod tests {
         assert_eq!(
             stored_base_when_unset(&config, RemoteOverrides::Shared).unwrap(),
             config.base
+        );
+    }
+
     // ---- verified-history tier (issue #624) ----
 
     fn history_store() -> crate::classify_history::HistoryStore {
@@ -3217,6 +3220,10 @@ mod tests {
             )
             .as_deref(),
             Some("stored-m")
+        );
+    }
+
+    #[test]
     fn history_accept_json_discloses_source_version_neighbours_and_scores() {
         let tier = history_tier_with(&[("fix the login bug", "yes")]);
         let mut output = RecordingOutput::default();
@@ -3326,6 +3333,10 @@ mod tests {
         assert_eq!(
             RemoteOverrides::Shared.var("PIXEL_REMOTE_BASE").as_deref(),
             Some("https://proxy.example/v1")
+        );
+    }
+
+    #[test]
     fn empty_history_preserves_current_behavior_and_consults_the_model() {
         let calls: Arc<Mutex<Vec<Spec>>> = Arc::new(Mutex::new(Vec::new()));
         let calls_for_engine = Arc::clone(&calls);
@@ -3376,6 +3387,10 @@ mod tests {
                 .var("PIXEL_INFISICAL_SECRET_NAME")
                 .as_deref(),
             Some("OPENROUTER_API_KEY")
+        );
+    }
+
+    #[test]
     fn history_abstention_falls_through_to_the_model_with_the_reason_disclosed() {
         let calls: Arc<Mutex<Vec<Spec>>> = Arc::new(Mutex::new(Vec::new()));
         let calls_for_engine = Arc::clone(&calls);
@@ -3500,6 +3515,9 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
     fn history_json_abstention_discloses_the_reason_on_the_model_document() {
         let tier = history_tier_with(&[]);
         let mut output = RecordingOutput::default();
