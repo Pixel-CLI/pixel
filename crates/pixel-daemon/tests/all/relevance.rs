@@ -368,6 +368,7 @@ fn targets_facts_should_list_a_structural_co_file_that_prose_outweighs() {
         "one word in 1 of 50 files"
     );
     assert_eq!(relevance.cofiles[8].structural_keywords, ["watchdog"]);
+    assert_eq!(relevance.structural_files, 1, "src/watchdog.rs alone");
     let cut = "co-file list cut: 9 of 10 matching files listed (the 8 heaviest and the 4 heaviest structural ones)";
     assert_eq!(relevance.caps, [cut]);
     assert!(envelope_caps(&response).iter().any(|cap| cap == cut));
