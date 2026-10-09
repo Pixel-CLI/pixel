@@ -293,9 +293,14 @@ snapshot and refreshes nothing: a stale or missing index or graph answers
 on-topic decision about a prompt: per task keyword, how many files contain it
 as a word, define a symbol named with it, or carry it in a path (a keyword the
 repository lacks as typed borrows the counts of its first thesaurus synonym
-that matches, within `RELEVANCE_EXPANSION_PROBES` probes), and the five files
-the most distinct keywords meet in. The block reuses the content probes the
-target ranking ran and counts documents against `files_considered`;
+that matches, within `RELEVANCE_EXPANSION_PROBES` probes), and the co-files:
+each file the keywords meet in is weighted by the sum of
+`relevance::keyword_weight` over them (inverse document frequency capped at
+`IDF_CAP`; 0 for a word in over a quarter of the files or whose probe
+truncated), and the block lists the five heaviest plus the three heaviest
+structural ones (a rare word in a path or symbol), so prose that repeats common
+words cannot crowd out the file the prompt names. The block reuses the content
+probes the target ranking ran and counts documents against `files_considered`;
 `pixel_daemon::relevance::relevance_on` computes the same block in process for a
 reader with no daemon. Credential-shaped paths are never counted or listed.
 Each cap that bounds the block is in `relevance.caps`, in `facts.envelope.caps`

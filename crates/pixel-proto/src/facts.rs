@@ -32,7 +32,7 @@ pub struct TargetsFactsInputs {
 /// the repository knows nothing about (that one has `keywords` with all-zero
 /// counts). `pixel_daemon::relevance::relevance_on` computes the same block
 /// in process.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Relevance {
     /// Indexed files the counts below are drawn from: the IDF denominator.
     #[serde(default)]
@@ -44,11 +44,12 @@ pub struct Relevance {
     /// One row per task keyword, in task order, matched or not.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<KeywordEvidence>,
-    /// The files the most distinct keywords meet in, best first.
+    /// The files the task's rarest words meet in, heaviest first: the best
+    /// few by weight and the best structural ones (see [`CoFile::weight`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cofiles: Vec<CoFile>,
-    /// Every cap that bounded these counts, in the words the response
-    /// envelope uses; a reader without that envelope still sees them.
+    /// Every cap that bounded the block, in the words the response envelope
+    /// uses; a reader without that envelope still sees them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub caps: Vec<String>,
 }
@@ -77,14 +78,21 @@ pub struct KeywordEvidence {
 }
 
 /// A file several task keywords meet in, with one line to start from.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoFile {
     pub path: String,
     /// The task keywords this file matches, in task order.
     #[serde(default)]
     pub keywords: Vec<String>,
-    /// A keyword matched the file's own name or one of its symbols, not only
-    /// its text.
+    /// The sum, over `keywords`, of how selective each is in this repository
+    /// (`pixel_daemon::relevance::keyword_weight`): a word in most files, or
+    /// one whose probe truncated, weighs 0; a rare one up to the cap. Rounded
+    /// to three decimals.
+    #[serde(default)]
+    pub weight: f64,
+    /// A keyword of positive weight matched the file's own name or one of its
+    /// symbols, not only its text. A ubiquitous word in a path (`src`) is not
+    /// structure.
     #[serde(default)]
     pub structural: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,6 +220,7 @@ mod tests {
                 CoFile {
                     path: "crates/pixel-install/src/claude.rs".into(),
                     keywords: vec!["install".into(), "claude".into()],
+                    weight: 6.25,
                     structural: true,
                     line: Some(120),
                     text: Some("fn merge_settings() {}".into()),
@@ -219,6 +228,7 @@ mod tests {
                 CoFile {
                     path: "docs/manual-setup.md".into(),
                     keywords: vec!["install".into()],
+                    weight: 0.5,
                     structural: false,
                     line: None,
                     text: None,
@@ -255,6 +265,7 @@ mod tests {
                     {
                         "path": "crates/pixel-install/src/claude.rs",
                         "keywords": ["install", "claude"],
+                        "weight": 6.25,
                         "structural": true,
                         "line": 120,
                         "text": "fn merge_settings() {}"
@@ -262,6 +273,7 @@ mod tests {
                     {
                         "path": "docs/manual-setup.md",
                         "keywords": ["install"],
+                        "weight": 0.5,
                         "structural": false
                     }
                 ],

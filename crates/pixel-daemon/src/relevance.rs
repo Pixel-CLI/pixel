@@ -16,7 +16,13 @@
 //! a path), because a prompt can be about a repository through any of them. A
 //! keyword the repository does not contain as typed (a French word) borrows
 //! the counts of its first thesaurus synonym that it does contain.
+//!
+//! How selective a keyword is, [`keyword_weight`], is the one definition of a
+//! rare word and of a ubiquitous one: co-files are ranked by the weights of the
+//! keywords they match, and a gate built on these counts takes its weights from
+//! the same function.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -34,14 +40,79 @@ use crate::api::{ContentProbes, probe_cap, probe_content};
 /// not contain as typed. The task's own keywords are always probed.
 pub const RELEVANCE_EXPANSION_PROBES: usize = 6;
 
-/// Co-files listed: enough to start from, few enough to read at a glance.
-const COFILE_LIMIT: usize = 5;
+/// Co-files listed by weight: enough to start from, few enough to read at a
+/// glance.
+const COFILE_BY_WEIGHT: usize = 5;
+
+/// Structural co-files listed whatever their weight, so a file the prompt
+/// names by path or symbol is not crowded out by prose that merely repeats
+/// its words.
+const COFILE_STRUCTURAL: usize = 3;
+
+/// The most one keyword weighs. A word in a handful of files is as telling as
+/// a word in one, and a cap keeps a typo from outweighing three real words.
+pub const IDF_CAP: f64 = 4.0;
+
+/// A keyword in more than one file in this many is ubiquitous: it says
+/// nothing about the repository.
+const UBIQUITOUS_INVERSE_SHARE: usize = 4;
+
+/// Decimal places kept in a co-file's weight, so the JSON is byte-stable.
+const WEIGHT_SCALE: f64 = 1000.0;
 
 /// Characters of a co-file's evidence line kept.
 const COFILE_TEXT_CHARS: usize = 160;
 
 /// Letters a word needs to take a plural in [`same_word`].
 const PLURAL_MIN_STEM: usize = 3;
+
+// ---------------------------------------------------------------------------
+// weights
+// ---------------------------------------------------------------------------
+
+/// Whether a word found in `df` of `files_considered` files is ubiquitous:
+/// strictly more than a quarter of them (`df` a quarter exactly is not).
+pub fn is_ubiquitous(df: usize, files_considered: usize) -> bool {
+    df.saturating_mul(UBIQUITOUS_INVERSE_SHARE) > files_considered
+}
+
+/// How much a keyword says about the repository: its inverse document
+/// frequency `ln((n + 1) / (df + 1))`, at most [`IDF_CAP`].
+///
+/// 0 for a keyword that is [`is_ubiquitous`] or whose content probe
+/// `truncated` (its `df` is then a prefix count, a lower bound: it may be in
+/// most files). A keyword found in no file (`df` 0) weighs [`IDF_CAP`]: the
+/// repository lacks the word, which a small repository's formula would
+/// understate.
+pub fn keyword_weight(df: usize, files_considered: usize, truncated: bool) -> f64 {
+    if truncated || is_ubiquitous(df, files_considered) {
+        return 0.0;
+    }
+    if df == 0 {
+        return IDF_CAP;
+    }
+    let idf = ((files_considered + 1) as f64 / (df + 1) as f64).ln();
+    idf.min(IDF_CAP)
+}
+
+/// The files a keyword is found in: its largest channel count. The channels
+/// overlap and only the counts reach a reader, so this is a lower bound of
+/// the union.
+pub fn keyword_df(row: &KeywordEvidence) -> usize {
+    row.content_files
+        .max(row.symbol_files)
+        .max(row.filename_files)
+}
+
+/// The weight of a keyword row in a repository of `files_considered` files.
+pub fn row_weight(row: &KeywordEvidence, files_considered: usize) -> f64 {
+    keyword_weight(keyword_df(row), files_considered, row.truncated)
+}
+
+/// `weight` kept to [`WEIGHT_SCALE`]'s decimals.
+fn rounded(weight: f64) -> f64 {
+    (weight * WEIGHT_SCALE).round() / WEIGHT_SCALE
+}
 
 // ---------------------------------------------------------------------------
 // words
@@ -257,6 +328,21 @@ struct FileMatch {
     structural: bool,
 }
 
+/// A file that matched, with the weight of what it matched.
+struct Candidate<'a> {
+    path: &'a str,
+    weight: f64,
+    file: FileMatch,
+}
+
+/// Heaviest first, then structural before prose, then path order.
+fn rank_order(a: &Candidate, b: &Candidate) -> Ordering {
+    b.weight
+        .total_cmp(&a.weight)
+        .then_with(|| b.file.structural.cmp(&a.file.structural))
+        .then_with(|| a.path.cmp(b.path))
+}
+
 /// The sentence for a task longer than the keyword list holds. The wording is
 /// `pixel_rank::compute_targets`' own, so a `targets_facts` envelope that
 /// already carries it takes this one as a duplicate and names it once.
@@ -270,8 +356,12 @@ fn keywords_cap(kept: usize) -> String {
 /// symbol whose name has the word, the files with the word in a path. A
 /// keyword with no match in any channel takes the counts of its first
 /// *probed* thesaurus synonym that has one, and says which in
-/// `via_expansion`. Co-files are the files matched by the most distinct
-/// keywords (path order on a tie), at most [`COFILE_LIMIT`].
+/// `via_expansion`. A co-file's weight is the sum of [`row_weight`] over the
+/// keywords it matches, so a rare word counts and a ubiquitous or truncated
+/// one does not; a file whose keywords all weigh nothing is dropped. The
+/// co-files returned are the [`COFILE_BY_WEIGHT`] heaviest and the
+/// [`COFILE_STRUCTURAL`] heaviest structural ones, heaviest first, structural
+/// before prose on a tie, then by path.
 ///
 /// `symbol_hits` is `None` when no graph answered. A file with more matching
 /// symbols than the graph scan keeps (five) can lose a keyword that only its
@@ -339,13 +429,21 @@ pub(crate) fn relevance_from(
         })
         .collect();
 
+    let weights: Vec<f64> = rows
+        .iter()
+        .map(|row| row_weight(row, all_paths.len()))
+        .collect();
     let mut matched: BTreeMap<&str, FileMatch> = BTreeMap::new();
     for (at, standing) in standings.iter().enumerate() {
         let channels = &standing.channels;
+        // A name or symbol only counts as structure when the word that
+        // matched it says something: a directory called `src` is no sign
+        // that a prompt is about this repository.
+        let selective = weights[at] > 0.0;
         for (paths, structural) in [
             (&channels.content, false),
-            (&channels.symbol, true),
-            (&channels.filename, true),
+            (&channels.symbol, selective),
+            (&channels.filename, selective),
         ] {
             for &path in paths {
                 let file = matched.entry(path).or_default();
@@ -356,18 +454,34 @@ pub(crate) fn relevance_from(
             }
         }
     }
-    let mut ranked: Vec<(&str, FileMatch)> = matched.into_iter().collect();
-    ranked.sort_by(|a, b| {
-        b.1.keywords
-            .len()
-            .cmp(&a.1.keywords.len())
-            .then_with(|| a.0.cmp(b.0))
-    });
-    ranked.truncate(COFILE_LIMIT);
-    let cofiles = ranked
+    let mut candidates: Vec<Candidate> = matched
         .into_iter()
-        .map(|(path, file)| {
-            let evidence = probes.lines.get(path).and_then(|lines| {
+        .map(|(path, file)| Candidate {
+            path,
+            weight: rounded(file.keywords.iter().map(|&at| weights[at]).sum()),
+            file,
+        })
+        .filter(|candidate| candidate.weight > 0.0)
+        .collect();
+    candidates.sort_by(rank_order);
+    let eligible = candidates.len();
+    let mut listed: Vec<Candidate> = Vec::new();
+    let mut structural_seen = 0;
+    for (at, candidate) in candidates.into_iter().enumerate() {
+        if candidate.file.structural {
+            structural_seen += 1;
+        }
+        let by_weight = at < COFILE_BY_WEIGHT;
+        let best_structural = candidate.file.structural && structural_seen <= COFILE_STRUCTURAL;
+        if by_weight || best_structural {
+            listed.push(candidate);
+        }
+    }
+    let cofiles = listed
+        .iter()
+        .map(|candidate| {
+            let file = &candidate.file;
+            let evidence = probes.lines.get(candidate.path).and_then(|lines| {
                 lines.iter().find(|line| {
                     file.keywords
                         .iter()
@@ -375,12 +489,13 @@ pub(crate) fn relevance_from(
                 })
             });
             CoFile {
-                path: path.to_owned(),
+                path: candidate.path.to_owned(),
                 keywords: file
                     .keywords
                     .iter()
                     .map(|&at| keywords[at].to_owned())
                     .collect(),
+                weight: candidate.weight,
                 structural: file.structural,
                 line: evidence.and_then(|line| u32::try_from(line.line).ok()),
                 text: evidence.map(|line| {
@@ -412,6 +527,14 @@ pub(crate) fn relevance_from(
         caps.push(format!(
             "{} credential-shaped file(s) matched and are neither counted nor listed",
             hidden.len()
+        ));
+    }
+
+    if eligible > listed.len() {
+        caps.push(format!(
+            "co-file list cut: {} of {eligible} matching files listed (the {COFILE_BY_WEIGHT} \
+             heaviest and the {COFILE_STRUCTURAL} heaviest structural ones)",
+            listed.len()
         ));
     }
 
@@ -596,8 +719,34 @@ mod tests {
         tokenize_task(task).unwrap()
     }
 
+    /// Paths that make a repository big enough for a word in a few files to be
+    /// rare: `names` plus [`FILLER`] files that are about nothing.
+    const FILLER: usize = 200;
+
     fn paths(names: &[&str]) -> Vec<String> {
-        names.iter().map(ToString::to_string).collect()
+        names
+            .iter()
+            .map(ToString::to_string)
+            .chain((0..FILLER).map(|n| format!("filler/f{n:03}.txt")))
+            .collect()
+    }
+
+    /// `count` distinct paths under `dir`.
+    fn many(dir: &str, count: usize) -> Vec<String> {
+        (0..count).map(|n| format!("{dir}/{n:03}.md")).collect()
+    }
+
+    /// Probes that matched each keyword once in each of its files.
+    fn probed_files(hits: &[(&str, Vec<String>)]) -> ContentProbes {
+        let mut probes = ContentProbes::default();
+        for (keyword, files) in hits {
+            probes.probed.insert((*keyword).to_owned());
+            probes.hits.insert(
+                (*keyword).to_owned(),
+                files.iter().map(|file| (file.clone(), 1)).collect(),
+            );
+        }
+        probes
     }
 
     /// Probes that matched `files` for each keyword, one match per file.
@@ -666,6 +815,115 @@ mod tests {
             .iter()
             .map(|cofile| cofile.path.as_str())
             .collect()
+    }
+
+    // ----- weights ----------------------------------------------------------
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn keyword_weight_should_be_the_inverse_document_frequency_below_the_cap() {
+        assert!(close(keyword_weight(2, 100, false), (101.0_f64 / 3.0).ln()));
+        assert!(close(
+            keyword_weight(24, 100, false),
+            (101.0_f64 / 25.0).ln()
+        ));
+        assert!(close(
+            keyword_weight(25, 100, false),
+            (101.0_f64 / 26.0).ln()
+        ));
+        assert!(
+            close(keyword_weight(18, 1000, false), (1001.0_f64 / 19.0).ln()),
+            "ln(1001 / 19) = 3.964 is under the cap"
+        );
+    }
+
+    #[test]
+    fn keyword_weight_should_stop_at_the_cap() {
+        assert_eq!(IDF_CAP, 4.0);
+        assert_eq!(
+            keyword_weight(17, 1000, false),
+            IDF_CAP,
+            "ln(1001 / 18) = 4.018 is over it"
+        );
+        assert_eq!(keyword_weight(1, 1_000_000, false), IDF_CAP);
+    }
+
+    #[test]
+    fn keyword_weight_should_give_a_word_found_nowhere_the_cap_whatever_the_size() {
+        for files in [0, 3, 10, 1000] {
+            assert_eq!(keyword_weight(0, files, false), IDF_CAP, "{files} files");
+        }
+    }
+
+    #[test]
+    fn keyword_weight_should_be_zero_when_the_probe_truncated() {
+        assert_eq!(keyword_weight(1, 1000, true), 0.0);
+        assert_eq!(keyword_weight(0, 1000, true), 0.0);
+        assert!(keyword_weight(1, 1000, false) > 0.0);
+    }
+
+    #[test]
+    fn keyword_weight_should_zero_a_word_only_once_it_is_ubiquitous() {
+        assert!(keyword_weight(24, 100, false) > 1.0, "below a quarter");
+        assert!(keyword_weight(25, 100, false) > 1.0, "a quarter exactly");
+        assert_eq!(keyword_weight(26, 100, false), 0.0, "past a quarter");
+    }
+
+    #[test]
+    fn is_ubiquitous_should_mean_strictly_more_than_a_quarter_of_the_files() {
+        assert!(!is_ubiquitous(24, 100));
+        assert!(!is_ubiquitous(25, 100), "df * 4 == n is not ubiquitous");
+        assert!(is_ubiquitous(26, 100));
+        assert!(!is_ubiquitous(0, 0));
+        assert!(is_ubiquitous(1, 0));
+        assert!(is_ubiquitous(usize::MAX, 100), "the product saturates");
+    }
+
+    #[test]
+    fn keyword_df_should_be_the_largest_channel_count() {
+        let row = |content, symbol, filename| KeywordEvidence {
+            keyword: "x".into(),
+            content_files: content,
+            symbol_files: symbol,
+            filename_files: filename,
+            ..KeywordEvidence::default()
+        };
+        assert_eq!(keyword_df(&row(3, 1, 2)), 3);
+        assert_eq!(keyword_df(&row(1, 4, 2)), 4);
+        assert_eq!(keyword_df(&row(1, 2, 5)), 5);
+        assert_eq!(keyword_df(&row(0, 0, 0)), 0);
+    }
+
+    #[test]
+    fn row_weight_should_weigh_the_row_the_way_the_co_files_do() {
+        let row = KeywordEvidence {
+            keyword: "x".into(),
+            content_files: 2,
+            symbol_files: 5,
+            ..KeywordEvidence::default()
+        };
+        assert!(close(row_weight(&row, 100), (101.0_f64 / 6.0).ln()));
+        let truncated = KeywordEvidence {
+            truncated: true,
+            ..row.clone()
+        };
+        assert_eq!(row_weight(&truncated, 100), 0.0);
+        let unknown = KeywordEvidence {
+            keyword: "y".into(),
+            ..KeywordEvidence::default()
+        };
+        assert_eq!(row_weight(&unknown, 100), IDF_CAP);
+    }
+
+    #[test]
+    fn rounded_should_keep_three_decimals() {
+        assert_eq!(rounded(1.2344), 1.234);
+        assert_eq!(rounded(1.2346), 1.235);
+        assert_eq!(rounded(4.0), 4.0);
+        assert_eq!(rounded(0.0), 0.0);
     }
 
     // ----- words ------------------------------------------------------------
@@ -829,7 +1087,7 @@ mod tests {
         assert_eq!(
             relevance,
             Relevance {
-                files_considered: 2,
+                files_considered: FILLER + 2,
                 graph: true,
                 keywords: ["quantum", "flux", "capacitor"]
                     .map(|keyword| KeywordEvidence {
@@ -880,7 +1138,7 @@ mod tests {
                 ..KeywordEvidence::default()
             }
         );
-        assert_eq!(relevance.files_considered, 4);
+        assert_eq!(relevance.files_considered, FILLER + 4);
     }
 
     #[test]
@@ -1120,18 +1378,23 @@ mod tests {
         let long = query(task);
         assert!(long.keywords_truncated);
         assert_eq!(long.keywords.len(), 12);
-        let relevance = relevance_from(&long, &ContentProbes::default(), None, &[]);
+        let relevance = relevance_from(&long, &ContentProbes::default(), None, &paths(&[]));
         assert_eq!(
             relevance.caps,
             ["task keywords truncated at 12; later task words contributed no signal"]
         );
-        let short = relevance_from(&query("alpha bravo"), &ContentProbes::default(), None, &[]);
+        let short = relevance_from(
+            &query("alpha bravo"),
+            &ContentProbes::default(),
+            None,
+            &paths(&[]),
+        );
         assert!(short.caps.is_empty());
     }
 
     #[test]
-    fn relevance_from_should_rank_co_files_by_distinct_keywords_then_path() {
-        // Keywords: alpha beta gamma delta.
+    fn relevance_from_should_rank_co_files_by_the_weight_of_what_they_match() {
+        // Keywords: alpha beta gamma delta, in 4, 4, 2 and 1 of the files.
         let probes = probed(&[
             ("alpha", &["z.rs", "m.rs", "b.rs", "c.rs"]),
             ("beta", &["z.rs", "m.rs", "b.rs", "d.rs"]),
@@ -1157,36 +1420,278 @@ mod tests {
                 ("c.rs", 1),
                 ("d.rs", 1)
             ],
-            "count descending, path ascending on a tie"
+            "the heaviest first, path ascending on a tie"
+        );
+        let weights: Vec<f64> = relevance.cofiles.iter().map(|c| c.weight).collect();
+        assert!(
+            weights.windows(2).all(|pair| pair[0] >= pair[1]),
+            "{weights:?}"
         );
     }
 
     #[test]
-    fn relevance_from_should_list_exactly_five_co_files_and_no_more() {
-        let names = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"];
-        let five = relevance_from(
-            &query("alpha"),
-            &probed(&[("alpha", &names[..5])]),
-            None,
-            &[],
+    fn relevance_from_should_weigh_a_co_file_by_the_sum_of_its_keywords() {
+        // 201 files; alpha is in 2 of them, beta in 5, gamma in 1.
+        let probes = probed(&[
+            ("alpha", &["a.md", "b.md"]),
+            ("beta", &["a.md", "c.md", "d.md", "e.md", "f.md"]),
+            ("gamma", &["a.md"]),
+        ]);
+        let relevance =
+            relevance_from(&query("alpha beta gamma"), &probes, None, &paths(&["a.md"]));
+        let alpha = (202.0_f64 / 3.0).ln().min(IDF_CAP);
+        let beta = (202.0_f64 / 6.0).ln();
+        let gamma = (202.0_f64 / 2.0).ln().min(IDF_CAP);
+        let weight_of = |path: &str| {
+            relevance
+                .cofiles
+                .iter()
+                .find(|cofile| cofile.path == path)
+                .unwrap()
+                .weight
+        };
+        assert_eq!(weight_of("a.md"), rounded(alpha + beta + gamma));
+        assert_eq!(weight_of("b.md"), rounded(alpha));
+        assert_eq!(weight_of("c.md"), rounded(beta));
+        assert_eq!(weight_of("a.md"), 11.517, "pinned: 4 + 3.517 + 4");
+    }
+
+    #[test]
+    fn relevance_from_should_rank_a_structural_file_of_two_rare_words_above_prose_of_four_common_ones()
+     {
+        // 200 files. `alpha` and `beta` are each in one file, a symbol name;
+        // the four common words are each in 50 files, one of them the same
+        // guide.
+        let common = |dir: &str| {
+            let mut files = many(dir, 49);
+            files.push("docs/guide.md".to_owned());
+            files
+        };
+        let probes = probed_files(&[
+            ("gamma", common("g")),
+            ("delta", common("d")),
+            ("epsilon", common("e")),
+            ("zeta", common("z")),
+        ]);
+        let relevance = relevance_from(
+            &query("alpha beta gamma delta epsilon zeta"),
+            &probes,
+            Some(&[symbols_in("src/alpha_beta.rs", &["alpha_beta_loader"])]),
+            &paths(&[]),
+        );
+        let top: Vec<(&str, f64, bool)> = relevance
+            .cofiles
+            .iter()
+            .map(|cofile| (cofile.path.as_str(), cofile.weight, cofile.structural))
+            .collect();
+        assert_eq!(
+            top,
+            [
+                ("src/alpha_beta.rs", 8.0, true),
+                ("docs/guide.md", 5.486, false),
+                ("d/000.md", 1.371, false),
+                ("d/001.md", 1.371, false),
+                ("d/002.md", 1.371, false),
+            ],
+            "two rare words weigh 4 + 4; four common ones 4 x 1.371"
+        );
+    }
+
+    #[test]
+    fn relevance_from_should_list_a_structural_file_the_prose_outweighs() {
+        // Six docs say both words; one source file defines `alpha`.
+        let docs: Vec<String> = (0..6).map(|n| format!("docs/p{n}.md")).collect();
+        let probes = probed_files(&[("alpha", docs.clone()), ("beta", docs)]);
+        let relevance = relevance_from(
+            &query("alpha beta"),
+            &probes,
+            Some(&[symbols_in("src/alpha.rs", &["alpha_tool"])]),
+            &paths(&[]),
         );
         assert_eq!(
-            cofile_paths(&five),
-            ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]
+            cofile_paths(&relevance),
+            [
+                "docs/p0.md",
+                "docs/p1.md",
+                "docs/p2.md",
+                "docs/p3.md",
+                "docs/p4.md",
+                "src/alpha.rs"
+            ],
+            "the five heaviest are prose; the structural file still comes with them"
         );
-        let six = relevance_from(&query("alpha"), &probed(&[("alpha", &names)]), None, &[]);
+        let last = relevance.cofiles.last().unwrap();
+        assert!(last.structural);
+        assert_eq!(last.weight, 3.357, "alpha alone");
+        assert_eq!(relevance.cofiles[0].weight, 6.715, "alpha and beta");
         assert_eq!(
-            cofile_paths(&six),
-            ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"],
-            "the sixth equal file is cut, path order decides"
+            relevance.caps,
+            [
+                "co-file list cut: 6 of 7 matching files listed (the 5 heaviest and the 3 heaviest structural ones)"
+            ]
         );
-        let four = relevance_from(
+    }
+
+    #[test]
+    fn relevance_from_should_list_at_most_three_structural_files_beyond_the_heaviest_five() {
+        let docs: Vec<String> = (0..6).map(|n| format!("docs/p{n}.md")).collect();
+        let sources: Vec<SymbolHit> = (0..5)
+            .map(|n| symbols_in(&format!("src/s{n}.rs"), &["alpha_tool"]))
+            .collect();
+        let probes = probed_files(&[("alpha", docs.clone()), ("beta", docs)]);
+        let relevance = relevance_from(&query("alpha beta"), &probes, Some(&sources), &paths(&[]));
+        assert_eq!(
+            cofile_paths(&relevance),
+            [
+                "docs/p0.md",
+                "docs/p1.md",
+                "docs/p2.md",
+                "docs/p3.md",
+                "docs/p4.md",
+                "src/s0.rs",
+                "src/s1.rs",
+                "src/s2.rs"
+            ],
+            "p5 and the fourth and fifth source files are cut"
+        );
+        assert_eq!(
+            relevance.caps,
+            [
+                "co-file list cut: 8 of 11 matching files listed (the 5 heaviest and the 3 heaviest structural ones)"
+            ]
+        );
+    }
+
+    #[test]
+    fn relevance_from_should_not_list_a_structural_file_twice_when_it_is_among_the_heaviest() {
+        // Four structural files, all heavier than the prose: the fourth is
+        // listed as one of the five heaviest, not as a structural extra.
+        let sources: Vec<SymbolHit> = (0..4)
+            .map(|n| symbols_in(&format!("src/s{n}.rs"), &["alpha_beta_tool"]))
+            .collect();
+        let docs: Vec<String> = (0..3).map(|n| format!("docs/p{n}.md")).collect();
+        let probes = probed_files(&[("alpha", docs.clone())]);
+        let relevance = relevance_from(&query("alpha beta"), &probes, Some(&sources), &paths(&[]));
+        assert_eq!(
+            cofile_paths(&relevance),
+            [
+                "src/s0.rs",
+                "src/s1.rs",
+                "src/s2.rs",
+                "src/s3.rs",
+                "docs/p0.md"
+            ],
+            "heavier structural files first, then the heaviest prose; 2 prose files are cut"
+        );
+        assert_eq!(relevance.cofiles.len(), 5);
+    }
+
+    #[test]
+    fn relevance_from_should_put_structural_before_prose_and_prose_by_path_on_a_tie() {
+        let probes = probed(&[("alpha", &["m.md", "b.md"])]);
+        let relevance = relevance_from(
             &query("alpha"),
-            &probed(&[("alpha", &names[..4])]),
-            None,
-            &[],
+            &probes,
+            Some(&[symbols_in("zz/tool.rs", &["alpha_tool"])]),
+            &paths(&[]),
         );
-        assert_eq!(cofile_paths(&four), ["a.rs", "b.rs", "c.rs", "d.rs"]);
+        assert_eq!(cofile_paths(&relevance), ["zz/tool.rs", "b.md", "m.md"]);
+        let weights: Vec<f64> = relevance.cofiles.iter().map(|c| c.weight).collect();
+        assert_eq!(weights[0], weights[1], "the order is not the weight's");
+        assert_eq!(weights[1], weights[2]);
+    }
+
+    #[test]
+    fn relevance_from_should_drop_a_file_whose_every_keyword_is_ubiquitous() {
+        // 200 files: alpha is in 50 (a quarter exactly, not ubiquitous), beta
+        // in 51 (ubiquitous). Only `0both.md` is in both.
+        let mut alpha = many("a", 49);
+        alpha.push("0both.md".to_owned());
+        let mut beta = many("b", 50);
+        beta.push("0both.md".to_owned());
+        let probes = probed_files(&[("alpha", alpha), ("beta", beta)]);
+        let relevance = relevance_from(&query("alpha beta"), &probes, None, &paths(&[]));
+        assert!(
+            relevance
+                .cofiles
+                .iter()
+                .all(|cofile| !cofile.path.starts_with("b/")),
+            "a file only a ubiquitous word matched weighs nothing: {:?}",
+            cofile_paths(&relevance)
+        );
+        let both = &relevance.cofiles[0];
+        assert_eq!(both.path, "0both.md");
+        assert_eq!(both.keywords, ["alpha", "beta"]);
+        assert_eq!(both.weight, 1.371, "beta adds nothing");
+        assert_eq!(relevance.cofiles[1].weight, 1.371);
+    }
+
+    #[test]
+    fn relevance_from_should_drop_every_file_when_every_keyword_is_truncated() {
+        let mut probes = probed(&[("alpha", &["a.md", "b.md"])]);
+        probes.truncated.insert("alpha".into());
+        let relevance = relevance_from(&query("alpha"), &probes, None, &paths(&[]));
+        assert!(relevance.cofiles.is_empty(), "{:?}", relevance.cofiles);
+        assert!(evidence(&relevance, "alpha").truncated);
+    }
+
+    #[test]
+    fn relevance_from_should_not_call_a_ubiquitous_word_in_a_path_structure() {
+        // `alpha` is in 60 of 202 files: ubiquitous. `alpha/tool.rs` is named
+        // for it and says `beta` once; `beta/other.rs` is named for `beta`.
+        let probes = probed_files(&[
+            ("alpha", many("u", 60)),
+            ("beta", vec!["alpha/tool.rs".to_owned()]),
+        ]);
+        let relevance = relevance_from(
+            &query("alpha beta"),
+            &probes,
+            None,
+            &paths(&["alpha/tool.rs", "beta/other.rs"]),
+        );
+        let by_path: Vec<(&str, bool)> = relevance
+            .cofiles
+            .iter()
+            .map(|cofile| (cofile.path.as_str(), cofile.structural))
+            .collect();
+        assert_eq!(
+            by_path,
+            [("beta/other.rs", true), ("alpha/tool.rs", false)],
+            "same weight; the name that matched a rare word is structure"
+        );
+    }
+
+    #[test]
+    fn relevance_from_should_list_five_by_weight_and_say_only_when_it_cut() {
+        let six: Vec<String> = (0..6).map(|n| format!("d{n}.md")).collect();
+        let cut = relevance_from(
+            &query("alpha"),
+            &probed_files(&[("alpha", six.clone())]),
+            None,
+            &paths(&[]),
+        );
+        assert_eq!(
+            cofile_paths(&cut),
+            ["d0.md", "d1.md", "d2.md", "d3.md", "d4.md"]
+        );
+        assert_eq!(
+            cut.caps,
+            [
+                "co-file list cut: 5 of 6 matching files listed (the 5 heaviest and the 3 heaviest structural ones)"
+            ]
+        );
+        let whole = relevance_from(
+            &query("alpha"),
+            &probed_files(&[("alpha", six[..5].to_vec())]),
+            None,
+            &paths(&[]),
+        );
+        assert_eq!(cofile_paths(&whole).len(), 5);
+        assert!(
+            whole.caps.is_empty(),
+            "nothing was left out: {:?}",
+            whole.caps
+        );
     }
 
     #[test]
@@ -1195,7 +1700,7 @@ mod tests {
             ("alpha", &["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "z.rs"]),
             ("beta", &["z.rs"]),
         ]);
-        let relevance = relevance_from(&query("alpha beta"), &probes, None, &[]);
+        let relevance = relevance_from(&query("alpha beta"), &probes, None, &paths(&[]));
         assert_eq!(
             cofile_paths(&relevance),
             ["z.rs", "a.rs", "b.rs", "c.rs", "d.rs"]
@@ -1203,9 +1708,24 @@ mod tests {
     }
 
     #[test]
+    fn relevance_from_should_return_the_same_block_twice() {
+        let docs: Vec<String> = (0..6).map(|n| format!("docs/p{n}.md")).collect();
+        let probes = probed_files(&[("alpha", docs.clone()), ("beta", docs)]);
+        let hits = [symbols_in("src/alpha.rs", &["alpha_tool"])];
+        let all = paths(&["src/alpha.rs"]);
+        let first = relevance_from(&query("alpha beta"), &probes, Some(&hits), &all);
+        let second = relevance_from(&query("alpha beta"), &probes, Some(&hits), &all);
+        assert_eq!(first, second);
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+    }
+
+    #[test]
     fn relevance_from_should_list_the_keywords_of_a_co_file_in_task_order() {
         let probes = probed(&[("beta", &["a.rs"]), ("alpha", &["a.rs", "b.rs"])]);
-        let relevance = relevance_from(&query("alpha beta"), &probes, None, &[]);
+        let relevance = relevance_from(&query("alpha beta"), &probes, None, &paths(&[]));
         assert_eq!(relevance.cofiles[0].keywords, ["alpha", "beta"]);
         assert_eq!(relevance.cofiles[1].keywords, ["alpha"]);
     }
@@ -1273,7 +1793,7 @@ mod tests {
                 line("beta", 9, "beta()"),
             ],
         );
-        let relevance = relevance_from(&query("alpha beta"), &probes, None, &[]);
+        let relevance = relevance_from(&query("alpha beta"), &probes, None, &paths(&[]));
         let cofile = &relevance.cofiles[0];
         assert_eq!(cofile.line, Some(7));
         assert_eq!(cofile.text.as_deref(), Some("let alpha = 1;"), "trimmed");
@@ -1290,7 +1810,7 @@ mod tests {
             "a.rs".into(),
             vec![line("auth", 3, "auth()"), line("login", 8, "login()")],
         );
-        let relevance = relevance_from(&query("connexion"), &probes, None, &[]);
+        let relevance = relevance_from(&query("connexion"), &probes, None, &paths(&[]));
         assert_eq!(
             (
                 relevance.cofiles[0].line,
@@ -1312,7 +1832,7 @@ mod tests {
         probes
             .lines
             .insert("b.rs".into(), vec![line("alpha", 1, &over_cap)]);
-        let relevance = relevance_from(&query("alpha"), &probes, None, &[]);
+        let relevance = relevance_from(&query("alpha"), &probes, None, &paths(&[]));
         assert_eq!(relevance.cofiles[0].text.as_deref(), Some(at_cap.as_str()));
         assert_eq!(
             relevance.cofiles[1].text.as_deref(),
@@ -1327,7 +1847,7 @@ mod tests {
         probes
             .lines
             .insert("a.rs".into(), vec![line("alpha", 1, &accented)]);
-        let relevance = relevance_from(&query("alpha"), &probes, None, &[]);
+        let relevance = relevance_from(&query("alpha"), &probes, None, &paths(&[]));
         assert_eq!(
             relevance.cofiles[0]
                 .text
@@ -1350,7 +1870,7 @@ mod tests {
             "b.rs".into(),
             vec![line("alpha", u64::from(u32::MAX) + 1, "past")],
         );
-        let relevance = relevance_from(&query("alpha"), &probes, None, &[]);
+        let relevance = relevance_from(&query("alpha"), &probes, None, &paths(&[]));
         assert_eq!(relevance.cofiles[0].line, Some(u32::MAX));
         assert_eq!(relevance.cofiles[1].line, None);
         assert_eq!(relevance.cofiles[1].text.as_deref(), Some("past"));
@@ -1388,7 +1908,7 @@ mod tests {
     #[test]
     fn relevance_from_should_count_a_hidden_file_once_across_keywords() {
         let probes = probed(&[("token", &[".env"]), ("secret", &[".env"])]);
-        let relevance = relevance_from(&query("token secret"), &probes, None, &[]);
+        let relevance = relevance_from(&query("token secret"), &probes, None, &paths(&[]));
         assert_eq!(
             relevance.caps,
             ["1 credential-shaped file(s) matched and are neither counted nor listed"]
@@ -1398,7 +1918,7 @@ mod tests {
     #[test]
     fn relevance_from_should_fold_a_keyword_whose_only_matches_are_credential_files() {
         let probes = probed(&[("connexion", &[".env"]), ("login", &["src/login.rs"])]);
-        let relevance = relevance_from(&query("connexion"), &probes, None, &[]);
+        let relevance = relevance_from(&query("connexion"), &probes, None, &paths(&[]));
         assert_eq!(
             evidence(&relevance, "connexion").via_expansion.as_deref(),
             Some("login")
@@ -1577,6 +2097,10 @@ mod tests {
         assert!(out.status.success(), "git {args:?}: {out:?}");
     }
 
+    /// Files added to every fixture repository so a word in a few of them is
+    /// rare, not ubiquitous.
+    const REPO_FILLER: usize = 40;
+
     fn repo(tag: &str, files: &[(&str, &str)]) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "pixel-relevance-{tag}-{}-{}",
@@ -1586,7 +2110,11 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        for (path, body) in files {
+        let filler: Vec<(String, &str)> = (0..REPO_FILLER)
+            .map(|n| (format!("filler/f{n:02}.txt"), "nothing here\n"))
+            .collect();
+        let named = files.iter().map(|(path, body)| ((*path).to_owned(), *body));
+        for (path, body) in named.chain(filler) {
             let file = root.join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, body).unwrap();
@@ -1716,7 +2244,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            relevance.files_considered, 5,
+            relevance.files_considered,
+            REPO_FILLER + 5,
             "every indexed file, .env included"
         );
         assert!(relevance.graph);
@@ -1757,7 +2286,16 @@ mod tests {
                 "crates/install/src/hooks.rs",
                 "docs/manual-setup.md",
             ],
-            "five keywords, then two each in path order; .env is neither listed nor counted"
+            "heaviest first, structural before prose on a tie; .env is neither listed nor counted"
+        );
+        assert_eq!(
+            relevance
+                .cofiles
+                .iter()
+                .map(|cofile| cofile.weight)
+                .collect::<Vec<_>>(),
+            [14.579, 5.172, 5.172],
+            "install 2, handle 1, existing 1, claude 1, settings 3 files of 45"
         );
         let best = &relevance.cofiles[0];
         assert_eq!(

@@ -31,6 +31,15 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {out:?}");
 }
 
+/// Files about nothing: they make a word in a few files rare, not ubiquitous.
+const FILLER: usize = 40;
+
+fn filler() -> Vec<(String, String)> {
+    (0..FILLER)
+        .map(|n| (format!("filler/f{n:02}.txt"), "nothing here\n".to_owned()))
+        .collect()
+}
+
 fn fixture(tag: &str, files: &[(String, String)]) -> PathBuf {
     let root = std::env::temp_dir().join(format!("gpx-relevance-{tag}-{}", std::process::id()));
     std::fs::remove_dir_all(&root).ok();
@@ -66,6 +75,7 @@ fn install_repo(tag: &str) -> PathBuf {
     let owned: Vec<(String, String)> = files
         .iter()
         .map(|(path, body)| ((*path).to_owned(), (*body).to_owned()))
+        .chain(filler())
         .collect();
     fixture(tag, &owned)
 }
@@ -120,7 +130,7 @@ fn targets_facts_should_carry_the_relevance_block_and_repeat_it_identically() {
     assert_eq!(first.data(), second.data(), "same inputs, same facts");
     assert_eq!(first.data()["inputs"]["algorithm_version"], 2);
     let relevance = relevance_of(&first);
-    assert_eq!(relevance.files_considered, 5);
+    assert_eq!(relevance.files_considered, FILLER + 5);
     assert!(relevance.graph);
     let counts: Vec<(&str, usize)> = relevance
         .keywords
@@ -143,6 +153,8 @@ fn targets_facts_should_carry_the_relevance_block_and_repeat_it_identically() {
         "crates/install/src/claude_settings.rs"
     );
     assert_eq!(relevance.cofiles[0].line, Some(1));
+    assert_eq!(relevance.cofiles[0].weight, 14.579);
+    assert!(relevance.cofiles[0].structural);
     assert!(
         !first.data()["facts"]["relevance"]
             .to_string()
@@ -304,5 +316,56 @@ fn targets_should_not_carry_a_relevance_block_outside_fact_mode() {
     assert!(response.ok, "{:?}", response.error);
     let data: &Value = response.data();
     assert!(data.get("relevance").is_none(), "{data}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn targets_facts_should_list_a_structural_co_file_that_prose_outweighs() {
+    // Eight notes repeat four of the prompt's words; the one source file is
+    // named for the fifth. The notes weigh more, the source file still comes.
+    let mut files: Vec<(String, String)> = (0..8)
+        .map(|n| {
+            (
+                format!("docs/note{n}.md"),
+                "Why does install handle existing files?\n".to_owned(),
+            )
+        })
+        .collect();
+    files.push((
+        "crates/install/src/claude_settings.rs".to_owned(),
+        "pub fn merge_claude_settings() {}\n".to_owned(),
+    ));
+    files.extend(filler());
+    let root = fixture("structural", &files);
+    let mut service = ready(&root);
+
+    let response = facts(&mut service, "does install handle existing claude");
+
+    let relevance = relevance_of(&response);
+    let listed: Vec<(&str, bool)> = relevance
+        .cofiles
+        .iter()
+        .map(|cofile| (cofile.path.as_str(), cofile.structural))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("docs/note0.md", false),
+            ("docs/note1.md", false),
+            ("docs/note2.md", false),
+            ("docs/note3.md", false),
+            ("docs/note4.md", false),
+            ("crates/install/src/claude_settings.rs", true),
+        ],
+        "five notes by weight, then the structural file"
+    );
+    assert!(
+        relevance.cofiles[0].weight > relevance.cofiles[5].weight,
+        "{:?}",
+        relevance.cofiles
+    );
+    let cut = "co-file list cut: 6 of 9 matching files listed (the 5 heaviest and the 3 heaviest structural ones)";
+    assert_eq!(relevance.caps, [cut]);
+    assert!(envelope_caps(&response).iter().any(|cap| cap == cut));
     std::fs::remove_dir_all(&root).ok();
 }
