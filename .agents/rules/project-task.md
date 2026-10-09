@@ -50,8 +50,17 @@ Recorded procedure, verified live on 2026-10-07:
    `target/dev-release/pixel` to `~/.local/bin/pixel-dev`).
 2. `pixel-dev build-index --history .` (fresh, 2413 commits, 100% diff
    coverage) then `pixel-dev install --repo .` — 8 green, 0 yellow, 0 red.
-3. `printf '%s' '<key>' | pixel-dev config remote-key openai -` writes the
-   key to `~/.pixel/config.yaml` (never the repo, never printed back).
+3. Enter the key at a non-echoing prompt, then pipe it to Pixel's config
+   command (the key is neither a command argument nor printed back):
+
+   ```sh
+   read -rs 'openai_key?OpenAI API key: '
+   printf '\n'
+   printf '%s' "$openai_key" | pixel-dev config remote-key openai -
+   unset openai_key
+   ```
+
+   This writes the key to `~/.pixel/config.yaml` (never the repo).
 4. Live smoke: `pixel-dev classify 'Choose the letter that comes first in
    the alphabet.' --context 'Classify the text.' --label a --label b
    --remote-preset openai --engine remote --json` returned

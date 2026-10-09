@@ -190,6 +190,8 @@ repository file.
   `crates/pixel/src/decide_remote.rs` (`Preset::base`), over `ureq` with
   `rustls-webpki-roots`; the question and its context are sent, each capped
   at `TEXT_CAP_CHARS` (32 768). `PIXEL_REMOTE_BASE` overrides the endpoint.
+  The `openai` preset posts to `https://api.openai.com/v1/decisions` with
+  `OPENAI_API_KEY` (or a key stored by `pixel config remote-key openai`).
 - `pixel classify` on the `clef-cloudflare` preset (`crates/pixel/src/decide_clef.rs`):
   `POST https://api.cloudflare.com/client/v4/accounts/<account>/ai/run/@cf/cloudflare/<model>`
   (Workers AI) with the API token as a Bearer `Authorization` header
@@ -510,6 +512,8 @@ hold.
   an attacker's server while the key comes from the user's global config.
 - **Mitigation**: endpoints, presets and keys are read from the global config
   only (3.7); key variable names are fixed per preset (`Preset::key_env`);
+  the OpenAI preset uses `OPENAI_API_KEY` for
+  `https://api.openai.com/v1/decisions`;
   `decide_remote::sends_in_clear_text` refuses to send a key over `http://`
   to a non-loopback host (`a_key_never_leaves_the_machine_over_cleartext_http`);
   TLS uses webpki roots and `ureq` does not forward `Authorization` across a
@@ -525,7 +529,8 @@ hold.
 
 - **Scenario**: repository text or prompts reach a third party.
 - **Mitigation**: nothing is sent without an explicit command or setting:
-  `classify` sends its capped input to the configured endpoint, `web-search`
+  `classify` sends its capped input to the configured endpoint (including
+  `https://api.openai.com/v1/decisions` for the OpenAI preset), `web-search`
   sends its query, and the automatic prompt-submit brief judge is pinned to an
   already-warm loopback Ollaya endpoint with no remote fallback; the release
   check sends no repository data (SECURITY.md, "Security model").
