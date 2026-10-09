@@ -70,10 +70,18 @@ pub enum Op {
     /// Deterministic prompt-start file facts from already-published indexes.
     /// This operation never builds or refreshes either index; unavailable or
     /// stale inputs are reported in a typed successful result.
+    ///
+    /// With `relevance_only` the answer carries `facts.relevance` and the
+    /// caps that bound it, and no target list: the same freshness gate, the
+    /// same `inputs`, the same block as the full answer, without ranking
+    /// targets. A daemon that predates the flag ignores it and answers in
+    /// full, so a reader checks `facts.relevance`, not the flag.
     TargetsFacts {
         task: String,
         #[serde(default)]
         limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        relevance_only: bool,
     },
     Symbol {
         name: String,
@@ -528,6 +536,12 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
 /// stay the default, and Pixel is one option among them.
 pub const SESSION_USAGE: &str = "pixel offers deterministic repository retrieval and git commands: `pixel search-content`, `pixel find-code`, `pixel impact <symbol>` for callers and blast radius, `pixel dig-history` for past code, and `pixel what-changed`. Use one when it answers a question faster than your native tools; native search and reads remain available. `pixel --help` lists every command.";
 
+/// The `skip_serializing_if` predicate for a flag whose absence means false;
+/// serde hands the field by reference.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +601,7 @@ mod tests {
         let op = Op::TargetsFacts {
             task: "fix login flow".into(),
             limit: Some(12),
+            relevance_only: false,
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(
@@ -605,7 +620,36 @@ mod tests {
             Op::TargetsFacts {
                 task: "fix login flow".into(),
                 limit: None,
+                relevance_only: false,
             }
+        );
+    }
+
+    #[test]
+    fn targets_facts_names_relevance_only_on_the_wire_only_when_asked() {
+        let asked = Op::TargetsFacts {
+            task: "how does install work".into(),
+            limit: Some(8),
+            relevance_only: true,
+        };
+        let value = serde_json::to_value(&asked).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "targets_facts", "task": "how does install work", "limit": 8, "relevance_only": true})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), asked);
+
+        // A request that does not ask is the request an older daemon knows.
+        let plain = Op::TargetsFacts {
+            task: "how does install work".into(),
+            limit: Some(8),
+            relevance_only: false,
+        };
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("relevance_only")
+                .is_none()
         );
     }
 
@@ -838,6 +882,7 @@ mod tests {
                 Op::TargetsFacts {
                     task: "".into(),
                     limit: None,
+                    relevance_only: false,
                 },
                 "targets_facts",
             ),

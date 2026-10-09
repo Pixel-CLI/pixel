@@ -1033,7 +1033,11 @@ impl Service {
                 )
             }),
             Request::Targets { task, limit, max_tier, precision, regions } => self.op_targets(&task, limit, max_tier.as_deref(), precision, regions),
-            Request::TargetsFacts { task, limit } => self.op_targets_facts(&task, limit),
+            Request::TargetsFacts {
+                task,
+                limit,
+                relevance_only,
+            } => self.op_targets_facts(&task, limit, relevance_only),
             Request::Symbol { name } => self.op_symbol(&name),
             Request::Skeleton { file } => self.op_skeleton(&file),
             Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
@@ -1467,7 +1471,13 @@ impl Service {
     }
 
     /// Serve deterministic targets facts only from a fresh published snapshot.
-    fn op_targets_facts(&mut self, task: &str, limit: Option<usize>) -> Result<Value, String> {
+    /// With `relevance_only` the facts are the relevance block and its caps.
+    fn op_targets_facts(
+        &mut self,
+        task: &str,
+        limit: Option<usize>,
+        relevance_only: bool,
+    ) -> Result<Value, String> {
         let limit = limit.unwrap_or(pixel_rank::DEFAULT_LIMIT);
         let publication = Arc::clone(&self.publication);
         let state = publication.read().expect("publication lock poisoned");
@@ -1528,7 +1538,15 @@ impl Service {
             semantic_fallback: false,
         };
         self.graph = Some(graph);
-        let facts = self.op_targets_mode(task, Some(limit), None, false, true, false)?;
+        let facts = if relevance_only {
+            // The same gate and inputs as the full answer; the ranking of
+            // targets, the part of the work a gate on relevance does not read,
+            // is skipped.
+            let index = self.index.read().expect("index lock poisoned");
+            relevance::facts_of_relevance_only(&index, self.graph.as_ref(), task)?
+        } else {
+            self.op_targets_mode(task, Some(limit), None, false, true, false)?
+        };
         serde_json::to_value(TargetsFactsResult::Available { inputs, facts })
             .map_err(|error| error.to_string())
     }
@@ -7368,11 +7386,22 @@ mod tests {
         let response = service.handle(Request::TargetsFacts {
             task: "change login".into(),
             limit: Some(8),
+            relevance_only: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
         assert_eq!(response.data()["status"], "unavailable");
         assert_eq!(response.data()["reason"], "graph_missing");
+        let relevance_only = service.handle(Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+            relevance_only: true,
+        });
+        assert_eq!(
+            relevance_only.data(),
+            response.data(),
+            "the relevance-only path refuses on the same gate, with the same reason"
+        );
         assert!(
             !graph_path.exists(),
             "a fact request must not create a missing graph"
@@ -7404,11 +7433,22 @@ mod tests {
         let response = service.handle(Request::TargetsFacts {
             task: "change login".into(),
             limit: Some(8),
+            relevance_only: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
         assert_eq!(response.data()["status"], "unavailable");
         assert_eq!(response.data()["reason"], "graph_stale");
+        let relevance_only = service.handle(Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+            relevance_only: true,
+        });
+        assert_eq!(
+            relevance_only.data(),
+            response.data(),
+            "the relevance-only path refuses on the same gate, with the same reason"
+        );
         assert_eq!(
             std::fs::read(&graph_path).unwrap(),
             graph_before,
@@ -7443,11 +7483,22 @@ mod tests {
         let response = service.handle(Request::TargetsFacts {
             task: "change session".into(),
             limit: Some(8),
+            relevance_only: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
         assert_eq!(response.data()["status"], "unavailable");
         assert_eq!(response.data()["reason"], "index_stale");
+        let relevance_only = service.handle(Request::TargetsFacts {
+            task: "change session".into(),
+            limit: Some(8),
+            relevance_only: true,
+        });
+        assert_eq!(
+            relevance_only.data(),
+            response.data(),
+            "the relevance-only path refuses on the same gate, with the same reason"
+        );
         assert_eq!(
             std::fs::read(&graph_path).unwrap(),
             graph_before,
@@ -7482,6 +7533,7 @@ mod tests {
         let request = || Request::TargetsFacts {
             task: "change login".into(),
             limit: Some(8),
+            relevance_only: false,
         };
         let first = service.handle(request());
         let second = service.handle(request());
@@ -7516,6 +7568,32 @@ mod tests {
         assert!(
             first.data()["facts"].get("closed_world").is_none(),
             "fact packets must not carry the targets-manifest read/edit boundary"
+        );
+        let only = || Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+            relevance_only: true,
+        };
+        let (fast, fast_again) = (service.handle(only()), service.handle(only()));
+        assert_eq!(fast.data(), fast_again.data(), "the fast path repeats too");
+        assert_eq!(fast.data()["status"], "available");
+        assert_eq!(
+            fast.data()["inputs"],
+            *inputs,
+            "same gate, same declared inputs"
+        );
+        assert_eq!(
+            fast.data()["facts"]["relevance"],
+            first.data()["facts"]["relevance"],
+            "the block is the one the full answer carries"
+        );
+        assert!(
+            fast.data()["facts"].get("targets").is_none(),
+            "the fast path ranks no targets"
+        );
+        assert_eq!(
+            fast.epistemics.as_ref().map(|e| e.lower_bound),
+            first.epistemics.as_ref().map(|e| e.lower_bound),
         );
         assert_eq!(
             std::fs::read(&graph_path).unwrap(),
@@ -7639,6 +7717,7 @@ mod tests {
                 Request::TargetsFacts {
                     task: "alpha beta".into(),
                     limit: Some(5),
+                    relevance_only: false,
                 },
             ),
             (

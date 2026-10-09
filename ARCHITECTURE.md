@@ -310,6 +310,13 @@ probes the target ranking ran and counts documents against `files_considered`;
 reader with no daemon. Credential-shaped paths are never counted or listed.
 Each cap that bounds the block is in `relevance.caps`, in `facts.envelope.caps`
 and, through `derive_epistemics`, in the response's `epistemics` and `warnings`.
+`relevance_only: true` on the request (omitted from the wire when false, so an
+older daemon sees the request it knows) asks for the block without the ranking:
+the same freshness gate and `inputs`, then `facts` is `{envelope, relevance}`
+with no `targets`, the block byte-identical to the full answer's and its caps
+in the same three places. A daemon that predates the flag ignores it and
+answers in full, so a reader checks `facts.relevance` and
+`inputs.algorithm_version >= 2`, never the flag.
 
 Adding an op is one variant on `pixel_proto::Op`, one arm in
 `Service::dispatch` and one entry in `pixel_proto::SESSION_CAPABILITIES`.

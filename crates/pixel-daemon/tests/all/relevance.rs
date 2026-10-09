@@ -98,8 +98,25 @@ fn facts(service: &mut Service, task: &str) -> Response {
     let response = service.handle(Request::TargetsFacts {
         task: task.to_owned(),
         limit: Some(10),
+        relevance_only: false,
     });
     assert!(response.ok, "targets_facts: {:?}", response.error);
+    assert_eq!(response.data()["status"], "available", "{response:?}");
+    response
+}
+
+/// The same question through the cheap path: no targets are ranked.
+fn facts_relevance_only(service: &mut Service, task: &str) -> Response {
+    let response = service.handle(Request::TargetsFacts {
+        task: task.to_owned(),
+        limit: Some(10),
+        relevance_only: true,
+    });
+    assert!(
+        response.ok,
+        "targets_facts relevance_only: {:?}",
+        response.error
+    );
     assert_eq!(response.data()["status"], "available", "{response:?}");
     response
 }
@@ -372,5 +389,153 @@ fn targets_facts_should_list_a_structural_co_file_that_prose_outweighs() {
     let cut = "co-file list cut: 9 of 10 matching files listed (the 8 heaviest and the 4 heaviest structural ones)";
     assert_eq!(relevance.caps, [cut]);
     assert!(envelope_caps(&response).iter().any(|cap| cap == cut));
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn relevance_only_should_return_the_block_the_full_answer_carries_byte_for_byte() {
+    let root = install_repo("only-identical");
+    let mut service = ready(&root);
+
+    for task in [
+        "how does install handle existing Claude settings",
+        "la connexion ne marche pas",
+        "claude setting hooks",
+        "auth connexion",
+        // No keyword finds a file: the block is all zeros, not absent.
+        "quantum flux capacitor",
+    ] {
+        let full = facts(&mut service, task);
+        let only = facts_relevance_only(&mut service, task);
+
+        assert_eq!(
+            only.data()["facts"]["relevance"].to_string(),
+            full.data()["facts"]["relevance"].to_string(),
+            "task: {task}"
+        );
+        assert_eq!(only.data()["inputs"], full.data()["inputs"], "task: {task}");
+        assert!(
+            full.data()["facts"].get("targets").is_some(),
+            "the full answer ranks targets: {task}"
+        );
+        assert!(
+            only.data()["facts"].get("targets").is_none(),
+            "the relevance-only answer ranks none: {task}"
+        );
+    }
+    let none = relevance_of(&facts_relevance_only(
+        &mut service,
+        "quantum flux capacitor",
+    ));
+    assert!(
+        none.cofiles.is_empty() && none.structural_files == 0,
+        "{none:?}"
+    );
+    assert!(none.keywords.iter().all(|row| row.content_files == 0));
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn relevance_only_should_surface_the_same_caps_as_the_full_answer() {
+    let files: Vec<(String, String)> = (0..12)
+        .map(|file| {
+            (
+                format!("f{file:02}.rs"),
+                (0..100).map(|n| format!("// needle {n}\n")).collect(),
+            )
+        })
+        .collect();
+    let root = fixture("only-capped", &files);
+    let mut service = ready(&root);
+
+    let full = facts(&mut service, "needle probe");
+    let only = facts_relevance_only(&mut service, "needle probe");
+
+    let cap = "content probe truncated at 1000 matches for keyword 'needle'; \
+               files beyond the cap carry no content signal";
+    assert_eq!(relevance_of(&only).caps, [cap]);
+    assert_eq!(relevance_of(&only), relevance_of(&full));
+    assert_eq!(envelope_caps(&only), [cap], "named once, in the envelope");
+    assert_eq!(only.data()["facts"]["envelope"]["lower_bound"], true);
+    let (full_epistemics, only_epistemics) = (
+        full.epistemics.as_ref().unwrap(),
+        only.epistemics.as_ref().unwrap(),
+    );
+    assert!(only_epistemics.lower_bound && !only_epistemics.closed_world);
+    assert!(
+        only_epistemics.basis.contains(cap),
+        "{}",
+        only_epistemics.basis
+    );
+    assert_eq!(only_epistemics.lower_bound, full_epistemics.lower_bound);
+    assert!(
+        only.warnings
+            .iter()
+            .any(|warning| warning.code == "RESULT_CAPPED" && warning.message == cap),
+        "{:?}",
+        only.warnings
+    );
+
+    // The task-keyword cap too: one sentence, in the block and the envelope.
+    let long = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike";
+    let only = facts_relevance_only(&mut service, long);
+    let sentence = "task keywords truncated at 12; later task words contributed no signal";
+    assert_eq!(relevance_of(&only).caps, [sentence]);
+    assert_eq!(envelope_caps(&only), [sentence]);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn relevance_only_should_leave_the_envelope_open_when_the_block_has_no_cap() {
+    let root = install_repo("only-quiet");
+    let mut service = ready(&root);
+
+    let only = facts_relevance_only(&mut service, "pad hooks");
+
+    assert!(relevance_of(&only).caps.is_empty());
+    assert!(envelope_caps(&only).is_empty());
+    assert_eq!(only.data()["facts"]["envelope"]["lower_bound"], false);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn relevance_only_should_refuse_a_task_with_no_keyword_like_the_full_answer() {
+    let root = install_repo("only-nokeyword");
+    let mut service = ready(&root);
+
+    let ask = |service: &mut Service, relevance_only| {
+        service.handle(Request::TargetsFacts {
+            task: "the of a".to_owned(),
+            limit: Some(10),
+            relevance_only,
+        })
+    };
+    let full = ask(&mut service, false);
+    let only = ask(&mut service, true);
+
+    assert!(!full.ok, "a task without keywords is an error: {full:?}");
+    assert_eq!(only.ok, full.ok);
+    assert_eq!(only.error, full.error, "one message, one spelling");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn relevance_only_should_agree_with_the_in_process_reader() {
+    let root = install_repo("only-in-process");
+    let mut service = ready(&root);
+    let index = IndexSet::open_or_build(&root, Box::new(TrigramExtractor)).unwrap();
+    let graph = GraphStore::open_read_only(&service.graph_db_path()).unwrap();
+
+    for task in [
+        "how does install handle existing Claude settings",
+        "claude setting hooks",
+    ] {
+        let from_daemon = relevance_of(&facts_relevance_only(&mut service, task));
+        assert_eq!(
+            from_daemon,
+            relevance_on(&index, Some(&graph), task).unwrap(),
+            "task: {task}"
+        );
+    }
     std::fs::remove_dir_all(&root).ok();
 }
