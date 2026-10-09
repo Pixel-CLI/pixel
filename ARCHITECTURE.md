@@ -48,7 +48,7 @@ MCP server. `pixel install` registers no MCP server with any agent.
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
 | `pixel-ops` | Safe git mutation infrastructure ported from usable-git: snapshot store, repository lock, operation journal, recovery keys. Implements `inspect`, `review`, `history`, `diff`, `publish`, `push`, `ship`, `branch`, `update`, `sync`, `reconcile`, `rewrite`, `provenance`, `branches`, `env`. | git |
 | `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through `GitRunner` (timeout, output cap, redacted stderr); `crates/pixel-git/tests/boundary.rs` fails the build on a `Command::new("git")` in any other crate's non-test code. Also owns the trust boundary of `.pixel/`: `sidecar` refuses a `.pixel` that is a link or that git tracks and creates owner-only directories without following a link, `nofollow` opens files without following a link at their name, and `repo_path` confines a stored path to the repository root. | none |
-| `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, pi, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features) and the `search-meaning` code chunker, which reuses the graph's tree-sitter extraction. | git, graph, index, rank |
+| `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, pi, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features) and the `search-meaning` code chunker, which reuses the graph's tree-sitter extraction, and the resident code index (`code_resident`) the daemon's `meaning` op ranks from. | git, graph, index, rank |
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | git |
 | `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` and `pixel token-savings` reporting. | git |
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
@@ -161,7 +161,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `base.shard`, `delta.shard`, `state.json`, `build.lock` | `pixel-index` | Base shard for all tracked files at a pinned commit, delta shard for files changed between that commit and HEAD, and `state.json` as the delta-layer sidecar (tombstones for superseded base paths). The dirty working-tree overlay is in memory only. First process to hold `build.lock` builds; others wait. |
 | `graph.v2.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. The name moves with the schema (`pixel_daemon::api::GRAPH_DB_FILE`); user-facing messages still say `graph.db`. |
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
-| `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
+| `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback; the daemon's `meaning` build (below) reads it and, for its first build only, writes it, so the two share vectors. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
 | `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker `reconcile` writes and clears (no hook reads it), and the pre-mutation copies `env` takes. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
@@ -267,7 +267,7 @@ variants no producer reaches are listed on `pixel_proto::ErrorCode`.
 Invariants enforced by `Service::handle`:
 
 - Success carries `result`, failure carries `error`. Never both.
-- Every retrieval op (`search`, `resolve`, `targets`, `impact`, `uses`,
+- Every retrieval op (`search`, `resolve`, `targets`, `meaning`, `impact`, `uses`,
   `trace`, `changes`, `context`, `symbol`, `processes`, `clusters`, `plan`) gets an
   `epistemics` object. Ops that hit a cap name it in `basis` and mirror it as
   a warning. Ops that attested nothing get a conservative not-closed-world
@@ -291,6 +291,33 @@ Unit tests in `pixel-proto` check both: `op_name_matches_serde_tag` (the
 `Op::op_name` of every variant is its serde tag) and
 `session_capabilities_track_every_real_op` (the capability list and the enum
 agree).
+
+`meaning` (`pixel-daemon/src/meaning.rs`, `pixel-recall/src/code_resident.rs`)
+answers a natural-language question from the code chunks of the repository,
+their vectors kept resident in the daemon: each eligible file cut along its
+symbols exactly as `search-meaning` cuts it (`RESIDENT_MAX_FILES` files at
+most, credential-shaped paths never read), each chunk with its unit-length
+`f32` vector, term counts and line range. A hit is the best chunk of a file
+(`path`, `start_line`, `end_line`, `symbol`, fused `score`, one-line
+`snippet`), ranked by `search-meaning`'s own fusion (`rank_files`: semantic
+rank plus chunk BM25, tests, configuration and docs demoted), so it ranks
+as that command does, in a few milliseconds instead of a CLI process's 250 ms. It
+ranks; it never decides relevance, and says so in `caps`
+(`SEMANTIC_LEADS_UNVERIFIED`) and `epistemics`. A request never builds,
+reads a file or waits: the vectors are built on one background thread the
+first request starts, from the model `search-meaning` uses and never
+downloaded here, and a request that cannot rank answers `status:
+"unavailable"` with a `reason` (`cold`, `warming`, `stale`, `refreshing`,
+`model_missing`, `failed`) and starts the build, so a caller on a deadline
+falls back. The build is stamped with the publication generation (the
+counter watcher batches and graph builds advance) read before its first
+file, so an edit mid-build leaves it stale, never wrongly fresh; once the
+vectors have been asked for, each new generation rebuilds them at once
+(coalescing, at most eight builds per run), reusing every file whose bytes
+hash as before. The read plane (`read_evidence` kind `meaning`, the evidence
+bridge) ranks from the same shared vectors and never builds them; the
+bridge's writable service starts the build for a bundle that asks. The
+memory held is about 2 KiB per chunk at 256 dimensions (`pool.resident_bytes`).
 
 ## Request path from the CLI
 
@@ -338,6 +365,11 @@ envelope talks to the daemon socket directly.
 - The text index is git-anchored: base shards correspond to a commit, delta
   shards to changes since, and an overlay covers the dirty working tree.
   `pixel status` reports whether each layer is fresh.
+- The resident `meaning` vectors are as fresh as the publication generation
+  they were built for (`pool.generation`, `pool.age_ms`): a request at a newer
+  generation is `unavailable` (`stale`, then `refreshing`) until the rebuild
+  lands. They read the tree, not the watcher's change list, so a file the
+  watcher missed is picked up by the next rebuild.
 - The graph is built lazily on the first graph command and updated per file
   by the daemon watcher. Without a daemon (CI, `PIXEL_DAEMON_AUTO_START=0`,
   a copied `.pixel/`), the first graph command after an edit compares the

@@ -312,6 +312,7 @@ fn bundle_frames<W: Write>(
                 "bundle requires 1..={MAX_QUERIES_PER_BUNDLE} queries"
             ));
         }
+        let wants_meaning = queries.iter().any(|query| query.kind == "meaning");
         if let Some(status) = interrupted_status(cancelled, started, request.deadline_ms) {
             return Ok(status);
         }
@@ -327,10 +328,17 @@ fn bundle_frames<W: Write>(
             }
             Arc::clone(&slot.as_ref().expect("master opened above").service)
         };
-        let mut reader = service
-            .lock()
-            .map_err(|_| "evidence service lock poisoned".to_string())?
-            .read_replica();
+        let mut reader = {
+            let service = service
+                .lock()
+                .map_err(|_| "evidence service lock poisoned".to_string())?;
+            // Replicas rank from the resident vectors and never build them:
+            // the writable service starts the build for a bundle that asks.
+            if wants_meaning {
+                service.warm_meaning();
+            }
+            service.read_replica()
+        };
         for query in queries {
             if let Some(status) = interrupted_status(cancelled, started, request.deadline_ms) {
                 return Ok(status);
@@ -1020,6 +1028,41 @@ mod tests {
             partial(&second, "after").to_string().contains("late.rs"),
             "the edit made between two bundles is searchable: {second:?}"
         );
+    }
+
+    /// A bundle that asks for `meaning` makes the bridge's writable service
+    /// start the build its read replicas rank from: the answer is a typed
+    /// `meaning` result and never `cold` (nothing asked for a build), whatever
+    /// this machine's model is.
+    #[test]
+    fn a_meaning_query_should_start_the_build_its_replicas_rank_from() {
+        let root =
+            std::env::temp_dir().join(format!("pixel-evidence-meaning-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        std::fs::write(root.join("a.rs"), "fn early() {}\n").unwrap();
+        git(&root, &["add", "a.rs"]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let ask = json!({"op": "bundle", "version": 1, "requestId": "m",
+            "queries": [{"id": "q", "kind": "meaning", "query": "early"}]})
+        .to_string();
+        let (result, frames) = serve_lines(&root, &[ask]);
+        let _ = std::fs::remove_dir_all(&root);
+        result.unwrap();
+
+        assert_eq!(terminal(&frames, "m")["status"], "complete");
+        let partial = frames
+            .iter()
+            .find(|frame| frame["type"] == "partial")
+            .unwrap_or_else(|| panic!("no partial frame: {frames:?}"));
+        let status = partial["result"]["status"].as_str();
+        assert!(
+            matches!(status, Some("ready" | "unavailable")),
+            "a meaning result: {partial}"
+        );
+        assert_ne!(partial["result"]["reason"], "cold", "{partial}");
     }
 
     #[test]

@@ -51,7 +51,7 @@ pub struct AskHit {
     pub snippet: String,
 }
 
-const MAX_FILE_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_FILE_BYTES: usize = 512 * 1024;
 
 /// Most files a question without a `--max-files` budget embeds: a guard
 /// against a runaway universe, not a budget. A question searches every
@@ -233,7 +233,7 @@ pub struct AskResult {
 /// are a sample spread over the whole tree ([`sample_across_tree`]);
 /// `candidate_files` still counts every eligible file, and
 /// `file_limit_reached` and `degraded` say that the search was partial.
-fn collect_files(root: &Path, max_files: Option<usize>) -> (Vec<PathBuf>, AskCoverage) {
+pub(crate) fn collect_files(root: &Path, max_files: Option<usize>) -> (Vec<PathBuf>, AskCoverage) {
     collect_files_within(root, max_files, UNBUDGETED_FILE_CEILING)
 }
 
@@ -424,10 +424,10 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if denom > 0.0 { dot / denom } else { 0.0 }
 }
 
-struct CorpusEntry {
-    path: String,
-    text: String,
-    key: ChunkKey,
+pub(crate) struct CorpusEntry {
+    pub(crate) path: String,
+    pub(crate) text: String,
+    pub(crate) key: ChunkKey,
 }
 
 /// Answer a natural-language question over a code tree.
@@ -479,10 +479,7 @@ impl SemanticFallback {
         if self.hits.is_empty() {
             return Vec::new();
         }
-        let mut caps = vec![
-            "semantic leads are unverified: embedding similarity does not separate related from unrelated files"
-                .to_string(),
-        ];
+        let mut caps = vec![SEMANTIC_LEADS_UNVERIFIED.to_string()];
         if self.file_limit_reached {
             caps.push(format!(
                 "semantic fallback embedded only a deterministic sample of {} of the eligible files",
@@ -492,6 +489,10 @@ impl SemanticFallback {
         caps
     }
 }
+
+/// The cap every semantic answer names: embedding similarity ranks, it does
+/// not decide relevance.
+pub const SEMANTIC_LEADS_UNVERIFIED: &str = "semantic leads are unverified: embedding similarity does not separate related from unrelated files";
 
 /// Whether the semantic fallback may run. Default OFF: a lexical miss used
 /// to load the embedding model and embed up to
@@ -607,7 +608,7 @@ pub fn ask_with_metadata(
 
 /// The question over `root`, with the embedder `open` returns (opened only
 /// when a file is eligible) and the store `cache` names.
-fn ask_opening(
+pub(crate) fn ask_opening(
     root: &Path,
     query: &str,
     k: usize,
@@ -648,8 +649,26 @@ fn ask_opening(
 /// the opener and [`warm_probe`], which reads its download marker.
 const CODE_SEARCH_MODEL_REPO: &str = "minishlab/potion-code-16M-v2";
 
-fn open_code_embedder(download: bool) -> Result<Box<dyn crate::embed::Embedder>, String> {
+pub(crate) fn open_code_embedder(
+    download: bool,
+) -> Result<Box<dyn crate::embed::Embedder>, String> {
     crate::embed::open_embedder_with_potion_repo(download, Some(CODE_SEARCH_MODEL_REPO))
+}
+
+/// Whether the code-search model finished downloading, so
+/// [`open_code_embedder_offline`] would not need the network.
+#[cfg_attr(test, mutants::skip)] // adapter reading $HOME; `potion_set_up` holds the rule and is tested
+pub fn code_model_on_disk() -> bool {
+    crate::potion_set_up(&crate::models_dir(), CODE_SEARCH_MODEL_REPO)
+}
+
+/// The embedder `pixel search-meaning` ranks with, opened from the model
+/// cache and never downloaded: a long-lived caller must not block on the
+/// network, so it learns "not set up" from [`code_model_on_disk`] or the
+/// error and reports it.
+#[cfg_attr(test, mutants::skip)] // adapter over the on-disk model; no instance exists without the downloaded weights
+pub fn open_code_embedder_offline() -> Result<Box<dyn crate::embed::Embedder>, String> {
+    open_code_embedder(false)
 }
 
 /// Whether the semantic code-search path over a root is already warm: the
@@ -809,7 +828,7 @@ fn ask_collected(
 /// `coverage.vector_cache_errors` and marks the answer degraded, and the next
 /// save rebuilds the store. Counts go to `coverage.chunks`,
 /// `embedded_chunks` and `cached_chunks`.
-fn chunk_vectors(
+pub(crate) fn chunk_vectors(
     corpus: &[CorpusEntry],
     namespace: &Namespace,
     embedder: &mut dyn crate::embed::Embedder,
@@ -931,7 +950,7 @@ fn read_file(root: &Path, file: &Path, terms: &[String]) -> FileRead {
     FileRead::Searched { path, chunks }
 }
 
-fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
+pub(crate) fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
     let norm: f64 = vector.iter().map(|x| f64::from(*x).powi(2)).sum();
     if dims == 0 || vector.len() != dims || !norm.is_finite() || norm <= 0.0 {
         return Err(
@@ -945,7 +964,7 @@ fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
 /// Exclude identifier fragments created only by fixed byte-window boundaries
 /// (the windows of an unparsed file or an oversize piece; symbol chunks end
 /// on line boundaries).
-fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
+pub(crate) fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
     let is_ident = |character: char| character.is_alphanumeric() || character == '_';
     let chunk = &text[start..end];
     let chunk = if text[..start].chars().next_back().is_some_and(is_ident)
@@ -982,7 +1001,7 @@ fn words(text: &str) -> HashSet<String> {
 /// the only part is the identifier itself (`readHTTPResponse` gives
 /// `readhttpresponse`, `read`, `http`, `response`; `_setup` gives `_setup`,
 /// `setup`; `setup` gives `setup` once).
-fn for_each_word(text: &str, mut emit: impl FnMut(String)) {
+pub(crate) fn for_each_word(text: &str, mut emit: impl FnMut(String)) {
     for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
         if word.is_empty() {
             continue;
@@ -1029,7 +1048,7 @@ fn term_counts(text: &str, terms: &[String]) -> (Vec<u32>, u32) {
 }
 
 /// [`query_terms`], sorted: the term order of every lexical document.
-fn sorted_query_terms(query: &str) -> Vec<String> {
+pub(crate) fn sorted_query_terms(query: &str) -> Vec<String> {
     let mut terms: Vec<String> = query_terms(query).into_iter().collect();
     terms.sort_unstable();
     terms
@@ -1124,11 +1143,11 @@ fn lexical_evidence(
 
 /// A file's lexical evidence for one question.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct Lexical {
+pub(crate) struct Lexical {
     /// BM25 score of its best chunk (0 when no query term occurs).
-    score: f64,
+    pub(crate) score: f64,
     /// Most distinct query terms found together in one chunk.
-    matches: usize,
+    pub(crate) matches: usize,
 }
 
 /// Kinds of file that answer a question about code less often than the code
@@ -1219,7 +1238,7 @@ impl FileKind {
 /// evidence is strong, but a source file with the same evidence goes first.
 const DEMOTED_WEIGHT: f64 = 0.8;
 
-fn rank_files(
+pub(crate) fn rank_files(
     query: &str,
     lexical: &HashMap<String, Lexical>,
     best: HashMap<String, f32>,
@@ -1297,7 +1316,7 @@ fn competition_ranks<T: Ord + std::hash::Hash + Copy>(
     ranks
 }
 
-fn make_snippet(text: &str) -> String {
+pub(crate) fn make_snippet(text: &str) -> String {
     let joined: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut cut = joined;
     if cut.len() > 160 {

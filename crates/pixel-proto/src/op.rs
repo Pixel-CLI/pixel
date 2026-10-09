@@ -75,6 +75,18 @@ pub enum Op {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// Natural-language retrieval over the code chunks whose embeddings stay
+    /// resident in the daemon: ranked leads (file, lines, symbol, snippet),
+    /// never a verdict on relevance. Answers `unavailable` with a reason
+    /// instead of waiting while the vectors are cold, stale or rebuilding
+    /// (a background build is started), so a deadline-bounded caller falls
+    /// back. Never downloads the model.
+    Meaning {
+        query: String,
+        /// Leads returned; the daemon's default when absent, capped.
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     Symbol {
         name: String,
     },
@@ -424,6 +436,7 @@ impl Op {
             Op::Search { .. } => "search",
             Op::Targets { .. } => "targets",
             Op::TargetsFacts { .. } => "targets_facts",
+            Op::Meaning { .. } => "meaning",
             Op::Symbol { .. } => "symbol",
             Op::Skeleton { .. } => "skeleton",
             Op::Context { .. } => "context",
@@ -481,6 +494,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "search",
     "targets",
     "targets_facts",
+    "meaning",
     "symbol",
     "skeleton",
     "context",
@@ -604,6 +618,31 @@ mod tests {
             defaulted,
             Op::TargetsFacts {
                 task: "fix login flow".into(),
+                limit: None,
+            }
+        );
+    }
+
+    /// `limit` is optional on the wire; the daemon applies its default.
+    #[test]
+    fn meaning_round_trips_with_defaulted_limit() {
+        let op = Op::Meaning {
+            query: "how is the index refreshed".into(),
+            limit: Some(5),
+        };
+        let value = serde_json::to_value(&op).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "meaning", "query": "how is the index refreshed", "limit": 5})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), op);
+
+        let defaulted: Op =
+            serde_json::from_value(json!({"op": "meaning", "query": "refresh"})).unwrap();
+        assert_eq!(
+            defaulted,
+            Op::Meaning {
+                query: "refresh".into(),
                 limit: None,
             }
         );
@@ -840,6 +879,13 @@ mod tests {
                     limit: None,
                 },
                 "targets_facts",
+            ),
+            (
+                Op::Meaning {
+                    query: "".into(),
+                    limit: None,
+                },
+                "meaning",
             ),
             (Op::Symbol { name: "".into() }, "symbol"),
             (Op::Skeleton { file: "".into() }, "skeleton"),
@@ -1101,6 +1147,7 @@ mod tests {
             "search",
             "targets",
             "targets_facts",
+            "meaning",
             "symbol",
             "skeleton",
             "context",

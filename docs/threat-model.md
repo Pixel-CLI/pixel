@@ -88,13 +88,22 @@ wire contract"). In `crates/pixel-daemon/src/daemon.rs`: `MAX_REQUEST_LINE`
 (64 KiB), `CONNECTION_DEADLINE` (5 s per connection), a 1 s read timeout,
 `MAX_REQUESTS_PER_CONN` (64), `IDLE_TIMEOUT` (30 min). The socket file is
 set to 0600 after `bind`; on Linux the fallback directory is set to 0700.
-`PROTOCOL_VERSION` (`pixel_daemon::api`, 13) is compared by the CLI's
+`PROTOCOL_VERSION` (`pixel_daemon::api`, 16) is compared by the CLI's
 `classify_ping`: an older daemon is shut down and replaced, a newer one is
 left alone and the command runs in process. Requests are served one at a
 time. The op set includes git mutations (`publish`, `push`, `ship`,
 `branch_op`, `update`, `sync`, `reconcile`), file writes (`rename`), index
 rebuilds and `shutdown`. The CLI starts a daemon on demand
 (`auto_start_daemon`; `PIXEL_DAEMON_AUTO_START=0` turns that off).
+
+`meaning` takes a free-text question (cut to `MEANING_QUERY_MAX_BYTES`, 1 KiB)
+and returns at most `MEANING_MAX_LIMIT` (50) one-line snippets from the
+resident code index (ARCHITECTURE.md, "Daemon and wire contract"). A request
+reads no file, embeds one question and starts no download; the index is built
+on one background thread from the files `search-meaning` would read, under its
+caps (`RESIDENT_MAX_FILES`, 512 KiB per file), and never from a path
+`credential_path` names. A same-user client can make the daemon read and
+embed the repository by sending it, which it could do with `search`.
 
 ### 3.3 Installed hooks (B2, B3, B5)
 
@@ -661,6 +670,7 @@ hold.
 | --- | --- | --- |
 | Daemon request framing | `daemon::handle_conn`, `read_capped_line` | `oversized_line_is_rejected_without_unbounded_drain`, `expired_connection_deadline_stops_frame_read`, `socket_identity_should_follow_the_file_not_the_path`, `the_daemon_socket_should_be_0600_after_bind` (`daemon.rs`) |
 | Protocol skew | `classify_ping`, `PROTOCOL_VERSION` | `op_name_matches_serde_tag`, `session_capabilities_track_every_real_op` (`pixel-proto`) |
+| Snippets from the semantic index | `Resident::build`, `Meaning::answer` | `build_should_never_index_credential_shaped_paths` (`code_resident.rs`), `answer_should_apply_the_default_limit_and_cap_the_requested_one` and `bounded_query_should_cut_at_a_character_boundary_above_the_cap_only` (`meaning.rs`) |
 | Planted history database | `FactsStore::needs_rebuild`, `_pixel_marker` | `open_should_wipe_a_planted_history_database` (both refusals: no marker, foreign `created_by`; asserts the planted tables are gone and the marker is Pixel's); `concurrent_open_on_poisoned_db_never_ioerrors` covers the rebuild path |
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
 | Hook payload cap | `hook_input::read_bounded` | the `read_bounded` tests in `hook_input.rs` |

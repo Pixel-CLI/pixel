@@ -9,6 +9,7 @@ pub mod cycles;
 pub mod daemon;
 pub mod evaluate;
 pub mod evidence;
+mod meaning;
 pub mod recall_service;
 
 pub use api::{Request, Response, ServeError, Service};
