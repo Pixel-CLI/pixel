@@ -772,11 +772,22 @@ The excerpt is the signature, the first doc-comment line and up to eight lines
 of the matched region of each of the two best files (`Evidence::lines_at`,
 a bounded read outside the op count, refused for a credential-shaped path),
 preceded by the routed kind's own block when its data is in: the Flow hops
-with site and first line, the tests that mention the target with their first
-assertion, the config constant line with its default and where the
-environment reads it (only lines that carry a probed term). Code files come
-before test files; a kind without data leaves the generic excerpt alone, a
-rationale question gets none. That
+(or, with one endpoint, the callers) with site and first line, the tests that
+mention the target with their first assertion, the config constant line with
+its default and where the environment reads it (only lines that carry a
+probed term). The generic excerpt is cut from the meaning search's own chunk
+(lexical hits only when there is none); tests, docs and changelogs are
+excluded unless the question asks about them, as are `#[cfg(test)]` modules
+and test-named symbols. A plain-language flow or tests question borrows its
+symbol anchor from the best non-test chunk. The `confidence: high` line and
+the "Answer from this evidence" directive stay only when the top excerpt's
+file is also among the lexical probe's top two co-files (two independent
+retrievers agree); otherwise the block says `confidence: medium — verify the
+excerpt answers the question` and drops the directive.
+`scripts/bench-brief-excerpt.py` measures excerpt@1 and the directive's
+precision. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
+explicit cue (config, setting, env, flag, option, default), not `install` or
+`hook`. That
 block's cap is `PROSE_BRIEF_BYTES` (3584, under Pi's 4000-byte extension
 cap; `PLAIN_PROSE_BRIEF_BYTES`, 2 KiB, without answer evidence); over the
 cap the second file's excerpt lines go first, then the first's, never the

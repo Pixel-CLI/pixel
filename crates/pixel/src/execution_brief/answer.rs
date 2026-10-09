@@ -25,7 +25,7 @@ const BODY_LINES: usize = 8;
 /// Chars of one excerpt line.
 const LINE_CHARS: usize = 110;
 /// Hops a flow excerpt names.
-const MAX_HOPS: usize = 5;
+pub(crate) const MAX_HOPS: usize = 5;
 /// Test functions a tests excerpt names.
 pub(crate) const MAX_TESTS: usize = 4;
 /// Lines of a test file read to find its test functions.
@@ -91,8 +91,11 @@ impl Receipt {
         &self.terms
     }
 
-    /// The receipt lines: facts, then the instruction they support.
-    pub(crate) fn lines(&self) -> Vec<String> {
+    /// The receipt lines: facts, then the instruction they support. Only
+    /// `agreed` (two independent retrievers named the same file) earns the
+    /// instruction to answer from the matches; otherwise the line asks the
+    /// agent to check them.
+    pub(crate) fn lines(&self, agreed: bool) -> Vec<String> {
         let mut searched = format!(
             "searched: content+symbols+paths for {} ({} terms, {} files)",
             names(&self.terms),
@@ -111,9 +114,15 @@ impl Receipt {
         } else {
             "the search"
         };
-        lines.push(format!(
-            "result: the matches below are the best across {scope}; answer from them if they suffice, search further only if they don't"
-        ));
+        lines.push(if agreed {
+            format!(
+                "result: the matches below are the best across {scope}; answer from them if they suffice, search further only if they don't"
+            )
+        } else {
+            format!(
+                "result: the matches below are the best across {scope}; verify they answer the question"
+            )
+        });
         lines
     }
 }
@@ -136,7 +145,77 @@ fn names(list: &[String]) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Excerpt {
     pub(crate) label: String,
+    /// The file the block was cut from, empty for a kind block that spans
+    /// several.
+    pub(crate) path: String,
+    /// The block comes from the meaning search's own chunk.
+    pub(crate) from_meaning: bool,
     pub(crate) lines: Vec<String>,
+}
+
+/// Words of the question that ask about tests, and about documentation.
+const TEST_TERMS: &[&str] = &["test", "tests", "tested", "testing", "spec", "specs"];
+const DOC_TERMS: &[&str] = &[
+    "doc",
+    "docs",
+    "documentation",
+    "readme",
+    "changelog",
+    "guide",
+    "manual",
+];
+
+/// Whether `terms` (the probed words of the question) name any of `words`.
+pub(crate) fn asks_about(terms: &[String], words: &[&str]) -> bool {
+    terms
+        .iter()
+        .any(|term| words.contains(&term.to_lowercase().as_str()))
+}
+
+pub(crate) fn asks_tests(terms: &[String]) -> bool {
+    asks_about(terms, TEST_TERMS)
+}
+
+pub(crate) fn asks_docs(terms: &[String]) -> bool {
+    asks_about(terms, DOC_TERMS)
+}
+
+/// Whether `path` is a test file by its name or its directory.
+pub(crate) fn is_test_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    path.split('/')
+        .any(|part| matches!(part, "tests" | "test" | "__tests__" | "e2e"))
+        || name.contains("_test.")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || name.starts_with("test_")
+        || name == "tests.rs"
+}
+
+/// Whether `path` is prose a reader opens for documentation, not code.
+pub(crate) fn is_docs_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let extension = name.rsplit('.').next().unwrap_or("");
+    matches!(extension, "md" | "mdx" | "rst" | "txt" | "adoc")
+        || path.starts_with("docs/")
+        || path.starts_with("changelog.d/")
+}
+
+/// Whether a symbol is named like a test.
+pub(crate) fn is_test_symbol(name: &str) -> bool {
+    name.contains("_should_") || name.starts_with("test_") || name.ends_with("_test")
+}
+
+/// Whether line `at` (1-based) of `source` sits inside a `#[cfg(test)] mod`.
+pub(crate) fn in_test_module(source: &[String], at: u64) -> bool {
+    let end = usize::try_from(at).unwrap_or(usize::MAX).min(source.len());
+    (0..end).any(|index| {
+        source[index].trim() == "#[cfg(test)]"
+            && source.get(index + 1).is_some_and(|next| {
+                let next = next.trim_start();
+                next.starts_with("mod ") || next.starts_with("pub mod ")
+            })
+    })
 }
 
 /// The line range to read around `matched`: enough above it for the
@@ -260,7 +339,16 @@ pub(crate) fn lookup_excerpt(start: u64, window: &[String], matched: u64) -> Vec
     let at = usize::try_from(matched.saturating_sub(start))
         .unwrap_or(0)
         .min(window.len() - 1);
-    let sig = (0..=at).rev().find(|&index| is_signature(&window[index]));
+    // A match on the doc comment or attribute of a declaration belongs to the
+    // declaration below it; any other match to the nearest one above.
+    let below = (at..window.len())
+        .find(|&index| {
+            !(is_doc(&window[index])
+                || is_attribute(&window[index])
+                || window[index].trim().is_empty())
+        })
+        .filter(|&index| is_signature(&window[index]));
+    let sig = below.or_else(|| (0..=at).rev().find(|&index| is_signature(&window[index])));
     let mut chosen: Vec<usize> = Vec::new();
     if let Some(sig) = sig {
         chosen.extend(doc_above(window, sig));
@@ -525,7 +613,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let text = receipt.lines().join("\n");
+        let text = receipt.lines(true).join("\n");
         assert!(
             text.contains(
                 "searched: content+symbols+paths for watchdog, daemon (2 terms, 412 files)"
@@ -540,13 +628,16 @@ mod tests {
     #[test]
     fn receipt_should_name_the_meaning_search_only_when_it_answered() {
         let weights = input(&[("watchdog", 2.0)]);
-        let with = Receipt::new(&weights, Some(8)).unwrap().lines().join("\n");
+        let with = Receipt::new(&weights, Some(8))
+            .unwrap()
+            .lines(true)
+            .join("\n");
         assert!(
             with.contains("· meaning search returned 8 chunks"),
             "{with}"
         );
         assert!(with.contains("across both searches;"), "{with}");
-        let without = Receipt::new(&weights, None).unwrap().lines().join("\n");
+        let without = Receipt::new(&weights, None).unwrap().lines(true).join("\n");
         assert!(!without.contains("meaning"), "{without}");
     }
 
@@ -562,7 +653,7 @@ mod tests {
         let pairs: Vec<(&str, f64)> = many.iter().map(|(k, w)| (k.as_str(), *w)).collect();
         let text = Receipt::new(&input(&pairs), None)
             .unwrap()
-            .lines()
+            .lines(true)
             .join("\n");
         assert!(text.contains("term5 (+3) (9 terms"), "{text}");
         assert!(!text.contains("term6"), "{text}");
@@ -744,5 +835,66 @@ mod tests {
         let terms = vec!["receipt".to_string()];
         assert_eq!(config_excerpt(&hits, &terms).len(), 2);
         assert!(config_excerpt(&hits, &["unrelated".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn path_and_symbol_predicates_should_tell_tests_and_docs_from_code() {
+        for docs in [
+            "README.md",
+            "docs/a.rs",
+            "CHANGELOG.md",
+            "changelog.d/1.changed.md",
+        ] {
+            assert!(is_docs_path(docs), "{docs}");
+        }
+        for code in ["src/a.rs", "src/docs.rs", "web/a.ts"] {
+            assert!(!is_docs_path(code), "{code}");
+        }
+        assert!(is_test_symbol("render_should_wrap"));
+        assert!(is_test_symbol("test_render"));
+        assert!(!is_test_symbol("render"));
+        assert!(!is_test_symbol("latest_release"));
+        let terms = vec!["Tests".to_string(), "x".to_string()];
+        assert!(asks_tests(&terms) && !asks_docs(&terms));
+        assert!(asks_docs(&["readme".to_string()]));
+    }
+
+    #[test]
+    fn in_test_module_should_see_a_cfg_test_mod_above_the_line_only() {
+        let source = lines(&[
+            "fn real() {}",
+            "#[cfg(test)]",
+            "fn only_in_tests() {}",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    fn a() {}",
+            "}",
+        ]);
+        assert!(
+            !in_test_module(&source, 3),
+            "a cfg(test) fn is not a module"
+        );
+        assert!(!in_test_module(&source, 1));
+        assert!(in_test_module(&source, 6));
+    }
+
+    #[test]
+    fn lookup_excerpt_should_follow_a_match_on_a_doc_comment_down_to_its_declaration() {
+        let window = lines(&[
+            "fn previous() {}",
+            "",
+            "/// Wait for the daemon.",
+            "#[must_use]",
+            "pub fn wait() -> bool {",
+            "    true",
+            "}",
+        ]);
+        let excerpt = lookup_excerpt(10, &window, 12);
+        assert_eq!(excerpt[0], "12| /// Wait for the daemon.");
+        assert_eq!(excerpt[1], "14| pub fn wait() -> bool {");
+        assert!(
+            !excerpt.iter().any(|line| line.contains("previous")),
+            "{excerpt:?}"
+        );
     }
 }

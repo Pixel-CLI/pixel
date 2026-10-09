@@ -74,6 +74,11 @@ const ANSWER_FILES: usize = 4;
 const EXCERPT_TRIES: usize = 4;
 /// Files a generic excerpt covers.
 const EXCERPT_FILES: usize = 2;
+/// Lexical co-files an excerpt's file must be among for the brief to keep
+/// its directive to answer from the evidence. Measured on the dev split of
+/// `eval/brief-gate`: the top three let a wrong excerpt keep it (precision
+/// 0.67), the top two did not (1.0).
+const AGREE_TOP: usize = 2;
 /// Whether an off-tier relevance decision silences a weakly code-shaped
 /// prompt's brief, as it does a plain-language one. The decision is computed
 /// and logged either way.
@@ -140,6 +145,10 @@ const CONCEPT_STOPWORDS: &[&str] = &[
 const GENERATED_EXTENSIONS: &[&str] = &["json", "lock"];
 /// Directories that hold build output or vendored code.
 const GENERATED_DIRS: &[&str] = &["output", "dist", "node_modules"];
+/// The confidence line of a brief whose excerpt rests on one retriever.
+const MEDIUM_CONFIDENCE: &str = "confidence: medium — verify the excerpt answers the question";
+/// The footer of such a brief: the verification rule without the directive.
+const UNCORROBORATED_FOOTER: &str = "0 hits or 0 callers: verify with rg before concluding.";
 const FOOTER: &str = "Answer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.";
 
 static QUOTED: LazyLock<Regex> = LazyLock::new(|| {
@@ -818,6 +827,10 @@ pub(crate) struct Brief {
     /// What the searches of this brief covered, when it is confident and the
     /// probe answered.
     receipt: Option<Receipt>,
+    /// The meaning search's leads, best first.
+    leads: Vec<MeaningHit>,
+    /// The relevance probe's co-files, heaviest first.
+    lexical: Vec<String>,
     /// Answer-sized evidence cut from the best files, or one kind's own.
     excerpts: Vec<Excerpt>,
     /// Test files a `uses` route found calling the picked symbol.
@@ -864,30 +877,58 @@ impl Brief {
     }
 
     /// The packet names its own gaps: cut by the budget, unfinished, or with
-    /// an unresolved note. A partial packet carries no receipt or excerpt.
+    /// an unresolved note, and says so in its footer.
     fn partial(&self) -> bool {
-        self.gaps() || !self.finished
+        self.short() || !self.unresolved.is_empty()
     }
 
-    /// The budget cut the chain short or an op left a note.
-    fn gaps(&self) -> bool {
-        self.cut || !self.unresolved.is_empty()
+    /// The budget cut the chain short or it has not finished: the searches
+    /// the receipt describes may not all have answered. An unresolved note of
+    /// a kind op does not change what the searches covered, so a packet with
+    /// one still carries its receipt and excerpts (and, being partial, no
+    /// directive).
+    fn short(&self) -> bool {
+        self.cut || !self.finished
     }
 
     /// The receipt is shown: a confident (high-tier) brief of a prompt that
     /// did not name code, whose packet is complete.
     fn receipt_lines(&self) -> Vec<String> {
-        if self.signal == Some(Signal::Strong) || self.tier() != Some(Tier::High) || self.partial()
-        {
+        if self.signal == Some(Signal::Strong) || self.tier() != Some(Tier::High) || self.short() {
             return Vec::new();
         }
         if !answer::receipt_enabled() {
             return Vec::new();
         }
+        // No excerpt means nothing was cut to disagree with.
+        let agreed = self.agreed() != Some(false) && self.unresolved.is_empty();
         self.receipt
             .as_ref()
-            .map(Receipt::lines)
+            .map(|receipt| receipt.lines(agreed))
             .unwrap_or_default()
+    }
+
+    /// Whether two independent retrievers name the file of the top excerpt:
+    /// the meaning search cut it from its own chunk, and the lexical probe
+    /// has the same file among its top two co-files. `None` when the brief
+    /// carries no excerpt, so nothing was claimed or withheld.
+    fn agreed(&self) -> Option<bool> {
+        if self.short() || self.excerpts.is_empty() {
+            return None;
+        }
+        Some(
+            self.excerpts
+                .iter()
+                .find(|excerpt| !excerpt.path.is_empty())
+                .is_some_and(|top| {
+                    top.from_meaning
+                        && self
+                            .lexical
+                            .iter()
+                            .take(AGREE_TOP)
+                            .any(|path| *path == top.path)
+                }),
+        )
     }
 
     fn has_excerpts(&self) -> bool {
@@ -896,7 +937,7 @@ impl Brief {
 
     fn excerpt_counts(&self) -> [usize; EXCERPT_FILES] {
         let mut counts = [0; EXCERPT_FILES];
-        if !self.partial() {
+        if !self.short() {
             for (slot, excerpt) in counts.iter_mut().zip(&self.excerpts) {
                 *slot = excerpt.lines.len();
             }
@@ -1139,7 +1180,7 @@ fn answer_evidence(evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Inst
     let brief = edit(state, |brief| brief.clone());
     if brief.signal == Some(Signal::Strong)
         || brief.tier() != Some(Tier::High)
-        || brief.gaps()
+        || brief.cut
         || brief.kind == Some(QuestionKind::Rationale)
     {
         return;
@@ -1152,6 +1193,8 @@ fn answer_evidence(evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Inst
             let lines = answer::config_excerpt(&brief.files, terms);
             (!lines.is_empty()).then(|| Excerpt {
                 label: "config".to_string(),
+                path: String::new(),
+                from_meaning: false,
                 lines,
             })
         }
@@ -1174,6 +1217,9 @@ fn flow_excerpt(
     brief: &Brief,
     deadline: Instant,
 ) -> Option<Excerpt> {
+    if brief.flow_hops.is_empty() {
+        return caller_excerpt(evidence, brief, deadline);
+    }
     let names = answer::pick_hops(&brief.flow_hops);
     if names.is_empty() || !has_budget(state, deadline) {
         return None;
@@ -1203,6 +1249,31 @@ fn flow_excerpt(
     }
     Some(Excerpt {
         label: "flow".to_string(),
+        path: String::new(),
+        from_meaning: false,
+        lines,
+    })
+}
+
+/// A flow question with one endpoint: its direct callers, one per line with
+/// the site and the first line of the calling declaration.
+fn caller_excerpt(evidence: &dyn Evidence, brief: &Brief, deadline: Instant) -> Option<Excerpt> {
+    let hops: Vec<Hop> = brief
+        .callers
+        .iter()
+        .filter(|hit| !pixel_index::index::credential_path(Path::new(&hit.path)))
+        .take(answer::MAX_HOPS)
+        .map(|hit| Hop {
+            name: hit.via.clone(),
+            site: Some((hit.path.clone(), hit.line)),
+            head: evidence.line_at(&hit.path, hit.line, deadline).ok(),
+        })
+        .collect();
+    let lines = answer::flow_excerpt(&hops);
+    (!lines.is_empty()).then(|| Excerpt {
+        label: "callers".to_string(),
+        path: String::new(),
+        from_meaning: false,
         lines,
     })
 }
@@ -1230,69 +1301,113 @@ fn tests_excerpt(evidence: &dyn Evidence, brief: &Brief, deadline: Instant) -> O
     }
     (!lines.is_empty()).then(|| Excerpt {
         label: "tests".to_string(),
+        path: String::new(),
+        from_meaning: false,
         lines,
     })
 }
 
-/// Whether `path` is a test file by its name or its directory.
-fn is_test_path(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    path.split('/')
-        .any(|part| matches!(part, "tests" | "test" | "__tests__" | "e2e"))
-        || name.contains("_test.")
-        || name.contains(".test.")
-        || name.contains(".spec.")
-        || name.starts_with("test_")
-        || name == "tests.rs"
+/// Where an excerpt may be cut from: the meaning search's chunks first, in
+/// rank order, then the lexical hits; one entry per file, code before tests
+/// and docs unless the question asks about them.
+struct Candidate {
+    path: String,
+    line: u64,
+    symbol: Option<String>,
+    meaning: bool,
 }
 
-/// The best-matching symbol of the top fused files: its signature, the
-/// first line of its doc comment and the matched region, one block per file.
+fn excerpt_candidates(brief: &Brief) -> Vec<Candidate> {
+    let terms = brief.receipt.as_ref().map_or(&[][..], Receipt::terms);
+    let tests_ok = brief.kind == Some(QuestionKind::Tests) || answer::asks_tests(terms);
+    let docs_ok = answer::asks_docs(terms);
+    let leads = brief.leads.iter().map(|lead| Candidate {
+        path: lead.path.clone(),
+        line: u64::from(lead.start_line),
+        symbol: lead.symbol.clone(),
+        meaning: true,
+    });
+    let hits = brief.files.iter().map(|hit| Candidate {
+        path: hit.path.clone(),
+        line: hit.line,
+        symbol: None,
+        meaning: false,
+    });
+    let mut seen: Vec<String> = Vec::new();
+    let mut kept = Vec::new();
+    for candidate in leads.chain(hits) {
+        let packed = brief.def_body.is_some()
+            && brief
+                .defined
+                .first()
+                .is_some_and(|def| def.path == candidate.path);
+        let barred = pixel_index::index::credential_path(Path::new(&candidate.path))
+            || (!tests_ok && answer::is_test_path(&candidate.path))
+            || (!docs_ok && answer::is_docs_path(&candidate.path))
+            || (!tests_ok
+                && candidate
+                    .symbol
+                    .as_deref()
+                    .is_some_and(answer::is_test_symbol));
+        if packed || barred || seen.contains(&candidate.path) {
+            continue;
+        }
+        seen.push(candidate.path.clone());
+        kept.push(candidate);
+    }
+    kept
+}
+
+/// Lines of a Rust file read from the top so a `#[cfg(test)] mod` above the
+/// match can be seen; longer prefixes are read as a window only.
+const MAX_PREFIX_LINES: u64 = 20_000;
+
+/// The best-matching symbol of the best files: its signature, the first line
+/// of its doc comment and the matched region, one block per file, cut from
+/// the meaning search's chunk when it has one.
 fn generic_excerpts(
     evidence: &dyn Evidence,
     brief: &Brief,
     limit: usize,
     deadline: Instant,
 ) -> Vec<Excerpt> {
-    let mut seen: Vec<&str> = Vec::new();
     let mut blocks: Vec<Excerpt> = Vec::new();
-    // The best files in fused order, test files after the rest: a test that
-    // quotes the question is a worse answer than the code it exercises.
-    let (tests, code): (Vec<&RichHit>, Vec<&RichHit>) =
-        brief.files.iter().partition(|hit| is_test_path(&hit.path));
-    for hit in code.into_iter().chain(tests).take(EXCERPT_TRIES) {
+    for candidate in excerpt_candidates(brief).into_iter().take(EXCERPT_TRIES) {
         if blocks.len() >= limit {
             break;
         }
-        let packed = brief.def_body.is_some()
-            && brief
+        let matched = if candidate.meaning {
+            candidate.line
+        } else {
+            brief
                 .defined
-                .first()
-                .is_some_and(|def| def.path == hit.path);
-        if seen.contains(&hit.path.as_str())
-            || packed
-            || pixel_index::index::credential_path(Path::new(&hit.path))
+                .iter()
+                .find(|def| def.path == candidate.path)
+                .map_or(candidate.line, |def| def.start_line)
+        };
+        let (start, end) = answer::window_range(matched);
+        let rust = candidate.path.ends_with(".rs") && end <= MAX_PREFIX_LINES;
+        let from = if rust { 1 } else { start };
+        let Ok(source) = evidence.lines_at(&candidate.path, from, end, deadline) else {
+            continue;
+        };
+        if rust
+            && answer::in_test_module(&source, matched)
+            && brief.kind != Some(QuestionKind::Tests)
         {
             continue;
         }
-        seen.push(&hit.path);
-        let matched = brief
-            .defined
-            .iter()
-            .find(|def| def.path == hit.path)
-            .map_or(hit.line, |def| def.start_line);
-        let (start, end) = answer::window_range(matched);
-        let Ok(window) = evidence.lines_at(&hit.path, start, end, deadline) else {
-            continue;
-        };
-        let lines = answer::lookup_excerpt(start, &window, matched);
+        let skip = usize::try_from(start - from).unwrap_or(0).min(source.len());
+        let lines = answer::lookup_excerpt(start, &source[skip..], matched);
         if !lines.is_empty() {
             blocks.push(Excerpt {
                 label: if matched == 0 {
-                    hit.path.clone()
+                    candidate.path.clone()
                 } else {
-                    format!("{}:{matched}", hit.path)
+                    format!("{}:{matched}", candidate.path)
                 },
+                path: candidate.path,
+                from_meaning: candidate.meaning,
                 lines,
             });
         }
@@ -2019,7 +2134,36 @@ where
         edit(state, |brief| brief.finished = true);
         return;
     }
+    let plan = seeded(plan, state);
     run(&plan, evidence.as_ref(), state, deadline);
+}
+
+/// A flow or tests question in plain language names no symbol, so the kind's
+/// route has nothing to resolve: the symbol of the meaning search's best
+/// non-test chunk stands in as its anchor, for a confident brief only.
+fn seeded(mut plan: Plan, state: &Mutex<Brief>) -> Plan {
+    if !matches!(plan.kind, QuestionKind::Flow | QuestionKind::Tests)
+        || plan.anchors.names().next().is_some()
+    {
+        return plan;
+    }
+    let seed = edit(state, |brief| {
+        (brief.tier() == Some(Tier::High) && answer::answer_enabled())
+            .then(|| {
+                brief
+                    .leads
+                    .iter()
+                    .filter(|lead| !answer::is_test_path(&lead.path))
+                    .find_map(|lead| lead.symbol.clone())
+            })
+            .flatten()
+    });
+    if let Some(symbol) = seed
+        .filter(|name| name.len() >= 3 && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_'))
+    {
+        plan.anchors.0.push(symbol);
+    }
+    plan
 }
 
 /// What the probes of a weak or plain prompt have answered so far.
@@ -2222,6 +2366,8 @@ fn fold(state: &Mutex<Brief>, plan: &Plan, got: &Gathered) {
             .as_ref()
             .and_then(relevance::Verdict::confidence_line);
         brief.absorb(fused, admit_json);
+        brief.leads = leads.to_vec();
+        brief.lexical = lines.iter().map(|hit| hit.path.clone()).collect();
         brief.receipt = match &got.relevance {
             Some(Ok(answer)) => {
                 let chunks = match &got.meaning {
@@ -2549,7 +2695,13 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
         lines.push(line);
     }
     if let Some(confidence) = &brief.confidence {
-        lines.push(confidence.clone());
+        // An excerpt the two retrievers do not both stand behind is shown
+        // with a medium confidence, not the high one.
+        lines.push(if brief.agreed() == Some(false) {
+            MEDIUM_CONFIDENCE.to_string()
+        } else {
+            confidence.clone()
+        });
     }
     lines.extend(brief.excerpt_block(shown));
     if let Some(line) = list_line(
@@ -2643,7 +2795,14 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
             lines.push(format!("next: {}", clean_n(next, DEF_BODY_CHARS)));
         }
     } else {
-        lines.push(FOOTER.to_string());
+        lines.push(
+            if brief.agreed() == Some(false) {
+                UNCORROBORATED_FOOTER
+            } else {
+                FOOTER
+            }
+            .to_string(),
+        );
     }
     lines.join("\n")
 }
@@ -6275,8 +6434,6 @@ mod tests {
         rationale.kind = Some(QuestionKind::Rationale);
         let mut strong = ready();
         strong.signal = Some(Signal::Strong);
-        let mut gap = ready();
-        gap.unresolved = vec!["x".into()];
         let mut cut = ready();
         cut.cut = true;
         let mut low = ready();
@@ -6287,7 +6444,6 @@ mod tests {
         for (name, brief) in [
             ("rationale", rationale),
             ("strong", strong),
-            ("gap", gap),
             ("cut", cut),
             ("low", low),
         ] {
@@ -6304,10 +6460,10 @@ mod tests {
             "src/tests.rs",
             "test_a.py",
         ] {
-            assert!(is_test_path(test), "{test}");
+            assert!(answer::is_test_path(test), "{test}");
         }
         for code in ["src/a.rs", "src/latest.rs", "docs/contest.md"] {
-            assert!(!is_test_path(code), "{code}");
+            assert!(!answer::is_test_path(code), "{code}");
         }
         let mut fake = Fake::new();
         fake.sources = vec![
@@ -6387,6 +6543,8 @@ mod tests {
             excerpts: (0..2)
                 .map(|n| Excerpt {
                     label: format!("src/f{n}.rs:3"),
+                    path: format!("src/f{n}.rs"),
+                    from_meaning: true,
                     lines: (0..10)
                         .map(|line| format!("{line}| {}", "x".repeat(105)))
                         .collect(),
@@ -6444,14 +6602,205 @@ mod tests {
     }
 
     #[test]
-    fn a_partial_packet_should_carry_no_receipt_and_no_excerpt() {
+    fn a_cut_packet_should_carry_no_receipt_and_no_excerpt() {
         let mut brief = high_brief();
-        brief.unresolved = vec!["search x: out of time".into()];
+        brief.cut = true;
         let (text, stats) = fit(&brief).unwrap();
         assert!(
             !text.contains("searched:") && !text.contains("\nanswer "),
             "{text}"
         );
         assert_eq!(stats, AnswerStats::default());
+    }
+
+    #[test]
+    fn an_unresolved_note_should_keep_the_evidence_but_never_the_directive() {
+        let mut brief = agreeing_brief(&[DAEMON]);
+        brief.unresolved = vec!["find-symbol x: 2 candidates".into()];
+        brief.receipt = Receipt::new(&on_topic_answer().input, Some(2));
+        let (text, stats) = fit(&brief).unwrap();
+        assert!(stats.receipt && stats.answer, "{text}");
+        assert!(text.contains("packet partial"), "{text}");
+        assert!(!text.contains("Answer from this evidence"), "{text}");
+        assert!(!text.contains("answer from them"), "{text}");
+        assert!(text.contains("verify they answer the question"), "{text}");
+    }
+
+    fn lead_at(path: &str, line: u32, symbol: Option<&str>) -> MeaningHit {
+        MeaningHit {
+            symbol: symbol.map(String::from),
+            ..lead(path, line, "chunk")
+        }
+    }
+
+    fn two_file_fake() -> Fake {
+        let mut fake = Fake::new();
+        fake.sources = vec![
+            (DAEMON.to_string(), daemon_source()),
+            (
+                "crates/pixel/src/other.rs".to_string(),
+                vec!["fn other() {".into(), "    go();".into(), "}".into()],
+            ),
+        ];
+        fake
+    }
+
+    #[test]
+    fn the_excerpt_should_come_from_the_meaning_chunk_not_the_lexical_line() {
+        let mut brief = high_brief();
+        brief.leads = vec![lead_at(DAEMON, 280, None)];
+        brief.files = vec![
+            rhit("crates/pixel/src/other.rs", 1, "go"),
+            rhit(DAEMON, 3, "filler"),
+        ];
+        let brief = answered(brief, &two_file_fake());
+        assert_eq!(brief.excerpts[0].label, format!("{DAEMON}:280"));
+        assert!(brief.excerpts[0].from_meaning);
+        assert_eq!(brief.excerpts[1].label, "crates/pixel/src/other.rs:1");
+        assert!(!brief.excerpts[1].from_meaning);
+    }
+
+    #[test]
+    fn excerpts_should_skip_tests_docs_and_test_modules_unless_the_question_asks() {
+        let mut fake = two_file_fake();
+        let mut inside: Vec<String> = vec![
+            "fn real() {}".into(),
+            "#[cfg(test)]".into(),
+            "mod tests {".into(),
+        ];
+        inside.extend((0..15).map(|n| format!("    fn t{n}() {{}}")));
+        fake.sources
+            .push(("src/mod_with_tests.rs".to_string(), inside));
+        for path in [
+            "tests/a.rs",
+            "docs/guide.md",
+            "CHANGELOG.md",
+            "src/lib_test.rs",
+        ] {
+            fake.sources
+                .push((path.to_string(), vec!["fn x() {}".into()]));
+        }
+        let mut brief = high_brief();
+        brief.leads = vec![
+            lead_at("tests/a.rs", 1, None),
+            lead_at("docs/guide.md", 1, None),
+            lead_at("CHANGELOG.md", 1, None),
+            lead_at("src/lib_test.rs", 1, None),
+            lead_at("crates/pixel/src/other.rs", 17, Some("render_should_wrap")),
+            lead_at("src/mod_with_tests.rs", 10, None),
+            lead_at(DAEMON, 280, Some("watch_ready")),
+        ];
+        brief.files.clear();
+        let kept = answered(brief.clone(), &fake);
+        let paths: Vec<&str> = kept.excerpts.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, [DAEMON]);
+        // A question about tests or docs may cut from them.
+        brief.kind = Some(QuestionKind::Tests);
+        brief.defined = Vec::new();
+        let tests = answered(brief, &fake);
+        assert!(
+            tests.excerpts.iter().any(|e| e.path == "tests/a.rs"),
+            "{:?}",
+            tests.excerpts
+        );
+    }
+
+    fn agreeing_brief(lexical: &[&str]) -> Brief {
+        let mut brief = high_brief();
+        brief.excerpts = vec![Excerpt {
+            label: format!("{DAEMON}:280"),
+            path: DAEMON.to_string(),
+            from_meaning: true,
+            lines: vec!["280| pub fn watch_ready()".into()],
+        }];
+        brief.lexical = lexical.iter().map(ToString::to_string).collect();
+        brief.confidence = Some(HIGH_CONFIDENCE.to_string());
+        brief
+    }
+
+    #[test]
+    fn the_directive_should_stay_only_when_both_retrievers_name_the_excerpt_file() {
+        let agreed = agreeing_brief(&["a.rs", DAEMON]);
+        assert_eq!(agreed.agreed(), Some(true));
+        let (text, _) = fit(&agreed).unwrap();
+        assert!(text.contains(HIGH_CONFIDENCE), "{text}");
+        assert!(text.contains(FOOTER), "{text}");
+        assert!(text.contains("answer from them if they suffice"), "{text}");
+
+        // The file is only the third lexical co-file: one retriever.
+        let alone = agreeing_brief(&["a.rs", "b.rs", DAEMON]);
+        assert_eq!(alone.agreed(), Some(false));
+        let (text, _) = fit(&alone).unwrap();
+        assert!(text.contains(MEDIUM_CONFIDENCE), "{text}");
+        assert!(!text.contains("confidence: high"), "{text}");
+        assert!(!text.contains("Answer from this evidence"), "{text}");
+        assert!(!text.contains("answer from them"), "{text}");
+        assert!(text.contains(UNCORROBORATED_FOOTER), "{text}");
+        assert!(text.contains("verify they answer the question"), "{text}");
+        assert!(text.contains(&format!("answer {DAEMON}:280:")), "{text}");
+
+        // A lexical-only excerpt has no second retriever to agree with it.
+        let mut lexical = agreeing_brief(&[DAEMON]);
+        lexical.excerpts[0].from_meaning = false;
+        assert_eq!(lexical.agreed(), Some(false));
+        // No excerpt, nothing withheld: the brief keeps its #887 shape.
+        let mut none = agreeing_brief(&[]);
+        none.excerpts.clear();
+        assert_eq!(none.agreed(), None);
+    }
+
+    #[test]
+    fn a_flow_or_tests_question_should_borrow_the_symbol_of_the_best_non_test_chunk() {
+        let mut brief = high_brief();
+        brief.leads = vec![
+            lead_at("tests/a.rs", 3, Some("a_test_symbol")),
+            lead_at(DAEMON, 280, Some("watch_ready")),
+        ];
+        let state = Mutex::new(brief);
+        let plan = |kind, text: &str| Plan {
+            anchors: Anchors::from_text(text),
+            change_intent: false,
+            kind,
+            typed: text.to_string(),
+            concept: None,
+        };
+        let seeded_flow = seeded(plan(QuestionKind::Flow, "what calls the watchdog"), &state);
+        assert_eq!(
+            seeded_flow.anchors.symbol_name().as_deref(),
+            Some("watch_ready")
+        );
+        // Another kind, or a question that names its own symbol, keeps its anchors.
+        let lookup = seeded(plan(QuestionKind::Lookup, "what is the watchdog"), &state);
+        assert!(lookup.anchors.names().next().is_none());
+        let named = seeded(plan(QuestionKind::Flow, "who calls `retry_loop`"), &state);
+        assert_eq!(named.anchors.names().collect::<Vec<_>>(), ["retry_loop"]);
+        // A maybe never borrows one.
+        state.lock().unwrap().relevance = None;
+        let cold = seeded(
+            plan(QuestionKind::Tests, "which tests cover the watchdog"),
+            &state,
+        );
+        assert!(cold.anchors.names().next().is_none());
+    }
+
+    #[test]
+    fn a_one_endpoint_flow_brief_should_list_the_callers_as_its_hops() {
+        let mut fake = Fake::new();
+        fake.source = Some("fn run() { watch_ready() }".into());
+        let mut brief = high_brief();
+        brief.kind = Some(QuestionKind::Flow);
+        brief.callers = vec![
+            caller("src/run.rs", "run", 12),
+            caller("src/boot.rs", "boot", 7),
+        ];
+        let brief = answered(brief, &fake);
+        assert_eq!(brief.excerpts[0].label, "callers");
+        assert_eq!(
+            brief.excerpts[0].lines,
+            [
+                "src/run.rs:12 run — fn run() { watch_ready() }",
+                "src/boot.rs:7 boot — fn run() { watch_ready() }"
+            ]
+        );
     }
 }
