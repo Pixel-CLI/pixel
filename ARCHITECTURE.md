@@ -768,15 +768,19 @@ terms, <files> files)`, ` · meaning search returned <n> chunks` only when
 that search answered, `ignored (too common)`, and the `result:` line that
 tells the agent to answer from the matches below) and carries answer-sized
 excerpts after the confidence line (`answer <path>:<line>:`, `execution_brief/answer.rs`).
-The excerpt is the signature, the first doc-comment line and up to eight lines
-of the matched region of each of the two best files (`Evidence::lines_at`,
+The excerpt is the signature, the first doc-comment line and six lines of the
+densest keyword region of a chunk, up to three chunks (`Evidence::lines_at`,
 a bounded read outside the op count, refused for a credential-shaped path),
 preceded by the routed kind's own block when its data is in: the Flow hops
 (or, with one endpoint, the callers) with site and first line, the tests that
 mention the target with their first assertion, the config constant line with
 its default and where the environment reads it (only lines that carry a
-probed term). The generic excerpt is cut from the meaning search's own chunk
-(lexical hits only when there is none); tests, docs and changelogs are
+probed term). The generic excerpt is chunk-first: the candidates are the meaning
+search's chunks from the five best fused files plus the declaration around
+each lexical hit; each is scored by the reciprocal-rank fusion of its own
+retriever's rank and the rank of its count of distinct probed keywords; the
+best chunk of the file the list ranks first leads, then the best of each
+other file; tests, docs and changelogs are
 excluded unless the question asks about them, as are `#[cfg(test)]` modules
 and test-named symbols. The ranked `files:` list puts tests, docs, `eval/` and changelog files after the code files (a stable demotion, nothing dropped) unless the question asks about them. A plain-language flow or tests question borrows its
 symbol anchor from the best non-test chunk. The `confidence: high` line and

@@ -18,9 +18,11 @@ const MAX_TERMS_SHOWN: usize = 6;
 const MAX_TERM_CHARS: usize = 24;
 /// Lines of source read before the matched line, to reach the signature and
 /// its doc comment, and after it.
-const WINDOW_BEFORE: u64 = 12;
+pub(crate) const WINDOW_BEFORE: u64 = 12;
+#[cfg(test)]
 const WINDOW_AFTER: u64 = 9;
 /// Body lines an excerpt shows after the signature and doc line.
+#[cfg(test)]
 const BODY_LINES: usize = 8;
 /// Chars of one excerpt line.
 const LINE_CHARS: usize = 110;
@@ -247,6 +249,7 @@ pub(crate) fn in_test_module(source: &[String], at: u64) -> bool {
 
 /// The line range to read around `matched`: enough above it for the
 /// signature and the doc comment, enough below for the body.
+#[cfg(test)]
 pub(crate) fn window_range(matched: u64) -> (u64, u64) {
     let matched = matched.max(1);
     (
@@ -359,7 +362,84 @@ fn doc_above(window: &[String], sig: usize) -> Option<usize> {
 /// The generic excerpt, and the lookup one: the signature of the symbol the
 /// matched line belongs to, the first line of its doc comment, and up to
 /// [`BODY_LINES`] lines of the matched region. `window[0]` is line `start`.
+#[cfg(test)]
 pub(crate) fn lookup_excerpt(start: u64, window: &[String], matched: u64) -> Vec<String> {
+    excerpt_around(start, window, matched, BODY_LINES)
+}
+
+/// Body lines of a chunk excerpt, after its signature and doc line.
+pub(crate) const CHUNK_BODY_LINES: usize = 6;
+/// Lines a chunk is read for: a chunk the meaning search reports longer than
+/// this is looked at through its first lines only.
+pub(crate) const MAX_CHUNK_LINES: u64 = 60;
+
+/// The stem a keyword is looked for by: a plural loses its `s`.
+fn stem(term: &str) -> String {
+    let term = term.to_lowercase();
+    match term.strip_suffix('s') {
+        Some(rest) if term.len() > 3 => rest.to_string(),
+        _ => term,
+    }
+}
+
+/// How many distinct `terms` the text `lines` contains (case-insensitive,
+/// plural-insensitive).
+pub(crate) fn distinct_terms(lines: &[&str], terms: &[String]) -> usize {
+    let text = lines.join("\n").to_lowercase();
+    terms
+        .iter()
+        .filter(|term| text.contains(&stem(term)))
+        .count()
+}
+
+/// The excerpt of one chunk (`chunk` = inclusive lines `(first, last)`;
+/// `window[0]` is line `start`, early enough to hold the signature): the
+/// signature of the declaration around the densest keyword region, its first
+/// doc line, and [`CHUNK_BODY_LINES`] lines from that region, not from the
+/// top of the file. Without any keyword in the chunk the region is its head.
+pub(crate) fn chunk_excerpt(
+    start: u64,
+    window: &[String],
+    chunk: (u64, u64),
+    terms: &[String],
+) -> Vec<String> {
+    if window.is_empty() {
+        return Vec::new();
+    }
+    let index = |line: u64| usize::try_from(line.saturating_sub(start)).unwrap_or(0);
+    let first = index(chunk.0).min(window.len() - 1);
+    let last = index(chunk.1).clamp(first, window.len() - 1);
+    let mut best = (0, first);
+    for from in first..=last {
+        let region: Vec<&str> = window[from..(from + CHUNK_BODY_LINES).min(last + 1)]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let density = distinct_terms(&region, terms);
+        if density > best.0 {
+            best = (density, from);
+        }
+    }
+    // Start at the first line of the region that carries a keyword.
+    let at = (best.1..=last)
+        .find(|&line| best.0 > 0 && distinct_terms(&[window[line].as_str()], terms) > 0)
+        .unwrap_or(best.1);
+    excerpt_around(start, &window[..=last], start + at as u64, CHUNK_BODY_LINES)
+}
+
+/// The line of the declaration around `line` (the nearest signature at or
+/// above it in `window`, whose first line is `start`), else `line` itself.
+pub(crate) fn enclosing_start(start: u64, window: &[String], line: u64) -> u64 {
+    let at = usize::try_from(line.saturating_sub(start))
+        .unwrap_or(0)
+        .min(window.len().saturating_sub(1));
+    (0..=at)
+        .rev()
+        .find(|&index| window.get(index).is_some_and(|text| is_signature(text)))
+        .map_or(line, |index| start + index as u64)
+}
+
+fn excerpt_around(start: u64, window: &[String], matched: u64, body: usize) -> Vec<String> {
     if window.is_empty() {
         return Vec::new();
     }
@@ -382,13 +462,13 @@ pub(crate) fn lookup_excerpt(start: u64, window: &[String], matched: u64) -> Vec
         chosen.push(sig);
     }
     let begin = match sig {
-        Some(sig) if at <= sig + BODY_LINES => sig + 1,
+        Some(sig) if at <= sig + body => sig + 1,
         _ => at.saturating_sub(1),
     };
     chosen.extend(
         (begin..window.len())
             .filter(|index| !window[*index].trim().is_empty() && !chosen.contains(index))
-            .take(BODY_LINES)
+            .take(body)
             .collect::<Vec<_>>(),
     );
     let rows: Vec<(u64, &str)> = chosen
@@ -956,5 +1036,59 @@ mod tests {
         assert_eq!(cues("what do the benchmarks say"), (false, true));
         assert_eq!(cues("how does the parser work"), (false, false));
         assert_eq!(cues("CHANGELOG entry for tests"), (true, true));
+    }
+
+    fn terms(words: &[&str]) -> Vec<String> {
+        words.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn distinct_terms_should_count_each_keyword_once_ignoring_case_and_plurals() {
+        let lines = ["Waits for a Key", "waits again"];
+        assert_eq!(
+            distinct_terms(&lines, &terms(&["waits", "key", "brief"])),
+            2
+        );
+        assert_eq!(distinct_terms(&lines, &terms(&["keys"])), 1);
+        assert_eq!(distinct_terms(&[], &terms(&["a"])), 0);
+    }
+
+    #[test]
+    fn chunk_excerpt_should_centre_on_the_densest_keyword_region_with_its_signature() {
+        let mut source: Vec<String> =
+            vec!["/// Decide the gate.".into(), "pub fn decide() {".into()];
+        source.extend((0..20).map(|n| format!("    let step_{n} = {n};")));
+        source.push("    let window = brief_window_millis(750);".into());
+        source.push("    wait_for_brief_window(window);".into());
+        source.extend((0..5).map(|n| format!("    let tail_{n} = {n};")));
+        source.push("}".into());
+        let found = chunk_excerpt(10, &source, (10, 10 + 28), &terms(&["brief", "window"]));
+        assert_eq!(found[0], "10| /// Decide the gate.");
+        assert_eq!(found[1], "11| pub fn decide() {");
+        let text = found.join("\n");
+        assert!(text.contains("brief_window_millis"), "{text}");
+        assert!(text.contains("wait_for_brief_window"), "{text}");
+        assert!(!text.contains("step_0"), "{text}");
+        assert!(found.len() <= 2 + CHUNK_BODY_LINES, "{found:?}");
+        // No keyword inside: the head of the chunk, as before.
+        let head = chunk_excerpt(10, &source, (10, 38), &terms(&["absent"]));
+        assert_eq!(head[2], "12|     let step_0 = 0;");
+    }
+
+    #[test]
+    fn chunk_excerpt_should_stay_inside_its_chunk() {
+        let source = lines(&[
+            "fn a() {",
+            "    brief();",
+            "}",
+            "fn b() {",
+            "    brief();",
+            "}",
+        ]);
+        let found = chunk_excerpt(1, &source, (1, 3), &terms(&["brief"])).join("\n");
+        assert!(
+            found.contains("fn a()") && !found.contains("fn b()"),
+            "{found}"
+        );
     }
 }

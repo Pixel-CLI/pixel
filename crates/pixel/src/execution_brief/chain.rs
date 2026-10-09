@@ -70,10 +70,8 @@ pub(crate) const PLAIN_PROSE_BRIEF_BYTES: usize = 2048;
 /// Files a brief that carries excerpts lists: the excerpts are the answer,
 /// the list only says where else to look.
 const ANSWER_FILES: usize = 4;
-/// Files tried for the generic excerpt before giving up.
-const EXCERPT_TRIES: usize = 4;
 /// Files a generic excerpt covers.
-const EXCERPT_FILES: usize = 2;
+const EXCERPT_FILES: usize = 3;
 /// Lexical co-files an excerpt's file must be among for the brief to keep
 /// its directive to answer from the evidence. Measured on the dev split of
 /// `eval/brief-gate`: the top three let a wrong excerpt keep it (precision
@@ -1311,109 +1309,216 @@ fn tests_excerpt(evidence: &dyn Evidence, brief: &Brief, deadline: Instant) -> O
     })
 }
 
-/// Where an excerpt may be cut from: the meaning search's chunks first, in
-/// rank order, then the lexical hits; one entry per file, code before tests
-/// and docs unless the question asks about them.
+/// Where an excerpt may be cut from: a chunk of the meaning search, or the
+/// declaration around a lexical hit.
 struct Candidate {
     path: String,
+    /// First line of the chunk, or the matched line of a lexical hit.
     line: u64,
+    /// Last line of a meaning chunk; `0` for a lexical hit.
+    end: u64,
     symbol: Option<String>,
     meaning: bool,
 }
 
+/// Files whose chunks compete for an excerpt: the head of the fused list.
+const CHUNK_FILES: usize = 5;
+/// Chunks scored, and chunks shown.
+const MAX_CANDIDATES: usize = 10;
+/// Lines read after the matched line of a lexical hit to cover its declaration.
+const LEXICAL_CHUNK_LINES: u64 = 40;
+
 fn excerpt_candidates(brief: &Brief) -> Vec<Candidate> {
     let tests_ok = brief.wants_tests || brief.kind == Some(QuestionKind::Tests);
     let docs_ok = brief.wants_docs;
-    let leads = brief.leads.iter().map(|lead| Candidate {
-        path: lead.path.clone(),
-        line: u64::from(lead.start_line),
-        symbol: lead.symbol.clone(),
-        meaning: true,
-    });
-    let hits = brief.files.iter().map(|hit| Candidate {
-        path: hit.path.clone(),
-        line: hit.line,
-        symbol: None,
-        meaning: false,
-    });
-    let mut seen: Vec<String> = Vec::new();
-    let mut kept = Vec::new();
-    for candidate in leads.chain(hits) {
+    let mut top: Vec<&str> = Vec::new();
+    for hit in &brief.files {
+        if top.len() < CHUNK_FILES && !top.contains(&hit.path.as_str()) {
+            top.push(&hit.path);
+        }
+    }
+    let leads: Vec<&MeaningHit> = brief
+        .leads
+        .iter()
+        .filter(|lead| top.is_empty() || top.contains(&lead.path.as_str()))
+        .collect();
+    let mut all: Vec<Candidate> = leads
+        .iter()
+        .map(|lead| Candidate {
+            path: lead.path.clone(),
+            line: u64::from(lead.start_line),
+            end: u64::from(lead.end_line),
+            symbol: lead.symbol.clone(),
+            meaning: true,
+        })
+        .collect();
+    for hit in brief
+        .files
+        .iter()
+        .filter(|hit| top.contains(&hit.path.as_str()))
+    {
+        let covered = leads.iter().any(|lead| {
+            lead.path == hit.path
+                && (u64::from(lead.start_line)..=u64::from(lead.end_line)).contains(&hit.line)
+        });
+        if !covered && !all.iter().any(|c| c.path == hit.path && c.line == hit.line) {
+            all.push(Candidate {
+                path: hit.path.clone(),
+                line: hit.line.max(1),
+                end: 0,
+                symbol: None,
+                meaning: false,
+            });
+        }
+    }
+    all.retain(|candidate| {
         let packed = brief.def_body.is_some()
             && brief
                 .defined
                 .first()
                 .is_some_and(|def| def.path == candidate.path);
-        let barred = pixel_index::index::credential_path(Path::new(&candidate.path))
+        !(packed
+            || pixel_index::index::credential_path(Path::new(&candidate.path))
             || (!tests_ok && answer::is_test_path(&candidate.path))
             || (!docs_ok && answer::is_docs_path(&candidate.path))
             || (!tests_ok
                 && candidate
                     .symbol
                     .as_deref()
-                    .is_some_and(answer::is_test_symbol));
-        if packed || barred || seen.contains(&candidate.path) {
-            continue;
-        }
-        seen.push(candidate.path.clone());
-        kept.push(candidate);
-    }
-    kept
+                    .is_some_and(answer::is_test_symbol)))
+    });
+    all.truncate(MAX_CANDIDATES);
+    all
 }
 
 /// Lines of a Rust file read from the top so a `#[cfg(test)] mod` above the
 /// match can be seen; longer prefixes are read as a window only.
 const MAX_PREFIX_LINES: u64 = 20_000;
 
-/// The best-matching symbol of the best files: its signature, the first line
-/// of its doc comment and the matched region, one block per file, cut from
-/// the meaning search's chunk when it has one.
+/// A chunk read and cut: where it is, how many keywords it holds, and the
+/// excerpt of its densest region.
+struct Chunk {
+    candidate: Candidate,
+    meaning_rank: usize,
+    density: usize,
+    lines: Vec<String>,
+}
+
+/// The chunks of the best files, cut where the question's keywords are
+/// densest. Each candidate is scored by the reciprocal-rank fusion of its
+/// meaning rank and its keyword-density rank; the best three are kept, one
+/// per file except for the file of the best chunk.
 fn generic_excerpts(
     evidence: &dyn Evidence,
     brief: &Brief,
     limit: usize,
     deadline: Instant,
 ) -> Vec<Excerpt> {
-    let mut blocks: Vec<Excerpt> = Vec::new();
-    for candidate in excerpt_candidates(brief).into_iter().take(EXCERPT_TRIES) {
-        if blocks.len() >= limit {
-            break;
-        }
-        let matched = if candidate.meaning {
-            candidate.line
+    let terms: &[String] = brief.receipt.as_ref().map_or(&[], Receipt::terms);
+    let mut chunks: Vec<Chunk> = Vec::new();
+    // Each retriever ranks its own candidates: a lexical hit is as good as
+    // the meaning chunk of the same rank, not worse than all of them.
+    let (mut meaning_seen, mut lexical_seen) = (0, 0);
+    for candidate in excerpt_candidates(brief) {
+        let rank = if candidate.meaning {
+            meaning_seen += 1;
+            meaning_seen - 1
         } else {
-            brief
-                .defined
-                .iter()
-                .find(|def| def.path == candidate.path)
-                .map_or(candidate.line, |def| def.start_line)
+            lexical_seen += 1;
+            lexical_seen - 1
         };
-        let (start, end) = answer::window_range(matched);
-        let rust = candidate.path.ends_with(".rs") && end <= MAX_PREFIX_LINES;
+        let from_line = candidate.line;
+        let mut last = if candidate.end > 0 {
+            candidate.end.min(from_line + answer::MAX_CHUNK_LINES - 1)
+        } else {
+            from_line + LEXICAL_CHUNK_LINES
+        };
+        let start = from_line.saturating_sub(answer::WINDOW_BEFORE).max(1);
+        let rust = candidate.path.ends_with(".rs") && last <= MAX_PREFIX_LINES;
         let from = if rust { 1 } else { start };
-        let Ok(source) = evidence.lines_at(&candidate.path, from, end, deadline) else {
+        let Ok(source) = evidence.lines_at(&candidate.path, from, last, deadline) else {
             continue;
         };
         if rust
-            && answer::in_test_module(&source, matched)
+            && answer::in_test_module(&source, from_line)
             && brief.kind != Some(QuestionKind::Tests)
         {
             continue;
         }
         let skip = usize::try_from(start - from).unwrap_or(0).min(source.len());
-        let lines = answer::lookup_excerpt(start, &source[skip..], matched);
-        if !lines.is_empty() {
-            blocks.push(Excerpt {
-                label: if matched == 0 {
-                    candidate.path.clone()
-                } else {
-                    format!("{}:{matched}", candidate.path)
-                },
-                path: candidate.path,
-                from_meaning: candidate.meaning,
-                lines,
-            });
+        let window = &source[skip..];
+        let mut first = from_line;
+        if !candidate.meaning {
+            first = answer::enclosing_start(start, window, from_line);
+            last = first + LEXICAL_CHUNK_LINES;
         }
+        let body: Vec<&str> = window
+            .iter()
+            .skip(usize::try_from(first.saturating_sub(start)).unwrap_or(0))
+            .take(usize::try_from(last.saturating_sub(first) + 1).unwrap_or(0))
+            .map(String::as_str)
+            .collect();
+        if chunks
+            .iter()
+            .any(|seen| seen.candidate.path == candidate.path && seen.candidate.line == first)
+        {
+            continue;
+        }
+        let density = answer::distinct_terms(&body, terms);
+        let lines = answer::chunk_excerpt(start, window, (first, last), terms);
+        if lines.is_empty() {
+            continue;
+        }
+        chunks.push(Chunk {
+            candidate: Candidate {
+                line: first,
+                ..candidate
+            },
+            meaning_rank: rank,
+            density,
+            lines,
+        });
+    }
+    // Rank by density, best first; ties keep the meaning order.
+    let mut by_density: Vec<usize> = (0..chunks.len()).collect();
+    by_density.sort_by_key(|&index| std::cmp::Reverse(chunks[index].density));
+    let mut score = vec![0.0_f64; chunks.len()];
+    for (density_rank, &index) in by_density.iter().enumerate() {
+        score[index] = reciprocal_rank(chunks[index].meaning_rank) + reciprocal_rank(density_rank);
+    }
+    // The file the fused list ranks first speaks first: it is the right file
+    // far more often than any other, so its best chunk leads.
+    let lead_path = brief
+        .files
+        .first()
+        .map(|hit| hit.path.as_str())
+        .filter(|path| chunks.iter().any(|chunk| chunk.candidate.path == *path));
+    let mut order: Vec<usize> = (0..chunks.len()).collect();
+    order.sort_by(|&a, &b| {
+        let off = |index: usize| Some(chunks[index].candidate.path.as_str()) != lead_path;
+        off(a)
+            .cmp(&off(b))
+            .then_with(|| score[b].total_cmp(&score[a]))
+    });
+    let top_path = order
+        .first()
+        .map(|&index| chunks[index].candidate.path.clone());
+    let mut blocks: Vec<Excerpt> = Vec::new();
+    for index in order {
+        if blocks.len() >= limit {
+            break;
+        }
+        let chunk = &chunks[index];
+        let path = &chunk.candidate.path;
+        if blocks.iter().any(|block| block.path == *path) && top_path.as_ref() != Some(path) {
+            continue;
+        }
+        blocks.push(Excerpt {
+            label: format!("{path}:{}", chunk.candidate.line),
+            path: path.clone(),
+            from_meaning: chunk.candidate.meaning,
+            lines: chunk.lines.clone(),
+        });
     }
     blocks
 }
@@ -4424,7 +4529,7 @@ mod tests {
             excluded: 1,
             caps: 1,
             unresolved: 1,
-            excerpt: [0, 0],
+            excerpt: [0, 0, 0],
         };
         let counts = |shown: &Shown| {
             [
@@ -4465,7 +4570,7 @@ mod tests {
             excluded: 0,
             caps: 0,
             unresolved: 3,
-            excerpt: [0, 0],
+            excerpt: [0, 0, 0],
         };
         assert!(uneven.shrink());
         assert_eq!((uneven.files, uneven.callers, uneven.unresolved), (2, 4, 3));
@@ -6518,7 +6623,10 @@ mod tests {
         ];
         let kept = answered(brief.clone(), &fake);
         let labels: Vec<&str> = kept.excerpts.iter().map(|e| e.label.as_str()).collect();
-        assert_eq!(labels, [format!("{DAEMON}:280").as_str(), "b.rs:1"]);
+        assert_eq!(
+            labels,
+            [format!("{DAEMON}:280").as_str(), "b.rs:1", "c.rs:1"]
+        );
         brief.defined = vec![symbol(DAEMON, "watch_ready")];
         brief.def_body = Some("fn watch_ready() {}".into());
         let packed = answered(brief, &fake);
@@ -6663,14 +6771,31 @@ mod tests {
         let mut brief = high_brief();
         brief.leads = vec![lead_at(DAEMON, 280, None)];
         brief.files = vec![
-            rhit("crates/pixel/src/other.rs", 1, "go"),
             rhit(DAEMON, 3, "filler"),
+            rhit("crates/pixel/src/other.rs", 1, "go"),
         ];
         let brief = answered(brief, &two_file_fake());
         assert_eq!(brief.excerpts[0].label, format!("{DAEMON}:280"));
         assert!(brief.excerpts[0].from_meaning);
-        assert_eq!(brief.excerpts[1].label, "crates/pixel/src/other.rs:1");
-        assert!(!brief.excerpts[1].from_meaning);
+        let other = brief
+            .excerpts
+            .iter()
+            .find(|excerpt| excerpt.path.ends_with("other.rs"))
+            .expect("the second file speaks too");
+        assert_eq!(other.label, "crates/pixel/src/other.rs:1");
+        assert!(!other.from_meaning);
+    }
+
+    #[test]
+    fn the_file_ranked_first_should_speak_first_even_against_a_better_scored_chunk() {
+        let mut brief = high_brief();
+        brief.leads = vec![lead_at(DAEMON, 280, None)];
+        brief.files = vec![
+            rhit("crates/pixel/src/other.rs", 1, "go"),
+            rhit(DAEMON, 280, "x"),
+        ];
+        let brief = answered(brief, &two_file_fake());
+        assert_eq!(brief.excerpts[0].label, "crates/pixel/src/other.rs:1");
     }
 
     #[test]
@@ -6876,5 +7001,71 @@ mod tests {
         let files = files_line(&finished.text.unwrap());
         assert!(files.find("docs/x.md") < files.find("src/b.rs"), "{files}");
         assert!(files.find("src/c.rs") < files.find("tests/a.rs"), "{files}");
+    }
+
+    #[test]
+    fn the_best_chunk_should_be_the_one_the_meaning_search_and_the_keywords_both_favour() {
+        let mut source: Vec<String> = (1..=90).map(|n| format!("let filler_{n} = {n};")).collect();
+        for (line, name) in [(10, "a_chunk"), (40, "b_chunk"), (70, "c_chunk")] {
+            source[line - 1] = format!("fn {name}() {{");
+        }
+        source[44] = "    daemon.notice(changes_during_startup);".into();
+        source[74] = "    daemon.notice(changes);".into();
+        let mut fake = Fake::new();
+        fake.sources = vec![(DAEMON.to_string(), source)];
+        let mut brief = high_brief();
+        brief.leads = [(10, 20), (40, 50), (70, 80)]
+            .iter()
+            .map(|&(start, end)| MeaningHit {
+                end_line: end,
+                ..lead_at(DAEMON, start, None)
+            })
+            .collect();
+        brief.files = vec![rhit(DAEMON, 10, "x")];
+        brief.excerpts.clear();
+        let brief = answered(brief, &fake);
+        let labels: Vec<&str> = brief.excerpts.iter().map(|e| e.label.as_str()).collect();
+        // Meaning ranks a, b, c; keyword density ranks b, c, a: b wins, and
+        // the file of the best chunk may show all three.
+        assert_eq!(
+            labels,
+            [
+                format!("{DAEMON}:40"),
+                format!("{DAEMON}:10"),
+                format!("{DAEMON}:70")
+            ]
+        );
+        let first = brief.excerpts[0].lines.join("\n");
+        assert!(first.contains("changes_during_startup"), "{first}");
+        assert!(
+            brief
+                .excerpts
+                .iter()
+                .all(|e| e.lines.len() <= 2 + answer::CHUNK_BODY_LINES)
+        );
+    }
+
+    #[test]
+    fn only_the_file_of_the_best_chunk_may_show_more_than_one_chunk() {
+        let mut fake = two_file_fake();
+        fake.sources[1].1 = (1..=30).map(|n| format!("fn other_{n}() {{}}")).collect();
+        let mut brief = high_brief();
+        brief.leads = vec![
+            lead_at(DAEMON, 280, None),
+            lead_at("crates/pixel/src/other.rs", 2, None),
+            lead_at("crates/pixel/src/other.rs", 20, None),
+        ];
+        brief.files = vec![
+            rhit(DAEMON, 280, "x"),
+            rhit("crates/pixel/src/other.rs", 2, "x"),
+        ];
+        brief.excerpts.clear();
+        let brief = answered(brief, &fake);
+        let other = brief
+            .excerpts
+            .iter()
+            .filter(|e| e.path.ends_with("other.rs"))
+            .count();
+        assert_eq!(other, 1, "{:?}", brief.excerpts);
     }
 }
