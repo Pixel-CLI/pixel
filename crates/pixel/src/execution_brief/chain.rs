@@ -38,7 +38,7 @@ use regex::Regex;
 
 use super::decision_log::{self, Record};
 use super::intent::Verdict;
-use super::relevance::{self, RelevanceInput, WeightFn};
+use super::relevance::{self, RelevanceInput};
 use super::routes::QuestionKind;
 use super::{SOURCE_EXTENSIONS, Signal, brief_signal, names_code};
 
@@ -272,13 +272,12 @@ pub(crate) struct MeaningHit {
     pub(crate) snippet: String,
 }
 
-/// The answer of a relevance probe: the counts the gate scores, the weight
-/// function they are scored with (the daemon's, so the formula has one
-/// spelling) and the line each co-file was found at.
+/// The answer of a relevance probe: the weights the gate scores (the
+/// daemon's, so the formula has one spelling) and the line each co-file was
+/// found at.
 #[derive(Clone, Debug)]
 pub(crate) struct RelevanceAnswer {
     pub(crate) input: RelevanceInput,
-    pub(crate) weight: WeightFn,
     /// The co-files in the input's order, each with the line and text that
     /// showed its keywords.
     pub(crate) lines: Vec<RichHit>,
@@ -1670,7 +1669,7 @@ where
                     got.scored = answer
                         .as_ref()
                         .ok()
-                        .map(|answer| relevance::judge(&answer.input, answer.weight));
+                        .map(|answer| relevance::judge(&answer.input));
                     got.relevance = Some(answer);
                 }
                 Reply::Meaning(leads) => got.meaning = Some(leads),
@@ -3896,53 +3895,39 @@ mod tests {
     const PROSE: &str = "the daemon misses changes made during startup";
     const DAEMON: &str = "crates/pixel-daemon/src/daemon.rs";
 
-    /// A table, not the daemon's formula: a keyword in ten files or more is
-    /// everywhere, one the repository lacks weighs 3, any other 2.
-    fn test_weight(df: usize, _files: usize, truncated: bool) -> f64 {
-        if truncated || df >= 10 {
-            0.0
-        } else if df == 0 {
-            3.0
-        } else {
-            2.0
-        }
-    }
-
-    fn keyword(word: &str, df: usize) -> relevance::KeywordStat {
+    fn keyword(word: &str, weight: f64) -> relevance::KeywordStat {
         relevance::KeywordStat {
             keyword: word.into(),
-            df,
-            truncated: false,
+            weight,
             french_only: false,
         }
     }
 
-    fn cofile(path: &str, words: &[&str], structural: bool) -> relevance::CoFileStat {
+    fn cofile(path: &str, words: &[&str], weight: f64, structural: bool) -> relevance::CoFileStat {
         relevance::CoFileStat {
             path: path.into(),
             keywords: words.iter().map(ToString::to_string).collect(),
+            weight,
             structural,
         }
     }
 
     /// The repository talks about the prompt: one structural file holds all
-    /// three of its words, a note holds them as text.
+    /// three of its words (2 each), a note holds two of them as text.
     fn on_topic_answer() -> RelevanceAnswer {
         RelevanceAnswer {
             input: RelevanceInput {
-                files_considered: 100,
                 graph: true,
                 keywords: vec![
-                    keyword("daemon", 4),
-                    keyword("changes", 3),
-                    keyword("startup", 2),
+                    keyword("daemon", 2.0),
+                    keyword("changes", 2.0),
+                    keyword("startup", 2.0),
                 ],
                 cofiles: vec![
-                    cofile(DAEMON, &["daemon", "changes", "startup"], true),
-                    cofile("docs/notes.md", &["daemon", "startup"], false),
+                    cofile(DAEMON, &["daemon", "changes", "startup"], 6.0, true),
+                    cofile("docs/notes.md", &["daemon", "startup"], 4.0, false),
                 ],
             },
-            weight: test_weight,
             lines: vec![
                 rhit(DAEMON, 280, "fn watch_ready"),
                 rhit("docs/notes.md", 12, "daemon startup notes"),
@@ -3951,20 +3936,18 @@ mod tests {
     }
 
     /// The repository does not talk about the prompt: two of its words are
-    /// nowhere, the third is everywhere, and no file holds any.
+    /// nowhere (the cap), the third is everywhere (0), and no file holds any.
     fn off_topic_answer() -> RelevanceAnswer {
         RelevanceAnswer {
             input: RelevanceInput {
-                files_considered: 100,
                 graph: true,
                 keywords: vec![
-                    keyword("weather", 0),
-                    keyword("tomorrow", 0),
-                    keyword("like", 50),
+                    keyword("weather", 3.0),
+                    keyword("tomorrow", 3.0),
+                    keyword("like", 0.0),
                 ],
                 cofiles: Vec::new(),
             },
-            weight: test_weight,
             lines: Vec::new(),
         }
     }
@@ -4349,7 +4332,7 @@ mod tests {
         let scored = relevance
             .as_ref()
             .and_then(|answer| answer.as_ref().ok())
-            .map(|answer| relevance::judge(&answer.input, answer.weight));
+            .map(|answer| relevance::judge(&answer.input));
         Gathered {
             relevance,
             scored,
