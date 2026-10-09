@@ -18,6 +18,7 @@ pub mod error;
 pub mod evaluate;
 pub mod evidence;
 pub mod facts;
+pub mod meaning;
 pub mod op;
 pub mod query;
 pub mod recovery;
@@ -33,6 +34,7 @@ pub use facts::{
     CoFile, KeywordEvidence, Relevance, TargetsFactsInputs, TargetsFactsResult,
     TargetsFactsUnavailableReason,
 };
+pub use meaning::{MeaningHit, MeaningPool, MeaningResult, MeaningUnavailableReason};
 pub use op::Op;
 pub use query::{QueryKind, QueryPlan, QueryResult, QueryStatus, compile_query};
 pub use recovery::{

@@ -19,6 +19,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cycles;
+use crate::meaning::Meaning;
 use crate::relevance;
 use pixel_context::estimate_tokens;
 use pixel_facts::FactsStore;
@@ -51,7 +52,9 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// `read_only`, and `status` reports `embedding`; an older daemon would
 /// drop the flag and run the facts-ingest path a prompt hook must never
 /// start.
-pub const PROTOCOL_VERSION: u64 = 15;
+/// 16: the `meaning` request, which an older daemon rejects as an unknown
+/// variant.
+pub const PROTOCOL_VERSION: u64 = 16;
 
 /// Rows a `search` returns when the request names no `limit`.
 pub const SEARCH_DEFAULT_ROWS: usize = 100;
@@ -321,6 +324,10 @@ pub struct Service {
     /// drops the graph handle, the re-walk hashes only files whose
     /// (mtime, len) changed instead of the whole tree.
     hash_cache: pixel_graph::build::TreeHashCache,
+    /// The resident chunk vectors behind `meaning`, built on a background
+    /// thread. Shared with every read replica, which ranks from it and never
+    /// builds it.
+    meaning: Arc<Meaning>,
 }
 
 /// How long a cached [`SnapshotInfo`] may be served. One concurrent burst
@@ -405,6 +412,7 @@ impl Service {
             .canonicalize()
             .map_err(|e| ServeError::Msg(format!("bad root {}: {e}", root.display())))?;
         let index = IndexSet::open_or_build(&root, Box::new(TrigramExtractor))?;
+        let meaning = Meaning::new(&root);
         Ok(Service {
             root,
             index: Arc::new(RwLock::new(index)),
@@ -425,6 +433,7 @@ impl Service {
             snapshot_cache: None,
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
+            meaning,
         })
     }
 
@@ -450,6 +459,7 @@ impl Service {
             snapshot_cache: None,
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
+            meaning: Arc::clone(&self.meaning),
         }
     }
 
@@ -485,6 +495,9 @@ impl Service {
             "search" => self.op_search(query, Some(limit), None, None, None, None),
             "resolve" => self.op_resolve(query, Some(limit)),
             "impact" => self.op_impact(query, "upstream", Some(2)),
+            // Ranks from the resident vectors the writable service builds;
+            // a replica never builds, embeds a chunk or reads a file.
+            "meaning" => self.meaning.answer(state.generation, query, Some(limit)),
             _ => Err(format!("unsupported evidence query kind: {kind}")),
         };
         if let Some(graph) = &self.graph {
@@ -559,11 +572,13 @@ impl Service {
                 );
                 self.graph = None;
                 state.publish_after_failure();
+                self.meaning.nudge(state.generation);
                 return;
             }
             self.graph = None;
         }
         state.publish();
+        self.meaning.nudge(state.generation);
     }
 
     /// Count a watcher-driven graph update that failed. The cached handle is
@@ -1034,6 +1049,7 @@ impl Service {
             }),
             Request::Targets { task, limit, max_tier, precision, regions } => self.op_targets(&task, limit, max_tier.as_deref(), precision, regions),
             Request::TargetsFacts { task, limit } => self.op_targets_facts(&task, limit),
+            Request::Meaning { query, limit } => self.op_meaning(&query, limit),
             Request::Symbol { name } => self.op_symbol(&name),
             Request::Skeleton { file } => self.op_skeleton(&file),
             Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
@@ -2801,6 +2817,38 @@ impl Service {
         Ok(out)
     }
 
+    /// `meaning`: ranked leads for a natural-language question, from the
+    /// resident chunk vectors. It starts the background build when they are
+    /// cold or stale and answers without waiting for it, so a caller on a
+    /// deadline gets `unavailable` and a reason instead of a slow answer.
+    fn op_meaning(&mut self, query: &str, limit: Option<usize>) -> Result<Value, String> {
+        let generation = self.publication_generation();
+        if !self.read_only {
+            self.meaning.ensure(generation);
+        }
+        self.meaning.answer(generation, query, limit)
+    }
+
+    /// Start the background build of the `meaning` vectors if they are cold
+    /// or stale. The evidence bridge calls it for a bundle that asks for
+    /// them: its read replicas rank from the vectors and never build.
+    pub(crate) fn warm_meaning(&self) {
+        self.meaning.ensure(self.publication_generation());
+    }
+
+    fn publication_generation(&self) -> u64 {
+        self.publication
+            .read()
+            .expect("publication lock poisoned")
+            .generation
+    }
+
+    /// Replace the `meaning` index, so a test never loads the real model.
+    #[cfg(test)]
+    pub(crate) fn set_meaning(&mut self, meaning: Arc<Meaning>) {
+        self.meaning = meaning;
+    }
+
     fn op_status(&mut self) -> Result<Value, String> {
         let s = self.index.read().expect("index lock poisoned").status();
         let db = self.graph_db_path();
@@ -3902,6 +3950,7 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "resolve",
     "targets",
     "targets_facts",
+    "meaning",
     "impact",
     "uses",
     "trace",
@@ -4020,6 +4069,7 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         "search" => "text index",
         "targets" | "resolve" => "text index + code graph",
         "changes" | "review_gate" => "code graph + working-tree diff",
+        "meaning" => "resident code-chunk embeddings + chunk BM25",
         _ => "code graph",
     };
     let mut basis = String::from(source);
@@ -4041,13 +4091,7 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     // extraction limits always apply, `closed_world` is never true: a
     // "0 callers" answer means "no callers found", not "this symbol has no
     // callers". This is Pixel's "I say when I don't know" value prop.
-    let extraction_limits = vec![
-        "callbacks passed as arguments (e.g. schema.plugin(fn), emitter.on('event', fn))"
-            .to_string(),
-        "dynamic dispatch (e.g. obj[methodName]())".to_string(),
-        "macro-generated calls".to_string(),
-        "eval / new Function".to_string(),
-    ];
+    let extraction_limits = extraction_limits_for(op_name);
     if caps.is_empty() {
         basis.push_str(
             "; static analysis cannot guarantee completeness: tree-sitter may miss callbacks, \
@@ -4089,6 +4133,27 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         })
         .collect();
     (epistemics, warnings)
+}
+
+/// The blind spots an op's answer carries into `epistemics.extraction_limits`.
+/// Graph answers share the static-analysis ones; `meaning` ranks embeddings
+/// and names its own.
+fn extraction_limits_for(op_name: &str) -> Vec<String> {
+    if op_name == "meaning" {
+        return vec![
+            "embedding similarity ranks chunks; it does not separate related from unrelated code"
+                .to_string(),
+            "only eligible source and document files are embedded (extension, size and ignore rules)"
+                .to_string(),
+        ];
+    }
+    vec![
+        "callbacks passed as arguments (e.g. schema.plugin(fn), emitter.on('event', fn))"
+            .to_string(),
+        "dynamic dispatch (e.g. obj[methodName]())".to_string(),
+        "macro-generated calls".to_string(),
+        "eval / new Function".to_string(),
+    ]
 }
 
 /// Drop matches whose path is credential-shaped before any byte or row
@@ -7593,6 +7658,8 @@ mod tests {
         .unwrap();
 
         let mut svc = Service::open(&root).unwrap();
+        // Never the real model: this walk only needs the envelope.
+        svc.set_meaning(crate::meaning::testing::meaning(&root));
         let uid = {
             let sym = svc.handle(Request::Symbol {
                 name: "alpha".into(),
@@ -7638,6 +7705,13 @@ mod tests {
                 "targets_facts",
                 Request::TargetsFacts {
                     task: "alpha beta".into(),
+                    limit: Some(5),
+                },
+            ),
+            (
+                "meaning",
+                Request::Meaning {
+                    query: "alpha beta".into(),
                     limit: Some(5),
                 },
             ),
@@ -7746,6 +7820,7 @@ mod tests {
                 "search" => "text index",
                 "targets" | "resolve" => "text index + code graph",
                 "changes" => "code graph + working-tree diff",
+                "meaning" => "resident code-chunk embeddings",
                 _ => "code graph",
             };
             assert!(
