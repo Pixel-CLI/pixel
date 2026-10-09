@@ -40,6 +40,10 @@ fn fixture(tag: &str) -> Scratch {
     )
     .unwrap();
     std::fs::write(root.join("data/out.json"), "{\"handleError\": 1}\n").unwrap();
+    // A tree of its own: two fixtures with the same tree committed in the same
+    // second share a commit, so the shared base-shard cache answers both and a
+    // test that asserts its shard did not move reads another test's write.
+    std::fs::write(root.join("data/fixture.txt"), format!("{tag}\n")).unwrap();
     std::fs::write(root.join(".gitignore"), ".pixel/\n").unwrap();
     git(&root, &["init", "-q"]);
     git(&root, &["add", "."]);
