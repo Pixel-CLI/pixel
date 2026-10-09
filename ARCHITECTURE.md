@@ -311,6 +311,13 @@ probes the target ranking ran and counts documents against `files_considered`;
 reader with no daemon. Credential-shaped paths are never counted or listed.
 Each cap that bounds the block is in `relevance.caps`, in `facts.envelope.caps`
 and, through `derive_epistemics`, in the response's `epistemics` and `warnings`.
+`relevance_only: true` on the request (omitted from the wire when false, so an
+older daemon sees the request it knows) asks for the block without the ranking:
+the same freshness gate and `inputs`, then `facts` is `{envelope, relevance}`
+with no `targets`, the block byte-identical to the full answer's and its caps
+in the same three places. A daemon that predates the flag ignores it and
+answers in full, so a reader checks `facts.relevance` and
+`inputs.algorithm_version >= 2`, never the flag.
 
 Adding an op is one variant on `pixel_proto::Op`, one arm in
 `Service::dispatch` and one entry in `pixel_proto::SESSION_CAPABILITIES`.
@@ -702,8 +709,10 @@ long untagged paste:
   only the gate decides whether the repository is the subject.
 
 The gate (`execution_brief/relevance.rs`, constants in `gate_model.rs`) has
-no language model in it. From the daemon's `facts.relevance` (`targets_facts`,
-limit 8; in process over the index and graph when no daemon answers) and the
+no language model in it. From the daemon's `facts.relevance` (`targets_facts`
+with `relevance_only`, which skips the target ranking and is accepted only from
+an `algorithm_version` 2 result; in process over the index and graph when no
+daemon answers) and the
 typed prompt it computes four features: `struct_per_mille` (how many files a
 keyword of positive weight names by path or symbol, per thousand indexed
 files, as a log), `question` (the prompt ends on `?` or opens with a question

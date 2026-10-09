@@ -759,6 +759,25 @@ pub fn relevance_on(
     relevance_for(index, graph, &query, &index.paths(), None)
 }
 
+/// The `facts` of a `targets_facts` answer asked `relevance_only`: the block
+/// [`relevance_on`] computes and the caps that bound it, in the envelope
+/// `derive_epistemics` reads, and no target list.
+///
+/// # Errors
+///
+/// The task has no searchable keyword, or the graph cannot be read: the same
+/// errors the full answer reports.
+pub(crate) fn facts_of_relevance_only(
+    index: &IndexSet,
+    graph: Option<&GraphStore>,
+    task: &str,
+) -> Result<Value, String> {
+    let relevance = relevance_on(index, graph, task)?;
+    let mut facts = json!({"envelope": {"lower_bound": false, "caps": []}});
+    attach(&mut facts, &relevance)?;
+    Ok(facts)
+}
+
 /// Put `relevance` in a `targets_facts` packet, and name its caps in the
 /// packet's envelope, where `derive_epistemics` reads them: a cap the block
 /// carries is a cap the response states.

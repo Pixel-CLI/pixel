@@ -41,8 +41,12 @@ use super::relevance::{CoFileStat, KeywordStat, RelevanceInput};
 const FLOW_DEPTH: u32 = 8;
 
 /// Targets the relevance probe asks `targets_facts` for: as many files as a
-/// brief lists. The probe reads `facts.relevance`; the targets ride along.
+/// brief lists. It asks for the relevance block alone (`relevance_only`); a
+/// daemon that predates the flag ignores it and ranks this many targets too.
 const RELEVANCE_TARGETS: usize = 8;
+
+/// First `targets_facts` algorithm version that carries `facts.relevance`.
+const RELEVANCE_ALGORITHM_VERSION: u64 = 2;
 
 /// Where the facts come from, decided once per brief.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -503,6 +507,7 @@ impl Evidence for Live {
                     &Request::TargetsFacts {
                         task: task.to_string(),
                         limit: Some(MAX_TARGETS),
+                        relevance_only: false,
                     },
                     deadline,
                 )?;
@@ -524,6 +529,7 @@ impl Evidence for Live {
                     &Request::TargetsFacts {
                         task: typed.to_string(),
                         limit: Some(RELEVANCE_TARGETS),
+                        relevance_only: true,
                     },
                     deadline,
                 )?;
@@ -1012,8 +1018,9 @@ fn targets_of(data: &Value) -> Option<Vec<String>> {
 }
 
 /// The `facts.relevance` block of a `targets_facts` reply, or why there is
-/// none: an unavailable result names its reason, an older daemon's result has
-/// no block at all.
+/// none: an unavailable result names its reason, and a result of an algorithm
+/// version before [`RELEVANCE_ALGORITHM_VERSION`] is not trusted even if it
+/// carries something under that name.
 fn relevance_block(data: &Value) -> Result<Relevance, String> {
     if data.get("status").and_then(Value::as_str) == Some("unavailable") {
         return Err(data.get("reason").and_then(Value::as_str).map_or_else(
@@ -1024,8 +1031,17 @@ fn relevance_block(data: &Value) -> Result<Relevance, String> {
     let block = data
         .get("facts")
         .and_then(|facts| facts.get("relevance"))
-        .or_else(|| data.get("relevance"))
         .ok_or_else(|| "facts carry no relevance".to_string())?;
+    let version = data
+        .get("inputs")
+        .and_then(|inputs| inputs.get("algorithm_version"))
+        .and_then(Value::as_u64);
+    if version.is_none_or(|version| version < RELEVANCE_ALGORITHM_VERSION) {
+        return Err(format!(
+            "facts algorithm version {} predates relevance",
+            version.map_or_else(|| "unknown".to_string(), |version| version.to_string())
+        ));
+    }
     serde_json::from_value(block.clone()).map_err(|error| format!("facts.relevance: {error}"))
 }
 
@@ -1348,11 +1364,11 @@ mod tests {
                         Some("history") => json!({"candidates": [
                             {"oid": "0123456789abcdef", "subject": "add the retry loop"}
                         ]}),
-                        Some("targets_facts") => json!({
-                            "targets": [{"path": "src/flag.ts"}, {"path": "cfg/app.toml"}],
-                            "facts": {"relevance": {
+                        Some("targets_facts") => {
+                            let relevance = json!({
                                 "files_considered": 100,
                                 "graph": true,
+                                "structural_files": 12,
                                 "keywords": [
                                     {"keyword": "daemon", "content_files": 4, "symbol_files": 2},
                                     {"keyword": "weather"},
@@ -1365,8 +1381,20 @@ mod tests {
                                     {"path": "docs/notes.md", "keywords": ["daemon"],
                                      "weight": 1.5}
                                 ]
-                            }}
-                        }),
+                            });
+                            let inputs = json!({"algorithm_version": 2, "limit": 4});
+                            // A relevance-only request gets no target list.
+                            if request["relevance_only"] == true {
+                                json!({"status": "available", "inputs": inputs,
+                                       "facts": {"envelope": {}, "relevance": relevance}})
+                            } else {
+                                json!({
+                                    "targets": [{"path": "src/flag.ts"}, {"path": "cfg/app.toml"}],
+                                    "inputs": inputs,
+                                    "facts": {"relevance": relevance}
+                                })
+                            }
+                        }
                         Some("meaning") => json!({
                             "status": "ready",
                             "hits": [
@@ -1895,7 +1923,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             daemon.requests(),
-            [json!({"op": "targets_facts", "task": "the daemon and the weather", "limit": 8})]
+            [
+                json!({"op": "targets_facts", "task": "the daemon and the weather", "limit": 8,
+                    "relevance_only": true})
+            ]
         );
         let input = &answer.input;
         assert!(input.graph);
@@ -2068,21 +2099,68 @@ mod tests {
             "facts are unavailable"
         );
         assert_eq!(
-            relevance_block(&json!({"status": "available", "facts": {"targets": []}})).unwrap_err(),
+            relevance_block(&json!({"status": "available", "facts": {"targets": []},
+                "inputs": {"algorithm_version": 2}}))
+            .unwrap_err(),
             "facts carry no relevance"
         );
         assert!(
-            relevance_block(&json!({"facts": {"relevance": {"files_considered": "x"}}}))
-                .unwrap_err()
-                .starts_with("facts.relevance: ")
+            relevance_block(&json!({"inputs": {"algorithm_version": 2},
+                "facts": {"relevance": {"files_considered": "x"}}}))
+            .unwrap_err()
+            .starts_with("facts.relevance: ")
         );
-        let block = relevance_block(&json!({"facts": {"relevance": {
-            "files_considered": 7, "graph": true
-        }}}))
+        // The relevance-only shape: no targets, the block and its envelope.
+        let block = relevance_block(&json!({"status": "available",
+            "inputs": {"algorithm_version": 2},
+            "facts": {"envelope": {}, "relevance": {"files_considered": 7, "graph": true}}}))
         .unwrap();
         assert_eq!((block.files_considered, block.graph), (7, true));
-        let top = relevance_block(&json!({"relevance": {"files_considered": 3}})).unwrap();
-        assert_eq!(top.files_considered, 3);
+    }
+
+    #[test]
+    fn relevance_block_should_not_trust_a_result_older_than_the_block() {
+        let reply = |inputs: Value| json!({"inputs": inputs, "facts": {"relevance": {"files_considered": 7}}});
+        assert_eq!(
+            relevance_block(&reply(json!({"algorithm_version": 1}))).unwrap_err(),
+            "facts algorithm version 1 predates relevance"
+        );
+        assert_eq!(
+            relevance_block(&reply(json!({}))).unwrap_err(),
+            "facts algorithm version unknown predates relevance"
+        );
+        assert_eq!(
+            relevance_block(&json!({"facts": {"relevance": {"files_considered": 7}}})).unwrap_err(),
+            "facts algorithm version unknown predates relevance"
+        );
+        // Version 2 is the first that carries it; later ones keep it.
+        for version in [2, 3] {
+            let block = relevance_block(&reply(json!({"algorithm_version": version}))).unwrap();
+            assert_eq!(block.files_considered, 7, "{version}");
+        }
+    }
+
+    #[test]
+    fn daemon_route_should_ask_for_the_relevance_block_alone_and_the_task_facts_in_full() {
+        let root = scratch("daemon-relevance-only");
+        let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
+        let live = Live::new(&root, Route::Daemon);
+        let deadline = Instant::now() + WINDOW;
+        let answer = live.relevance("the daemon", deadline).unwrap();
+        assert_eq!(answer.input.structural_files, 12);
+        assert_eq!(answer.input.files_considered, 100);
+        let targets = live.task_facts("the daemon", deadline).unwrap();
+        assert_eq!(targets, ["src/flag.ts", "cfg/app.toml"]);
+        assert_eq!(
+            daemon.requests(),
+            [
+                json!({"op": "targets_facts", "task": "the daemon", "limit": 8,
+                       "relevance_only": true}),
+                json!({"op": "targets_facts", "task": "the daemon", "limit": 4}),
+            ]
+        );
+        drop(daemon);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

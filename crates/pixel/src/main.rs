@@ -2306,7 +2306,14 @@ fn execute_targets_facts_read_only(
     if probe_daemon(&root) != DaemonProbe::Current {
         return unavailable();
     }
-    match send_to_daemon(&root, &Request::TargetsFacts { task, limit }) {
+    match send_to_daemon(
+        &root,
+        &Request::TargetsFacts {
+            task,
+            limit,
+            relevance_only: false,
+        },
+    ) {
         DaemonRoute::Served(response) => unwrap_response(*response).or_else(|_| unavailable()),
         DaemonRoute::Absent | DaemonRoute::Declined => unavailable(),
     }
