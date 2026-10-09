@@ -572,12 +572,10 @@ fn propose_jev_key_with(
 /// Workers AI (a Cloudflare account id and API token). The account id is not
 /// a secret: it is stored in the preset's base URL, the token in the global
 /// config's `remote_keys` like every other key.
-#[cfg_attr(test, mutants::skip)] // Config adapter; prompt and persistence dispatch are tested with injected storage.
 /// The OpenAI path: one key source (OPENAI_API_KEY, platform.openai.com)
 /// and one Decisions-capable model today (gpt-6-luna, per OpenAI's Decisions
 /// guide), so the flow is a single key prompt that stores the preset and
 /// its default model — no provider or model menu.
-#[cfg_attr(test, mutants::skip)] // Config adapter; prompt and persistence dispatch are tested with injected storage.
 fn propose_openai_key(
     stdin: &mut dyn BufRead,
     stdout: &mut dyn std::io::Write,
@@ -1220,6 +1218,48 @@ use std::time::Duration;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ScopedHome {
+        path: PathBuf,
+        saved: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ScopedHome {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let lock = crate::ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let path = std::env::temp_dir().join(format!(
+                "pixel-openai-setup-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).unwrap();
+            let saved = std::env::var_os("HOME");
+            // SAFETY: ENV_LOCK is held until Drop restores HOME.
+            unsafe { std::env::set_var("HOME", &path) };
+            Self {
+                path,
+                saved,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for ScopedHome {
+        fn drop(&mut self) {
+            // SAFETY: ENV_LOCK is still held and HOME is restored before it drops.
+            unsafe {
+                match &self.saved {
+                    Some(home) => std::env::set_var("HOME", home),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     /// No-op raw-mode seam: test stdin is a cursor, never a terminal.
     struct FakeRaw;
@@ -1922,6 +1962,39 @@ mod tests {
         )
         .unwrap();
         assert!(String::from_utf8(output).unwrap().contains("skipped"));
+    }
+
+    #[test]
+    fn install_step_should_persist_openai_preset_and_supplied_key() {
+        let _home = ScopedHome::new();
+        let key = "sk-test-openai-setup-key";
+        let mut stdin = std::io::Cursor::new(format!("3\n{key}\nn\n"));
+        let mut stdout = Vec::new();
+
+        install_step_with(
+            true,
+            &mut stdin,
+            &mut stdout,
+            None,
+            setup_local,
+            propose_remote_key,
+            propose_openai_key,
+            propose_jev_key,
+            propose_clef_key,
+            propose_classify_helpers,
+            &mut FakeRaw,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::config_cmd::classify_remote_preset(),
+            Some(crate::decide_remote::Preset::Openai)
+        );
+        assert_eq!(
+            crate::config_cmd::remote_key(crate::decide_remote::Preset::Openai).as_deref(),
+            Some(key)
+        );
     }
 
     /// The helpers for a scratch home, with Pi's agent directory at its
