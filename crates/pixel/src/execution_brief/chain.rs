@@ -3924,20 +3924,27 @@ mod tests {
         }
     }
 
+    /// The words of a prompt the repository talks about, as many as one file
+    /// must share for the gate to open.
+    const TOPIC_WORDS: [&str; 6] = ["daemon", "changes", "startup", "restart", "files", "watch"];
+
     /// The repository talks about the prompt: one structural file holds all
-    /// three of its words (2 each), a note holds two of them as text.
+    /// its words (2 each), a note holds all but one as text.
     fn on_topic_answer() -> RelevanceAnswer {
+        let count = relevance::MIN_SHARED_KEYWORDS;
+        let topic = &TOPIC_WORDS[..count];
         RelevanceAnswer {
             input: RelevanceInput {
                 graph: true,
-                keywords: vec![
-                    keyword("daemon", 2.0),
-                    keyword("changes", 2.0),
-                    keyword("startup", 2.0),
-                ],
+                keywords: topic.iter().map(|word| keyword(word, 2.0)).collect(),
                 cofiles: vec![
-                    cofile(DAEMON, &["daemon", "changes", "startup"], 6.0, true),
-                    cofile("docs/notes.md", &["daemon", "startup"], 4.0, false),
+                    cofile(DAEMON, topic, 2.0 * count as f64, true),
+                    cofile(
+                        "docs/notes.md",
+                        &topic[..count - 1],
+                        2.0 * (count - 1) as f64,
+                        false,
+                    ),
                 ],
             },
             lines: vec![
@@ -3945,6 +3952,12 @@ mod tests {
                 rhit("docs/notes.md", 12, "daemon startup notes"),
             ],
         }
+    }
+
+    /// The `confidence:` line of a brief the whole of `on_topic_answer` covers.
+    fn full_confidence() -> String {
+        let count = relevance::MIN_SHARED_KEYWORDS;
+        format!("confidence: high — {count}/{count} key terms covered; start with the first file")
     }
 
     /// The repository does not talk about the prompt: two of its words are
@@ -4026,7 +4039,7 @@ mod tests {
                     "[PIXEL:BRIEF]",
                     "kind: lookup",
                     "files: crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready() {; crates/pixel-daemon/src/api.rs:40 — fn op_status; docs/notes.md:12 — daemon startup notes",
-                    "confidence: high — 3/3 key terms covered; start with the first file",
+                    full_confidence().as_str(),
                     "coverage: 2/2 ops answered",
                     FOOTER,
                 ]
@@ -4050,7 +4063,13 @@ mod tests {
         assert!((record.score.unwrap() - 1.0).abs() < f64::EPSILON);
         assert_eq!((record.ops, record.answered), (2, 2));
         let features = record.features.as_ref().unwrap();
-        assert_eq!((features.shared, features.informative), (3, 3));
+        assert_eq!(
+            (features.shared, features.informative),
+            (
+                relevance::MIN_SHARED_KEYWORDS,
+                relevance::MIN_SHARED_KEYWORDS
+            )
+        );
         assert!(features.structural);
         assert_eq!(record.bytes, finished.text.unwrap().len());
         assert_eq!(record.typed, PROSE);

@@ -22,13 +22,18 @@
 
 /// Share of the prompt's total keyword weight one file must hold to cover
 /// it. Tuned on the dev split of the brief-gate set (#883), never the test
-/// split.
+/// split: from 0.3 to 0.5 the dev F1 does not move once a file needs
+/// [`MIN_SHARED_KEYWORDS`] words, and above 0.5 it only loses recall.
 pub(crate) const MIN_COVERAGE: f64 = 0.5;
-/// Informative keywords one file must hold: a single shared word is a
-/// coincidence, two are a topic.
-pub(crate) const MIN_SHARED_KEYWORDS: usize = 2;
-/// Share of the weight from which the brief says its confidence is high.
-pub(crate) const HIGH_COVERAGE: f64 = 0.8;
+/// Informative keywords one file must hold. With two, a git tool's own
+/// vocabulary opened for 15 of 20 ops prompts and 58% of the off-topic dev
+/// prompts; with four the dev F1 gives up 4 points (74.6 to 70.2) for 31
+/// points less false positives (58 to 27%). Tuned on the dev split only.
+pub(crate) const MIN_SHARED_KEYWORDS: usize = 4;
+/// Share of the weight from which the brief says its confidence is high: on
+/// the dev split the first file of a brief at or above it held an expected
+/// file for 73% of the prompts, below it for 22%.
+pub(crate) const HIGH_COVERAGE: f64 = 0.9;
 
 /// How much one task keyword says about the repository.
 #[derive(Clone, Debug, PartialEq)]
@@ -229,16 +234,21 @@ pub(crate) fn judge(input: &RelevanceInput) -> Verdict {
 mod tests {
     use super::*;
 
+    /// The words every fixture is made of: `w0`, `w1`, ...
+    fn word(index: usize) -> String {
+        format!("w{index}")
+    }
+
     /// A prompt of `keywords` (word, weight) and the files its words meet in
     /// (path, words, structural); a file weighs what the daemon says it does:
     /// the sum of the weights of its words.
-    fn input(keywords: &[(&str, f64)], cofiles: &[(&str, &[&str], bool)]) -> RelevanceInput {
+    fn input(keywords: &[(String, f64)], cofiles: &[(&str, Vec<String>, bool)]) -> RelevanceInput {
         RelevanceInput {
             graph: true,
             keywords: keywords
                 .iter()
                 .map(|(word, weight)| KeywordStat {
-                    keyword: (*word).into(),
+                    keyword: word.clone(),
                     weight: *weight,
                     french_only: false,
                 })
@@ -247,7 +257,7 @@ mod tests {
                 .iter()
                 .map(|(path, words, structural)| CoFileStat {
                     path: (*path).into(),
-                    keywords: words.iter().map(ToString::to_string).collect(),
+                    keywords: words.clone(),
                     weight: keywords
                         .iter()
                         .filter(|(word, _)| words.contains(word))
@@ -259,11 +269,25 @@ mod tests {
         }
     }
 
+    /// `count` words of weight `weight`, numbered from `from`.
+    fn words(from: usize, count: usize, weight: f64) -> Vec<(String, f64)> {
+        (from..from + count).map(|n| (word(n), weight)).collect()
+    }
+
+    /// The names of the words `from..from + count`.
+    fn names(from: usize, count: usize) -> Vec<String> {
+        (from..from + count).map(word).collect()
+    }
+
+    /// Every word of the shared minimum, at weight 2.
+    const K: usize = MIN_SHARED_KEYWORDS;
+
     #[test]
-    fn shares_enough_should_need_two_informative_keywords() {
+    fn shares_enough_should_need_the_minimum_of_informative_keywords() {
         assert!(!shares_enough(MIN_SHARED_KEYWORDS - 1));
         assert!(shares_enough(MIN_SHARED_KEYWORDS));
         assert!(shares_enough(MIN_SHARED_KEYWORDS + 1));
+        assert_eq!(MIN_SHARED_KEYWORDS, 4);
     }
 
     #[test]
@@ -318,20 +342,21 @@ mod tests {
     #[test]
     fn judge_should_take_a_prompt_one_file_covers_as_on_topic() {
         let verdict = judge(&input(
-            &[("watch", 2.0), ("daemon", 2.0), ("startup", 2.0)],
-            &[("daemon.rs", &["watch", "daemon", "startup"], true)],
+            &words(0, K, 2.0),
+            &[("daemon.rs", names(0, K), true)],
         ));
         assert!(verdict.on_topic);
         assert_eq!(verdict.best_file.as_deref(), Some("daemon.rs"));
         assert!((verdict.score - 1.0).abs() < f64::EPSILON);
+        let total = 2.0 * K as f64;
         assert_eq!(
             verdict.features,
             Features {
-                total_weight: 6.0,
-                covered_weight: 6.0,
-                keywords: 3,
-                informative: 3,
-                shared: 3,
+                total_weight: total,
+                covered_weight: total,
+                keywords: K,
+                informative: K,
+                shared: K,
                 structural: true,
             }
         );
@@ -339,28 +364,32 @@ mod tests {
 
     #[test]
     fn judge_should_cover_a_prompt_at_exactly_the_minimum_share() {
-        // Weights 2 + 2 held of 2 + 2 + 3 + 3 = 10: a share of 0.4, below.
-        let below = judge(&input(
-            &[("a", 2.0), ("b", 2.0), ("gone0", 3.0), ("gone1", 3.0)],
-            &[("f.rs", &["a", "b"], true)],
-        ));
-        assert!(!below.on_topic);
-        assert!((below.score - 0.4).abs() < 1e-9, "{}", below.score);
-        // The equality edge: a and b held (4) of a, b, c and d (8) is exactly
-        // half, and half covers.
+        // The file holds K words of weight 2; the prompt has K more of them:
+        // exactly half of the weight, and half covers.
         let at = judge(&input(
-            &[("a", 2.0), ("b", 2.0), ("c", 2.0), ("d", 2.0)],
-            &[("f.rs", &["a", "b"], true)],
+            &words(0, 2 * K, 2.0),
+            &[("f.rs", names(0, K), true)],
         ));
         assert!(at.on_topic, "exactly half of the weight is covered");
         assert!((at.score - 0.5).abs() < f64::EPSILON);
+        // One more word the file lacks and the share is just under half.
+        let below = judge(&input(
+            &words(0, 2 * K + 1, 2.0),
+            &[("f.rs", names(0, K), true)],
+        ));
+        assert!(!below.on_topic);
+        assert!(below.score < MIN_COVERAGE, "{}", below.score);
     }
 
     #[test]
     fn judge_should_reject_a_prompt_the_repository_does_not_talk_about() {
         // Two words found nowhere, one in a lot of files: the weather.
         let verdict = judge(&input(
-            &[("weather", 3.0), ("tomorrow", 3.0), ("like", 0.0)],
+            &[
+                ("weather".into(), 3.0),
+                ("tomorrow".into(), 3.0),
+                ("like".into(), 0.0),
+            ],
             &[],
         ));
         assert!(!verdict.on_topic);
@@ -374,14 +403,11 @@ mod tests {
     fn judge_should_reject_a_prompt_with_no_weight_at_all() {
         // Every word is everywhere (or French and absent): Q == 0, even
         // with a file that holds all of them.
-        let verdict = judge(&input(
-            &[("file", 0.0), ("line", 0.0)],
-            &[("f.rs", &["file", "line"], true)],
-        ));
+        let verdict = judge(&input(&words(0, K, 0.0), &[("f.rs", names(0, K), true)]));
         assert!(!verdict.on_topic);
         assert!(verdict.features.total_weight.abs() < f64::EPSILON);
         assert!(verdict.score.abs() < f64::EPSILON);
-        let mut french = input(&[("fichier", 4.0)], &[]);
+        let mut french = input(&[("fichier".into(), 4.0)], &[]);
         french.keywords[0].french_only = true;
         let only_french = judge(&french);
         assert!(!only_french.on_topic);
@@ -389,35 +415,39 @@ mod tests {
     }
 
     #[test]
-    fn judge_should_not_count_a_ubiquitous_keyword_toward_the_two_a_file_needs() {
-        // `file` is everywhere: the file holds it and one informative word.
-        let verdict = judge(&input(
-            &[("watch", 2.0), ("file", 0.0)],
-            &[("f.rs", &["watch", "file"], true)],
-        ));
+    fn judge_should_not_count_a_ubiquitous_keyword_toward_the_words_a_file_needs() {
+        // The file holds K - 1 informative words and a ubiquitous one.
+        let mut short = words(0, K - 1, 2.0);
+        short.push((word(K - 1), 0.0));
+        let verdict = judge(&input(&short, &[("f.rs", names(0, K), true)]));
         assert!(!verdict.on_topic);
-        assert_eq!(verdict.features.shared, 1);
-        // The same file with a second informative word qualifies.
-        let two = judge(&input(
-            &[("watch", 2.0), ("file", 0.0), ("daemon", 2.0)],
-            &[("f.rs", &["watch", "file", "daemon"], true)],
-        ));
+        assert_eq!(verdict.features.shared, K - 1);
+        // The same file with one more informative word qualifies.
+        let mut enough = short.clone();
+        enough.push((word(K), 2.0));
+        let two = judge(&input(&enough, &[("f.rs", names(0, K + 1), true)]));
         assert!(two.on_topic);
-        assert_eq!(two.features.shared, 2);
+        assert_eq!(two.features.shared, K);
     }
 
     #[test]
-    fn judge_should_refuse_a_single_shared_keyword() {
-        let verdict = judge(&input(&[("watch", 2.0)], &[("f.rs", &["watch"], true)]));
-        assert!(!verdict.on_topic, "one keyword is a coincidence");
+    fn judge_should_refuse_a_file_one_word_short_of_the_minimum() {
+        let verdict = judge(&input(
+            &words(0, K - 1, 2.0),
+            &[("f.rs", names(0, K - 1), true)],
+        ));
+        assert!(
+            !verdict.on_topic,
+            "{K} words are a topic, fewer a coincidence"
+        );
         assert_eq!(verdict.best_file.as_deref(), Some("f.rs"));
         assert!((verdict.score - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn judge_should_need_a_structural_file_only_when_the_graph_answered() {
-        let keywords = [("watch", 2.0), ("daemon", 2.0)];
-        let flat = [("notes.md", &["watch", "daemon"][..], false)];
+        let keywords = words(0, K, 2.0);
+        let flat = [("notes.md", names(0, K), false)];
         let with_graph = judge(&input(&keywords, &flat));
         assert!(
             !with_graph.on_topic,
@@ -433,25 +463,25 @@ mod tests {
     fn judge_should_prefer_the_qualifying_file_over_one_holding_more_weight() {
         // `a.md` holds more weight but is not structural: `b.rs` decides.
         let verdict = judge(&input(
-            &[("a", 2.0), ("b", 2.0), ("c", 2.0)],
+            &words(0, K + 1, 2.0),
             &[
-                ("a.md", &["a", "b", "c"], false),
-                ("b.rs", &["a", "b"], true),
+                ("a.md", names(0, K + 1), false),
+                ("b.rs", names(0, K), true),
             ],
         ));
         assert!(verdict.on_topic);
         assert_eq!(verdict.best_file.as_deref(), Some("b.rs"));
-        assert!((verdict.score - 4.0 / 6.0).abs() < 1e-9);
+        assert!((verdict.score - K as f64 / (K as f64 + 1.0)).abs() < 1e-9);
         assert!(verdict.features.structural);
     }
 
     #[test]
     fn judge_should_keep_the_first_of_two_equal_files() {
         let verdict = judge(&input(
-            &[("a", 2.0), ("b", 2.0)],
+            &words(0, K, 2.0),
             &[
-                ("first.rs", &["a", "b"], true),
-                ("second.rs", &["a", "b"], true),
+                ("first.rs", names(0, K), true),
+                ("second.rs", names(0, K), true),
             ],
         ));
         assert_eq!(verdict.best_file.as_deref(), Some("first.rs"));
@@ -459,21 +489,25 @@ mod tests {
 
     #[test]
     fn judge_should_name_the_heaviest_file_when_none_qualifies() {
+        let mut keywords = words(0, K, 2.0);
+        keywords.extend(words(K, 2, 3.0));
         let verdict = judge(&input(
-            &[("a", 2.0), ("b", 2.0), ("c", 3.0), ("d", 3.0)],
-            &[("small.rs", &["a"], true), ("heavy.rs", &["a", "b"], true)],
+            &keywords,
+            &[
+                ("small.rs", names(0, 1), true),
+                ("heavy.rs", names(0, K - 1), true),
+            ],
         ));
         assert!(!verdict.on_topic);
         assert_eq!(verdict.best_file.as_deref(), Some("heavy.rs"));
-        assert!((verdict.features.covered_weight - 4.0).abs() < f64::EPSILON);
-        assert!((verdict.score - 0.4).abs() < 1e-9);
+        assert!((verdict.features.covered_weight - 2.0 * (K - 1) as f64).abs() < f64::EPSILON);
     }
 
     #[test]
     fn judge_should_count_a_keyword_a_file_lists_twice_once() {
         let verdict = judge(&input(
-            &[("a", 2.0), ("b", 2.0)],
-            &[("f.rs", &["a", "a", "a"], true)],
+            &words(0, K, 2.0),
+            &[("f.rs", vec![word(0), word(0), word(0)], true)],
         ));
         assert_eq!(verdict.features.shared, 1);
     }
@@ -481,65 +515,62 @@ mod tests {
     #[test]
     fn judge_should_weigh_a_missing_french_word_as_nothing_not_as_off_topic() {
         // "modifie" is French and absent: it neither lifts Q nor stops a file
-        // that holds the two other words from covering the prompt.
-        let mut french = input(
-            &[("env", 2.0), ("cle", 2.0), ("modifie", 3.0)],
-            &[("envfile.rs", &["env", "cle"], true)],
-        );
-        french.keywords[2].french_only = true;
+        // that holds the other words from covering the prompt.
+        let mut keywords = words(0, K, 2.0);
+        keywords.push(("modifie".into(), 3.0));
+        let held = [("envfile.rs", names(0, K), true)];
+        let mut french = input(&keywords, &held);
+        french.keywords[K].french_only = true;
         let verdict = judge(&french);
         assert!(verdict.on_topic);
         assert!((verdict.score - 1.0).abs() < f64::EPSILON);
-        assert_eq!(verdict.features.informative, 2);
-        // The same word, English, would have weighed 3 and sunk the share.
-        let english = judge(&input(
-            &[("env", 2.0), ("cle", 2.0), ("modifie", 3.0)],
-            &[("envfile.rs", &["env", "cle"], true)],
-        ));
-        assert!(english.on_topic, "4 of 7 still covers");
-        assert!((english.score - 4.0 / 7.0).abs() < 1e-9);
+        assert_eq!(verdict.features.informative, K);
+        // The same word, English, would have weighed 3 and lowered the share.
+        let english = judge(&input(&keywords, &held));
+        assert!(english.on_topic);
+        assert!((english.score - 2.0 * K as f64 / (2.0 * K as f64 + 3.0)).abs() < 1e-9);
     }
 
     #[test]
     fn judge_should_take_the_file_weight_from_the_daemon_and_not_recompute_it() {
-        let mut prompt = input(&[("a", 2.0), ("b", 2.0)], &[("f.rs", &["a", "b"], true)]);
-        prompt.cofiles[0].weight = 3.0;
+        let total = 2.0 * K as f64;
+        let mut prompt = input(&words(0, K, 2.0), &[("f.rs", names(0, K), true)]);
+        prompt.cofiles[0].weight = 0.75 * total;
         let verdict = judge(&prompt);
-        assert!((verdict.features.covered_weight - 3.0).abs() < f64::EPSILON);
+        assert!((verdict.features.covered_weight - 0.75 * total).abs() < 1e-9);
         assert!((verdict.score - 0.75).abs() < 1e-9);
         // A file the daemon weighs above the whole prompt scores the whole.
-        prompt.cofiles[0].weight = 6.0;
+        prompt.cofiles[0].weight = 1.5 * total;
         let boosted = judge(&prompt);
-        assert!((boosted.features.covered_weight - 6.0).abs() < f64::EPSILON);
+        assert!((boosted.features.covered_weight - 1.5 * total).abs() < 1e-9);
         assert!((boosted.score - 1.0).abs() < f64::EPSILON);
         // And a file the daemon weighs too low no longer covers the prompt.
-        prompt.cofiles[0].weight = 1.9;
+        prompt.cofiles[0].weight = 0.49 * total;
         assert!(!judge(&prompt).on_topic);
     }
 
     #[test]
     fn confidence_line_should_say_how_much_of_the_prompt_the_file_covers() {
-        let on_topic = judge(&input(
-            &[("a", 2.0), ("b", 2.0), ("c", 2.0), ("d", 3.0)],
-            &[("f.rs", &["a", "b", "c"], true)],
-        ));
-        assert!(on_topic.on_topic);
-        // 6 of 9: medium. Three of the four informative terms are held.
+        // K words held, one more the file lacks, weight 3: medium.
+        let mut keywords = words(0, K, 2.0);
+        keywords.push((word(K), 3.0));
+        let medium = judge(&input(&keywords, &[("f.rs", names(0, K), true)]));
+        assert!(medium.on_topic);
         assert_eq!(
-            on_topic.confidence_line(),
-            "confidence: medium — 3/4 key terms covered; start with the first file"
+            medium.confidence_line(),
+            format!(
+                "confidence: medium — {K}/{} key terms covered; start with the first file",
+                K + 1
+            )
         );
-        let whole = judge(&input(
-            &[("a", 2.0), ("b", 2.0)],
-            &[("f.rs", &["a", "b"], true)],
-        ));
+        let whole = judge(&input(&words(0, K, 2.0), &[("f.rs", names(0, K), true)]));
         assert_eq!(
             whole.confidence_line(),
-            "confidence: high — 2/2 key terms covered; start with the first file"
+            format!("confidence: high — {K}/{K} key terms covered; start with the first file")
         );
         let off = judge(&input(
-            &[("a", 2.0), ("b", 3.0), ("c", 3.0)],
-            &[("f.rs", &["a"], true)],
+            &[(word(0), 2.0), (word(1), 3.0), (word(2), 3.0)],
+            &[("f.rs", names(0, 1), true)],
         ));
         assert!(!off.on_topic);
         assert_eq!(
