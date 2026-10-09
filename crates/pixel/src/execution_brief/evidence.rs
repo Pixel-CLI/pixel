@@ -2035,9 +2035,12 @@ mod tests {
         };
         let weight = relevance_answer(&block, false).input.keywords[0].weight;
         assert!((weight - (101.0_f64 / 10.0).ln()).abs() < 1e-9, "{weight}");
-        let truncated = Relevance {
+        // A truncated probe is a lower bound: the daemon weighs the count it
+        // has, and a word it calls common weighs nothing whatever its counts.
+        let row = |truncated: bool, common: bool| Relevance {
             keywords: vec![pixel_proto::KeywordEvidence {
-                truncated: true,
+                truncated,
+                common,
                 content_files: 3,
                 keyword: "daemon".into(),
                 ..pixel_proto::KeywordEvidence::default()
@@ -2045,12 +2048,10 @@ mod tests {
             files_considered: 100,
             ..Relevance::default()
         };
-        assert!(
-            relevance_answer(&truncated, false).input.keywords[0]
-                .weight
-                .abs()
-                < f64::EPSILON
-        );
+        let weight_of = |block: &Relevance| relevance_answer(block, false).input.keywords[0].weight;
+        assert!((weight_of(&row(true, false)) - (101.0_f64 / 4.0).ln()).abs() < 1e-9);
+        assert!(weight_of(&row(false, true)).abs() < f64::EPSILON);
+        assert!(weight_of(&row(true, true)).abs() < f64::EPSILON);
     }
 
     #[test]
