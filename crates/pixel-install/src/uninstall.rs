@@ -391,6 +391,12 @@ fn strip_setup_blocks(
             continue;
         }
         let cleaned = crate::setup::strip_block(&original);
+        if cleaned == original {
+            // A malformed block, or a marker only quoted in prose: the strip
+            // is a no-op, and a no-op must not be written or counted as a
+            // repair.
+            continue;
+        }
         if !dry_run {
             let bk = config::backup_if_changing(path, cleaned.as_bytes())?;
             fs::write(path, &cleaned)?;

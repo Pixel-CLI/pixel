@@ -32,24 +32,32 @@ wizard does, read in their tree at `5cbe33d` and PR #14425).
 
 ## What a feature writes
 
-Each feature is a bundle: a steering section in the managed block, config keys in
-`~/.pixel/config.yaml`, and/or a note naming the `pixel install` step that deploys
-the matching artifact.
+A feature writes exactly one of four things (`Feature::writes()` in
+`crates/pixel-install/src/setup/feature.rs`), and saying which is the point:
+
+- `Steering` — a `###` section in the managed block of every selected agent's
+  instruction file;
+- `Config` — a key in the global `~/.pixel/config.yaml`;
+- `Rules` — a per-agent rule file, for the three harnesses that load a plain
+  Markdown one;
+- `Note` — nothing here, because another pixel command owns that artifact. The
+  wizard never writes a hook entry: `pixel install` owns the hook files, and a
+  second writer of one settings file is how a user's own hooks get lost.
 
 | # | id | label | default | writes |
 |---|---|---|---|---|
-| 1 | `prompt` | Retrieval-first workflow | on | managed block in the agent's instruction file |
-| 2 | `brief` | Per-prompt brief | on | `brief: true` |
-| 3 | `guard` | Guard destructive git commands | on | guard hook entry |
-| 4 | `metrics` | Command timing and savings | on | `metrics: "on"` + metrics hook entry |
-| 5 | `daemon` | Background daemon on demand | on | `daemon_auto_start: true` |
-| 6 | `semantic` | Semantic search first | off | steering section |
-| 7 | `classify` | AI classification | off | `classify.enabled: true` |
-| 8 | `web-search` | Private web-search provider | off | steering section |
-| 9 | `rules` | Per-agent rule files | off | per-agent rules file |
-| 10 | `pi-extension` | Pi impact extension | on for Pi | the pi extension |
-| 11 | `codex-config` | Codex config and hooks | on for Codex | `.codex` config |
-| 12 | `land` | Land on the target branch | off, repo-only | steering section |
+| 1 | `prompt` | Retrieval-first workflow | on | `Steering`: the `## Pixel` baseline |
+| 2 | `brief` | Per-prompt brief | on | `Config`: `brief: true` |
+| 3 | `guard` | Guard destructive git commands | on | `Note`: `pixel install` writes the hook |
+| 4 | `metrics` | Command timing and savings | on | `Config`: `metrics: "on"` |
+| 5 | `daemon` | Background daemon on demand | on | `Config`: `daemon_auto_start: true` |
+| 6 | `semantic` | Semantic search first | off | `Steering`: `### Search` |
+| 7 | `classify` | AI classification | off | `Config`: `classify.enabled: true` |
+| 8 | `web-search` | Private web-search provider | off | `Steering`: `### Web search` |
+| 9 | `rules` | Per-agent rule files | off | `Rules`: `<rules dir>/pixel-setup.md` |
+| 10 | `pi-extension` | pi impact extension | off | `Note`: `pixel install` writes it |
+| 11 | `codex-config` | Codex config and hooks | off | `Note`: `pixel install` writes them |
+| 12 | `land` | Land on the target branch | off, repo-only | `Steering`: `### Publishing` |
 
 ## Temporary development flags (do not ship)
 
@@ -120,9 +128,10 @@ repository state is touched by `pixel setup`.
 - [x] `Feature` enum with `label()`, `help()`, `default_selected()`,
       `repo_local_only()`, and the artifact mapping; a stable index per feature
       (the index the temporary flags use).
-- [x] A table test: every feature id is
-      unique, every feature maps to at least one artifact, and no artifact
-      appears twice for the same agent.
+- [x] Tests over the table: ids are unique, every feature carries a label and
+      actionable help, only the five free features are pre-checked, `land` is
+      the only repository-local one, the `Config` features name the four keys
+      that exist, and every `Note` names the command that owns the artifact.
 - [x] Default selection pinned by a test (`render` of the default answers is
       the `pixel setup --print` output).
 
@@ -134,9 +143,12 @@ repository state is touched by `pixel setup`.
       section plus one `###` section per selected feature; repo-local features
       excluded outside a repo-only setup; per-agent wording where the agent
       differs (e.g. Pi's TS extension vs Claude's Markdown rules).
-- [x] Paths derived from one `AgentTarget` table (no
-      duplicated path literals), asserted by a test that the wizard's paths
-      equal `pixel install`'s.
+- [x] Paths derived from `AgentTarget` alone, with no second copy of a path in
+      the wizard. A test asserts every target names a repository instruction
+      file and that the four global ones are the only targets claiming one
+      (no cross-check against `pixel install`'s own file list exists; a
+      repository-scoped setup writes `CLAUDE.md`/`AGENTS.md`, which that list
+      does not name).
 - [x] Review screen prints every path (`~` collapsed) and the exact text, then a
       single Apply/Cancel. Cancel writes nothing and says so.
 
@@ -154,25 +166,35 @@ repository state is touched by `pixel setup`.
 ### 6. The command
 
 - [x] `pixel setup` in `crates/pixel/src/main.rs`, in `--help` order, with
-      `#[arg]` docs; `pixel setup --print` non-interactive (plain text and
-      `--json`).
-- [x] Interactive wizard: a numbered list answered by index/`ask_bool`
-      machinery for the features (y/n) and the arrow picker for the agent
-      multi-select; `q`/Esc/Ctrl-C cancels without writing.
+      `#[arg]` docs; `pixel setup --print` is the non-interactive surface and
+      prints plain text only (no `--json`: the wizard's output is a Markdown
+      block, and a JSON envelope would wrap one string in an object).
+- [x] Interactive wizard: both questions are one numbered list answered by
+      index (`ask_list`) — there is no arrow-key picker and no `y/n` prompt in
+      this command, because a 9-row and a 12-row multi-select is not a
+      yes/no question. `q` and end-of-input cancel; `Esc` is not handled and
+      is left to the terminal. Cancel writes nothing and says so.
 - [x] Temporary non-interactive flags (`--selected-agents`,
       `--selected-features`, `--dummy-apply`) per answer to question 8; every
       out-of-range index is an error naming the valid range.
-- [x] `--dummy-apply`: redirect every write root to `test/.agents/` and write
-      there; no other difference in behaviour.
-- [x] Errors: no TTY without `--print` → exit 1 pointing at `--print`.
+- [x] `--dummy-apply`: resolves the write root to `<repo>/tests/setup/` and
+      leaves the real global configuration alone, so a development run changes
+      nothing outside the checkout; no other behaviour differs.
+- [x] Errors: no TTY without `--print` → exit 1 pointing at `--print`, or at
+      the two flags that answer without a terminal.
 
 ### 7. Tests
 
 - [x] One golden file per agent under `tests/setup/.agents/`, showing the exact
       modification the setup makes for that agent, plus `config.yaml` for the
       global config the selected features wrote.
-- [x] CLI tests in `crates/pixel/tests/cli/setup_cli.rs`; the goldens are compared in-process --selected-agents=… --selected-features=…`
-      and diffs the result against the committed goldens.
+- [x] The CLI tests in `crates/pixel/tests/cli/setup_cli.rs` cover `--print`
+      (byte-identical to what a run writes), the no-terminal refusal, a
+      repository run writing the repository files only, an out-of-range index,
+      a second run being byte-identical with both exit statuses asserted, a
+      machine `pixel config setup` already configured, and `--dummy-apply`
+      leaving the real global configuration alone. The goldens are compared
+      in-process by `setup/goldens.rs`, so they survive the flag removal.
 - [x] Tests that a partial selection writes only the selected agents' files and
       only the selected features' sections; that a second run is byte-identical;
       that cancellation writes nothing; that `--print` output matches the
@@ -182,18 +204,29 @@ repository state is touched by `pixel setup`.
 
 ### 8. Release prep
 
-- [ ] Delete `--selected-agents`, `--selected-features`, `--dummy-apply` and
-      re-point the golden test at the in-process renderer (see the removal gate
-      above).
+- [ ] Delete the three development-only flags. Every site is marked
+      `TEMPORARY (dev-flags)`; `rg -n 'TEMPORARY \(dev-flags\)' crates/` lists
+      them, and the recipe is at the top of the fenced block in
+      `crates/pixel/src/setup_cmd.rs`. It is a deletion-only diff: the whole
+      `mod dev` section, the `dev: DevOptions` field and its construction site,
+      the three clap args, the wrappers they guard, the `mod dev_tests` block,
+      and the scripted cases in `setup_cli.rs`. The golden test never used the
+      flags, so nothing has to be re-pointed.
 
 ### 9. Docs and gates
 
-- [x] `ARCHITECTURE.md` command table (+ the `docs_drift` test if it needs a row),
-      `crates/pixel-install/assets/pixel-agent-prompt.md`, `docs/manual-setup.md`,
-      README and `website/content/docs.md` if they enumerate commands.
+- [x] `ARCHITECTURE.md` command table (a `pixel setup` row, and the
+      `pixel uninstall` row now that uninstall strips the block), which is what
+      `docs_drift` requires; `docs/manual-setup.md` got the guided path.
+      `crates/pixel-install/assets/pixel-agent-prompt.md` is deliberately
+      unchanged: it is the retrieval protocol, and the setup block is
+      user-facing steering, not a command the agent runs.
 - [x] `changelog.d/pixel-setup-wizard.added.md`.
-- [x] `cargo fmt --all -- --check`, `cargo test -p pixel-install`, `cargo test -p pixel-cli --test cli`, `cargo clippy` on both crates, `cargo clippy
-      --workspace --all-targets -- -D warnings`.
+- [x] `cargo fmt --all -- --check`, `cargo test -p pixel-install`,
+      `cargo test -p pixel-cli --test cli`, `cargo clippy -p pixel-install -p
+      pixel-cli --all-targets`, `cargo check --workspace --all-targets`,
+      `cargo test -p pixel-git --test boundary`,
+      `python3 scripts/check-spdx.py`.
 - [ ] Optional: `pixel-dev build-index --history . && pixel-dev install --repo . &&
       pixel-dev doctor . --fix --fail-on yellow --skip 'install.*'` if the change
       moves what the home install writes.

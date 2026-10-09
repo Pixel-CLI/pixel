@@ -24,12 +24,18 @@ use super::render::render_block;
 pub const RULES_FILE: &str = "pixel-setup.md";
 
 /// The rules directories, relative to the scope base, of the harnesses that
-/// load a per-tool rule file. A harness with no directory here gets its
-/// steering in its instruction file only.
+/// load a plain Markdown rule file, and the only ones `RULES_FILE` may be
+/// written into.
+///
+/// Deliberately not every directory named `rules`. Cursor loads `.mdc` files
+/// with frontmatter, and Codex's `rules` directory holds execution-policy
+/// `.rules` files; a `pixel-setup.md` written there is a file the harness never
+/// reads, which on the review screen reads as pixel having done something. The
+/// three below take a Markdown file: Claude Code's per-tool rules, Gemini's
+/// rules directory, and Devin's `~/.devin/rules/`, which pixel already scrubs
+/// (`AGENT_RULES_DIRS` in `config.rs`).
 const RULES_DIRS: &[(AgentTarget, &str)] = &[
     (AgentTarget::ClaudeCode, ".claude/rules"),
-    (AgentTarget::Codex, ".codex/rules"),
-    (AgentTarget::Cursor, ".cursor/rules"),
     (AgentTarget::Gemini, ".gemini/rules"),
     (AgentTarget::Devin, ".devin/rules"),
 ];

@@ -18,8 +18,10 @@
 //! - **CRLF** — a replaced block follows the file's existing endings instead of
 //!   introducing mixed ones;
 //! - **atomic replace** — temp file in the same directory, permissions carried
-//!   over, content compared again before the rename, so a concurrent editor's
-//!   save is never overwritten by a write built from a stale read.
+//!   over, and the content compared again just before the rename. The rename
+//!   itself is unconditional, so this narrows the window in which a concurrent
+//!   editor's save is lost; it cannot close it. Nothing here is a substitute
+//!   for not writing a file another process is editing.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -35,8 +37,8 @@ pub const BLOCK_END: &str = "<!-- pixel:setup:end -->";
 
 /// A block that cannot be read as a whole is left alone, with the fix in the
 /// message: pixel removes what it wrote, never what it cannot parse.
-const PARTIAL_BLOCK: &str = "found one pixel:setup marker with no matching other one in \
-                             AGENTS.md; close or delete that block, then re-run";
+const PARTIAL_BLOCK: &str = "found one pixel:setup marker with no matching other one; \
+                             close or delete that block, then re-run";
 const REVERSED_BLOCK: &str = "found the pixel:setup end marker before its start marker; \
                               close or delete that block, then re-run";
 
@@ -121,9 +123,11 @@ fn write_and_rename(path: &Path, read_content: &str, content: &str, tmp: &Path) 
     file.sync_all()
         .map_err(|err| InstallError::Setup(format!("sync {}: {err}", tmp.display())))?;
     drop(file);
-    // The rename replaces the whole file, so an edit that landed after the
-    // read would be thrown away with it. Back off instead: a later run
-    // re-reads the fresh content.
+    // The rename below replaces the whole file, so an edit that landed after
+    // the read is thrown away with it. Comparing here narrows that window to
+    // the few instructions between this check and the rename; it does not
+    // close it, and `rename` cannot be made conditional on the content. Back
+    // off rather than write a stale read: a later run re-reads the file.
     let current = std::fs::read_to_string(path).unwrap_or_default();
     if current != read_content {
         return Err(InstallError::Setup(format!(

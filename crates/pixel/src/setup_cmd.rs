@@ -32,17 +32,12 @@ pub struct SetupOptions {
     pub repo: Option<PathBuf>,
     /// Print the block the default answers produce and change nothing.
     pub print: bool,
-    /// Answer the agent question from a list of indices, comma-separated.
-    pub selected_agents: Option<String>,
-    /// Answer the feature question from a list of indices, comma-separated.
-    pub selected_features: Option<String>,
-    /// Redirect every write under `tests/setup/` instead of a real home or
-    /// repository. A development aid, removed before the release.
-    pub dummy_apply: bool,
+    /// The development-only switches. `TEMPORARY (dev-flags)`, see `dev`.
+    pub dev: dev::Options,
 }
 
-/// The directory `--dummy-apply` writes under, relative to the repository root.
-const DUMMY_ROOT: [&str; 2] = ["tests", "setup"];
+// TEMPORARY (dev-flags): the public name `main.rs` fills in.
+pub use dev::Options as DevOptions;
 
 /// Run the wizard.
 pub fn run(options: SetupOptions) -> Result<(), String> {
@@ -65,10 +60,9 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
         return Ok(());
     }
 
-    // A run is scripted only when *both* answers came from a flag: one flag and
-    // a terminal still has a question to ask, and one flag without a terminal
-    // has no way to ask it.
-    let scripted = options.selected_agents.is_some() && options.selected_features.is_some();
+    // TEMPORARY (dev-flags): `scripted` is `dev`'s; without it the line is
+    // `if !std::io::stdin().is_terminal()`.
+    let scripted = dev::scripted(&options.dev);
     if !scripted && !std::io::stdin().is_terminal() {
         return Err(
             "setup needs a terminal. Use --print for the default block, or answer both \
@@ -99,20 +93,22 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
     }
 
     let written = plan.apply().map_err(|e| e.to_string())?;
-    for key in &plan.config_writes {
-        config_cmd::set_global_key(key.key, key.value.to_json())?;
+    // TEMPORARY (dev-flags): the `if` is `dev`'s; without it the loop below runs
+    // unconditionally, which is what a normal run does.
+    if !dev::skips_config(&options.dev) {
+        for key in &plan.config_writes {
+            config_cmd::set_global_key(key.key, key.value.to_json())?;
+        }
     }
     report(&mut output, &plan, &written, scripted)
 }
 
 /// The directory every path of this run is resolved under.
 fn base_for(options: &SetupOptions) -> Result<PathBuf, String> {
-    if options.dummy_apply {
-        return Ok(DUMMY_ROOT
-            .iter()
-            .fold(crate::discover_root(Path::new("."))?, |path, part| {
-                path.join(part)
-            }));
+    // TEMPORARY (dev-flags): these three lines are `dev`'s; without them a run
+    // always resolves `--repo` or `$HOME`.
+    if let Some(root) = dev::dummy_root(&options.dev)? {
+        return Ok(root);
     }
     match &options.repo {
         Some(repo) => Ok(repo.clone()),
@@ -172,25 +168,16 @@ fn collect(
 ) -> Result<Option<Answers>, String> {
     let running = running_agent();
     write_intro(output, base, scope, running, color)?;
-    let agents = match &options.selected_agents {
-        Some(list) => parse_agents(list)?,
-        None => {
-            let picked = ask_agents(input, output, base, scope, running, color)?;
-            let Some(picked) = picked else {
-                return Ok(None);
-            };
-            picked
-        }
+    // TEMPORARY (dev-flags): these four lines are `dev`'s; without them every
+    // answer comes from the prompts below.
+    if let Some(answers) = dev::answers(&options.dev, scope)? {
+        return Ok(Some(answers));
+    }
+    let Some(agents) = ask_agents(input, output, base, scope, running, color)? else {
+        return Ok(None);
     };
-    let features = match &options.selected_features {
-        Some(list) => parse_features(list, scope)?,
-        None => {
-            let picked = ask_features(input, output, scope, color)?;
-            let Some(picked) = picked else {
-                return Ok(None);
-            };
-            picked
-        }
+    let Some(features) = ask_features(input, output, scope, color)? else {
+        return Ok(None);
     };
     Ok(Some(Answers { agents, features }))
 }
@@ -435,35 +422,6 @@ fn parse_indices(answer: &str, total: usize) -> Result<Option<Vec<usize>>, Strin
     }
 }
 
-/// `--selected-agents 1,3,4`.
-fn parse_agents(list: &str) -> Result<Vec<AgentTarget>, String> {
-    let total = AgentTarget::ALL.len();
-    let Some(indices) = parse_indices(list, total)? else {
-        return Err("--selected-agents cannot cancel a run".into());
-    };
-    Ok(AgentTarget::ALL
-        .iter()
-        .copied()
-        .filter(|agent| indices.contains(&agent.index()))
-        .collect())
-}
-
-/// `--selected-features 2,4,12`.
-fn parse_features(list: &str, scope: Scope) -> Result<Vec<Feature>, String> {
-    let total = Feature::ALL.len();
-    let Some(indices) = parse_indices(list, total)? else {
-        return Err("--selected-features cannot cancel a run".into());
-    };
-    Ok(Feature::ALL
-        .iter()
-        .copied()
-        .filter(|feature| {
-            indices.contains(&feature.index())
-                && !(feature.repo_local_only() && scope != Scope::Repository)
-        })
-        .collect())
-}
-
 /// The review: every path, every configuration key, every note, and the exact
 /// text, before anything is written.
 fn write_review(output: &mut impl Write, plan: &SetupPlan, color: bool) -> Result<(), String> {
@@ -626,6 +584,126 @@ fn io(err: std::io::Error) -> String {
     err.to_string()
 }
 
+// ===========================================================================
+// TEMPORARY (dev-flags): the development-only switches.
+//
+// `but agent setup` has no non-interactive apply, so the port carries three
+// throwaway flags to drive the wizard from a script while the goldens under
+// `tests/setup/` are built. They are hidden from `--help` and are not part of
+// the shipped command.
+//
+// REMOVAL (before the release, tracked in docs/design/pixel-setup-plan.md and
+// on issue #890). Every site is a deletion; nothing new is written:
+//
+//   1. delete this whole section, to the matching END marker below, and the
+//      `#[cfg(test)] mod dev_tests` block in the tests module;
+//   2. delete the `dev: dev::Options` field of `SetupOptions` here, the
+//      `dev` argument at the construction site in `main.rs`, and the three
+//      `--selected-agents` / `--selected-features` / `--dummy-apply` clap args
+//      in `main.rs` (marked with the same phrase);
+//   3. delete the four `TEMPORARY (dev-flags)` lines in `run` and `collect`,
+//      and the `dev::dummy_root` / `dev::skips_config` blocks they guard:
+//      each one wraps the production code, so deleting the wrapper leaves it;
+//   4. delete the scripted cases in `crates/pixel/tests/cli/setup_cli.rs`
+//      (marked the same way) and the `tests/setup/` gitignore entry, if any.
+//
+// Nothing else refers to them: `setup::goldens` renders and applies in-process
+// and the golden files are compared without the command line.
+// ===========================================================================
+mod dev {
+    use std::path::{Path, PathBuf};
+
+    use pixel_install::setup::{AgentTarget, Feature, Scope};
+
+    use super::{Answers, parse_indices};
+
+    /// The directory `--dummy-apply` writes under, relative to the repository
+    /// root.
+    const DUMMY_ROOT: [&str; 2] = ["tests", "setup"];
+
+    /// The three development switches, as `main.rs` fills them from the
+    /// command line.
+    #[derive(Debug, Clone, Default)]
+    pub struct Options {
+        /// Answer the agent question from 1-based indices, comma-separated.
+        pub selected_agents: Option<String>,
+        /// Answer the feature question from 1-based indices, comma-separated.
+        pub selected_features: Option<String>,
+        /// Redirect every write under `tests/setup/` instead of a real home or
+        /// repository.
+        pub dummy_apply: bool,
+    }
+
+    /// The directory `--dummy-apply` writes under, relative to the repository
+    /// root. `None` for a normal run.
+    pub(super) fn dummy_root(options: &Options) -> Result<Option<PathBuf>, String> {
+        if !options.dummy_apply {
+            return Ok(None);
+        }
+        let root = crate::discover_root(Path::new("."))?;
+        Ok(Some(
+            DUMMY_ROOT.iter().fold(root, |path, part| path.join(part)),
+        ))
+    }
+
+    /// Whether a dummy run must leave the real `~/.pixel/config.yaml` alone:
+    /// the promise of the flag is that nothing outside `tests/setup/` changes.
+    pub(super) fn skips_config(options: &Options) -> bool {
+        options.dummy_apply
+    }
+
+    /// Whether *both* answers came from the command line. One flag and a
+    /// terminal still has a question to ask; one flag without a terminal has no
+    /// way to ask it.
+    pub(super) fn scripted(options: &Options) -> bool {
+        options.selected_agents.is_some() && options.selected_features.is_some()
+    }
+
+    /// The answers the flags carry, or `None` when the wizard has to ask.
+    pub(super) fn answers(options: &Options, scope: Scope) -> Result<Option<Answers>, String> {
+        let (Some(agents), Some(features)) = (&options.selected_agents, &options.selected_features)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Answers {
+            agents: parse_agents(agents)?,
+            features: parse_features(features, scope)?,
+        }))
+    }
+
+    /// `--selected-agents 1,3,4`.
+    fn parse_agents(list: &str) -> Result<Vec<AgentTarget>, String> {
+        let total = AgentTarget::ALL.len();
+        let Some(indices) = parse_indices(list, total)? else {
+            return Err("--selected-agents cannot cancel a run".into());
+        };
+        Ok(AgentTarget::ALL
+            .iter()
+            .copied()
+            .filter(|agent| indices.contains(&agent.index()))
+            .collect())
+    }
+
+    /// `--selected-features 2,4,12`.
+    fn parse_features(list: &str, scope: Scope) -> Result<Vec<Feature>, String> {
+        let total = Feature::ALL.len();
+        let Some(indices) = parse_indices(list, total)? else {
+            return Err("--selected-features cannot cancel a run".into());
+        };
+        Ok(Feature::ALL
+            .iter()
+            .copied()
+            .filter(|feature| {
+                indices.contains(&feature.index())
+                    && !(feature.repo_local_only() && scope != Scope::Repository)
+            })
+            .collect())
+    }
+}
+// ===========================================================================
+// END TEMPORARY (dev-flags)
+// ===========================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,10 +839,6 @@ mod tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    fn scripted(list: &str, total: usize) -> Result<Option<Vec<usize>>, String> {
-        parse_indices(list, total)
-    }
-
     /// A scratch directory of this test's own: the crate has no `tempfile`
     /// dev-dependency, and a shared name would let two tests collide.
     fn scratch_dir(label: &str) -> PathBuf {
@@ -779,61 +853,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn an_empty_answer_is_refused_rather_than_read_as_all() {
-        assert!(scripted("   ", 12).is_err());
-    }
-
-    #[test]
-    fn all_and_none_answer_the_list() {
-        assert_eq!(scripted("all", 3).unwrap(), Some(vec![1, 2, 3]));
-        assert_eq!(scripted("none", 3).unwrap(), Some(Vec::new()));
-    }
-
-    #[test]
-    fn q_cancels() {
-        assert_eq!(scripted("q", 3).unwrap(), None);
-        assert_eq!(scripted("Q", 3).unwrap(), None);
-    }
-
-    #[test]
-    fn a_list_of_indices_parses_in_either_separator() {
-        assert_eq!(scripted("1,3", 4).unwrap(), Some(vec![1, 3]));
-        assert_eq!(scripted("1 3", 4).unwrap(), Some(vec![1, 3]));
-        assert_eq!(scripted(" 2 , 2 ,1 ", 4).unwrap(), Some(vec![2, 1]));
-    }
-
-    #[test]
-    fn an_index_outside_the_list_names_the_range() {
-        let err = scripted("1,9", 3).unwrap_err();
-        assert!(err.contains("outside 1 to 3"), "got {err}");
-        let err = scripted("0", 3).unwrap_err();
-        assert!(err.contains("outside 1 to 3"), "got {err}");
-        let err = scripted("two", 3).unwrap_err();
-        assert!(err.contains("not a number"), "got {err}");
-    }
-
-    #[test]
-    fn the_agent_flag_selects_agents_by_index() {
-        let agents = parse_agents("1,3").unwrap();
-        assert_eq!(agents, vec![AgentTarget::ClaudeCode, AgentTarget::Devin]);
-    }
-
-    #[test]
-    fn the_feature_flag_drops_a_repository_local_feature_outside_a_repository() {
-        let land = Feature::Land.index();
-        let global = parse_features(&format!("1,{land}"), Scope::Global).unwrap();
-        assert_eq!(global, vec![Feature::Prompt], "got {global:?}");
-        let repo = parse_features(&format!("1,{land}"), Scope::Repository).unwrap();
-        assert_eq!(repo, vec![Feature::Prompt, Feature::Land]);
-    }
-
-    #[test]
-    fn a_cancel_cannot_be_typed_into_a_flag() {
-        assert!(parse_agents("q").is_err());
-        assert!(parse_features("q", Scope::Global).is_err());
     }
 
     #[test]
@@ -883,20 +902,6 @@ mod tests {
     }
 
     #[test]
-    fn a_dummy_run_writes_under_the_repository_test_folder() {
-        let options = SetupOptions {
-            repo: None,
-            print: false,
-            selected_agents: None,
-            selected_features: None,
-            dummy_apply: true,
-        };
-        let base = base_for(&options).unwrap();
-        assert!(base.ends_with("tests/setup"), "got {}", base.display());
-        assert!(base.starts_with(crate::discover_root(Path::new(".")).unwrap()));
-    }
-
-    #[test]
     fn a_config_value_renders_the_way_the_yaml_document_shows_it() {
         assert_eq!(render_value(serde_json::Value::Bool(true)), "true");
         assert_eq!(
@@ -904,5 +909,120 @@ mod tests {
             "\"on\"",
             "a bare off would parse as a YAML boolean"
         );
+    }
+    // TEMPORARY (dev-flags): these tests go with the `dev` section — delete
+    // them with it.
+    mod dev_tests {
+        use super::super::dev::{self, Options};
+        use super::super::parse_indices as scripted;
+
+        #[test]
+        fn an_empty_answer_is_refused_rather_than_read_as_all() {
+            assert!(scripted("   ", 12).is_err());
+        }
+
+        #[test]
+        fn all_and_none_answer_the_list() {
+            assert_eq!(scripted("all", 3).unwrap(), Some(vec![1, 2, 3]));
+            assert_eq!(scripted("none", 3).unwrap(), Some(Vec::new()));
+        }
+
+        #[test]
+        fn q_cancels() {
+            assert_eq!(scripted("q", 3).unwrap(), None);
+            assert_eq!(scripted("Q", 3).unwrap(), None);
+        }
+
+        #[test]
+        fn a_list_of_indices_parses_in_either_separator() {
+            assert_eq!(scripted("1,3", 4).unwrap(), Some(vec![1, 3]));
+            assert_eq!(scripted("1 3", 4).unwrap(), Some(vec![1, 3]));
+            assert_eq!(scripted(" 2 , 2 ,1 ", 4).unwrap(), Some(vec![2, 1]));
+        }
+
+        #[test]
+        fn an_index_outside_the_list_names_the_range() {
+            let err = scripted("1,9", 3).unwrap_err();
+            assert!(err.contains("outside 1 to 3"), "got {err}");
+            let err = scripted("0", 3).unwrap_err();
+            assert!(err.contains("outside 1 to 3"), "got {err}");
+            let err = scripted("two", 3).unwrap_err();
+            assert!(err.contains("not a number"), "got {err}");
+        }
+
+        #[test]
+        fn the_agent_flag_selects_agents_by_index() {
+            let options = Options {
+                selected_agents: Some("1,3".into()),
+                selected_features: Some("1".into()),
+                dummy_apply: false,
+            };
+            let answers = dev::answers(&options, pixel_install::setup::Scope::Global)
+                .unwrap()
+                .expect("both flags answered");
+            assert_eq!(
+                answers.agents,
+                vec![
+                    pixel_install::setup::AgentTarget::ClaudeCode,
+                    pixel_install::setup::AgentTarget::Devin
+                ]
+            );
+            assert!(!dev::scripted(&Options {
+                selected_agents: Some("1".into()),
+                ..Options::default()
+            }));
+        }
+
+        #[test]
+        fn the_feature_flag_drops_a_repository_local_feature_outside_a_repository() {
+            use pixel_install::setup::{Feature, Scope};
+            let land = Feature::Land.index();
+            let list = format!("1,{land}");
+            let global = Options {
+                selected_agents: Some("1".into()),
+                selected_features: Some(list.clone()),
+                dummy_apply: false,
+            };
+            let answers = dev::answers(&global, Scope::Global).unwrap().unwrap();
+            assert_eq!(
+                answers.features,
+                vec![Feature::Prompt],
+                "a repository-only feature is dropped in a machine-wide run"
+            );
+            let repo = dev::answers(&global, Scope::Repository).unwrap().unwrap();
+            assert_eq!(repo.features, vec![Feature::Prompt, Feature::Land]);
+        }
+
+        #[test]
+        fn a_cancel_cannot_be_typed_into_a_flag() {
+            let options = Options {
+                selected_agents: Some("q".into()),
+                selected_features: Some("q".into()),
+                dummy_apply: false,
+            };
+            assert!(dev::answers(&options, pixel_install::setup::Scope::Global).is_err());
+        }
+
+        #[test]
+        fn a_dummy_run_writes_under_the_repository_test_folder() {
+            let root = dev::dummy_root(&Options {
+                dummy_apply: true,
+                ..Options::default()
+            })
+            .unwrap()
+            .expect("the flag redirects the writes");
+            assert!(root.ends_with("tests/setup"), "got {}", root.display());
+            assert!(root.starts_with(crate::discover_root(std::path::Path::new(".")).unwrap()));
+            assert_eq!(
+                dev::dummy_root(&Options::default()).unwrap(),
+                None,
+                "a normal run resolves --repo or $HOME"
+            );
+            assert!(dev::skips_config(&Options {
+                dummy_apply: true,
+                ..Options::default()
+            }));
+            assert!(!dev::skips_config(&Options::default()));
+        }
     }
 }

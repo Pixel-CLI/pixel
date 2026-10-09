@@ -918,12 +918,17 @@ fn strip_setup_blocks_leaves_a_malformed_block_for_the_user_to_close() {
     let broken = format!("# My rules\n{}\n", crate::setup::BLOCK_START);
     write(&claude, &broken);
 
-    strip_setup_blocks(home.path(), crate::setup::Scope::Global, false).unwrap();
+    let step = strip_setup_blocks(home.path(), crate::setup::Scope::Global, false).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&claude).unwrap(),
         broken,
         "uninstall removes what pixel wrote and never what it cannot parse"
+    );
+    assert!(
+        step.summary.contains("0 file(s)"),
+        "a file left alone is not reported as repaired: {}",
+        step.summary
     );
 }
 

@@ -1271,9 +1271,10 @@ enum Command {
         /// base both the agent detection and every write resolve against.
         #[arg(long, value_name = "PATH")]
         repo: Option<PathBuf>,
-        // --- temporary: answer the wizard from a script. Removed before the
-        // release; the golden files under tests/setup/ are regenerated with
-        // them, then the golden test is re-pointed at the renderer.
+        // TEMPORARY (dev-flags) start: three development-only args, removed
+        // before the release. The removal recipe is in `setup_cmd.rs`; the
+        // three lines below and the `dev:` field at the construction site are
+        // the whole command-surface part of it.
         /// Answer the agent question with 1-based indices into the list
         /// `pixel setup --help` prints, comma-separated. Temporary.
         #[arg(long, value_name = "LIST", hide = true)]
@@ -1282,10 +1283,12 @@ enum Command {
         /// `pixel setup --help` prints, comma-separated. Temporary.
         #[arg(long, value_name = "LIST", hide = true)]
         selected_features: Option<String>,
-        /// Redirect every write under `tests/setup/` in this repository instead
-        /// of a real home or repository. Temporary.
+        /// Redirect every write under `tests/setup/` in this repository
+        /// instead of a real home or repository, and leave the real global
+        /// configuration alone. Temporary.
         #[arg(long, hide = true)]
         dummy_apply: bool,
+        // TEMPORARY (dev-flags) end.
     },
     // -----------------------------------------------------------------
     // M5/M6 — install / doctor / migrate / hook
@@ -6581,9 +6584,14 @@ fn run_command(
         } => setup_cmd::run(setup_cmd::SetupOptions {
             repo,
             print,
-            selected_agents,
-            selected_features,
-            dummy_apply,
+            // TEMPORARY (dev-flags): this one field, the three args above and
+            // the three clap args in the `Setup` variant are the whole removal
+            // in the command surface.
+            dev: setup_cmd::DevOptions {
+                selected_agents,
+                selected_features,
+                dummy_apply,
+            },
         }),
         Command::Install { json, shell, repo } => {
             let is_global_install = repo.is_none();

@@ -76,7 +76,7 @@ Step 4 of 4  Review          exact paths + exact generated text
 
 ## Agent detection and pre-selection
 
-Pre-selection is a three-way OR (`plan.rs:114-164`, `utils/detect_agent.rs`):
+Pre-selection is a four-way OR (`plan.rs:114-164`, `utils/detect_agent.rs`):
 
 1. **The agent currently driving the CLI**, from env vars: the generic
    `AI_AGENT` convention (`@vercel/detect-agent`) first, then ~40
@@ -89,6 +89,9 @@ Pre-selection is a three-way OR (`plan.rs:114-164`, `utils/detect_agent.rs`):
    `~/.copilot`, `~/.codeium`, `~/.config/opencode`, `~/.config/poolside`.
 3. **Unambiguous repo marker**: `CLAUDE.md`, `.cursor/`, `.poolside/`,
    `.github/copilot-instructions.md`.
+4. **An already-installed skill** under the agent's resolved skill path
+   (`SKILL_FORMATS`), global or repository — so a re-run of the wizard
+   re-selects the agents it, or `but skill`, previously set up.
 
 `AGENTS.md` is *explicitly excluded* as a marker — six of the eight targets
 share it, so it is never evidence for a specific one. Detected rows are
@@ -209,10 +212,14 @@ What makes it safe to run implicitly:
 
 ### Telemetry
 
-PostHog: `agentSetupOutcome` ∈ {`printOnly`, `cancelled`, `completed`},
-`agentSetupManualInstructionsRequired`, `agentSkillHintShown`,
-`retiredPolicySyntaxCleaned`, `retiredCommitSyntax`, plus an `agent` property on
-**every** event, from the same detection module.
+PostHog: `agentSetupOutcome` ∈ {`printOnly`, `cancelled`, `completed`,
+`completedWithManualStep`} (the last when the run left a file for the user to
+edit by hand; the flag `agentSetupManualInstructionsRequired` carries the same
+boolean), plus `agentSkillHintShown`, `retiredPolicySyntaxCleaned` and
+`retiredCommitSyntax`. Every event also gets an `agent` property — but only when
+detection names one: `Event::new` inserts it inside `if let Some(agent) =
+detect_agent::detect()`, so a human-driven invocation carries no `agent` at
+all.
 
 ## Testing strategy
 
