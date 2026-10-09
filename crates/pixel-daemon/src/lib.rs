@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod evaluate;
 pub mod evidence;
 pub mod recall_service;
+pub mod relevance;
 
 pub use api::{Request, Response, ServeError, Service};
 pub use daemon::{pid_path, run, socket_path};
