@@ -1,0 +1,166 @@
+// ---------------------------------------------------------------------------
+// research only: the evidence a gate could read, never committed
+// ---------------------------------------------------------------------------
+
+/// What one question finds in a resident index, before any fusion.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct Trace {
+    pub chunks: usize,
+    pub files: usize,
+    pub terms: Vec<String>,
+    pub noncommon_terms: Vec<String>,
+    /// Best chunk cosine per file, top ten: (cosine, path).
+    pub cosine_top: Vec<(f32, String)>,
+    /// The fused ranking `search` returns, paths.
+    pub fused_top: Vec<String>,
+    /// Chunk BM25 over every term, top ten: (score, path, lines, distinct terms).
+    pub bm25_all_top: Vec<(f64, String, u32, usize)>,
+    /// The same over the non-common terms only.
+    pub bm25_nc_top: Vec<(f64, String, u32, usize)>,
+    /// Chunks with at least k distinct non-common terms, k = 1..=4.
+    pub cooc_chunks: Vec<usize>,
+    /// The most distinct non-common terms in one chunk, and where.
+    pub best_cooc: usize,
+    pub best_cooc_chunk: Option<(String, Option<String>, u32, u32)>,
+    /// Σ idf · (k1 + 1) over the terms: what a chunk holding all of them could score.
+    pub ceiling_all: f64,
+    pub ceiling_nc: f64,
+    pub query_vector: Vec<f32>,
+}
+
+impl Resident {
+    pub fn trace(
+        &self,
+        embedder: &mut dyn Embedder,
+        query: &str,
+        noncommon: &[String],
+    ) -> Result<Trace, String> {
+        let query_vector = embedder
+            .embed_batch(&[query], EmbedKind::Query)?
+            .into_iter()
+            .next()
+            .ok_or("empty query embedding")?;
+        let mut unit = query_vector.clone();
+        normalize(&mut unit);
+
+        let terms = sorted_query_terms(query);
+        let nc_terms: Vec<String> = terms
+            .iter()
+            .filter(|term| noncommon.contains(term))
+            .cloned()
+            .collect();
+        let all_ids: Vec<Option<u32>> = terms.iter().map(|t| self.vocab.get(t)).collect();
+        let nc_ids: Vec<Option<u32>> = nc_terms.iter().map(|t| self.vocab.get(t)).collect();
+
+        let mut docs_all: Vec<pixel_rank::Bm25Doc> = Vec::new();
+        let mut docs_nc: Vec<pixel_rank::Bm25Doc> = Vec::new();
+        let mut owners: Vec<(usize, usize)> = Vec::new();
+        let mut best_cos: Vec<(f32, usize)> = Vec::new();
+        for (fi, file) in self.files.iter().enumerate() {
+            let mut top = (f32::MIN, 0);
+            for (ci, chunk) in file.chunks.iter().enumerate() {
+                let cosine = dot(&unit, &chunk.vector);
+                if cosine > top.0 {
+                    top = (cosine, ci);
+                }
+                docs_all.push(pixel_rank::Bm25Doc {
+                    path: String::new(),
+                    term_freqs: all_ids
+                        .iter()
+                        .map(|id| id.map_or(0, |id| count_of(&chunk.terms, id)))
+                        .collect(),
+                    len: chunk.len,
+                });
+                docs_nc.push(pixel_rank::Bm25Doc {
+                    path: String::new(),
+                    term_freqs: nc_ids
+                        .iter()
+                        .map(|id| id.map_or(0, |id| count_of(&chunk.terms, id)))
+                        .collect(),
+                    len: chunk.len,
+                });
+                owners.push((fi, ci));
+            }
+            best_cos.push(top);
+        }
+        let scores_all =
+            pixel_rank::bm25_scores(&terms, &docs_all).unwrap_or_else(|| vec![0.0; docs_all.len()]);
+        let scores_nc =
+            pixel_rank::bm25_scores(&nc_terms, &docs_nc).unwrap_or_else(|| vec![0.0; docs_nc.len()]);
+
+        let describe = |at: usize, score: f64, docs: &[pixel_rank::Bm25Doc]| {
+            let (fi, ci) = owners[at];
+            let file = &self.files[fi];
+            let chunk = &file.chunks[ci];
+            let distinct = docs[at].term_freqs.iter().filter(|f| **f > 0).count();
+            (score, file.path.clone(), chunk.end_line - chunk.start_line + 1, distinct)
+        };
+        let top_of = |scores: &[f64], docs: &[pixel_rank::Bm25Doc]| {
+            let mut order: Vec<usize> = (0..scores.len()).collect();
+            order.sort_by(|a, b| scores[*b].total_cmp(&scores[*a]).then(a.cmp(b)));
+            order
+                .into_iter()
+                .take(10)
+                .map(|at| describe(at, scores[at], docs))
+                .collect::<Vec<_>>()
+        };
+
+        let mut cooc_chunks = vec![0usize; 4];
+        let mut best_cooc = 0usize;
+        let mut best_at: Option<usize> = None;
+        for (at, doc) in docs_nc.iter().enumerate() {
+            let distinct = doc.term_freqs.iter().filter(|f| **f > 0).count();
+            for k in 1..=4 {
+                if distinct >= k {
+                    cooc_chunks[k - 1] += 1;
+                }
+            }
+            let better = distinct > best_cooc
+                || (distinct == best_cooc && distinct > 0 && best_at.is_some_and(|b| scores_nc[at] > scores_nc[b]));
+            if better {
+                best_cooc = distinct;
+                best_at = Some(at);
+            }
+        }
+        let ceiling = |ids: &[Option<u32>], docs: &[pixel_rank::Bm25Doc]| -> f64 {
+            let n = docs.len() as f64;
+            (0..ids.len())
+                .map(|j| {
+                    let df = docs.iter().filter(|d| d.term_freqs.get(j).copied().unwrap_or(0) > 0).count() as f64;
+                    (1.0 + (n - df + 0.5) / (df + 0.5)).ln() * (pixel_rank::BM25_K1 + 1.0)
+                })
+                .sum()
+        };
+
+        let mut cosine_top: Vec<(f32, String)> = self
+            .files
+            .iter()
+            .zip(&best_cos)
+            .map(|(file, (cosine, _))| (*cosine, file.path.clone()))
+            .collect();
+        cosine_top.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        cosine_top.truncate(10);
+        let fused_top = self.rank(query, &query_vector, 10)?.into_iter().map(|hit| hit.path).collect();
+
+        Ok(Trace {
+            chunks: docs_all.len(),
+            files: self.files.len(),
+            terms: terms.clone(),
+            noncommon_terms: nc_terms.clone(),
+            cosine_top,
+            fused_top,
+            bm25_all_top: top_of(&scores_all, &docs_all),
+            bm25_nc_top: top_of(&scores_nc, &docs_nc),
+            cooc_chunks,
+            best_cooc,
+            best_cooc_chunk: best_at.map(|at| {
+                let (fi, ci) = owners[at];
+                let chunk = &self.files[fi].chunks[ci];
+                (self.files[fi].path.clone(), chunk.symbol.clone(), chunk.start_line, chunk.end_line)
+            }),
+            ceiling_all: ceiling(&all_ids, &docs_all),
+            ceiling_nc: ceiling(&nc_ids, &docs_nc),
+            query_vector: unit.clone(),
+        })
+    }
+}
