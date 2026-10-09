@@ -371,6 +371,10 @@ enum Command {
         prompt: String,
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Print the decision (signal, gate, score, judge, cost) and the
+        /// rendered brief as one JSON object, also when no brief was made.
+        #[arg(long)]
+        json: bool,
     },
     /// Build a deterministic, bounded execution brief from scope-task evidence.
     ExecutionBrief {
@@ -5242,11 +5246,24 @@ fn run_command(
             }
             Ok(())
         }
-        Command::Brief { prompt, path } => {
+        Command::Brief { prompt, path, json } => {
             let root = discover_root(&path)?;
-            let brief = execution_brief::chain::start(&prompt, &root)
-                .and_then(execution_brief::chain::Pending::finish);
-            if let Some(text) = brief {
+            if json {
+                let finished = execution_brief::chain::try_start(&prompt, &root)
+                    .map(execution_brief::chain::Pending::finish_with_record);
+                let (record, text) = match finished {
+                    Ok(finished) => (finished.record, finished.text),
+                    Err(declined) => (
+                        execution_brief::chain::declined_record(declined, &prompt),
+                        None,
+                    ),
+                };
+                let mut decision = record.to_json();
+                decision["brief"] = text.map_or(Value::Null, Value::from);
+                write_stdout(&format!("{decision}\n"))
+            } else if let Some(text) = execution_brief::chain::start(&prompt, &root)
+                .and_then(execution_brief::chain::Pending::finish)
+            {
                 write_stdout(&text)
             } else {
                 Ok(())

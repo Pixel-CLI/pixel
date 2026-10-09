@@ -18,18 +18,29 @@
 //! it has when the deadline passes, so it never holds the prompt back. The
 //! lookups sit behind [`Evidence`]: `evidence.rs` is the live source, tests
 //! bring their own.
+//!
+//! A prompt in plain language (no identifier, no code word) starts differently:
+//! the intent judge, the relevance probe and the meaning search run at once on
+//! the shared deadline, and the relevance decision, with no model in it, says
+//! whether the prompt is about this repository at all. Off topic ends the
+//! brief at once and renders nothing; on topic fuses the meaning leads with
+//! the files the prompt's words meet in, and the routed kind goes on from
+//! there. A weakly code-shaped prompt gets the same probes as its retriever and
+//! records the decision without enforcing it ([`ENFORCE_GATE_ON_WEAK`]).
 
 use std::collections::HashSet;
-use std::path::Path;
-use std::sync::mpsc::{self, Receiver};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use regex::Regex;
 
+use super::decision_log::{self, Record};
 use super::intent::Verdict;
+use super::relevance::{self, RelevanceInput, WeightFn};
 use super::routes::QuestionKind;
-use super::{SOURCE_EXTENSIONS, Signal, code_signal, names_code};
+use super::{SOURCE_EXTENSIONS, Signal, brief_signal, names_code};
 
 /// Opening line of the block; a host and a test find the brief by it.
 pub(crate) const BRIEF_TAG: &str = "[PIXEL:BRIEF]";
@@ -46,6 +57,19 @@ pub(crate) const BRIEF_WINDOW: Duration = Duration::from_millis(750);
 pub(crate) const MAX_OPS: usize = 6;
 /// Rendered size cap; lists give way before a line is cut.
 pub(crate) const BRIEF_BYTES: usize = 2048;
+/// Size cap of a brief built for a plain-language prompt; its own constant
+/// so an experiment can widen it without touching code-shaped briefs.
+pub(crate) const PROSE_BRIEF_BYTES: usize = 2048;
+/// Whether an off-topic relevance decision silences a weakly code-shaped
+/// prompt's brief. The decision is computed and logged either way; the
+/// evaluation decides when it starts to bind.
+pub(crate) const ENFORCE_GATE_ON_WEAK: bool = false;
+/// Leads a meaning search returns: as many files as a brief shows.
+const MEANING_LIMIT: usize = MAX_FILES;
+/// Rank constant of the reciprocal-rank fusion of the meaning leads and the
+/// co-files: large enough that the top of either list outweighs the bottom of
+/// both, the value the fusion literature settled on.
+const FUSE_K: f64 = 60.0;
 /// Match rows one text search pulls before its files are grouped.
 pub(crate) const SEARCH_ROWS: usize = 200;
 /// Matches one concept search keeps.
@@ -232,9 +256,38 @@ pub(crate) struct CallerHit {
     pub(crate) line: u64,
 }
 
+/// One lead of a natural-language search over code: the best chunk of a file
+/// for the question. A lead ranks, it does not prove relevance.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MeaningHit {
+    pub(crate) path: String,
+    /// Inclusive 1-based line range of the chunk.
+    pub(crate) start_line: u32,
+    pub(crate) end_line: u32,
+    /// The symbol the chunk belongs to, when it belongs to one.
+    pub(crate) symbol: Option<String>,
+    /// Comparable within one answer, not across questions.
+    pub(crate) score: f64,
+    /// The head of the chunk on one line.
+    pub(crate) snippet: String,
+}
+
+/// The answer of a relevance probe: the counts the gate scores, the weight
+/// function they are scored with (the daemon's, so the formula has one
+/// spelling) and the line each co-file was found at.
+#[derive(Clone, Debug)]
+pub(crate) struct RelevanceAnswer {
+    pub(crate) input: RelevanceInput,
+    pub(crate) weight: WeightFn,
+    /// The co-files in the input's order, each with the line and text that
+    /// showed its keywords.
+    pub(crate) lines: Vec<RichHit>,
+}
+
 /// The lookups of the chain. Every method answers within `deadline` or
-/// fails; none of them builds, refreshes or starts anything.
-pub(crate) trait Evidence {
+/// fails; none of them builds, refreshes or starts anything. `Sync`: a
+/// plain-language prompt asks several of them from threads at once.
+pub(crate) trait Evidence: Sync {
     /// Files containing `anchor` as literal text.
     fn files_with(&self, anchor: &str, deadline: Instant) -> Result<Found, String>;
     /// The same literal search, keeping each row's matched text when the
@@ -322,6 +375,25 @@ pub(crate) trait Evidence {
     /// already on disk — never an embed or a download. `None` when cold.
     fn semantic_hint(&self, _phrase: &str) -> Option<String> {
         None
+    }
+    /// How widely the words of `typed` occur in the repository and the files
+    /// they meet in (`facts.relevance`): what the relevance gate scores. An
+    /// `Err` is "cannot tell", which a plain-language prompt treats as off
+    /// topic.
+    fn relevance(&self, typed: &str, deadline: Instant) -> Result<RelevanceAnswer, String> {
+        let _ = (typed, deadline);
+        Err("unavailable".to_string())
+    }
+    /// At most `limit` leads for a natural-language `query`, best first, from
+    /// vectors already resident in memory — never an embed or a download.
+    fn meaning(
+        &self,
+        query: &str,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<Vec<MeaningHit>, String> {
+        let _ = (query, limit, deadline);
+        Err("unavailable".to_string())
     }
     /// One source line at `path:line` — "what it is" for a declaration
     /// (`export const CustomMenu = defineMultiStyleConfig(...)`, not just a
@@ -472,7 +544,7 @@ impl Plan {
         if crate::prompt_continuation::is_trivial_continuation(prompt) {
             return None;
         }
-        let (typed, _) = code_signal(prompt)?;
+        let (typed, _) = super::code_signal(prompt)?;
         Some(Self::from_typed(&typed, has_change_intent(&typed), None))
     }
 
@@ -628,9 +700,55 @@ pub(crate) fn pick_uid<'a>(
     }
 }
 
+/// What the gates decided about the prompt: the relevance probe and the
+/// intent judge, for the log and for the render.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// No gate looked at it: a code-shaped prompt, or a weak one whose
+    /// probes had nothing to say.
+    #[default]
+    Unjudged,
+    /// The prompt is about this repository.
+    Open,
+    /// The repository does not talk about the prompt, or could not be asked.
+    Closed(String),
+    /// The intent judge said the prompt is not a coding task.
+    Denied(String),
+}
+
+impl Admission {
+    /// The decision as the log spells it.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Unjudged => "unjudged",
+            Self::Open => "open",
+            Self::Closed(_) => "closed",
+            Self::Denied(_) => "denied",
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Closed(reason) | Self::Denied(reason) => Some(reason),
+            Self::Unjudged | Self::Open => None,
+        }
+    }
+}
+
 /// What the chain has learned, shared between the worker and the hook.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Brief {
+    /// How the prompt came to be briefed.
+    signal: Option<Signal>,
+    admission: Admission,
+    /// The gate refused the prompt and the refusal binds: nothing renders.
+    silenced: bool,
+    /// The relevance decision, when the probe answered.
+    relevance: Option<relevance::Verdict>,
+    /// The intent judge's verdict, when it answered.
+    judged: Option<Verdict>,
+    /// The `confidence:` line of a brief built on the relevance decision.
+    confidence: Option<String>,
     anchors: Vec<String>,
     /// The intent a warm local verdict decided, when one drove the plan.
     intent: Option<String>,
@@ -1209,22 +1327,129 @@ fn ordered(hits: &[SymbolHit], pick: Option<&SymbolHit>) -> Vec<SymbolHit> {
     shown
 }
 
+/// Why a prompt got no brief at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Declined {
+    /// `brief: false` in the configuration or `PIXEL_BRIEF=0`.
+    Disabled,
+    /// The repository has no published index.
+    Unindexed,
+    /// An acknowledgement, a greeting or a harness envelope.
+    Continuation,
+    /// Neither code-shaped nor plain language about a task.
+    NotAboutCode,
+    /// The operating system gave no thread to run it on.
+    NoWorker,
+}
+
+impl Declined {
+    /// The reason as the decision log spells it.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Unindexed => "unindexed",
+            Self::Continuation => "continuation",
+            Self::NotAboutCode => "not_about_code",
+            Self::NoWorker => "no_worker",
+        }
+    }
+}
+
+/// The record of a prompt that got no brief.
+pub(crate) fn declined_record(declined: Declined, prompt: &str) -> Record {
+    let typed = super::typed_text(prompt);
+    let typed = typed.trim();
+    Record {
+        ts_ms: pixel_task::now_ms(),
+        signal: None,
+        gate: "declined",
+        enforced: false,
+        reason: Some(declined.as_str().to_string()),
+        score: None,
+        best_file: None,
+        judge: None,
+        kind: None,
+        ops: 0,
+        answered: 0,
+        bytes: 0,
+        elapsed_ms: 0,
+        typed: decision_log::logged_typed(typed),
+        sha256: decision_log::sha256_hex(typed),
+    }
+}
+
 /// A brief on its way: the worker is running, the deadline is fixed.
 pub(crate) struct Pending {
     state: Arc<Mutex<Brief>>,
     done: Receiver<()>,
     deadline: Instant,
+    started: Instant,
+    /// Where the decision is recorded, when it is.
+    log: Option<PathBuf>,
+    /// The text the brief judged: the typed prompt, or its last paragraph.
+    task: String,
+    signal: Signal,
+}
+
+/// A finished brief: the block, when there is one, and what was decided.
+pub(crate) struct Finished {
+    pub(crate) text: Option<String>,
+    pub(crate) record: Record,
+}
+
+/// Whether the gate's verdict decided if the brief was shown: always for
+/// plain language, for a weak prompt only when [`ENFORCE_GATE_ON_WEAK`] says
+/// so or the judge refused it.
+const fn gate_enforced(signal: Signal, silenced: bool, enforce_weak: bool) -> bool {
+    match signal {
+        Signal::Prose => true,
+        Signal::Weak => silenced || enforce_weak,
+        Signal::Strong => false,
+    }
 }
 
 impl Pending {
     /// Wait for the worker until the shared deadline and render what it has.
     /// `None` when no operation answered: a brief of failures says nothing.
     pub(crate) fn finish(self) -> Option<String> {
+        self.finish_with_record().text
+    }
+
+    /// [`Pending::finish`], and the decision it recorded.
+    pub(crate) fn finish_with_record(self) -> Finished {
         let _ = self
             .done
             .recv_timeout(self.deadline.saturating_duration_since(Instant::now()));
         let brief = edit(&self.state, |brief| brief.clone());
-        render(&brief)
+        let text = render(&brief);
+        let record = Record {
+            ts_ms: pixel_task::now_ms(),
+            signal: Some(self.signal.as_str()),
+            gate: brief.admission.label(),
+            enforced: gate_enforced(self.signal, brief.silenced, ENFORCE_GATE_ON_WEAK),
+            reason: brief.admission.reason().map(str::to_string),
+            score: brief.relevance.as_ref().map(|verdict| verdict.score),
+            best_file: brief
+                .relevance
+                .as_ref()
+                .and_then(|verdict| verdict.best_file.clone()),
+            judge: brief
+                .judged
+                .as_ref()
+                .map(|verdict| (verdict.label.clone(), verdict.confidence)),
+            kind: brief.kind.map(QuestionKind::as_str),
+            ops: brief.ops,
+            answered: brief.answered,
+            bytes: text.as_ref().map_or(0, String::len),
+            elapsed_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            typed: decision_log::logged_typed(&self.task),
+            sha256: decision_log::sha256_hex(&self.task),
+        };
+        if let Some(path) = &self.log {
+            // Best effort: a log that cannot be written never costs the prompt.
+            let _ = decision_log::append(path, &record.line(), decision_log::MAX_LINES);
+        }
+        Finished { text, record }
     }
 }
 
@@ -1232,19 +1457,27 @@ impl Pending {
 /// a repository without an index and a prompt that asks nothing about code
 /// start no thread and run no lookup.
 pub(crate) fn start(prompt: &str, root: &Path) -> Option<Pending> {
+    try_start(prompt, root).ok()
+}
+
+/// [`start`], saying why it declined.
+pub(crate) fn try_start(prompt: &str, root: &Path) -> Result<Pending, Declined> {
+    let log = decision_log::path_for(root);
+    let gate = Gate::read(root);
     let root = root.to_path_buf();
-    start_with(
+    try_start_with(
         prompt,
-        Gate::read(&root),
+        gate,
         BRIEF_WINDOW,
         move |deadline| super::evidence::open(&root, deadline),
         super::intent::judge,
+        log,
     )
 }
 
-/// [`start`] with its gate, window, evidence source and intent judge given.
-/// `judge` runs only on a weakly code-shaped prompt; a denying verdict ends
-/// the brief before any lookup, and no verdict means the heuristic plan.
+/// [`start`] with its gate, window, evidence source and intent judge given and
+/// no decision log: the seam the chain's tests start from.
+#[cfg(test)]
 pub(crate) fn start_with<F, J>(
     prompt: &str,
     gate: Gate,
@@ -1254,52 +1487,349 @@ pub(crate) fn start_with<F, J>(
 ) -> Option<Pending>
 where
     F: FnOnce(Instant) -> Box<dyn Evidence> + Send + 'static,
-    J: Fn(&str, Instant) -> Option<Verdict> + Send + 'static,
+    J: Fn(&str, Instant) -> Option<Verdict> + Send + Sync + 'static,
+{
+    try_start_with(prompt, gate, window, open, judge, None).ok()
+}
+
+/// [`try_start`] with its gate, window, evidence source, intent judge and
+/// decision log given. The judge runs on a weakly code-shaped or plain
+/// prompt, beside the relevance probe and the meaning search; a denying
+/// verdict ends the brief before any evidence op, and no verdict means the
+/// heuristic plan.
+pub(crate) fn try_start_with<F, J>(
+    prompt: &str,
+    gate: Gate,
+    window: Duration,
+    open: F,
+    judge: J,
+    log: Option<PathBuf>,
+) -> Result<Pending, Declined>
+where
+    F: FnOnce(Instant) -> Box<dyn Evidence> + Send + 'static,
+    J: Fn(&str, Instant) -> Option<Verdict> + Send + Sync + 'static,
 {
     if !gate.open() {
-        return None;
+        return Err(if gate.enabled {
+            Declined::Unindexed
+        } else {
+            Declined::Disabled
+        });
     }
     if crate::prompt_continuation::is_trivial_continuation(prompt) {
-        return None;
+        return Err(Declined::Continuation);
     }
-    let (typed, signal) = code_signal(prompt)?;
-    let deadline = Instant::now() + window;
-    let state = Arc::new(Mutex::new(Brief::default()));
+    let Some((typed, signal)) = brief_signal(prompt) else {
+        if let Some(path) = &log {
+            let record = declined_record(Declined::NotAboutCode, prompt);
+            let _ = decision_log::append(path, &record.line(), decision_log::MAX_LINES);
+        }
+        return Err(Declined::NotAboutCode);
+    };
+    let started = Instant::now();
+    let deadline = started + window;
+    let state = Arc::new(Mutex::new(Brief {
+        signal: Some(signal),
+        ..Brief::default()
+    }));
     let (finished, done) = mpsc::channel();
     let worker = Arc::clone(&state);
+    let task = typed.clone();
     std::thread::Builder::new()
         .name("pixel-brief".into())
         .spawn(move || {
-            let plan = match signal {
-                Signal::Strong => Plan::from_typed(&typed, has_change_intent(&typed), None),
-                Signal::Weak => match judge(&typed, deadline) {
-                    Some(verdict) if verdict.denies_brief() => {
-                        edit(&worker, |brief| brief.finished = true);
-                        let _ = finished.send(());
-                        return;
-                    }
-                    Some(verdict) => {
-                        let change_intent = verdict.change_intent();
-                        let label = verdict.label.clone();
-                        edit(&worker, |brief| {
-                            brief.intent =
-                                Some(format!("{} ({:.2})", verdict.label, verdict.confidence));
-                        });
-                        Plan::from_typed(&typed, change_intent, Some(&label))
-                    }
-                    None => Plan::from_typed(&typed, has_change_intent(&typed), None),
-                },
-            };
-            let evidence = open(deadline);
-            run(&plan, evidence.as_ref(), &worker, deadline);
+            work(&typed, signal, deadline, &worker, &finished, open, &judge);
             let _ = finished.send(());
         })
-        .ok()?;
-    Some(Pending {
+        .map_err(|_| Declined::NoWorker)?;
+    Ok(Pending {
         state,
         done,
         deadline,
+        started,
+        log,
+        task,
+        signal,
     })
+}
+
+/// The worker of one brief: plan, ask, run.
+fn work<F, J>(
+    typed: &str,
+    signal: Signal,
+    deadline: Instant,
+    state: &Mutex<Brief>,
+    finished: &Sender<()>,
+    open: F,
+    judge: &J,
+) where
+    F: FnOnce(Instant) -> Box<dyn Evidence>,
+    J: Fn(&str, Instant) -> Option<Verdict> + Sync,
+{
+    if signal == Signal::Strong {
+        let plan = Plan::from_typed(typed, has_change_intent(typed), None);
+        let evidence = open(deadline);
+        run(&plan, evidence.as_ref(), state, deadline);
+        return;
+    }
+    let evidence = open(deadline);
+    let mut settled = |got: &Gathered| match refusal(signal, got, false, ENFORCE_GATE_ON_WEAK) {
+        Some(admission) => {
+            close(state, got, admission);
+            let _ = finished.send(());
+            true
+        }
+        None => false,
+    };
+    let got = gather(
+        typed,
+        evidence.as_ref(),
+        judge,
+        state,
+        deadline,
+        &mut settled,
+    );
+    if edit(state, |brief| brief.silenced) {
+        return;
+    }
+    if let Some(admission) = refusal(signal, &got, true, ENFORCE_GATE_ON_WEAK) {
+        close(state, &got, admission);
+        return;
+    }
+    let (change_intent, label) = match got.judged.as_ref().and_then(Option::as_ref) {
+        Some(verdict) => (verdict.change_intent(), Some(verdict.label.clone())),
+        None => (has_change_intent(typed), None),
+    };
+    let plan = Plan::from_typed(typed, change_intent, label.as_deref());
+    fold(state, &plan, &got);
+    run(&plan, evidence.as_ref(), state, deadline);
+}
+
+/// What the probes of a weak or plain prompt have answered so far.
+#[derive(Default)]
+struct Gathered {
+    relevance: Option<Result<RelevanceAnswer, String>>,
+    /// The decision scored from an answered relevance probe.
+    scored: Option<relevance::Verdict>,
+    meaning: Option<Result<Vec<MeaningHit>, String>>,
+    /// `Some(None)`: the judge ran and had no verdict.
+    judged: Option<Option<Verdict>>,
+}
+
+/// One probe's answer on its way back to the worker.
+enum Reply {
+    Relevance(Result<RelevanceAnswer, String>),
+    Meaning(Result<Vec<MeaningHit>, String>),
+    Judge(Option<Verdict>),
+}
+
+/// Ask the judge, the relevance probe and the meaning search at once, each
+/// on the shared `deadline`; the probes count against the op budget. Stops
+/// collecting as soon as `settled` says the brief is decided, so a refusal
+/// does not wait for the slowest sibling.
+fn gather<J>(
+    typed: &str,
+    evidence: &dyn Evidence,
+    judge: &J,
+    state: &Mutex<Brief>,
+    deadline: Instant,
+    settled: &mut dyn FnMut(&Gathered) -> bool,
+) -> Gathered
+where
+    J: Fn(&str, Instant) -> Option<Verdict> + Sync,
+{
+    let ask_relevance = spend(state, deadline);
+    let ask_meaning = spend(state, deadline);
+    let mut got = Gathered::default();
+    std::thread::scope(|scope| {
+        let (send, receive) = mpsc::channel();
+        if ask_relevance {
+            let send = send.clone();
+            scope.spawn(move || {
+                let _ = send.send(Reply::Relevance(evidence.relevance(typed, deadline)));
+            });
+        }
+        if ask_meaning {
+            let send = send.clone();
+            scope.spawn(move || {
+                let _ = send.send(Reply::Meaning(evidence.meaning(
+                    typed,
+                    MEANING_LIMIT,
+                    deadline,
+                )));
+            });
+        }
+        scope.spawn(move || {
+            let _ = send.send(Reply::Judge(judge(typed, deadline)));
+        });
+        while let Ok(reply) =
+            receive.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            match reply {
+                Reply::Relevance(answer) => {
+                    got.scored = answer
+                        .as_ref()
+                        .ok()
+                        .map(|answer| relevance::judge(&answer.input, answer.weight));
+                    got.relevance = Some(answer);
+                }
+                Reply::Meaning(leads) => got.meaning = Some(leads),
+                Reply::Judge(verdict) => got.judged = Some(verdict),
+            }
+            if settled(&got) {
+                break;
+            }
+        }
+    });
+    got
+}
+
+/// Why `signal`'s prompt gets no brief, if it does not. `complete`: no more
+/// answers are coming, so a probe that never answered counts as "cannot tell".
+/// Plain language must be shown on topic by the repository; a weak prompt is
+/// refused by the judge, and by the relevance decision only when `enforce_weak`.
+fn refusal(
+    signal: Signal,
+    got: &Gathered,
+    complete: bool,
+    enforce_weak: bool,
+) -> Option<Admission> {
+    let verdict = got.judged.as_ref().and_then(Option::as_ref);
+    match signal {
+        Signal::Strong => None,
+        Signal::Weak => {
+            if let Some(verdict) = verdict.filter(|verdict| verdict.denies_brief()) {
+                return Some(Admission::Denied(judge_reason(verdict)));
+            }
+            got.scored
+                .as_ref()
+                .filter(|scored| enforce_weak && !scored.on_topic)
+                .map(|scored| Admission::Closed(off_topic_reason(scored)))
+        }
+        Signal::Prose => {
+            match (&got.relevance, &got.scored) {
+                (Some(Err(reason)), _) => {
+                    return Some(Admission::Closed(format!("relevance: {reason}")));
+                }
+                (_, Some(scored)) if !scored.on_topic => {
+                    return Some(Admission::Closed(off_topic_reason(scored)));
+                }
+                (None, _) if complete => {
+                    return Some(Admission::Closed(
+                        "relevance: no answer before the deadline".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+            verdict
+                .filter(|verdict| verdict.denies_prose())
+                .map(|verdict| Admission::Denied(judge_reason(verdict)))
+        }
+    }
+}
+
+fn judge_reason(verdict: &Verdict) -> String {
+    format!("judge: {} ({:.2})", verdict.label, verdict.confidence)
+}
+
+fn off_topic_reason(scored: &relevance::Verdict) -> String {
+    format!(
+        "off topic: the best file covers {}/{} key terms, {:.2} of the weight",
+        scored.features.shared, scored.features.informative, scored.score
+    )
+}
+
+/// Keep the decisions the probes reached: the relevance verdict and the judge's.
+fn note(brief: &mut Brief, got: &Gathered) {
+    brief.relevance.clone_from(&got.scored);
+    if let Some(Some(verdict)) = &got.judged {
+        brief.intent = Some(format!("{} ({:.2})", verdict.label, verdict.confidence));
+        brief.judged = Some(verdict.clone());
+    }
+}
+
+/// End the brief on a refusal that binds: nothing renders.
+fn close(state: &Mutex<Brief>, got: &Gathered, admission: Admission) {
+    edit(state, |brief| {
+        note(brief, got);
+        brief.admission = admission;
+        brief.silenced = true;
+    });
+}
+
+/// Fold what the probes found into the brief: the decision, and the fused
+/// leads as its first files, so the literal and concept searches only run
+/// when they found nothing.
+fn fold(state: &Mutex<Brief>, plan: &Plan, got: &Gathered) {
+    let leads: &[MeaningHit] = match &got.meaning {
+        Some(Ok(leads)) => leads,
+        _ => &[],
+    };
+    let lines: &[RichHit] = match &got.relevance {
+        Some(Ok(answer)) => &answer.lines,
+        _ => &[],
+    };
+    let fused = RichFound {
+        hits: fuse(leads, lines),
+        capped: false,
+    };
+    let admit_json = plan.kind == QuestionKind::Config;
+    edit(state, |brief| {
+        note(brief, got);
+        brief.admission = match &got.scored {
+            Some(scored) if scored.on_topic => Admission::Open,
+            Some(scored) => Admission::Closed(off_topic_reason(scored)),
+            None => Admission::Unjudged,
+        };
+        let answers = usize::from(matches!(got.relevance, Some(Ok(_))))
+            + usize::from(matches!(got.meaning, Some(Ok(_))));
+        if answers > 0 {
+            brief.answered += answers;
+            brief.searched = true;
+        }
+        brief.confidence = got.scored.as_ref().map(relevance::Verdict::confidence_line);
+        brief.absorb(fused, admit_json);
+    });
+}
+
+/// What the entry at zero-based `rank` of one list adds to a file's fused
+/// score: ranks count from one, so the first entry adds `1 / (FUSE_K + 1)`.
+fn reciprocal_rank(rank: usize) -> f64 {
+    1.0 / (FUSE_K + rank as f64 + 1.0)
+}
+
+/// Reciprocal-rank fusion of the meaning leads and the relevance co-files,
+/// best first and at most [`MAX_FILES`], one row per file. A file both lists
+/// name rises above one only a list names; its row is the first list's, the
+/// meaning chunk, which is the more precise place to start. A credential-shaped
+/// path never enters a brief.
+fn fuse(leads: &[MeaningHit], cofiles: &[RichHit]) -> Vec<RichHit> {
+    fn add(ranked: &mut Vec<(RichHit, f64)>, hit: RichHit, rank: usize) {
+        let score = reciprocal_rank(rank);
+        match ranked.iter_mut().find(|(held, _)| held.path == hit.path) {
+            Some((_, total)) => *total += score,
+            None => ranked.push((hit, score)),
+        }
+    }
+    let mut ranked: Vec<(RichHit, f64)> = Vec::new();
+    for (rank, lead) in leads.iter().enumerate() {
+        let hit = RichHit {
+            path: lead.path.clone(),
+            line: u64::from(lead.start_line),
+            text: (!lead.snippet.is_empty()).then(|| lead.snippet.clone()),
+        };
+        add(&mut ranked, hit, rank);
+    }
+    for (rank, hit) in cofiles.iter().enumerate() {
+        add(&mut ranked, hit.clone(), rank);
+    }
+    ranked.retain(|(hit, _)| !pixel_index::index::credential_path(Path::new(&hit.path)));
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+    ranked
+        .into_iter()
+        .map(|(hit, _)| hit)
+        .take(MAX_FILES)
+        .collect()
 }
 
 /// How many entries of each list a render shows.
@@ -1376,18 +1906,29 @@ impl Shown {
     }
 }
 
-/// The block, at most [`BRIEF_BYTES`], or `None` when nothing answered.
-/// A list that does not fit loses entries and says how many.
+/// The block, at most [`byte_cap`] bytes, or `None` when nothing answered or
+/// the gate refused the prompt. A list that does not fit loses entries and
+/// says how many.
 pub(crate) fn render(brief: &Brief) -> Option<String> {
-    if brief.answered == 0 {
+    if brief.silenced || brief.answered == 0 {
         return None;
     }
+    let cap = byte_cap(brief.signal);
     let mut shown = Shown::of(brief);
     let mut text = render_with(brief, shown);
-    while text.len() > BRIEF_BYTES && shown.shrink() {
+    while text.len() > cap && shown.shrink() {
         text = render_with(brief, shown);
     }
     Some(text)
+}
+
+/// The size cap of a brief started by `signal`.
+fn byte_cap(signal: Option<Signal>) -> usize {
+    if signal == Some(Signal::Prose) {
+        PROSE_BRIEF_BYTES
+    } else {
+        BRIEF_BYTES
+    }
 }
 
 fn render_with(brief: &Brief, shown: Shown) -> String {
@@ -1474,6 +2015,9 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
         brief.searched,
     ) {
         lines.push(line);
+    }
+    if let Some(confidence) = &brief.confidence {
+        lines.push(confidence.clone());
     }
     if let Some(line) = list_line(
         "callers (impact d1)",
@@ -1961,6 +2505,10 @@ mod tests {
         status: Result<StatusProbe, String>,
         history: Result<(Vec<HistoryHit>, Vec<String>), String>,
         task_facts: Result<Vec<String>, String>,
+        relevance: Result<RelevanceAnswer, String>,
+        meaning: Result<Vec<MeaningHit>, String>,
+        /// How long the meaning search takes, on top of `pause`.
+        meaning_pause: Duration,
         /// The semantic hint the fake advertises, when it models a warm index.
         semantic: Option<String>,
         /// Source line a `line_at` read answers with, when the fake models
@@ -1986,6 +2534,9 @@ mod tests {
                 status: Err("status unsupported".into()),
                 history: Err("history unsupported".into()),
                 task_facts: Err("task facts unsupported".into()),
+                relevance: Err("unavailable".into()),
+                meaning: Err("unavailable".into()),
+                meaning_pause: Duration::ZERO,
                 semantic: None,
                 source: None,
                 pause: Duration::ZERO,
@@ -2070,6 +2621,20 @@ mod tests {
             self.note(format!("task_facts {task}"));
             self.task_facts.clone()
         }
+        fn relevance(&self, typed: &str, _: Instant) -> Result<RelevanceAnswer, String> {
+            self.note(format!("relevance {typed}"));
+            self.relevance.clone()
+        }
+        fn meaning(
+            &self,
+            query: &str,
+            limit: usize,
+            _: Instant,
+        ) -> Result<Vec<MeaningHit>, String> {
+            self.note(format!("meaning {query} limit {limit}"));
+            std::thread::sleep(self.meaning_pause);
+            self.meaning.clone()
+        }
         fn semantic_hint(&self, phrase: &str) -> Option<String> {
             self.note(format!("semantic_hint {phrase}"));
             self.semantic.clone()
@@ -2077,6 +2642,35 @@ mod tests {
         fn line_at(&self, path: &str, line: u64, _: Instant) -> Result<String, String> {
             self.note(format!("line_at {path}:{line}"));
             self.source.clone().ok_or_else(|| "no source".to_string())
+        }
+    }
+
+    /// A `Fake` the test keeps a handle to after the brief took the source.
+    struct Shared(Arc<Fake>);
+
+    impl Evidence for Shared {
+        fn files_with(&self, anchor: &str, deadline: Instant) -> Result<Found, String> {
+            self.0.files_with(anchor, deadline)
+        }
+        fn concept(&self, phrase: &str, deadline: Instant) -> Result<Found, String> {
+            self.0.concept(phrase, deadline)
+        }
+        fn symbols(&self, name: &str, deadline: Instant) -> Result<Vec<SymbolHit>, String> {
+            self.0.symbols(name, deadline)
+        }
+        fn callers(&self, target: &str, deadline: Instant) -> Result<Vec<CallerHit>, String> {
+            self.0.callers(target, deadline)
+        }
+        fn relevance(&self, typed: &str, deadline: Instant) -> Result<RelevanceAnswer, String> {
+            self.0.relevance(typed, deadline)
+        }
+        fn meaning(
+            &self,
+            query: &str,
+            limit: usize,
+            deadline: Instant,
+        ) -> Result<Vec<MeaningHit>, String> {
+            self.0.meaning(query, limit, deadline)
         }
     }
 
@@ -2904,6 +3498,7 @@ mod tests {
             targeted: true,
             cut: false,
             finished: true,
+            ..Brief::default()
         }
     }
 
@@ -3293,5 +3888,1001 @@ mod tests {
         )
         .unwrap();
         let _ = pending.finish();
+    }
+
+    // ---- plain-language and weak prompts: the relevance gate ----
+
+    /// A plain-language prompt: no identifier, no code word, no operation.
+    const PROSE: &str = "the daemon misses changes made during startup";
+    const DAEMON: &str = "crates/pixel-daemon/src/daemon.rs";
+
+    /// A table, not the daemon's formula: a keyword in ten files or more is
+    /// everywhere, one the repository lacks weighs 3, any other 2.
+    fn test_weight(df: usize, _files: usize, truncated: bool) -> f64 {
+        if truncated || df >= 10 {
+            0.0
+        } else if df == 0 {
+            3.0
+        } else {
+            2.0
+        }
+    }
+
+    fn keyword(word: &str, df: usize) -> relevance::KeywordStat {
+        relevance::KeywordStat {
+            keyword: word.into(),
+            df,
+            truncated: false,
+            french_only: false,
+        }
+    }
+
+    fn cofile(path: &str, words: &[&str], structural: bool) -> relevance::CoFileStat {
+        relevance::CoFileStat {
+            path: path.into(),
+            keywords: words.iter().map(ToString::to_string).collect(),
+            structural,
+        }
+    }
+
+    /// The repository talks about the prompt: one structural file holds all
+    /// three of its words, a note holds them as text.
+    fn on_topic_answer() -> RelevanceAnswer {
+        RelevanceAnswer {
+            input: RelevanceInput {
+                files_considered: 100,
+                graph: true,
+                keywords: vec![
+                    keyword("daemon", 4),
+                    keyword("changes", 3),
+                    keyword("startup", 2),
+                ],
+                cofiles: vec![
+                    cofile(DAEMON, &["daemon", "changes", "startup"], true),
+                    cofile("docs/notes.md", &["daemon", "startup"], false),
+                ],
+            },
+            weight: test_weight,
+            lines: vec![
+                rhit(DAEMON, 280, "fn watch_ready"),
+                rhit("docs/notes.md", 12, "daemon startup notes"),
+            ],
+        }
+    }
+
+    /// The repository does not talk about the prompt: two of its words are
+    /// nowhere, the third is everywhere, and no file holds any.
+    fn off_topic_answer() -> RelevanceAnswer {
+        RelevanceAnswer {
+            input: RelevanceInput {
+                files_considered: 100,
+                graph: true,
+                keywords: vec![
+                    keyword("weather", 0),
+                    keyword("tomorrow", 0),
+                    keyword("like", 50),
+                ],
+                cofiles: Vec::new(),
+            },
+            weight: test_weight,
+            lines: Vec::new(),
+        }
+    }
+
+    fn lead(path: &str, line: u32, snippet: &str) -> MeaningHit {
+        MeaningHit {
+            path: path.into(),
+            start_line: line,
+            end_line: line + 9,
+            symbol: None,
+            score: 0.5,
+            snippet: snippet.into(),
+        }
+    }
+
+    fn sorted(mut calls: Vec<String>) -> Vec<String> {
+        calls.sort();
+        calls
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pixel-brief-chain-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Start `prompt` on `fake` with `judge` and wait for the brief.
+    fn briefed(
+        prompt: &str,
+        fake: Fake,
+        judge: impl Fn(&str, Instant) -> Option<Verdict> + Send + Sync + 'static,
+    ) -> Finished {
+        start_with(prompt, OPEN, SECOND, move |_| Box::new(fake), judge)
+            .expect("the prompt starts a brief")
+            .finish_with_record()
+    }
+
+    #[test]
+    fn a_prose_prompt_on_topic_should_render_the_fused_files_and_a_confidence_line() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![
+            lead(DAEMON, 280, "fn watch_ready() {"),
+            lead("crates/pixel-daemon/src/api.rs", 40, "fn op_status"),
+        ]);
+        let fake = Arc::new(fake);
+        let seen = Arc::clone(&fake);
+        let finished = start_with(
+            PROSE,
+            OPEN,
+            SECOND,
+            move |_| Box::new(Shared(fake)),
+            no_verdict,
+        )
+        .unwrap()
+        .finish_with_record();
+        // The file both lists name leads, on the meaning chunk's line; then
+        // the two files one list names, the meaning lead first.
+        assert_eq!(
+            finished.text.as_deref(),
+            Some(
+                [
+                    "[PIXEL:BRIEF]",
+                    "kind: lookup",
+                    "files: crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready() {; crates/pixel-daemon/src/api.rs:40 — fn op_status; docs/notes.md:12 — daemon startup notes",
+                    "confidence: high — 3/3 key terms covered; start with the first file",
+                    "coverage: 2/2 ops answered",
+                    FOOTER,
+                ]
+                .join("\n")
+                .as_str()
+            )
+        );
+        assert_eq!(
+            sorted(seen.calls()),
+            [
+                format!("meaning {PROSE} limit 8"),
+                format!("relevance {PROSE}")
+            ]
+        );
+        let record = finished.record;
+        assert_eq!(
+            (record.signal, record.gate, record.enforced),
+            (Some("prose"), "open", true)
+        );
+        assert_eq!(record.best_file.as_deref(), Some(DAEMON));
+        assert!((record.score.unwrap() - 1.0).abs() < f64::EPSILON);
+        assert_eq!((record.ops, record.answered), (2, 2));
+        assert_eq!(record.bytes, finished.text.unwrap().len());
+        assert_eq!(record.typed, PROSE);
+        assert_eq!(record.sha256, decision_log::sha256_hex(PROSE));
+    }
+
+    #[test]
+    fn a_prose_prompt_off_topic_should_render_nothing_without_waiting_for_the_slow_meaning_search()
+    {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(off_topic_answer());
+        fake.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
+        fake.meaning_pause = Duration::from_millis(1200);
+        let started = Instant::now();
+        let finished = start_with(
+            "what's the weather going to be like tomorrow",
+            OPEN,
+            Duration::from_secs(5),
+            move |_| Box::new(fake),
+            no_verdict,
+        )
+        .unwrap()
+        .finish_with_record();
+        assert!(
+            started.elapsed() < Duration::from_millis(700),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(finished.text, None);
+        let record = finished.record;
+        assert_eq!((record.signal, record.gate), (Some("prose"), "closed"));
+        assert_eq!(
+            record.reason.as_deref(),
+            Some("off topic: the best file covers 0/2 key terms, 0.00 of the weight")
+        );
+        assert_eq!((record.answered, record.bytes), (0, 0));
+    }
+
+    #[test]
+    fn a_prose_prompt_a_confident_none_or_ops_verdict_refuses_should_render_nothing() {
+        for label in ["none", "ops"] {
+            let mut fake = Fake::new();
+            fake.relevance = Ok(on_topic_answer());
+            fake.meaning = Ok(vec![lead(DAEMON, 280, "fn watch_ready")]);
+            let finished = briefed(PROSE, fake, verdict(label));
+            assert_eq!(finished.text, None, "{label}");
+            assert_eq!(finished.record.gate, "denied", "{label}");
+            assert_eq!(
+                finished.record.reason,
+                Some(format!("judge: {label} (0.90)")),
+                "{label}"
+            );
+            assert_eq!(
+                finished.record.judge,
+                Some((label.to_string(), 0.9)),
+                "{label}"
+            );
+        }
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        let finished = briefed(PROSE, fake, verdict("question"));
+        let text = finished
+            .text
+            .expect("a question verdict lets the brief through");
+        assert!(text.contains("\nintent: question (0.90)\n"), "{text}");
+        assert_eq!(finished.record.gate, "open");
+    }
+
+    #[test]
+    fn a_prose_prompt_whose_probes_all_fail_should_render_nothing() {
+        let finished = briefed(PROSE, Fake::new(), no_verdict);
+        assert_eq!(finished.text, None);
+        assert_eq!(finished.record.gate, "closed");
+        assert_eq!(
+            finished.record.reason.as_deref(),
+            Some("relevance: unavailable")
+        );
+        assert_eq!((finished.record.ops, finished.record.answered), (2, 0));
+    }
+
+    #[test]
+    fn a_prose_prompt_should_still_render_the_cofiles_when_the_meaning_search_fails() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Err("cold".into());
+        let finished = briefed(PROSE, fake, no_verdict);
+        let text = finished.text.unwrap();
+        assert!(
+            text.contains(
+                "\nfiles: crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready; docs/notes.md:12 — daemon startup notes\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("\ncoverage: 1/2 ops answered\n"), "{text}");
+        assert!(!text.contains("unresolved"), "{text}");
+    }
+
+    #[test]
+    fn a_prose_prompt_whose_relevance_probe_outlives_the_window_should_render_nothing_on_time() {
+        struct Hang;
+        impl Evidence for Hang {
+            fn files_with(&self, _: &str, _: Instant) -> Result<Found, String> {
+                Err("unused".into())
+            }
+            fn concept(&self, _: &str, _: Instant) -> Result<Found, String> {
+                Err("unused".into())
+            }
+            fn symbols(&self, _: &str, _: Instant) -> Result<Vec<SymbolHit>, String> {
+                Err("unused".into())
+            }
+            fn callers(&self, _: &str, _: Instant) -> Result<Vec<CallerHit>, String> {
+                Err("unused".into())
+            }
+            fn relevance(&self, _: &str, _: Instant) -> Result<RelevanceAnswer, String> {
+                std::thread::sleep(Duration::from_millis(500));
+                Ok(on_topic_answer())
+            }
+        }
+        let started = Instant::now();
+        let pending = start_with(
+            PROSE,
+            OPEN,
+            Duration::from_millis(150),
+            |_| Box::new(Hang),
+            no_verdict,
+        )
+        .unwrap();
+        assert_eq!(pending.finish(), None);
+        assert!(
+            started.elapsed() < Duration::from_millis(450),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_weak_prompt_should_take_the_probe_leads_and_skip_concept_matching() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![lead(
+            "crates/pixel-daemon/src/api.rs",
+            40,
+            "fn op_status",
+        )]);
+        fake.concept = Ok(found(vec![hit("src/login.ts", 3)]));
+        let finished = briefed("how does the login flow work", fake, no_verdict);
+        let text = finished.text.unwrap();
+        assert!(
+            text.contains(
+                "\nfiles: crates/pixel-daemon/src/api.rs:40 — fn op_status; crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready; docs/notes.md:12 — daemon startup notes\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("src/login.ts"), "{text}");
+        assert_eq!(finished.record.signal, Some("weak"));
+        assert_eq!(finished.record.gate, "open");
+    }
+
+    #[test]
+    fn a_weak_prompt_whose_probes_fail_should_fall_back_to_concept_matching_quietly() {
+        let mut fake = Fake::new();
+        fake.concept = Ok(found(vec![hit("src/login.ts", 3)]));
+        let finished = briefed("how does the login flow work", fake, no_verdict);
+        let text = finished.text.unwrap();
+        assert!(text.contains("\nfiles: src/login.ts:3\n"), "{text}");
+        assert!(!text.contains("unresolved"), "{text}");
+        assert!(!text.contains("confidence"), "{text}");
+        assert!(text.ends_with(FOOTER), "{text}");
+        assert_eq!(finished.record.gate, "unjudged");
+    }
+
+    #[test]
+    fn a_weak_prompt_an_off_topic_decision_flags_should_still_get_its_brief_while_unenforced() {
+        // Flipping `ENFORCE_GATE_ON_WEAK` flips this test: the decision is
+        // logged either way, and the const says whether it binds.
+        let mut fake = Fake::new();
+        fake.relevance = Ok(off_topic_answer());
+        fake.concept = Ok(found(vec![hit("src/login.ts", 3)]));
+        let finished = briefed("how does the login flow work", fake, no_verdict);
+        let text = finished.text.unwrap();
+        assert!(text.contains("\nfiles: src/login.ts:3\n"), "{text}");
+        assert!(
+            text.contains(
+                "\nconfidence: low — 0/2 key terms covered; verify with rg before relying on these files\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(finished.record.gate, "closed");
+        assert!(!finished.record.enforced);
+    }
+
+    #[test]
+    fn a_strong_prompt_should_never_ask_the_relevance_probe_or_the_meaning_search() {
+        let mut fake = Fake::new();
+        fake.files = Ok(found(vec![hit("src/a.ts", 2)]));
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
+        let fake = Arc::new(fake);
+        let seen = Arc::clone(&fake);
+        let finished = start_with(
+            "where is `fetchUser` used",
+            OPEN,
+            SECOND,
+            move |_| Box::new(Shared(fake)),
+            no_verdict,
+        )
+        .unwrap()
+        .finish_with_record();
+        assert!(
+            seen.calls()
+                .iter()
+                .all(|call| !call.starts_with("relevance") && !call.starts_with("meaning")),
+            "{:?}",
+            seen.calls()
+        );
+        assert_eq!(finished.record.signal, Some("strong"));
+        assert_eq!(finished.record.gate, "unjudged");
+        assert!(!finished.record.enforced);
+        assert_eq!(finished.record.score, None);
+    }
+
+    #[test]
+    fn gather_should_spend_one_op_per_probe_and_skip_a_probe_the_budget_refuses() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
+        let state = Mutex::new(Brief {
+            ops: MAX_OPS - 1,
+            ..Brief::default()
+        });
+        let got = gather(
+            PROSE,
+            &fake,
+            &no_verdict,
+            &state,
+            Instant::now() + SECOND,
+            &mut |_| false,
+        );
+        assert_eq!(fake.calls(), [format!("relevance {PROSE}")]);
+        assert!(matches!(got.relevance, Some(Ok(_))));
+        assert!(got.meaning.is_none());
+        assert_eq!(got.judged, Some(None));
+        let brief = edit(&state, |brief| brief.clone());
+        assert_eq!((brief.ops, brief.cut), (MAX_OPS, true));
+
+        let fresh = Mutex::new(Brief::default());
+        let both = Fake::new();
+        gather(
+            PROSE,
+            &both,
+            &no_verdict,
+            &fresh,
+            Instant::now() + SECOND,
+            &mut |_| false,
+        );
+        assert_eq!(edit(&fresh, |brief| brief.ops), 2);
+        assert_eq!(
+            sorted(both.calls()),
+            [
+                format!("meaning {PROSE} limit 8"),
+                format!("relevance {PROSE}")
+            ]
+        );
+    }
+
+    #[test]
+    fn gather_should_stop_collecting_when_the_decision_is_settled() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(off_topic_answer());
+        let state = Mutex::new(Brief::default());
+        let mut seen = 0;
+        let got = gather(
+            PROSE,
+            &fake,
+            &no_verdict,
+            &state,
+            Instant::now() + SECOND,
+            &mut |_| {
+                seen += 1;
+                true
+            },
+        );
+        assert_eq!(seen, 1, "the first reply settled it");
+        let replies = usize::from(got.relevance.is_some())
+            + usize::from(got.meaning.is_some())
+            + usize::from(got.judged.is_some());
+        assert_eq!(replies, 1);
+    }
+
+    fn gathered(
+        relevance: Option<Result<RelevanceAnswer, String>>,
+        judged: Option<Option<Verdict>>,
+    ) -> Gathered {
+        let scored = relevance
+            .as_ref()
+            .and_then(|answer| answer.as_ref().ok())
+            .map(|answer| relevance::judge(&answer.input, answer.weight));
+        Gathered {
+            relevance,
+            scored,
+            meaning: None,
+            judged,
+        }
+    }
+
+    fn said(label: &str, confidence: f64) -> Option<Option<Verdict>> {
+        Some(Some(Verdict {
+            label: label.into(),
+            confidence,
+        }))
+    }
+
+    #[test]
+    fn refusal_should_let_a_strong_prompt_through_whatever_the_probes_say() {
+        let got = gathered(Some(Ok(off_topic_answer())), said("none", 0.99));
+        assert_eq!(refusal(Signal::Strong, &got, true, true), None);
+    }
+
+    #[test]
+    fn refusal_should_close_a_prose_prompt_the_repository_does_not_cover() {
+        let off = gathered(Some(Ok(off_topic_answer())), None);
+        assert_eq!(
+            refusal(Signal::Prose, &off, false, false),
+            Some(Admission::Closed(
+                "off topic: the best file covers 0/2 key terms, 0.00 of the weight".into()
+            ))
+        );
+        let failed = gathered(Some(Err("cold".into())), None);
+        assert_eq!(
+            refusal(Signal::Prose, &failed, false, false),
+            Some(Admission::Closed("relevance: cold".into()))
+        );
+    }
+
+    #[test]
+    fn refusal_should_wait_for_a_missing_relevance_answer_until_nothing_more_is_coming() {
+        let silent = gathered(None, Some(None));
+        assert_eq!(refusal(Signal::Prose, &silent, false, false), None);
+        assert_eq!(
+            refusal(Signal::Prose, &silent, true, false),
+            Some(Admission::Closed(
+                "relevance: no answer before the deadline".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn refusal_should_deny_prose_only_on_a_confident_none_or_ops() {
+        let on = || Some(Ok(on_topic_answer()));
+        assert_eq!(
+            refusal(
+                Signal::Prose,
+                &gathered(on(), said("none", 0.5)),
+                true,
+                false
+            ),
+            Some(Admission::Denied("judge: none (0.50)".into()))
+        );
+        assert_eq!(
+            refusal(
+                Signal::Prose,
+                &gathered(on(), said("ops", 0.9)),
+                true,
+                false
+            ),
+            Some(Admission::Denied("judge: ops (0.90)".into()))
+        );
+        assert_eq!(
+            refusal(
+                Signal::Prose,
+                &gathered(on(), said("none", 0.49)),
+                true,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            refusal(
+                Signal::Prose,
+                &gathered(on(), said("bugfix", 0.99)),
+                true,
+                false
+            ),
+            None
+        );
+        // The judge may refuse before the relevance answer has arrived.
+        assert_eq!(
+            refusal(
+                Signal::Prose,
+                &gathered(None, said("none", 0.9)),
+                false,
+                false
+            ),
+            Some(Admission::Denied("judge: none (0.90)".into()))
+        );
+    }
+
+    #[test]
+    fn refusal_should_deny_a_weak_prompt_only_on_none_and_close_it_only_when_enforced() {
+        let on = || Some(Ok(on_topic_answer()));
+        let off = || Some(Ok(off_topic_answer()));
+        assert_eq!(
+            refusal(
+                Signal::Weak,
+                &gathered(on(), said("none", 0.9)),
+                true,
+                false
+            ),
+            Some(Admission::Denied("judge: none (0.90)".into()))
+        );
+        assert_eq!(
+            refusal(
+                Signal::Weak,
+                &gathered(on(), said("ops", 0.99)),
+                true,
+                false
+            ),
+            None,
+            "ops steers a weak prompt, it never silences it"
+        );
+        assert_eq!(
+            refusal(Signal::Weak, &gathered(off(), None), true, false),
+            None
+        );
+        assert_eq!(
+            refusal(Signal::Weak, &gathered(off(), None), true, true),
+            Some(Admission::Closed(
+                "off topic: the best file covers 0/2 key terms, 0.00 of the weight".into()
+            ))
+        );
+        assert_eq!(
+            refusal(Signal::Weak, &gathered(on(), None), true, true),
+            None
+        );
+        let failed = gathered(Some(Err("cold".into())), None);
+        assert_eq!(
+            refusal(Signal::Weak, &failed, true, true),
+            None,
+            "a probe that cannot tell never silences a weak prompt"
+        );
+        assert_eq!(
+            refusal(Signal::Weak, &gathered(None, None), true, true),
+            None
+        );
+    }
+
+    #[test]
+    fn fuse_should_rank_a_file_both_lists_name_above_one_list_and_keep_the_meaning_row() {
+        let fused = fuse(
+            &[
+                lead("a.rs", 10, "from meaning"),
+                lead("b.rs", 20, "b meaning"),
+            ],
+            &[rhit("b.rs", 99, "from cofile"), rhit("c.rs", 5, "c cofile")],
+        );
+        assert_eq!(
+            fused,
+            [
+                rhit("b.rs", 20, "b meaning"),
+                rhit("a.rs", 10, "from meaning"),
+                rhit("c.rs", 5, "c cofile"),
+            ]
+        );
+    }
+
+    #[test]
+    fn fuse_should_keep_ties_in_list_order_meaning_first() {
+        let fused = fuse(
+            &[lead("m1.rs", 1, "m1"), lead("m2.rs", 2, "m2")],
+            &[rhit("c1.rs", 1, "c1"), rhit("c2.rs", 2, "c2")],
+        );
+        let paths: Vec<&str> = fused.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(paths, ["m1.rs", "c1.rs", "m2.rs", "c2.rs"]);
+    }
+
+    #[test]
+    fn fuse_should_give_a_leadless_row_no_text_and_stop_at_the_file_cap() {
+        let leads: Vec<MeaningHit> = (0..MAX_FILES + 3)
+            .map(|n| lead(&format!("f{n}.rs"), 1, if n == 0 { "" } else { "x" }))
+            .collect();
+        let fused = fuse(&leads, &[]);
+        assert_eq!(fused.len(), MAX_FILES);
+        assert_eq!(fused[0], rhit_no_text("f0.rs", 1));
+        assert_eq!(fused[MAX_FILES - 1].path, format!("f{}.rs", MAX_FILES - 1));
+        assert!(fuse(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn fuse_should_never_name_a_credential_shaped_path() {
+        let fused = fuse(
+            &[lead(".aws/credentials", 1, "key"), lead("src/a.rs", 2, "a")],
+            &[rhit(".env", 3, "TOKEN=1")],
+        );
+        assert_eq!(fused, [rhit("src/a.rs", 2, "a")]);
+    }
+
+    #[test]
+    fn a_brief_the_gate_silenced_should_render_nothing_even_when_it_answered() {
+        let mut brief = full_brief();
+        assert!(render(&brief).is_some());
+        brief.silenced = true;
+        assert_eq!(render(&brief), None);
+    }
+
+    #[test]
+    fn the_confidence_line_should_follow_the_files_line() {
+        let mut brief = full_brief();
+        brief.confidence =
+            Some("confidence: high — 3/3 key terms covered; start with the first file".into());
+        let text = render(&brief).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let files = lines
+            .iter()
+            .position(|line| line.starts_with("files: "))
+            .unwrap();
+        assert_eq!(
+            lines[files + 1],
+            "confidence: high — 3/3 key terms covered; start with the first file"
+        );
+    }
+
+    #[test]
+    fn byte_cap_should_give_a_prose_brief_its_own_bound() {
+        assert_eq!(byte_cap(Some(Signal::Prose)), PROSE_BRIEF_BYTES);
+        assert_eq!(byte_cap(Some(Signal::Strong)), BRIEF_BYTES);
+        assert_eq!(byte_cap(Some(Signal::Weak)), BRIEF_BYTES);
+        assert_eq!(byte_cap(None), BRIEF_BYTES);
+        assert_eq!(PROSE_BRIEF_BYTES, 2048);
+    }
+
+    #[test]
+    fn a_prose_brief_should_fit_its_cap() {
+        let mut brief = full_brief();
+        brief.signal = Some(Signal::Prose);
+        brief.files = (0..30)
+            .map(|n| {
+                rhit(
+                    &format!("crates/long/path/number/{n}/file.rs"),
+                    n + 1,
+                    "some matched text on the line",
+                )
+            })
+            .collect();
+        let text = render(&brief).unwrap();
+        assert!(text.len() <= PROSE_BRIEF_BYTES, "{}", text.len());
+        assert!(text.contains("(+"), "{text}");
+    }
+
+    #[test]
+    fn admission_should_name_itself_and_its_reason_for_the_log() {
+        assert_eq!(Admission::default(), Admission::Unjudged);
+        for (admission, label, reason) in [
+            (Admission::Unjudged, "unjudged", None),
+            (Admission::Open, "open", None),
+            (Admission::Closed("why".into()), "closed", Some("why")),
+            (Admission::Denied("how".into()), "denied", Some("how")),
+        ] {
+            assert_eq!(admission.label(), label);
+            assert_eq!(admission.reason(), reason);
+        }
+    }
+
+    #[test]
+    fn gate_enforced_should_bind_prose_always_and_a_weak_prompt_when_asked_or_refused() {
+        assert!(gate_enforced(Signal::Prose, false, false));
+        assert!(gate_enforced(Signal::Weak, true, false));
+        assert!(gate_enforced(Signal::Weak, false, true));
+        assert!(!gate_enforced(Signal::Weak, false, false));
+        assert!(!gate_enforced(Signal::Strong, true, true));
+    }
+
+    #[test]
+    fn declined_should_name_why_no_brief_started() {
+        let closed = Gate {
+            enabled: false,
+            indexed: true,
+        };
+        let unindexed = Gate {
+            enabled: true,
+            indexed: false,
+        };
+        let open = |_: Instant| -> Box<dyn Evidence> { Box::new(Fake::new()) };
+        let why = |prompt: &str, gate: Gate| {
+            try_start_with(prompt, gate, SECOND, open, no_verdict, None)
+                .err()
+                .map(Declined::as_str)
+        };
+        assert_eq!(why("callers of `fetchUser`", closed), Some("disabled"));
+        assert_eq!(why("callers of `fetchUser`", unindexed), Some("unindexed"));
+        assert_eq!(why("ok", OPEN), Some("continuation"));
+        assert_eq!(why("thanks, that works", OPEN), Some("not_about_code"));
+        assert_eq!(why("commit and push", OPEN), Some("not_about_code"));
+        assert_eq!(why("callers of `fetchUser`", OPEN), None);
+        assert_eq!(why(PROSE, OPEN), None);
+    }
+
+    #[test]
+    fn declined_should_spell_every_reason_for_the_log() {
+        let spelled: Vec<&str> = [
+            Declined::Disabled,
+            Declined::Unindexed,
+            Declined::Continuation,
+            Declined::NotAboutCode,
+            Declined::NoWorker,
+        ]
+        .into_iter()
+        .map(Declined::as_str)
+        .collect();
+        assert_eq!(
+            spelled,
+            [
+                "disabled",
+                "unindexed",
+                "continuation",
+                "not_about_code",
+                "no_worker"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_decision_should_be_logged_only_when_a_log_is_given() {
+        let dir = scratch_dir("given");
+        let path = dir.join(decision_log::LOG_FILE);
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        let finished = try_start_with(
+            PROSE,
+            OPEN,
+            SECOND,
+            move |_| Box::new(fake),
+            no_verdict,
+            Some(path.clone()),
+        )
+        .unwrap()
+        .finish_with_record();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(lines[0]).unwrap(),
+            finished.record.to_json()
+        );
+        // The same decision with no log leaves nothing behind.
+        let quiet = scratch_dir("absent");
+        let mut other = Fake::new();
+        other.relevance = Ok(on_topic_answer());
+        try_start_with(
+            PROSE,
+            OPEN,
+            SECOND,
+            move |_| Box::new(other),
+            no_verdict,
+            None,
+        )
+        .unwrap()
+        .finish_with_record();
+        assert!(std::fs::read_dir(&quiet).unwrap().next().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&quiet).unwrap();
+    }
+
+    #[test]
+    fn a_prompt_about_nothing_should_be_logged_as_declined_and_a_continuation_should_not() {
+        let dir = scratch_dir("declined");
+        let path = dir.join(decision_log::LOG_FILE);
+        let open = |_: Instant| -> Box<dyn Evidence> { Box::new(Fake::new()) };
+        for prompt in ["ok", "thanks, that works"] {
+            assert!(
+                try_start_with(prompt, OPEN, SECOND, open, no_verdict, Some(path.clone())).is_err()
+            );
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert_eq!(lines[0]["gate"], "declined");
+        assert_eq!(lines[0]["reason"], "not_about_code");
+        assert_eq!(lines[0]["typed"], "thanks, that works");
+        assert_eq!(lines[0]["signal"], serde_json::Value::Null);
+        // A gate that never opened writes nothing, whatever the prompt.
+        let closed = Gate {
+            enabled: false,
+            indexed: true,
+        };
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            try_start_with(
+                "thanks, that works",
+                closed,
+                SECOND,
+                open,
+                no_verdict,
+                Some(path.clone())
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_log_should_keep_the_last_five_hundred_decisions() {
+        let dir = scratch_dir("capped");
+        let path = dir.join(decision_log::LOG_FILE);
+        let old: String = (0..decision_log::MAX_LINES)
+            .map(|n| format!("{{\"old\":{n}}}\n"))
+            .collect();
+        std::fs::write(&path, old).unwrap();
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        try_start_with(
+            PROSE,
+            OPEN,
+            SECOND,
+            move |_| Box::new(fake),
+            no_verdict,
+            Some(path.clone()),
+        )
+        .unwrap()
+        .finish_with_record();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 500);
+        assert_eq!(lines[0], "{\"old\":1}");
+        assert!(
+            lines[499].contains("\"signal\":\"prose\""),
+            "{}",
+            lines[499]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn declined_record_should_carry_the_typed_text_only() {
+        let record = declined_record(
+            Declined::NotAboutCode,
+            "<pasted_content>secret thread</pasted_content> thanks, that works",
+        );
+        assert_eq!(record.gate, "declined");
+        assert_eq!(record.reason.as_deref(), Some("not_about_code"));
+        assert_eq!(record.typed, "thanks, that works");
+        assert_eq!(
+            record.sha256,
+            decision_log::sha256_hex("thanks, that works")
+        );
+        assert_eq!(record.signal, None);
+        assert_eq!((record.ops, record.answered, record.bytes), (0, 0, 0));
+        assert!(record.ts_ms > 1_577_836_800_000, "{}", record.ts_ms);
+    }
+
+    #[test]
+    fn a_decision_should_be_stamped_with_the_clock_and_the_time_it_took() {
+        let before = pixel_task::now_ms();
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.pause = Duration::from_millis(30);
+        let finished = briefed(PROSE, fake, no_verdict);
+        let after = pixel_task::now_ms();
+        let record = finished.record;
+        assert!(
+            (before..=after).contains(&record.ts_ms),
+            "{before} <= {} <= {after}",
+            record.ts_ms
+        );
+        assert!(record.elapsed_ms >= 30, "{}", record.elapsed_ms);
+        assert!(record.elapsed_ms < 1000, "{}", record.elapsed_ms);
+    }
+
+    #[test]
+    fn reciprocal_rank_should_count_ranks_from_one() {
+        assert!((reciprocal_rank(0) - 1.0 / 61.0).abs() < 1e-12);
+        assert!((reciprocal_rank(1) - 1.0 / 62.0).abs() < 1e-12);
+        assert!((reciprocal_rank(7) - 1.0 / 68.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_weak_prompt_with_only_a_meaning_lead_should_show_it_without_a_confidence_line() {
+        let mut fake = Fake::new();
+        fake.meaning = Ok(vec![lead(
+            "crates/pixel-daemon/src/api.rs",
+            40,
+            "fn op_status",
+        )]);
+        let finished = briefed("how does the login flow work", fake, no_verdict);
+        let text = finished.text.unwrap();
+        assert!(
+            text.contains("\nfiles: crates/pixel-daemon/src/api.rs:40 — fn op_status\n"),
+            "{text}"
+        );
+        assert!(!text.contains("confidence"), "{text}");
+        assert!(text.contains("\ncoverage: 1/2 ops answered\n"), "{text}");
+        assert_eq!(finished.record.gate, "unjudged");
+        assert_eq!(finished.record.score, None);
+    }
+
+    #[test]
+    fn a_weak_feature_prompt_with_every_search_failing_should_show_no_files_line() {
+        let mut fake = Fake::new();
+        fake.concept = Err("no index".into());
+        fake.task_facts = Ok(vec!["src/new/route.ts".into()]);
+        let finished = briefed(
+            "add an export endpoint to the report page",
+            fake,
+            verdict("feature"),
+        );
+        let text = finished.text.unwrap();
+        assert!(text.contains("\ntargets: src/new/route.ts\n"), "{text}");
+        assert!(!text.contains("\nfiles:"), "{text}");
+    }
+
+    #[test]
+    fn a_judge_that_refuses_before_the_relevance_probe_answers_should_be_the_reason() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.pause = Duration::from_millis(300);
+        let started = Instant::now();
+        let finished = briefed(PROSE, fake, verdict("none"));
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(finished.text, None);
+        assert_eq!(finished.record.gate, "denied");
+        assert_eq!(
+            finished.record.reason.as_deref(),
+            Some("judge: none (0.90)")
+        );
     }
 }

@@ -322,3 +322,76 @@ fn the_brief_command_should_leave_an_unindexed_repository_untouched() {
     assert!(output.stdout.is_empty());
     assert!(!root.join(".pixel").exists());
 }
+
+fn brief_json(root: &Path, prompt: &str, env: &[(&str, &str)]) -> Value {
+    let mut command = pixel_command();
+    command
+        .current_dir(root)
+        .args(["brief", prompt, "--json", "--metrics", "off"]);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stdout)))
+}
+
+fn logged(root: &Path) -> Vec<Value> {
+    std::fs::read_to_string(root.join(".pixel/brief-decisions.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn the_brief_command_should_print_its_decision_as_json_beside_the_brief() {
+    let root = indexed("brief-json");
+    let decision = brief_json(&root, RENAME, &[]);
+    assert_eq!(decision["signal"], "strong");
+    assert_eq!(decision["gate"], "unjudged");
+    assert_eq!(decision["enforced"], false);
+    assert_eq!(decision["typed"], RENAME);
+    let text = decision["brief"].as_str().unwrap();
+    assert!(text.starts_with("[PIXEL:BRIEF]"), "{text}");
+    assert_eq!(decision["bytes"].as_u64().unwrap(), text.len() as u64);
+    assert_eq!(decision["answered"], 4);
+    assert_eq!(decision["sha256"].as_str().unwrap().len(), 64);
+    // The decision is also the one line the log kept, minus the brief.
+    let mut kept = decision.clone();
+    kept.as_object_mut().unwrap().remove("brief");
+    assert_eq!(logged(&root), [kept]);
+}
+
+#[test]
+fn the_brief_command_should_say_why_a_prompt_got_no_brief() {
+    let root = indexed("brief-json-declined");
+    let quiet = brief_json(&root, "thanks, that looks good", &[]);
+    assert_eq!(quiet["gate"], "declined");
+    assert_eq!(quiet["reason"], "not_about_code");
+    assert_eq!(quiet["brief"], Value::Null);
+    assert_eq!(quiet["signal"], Value::Null);
+    let continuation = brief_json(&root, "ok", &[]);
+    assert_eq!(continuation["reason"], "continuation");
+    // A prompt about nothing is a decision worth keeping; an "ok" is not.
+    let kept = logged(&root);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0]["typed"], "thanks, that looks good");
+
+    let off = brief_json(&root, RENAME, &[("PIXEL_BRIEF", "0")]);
+    assert_eq!(off["reason"], "disabled");
+    let bare = fixture("brief-json-unindexed");
+    let unindexed = brief_json(&bare, RENAME, &[]);
+    assert_eq!(unindexed["reason"], "unindexed");
+    assert!(!bare.join(".pixel").exists());
+}
+
+#[test]
+fn the_decision_log_should_stay_off_when_pixel_brief_log_says_so() {
+    let root = indexed("brief-json-log-off");
+    let decision = brief_json(&root, RENAME, &[("PIXEL_BRIEF_LOG", "0")]);
+    assert_eq!(decision["gate"], "unjudged");
+    assert!(decision["brief"].is_string());
+    assert!(!root.join(".pixel/brief-decisions.jsonl").exists());
+}
