@@ -69,6 +69,11 @@ pub(crate) struct Record {
     /// Bytes of the brief that was rendered; `0` when none was.
     pub(crate) bytes: usize,
     pub(crate) elapsed_ms: u64,
+    /// Where the evidence came from: `daemon` or `local`.
+    pub(crate) route: Option<&'static str>,
+    /// What the daemon start the prompt gave came to, when it gave one and
+    /// the hook saw the outcome (`launched`, `running`, `skipped: …`).
+    pub(crate) daemon: Option<&'static str>,
     /// The typed text, masked and bounded.
     pub(crate) typed: String,
     /// SHA-256 of the whole typed text, lowercase hex.
@@ -172,6 +177,8 @@ impl Record {
             "answered": self.answered,
             "bytes": self.bytes,
             "elapsed_ms": self.elapsed_ms,
+            "route": self.route,
+            "daemon": self.daemon,
             "typed": self.typed,
             "sha256": self.sha256,
         })
@@ -270,6 +277,8 @@ mod tests {
             answered: 2,
             bytes: 412,
             elapsed_ms: 188,
+            route: Some("daemon"),
+            daemon: Some("running"),
             typed: "how does the daemon start".into(),
             sha256: sha256_hex("how does the daemon start"),
         }
@@ -318,6 +327,8 @@ mod tests {
                 "answered": 2,
                 "bytes": 412,
                 "elapsed_ms": 188,
+                "route": "daemon",
+                "daemon": "running",
                 "typed": "how does the daemon start",
                 "sha256": sha256_hex("how does the daemon start"),
             })

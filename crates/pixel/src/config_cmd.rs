@@ -26,9 +26,14 @@ use std::path::{Path, PathBuf};
 use crate::prompt_key::{KeyReader, RawGuard};
 use serde_json::{Value, json};
 
+/// Settings key of the daemon auto-start opt-out (`daemon_auto_start: false`).
+pub(crate) const DAEMON_AUTO_START_FEATURE: &str = "daemon_auto_start";
+/// Its environment opt-out: `0`, `false` or `off`.
+pub(crate) const DAEMON_AUTO_START_ENV: &str = "PIXEL_DAEMON_AUTO_START";
+
 /// The environment overrides and YAML switches exposed in the overview.
 const FEATURES: &[(&str, &str)] = &[
-    ("daemon_auto_start", "PIXEL_DAEMON_AUTO_START"),
+    (DAEMON_AUTO_START_FEATURE, DAEMON_AUTO_START_ENV),
     ("task_context", "PIXEL_TASK_CONTEXT"),
     ("task_boundary", "PIXEL_TASK_BOUNDARY"),
     (

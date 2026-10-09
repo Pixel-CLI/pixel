@@ -1066,6 +1066,10 @@ fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
     // The brief runs beside the ledger: it needs neither, and a slow ledger
     // must not use up its window.
     let brief = start_brief(provider, event, &payload);
+    if let Some(root) = session_start_root(provider, event, &payload) {
+        // A start is a nicety: whatever it came to, the hook goes on.
+        let _ = crate::execution_brief::autostart::warm(&root);
+    }
     let decision =
         handle_at(&payload_cwd(&payload), provider, event, &payload).unwrap_or_else(|_| {
             unavailable(
@@ -1090,6 +1094,19 @@ fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -
         }
         _ => string(payload, &["prompt"]).map(str::to_string),
     }
+}
+
+/// The repository whose daemon a session starting should keep warm for the
+/// brief: the briefed providers' `SessionStart`, in a discoverable repository.
+fn session_start_root(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    payload: &Value,
+) -> Option<std::path::PathBuf> {
+    if provider == TaskProvider::Pi || event != TaskHookEvent::SessionStart {
+        return None;
+    }
+    crate::discover_root(&payload_cwd(payload)).ok()
 }
 
 /// Start the evidence brief for a Claude or Codex prompt; Pi, every other
@@ -2186,6 +2203,53 @@ mod tests {
                 &elsewhere
             )
             .is_none()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_session_start_should_name_its_repository_for_the_briefed_providers_only() {
+        let root = std::env::temp_dir().join(format!("pixel-hook-warm-{}", std::process::id()));
+        let shard_dir = root.join(pixel_index::index::SHARD_DIR);
+        std::fs::create_dir_all(&shard_dir).unwrap();
+        std::fs::write(shard_dir.join(pixel_index::index::SHARD_FILE), b"x").unwrap();
+        let root = root.canonicalize().unwrap();
+        let payload = json!({"cwd":root});
+        for provider in [
+            TaskProvider::Claude,
+            TaskProvider::Codex,
+            TaskProvider::Antigravity,
+        ] {
+            assert_eq!(
+                session_start_root(provider, TaskHookEvent::SessionStart, &payload),
+                Some(root.clone()),
+                "{provider:?}"
+            );
+            for event in [
+                TaskHookEvent::PromptSubmit,
+                TaskHookEvent::PreToolUse,
+                TaskHookEvent::PostToolUse,
+                TaskHookEvent::Stop,
+            ] {
+                assert_eq!(
+                    session_start_root(provider, event, &payload),
+                    None,
+                    "{provider:?} {event:?}"
+                );
+            }
+        }
+        assert_eq!(
+            session_start_root(TaskProvider::Pi, TaskHookEvent::SessionStart, &payload),
+            None
+        );
+        let elsewhere = json!({"cwd":root.join("missing")});
+        assert_eq!(
+            session_start_root(
+                TaskProvider::Claude,
+                TaskHookEvent::SessionStart,
+                &elsewhere
+            ),
+            None
         );
         std::fs::remove_dir_all(&root).unwrap();
     }

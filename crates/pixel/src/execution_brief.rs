@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
+pub(crate) mod autostart;
 pub(crate) mod chain;
 pub(crate) mod decision_log;
 mod evidence;

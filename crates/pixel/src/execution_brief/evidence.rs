@@ -6,9 +6,10 @@
 //! A warm daemon answers when one serves the repository; otherwise the same
 //! facts come from read-only readers over the published index and graph.
 //! Neither route builds an index or a graph, refreshes one, or starts a
-//! daemon: a source that is not current fails its operation and the brief
-//! reports it as unresolved. Every daemon request carries what is left of the
-//! brief's shared window as its socket timeout.
+//! daemon (`autostart.rs` does that, beside the brief, for the next prompt):
+//! a source that is not current fails its operation and the brief reports it
+//! as unresolved. Every daemon request carries what is left of the brief's
+//! shared window as its socket timeout.
 
 use std::collections::HashSet;
 use std::os::unix::net::UnixStream;
@@ -331,6 +332,13 @@ impl Live {
 }
 
 impl Evidence for Live {
+    fn route(&self) -> &'static str {
+        match self.route {
+            Route::Daemon => "daemon",
+            Route::Local => "local",
+        }
+    }
+
     fn files_with(&self, anchor: &str, deadline: Instant) -> Result<Found, String> {
         self.files_matching(anchor, deadline).map(Found::from)
     }
@@ -1616,6 +1624,19 @@ mod tests {
             assert!(!daemon_serves(&root, deadline));
         }
         assert!(!daemon_serves(&root, Instant::now()));
+        let _ = std::fs::remove_file(pixel_daemon::socket_path(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn open_should_name_the_route_it_chose() {
+        let root = scratch("route-name");
+        let deadline = Instant::now() + WINDOW;
+        assert_eq!(open(&root, deadline).route(), "local");
+        {
+            let _daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
+            assert_eq!(open(&root, deadline).route(), "daemon");
+        }
         let _ = std::fs::remove_file(pixel_daemon::socket_path(&root));
         std::fs::remove_dir_all(&root).unwrap();
     }

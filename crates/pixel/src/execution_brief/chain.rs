@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 
 use regex::Regex;
 
+use super::autostart;
 use super::decision_log::{self, Record};
 use super::intent::Verdict;
 use super::relevance::{self, Basis, GateInput, RelevanceInput, Tier};
@@ -382,6 +383,11 @@ pub(crate) trait Evidence: Sync {
     fn semantic_hint(&self, _phrase: &str) -> Option<String> {
         None
     }
+    /// Where this source reads from, for the decision log: `daemon`, `local`,
+    /// or `unknown` for a source that has no route.
+    fn route(&self) -> &'static str {
+        "unknown"
+    }
     /// How widely the words of `typed` occur in the repository and the files
     /// they meet in (`facts.relevance`): what the relevance gate scores. An
     /// `Err` is "cannot tell", which a plain-language prompt treats as off
@@ -420,8 +426,13 @@ pub(crate) struct Gate {
 
 impl Gate {
     pub(crate) fn read(root: &Path) -> Self {
+        Self::read_with(root, BRIEF_ENV)
+    }
+
+    /// [`Gate::read`] with the name of the environment switch given.
+    pub(crate) fn read_with(root: &Path, env: &str) -> Self {
         Self {
-            enabled: crate::config_cmd::feature_enabled(Some(root), BRIEF_FEATURE, BRIEF_ENV),
+            enabled: crate::config_cmd::feature_enabled(Some(root), BRIEF_FEATURE, env),
             indexed: root
                 .join(pixel_index::index::SHARD_DIR)
                 .join(pixel_index::index::SHARD_FILE)
@@ -746,6 +757,8 @@ impl Admission {
 pub(crate) struct Brief {
     /// How the prompt came to be briefed.
     signal: Option<Signal>,
+    /// Where the evidence came from: `daemon` or `local`.
+    route: Option<&'static str>,
     admission: Admission,
     /// The gate refused the prompt and the refusal binds: nothing renders.
     silenced: bool,
@@ -1396,8 +1409,35 @@ pub(crate) fn declined_record(declined: Declined, prompt: &str) -> Record {
         answered: 0,
         bytes: 0,
         elapsed_ms: 0,
+        route: None,
+        daemon: None,
         typed: decision_log::logged_typed(typed),
         sha256: decision_log::sha256_hex(typed),
+    }
+}
+
+/// Starts a daemon in the background for a prompt that is going to be
+/// briefed; the kick it returns is awaited, briefly, when the brief is
+/// collected, so a hook about to exit has let the launch happen.
+pub(crate) type Starter = Box<dyn FnOnce() -> autostart::Kicked + Send>;
+
+/// What a brief does around its chain besides running it.
+#[derive(Default)]
+pub(crate) struct Around {
+    /// Where the decision is recorded, when it is.
+    pub(crate) log: Option<PathBuf>,
+    /// How a daemon is started for the prompt, when one may be.
+    pub(crate) starter: Option<Starter>,
+}
+
+impl Around {
+    /// Record the decision at `path` and start nothing.
+    #[cfg(test)]
+    pub(crate) fn logging(path: PathBuf) -> Self {
+        Self {
+            log: Some(path),
+            starter: None,
+        }
     }
 }
 
@@ -1409,6 +1449,8 @@ pub(crate) struct Pending {
     started: Instant,
     /// Where the decision is recorded, when it is.
     log: Option<PathBuf>,
+    /// The daemon start this prompt gave, when it gave one.
+    kicked: Option<autostart::Kicked>,
     /// The text the brief judged: the typed prompt, or its last paragraph.
     task: String,
     signal: Signal,
@@ -1445,6 +1487,14 @@ impl Pending {
             .recv_timeout(self.deadline.saturating_duration_since(Instant::now()));
         let brief = edit(&self.state, |brief| brief.clone());
         let text = render(&brief);
+        let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // The daemon start has had the whole brief to launch; a hook about to
+        // exit sees it through, for at most the hook bound.
+        let daemon = self
+            .kicked
+            .as_ref()
+            .and_then(|kicked| kicked.wait(autostart::HOOK_BOUND))
+            .map(autostart::Outcome::as_str);
         let record = Record {
             ts_ms: pixel_task::now_ms(),
             signal: Some(self.signal.as_str()),
@@ -1470,7 +1520,9 @@ impl Pending {
             ops: brief.ops,
             answered: brief.answered,
             bytes: text.as_ref().map_or(0, String::len),
-            elapsed_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            elapsed_ms,
+            route: brief.route,
+            daemon,
             typed: decision_log::logged_typed(&self.task),
             sha256: decision_log::sha256_hex(&self.task),
         };
@@ -1494,6 +1546,7 @@ pub(crate) fn try_start(prompt: &str, root: &Path) -> Result<Pending, Declined> 
     let log = decision_log::path_for(root);
     let gate = Gate::read(root);
     let root = root.to_path_buf();
+    let for_start = root.clone();
     try_start_with(
         prompt,
         gate,
@@ -1501,7 +1554,10 @@ pub(crate) fn try_start(prompt: &str, root: &Path) -> Result<Pending, Declined> 
         move |deadline| super::evidence::open(&root, deadline),
         super::intent::judge,
         relevance::judge,
-        log,
+        Around {
+            log,
+            starter: Some(Box::new(move || autostart::start_for_prompt(&for_start))),
+        },
     )
 }
 
@@ -1519,7 +1575,16 @@ where
     F: FnOnce(Instant) -> Box<dyn Evidence> + Send + 'static,
     J: Fn(&str, Instant) -> Option<Verdict> + Send + Sync + 'static,
 {
-    try_start_with(prompt, gate, window, open, judge, relevance::judge, None).ok()
+    try_start_with(
+        prompt,
+        gate,
+        window,
+        open,
+        judge,
+        relevance::judge,
+        Around::default(),
+    )
+    .ok()
 }
 
 /// [`try_start`] with its gate, window, evidence source, intent judge, tier
@@ -1534,12 +1599,13 @@ pub(crate) fn try_start_with<F, J>(
     open: F,
     judge: J,
     model: Model,
-    log: Option<PathBuf>,
+    around: Around,
 ) -> Result<Pending, Declined>
 where
     F: FnOnce(Instant) -> Box<dyn Evidence> + Send + 'static,
     J: Fn(&str, Instant) -> Option<Verdict> + Send + Sync + 'static,
 {
+    let Around { log, starter } = around;
     if !gate.open() {
         return Err(if gate.enabled {
             Declined::Unindexed
@@ -1557,6 +1623,9 @@ where
         }
         return Err(Declined::NotAboutCode);
     };
+    // The prompt is going to be briefed: let a daemon come up for the next
+    // one, whatever route this one takes.
+    let kicked = starter.map(|start| start());
     let started = Instant::now();
     let deadline = started + window;
     let state = Arc::new(Mutex::new(Brief {
@@ -1588,6 +1657,7 @@ where
         deadline,
         started,
         log,
+        kicked,
         task,
         signal,
     })
@@ -1622,10 +1692,12 @@ where
     if signal == Signal::Strong {
         let plan = Plan::from_typed(typed, has_change_intent(typed), None);
         let evidence = open(deadline);
+        edit(state, |brief| brief.route = Some(evidence.route()));
         run(&plan, evidence.as_ref(), state, deadline);
         return;
     }
     let evidence = open(deadline);
+    edit(state, |brief| brief.route = Some(evidence.route()));
     let mut settled = |got: &Gathered| match refusal(signal, got, false, ENFORCE_GATE_ON_WEAK) {
         Some(admission) => {
             close(state, got, admission);
@@ -4170,7 +4242,7 @@ mod tests {
             move |_| Box::new(fake),
             judge,
             model,
-            None,
+            Around::default(),
         )
         .expect("the prompt starts a brief")
         .finish_with_record()
@@ -4202,7 +4274,7 @@ mod tests {
             move |_| Box::new(Shared(fake)),
             no_verdict,
             model_high,
-            None,
+            Around::default(),
         )
         .unwrap()
         .finish_with_record();
@@ -4281,7 +4353,7 @@ mod tests {
             move |_| Box::new(fake),
             no_verdict,
             model_high,
-            None,
+            Around::default(),
         )
         .unwrap()
         .finish_with_record();
@@ -4810,9 +4882,17 @@ mod tests {
         };
         let open = |_: Instant| -> Box<dyn Evidence> { Box::new(Fake::new()) };
         let why = |prompt: &str, gate: Gate| {
-            try_start_with(prompt, gate, SECOND, open, no_verdict, model_high, None)
-                .err()
-                .map(Declined::as_str)
+            try_start_with(
+                prompt,
+                gate,
+                SECOND,
+                open,
+                no_verdict,
+                model_high,
+                Around::default(),
+            )
+            .err()
+            .map(Declined::as_str)
         };
         assert_eq!(why("callers of `fetchUser`", closed), Some("disabled"));
         assert_eq!(why("callers of `fetchUser`", unindexed), Some("unindexed"));
@@ -4860,7 +4940,7 @@ mod tests {
             move |_| Box::new(fake),
             no_verdict,
             model_high,
-            Some(path.clone()),
+            Around::logging(path.clone()),
         )
         .unwrap()
         .finish_with_record();
@@ -4882,7 +4962,7 @@ mod tests {
             move |_| Box::new(other),
             no_verdict,
             model_high,
-            None,
+            Around::default(),
         )
         .unwrap()
         .finish_with_record();
@@ -4905,7 +4985,7 @@ mod tests {
                     open,
                     no_verdict,
                     model_high,
-                    Some(path.clone())
+                    Around::logging(path.clone()),
                 )
                 .is_err()
             );
@@ -4934,7 +5014,7 @@ mod tests {
                 open,
                 no_verdict,
                 model_high,
-                Some(path.clone())
+                Around::logging(path.clone()),
             )
             .is_err()
         );
@@ -4959,7 +5039,7 @@ mod tests {
             move |_| Box::new(fake),
             no_verdict,
             model_high,
-            Some(path.clone()),
+            Around::logging(path.clone()),
         )
         .unwrap()
         .finish_with_record();
@@ -5362,5 +5442,180 @@ mod tests {
         let declined = declined_record(Declined::NotAboutCode, "hello there");
         assert_eq!(declined.model, crate::execution_brief::gate_model::SOURCE);
         assert_eq!(declined.tier, None);
+    }
+
+    /// A daemon that counts launches, for the tests of the starter.
+    struct Counting {
+        probe: crate::DaemonProbe,
+        launches: std::sync::atomic::AtomicUsize,
+        stall: Duration,
+    }
+
+    impl Counting {
+        fn new(probe: crate::DaemonProbe, stall: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                probe,
+                launches: std::sync::atomic::AtomicUsize::new(0),
+                stall,
+            })
+        }
+
+        fn launched(&self) -> usize {
+            self.launches.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl autostart::Daemons for Counting {
+        fn probe(&self, _: &Path) -> crate::DaemonProbe {
+            std::thread::sleep(self.stall);
+            self.probe
+        }
+
+        fn retire(&self, _: &Path) {}
+
+        fn launch(&self, _: &Path) -> std::io::Result<()> {
+            self.launches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The starter a prompt gives `daemons`, with every switch on.
+    fn starter_of(daemons: &Arc<Counting>) -> Starter {
+        let daemons = Arc::clone(daemons);
+        Box::new(move || {
+            autostart::kick(
+                Path::new("/repo"),
+                autostart::Mode::Start,
+                autostart::Permit {
+                    brief: true,
+                    indexed: true,
+                    auto_start: true,
+                },
+                daemons,
+            )
+        })
+    }
+
+    fn with_starter(
+        prompt: &str,
+        gate: Gate,
+        window: Duration,
+        log: Option<PathBuf>,
+        starter: Starter,
+    ) -> Result<Pending, Declined> {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        try_start_with(
+            prompt,
+            gate,
+            window,
+            move |_| Box::new(fake),
+            no_verdict,
+            model_high,
+            Around {
+                log,
+                starter: Some(starter),
+            },
+        )
+    }
+
+    #[test]
+    fn a_briefed_prompt_should_start_an_absent_daemon_and_log_that_it_did() {
+        let dir = scratch_dir("starter-absent");
+        let path = dir.join(decision_log::LOG_FILE);
+        let daemons = Counting::new(crate::DaemonProbe::Absent, Duration::ZERO);
+        let finished = with_starter(
+            PROSE,
+            OPEN,
+            SECOND,
+            Some(path.clone()),
+            starter_of(&daemons),
+        )
+        .unwrap()
+        .finish_with_record();
+        assert_eq!(daemons.launched(), 1);
+        assert_eq!(finished.record.daemon, Some("launched"));
+        let logged: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+        assert_eq!(logged["daemon"], "launched");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_briefed_prompt_should_leave_a_current_daemon_alone_and_log_that_one_ran() {
+        let daemons = Counting::new(crate::DaemonProbe::Current, Duration::ZERO);
+        let finished = with_starter(PROSE, OPEN, SECOND, None, starter_of(&daemons))
+            .unwrap()
+            .finish_with_record();
+        assert_eq!(daemons.launched(), 0);
+        assert_eq!(finished.record.daemon, Some("running"));
+    }
+
+    #[test]
+    fn a_prompt_that_is_not_briefed_should_start_no_daemon() {
+        let closed = Gate {
+            enabled: false,
+            indexed: true,
+        };
+        let unindexed = Gate {
+            enabled: true,
+            indexed: false,
+        };
+        let cases = [
+            ("callers of `fetchUser`", closed),
+            ("callers of `fetchUser`", unindexed),
+            ("ok", OPEN),
+            ("thanks, that works", OPEN),
+        ];
+        for (prompt, gate) in cases {
+            let daemons = Counting::new(crate::DaemonProbe::Absent, Duration::ZERO);
+            let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = Arc::clone(&starts);
+            let inner = starter_of(&daemons);
+            let starter: Starter = Box::new(move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                inner()
+            });
+            assert!(
+                with_starter(prompt, gate, SECOND, None, starter).is_err(),
+                "{prompt:?}"
+            );
+            assert_eq!(
+                starts.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{prompt:?}: the starter ran"
+            );
+            assert_eq!(daemons.launched(), 0, "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn a_start_that_hangs_should_not_hold_the_brief_past_its_bound() {
+        let daemons = Counting::new(crate::DaemonProbe::Absent, Duration::from_secs(30));
+        let window = Duration::from_millis(200);
+        let started = Instant::now();
+        let finished = with_starter(PROSE, OPEN, window, None, starter_of(&daemons))
+            .unwrap()
+            .finish_with_record();
+        let held = started.elapsed();
+        assert_eq!(finished.record.daemon, None, "the outcome was not known");
+        assert!(
+            held < window + autostart::HOOK_BOUND + Duration::from_secs(2),
+            "the brief was held for {held:?}"
+        );
+        assert!(
+            held >= autostart::HOOK_BOUND,
+            "the hook gave the start its bound before it gave up: {held:?}"
+        );
+    }
+
+    #[test]
+    fn a_decision_should_name_where_its_evidence_came_from() {
+        let finished = briefed(PROSE, Fake::new(), no_verdict);
+        assert_eq!(finished.record.route, Some("unknown"));
+        assert_eq!(finished.record.daemon, None, "no starter was given");
+        let declined = declined_record(Declined::NotAboutCode, "hello there");
+        assert_eq!((declined.route, declined.daemon), (None, None));
     }
 }

@@ -7,12 +7,13 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use std::process::Stdio;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 
-use crate::support::{Scratch, git, pixel_command};
+use crate::support::{Scratch, daemons_serving, git, pixel_command};
 
 const RENAME: &str = "handleError in packages/ui/handleError.ts is being renamed to reportError. Which files change?";
 
@@ -78,25 +79,33 @@ fn hook(root: &Path, provider: &str, prompt: &str, env: &[(&str, &str)]) -> Valu
         "cwd": root,
         "hook_event_name": "UserPromptSubmit",
     });
+    run_hook(root, provider, "prompt-submit", &payload, |command| {
+        command.env_remove("PIXEL_BRIEF");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+    })
+}
+
+/// Run `pixel run-hook task-event` for `event` with `payload` on stdin;
+/// `configure` adjusts the environment of the hook after the defaults.
+fn run_hook(
+    root: &Path,
+    provider: &str,
+    event: &str,
+    payload: &Value,
+    configure: impl FnOnce(&mut Command),
+) -> Value {
     let mut command = pixel_command();
     command
         .current_dir(root)
         .env("PIXEL_METRICS", "0")
-        .env_remove("PIXEL_BRIEF")
-        .args([
-            "run-hook",
-            "task-event",
-            "--provider",
-            provider,
-            "--event",
-            "prompt-submit",
-        ])
+        .args(["run-hook", "task-event", "--provider", provider])
+        .args(["--event", event])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for (key, value) in env {
-        command.env(key, value);
-    }
+    configure(&mut command);
     let mut child = command.spawn().unwrap();
     child
         .stdin
@@ -398,4 +407,196 @@ fn the_decision_log_should_stay_off_when_pixel_brief_log_says_so() {
     assert_eq!(decision["gate"], "unjudged");
     assert!(decision["brief"].is_string());
     assert!(!root.join(".pixel/brief-decisions.jsonl").exists());
+}
+
+// A hook that may start a daemon: the three switches (brief, auto-start, an
+// index) and the two moments (a session starting, a prompt).
+
+fn session_start(root: &Path, configure: impl FnOnce(&mut Command)) -> Value {
+    let payload = json!({
+        "session_id": "brief-session",
+        "cwd": root,
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+    });
+    run_hook(root, "claude", "session-start", &payload, configure)
+}
+
+/// The environment of a hook allowed to start a daemon, in a shard cache of
+/// its own so nothing is written under the developer's cache.
+fn auto_start(command: &mut Command, cache: &Path) {
+    command
+        .env("PIXEL_DAEMON_AUTO_START", "1")
+        .env_remove("PIXEL_BRIEF")
+        .env("XDG_CACHE_HOME", cache);
+}
+
+fn daemon_running(root: &Path) -> bool {
+    let output = pixel_command()
+        .args(["daemon", "status"])
+        .arg(root)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).starts_with("daemon running")
+}
+
+fn wait_for_daemon(root: &Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if daemon_running(root) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Stop the daemon and wait for the start process that launched it to be
+/// gone too, so the fixture can drop without a leak.
+fn stop_daemon(root: &Path) {
+    let _ = pixel_command()
+        .args(["daemon", "stop"])
+        .arg(root)
+        .output()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline && !daemons_serving(root).is_empty() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_session_start_should_start_the_daemon_of_an_indexed_repository() {
+    let root = indexed("warm");
+    let cache = Scratch::for_test("prompt-brief-cache", "warm");
+    assert!(!daemon_running(&root), "no daemon before the session");
+    session_start(&root, |command| auto_start(command, &cache));
+    let up = wait_for_daemon(&root);
+    // Stop before asserting: a failed assertion never leaves a daemon.
+    stop_daemon(&root);
+    assert!(up, "the session start started no daemon");
+}
+
+/// A session start with `configure` applied, which must start no daemon.
+fn assert_session_start_starts_no_daemon(
+    name: &str,
+    root: &Path,
+    configure: impl FnOnce(&mut Command),
+) {
+    session_start(root, configure);
+    std::thread::sleep(Duration::from_millis(500));
+    let started = daemon_running(root) || !daemons_serving(root).is_empty();
+    if started {
+        stop_daemon(root);
+    }
+    assert!(!started, "{name}: a daemon was started");
+}
+
+#[test]
+fn a_session_start_should_start_no_daemon_when_any_switch_is_off_or_there_is_no_index() {
+    let indexed_root = indexed("warm-off");
+    let bare = fixture("warm-unindexed");
+    let cache = Scratch::for_test("prompt-brief-cache", "warm-off");
+    assert_session_start_starts_no_daemon(
+        "auto-start off by the environment",
+        &indexed_root,
+        |command| {
+            auto_start(command, &cache);
+            command.env("PIXEL_DAEMON_AUTO_START", "0");
+        },
+    );
+    assert_session_start_starts_no_daemon("brief off by the environment", &indexed_root, |c| {
+        auto_start(c, &cache);
+        c.env("PIXEL_BRIEF", "0");
+    });
+    assert_session_start_starts_no_daemon("no index", &bare, |c| auto_start(c, &cache));
+    // Last: the setting stays in the repository.
+    std::fs::write(
+        indexed_root.join(".pixel/config.yaml"),
+        "daemon_auto_start: false\n",
+    )
+    .unwrap();
+    assert_session_start_starts_no_daemon(
+        "auto-start off by the repository",
+        &indexed_root,
+        |command| {
+            auto_start(command, &cache);
+            command.env_remove("PIXEL_DAEMON_AUTO_START");
+        },
+    );
+}
+
+#[test]
+fn a_prompt_that_finds_no_daemon_should_brief_locally_and_leave_a_daemon_for_the_next() {
+    let root = indexed("prompt-start");
+    let cache = Scratch::for_test("prompt-brief-cache", "prompt-start");
+    let payload = |prompt: &str| {
+        json!({
+            "session_id": "brief-session",
+            "prompt": prompt,
+            "cwd": &*root,
+            "hook_event_name": "UserPromptSubmit",
+        })
+    };
+    let first = run_hook(
+        &root,
+        "claude",
+        "prompt-submit",
+        &payload(RENAME),
+        |command| {
+            auto_start(command, &cache);
+        },
+    );
+    let up = wait_for_daemon(&root);
+    let second = up.then(|| {
+        run_hook(
+            &root,
+            "claude",
+            "prompt-submit",
+            &payload(RENAME),
+            |command| {
+                auto_start(command, &cache);
+            },
+        )
+    });
+    stop_daemon(&root);
+    assert!(
+        context(&first).starts_with("[PIXEL:BRIEF]"),
+        "the first prompt is briefed without the daemon: {first}"
+    );
+    assert!(up, "the prompt started no daemon");
+    assert!(
+        context(&second.unwrap()).starts_with("[PIXEL:BRIEF]"),
+        "the second prompt is briefed by the daemon"
+    );
+    let records = logged(&root);
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(
+        (records[0]["route"].as_str(), records[0]["daemon"].as_str()),
+        (Some("local"), Some("launched")),
+        "{}",
+        records[0]
+    );
+    assert_eq!(
+        (records[1]["route"].as_str(), records[1]["daemon"].as_str()),
+        (Some("daemon"), Some("running")),
+        "{}",
+        records[1]
+    );
+}
+
+#[test]
+fn a_prompt_should_start_no_daemon_when_auto_start_is_off() {
+    let root = indexed("prompt-no-start");
+    let output = hook(&root, "claude", RENAME, &[("PIXEL_DAEMON_AUTO_START", "0")]);
+    assert!(context(&output).starts_with("[PIXEL:BRIEF]"), "{output}");
+    std::thread::sleep(Duration::from_millis(500));
+    let started = daemon_running(&root) || !daemons_serving(&root).is_empty();
+    if started {
+        stop_daemon(&root);
+    }
+    assert!(!started, "a daemon was started");
+    let records = logged(&root);
+    assert_eq!(records[0]["route"], "local");
+    assert_eq!(records[0]["daemon"], "skipped: auto-start off");
 }
