@@ -84,9 +84,9 @@ The 38.8 ms median latency and 98.76 case-exact on BFCL it reports against
 Jev's 524.1 ms and 95.75 are Cloudflare's own figures, not a Pixel measurement.
 
 Remote decisions (uses fast LLMs, not the System One model) can also return scores, through
-OpenRouter, Ollama Cloud, DeepSeek, OpenCode Go, or a local OpenAI-compatible
-endpoint (`--engine remote
---remote-preset openrouter|ollama|deepseek|opencode-go|local`). On 14 public
+OpenRouter, Ollama Cloud, DeepSeek, OpenCode Go, OpenAI, or a local
+OpenAI-compatible endpoint (`--engine remote
+--remote-preset openrouter|ollama|deepseek|opencode-go|openai|local`). On 14 public
 coding prompts:
 
 | Model | Provider (preset) | Score |
