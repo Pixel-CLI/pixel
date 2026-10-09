@@ -1366,6 +1366,7 @@ pub(crate) fn declined_record(declined: Declined, prompt: &str) -> Record {
         reason: Some(declined.as_str().to_string()),
         score: None,
         best_file: None,
+        features: None,
         judge: None,
         kind: None,
         ops: 0,
@@ -1432,6 +1433,10 @@ impl Pending {
                 .relevance
                 .as_ref()
                 .and_then(|verdict| verdict.best_file.clone()),
+            features: brief
+                .relevance
+                .as_ref()
+                .map(|verdict| verdict.features.clone()),
             judge: brief
                 .judged
                 .as_ref()
@@ -1733,8 +1738,15 @@ fn judge_reason(verdict: &Verdict) -> String {
 
 fn off_topic_reason(scored: &relevance::Verdict) -> String {
     format!(
-        "off topic: the best file covers {}/{} key terms, {:.2} of the weight",
-        scored.features.shared, scored.features.informative, scored.score
+        "off topic: the best file covers {}/{} key terms, {:.2} of the weight, {}",
+        scored.features.shared,
+        scored.features.informative,
+        scored.score,
+        if scored.features.structural {
+            "with a symbol or path match"
+        } else {
+            "in text only"
+        }
     )
 }
 
@@ -4037,6 +4049,9 @@ mod tests {
         assert_eq!(record.best_file.as_deref(), Some(DAEMON));
         assert!((record.score.unwrap() - 1.0).abs() < f64::EPSILON);
         assert_eq!((record.ops, record.answered), (2, 2));
+        let features = record.features.as_ref().unwrap();
+        assert_eq!((features.shared, features.informative), (3, 3));
+        assert!(features.structural);
         assert_eq!(record.bytes, finished.text.unwrap().len());
         assert_eq!(record.typed, PROSE);
         assert_eq!(record.sha256, decision_log::sha256_hex(PROSE));
@@ -4069,7 +4084,7 @@ mod tests {
         assert_eq!((record.signal, record.gate), (Some("prose"), "closed"));
         assert_eq!(
             record.reason.as_deref(),
-            Some("off topic: the best file covers 0/2 key terms, 0.00 of the weight")
+            Some("off topic: the best file covers 0/2 key terms, 0.00 of the weight, in text only")
         );
         assert_eq!((record.answered, record.bytes), (0, 0));
     }
@@ -4360,7 +4375,8 @@ mod tests {
         assert_eq!(
             refusal(Signal::Prose, &off, false, false),
             Some(Admission::Closed(
-                "off topic: the best file covers 0/2 key terms, 0.00 of the weight".into()
+                "off topic: the best file covers 0/2 key terms, 0.00 of the weight, in text only"
+                    .into()
             ))
         );
         let failed = gathered(Some(Err("cold".into())), None);
@@ -4463,7 +4479,8 @@ mod tests {
         assert_eq!(
             refusal(Signal::Weak, &gathered(off(), None), true, true),
             Some(Admission::Closed(
-                "off topic: the best file covers 0/2 key terms, 0.00 of the weight".into()
+                "off topic: the best file covers 0/2 key terms, 0.00 of the weight, in text only"
+                    .into()
             ))
         );
         assert_eq!(

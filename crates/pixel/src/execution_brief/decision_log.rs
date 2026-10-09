@@ -21,6 +21,8 @@ use fs2::FileExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use super::relevance;
+
 /// File name under the repository's `.pixel` directory.
 pub(crate) const LOG_FILE: &str = "brief-decisions.jsonl";
 /// Environment opt-out: `0`, `false` or `off` writes nothing.
@@ -51,6 +53,8 @@ pub(crate) struct Record {
     /// The best file's share of the prompt's keyword weight.
     pub(crate) score: Option<f64>,
     pub(crate) best_file: Option<String>,
+    /// What the relevance decision weighed, when the probe answered.
+    pub(crate) features: Option<relevance::Features>,
     /// The intent judge's label and probability, when it answered.
     pub(crate) judge: Option<(String, f64)>,
     /// The question kind the plan routed to.
@@ -140,6 +144,14 @@ impl Record {
             "reason": self.reason,
             "score": self.score,
             "best_file": self.best_file,
+            "features": self.features.as_ref().map(|features| json!({
+                "total_weight": features.total_weight,
+                "covered_weight": features.covered_weight,
+                "keywords": features.keywords,
+                "informative": features.informative,
+                "shared": features.shared,
+                "structural": features.structural,
+            })),
             "judge": self.judge.as_ref().map(|(label, confidence)| {
                 json!({"label": label, "confidence": confidence})
             }),
@@ -225,6 +237,14 @@ mod tests {
             reason: Some("2 of 3 key terms".into()),
             score: Some(0.75),
             best_file: Some("src/a.rs".into()),
+            features: Some(relevance::Features {
+                total_weight: 8.0,
+                covered_weight: 6.0,
+                keywords: 4,
+                informative: 4,
+                shared: 3,
+                structural: true,
+            }),
             judge: Some(("question".into(), 0.9)),
             kind: Some("lookup"),
             ops: 3,
@@ -258,6 +278,14 @@ mod tests {
                 "reason": "2 of 3 key terms",
                 "score": 0.75,
                 "best_file": "src/a.rs",
+                "features": {
+                    "total_weight": 8.0,
+                    "covered_weight": 6.0,
+                    "keywords": 4,
+                    "informative": 4,
+                    "shared": 3,
+                    "structural": true,
+                },
                 "judge": {"label": "question", "confidence": 0.9},
                 "kind": "lookup",
                 "ops": 3,
@@ -273,12 +301,21 @@ mod tests {
             reason: None,
             score: None,
             best_file: None,
+            features: None,
             judge: None,
             kind: None,
             ..record()
         };
         let value = bare.to_json();
-        for key in ["signal", "reason", "score", "best_file", "judge", "kind"] {
+        for key in [
+            "signal",
+            "reason",
+            "score",
+            "best_file",
+            "features",
+            "judge",
+            "kind",
+        ] {
             assert_eq!(value[key], Value::Null, "{key}");
         }
     }
