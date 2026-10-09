@@ -623,6 +623,30 @@ impl Evidence for Live {
         caller_hits(&data)
     }
 
+    fn lines_at(
+        &self,
+        path: &str,
+        start: u64,
+        end: u64,
+        deadline: Instant,
+    ) -> Result<Vec<String>, String> {
+        if Instant::now() >= deadline {
+            return Err("out of time".to_string());
+        }
+        if pixel_index::index::credential_path(Path::new(path)) {
+            return Err("credential-shaped path".to_string());
+        }
+        let text = std::fs::read_to_string(self.root.join(path)).map_err(|e| e.to_string())?;
+        let skip = usize::try_from(start.saturating_sub(1)).unwrap_or(0);
+        let take = usize::try_from(end.saturating_sub(start) + 1).unwrap_or(0);
+        Ok(text
+            .lines()
+            .skip(skip)
+            .take(take)
+            .map(|line| line.chars().take(200).collect())
+            .collect())
+    }
+
     fn line_at(&self, path: &str, line: u64, deadline: Instant) -> Result<String, String> {
         if Instant::now() >= deadline {
             return Err("out of time".to_string());

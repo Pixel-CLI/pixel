@@ -163,7 +163,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback; the daemon's `meaning` build (below) reads it and, for its first build only, writes it, so the two share vectors. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
-| `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the typed text (never a pasted block, credential shapes masked, cut at 600 characters) and its SHA-256. The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
+| `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes (and whether it carried the search receipt and answer excerpts, with the excerpt bytes) and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the typed text (never a pasted block, credential shapes masked, cut at 600 characters) and its SHA-256. The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
 | `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker `reconcile` writes and clears (no hook reads it), and the pre-mutation copies `env` takes. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
 | `task-runtime.json` | CLI `task-state show/reset` and Claude hooks | Existing bounded Claude context packets; independent of completion evidence. |
@@ -759,10 +759,32 @@ version-15 daemon honours, so the hook can never be the request that opens
 the facts warmer. A repository without an index yields no brief. A missing or
 stale graph still yields the text evidence (`files:`), with the reason under
 `unresolved:` (`the graph is not built`, `the graph is stale`) and no callers.
-Output is capped at 2 KiB (`BRIEF_BYTES`; `PROSE_BRIEF_BYTES` for plain
-language) and says how many ops answered (`coverage: n/m`, `packet partial`
-when the budget cut short). Every decision, a refusal included, is one line of
-`.pixel/brief-decisions.jsonl` (see "On-disk state").
+Output is capped at 2 KiB (`BRIEF_BYTES`) and says how many ops answered
+(`coverage: n/m`, `packet partial` when the budget cut short). A confident
+(high-tier) brief of a plain-language or weak prompt, whose packet is
+complete, is meant to be answered from without a tool call: it opens with a
+search receipt (`searched: content+symbols+paths for <probed terms> (<n>
+terms, <files> files)`, ` · meaning search returned <n> chunks` only when
+that search answered, `ignored (too common)`, and the `result:` line that
+tells the agent to answer from the matches below) and carries answer-sized
+excerpts after the confidence line (`answer <path>:<line>:`, `execution_brief/answer.rs`).
+The excerpt is the signature, the first doc-comment line and up to eight lines
+of the matched region of each of the two best files (`Evidence::lines_at`,
+a bounded read outside the op count, refused for a credential-shaped path),
+preceded by the routed kind's own block when its data is in: the Flow hops
+with site and first line, the tests that mention the target with their first
+assertion, the config constant line with its default and where the
+environment reads it (only lines that carry a probed term). Code files come
+before test files; a kind without data leaves the generic excerpt alone, a
+rationale question gets none. That
+block's cap is `PROSE_BRIEF_BYTES` (3584, under Pi's 4000-byte extension
+cap; `PLAIN_PROSE_BRIEF_BYTES`, 2 KiB, without answer evidence); over the
+cap the second file's excerpt lines go first, then the first's, never the
+receipt. Strong, low-tier and partial briefs carry neither.
+`PIXEL_BRIEF_RECEIPT=0|false|off` and `PIXEL_BRIEF_ANSWER=0|false|off` remove
+the receipt and the excerpts. Every decision, a refusal included, is one line
+of `.pixel/brief-decisions.jsonl` (see "On-disk state"), with `receipt`,
+`answer` and `excerpt_bytes` for what the block carried.
 `PIXEL_BRIEF=0|false|off` or `brief: false` in `.pixel/config.yaml`
 switches the brief off.
 

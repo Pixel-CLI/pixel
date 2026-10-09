@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 
 use regex::Regex;
 
+use super::answer::{self, Excerpt, Hop, Receipt};
 use super::autostart;
 use super::decision_log::{self, Record};
 use super::intent::Verdict;
@@ -59,9 +60,20 @@ pub(crate) const BRIEF_WINDOW: Duration = Duration::from_millis(750);
 pub(crate) const MAX_OPS: usize = 6;
 /// Rendered size cap; lists give way before a line is cut.
 pub(crate) const BRIEF_BYTES: usize = 2048;
-/// Size cap of a brief built for a plain-language prompt; its own constant
-/// so an experiment can widen it without touching code-shaped briefs.
-pub(crate) const PROSE_BRIEF_BYTES: usize = 2048;
+/// Size cap of a confident brief that carries a search receipt or answer
+/// excerpts (a plain-language prompt, or a weak one the gate put in the high
+/// tier). Pi's extension caps injected context at 4000 bytes: stay under.
+pub(crate) const PROSE_BRIEF_BYTES: usize = 3584;
+const _: () = assert!(PROSE_BRIEF_BYTES < 4000);
+/// Size cap of a plain-language brief without answer evidence.
+pub(crate) const PLAIN_PROSE_BRIEF_BYTES: usize = 2048;
+/// Files a brief that carries excerpts lists: the excerpts are the answer,
+/// the list only says where else to look.
+const ANSWER_FILES: usize = 4;
+/// Files tried for the generic excerpt before giving up.
+const EXCERPT_TRIES: usize = 4;
+/// Files a generic excerpt covers.
+const EXCERPT_FILES: usize = 2;
 /// Whether an off-tier relevance decision silences a weakly code-shaped
 /// prompt's brief, as it does a plain-language one. The decision is computed
 /// and logged either way.
@@ -414,6 +426,19 @@ pub(crate) trait Evidence: Sync {
     /// not model source may leave it unsupported.
     fn line_at(&self, path: &str, line: u64, _deadline: Instant) -> Result<String, String> {
         let _ = (path, line);
+        Err("source read unsupported".to_string())
+    }
+    /// Lines `start..=end` (1-based) of `path`: the bounded window an answer
+    /// excerpt is cut from. Like `line_at`, a plain read outside the op
+    /// budget; a credential-shaped path is refused.
+    fn lines_at(
+        &self,
+        path: &str,
+        start: u64,
+        end: u64,
+        _deadline: Instant,
+    ) -> Result<Vec<String>, String> {
+        let _ = (path, start, end);
         Err("source read unsupported".to_string())
     }
 }
@@ -788,6 +813,13 @@ pub(crate) struct Brief {
     /// The ordered flow line of a flow question: `a -> b -> c`, or the
     /// honest negative.
     flow: Option<String>,
+    /// The hop names of that flow, in order.
+    flow_hops: Vec<String>,
+    /// What the searches of this brief covered, when it is confident and the
+    /// probe answered.
+    receipt: Option<Receipt>,
+    /// Answer-sized evidence cut from the best files, or one kind's own.
+    excerpts: Vec<Excerpt>,
     /// Test files a `uses` route found calling the picked symbol.
     tests: Vec<String>,
     /// Declarations a `list-signatures` op read of `skeleton_file`.
@@ -829,6 +861,67 @@ impl Brief {
             .as_ref()
             .filter(|verdict| verdict.basis != Basis::NoGraph)
             .map(|verdict| verdict.tier)
+    }
+
+    /// The packet names its own gaps: cut by the budget, unfinished, or with
+    /// an unresolved note. A partial packet carries no receipt or excerpt.
+    fn partial(&self) -> bool {
+        self.gaps() || !self.finished
+    }
+
+    /// The budget cut the chain short or an op left a note.
+    fn gaps(&self) -> bool {
+        self.cut || !self.unresolved.is_empty()
+    }
+
+    /// The receipt is shown: a confident (high-tier) brief of a prompt that
+    /// did not name code, whose packet is complete.
+    fn receipt_lines(&self) -> Vec<String> {
+        if self.signal == Some(Signal::Strong) || self.tier() != Some(Tier::High) || self.partial()
+        {
+            return Vec::new();
+        }
+        if !answer::receipt_enabled() {
+            return Vec::new();
+        }
+        self.receipt
+            .as_ref()
+            .map(Receipt::lines)
+            .unwrap_or_default()
+    }
+
+    fn has_excerpts(&self) -> bool {
+        self.excerpt_counts().iter().any(|count| *count > 0)
+    }
+
+    fn excerpt_counts(&self) -> [usize; EXCERPT_FILES] {
+        let mut counts = [0; EXCERPT_FILES];
+        if !self.partial() {
+            for (slot, excerpt) in counts.iter_mut().zip(&self.excerpts) {
+                *slot = excerpt.lines.len();
+            }
+        }
+        counts
+    }
+
+    /// The excerpt lines for the line counts in `shown`: one header per block
+    /// that keeps a line.
+    fn excerpt_block(&self, shown: Shown) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (excerpt, count) in self.excerpts.iter().zip(shown.excerpt) {
+            if count == 0 {
+                continue;
+            }
+            lines.push(format!("answer {}:", clean(&excerpt.label)));
+            lines.extend(
+                excerpt
+                    .lines
+                    .iter()
+                    .take(count)
+                    .map(|line| format!("  {}", clean_n(line, MAX_ITEM_CHARS + 30))),
+            );
+        }
+        lines
     }
 
     /// Fold search hits into the brief: one entry per (path, line) so
@@ -1023,7 +1116,188 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
             edit(state, |brief| brief.semantic = Some(hint));
         }
     }
+    answer_evidence(evidence, state, deadline);
     edit(state, |brief| brief.finished = true);
+}
+
+/// Whether the op budget and the window still allow an extra read. Unlike
+/// [`spend`] it counts nothing and marks nothing: the answer excerpt is an
+/// extra, its absence is not a gap in the evidence, and it is not an
+/// `ops answered` entry of the coverage line.
+fn has_budget(state: &Mutex<Brief>, deadline: Instant) -> bool {
+    edit(state, |brief| brief.ops < MAX_OPS) && Instant::now() < deadline
+}
+
+/// Cut the answer-sized evidence of a confident brief: the routed kind's own
+/// excerpt when its data is in, the generic one (signature, first doc line,
+/// the matched region of the best files) otherwise. Nothing for a strong
+/// prompt, a maybe, a partial packet or a rationale question.
+fn answer_evidence(evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Instant) {
+    if !answer::answer_enabled() {
+        return;
+    }
+    let brief = edit(state, |brief| brief.clone());
+    if brief.signal == Some(Signal::Strong)
+        || brief.tier() != Some(Tier::High)
+        || brief.gaps()
+        || brief.kind == Some(QuestionKind::Rationale)
+    {
+        return;
+    }
+    let own = match brief.kind {
+        Some(QuestionKind::Flow) => flow_excerpt(evidence, state, &brief, deadline),
+        Some(QuestionKind::Tests) => tests_excerpt(evidence, &brief, deadline),
+        Some(QuestionKind::Config) => {
+            let terms = brief.receipt.as_ref().map_or(&[][..], Receipt::terms);
+            let lines = answer::config_excerpt(&brief.files, terms);
+            (!lines.is_empty()).then(|| Excerpt {
+                label: "config".to_string(),
+                lines,
+            })
+        }
+        _ => None,
+    };
+    // The kind's own block leads and the generic excerpt of the best file
+    // follows it: the dropped-first block is the generic one.
+    let mut excerpts: Vec<Excerpt> = own.into_iter().collect();
+    let room = EXCERPT_FILES - excerpts.len();
+    excerpts.extend(generic_excerpts(evidence, &brief, room, deadline));
+    edit(state, |brief| brief.excerpts = excerpts);
+}
+
+/// The ordered call chain of a flow question, one hop per line with the
+/// site and first line of its definition. One extra lookup per name resolves them;
+/// a hop that does not resolve to exactly one definition is named bare.
+fn flow_excerpt(
+    evidence: &dyn Evidence,
+    state: &Mutex<Brief>,
+    brief: &Brief,
+    deadline: Instant,
+) -> Option<Excerpt> {
+    let names = answer::pick_hops(&brief.flow_hops);
+    if names.is_empty() || !has_budget(state, deadline) {
+        return None;
+    }
+    let hops: Vec<Hop> = names
+        .into_iter()
+        .map(|name| {
+            let site = evidence
+                .symbols(&name, deadline)
+                .ok()
+                .filter(|hits| hits.len() == 1)
+                .and_then(|hits| hits.into_iter().next())
+                .filter(|hit| !pixel_index::index::credential_path(Path::new(&hit.path)));
+            let head = site
+                .as_ref()
+                .and_then(|hit| evidence.line_at(&hit.path, hit.start_line, deadline).ok());
+            Hop {
+                name,
+                site: site.map(|hit| (hit.path, hit.start_line)),
+                head,
+            }
+        })
+        .collect();
+    let lines = answer::flow_excerpt(&hops);
+    if lines.is_empty() {
+        return None;
+    }
+    Some(Excerpt {
+        label: "flow".to_string(),
+        lines,
+    })
+}
+
+/// The tests of a tests question: each test function that mentions the
+/// target, with its first assertion, read from the test files the `uses`
+/// route found.
+fn tests_excerpt(evidence: &dyn Evidence, brief: &Brief, deadline: Instant) -> Option<Excerpt> {
+    let target = brief.defined.first()?.name.clone();
+    let mut lines: Vec<String> = Vec::new();
+    for path in brief.tests.iter().take(EXCERPT_FILES) {
+        if lines.len() >= answer::MAX_TESTS || pixel_index::index::credential_path(Path::new(path))
+        {
+            continue;
+        }
+        let Ok(source) = evidence.lines_at(path, 1, answer::TEST_FILE_LINES, deadline) else {
+            continue;
+        };
+        lines.extend(answer::tests_excerpt(
+            path,
+            &source,
+            &target,
+            answer::MAX_TESTS - lines.len(),
+        ));
+    }
+    (!lines.is_empty()).then(|| Excerpt {
+        label: "tests".to_string(),
+        lines,
+    })
+}
+
+/// Whether `path` is a test file by its name or its directory.
+fn is_test_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    path.split('/')
+        .any(|part| matches!(part, "tests" | "test" | "__tests__" | "e2e"))
+        || name.contains("_test.")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || name.starts_with("test_")
+        || name == "tests.rs"
+}
+
+/// The best-matching symbol of the top fused files: its signature, the
+/// first line of its doc comment and the matched region, one block per file.
+fn generic_excerpts(
+    evidence: &dyn Evidence,
+    brief: &Brief,
+    limit: usize,
+    deadline: Instant,
+) -> Vec<Excerpt> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut blocks: Vec<Excerpt> = Vec::new();
+    // The best files in fused order, test files after the rest: a test that
+    // quotes the question is a worse answer than the code it exercises.
+    let (tests, code): (Vec<&RichHit>, Vec<&RichHit>) =
+        brief.files.iter().partition(|hit| is_test_path(&hit.path));
+    for hit in code.into_iter().chain(tests).take(EXCERPT_TRIES) {
+        if blocks.len() >= limit {
+            break;
+        }
+        let packed = brief.def_body.is_some()
+            && brief
+                .defined
+                .first()
+                .is_some_and(|def| def.path == hit.path);
+        if seen.contains(&hit.path.as_str())
+            || packed
+            || pixel_index::index::credential_path(Path::new(&hit.path))
+        {
+            continue;
+        }
+        seen.push(&hit.path);
+        let matched = brief
+            .defined
+            .iter()
+            .find(|def| def.path == hit.path)
+            .map_or(hit.line, |def| def.start_line);
+        let (start, end) = answer::window_range(matched);
+        let Ok(window) = evidence.lines_at(&hit.path, start, end, deadline) else {
+            continue;
+        };
+        let lines = answer::lookup_excerpt(start, &window, matched);
+        if !lines.is_empty() {
+            blocks.push(Excerpt {
+                label: if matched == 0 {
+                    hit.path.clone()
+                } else {
+                    format!("{}:{matched}", hit.path)
+                },
+                lines,
+            });
+        }
+    }
+    blocks
 }
 
 /// The extra ops of the routed kind: each spends the shared deadline like
@@ -1113,6 +1387,7 @@ fn flow_evidence(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, dea
         Ok(Flow::Path { hops, notes }) => edit(state, |brief| {
             brief.answered += 1;
             brief.flow = Some(hops.join(" -> "));
+            brief.flow_hops.clone_from(&hops);
             brief.caps.extend(notes);
         }),
         Ok(Flow::Absent) => edit(state, |brief| {
@@ -1409,6 +1684,9 @@ pub(crate) fn declined_record(declined: Declined, prompt: &str) -> Record {
         ops: 0,
         answered: 0,
         bytes: 0,
+        receipt: false,
+        answer: false,
+        excerpt_bytes: 0,
         elapsed_ms: 0,
         route: None,
         daemon: None,
@@ -1487,7 +1765,10 @@ impl Pending {
             .done
             .recv_timeout(self.deadline.saturating_duration_since(Instant::now()));
         let brief = edit(&self.state, |brief| brief.clone());
-        let text = render(&brief);
+        let (text, stats) = match fit(&brief) {
+            Some((text, stats)) => (Some(text), stats),
+            None => (None, AnswerStats::default()),
+        };
         let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         // The daemon start has had the whole brief to launch; a hook about to
         // exit sees it through, for at most the hook bound.
@@ -1521,6 +1802,9 @@ impl Pending {
             ops: brief.ops,
             answered: brief.answered,
             bytes: text.as_ref().map_or(0, String::len),
+            receipt: stats.receipt,
+            answer: stats.answer,
+            excerpt_bytes: stats.excerpt_bytes,
             elapsed_ms,
             route: brief.route,
             daemon,
@@ -1938,6 +2222,16 @@ fn fold(state: &Mutex<Brief>, plan: &Plan, got: &Gathered) {
             .as_ref()
             .and_then(relevance::Verdict::confidence_line);
         brief.absorb(fused, admit_json);
+        brief.receipt = match &got.relevance {
+            Some(Ok(answer)) => {
+                let chunks = match &got.meaning {
+                    Some(Ok(leads)) => Some(leads.len()),
+                    _ => None,
+                };
+                Receipt::new(&answer.input, chunks)
+            }
+            _ => None,
+        };
     });
 }
 
@@ -1994,12 +2288,18 @@ struct Shown {
     excluded: usize,
     caps: usize,
     unresolved: usize,
+    /// Lines of each excerpt block (at most [`EXCERPT_FILES`] blocks).
+    excerpt: [usize; EXCERPT_FILES],
 }
 
 impl Shown {
     fn of(brief: &Brief) -> Self {
         Self {
-            files: brief.files.len().min(MAX_FILES),
+            files: brief.files.len().min(if brief.has_excerpts() {
+                ANSWER_FILES
+            } else {
+                MAX_FILES
+            }),
             defined: brief.defined.len().min(MAX_DEFINED),
             callers: brief.callers.len().min(MAX_CALLERS),
             tests: brief.tests.len().min(MAX_FILES),
@@ -2009,13 +2309,20 @@ impl Shown {
             excluded: brief.excluded.len(),
             caps: brief.caps.len(),
             unresolved: brief.unresolved.len(),
+            excerpt: brief.excerpt_counts(),
         }
     }
 
-    /// Drop one entry from the longest list (the earlier of equals in the
+    /// Drop one excerpt line, else one entry from the longest list (the earlier of equals in the
     /// order excluded, files, tests, targets, skeleton, history, callers,
     /// defined, caps, unresolved); `false` when every list is already empty.
     fn shrink(&mut self) -> bool {
+        // The excerpts give way first, the second file's before the first's;
+        // the receipt never does.
+        if let Some(slot) = self.excerpt.iter_mut().rev().find(|slot| **slot > 0) {
+            *slot -= 1;
+            return true;
+        }
         let widest = [
             self.excluded,
             self.files,
@@ -2058,20 +2365,44 @@ impl Shown {
 /// The block, at most [`byte_cap`] bytes, or `None` when nothing answered or
 /// the gate refused the prompt. A list that does not fit loses entries and
 /// says how many.
+#[cfg(test)]
 pub(crate) fn render(brief: &Brief) -> Option<String> {
+    fit(brief).map(|(text, _)| text)
+}
+
+/// What a rendered brief carried of the answer evidence, for the decision log.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AnswerStats {
+    /// The search receipt is in the block.
+    pub(crate) receipt: bool,
+    /// At least one excerpt line is in the block.
+    pub(crate) answer: bool,
+    /// Bytes of the excerpt lines (and their headers) in the block.
+    pub(crate) excerpt_bytes: usize,
+}
+
+/// [`render`], with the answer evidence it kept.
+pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
     if brief.silenced || brief.answered == 0 {
         return None;
     }
     if brief.tier() == Some(Tier::Low) {
-        return render_low(brief);
+        return render_low(brief).map(|text| (text, AnswerStats::default()));
     }
-    let cap = byte_cap(brief.signal);
+    let receipt = !brief.receipt_lines().is_empty();
+    let cap = byte_cap(brief.signal, receipt || brief.has_excerpts());
     let mut shown = Shown::of(brief);
     let mut text = render_with(brief, shown);
     while text.len() > cap && shown.shrink() {
         text = render_with(brief, shown);
     }
-    Some(text)
+    let excerpt = brief.excerpt_block(shown);
+    let stats = AnswerStats {
+        receipt,
+        answer: !excerpt.is_empty(),
+        excerpt_bytes: excerpt.iter().map(|line| line.len() + 1).sum(),
+    };
+    Some((text, stats))
 }
 
 /// One entry of a `files:` line: `path:line`, and the matched text after a
@@ -2120,12 +2451,14 @@ fn render_low(brief: &Brief) -> Option<String> {
     Some(text)
 }
 
-/// The size cap of a brief started by `signal`.
-fn byte_cap(signal: Option<Signal>) -> usize {
-    if signal == Some(Signal::Prose) {
-        PROSE_BRIEF_BYTES
-    } else {
-        BRIEF_BYTES
+/// The size cap of a brief started by `signal`; `answer`: it carries a
+/// receipt or excerpts, which raises the cap of a plain-language prompt and
+/// of a weak one.
+fn byte_cap(signal: Option<Signal>, answer: bool) -> usize {
+    match (signal, answer) {
+        (Some(Signal::Prose | Signal::Weak), true) => PROSE_BRIEF_BYTES,
+        (Some(Signal::Prose), false) => PLAIN_PROSE_BRIEF_BYTES,
+        _ => BRIEF_BYTES,
     }
 }
 
@@ -2141,6 +2474,7 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
         let anchors: Vec<String> = brief.anchors.iter().map(|a| clean(a)).collect();
         lines.push(format!("anchors: {}", anchors.join(", ")));
     }
+    lines.extend(brief.receipt_lines());
     if let Some(line) = list_line(
         "defined",
         brief.defined.iter().enumerate().map(|(index, hit)| {
@@ -2217,6 +2551,7 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
     if let Some(confidence) = &brief.confidence {
         lines.push(confidence.clone());
     }
+    lines.extend(brief.excerpt_block(shown));
     if let Some(line) = list_line(
         "callers (impact d1)",
         brief.callers.iter().map(|hit| {
@@ -2302,7 +2637,7 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
     ));
     // A brief that was cut, timed out, or left gaps is a partial packet:
     // it names its own next step instead of the whole-confidence footer.
-    if brief.cut || !brief.finished || !brief.unresolved.is_empty() {
+    if brief.partial() {
         lines.push("packet partial — open cited regions or run the named op".to_string());
         if let Some(next) = &brief.next {
             lines.push(format!("next: {}", clean_n(next, DEF_BODY_CHARS)));
@@ -2712,6 +3047,8 @@ mod tests {
         /// Source line a `line_at` read answers with, when the fake models
         /// source at all.
         source: Option<String>,
+        /// Files a `lines_at` read answers from, by path.
+        sources: Vec<(String, Vec<String>)>,
         pause: Duration,
         log: Arc<Mutex<Vec<String>>>,
     }
@@ -2737,6 +3074,7 @@ mod tests {
                 meaning_pause: Duration::ZERO,
                 semantic: None,
                 source: None,
+                sources: Vec::new(),
                 pause: Duration::ZERO,
                 log: Arc::new(Mutex::new(Vec::new())),
             }
@@ -2840,6 +3178,26 @@ mod tests {
         fn line_at(&self, path: &str, line: u64, _: Instant) -> Result<String, String> {
             self.note(format!("line_at {path}:{line}"));
             self.source.clone().ok_or_else(|| "no source".to_string())
+        }
+        fn lines_at(
+            &self,
+            path: &str,
+            start: u64,
+            end: u64,
+            _: Instant,
+        ) -> Result<Vec<String>, String> {
+            self.note(format!("lines_at {path}:{start}-{end}"));
+            let (_, all) = self
+                .sources
+                .iter()
+                .find(|(name, _)| name == path)
+                .ok_or_else(|| "no source".to_string())?;
+            Ok(all
+                .iter()
+                .skip(usize::try_from(start.saturating_sub(1)).unwrap_or(0))
+                .take(usize::try_from(end + 1 - start).unwrap_or(0))
+                .cloned()
+                .collect())
         }
     }
 
@@ -3895,6 +4253,7 @@ mod tests {
             excluded: 1,
             caps: 1,
             unresolved: 1,
+            excerpt: [0, 0],
         };
         let counts = |shown: &Shown| {
             [
@@ -3935,6 +4294,7 @@ mod tests {
             excluded: 0,
             caps: 0,
             unresolved: 3,
+            excerpt: [0, 0],
         };
         assert!(uneven.shrink());
         assert_eq!((uneven.files, uneven.callers, uneven.unresolved), (2, 4, 3));
@@ -4287,6 +4647,8 @@ mod tests {
                 [
                     "[PIXEL:BRIEF]",
                     "kind: lookup",
+                    "searched: content+symbols+paths for daemon, changes, startup (3 terms, 1000 files) · meaning search returned 2 chunks",
+                    "result: the matches below are the best across both searches; answer from them if they suffice, search further only if they don't",
                     "files: crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready() {; crates/pixel-daemon/src/api.rs:40 — fn op_status; docs/notes.md:12 — daemon startup notes",
                     HIGH_CONFIDENCE,
                     "coverage: 2/2 ops answered",
@@ -4823,11 +5185,17 @@ mod tests {
 
     #[test]
     fn byte_cap_should_give_a_prose_brief_its_own_bound() {
-        assert_eq!(byte_cap(Some(Signal::Prose)), PROSE_BRIEF_BYTES);
-        assert_eq!(byte_cap(Some(Signal::Strong)), BRIEF_BYTES);
-        assert_eq!(byte_cap(Some(Signal::Weak)), BRIEF_BYTES);
-        assert_eq!(byte_cap(None), BRIEF_BYTES);
-        assert_eq!(PROSE_BRIEF_BYTES, 2048);
+        assert_eq!(
+            byte_cap(Some(Signal::Prose), false),
+            PLAIN_PROSE_BRIEF_BYTES
+        );
+        assert_eq!(byte_cap(Some(Signal::Prose), true), PROSE_BRIEF_BYTES);
+        assert_eq!(byte_cap(Some(Signal::Weak), true), PROSE_BRIEF_BYTES);
+        assert_eq!(byte_cap(Some(Signal::Strong), true), BRIEF_BYTES);
+        assert_eq!(byte_cap(Some(Signal::Strong), false), BRIEF_BYTES);
+        assert_eq!(byte_cap(Some(Signal::Weak), false), BRIEF_BYTES);
+        assert_eq!(byte_cap(None, false), BRIEF_BYTES);
+        assert_eq!(PLAIN_PROSE_BRIEF_BYTES, 2048);
     }
 
     #[test]
@@ -4844,7 +5212,7 @@ mod tests {
             })
             .collect();
         let text = render(&brief).unwrap();
-        assert!(text.len() <= PROSE_BRIEF_BYTES, "{}", text.len());
+        assert!(text.len() <= PLAIN_PROSE_BRIEF_BYTES, "{}", text.len());
         assert!(text.contains("(+"), "{text}");
     }
 
@@ -5618,5 +5986,472 @@ mod tests {
         assert_eq!(finished.record.daemon, None, "no starter was given");
         let declined = declined_record(Declined::NotAboutCode, "hello there");
         assert_eq!((declined.route, declined.daemon), (None, None));
+    }
+
+    /// A daemon source file the fake can be asked for lines of.
+    fn daemon_source() -> Vec<String> {
+        let mut lines: Vec<String> = (1..=278)
+            .map(|n| format!("let filler_{n} = {n};"))
+            .collect();
+        lines.extend(
+            [
+                "/// Wait until the daemon answers its socket.",
+                "pub fn watch_ready(root: &Path) -> bool {",
+                "    let mut waited = 0;",
+                "    while waited < READY_TRIES {",
+                "        waited += 1;",
+                "    }",
+                "    waited < READY_TRIES",
+                "}",
+            ]
+            .map(String::from),
+        );
+        lines
+    }
+
+    /// A weakly code-shaped prompt the high-tier model accepts, with the
+    /// relevance probe, a meaning search and the daemon source answering.
+    fn confident_fake() -> Fake {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![lead(DAEMON, 280, "pub fn watch_ready")]);
+        fake.sources = vec![(DAEMON.to_string(), daemon_source())];
+        fake
+    }
+
+    const WEAK: &str = "how does the daemon handle changes made during startup";
+
+    #[test]
+    fn the_receipt_should_state_the_searches_that_ran_with_their_counts() {
+        let finished = briefed(WEAK, confident_fake(), no_verdict);
+        let text = finished.text.unwrap();
+        assert!(
+            text.contains(
+                "searched: content+symbols+paths for daemon, changes, startup (3 terms, 1000 files) · meaning search returned 1 chunks\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("result: the matches below are the best across both searches;"),
+            "{text}"
+        );
+        assert!(finished.record.receipt);
+    }
+
+    #[test]
+    fn the_receipt_should_never_name_a_meaning_search_that_did_not_answer() {
+        let mut fake = confident_fake();
+        fake.meaning = Err("cold".into());
+        let finished = briefed(WEAK, fake, no_verdict);
+        let text = finished.text.unwrap();
+        assert!(
+            text.contains("searched: content+symbols+paths for"),
+            "{text}"
+        );
+        assert!(!text.contains("meaning search"), "{text}");
+        assert!(text.contains("across the search;"), "{text}");
+    }
+
+    #[test]
+    fn a_brief_without_a_relevance_answer_should_carry_no_receipt() {
+        let mut fake = confident_fake();
+        fake.relevance = Err("cold".into());
+        let finished = briefed(WEAK, fake, no_verdict);
+        let text = finished.text.unwrap_or_default();
+        assert!(!text.contains("searched:"), "{text}");
+        assert!(!finished.record.receipt);
+    }
+
+    #[test]
+    fn a_low_tier_brief_should_carry_neither_receipt_nor_excerpt() {
+        let finished = briefed_with(WEAK, confident_fake(), no_verdict, model_low);
+        let text = finished.text.unwrap();
+        assert!(
+            !text.contains("searched:") && !text.contains("\nanswer "),
+            "{text}"
+        );
+        assert!(!finished.record.receipt && !finished.record.answer);
+    }
+
+    #[test]
+    fn a_strong_prompt_should_carry_neither_receipt_nor_excerpt() {
+        let mut fake = confident_fake();
+        fake.symbols = Ok(vec![symbol(DAEMON, "watch_ready")]);
+        let finished = briefed("what does `watch_ready` do", fake, no_verdict);
+        let text = finished.text.unwrap();
+        assert!(
+            !text.contains("searched:") && !text.contains("\nanswer "),
+            "{text}"
+        );
+        assert!(text.len() <= BRIEF_BYTES);
+    }
+
+    #[test]
+    fn the_excerpt_should_hold_the_signature_the_doc_line_and_the_body_within_the_cap() {
+        let finished = briefed(WEAK, confident_fake(), no_verdict);
+        let text = finished.text.unwrap();
+        assert!(
+            text.contains("\nanswer crates/pixel-daemon/src/daemon.rs:280:\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  279| /// Wait until the daemon answers its socket."),
+            "{text}"
+        );
+        assert!(
+            text.contains("  280| pub fn watch_ready(root: &Path) -> bool {"),
+            "{text}"
+        );
+        assert!(text.contains("  281|     let mut waited = 0;"), "{text}");
+        assert!(text.len() <= PROSE_BRIEF_BYTES, "{} bytes", text.len());
+        assert!(finished.record.answer);
+        assert!(
+            (1..=text.len()).contains(&finished.record.excerpt_bytes),
+            "{}",
+            finished.record.excerpt_bytes
+        );
+        assert_eq!(finished.record.bytes, text.len());
+    }
+
+    #[test]
+    fn a_source_that_cannot_be_read_should_leave_the_brief_without_an_excerpt() {
+        let mut fake = confident_fake();
+        fake.sources.clear();
+        let finished = briefed(WEAK, fake, no_verdict);
+        let text = finished.text.unwrap();
+        assert!(!text.contains("\nanswer "), "{text}");
+        assert!(text.contains("searched:"), "{text}");
+        assert!(!finished.record.answer);
+        assert_eq!(finished.record.excerpt_bytes, 0);
+    }
+
+    #[test]
+    fn a_credential_shaped_file_should_never_be_excerpted() {
+        let mut fake = confident_fake();
+        fake.relevance = Ok(RelevanceAnswer {
+            lines: vec![rhit("deploy/.env", 2, "TOKEN=x")],
+            ..on_topic_answer()
+        });
+        fake.meaning = Ok(Vec::new());
+        fake.sources = vec![(
+            "deploy/.env".to_string(),
+            vec!["TOKEN=x".into(), "B=2".into()],
+        )];
+        let finished = briefed(WEAK, fake, no_verdict);
+        let text = finished.text.unwrap_or_default();
+        assert!(
+            !text.contains("\nanswer ") && !text.contains("TOKEN"),
+            "{text}"
+        );
+    }
+
+    /// [`answer_evidence`] on `brief` against `fake`.
+    fn answered(brief: Brief, fake: &Fake) -> Brief {
+        let state = Mutex::new(brief);
+        answer_evidence(fake, &state, Instant::now() + SECOND);
+        state.into_inner().unwrap()
+    }
+
+    #[test]
+    fn a_flow_brief_should_list_the_hops_with_their_sites() {
+        let mut fake = Fake::new();
+        fake.symbols = Ok(vec![symbol("src/a.rs", "render_page")]);
+        fake.source = Some("pub fn render_page() {".into());
+        let mut brief = high_brief();
+        brief.kind = Some(QuestionKind::Flow);
+        brief.flow_hops = vec![
+            "render_page".into(),
+            "middleware".into(),
+            "send_response".into(),
+        ];
+        let brief = answered(brief, &fake);
+        assert_eq!(brief.excerpts.len(), 1);
+        assert_eq!(brief.excerpts[0].label, "flow");
+        assert_eq!(
+            brief.excerpts[0].lines[0],
+            "src/a.rs:3 render_page — pub fn render_page() {"
+        );
+        assert_eq!(brief.excerpts[0].lines.len(), 3);
+        // The extra lookups are outside the coverage count.
+        assert_eq!((brief.ops, brief.answered), (3, 3));
+    }
+
+    #[test]
+    fn a_flow_brief_whose_hops_do_not_resolve_should_fall_back_to_the_generic_excerpt() {
+        let mut fake = Fake::new();
+        fake.symbols = Ok(Vec::new());
+        fake.sources = vec![(DAEMON.to_string(), daemon_source())];
+        let mut brief = high_brief();
+        brief.kind = Some(QuestionKind::Flow);
+        brief.flow_hops = vec!["a".into(), "b".into()];
+        brief.files = vec![rhit(DAEMON, 280, "pub fn watch_ready")];
+        let brief = answered(brief, &fake);
+        assert_eq!(brief.excerpts.len(), 1);
+        assert_eq!(brief.excerpts[0].label, format!("{DAEMON}:280"));
+    }
+
+    #[test]
+    fn a_tests_brief_should_name_the_tests_with_their_first_assert() {
+        let mut fake = Fake::new();
+        fake.sources = vec![(
+            "tests/ready.rs".to_string(),
+            [
+                "#[test]",
+                "fn ready_after_startup() {",
+                "    let up = watch_ready(root);",
+                "    assert!(up);",
+                "}",
+            ]
+            .map(String::from)
+            .to_vec(),
+        )];
+        let mut brief = high_brief();
+        brief.kind = Some(QuestionKind::Tests);
+        brief.defined = vec![symbol("src/a.rs", "watch_ready")];
+        brief.tests = vec!["tests/ready.rs".into()];
+        let brief = answered(brief, &fake);
+        assert_eq!(brief.excerpts.len(), 1);
+        assert_eq!(brief.excerpts[0].label, "tests");
+        assert_eq!(
+            brief.excerpts[0].lines,
+            ["tests/ready.rs:2 ready_after_startup — assert!(up);"]
+        );
+    }
+
+    #[test]
+    fn a_config_brief_should_show_the_setting_line_with_its_default_and_where_it_is_read() {
+        let mut fake = Fake::new();
+        fake.sources = vec![(
+            "src/cfg.rs".to_string(),
+            vec![
+                "/// Tries before the daemon is called late.".into(),
+                "pub const READY_TRIES: u32 = 40;".into(),
+            ],
+        )];
+        let mut brief = high_brief();
+        brief.kind = Some(QuestionKind::Config);
+        brief.receipt = Receipt::new(
+            &RelevanceInput {
+                keywords: vec![keyword("tries", 2.0)],
+                ..on_topic_answer().input
+            },
+            None,
+        );
+        brief.files = vec![
+            rhit("src/cfg.rs", 2, "pub const READY_TRIES: u32 = 40;"),
+            rhit("src/run.rs", 9, "let n = std::env::var(READY_TRIES).ok();"),
+            rhit("src/other.rs", 1, "pub const UNRELATED_LIMIT: u32 = 1;"),
+        ];
+        let brief = answered(brief, &fake);
+        assert_eq!(brief.excerpts.len(), 2);
+        assert_eq!(brief.excerpts[0].label, "config");
+        assert_eq!(
+            brief.excerpts[0].lines,
+            [
+                "src/cfg.rs:2 — pub const READY_TRIES: u32 = 40;",
+                "src/run.rs:9 — let n = std::env::var(READY_TRIES).ok();"
+            ]
+        );
+        // The generic excerpt of the best file follows the kind's block.
+        assert_eq!(brief.excerpts[1].label, "src/cfg.rs:2");
+        assert_eq!(
+            brief.excerpts[1].lines[0],
+            "1| /// Tries before the daemon is called late."
+        );
+    }
+
+    #[test]
+    fn answer_evidence_should_skip_a_rationale_a_maybe_a_strong_prompt_and_a_gap() {
+        let mut fake = Fake::new();
+        fake.sources = vec![(DAEMON.to_string(), daemon_source())];
+        let ready = || {
+            let mut brief = high_brief();
+            brief.files = vec![rhit(DAEMON, 280, "pub fn watch_ready")];
+            brief.excerpts.clear();
+            brief
+        };
+        assert_eq!(answered(ready(), &fake).excerpts.len(), 1);
+        let mut rationale = ready();
+        rationale.kind = Some(QuestionKind::Rationale);
+        let mut strong = ready();
+        strong.signal = Some(Signal::Strong);
+        let mut gap = ready();
+        gap.unresolved = vec!["x".into()];
+        let mut cut = ready();
+        cut.cut = true;
+        let mut low = ready();
+        low.relevance = low.relevance.map(|verdict| relevance::Verdict {
+            tier: Tier::Low,
+            ..verdict
+        });
+        for (name, brief) in [
+            ("rationale", rationale),
+            ("strong", strong),
+            ("gap", gap),
+            ("cut", cut),
+            ("low", low),
+        ] {
+            assert!(answered(brief, &fake).excerpts.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_generic_excerpt_should_prefer_code_over_tests_that_quote_the_question() {
+        for test in [
+            "tests/a.rs",
+            "src/a_test.rs",
+            "web/a.test.ts",
+            "src/tests.rs",
+            "test_a.py",
+        ] {
+            assert!(is_test_path(test), "{test}");
+        }
+        for code in ["src/a.rs", "src/latest.rs", "docs/contest.md"] {
+            assert!(!is_test_path(code), "{code}");
+        }
+        let mut fake = Fake::new();
+        fake.sources = vec![
+            ("tests/a.rs".to_string(), vec!["fn quoted() {}".into()]),
+            ("src/b.rs".to_string(), vec!["fn b() {}".into()]),
+            ("src/c.rs".to_string(), vec!["fn c() {}".into()]),
+        ];
+        let mut brief = high_brief();
+        brief.files = vec![
+            rhit("tests/a.rs", 1, "x"),
+            rhit("src/b.rs", 1, "x"),
+            rhit("src/c.rs", 1, "x"),
+        ];
+        let labels: Vec<String> = answered(brief, &fake)
+            .excerpts
+            .into_iter()
+            .map(|e| e.label)
+            .collect();
+        assert_eq!(labels, ["src/b.rs:1", "src/c.rs:1"]);
+    }
+
+    #[test]
+    fn the_generic_excerpt_should_cover_two_distinct_files_and_skip_the_packed_definition() {
+        let mut fake = Fake::new();
+        fake.sources = vec![
+            (DAEMON.to_string(), daemon_source()),
+            (
+                "b.rs".to_string(),
+                vec!["fn b() {".into(), "    go();".into(), "}".into()],
+            ),
+            ("c.rs".to_string(), vec!["fn c() {}".into()]),
+        ];
+        let mut brief = high_brief();
+        brief.files = vec![
+            rhit(DAEMON, 280, "x"),
+            rhit(DAEMON, 281, "x"),
+            rhit("b.rs", 1, "x"),
+            rhit("c.rs", 1, "x"),
+        ];
+        let kept = answered(brief.clone(), &fake);
+        let labels: Vec<&str> = kept.excerpts.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, [format!("{DAEMON}:280").as_str(), "b.rs:1"]);
+        brief.defined = vec![symbol(DAEMON, "watch_ready")];
+        brief.def_body = Some("fn watch_ready() {}".into());
+        let packed = answered(brief, &fake);
+        let labels: Vec<&str> = packed.excerpts.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, ["b.rs:1", "c.rs:1"]);
+    }
+
+    #[test]
+    fn a_rationale_brief_should_carry_the_receipt_and_no_excerpt() {
+        let mut fake = confident_fake();
+        fake.status = Ok(StatusProbe {
+            facts_fresh: Some(true),
+        });
+        fake.history = Ok((vec![history("abc1234", "retry on startup")], Vec::new()));
+        let finished = briefed("why does the daemon retry during startup", fake, no_verdict);
+        let text = finished.text.unwrap();
+        assert!(text.contains("searched:"), "{text}");
+        assert!(!text.contains("\nanswer "), "{text}");
+    }
+
+    fn high_brief() -> Brief {
+        let hit = rhit("src/a.rs", 3, "fn a");
+        let model = verdict_in(
+            Tier::High,
+            &GateInput {
+                relevance: &on_topic_answer().input,
+                typed: "t",
+            },
+        );
+        Brief {
+            signal: Some(Signal::Prose),
+            relevance: Some(model),
+            receipt: Receipt::new(&on_topic_answer().input, Some(2)),
+            files: vec![hit.clone(); 6],
+            excerpts: (0..2)
+                .map(|n| Excerpt {
+                    label: format!("src/f{n}.rs:3"),
+                    lines: (0..10)
+                        .map(|line| format!("{line}| {}", "x".repeat(105)))
+                        .collect(),
+                })
+                .collect(),
+            ops: 3,
+            answered: 3,
+            finished: true,
+            ..Brief::default()
+        }
+    }
+
+    #[test]
+    fn an_oversized_brief_should_drop_the_second_excerpt_first_and_keep_the_receipt() {
+        let mut brief = high_brief();
+        brief.caps = vec!["c".repeat(110); 10];
+        let (text, stats) = fit(&brief).unwrap();
+        assert!(text.len() <= PROSE_BRIEF_BYTES, "{}", text.len());
+        assert!(
+            text.contains("searched:") && text.contains("result:"),
+            "{text}"
+        );
+        assert!(stats.receipt && stats.answer, "{stats:?}");
+        let count = |label: &str| {
+            text.lines()
+                .skip_while(|line| !line.starts_with(&format!("answer {label}")))
+                .skip(1)
+                .take_while(|line| line.starts_with("  "))
+                .count()
+        };
+        let (first, second) = (count("src/f0.rs:3"), count("src/f1.rs:3"));
+        // Whatever had to go went from the second block before the first.
+        assert!(second < 10, "{text}");
+        assert!(second == 0 || first == 10, "{text}");
+    }
+
+    #[test]
+    fn a_tight_cap_should_empty_the_excerpts_before_it_touches_the_receipt() {
+        let mut brief = high_brief();
+        brief.files = (0..4)
+            .map(|n| rhit(&format!("crates/long/{n}.rs"), 1, &"t".repeat(110)))
+            .collect();
+        brief.def_body = Some("b".repeat(480));
+        brief.defined = vec![symbol("src/handle.ts", "handle")];
+        brief.callers = (0..10)
+            .map(|n| caller("p.rs", &format!("via{n}"), n))
+            .collect();
+        let (text, stats) = fit(&brief).unwrap();
+        assert!(stats.receipt, "{text}");
+        assert!(text.contains("result: the matches below"), "{text}");
+        if !stats.answer {
+            assert_eq!(stats.excerpt_bytes, 0);
+            assert!(!text.contains("\nanswer "), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_partial_packet_should_carry_no_receipt_and_no_excerpt() {
+        let mut brief = high_brief();
+        brief.unresolved = vec!["search x: out of time".into()];
+        let (text, stats) = fit(&brief).unwrap();
+        assert!(
+            !text.contains("searched:") && !text.contains("\nanswer "),
+            "{text}"
+        );
+        assert_eq!(stats, AnswerStats::default());
     }
 }
