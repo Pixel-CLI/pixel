@@ -36,18 +36,20 @@ use serde_json::{Value, json};
 
 use crate::api::{ContentProbes, probe_cap, probe_content};
 
+mod common;
+
 /// Synonym probes `relevance` may spend on the keywords the repository does
 /// not contain as typed. The task's own keywords are always probed.
 pub const RELEVANCE_EXPANSION_PROBES: usize = 6;
 
 /// Co-files listed by weight: enough to start from, few enough to read at a
 /// glance.
-const COFILE_BY_WEIGHT: usize = 5;
+const COFILE_BY_WEIGHT: usize = 8;
 
 /// Structural co-files listed whatever their weight, so a file the prompt
 /// names by path or symbol is not crowded out by prose that merely repeats
 /// its words.
-const COFILE_STRUCTURAL: usize = 3;
+const COFILE_STRUCTURAL: usize = 4;
 
 /// The most one keyword weighs. A word in a handful of files is as telling as
 /// a word in one, and a cap keeps a typo from outweighing three real words.
@@ -76,16 +78,17 @@ pub fn is_ubiquitous(df: usize, files_considered: usize) -> bool {
     df.saturating_mul(UBIQUITOUS_INVERSE_SHARE) > files_considered
 }
 
-/// How much a keyword says about the repository: its inverse document
-/// frequency `ln((n + 1) / (df + 1))`, at most [`IDF_CAP`].
+/// How much a keyword found in `df` of `files_considered` files says about the
+/// repository: its inverse document frequency `ln((n + 1) / (df + 1))`, at
+/// most [`IDF_CAP`].
 ///
-/// 0 for a keyword that is [`is_ubiquitous`] or whose content probe
-/// `truncated` (its `df` is then a prefix count, a lower bound: it may be in
-/// most files). A keyword found in no file (`df` 0) weighs [`IDF_CAP`]: the
-/// repository lacks the word, which a small repository's formula would
-/// understate.
-pub fn keyword_weight(df: usize, files_considered: usize, truncated: bool) -> f64 {
-    if truncated || is_ubiquitous(df, files_considered) {
+/// 0 for a keyword that is [`is_ubiquitous`]. A keyword found in no file
+/// (`df` 0) weighs [`IDF_CAP`]: the repository lacks the word, which a small
+/// repository's formula would understate. When the content probe truncated,
+/// `df` is a lower bound (see [`keyword_df`]) and the weight an upper bound;
+/// a truncated word is still ubiquitous only when even that bound is.
+pub fn keyword_weight(df: usize, files_considered: usize) -> f64 {
+    if is_ubiquitous(df, files_considered) {
         return 0.0;
     }
     if df == 0 {
@@ -97,16 +100,20 @@ pub fn keyword_weight(df: usize, files_considered: usize, truncated: bool) -> f6
 
 /// The files a keyword is found in: its largest channel count. The channels
 /// overlap and only the counts reach a reader, so this is a lower bound of
-/// the union.
+/// the union, and of the truth when the content probe `truncated`.
 pub fn keyword_df(row: &KeywordEvidence) -> usize {
     row.content_files
         .max(row.symbol_files)
         .max(row.filename_files)
 }
 
-/// The weight of a keyword row in a repository of `files_considered` files.
+/// The weight of a keyword row in a repository of `files_considered` files:
+/// 0 for a [`common`](KeywordEvidence::common) word, whatever its counts.
 pub fn row_weight(row: &KeywordEvidence, files_considered: usize) -> f64 {
-    keyword_weight(keyword_df(row), files_considered, row.truncated)
+    if row.common {
+        return 0.0;
+    }
+    keyword_weight(keyword_df(row), files_considered)
 }
 
 /// `weight` kept to [`WEIGHT_SCALE`]'s decimals.
@@ -325,7 +332,14 @@ struct Standing<'a> {
 #[derive(Debug, Default)]
 struct FileMatch {
     keywords: Vec<usize>,
-    structural: bool,
+    /// The keywords of positive weight that matched its name or a symbol.
+    structural: Vec<usize>,
+}
+
+impl FileMatch {
+    fn is_structural(&self) -> bool {
+        !self.structural.is_empty()
+    }
 }
 
 /// A file that matched, with the weight of what it matched.
@@ -339,7 +353,7 @@ struct Candidate<'a> {
 fn rank_order(a: &Candidate, b: &Candidate) -> Ordering {
     b.weight
         .total_cmp(&a.weight)
-        .then_with(|| b.file.structural.cmp(&a.file.structural))
+        .then_with(|| b.file.is_structural().cmp(&a.file.is_structural()))
         .then_with(|| a.path.cmp(b.path))
 }
 
@@ -350,29 +364,20 @@ fn keywords_cap(kept: usize) -> String {
     format!("task keywords truncated at {kept}; later task words contributed no signal")
 }
 
-/// The relevance block for `query` from the probes already run.
-///
-/// Per keyword: the files its content probe matched, the files defining a
-/// symbol whose name has the word, the files with the word in a path. A
-/// keyword with no match in any channel takes the counts of its first
-/// *probed* thesaurus synonym that has one, and says which in
-/// `via_expansion`. A co-file's weight is the sum of [`row_weight`] over the
-/// keywords it matches, so a rare word counts and a ubiquitous or truncated
-/// one does not; a file whose keywords all weigh nothing is dropped. The
-/// co-files returned are the [`COFILE_BY_WEIGHT`] heaviest and the
-/// [`COFILE_STRUCTURAL`] heaviest structural ones, heaviest first, structural
-/// before prose on a tie, then by path.
-///
-/// `symbol_hits` is `None` when no graph answered. A file with more matching
-/// symbols than the graph scan keeps (five) can lose a keyword that only its
-/// later symbols carry; the keyword's content and filename counts still see
-/// the file.
-pub(crate) fn relevance_from(
-    query: &TaskQuery,
-    probes: &ContentProbes,
-    symbol_hits: Option<&[SymbolHit]>,
-    all_paths: &[String],
-) -> Relevance {
+/// Where each task keyword stands: the form (itself or a synonym) whose
+/// channels stand for it, and the evidence row built from them.
+struct Stage<'a> {
+    keywords: Vec<&'a str>,
+    standings: Vec<Standing<'a>>,
+    rows: Vec<KeywordEvidence>,
+}
+
+fn stage<'a>(
+    query: &'a TaskQuery,
+    probes: &'a ContentProbes,
+    symbol_hits: Option<&'a [SymbolHit]>,
+    all_paths: &'a [String],
+) -> Stage<'a> {
     let keywords: Vec<&str> = query.keywords.iter().map(String::as_str).collect();
     let synonyms: Vec<Vec<&str>> = keywords
         .iter()
@@ -426,9 +431,45 @@ pub(crate) fn relevance_from(
             symbol_files: standing.channels.symbol.len(),
             filename_files: standing.channels.filename.len(),
             via_expansion: (standing.form != keyword).then(|| standing.form.to_owned()),
+            common: common::is_common(keyword),
         })
         .collect();
 
+    Stage {
+        keywords,
+        standings,
+        rows,
+    }
+}
+
+/// The relevance block for `query` from the probes already run.
+///
+/// Per keyword: the files its content probe matched, the files defining a
+/// symbol whose name has the word, the files with the word in a path. A
+/// keyword with no match in any channel takes the counts of its first
+/// *probed* thesaurus synonym that has one, and says which in
+/// `via_expansion`. A co-file's weight is the sum of [`row_weight`] over the
+/// keywords it matches, so a rare word counts and a ubiquitous or general one
+/// does not; a file whose keywords all weigh nothing is dropped. The
+/// co-files returned are the [`COFILE_BY_WEIGHT`] heaviest and the
+/// [`COFILE_STRUCTURAL`] heaviest structural ones, heaviest first, structural
+/// before prose on a tie, then by path.
+///
+/// `symbol_hits` is `None` when no graph answered. A file with more matching
+/// symbols than the graph scan keeps (five) can lose a keyword that only its
+/// later symbols carry; the keyword's content and filename counts still see
+/// the file.
+pub(crate) fn relevance_from(
+    query: &TaskQuery,
+    probes: &ContentProbes,
+    symbol_hits: Option<&[SymbolHit]>,
+    all_paths: &[String],
+) -> Relevance {
+    let Stage {
+        keywords,
+        standings,
+        rows,
+    } = stage(query, probes, symbol_hits, all_paths);
     let weights: Vec<f64> = rows
         .iter()
         .map(|row| row_weight(row, all_paths.len()))
@@ -450,7 +491,9 @@ pub(crate) fn relevance_from(
                 if file.keywords.last() != Some(&at) {
                     file.keywords.push(at);
                 }
-                file.structural |= structural;
+                if structural && file.structural.last() != Some(&at) {
+                    file.structural.push(at);
+                }
             }
         }
     }
@@ -468,11 +511,12 @@ pub(crate) fn relevance_from(
     let mut listed: Vec<Candidate> = Vec::new();
     let mut structural_seen = 0;
     for (at, candidate) in candidates.into_iter().enumerate() {
-        if candidate.file.structural {
+        if candidate.file.is_structural() {
             structural_seen += 1;
         }
         let by_weight = at < COFILE_BY_WEIGHT;
-        let best_structural = candidate.file.structural && structural_seen <= COFILE_STRUCTURAL;
+        let best_structural =
+            candidate.file.is_structural() && structural_seen <= COFILE_STRUCTURAL;
         if by_weight || best_structural {
             listed.push(candidate);
         }
@@ -496,7 +540,12 @@ pub(crate) fn relevance_from(
                     .map(|&at| keywords[at].to_owned())
                     .collect(),
                 weight: candidate.weight,
-                structural: file.structural,
+                structural: file.is_structural(),
+                structural_keywords: file
+                    .structural
+                    .iter()
+                    .map(|&at| keywords[at].to_owned())
+                    .collect(),
                 line: evidence.and_then(|line| u32::try_from(line.line).ok()),
                 text: evidence.map(|line| {
                     line.text
@@ -584,25 +633,24 @@ fn quoted(words: &[&str]) -> String {
         .join(", ")
 }
 
-/// Gather what [`relevance_from`] needs and return its block.
-///
-/// `shared` holds the content probes a caller (`targets`) already ran: those
-/// of the task's own keywords are reused, everything else is probed here, so
-/// the block is the same whether or not a ranking ran first. A keyword with
-/// no match as typed gets its thesaurus synonyms probed in thesaurus order,
-/// until one has a content match, within [`RELEVANCE_EXPANSION_PROBES`] probes
-/// for the whole task; the cap names the keywords left without.
-///
-/// # Errors
-///
-/// The graph cannot be read.
-pub(crate) fn relevance_for(
+/// What [`relevance_from`] needs, gathered from an index and a graph.
+struct Gathered {
+    probes: ContentProbes,
+    hits: Option<Vec<SymbolHit>>,
+    /// Keywords whose synonyms the probe budget left unprobed.
+    left_without: Vec<String>,
+}
+
+/// Probe the task's keywords (reusing `shared`), scan the graph for their
+/// spellings, and spend the synonym budget on the keywords the repository
+/// lacks as typed.
+fn gather(
     index: &IndexSet,
     graph: Option<&GraphStore>,
     query: &TaskQuery,
     all_paths: &[String],
     shared: Option<&ContentProbes>,
-) -> Result<Relevance, String> {
+) -> Result<Gathered, String> {
     let mut probes = shared.map_or_else(ContentProbes::default, |ran| {
         ran.restricted_to(&query.keywords)
     });
@@ -623,7 +671,7 @@ pub(crate) fn relevance_for(
 
     let mut spent = 0;
     let mut tried: Vec<String> = Vec::new();
-    let mut left_without: Vec<&str> = Vec::new();
+    let mut left_without: Vec<String> = Vec::new();
     for keyword in &query.keywords {
         let synonyms = semantic_expand(keyword, query.language);
         if synonyms.is_empty() || is_known(&probes, hits.as_deref(), all_paths, keyword) {
@@ -631,7 +679,7 @@ pub(crate) fn relevance_for(
         }
         for synonym in synonyms {
             if spent == RELEVANCE_EXPANSION_PROBES {
-                left_without.push(keyword.as_str());
+                left_without.push(keyword.clone());
                 break;
             }
             spent += 1;
@@ -650,9 +698,37 @@ pub(crate) fn relevance_for(
         let more = symbol_hits(store, &spellings(&tried), &[]).map_err(|e| e.to_string())?;
         hits.get_or_insert_with(Vec::new).extend(more);
     }
+    Ok(Gathered {
+        probes,
+        hits,
+        left_without,
+    })
+}
 
-    let mut relevance = relevance_from(query, &probes, hits.as_deref(), all_paths);
-    if !left_without.is_empty() {
+/// Gather what [`relevance_from`] needs and return its block.
+///
+/// `shared` holds the content probes a caller (`targets`) already ran: those
+/// of the task's own keywords are reused, everything else is probed here, so
+/// the block is the same whether or not a ranking ran first. A keyword with
+/// no match as typed gets its thesaurus synonyms probed in thesaurus order,
+/// until one has a content match, within [`RELEVANCE_EXPANSION_PROBES`] probes
+/// for the whole task; the cap names the keywords left without.
+///
+/// # Errors
+///
+/// The graph cannot be read.
+pub(crate) fn relevance_for(
+    index: &IndexSet,
+    graph: Option<&GraphStore>,
+    query: &TaskQuery,
+    all_paths: &[String],
+    shared: Option<&ContentProbes>,
+) -> Result<Relevance, String> {
+    let gathered = gather(index, graph, query, all_paths, shared)?;
+    let mut relevance =
+        relevance_from(query, &gathered.probes, gathered.hits.as_deref(), all_paths);
+    if !gathered.left_without.is_empty() {
+        let left_without: Vec<&str> = gathered.left_without.iter().map(String::as_str).collect();
         relevance.caps.push(format!(
             "synonym probes capped at {RELEVANCE_EXPANSION_PROBES}: not every synonym of {} was probed",
             quoted(&left_without)
@@ -825,17 +901,11 @@ mod tests {
 
     #[test]
     fn keyword_weight_should_be_the_inverse_document_frequency_below_the_cap() {
-        assert!(close(keyword_weight(2, 100, false), (101.0_f64 / 3.0).ln()));
-        assert!(close(
-            keyword_weight(24, 100, false),
-            (101.0_f64 / 25.0).ln()
-        ));
-        assert!(close(
-            keyword_weight(25, 100, false),
-            (101.0_f64 / 26.0).ln()
-        ));
+        assert!(close(keyword_weight(2, 100), (101.0_f64 / 3.0).ln()));
+        assert!(close(keyword_weight(24, 100), (101.0_f64 / 25.0).ln()));
+        assert!(close(keyword_weight(25, 100), (101.0_f64 / 26.0).ln()));
         assert!(
-            close(keyword_weight(18, 1000, false), (1001.0_f64 / 19.0).ln()),
+            close(keyword_weight(18, 1000), (1001.0_f64 / 19.0).ln()),
             "ln(1001 / 19) = 3.964 is under the cap"
         );
     }
@@ -844,32 +914,25 @@ mod tests {
     fn keyword_weight_should_stop_at_the_cap() {
         assert_eq!(IDF_CAP, 4.0);
         assert_eq!(
-            keyword_weight(17, 1000, false),
+            keyword_weight(17, 1000),
             IDF_CAP,
             "ln(1001 / 18) = 4.018 is over it"
         );
-        assert_eq!(keyword_weight(1, 1_000_000, false), IDF_CAP);
+        assert_eq!(keyword_weight(1, 1_000_000), IDF_CAP);
     }
 
     #[test]
     fn keyword_weight_should_give_a_word_found_nowhere_the_cap_whatever_the_size() {
         for files in [0, 3, 10, 1000] {
-            assert_eq!(keyword_weight(0, files, false), IDF_CAP, "{files} files");
+            assert_eq!(keyword_weight(0, files), IDF_CAP, "{files} files");
         }
     }
 
     #[test]
-    fn keyword_weight_should_be_zero_when_the_probe_truncated() {
-        assert_eq!(keyword_weight(1, 1000, true), 0.0);
-        assert_eq!(keyword_weight(0, 1000, true), 0.0);
-        assert!(keyword_weight(1, 1000, false) > 0.0);
-    }
-
-    #[test]
     fn keyword_weight_should_zero_a_word_only_once_it_is_ubiquitous() {
-        assert!(keyword_weight(24, 100, false) > 1.0, "below a quarter");
-        assert!(keyword_weight(25, 100, false) > 1.0, "a quarter exactly");
-        assert_eq!(keyword_weight(26, 100, false), 0.0, "past a quarter");
+        assert!(keyword_weight(24, 100) > 1.0, "below a quarter");
+        assert!(keyword_weight(25, 100) > 1.0, "a quarter exactly");
+        assert_eq!(keyword_weight(26, 100), 0.0, "past a quarter");
     }
 
     #[test]
@@ -906,16 +969,42 @@ mod tests {
             ..KeywordEvidence::default()
         };
         assert!(close(row_weight(&row, 100), (101.0_f64 / 6.0).ln()));
-        let truncated = KeywordEvidence {
-            truncated: true,
-            ..row.clone()
-        };
-        assert_eq!(row_weight(&truncated, 100), 0.0);
         let unknown = KeywordEvidence {
             keyword: "y".into(),
             ..KeywordEvidence::default()
         };
         assert_eq!(row_weight(&unknown, 100), IDF_CAP);
+    }
+
+    #[test]
+    fn row_weight_should_be_zero_for_a_common_word_whatever_its_counts() {
+        let common = |content_files, common| KeywordEvidence {
+            keyword: "handle".into(),
+            content_files,
+            common,
+            ..KeywordEvidence::default()
+        };
+        assert_eq!(row_weight(&common(1, true), 1000), 0.0, "found once");
+        assert_eq!(row_weight(&common(0, true), 1000), 0.0, "found nowhere");
+        assert!(row_weight(&common(1, false), 1000) > 0.0);
+    }
+
+    #[test]
+    fn row_weight_should_treat_a_truncated_probe_as_a_lower_bound_not_as_ubiquity() {
+        let truncated = |content_files| KeywordEvidence {
+            keyword: "install".into(),
+            content_files,
+            truncated: true,
+            ..KeywordEvidence::default()
+        };
+        // 1,000 files: a quarter is 250.
+        assert!(
+            close(row_weight(&truncated(88), 1000), (1001.0_f64 / 89.0).ln()),
+            "a truncated word weighs what its prefix count says"
+        );
+        assert!(row_weight(&truncated(249), 1000) > 0.0, "below a quarter");
+        assert!(row_weight(&truncated(250), 1000) > 0.0, "a quarter exactly");
+        assert_eq!(row_weight(&truncated(251), 1000), 0.0, "past a quarter");
     }
 
     #[test]
@@ -1229,9 +1318,10 @@ mod tests {
             evidence(&relevance, "marche"),
             KeywordEvidence {
                 keyword: "marche".into(),
+                common: true,
                 ..KeywordEvidence::default()
             },
-            "a word without a thesaurus entry stays unmatched"
+            "a word without a thesaurus entry stays unmatched, and `marche` is a general word"
         );
     }
 
@@ -1485,22 +1575,25 @@ mod tests {
             .map(|cofile| (cofile.path.as_str(), cofile.weight, cofile.structural))
             .collect();
         assert_eq!(
-            top,
+            top[..3],
             [
                 ("src/alpha_beta.rs", 8.0, true),
                 ("docs/guide.md", 5.486, false),
                 ("d/000.md", 1.371, false),
-                ("d/001.md", 1.371, false),
-                ("d/002.md", 1.371, false),
             ],
             "two rare words weigh 4 + 4; four common ones 4 x 1.371"
+        );
+        assert_eq!(
+            top.len(),
+            8,
+            "the eight heaviest; the one structural file is among them"
         );
     }
 
     #[test]
     fn relevance_from_should_list_a_structural_file_the_prose_outweighs() {
-        // Six docs say both words; one source file defines `alpha`.
-        let docs: Vec<String> = (0..6).map(|n| format!("docs/p{n}.md")).collect();
+        // Nine docs say both words; one source file defines `alpha`.
+        let docs: Vec<String> = (0..9).map(|n| format!("docs/p{n}.md")).collect();
         let probes = probed_files(&[("alpha", docs.clone()), ("beta", docs)]);
         let relevance = relevance_from(
             &query("alpha beta"),
@@ -1508,68 +1601,58 @@ mod tests {
             Some(&[symbols_in("src/alpha.rs", &["alpha_tool"])]),
             &paths(&[]),
         );
+        let mut expected: Vec<String> = (0..8).map(|n| format!("docs/p{n}.md")).collect();
+        expected.push("src/alpha.rs".to_owned());
         assert_eq!(
             cofile_paths(&relevance),
-            [
-                "docs/p0.md",
-                "docs/p1.md",
-                "docs/p2.md",
-                "docs/p3.md",
-                "docs/p4.md",
-                "src/alpha.rs"
-            ],
-            "the five heaviest are prose; the structural file still comes with them"
+            expected,
+            "the eight heaviest are prose; the structural file still comes with them"
         );
         let last = relevance.cofiles.last().unwrap();
         assert!(last.structural);
-        assert_eq!(last.weight, 3.357, "alpha alone");
-        assert_eq!(relevance.cofiles[0].weight, 6.715, "alpha and beta");
+        assert_eq!(last.structural_keywords, ["alpha"]);
+        assert_eq!(last.weight, 3.001, "alpha alone, in 9 of 200 files");
+        assert_eq!(relevance.cofiles[0].weight, 6.001, "alpha and beta");
+        assert!(relevance.cofiles[0].structural_keywords.is_empty());
         assert_eq!(
             relevance.caps,
             [
-                "co-file list cut: 6 of 7 matching files listed (the 5 heaviest and the 3 heaviest structural ones)"
+                "co-file list cut: 9 of 10 matching files listed (the 8 heaviest and the 4 heaviest structural ones)"
             ]
         );
     }
 
     #[test]
-    fn relevance_from_should_list_at_most_three_structural_files_beyond_the_heaviest_five() {
-        let docs: Vec<String> = (0..6).map(|n| format!("docs/p{n}.md")).collect();
-        let sources: Vec<SymbolHit> = (0..5)
+    fn relevance_from_should_list_at_most_four_structural_files_beyond_the_heaviest_eight() {
+        let docs: Vec<String> = (0..9).map(|n| format!("docs/p{n}.md")).collect();
+        let sources: Vec<SymbolHit> = (0..6)
             .map(|n| symbols_in(&format!("src/s{n}.rs"), &["alpha_tool"]))
             .collect();
         let probes = probed_files(&[("alpha", docs.clone()), ("beta", docs)]);
         let relevance = relevance_from(&query("alpha beta"), &probes, Some(&sources), &paths(&[]));
+        let mut expected: Vec<String> = (0..8).map(|n| format!("docs/p{n}.md")).collect();
+        expected.extend((0..4).map(|n| format!("src/s{n}.rs")));
         assert_eq!(
             cofile_paths(&relevance),
-            [
-                "docs/p0.md",
-                "docs/p1.md",
-                "docs/p2.md",
-                "docs/p3.md",
-                "docs/p4.md",
-                "src/s0.rs",
-                "src/s1.rs",
-                "src/s2.rs"
-            ],
-            "p5 and the fourth and fifth source files are cut"
+            expected,
+            "p8 and the fifth and sixth source files are cut"
         );
         assert_eq!(
             relevance.caps,
             [
-                "co-file list cut: 8 of 11 matching files listed (the 5 heaviest and the 3 heaviest structural ones)"
+                "co-file list cut: 12 of 15 matching files listed (the 8 heaviest and the 4 heaviest structural ones)"
             ]
         );
     }
 
     #[test]
     fn relevance_from_should_not_list_a_structural_file_twice_when_it_is_among_the_heaviest() {
-        // Four structural files, all heavier than the prose: the fourth is
-        // listed as one of the five heaviest, not as a structural extra.
-        let sources: Vec<SymbolHit> = (0..4)
+        // Five structural files, all heavier than the prose: the fourth and
+        // fifth are among the eight heaviest and are not added again.
+        let sources: Vec<SymbolHit> = (0..5)
             .map(|n| symbols_in(&format!("src/s{n}.rs"), &["alpha_beta_tool"]))
             .collect();
-        let docs: Vec<String> = (0..3).map(|n| format!("docs/p{n}.md")).collect();
+        let docs: Vec<String> = (0..5).map(|n| format!("docs/p{n}.md")).collect();
         let probes = probed_files(&[("alpha", docs.clone())]);
         let relevance = relevance_from(&query("alpha beta"), &probes, Some(&sources), &paths(&[]));
         assert_eq!(
@@ -1579,11 +1662,13 @@ mod tests {
                 "src/s1.rs",
                 "src/s2.rs",
                 "src/s3.rs",
-                "docs/p0.md"
+                "src/s4.rs",
+                "docs/p0.md",
+                "docs/p1.md",
+                "docs/p2.md"
             ],
             "heavier structural files first, then the heaviest prose; 2 prose files are cut"
         );
-        assert_eq!(relevance.cofiles.len(), 5);
     }
 
     #[test]
@@ -1627,12 +1712,29 @@ mod tests {
     }
 
     #[test]
-    fn relevance_from_should_drop_every_file_when_every_keyword_is_truncated() {
-        let mut probes = probed(&[("alpha", &["a.md", "b.md"])]);
+    fn relevance_from_should_weigh_a_truncated_word_by_its_prefix_count() {
+        // `alpha` truncated at 20 of 200 files: a lower bound, still rare.
+        let mut probes = probed_files(&[("alpha", many("a", 20))]);
         probes.truncated.insert("alpha".into());
         let relevance = relevance_from(&query("alpha"), &probes, None, &paths(&[]));
-        assert!(relevance.cofiles.is_empty(), "{:?}", relevance.cofiles);
         assert!(evidence(&relevance, "alpha").truncated);
+        assert_eq!(relevance.cofiles[0].weight, 2.259, "ln(201 / 21)");
+        assert_eq!(relevance.caps[..1], [probe_cap("alpha")]);
+    }
+
+    #[test]
+    fn relevance_from_should_drop_a_truncated_word_only_when_its_prefix_is_ubiquitous() {
+        // 200 files: a quarter is 50.
+        for (count, kept) in [(50, true), (51, false)] {
+            let mut probes = probed_files(&[("alpha", many("a", count))]);
+            probes.truncated.insert("alpha".into());
+            let relevance = relevance_from(&query("alpha"), &probes, None, &paths(&[]));
+            assert_eq!(
+                !relevance.cofiles.is_empty(),
+                kept,
+                "{count} of 200 files, truncated"
+            );
+        }
     }
 
     #[test]
@@ -1662,31 +1764,28 @@ mod tests {
     }
 
     #[test]
-    fn relevance_from_should_list_five_by_weight_and_say_only_when_it_cut() {
-        let six: Vec<String> = (0..6).map(|n| format!("d{n}.md")).collect();
+    fn relevance_from_should_list_eight_by_weight_and_say_only_when_it_cut() {
+        let nine: Vec<String> = (0..9).map(|n| format!("d{n}.md")).collect();
         let cut = relevance_from(
             &query("alpha"),
-            &probed_files(&[("alpha", six.clone())]),
+            &probed_files(&[("alpha", nine.clone())]),
             None,
             &paths(&[]),
         );
-        assert_eq!(
-            cofile_paths(&cut),
-            ["d0.md", "d1.md", "d2.md", "d3.md", "d4.md"]
-        );
+        assert_eq!(cofile_paths(&cut), nine[..8].to_vec());
         assert_eq!(
             cut.caps,
             [
-                "co-file list cut: 5 of 6 matching files listed (the 5 heaviest and the 3 heaviest structural ones)"
+                "co-file list cut: 8 of 9 matching files listed (the 8 heaviest and the 4 heaviest structural ones)"
             ]
         );
         let whole = relevance_from(
             &query("alpha"),
-            &probed_files(&[("alpha", six[..5].to_vec())]),
+            &probed_files(&[("alpha", nine[..8].to_vec())]),
             None,
             &paths(&[]),
         );
-        assert_eq!(cofile_paths(&whole).len(), 5);
+        assert_eq!(cofile_paths(&whole).len(), 8);
         assert!(
             whole.caps.is_empty(),
             "nothing was left out: {:?}",
@@ -1696,14 +1795,19 @@ mod tests {
 
     #[test]
     fn relevance_from_should_keep_a_better_file_that_sorts_late() {
-        let probes = probed(&[
-            ("alpha", &["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "z.rs"]),
-            ("beta", &["z.rs"]),
-        ]);
+        let early: Vec<String> = (b'a'..=b'j')
+            .map(|c| format!("{}.rs", char::from(c)))
+            .collect();
+        let mut alpha = early.clone();
+        alpha.push("z.rs".to_owned());
+        let probes = probed_files(&[("alpha", alpha), ("beta", vec!["z.rs".to_owned()])]);
         let relevance = relevance_from(&query("alpha beta"), &probes, None, &paths(&[]));
+        let mut expected = vec!["z.rs".to_owned()];
+        expected.extend(early[..7].iter().cloned());
         assert_eq!(
             cofile_paths(&relevance),
-            ["z.rs", "a.rs", "b.rs", "c.rs", "d.rs"]
+            expected,
+            "h, i and j are cut, not z"
         );
     }
 
@@ -1742,6 +1846,11 @@ mod tests {
         );
         assert_eq!(relevance.cofiles.len(), 1);
         assert_eq!(relevance.cofiles[0].keywords, ["hooks"]);
+        assert_eq!(
+            relevance.cofiles[0].structural_keywords,
+            ["hooks"],
+            "named once though a symbol and a path both matched"
+        );
     }
 
     #[test]
@@ -1874,6 +1983,106 @@ mod tests {
         assert_eq!(relevance.cofiles[0].line, Some(u32::MAX));
         assert_eq!(relevance.cofiles[1].line, None);
         assert_eq!(relevance.cofiles[1].text.as_deref(), Some("past"));
+    }
+
+    #[test]
+    fn relevance_from_should_list_a_general_word_with_its_counts_and_weigh_it_nothing() {
+        // `handle` is in 3 files and `watchdog` in 2: only one of them is
+        // evidence, and the general one is still visible.
+        let probes = probed(&[
+            ("handle", &["a.rs", "b.rs", "c.rs"]),
+            ("watchdog", &["a.rs", "d.rs"]),
+        ]);
+        let relevance = relevance_from(&query("handle watchdog"), &probes, None, &paths(&[]));
+        assert_eq!(
+            evidence(&relevance, "handle"),
+            KeywordEvidence {
+                keyword: "handle".into(),
+                content_files: 3,
+                common: true,
+                ..KeywordEvidence::default()
+            }
+        );
+        assert!(!evidence(&relevance, "watchdog").common);
+        let weights: Vec<(&str, f64)> = relevance
+            .cofiles
+            .iter()
+            .map(|cofile| (cofile.path.as_str(), cofile.weight))
+            .collect();
+        assert_eq!(
+            weights,
+            [("a.rs", 4.0), ("d.rs", 4.0)],
+            "b.rs and c.rs matched only the general word and weigh nothing"
+        );
+        assert_eq!(
+            relevance.cofiles[0].keywords,
+            ["handle", "watchdog"],
+            "the general word is still named among a file's keywords"
+        );
+    }
+
+    #[test]
+    fn relevance_from_should_not_call_a_general_word_in_a_path_structure() {
+        // `handle/` is a directory; `watchdog.rs` is named for the rare word.
+        let probes = probed(&[("handle", &[]), ("watchdog", &["handle/mod.rs"])]);
+        let relevance = relevance_from(
+            &query("handle watchdog"),
+            &probes,
+            None,
+            &paths(&["handle/mod.rs", "src/watchdog.rs"]),
+        );
+        let by_path: Vec<(&str, bool, Vec<&str>)> = relevance
+            .cofiles
+            .iter()
+            .map(|cofile| {
+                (
+                    cofile.path.as_str(),
+                    cofile.structural,
+                    cofile
+                        .structural_keywords
+                        .iter()
+                        .map(String::as_str)
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            by_path,
+            [
+                ("src/watchdog.rs", true, vec!["watchdog"]),
+                ("handle/mod.rs", false, vec![]),
+            ],
+            "the directory named for a general word is not structure"
+        );
+    }
+
+    #[test]
+    fn relevance_from_should_name_the_keywords_that_made_a_file_structural() {
+        let probes = probed(&[
+            ("alpha", &["a.rs", "b.rs"]),
+            ("beta", &["a.rs"]),
+            ("gamma", &["a.rs"]),
+        ]);
+        let relevance = relevance_from(
+            &query("alpha beta gamma"),
+            &probes,
+            Some(&[symbols_in("a.rs", &["gamma_tool"])]),
+            &paths(&["a.rs", "beta/b.rs"]),
+        );
+        let a = relevance.cofiles.iter().find(|c| c.path == "a.rs").unwrap();
+        assert_eq!(a.keywords, ["alpha", "beta", "gamma"]);
+        assert_eq!(
+            a.structural_keywords,
+            ["gamma"],
+            "by symbol; alpha and beta by text only"
+        );
+        let b = relevance
+            .cofiles
+            .iter()
+            .find(|c| c.path == "beta/b.rs")
+            .unwrap();
+        assert_eq!(b.structural_keywords, ["beta"], "by the directory name");
+        assert!(b.structural);
     }
 
     #[test]
@@ -2273,6 +2482,17 @@ mod tests {
             ]
         );
         assert!(relevance.keywords.iter().all(|row| !row.truncated));
+        let general: Vec<&str> = relevance
+            .keywords
+            .iter()
+            .filter(|row| row.common)
+            .map(|row| row.keyword.as_str())
+            .collect();
+        assert_eq!(
+            general,
+            ["does", "handle", "existing"],
+            "listed with their counts, weighing nothing"
+        );
         assert!(
             relevance
                 .keywords
@@ -2294,8 +2514,8 @@ mod tests {
                 .iter()
                 .map(|cofile| cofile.weight)
                 .collect::<Vec<_>>(),
-            [14.579, 5.172, 5.172],
-            "install 2, handle 1, existing 1, claude 1, settings 3 files of 45"
+            [8.308, 5.172, 5.172],
+            "install 2, claude 1, settings 3 files of 45; handle and existing are general words"
         );
         let best = &relevance.cofiles[0];
         assert_eq!(
@@ -2548,5 +2768,96 @@ mod tests {
             "task description yields no searchable keywords"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ----- offline weight tuning --------------------------------------------
+
+    /// The material the co-file ranking works from, before it ranks, for every
+    /// prompt of a labelled set: per keyword the files each channel found,
+    /// and what the current rule returns. `scripts/bench-relevance-weights.py`
+    /// reads it to compare weighting rules without recompiling.
+    ///
+    /// Environment: `PIXEL_WEIGHT_FIXTURE` (a checkout the prompts were
+    /// labelled against), `PIXEL_WEIGHT_PROMPTS` (the `.jsonl` set),
+    /// `PIXEL_WEIGHT_SPLIT` (`dev` or `test`), `PIXEL_WEIGHT_OUT` (the file).
+    #[test]
+    #[ignore = "reads a fixture checkout and a prompt set named in the environment"]
+    fn dump_the_raw_material_of_the_co_file_ranking() {
+        let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("set {name}"));
+        let fixture = PathBuf::from(var("PIXEL_WEIGHT_FIXTURE"));
+        let split = var("PIXEL_WEIGHT_SPLIT");
+        let mut service = Service::open(&fixture).unwrap();
+        let built = service.handle(Request::Targets {
+            task: "build the graph".into(),
+            limit: Some(1),
+            max_tier: None,
+            precision: false,
+            regions: false,
+        });
+        assert!(built.ok, "{built:?}");
+        let graph = GraphStore::open_read_only(&service.graph_db_path()).unwrap();
+        let index = IndexSet::open_or_build(&fixture, Box::new(TrigramExtractor)).unwrap();
+        let all = index.paths();
+
+        let mut table: BTreeMap<String, usize> = BTreeMap::new();
+        let mut id_of = |path: &str| {
+            let next = table.len();
+            *table.entry(path.to_owned()).or_insert(next)
+        };
+        let mut prompts = Vec::new();
+        for line in std::fs::read_to_string(var("PIXEL_WEIGHT_PROMPTS"))
+            .unwrap()
+            .lines()
+        {
+            let row: Value = serde_json::from_str(line).unwrap();
+            if row["split"] != json!(split) {
+                continue;
+            }
+            let task = row["text"].as_str().unwrap();
+            let Ok(query) = tokenize_task(task) else {
+                prompts.push(json!({"row": row, "keywords": [], "production": null}));
+                continue;
+            };
+            let gathered = gather(&index, Some(&graph), &query, &all, None).unwrap();
+            let staged = stage(&query, &gathered.probes, gathered.hits.as_deref(), &all);
+            let keywords: Vec<Value> = staged
+                .keywords
+                .iter()
+                .zip(&staged.standings)
+                .map(|(keyword, standing)| {
+                    let channels = &standing.channels;
+                    let mut ids = |set: &BTreeSet<&str>| -> Vec<usize> {
+                        set.iter().map(|path| id_of(path)).collect()
+                    };
+                    json!({
+                        "keyword": keyword,
+                        "form": standing.form,
+                        "truncated": gathered.probes.truncated.contains(standing.form),
+                        "common": common::is_common(keyword),
+                        "content": ids(&channels.content),
+                        "symbol": ids(&channels.symbol),
+                        "filename": ids(&channels.filename),
+                        "hidden": channels.hidden.len(),
+                    })
+                })
+                .collect();
+            let production =
+                relevance_from(&query, &gathered.probes, gathered.hits.as_deref(), &all);
+            prompts.push(json!({
+                "row": row,
+                "keywords": keywords,
+                "production": production,
+            }));
+        }
+        let mut paths = vec![String::new(); table.len()];
+        for (path, id) in &table {
+            paths[*id].clone_from(path);
+        }
+        let dump = json!({
+            "files_considered": all.len(),
+            "paths": paths,
+            "prompts": prompts,
+        });
+        std::fs::write(var("PIXEL_WEIGHT_OUT"), serde_json::to_vec(&dump).unwrap()).unwrap();
     }
 }

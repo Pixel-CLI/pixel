@@ -153,7 +153,7 @@ fn targets_facts_should_carry_the_relevance_block_and_repeat_it_identically() {
         "crates/install/src/claude_settings.rs"
     );
     assert_eq!(relevance.cofiles[0].line, Some(1));
-    assert_eq!(relevance.cofiles[0].weight, 14.579);
+    assert_eq!(relevance.cofiles[0].weight, 8.308);
     assert!(relevance.cofiles[0].structural);
     assert!(
         !first.data()["facts"]["relevance"]
@@ -321,25 +321,25 @@ fn targets_should_not_carry_a_relevance_block_outside_fact_mode() {
 
 #[test]
 fn targets_facts_should_list_a_structural_co_file_that_prose_outweighs() {
-    // Eight notes repeat four of the prompt's words; the one source file is
-    // named for the fifth. The notes weigh more, the source file still comes.
-    let mut files: Vec<(String, String)> = (0..8)
+    // Nine notes repeat three of the prompt's words; the one source file is
+    // named for the fourth. The notes weigh more, the source file still comes.
+    let mut files: Vec<(String, String)> = (0..9)
         .map(|n| {
             (
                 format!("docs/note{n}.md"),
-                "Why does install handle existing files?\n".to_owned(),
+                "Why does claude install settings?\n".to_owned(),
             )
         })
         .collect();
     files.push((
-        "crates/install/src/claude_settings.rs".to_owned(),
-        "pub fn merge_claude_settings() {}\n".to_owned(),
+        "src/watchdog.rs".to_owned(),
+        "pub fn run_watchdog() {}\n".to_owned(),
     ));
     files.extend(filler());
     let root = fixture("structural", &files);
     let mut service = ready(&root);
 
-    let response = facts(&mut service, "does install handle existing claude");
+    let response = facts(&mut service, "claude install settings watchdog");
 
     let relevance = relevance_of(&response);
     let listed: Vec<(&str, bool)> = relevance
@@ -347,24 +347,28 @@ fn targets_facts_should_list_a_structural_co_file_that_prose_outweighs() {
         .iter()
         .map(|cofile| (cofile.path.as_str(), cofile.structural))
         .collect();
+    let mut expected: Vec<(String, bool)> = (0..8)
+        .map(|n| (format!("docs/note{n}.md"), false))
+        .collect();
+    expected.push(("src/watchdog.rs".to_owned(), true));
     assert_eq!(
         listed,
-        [
-            ("docs/note0.md", false),
-            ("docs/note1.md", false),
-            ("docs/note2.md", false),
-            ("docs/note3.md", false),
-            ("docs/note4.md", false),
-            ("crates/install/src/claude_settings.rs", true),
-        ],
-        "five notes by weight, then the structural file"
+        expected
+            .iter()
+            .map(|(p, s)| (p.as_str(), *s))
+            .collect::<Vec<_>>(),
+        "eight notes by weight, then the structural file"
     );
-    assert!(
-        relevance.cofiles[0].weight > relevance.cofiles[5].weight,
-        "{:?}",
-        relevance.cofiles
+    assert_eq!(
+        relevance.cofiles[0].weight, 4.888,
+        "three words in 9 of 50 files"
     );
-    let cut = "co-file list cut: 6 of 9 matching files listed (the 5 heaviest and the 3 heaviest structural ones)";
+    assert_eq!(
+        relevance.cofiles[8].weight, 3.239,
+        "one word in 1 of 50 files"
+    );
+    assert_eq!(relevance.cofiles[8].structural_keywords, ["watchdog"]);
+    let cut = "co-file list cut: 9 of 10 matching files listed (the 8 heaviest and the 4 heaviest structural ones)";
     assert_eq!(relevance.caps, [cut]);
     assert!(envelope_caps(&response).iter().any(|cap| cap == cut));
     std::fs::remove_dir_all(&root).ok();

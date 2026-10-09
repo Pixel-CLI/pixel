@@ -296,10 +296,14 @@ repository lacks as typed borrows the counts of its first thesaurus synonym
 that matches, within `RELEVANCE_EXPANSION_PROBES` probes), and the co-files:
 each file the keywords meet in is weighted by the sum of
 `relevance::keyword_weight` over them (inverse document frequency capped at
-`IDF_CAP`; 0 for a word in over a quarter of the files or whose probe
-truncated), and the block lists the five heaviest plus the three heaviest
-structural ones (a rare word in a path or symbol), so prose that repeats common
-words cannot crowd out the file the prompt names. The block reuses the content
+`IDF_CAP`, computed from the largest channel count, a lower bound when the
+content probe truncated; 0 for a word in over a quarter of the files and for
+a general word such as `does` or `quel`, listed with `common: true`), and the
+block lists the eight heaviest plus the four heaviest structural ones (a rare
+word in a path or symbol, named in `structural_keywords`), so prose that
+repeats common words cannot crowd out the file the prompt names. The rule was
+chosen against the dev split of the labelled prompts
+(`scripts/bench-relevance-weights.py`). The block reuses the content
 probes the target ranking ran and counts documents against `files_considered`;
 `pixel_daemon::relevance::relevance_on` computes the same block in process for a
 reader with no daemon. Credential-shaped paths are never counted or listed.

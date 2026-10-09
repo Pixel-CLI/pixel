@@ -75,6 +75,10 @@ pub struct KeywordEvidence {
     /// not contain as typed (a French word, through the thesaurus).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via_expansion: Option<String>,
+    /// A general word (`does`, `handle`, `quel`) that says nothing about a
+    /// repository: the counts are kept, the weight is 0.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub common: bool,
 }
 
 /// A file several task keywords meet in, with one line to start from.
@@ -95,6 +99,10 @@ pub struct CoFile {
     /// structure.
     #[serde(default)]
     pub structural: bool,
+    /// The keywords (a subset of `keywords`) that made it `structural`: the
+    /// ones of positive weight that matched the file's name or a symbol.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structural_keywords: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,6 +214,7 @@ mod tests {
                     symbol_files: 18,
                     filename_files: 9,
                     via_expansion: None,
+                    common: false,
                 },
                 KeywordEvidence {
                     keyword: "connexion".into(),
@@ -214,6 +223,12 @@ mod tests {
                     symbol_files: 0,
                     filename_files: 1,
                     via_expansion: Some("login".into()),
+                    common: false,
+                },
+                KeywordEvidence {
+                    keyword: "handle".into(),
+                    common: true,
+                    ..KeywordEvidence::default()
                 },
             ],
             cofiles: vec![
@@ -222,6 +237,7 @@ mod tests {
                     keywords: vec!["install".into(), "claude".into()],
                     weight: 6.25,
                     structural: true,
+                    structural_keywords: vec!["claude".into()],
                     line: Some(120),
                     text: Some("fn merge_settings() {}".into()),
                 },
@@ -230,6 +246,7 @@ mod tests {
                     keywords: vec!["install".into()],
                     weight: 0.5,
                     structural: false,
+                    structural_keywords: Vec::new(),
                     line: None,
                     text: None,
                 },
@@ -259,6 +276,13 @@ mod tests {
                         "symbol_files": 0,
                         "filename_files": 1,
                         "via_expansion": "login"
+                    },
+                    {
+                        "keyword": "handle",
+                        "content_files": 0,
+                        "symbol_files": 0,
+                        "filename_files": 0,
+                        "common": true
                     }
                 ],
                 "cofiles": [
@@ -267,6 +291,7 @@ mod tests {
                         "keywords": ["install", "claude"],
                         "weight": 6.25,
                         "structural": true,
+                        "structural_keywords": ["claude"],
                         "line": 120,
                         "text": "fn merge_settings() {}"
                     },
