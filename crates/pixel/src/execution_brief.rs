@@ -320,7 +320,9 @@ const CODE_QUESTIONS: &[&str] = &[
     "find the ",
     "fix ",
     "how does ",
+    "how do ",
     "how is ",
+    "how to ",
     "trace ",
     "what calls ",
     "what does ",
@@ -419,12 +421,34 @@ pub enum Signal {
 /// when it asks for something else (git and release requests, pasted chat
 /// threads, discussion). Only the typed text counts; pasted blocks never
 /// steer the search.
+///
+/// This is the only gate for brief execution. It replaces all regex-based
+/// detection (`CODE_WORDS`, `CODE_QUESTIONS`) with the classify decision
+/// model. When classify is unavailable the old heuristic is used as a
+/// safety net so the brief can still run.
 pub fn code_signal(prompt: &str) -> Option<(String, Signal)> {
     let typed = typed_text(prompt);
     let typed = typed.trim();
+    // Strong matches: identifiers and code-shaped tokens are unambiguous.
     if explicit_identifier(typed).is_some() || typed.split_whitespace().any(names_code) {
         return Some((typed.to_string(), Signal::Strong));
     }
+    // Classify the intent via the decision model.
+    if let Some((label, confidence)) = crate::classify::classify_intent(prompt) {
+        // "ops" means the prompt is infrastructure/release/git — decline brief.
+        if label == "ops" {
+            return None;
+        }
+        // Anything the model classified as a coding task is a signal;
+        // confidence below 30 % is Weak (model uncertain), above is Strong.
+        let signal = if confidence >= 0.3 {
+            Signal::Strong
+        } else {
+            Signal::Weak
+        };
+        return Some((typed.to_string(), signal));
+    }
+    // Classify unavailable — fall back to the old heuristic.
     let lower = typed.to_lowercase();
     let weak = lower
         .split(|ch: char| !ch.is_alphanumeric())

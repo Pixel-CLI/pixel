@@ -1457,6 +1457,25 @@ pub(crate) fn open_session(
     )
 }
 
+/// Classify a prompt as a coding-agent task intent and return the predicted
+/// label with its probability, or None when classify is unavailable.
+///
+/// This is the single-shot path the brief chain uses to replace the old
+/// regex gate: code_signal calls this first, maps the label through
+/// QuestionKind::of_verdict, and falls back to the heuristic when
+/// classify returns None.
+pub(crate) fn classify_intent(prompt: &str) -> Option<(String, f64)> {
+    if !crate::config_cmd::classify_enabled().ok()? {
+        return None;
+    }
+    let mut engine = open_session(None, String::new(), None, None).ok()?;
+    let spec = crate::prompt_intent::spec(prompt).ok()?;
+    let probs = engine.decide(&spec).ok()?;
+    let label = predicted(&probs, &spec.labels).to_string();
+    let confidence = probs.get(&label).copied().unwrap_or(0.0);
+    Some((label, confidence))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
