@@ -10,6 +10,7 @@ each brief of the high tier, reads which files its ``answer`` blocks were cut
 from and whether it still tells the agent to answer from the evidence (the
 directive). It reports
 
+* files@1: the first path of the ranked ``files:`` line is an expected file;
 * excerpt@1: the first block's file is an expected file;
 * excerpt@2: one of the first two blocks' files is;
 * directive rate: high briefs that keep the directive;
@@ -61,10 +62,20 @@ def block_paths(brief):
     return paths
 
 
+def first_file(brief):
+    """The first path of the ``files:`` line of ``brief``, or None."""
+    for line in brief.split("\n"):
+        if line.startswith("files: "):
+            match = re.match(r"([^\s:;]+)", line[len("files: "):])
+            return match.group(1) if match else None
+    return None
+
+
 def summarize(rows):
     """Metrics over ``rows``: dicts with ``expected``, ``tier``, ``paths`` and
     ``directive``."""
     high = [row for row in rows if row["tier"] == "high"]
+    listed = [row for row in high if row.get("first_file")]
     excerpted = [row for row in high if row["paths"]]
     directed = [row for row in excerpted if row["directive"]]
     first = lambda row: row["paths"][0] in row["expected"]
@@ -74,6 +85,7 @@ def summarize(rows):
         "rows": len(rows),
         "high": len(high),
         "with_excerpt": len(excerpted),
+        "files@1": div(sum(r["first_file"] in r["expected"] for r in listed), len(listed)),
         "excerpt@1": div(sum(map(first, excerpted)), len(excerpted)),
         "excerpt@2": div(sum(map(second, excerpted)), len(excerpted)),
         "directive": len(directed),
@@ -96,6 +108,7 @@ def measure(pixel, repo, prompt, timeout):
     return {
         "tier": record.get("tier"),
         "paths": block_paths(brief),
+        "first_file": first_file(brief),
         "directive": DIRECTIVE in brief,
         "kind": record.get("kind"),
     }
@@ -136,6 +149,11 @@ class Tests(unittest.TestCase):
             "  10| fn b()", "answer flow:", "  nothing here",
         ])
         self.assertEqual(block_paths(brief), ["src/a.rs", "src/b.rs", None])
+
+    def test_first_file_should_read_the_head_of_the_files_line(self):
+        self.assertEqual(first_file("x\nfiles: a/b.rs:3 — t; c.rs:1"), "a/b.rs")
+        self.assertEqual(first_file("files: a.rs b.rs"), "a.rs")
+        self.assertIsNone(first_file("kind: lookup"))
 
     def test_summarize_should_score_the_first_block_and_the_directive(self):
         rows = [

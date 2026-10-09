@@ -827,6 +827,10 @@ pub(crate) struct Brief {
     /// What the searches of this brief covered, when it is confident and the
     /// probe answered.
     receipt: Option<Receipt>,
+    /// The typed question asks about tests, or about docs, changelogs and
+    /// benchmarks: files of that kind are not demoted.
+    wants_tests: bool,
+    wants_docs: bool,
     /// The meaning search's leads, best first.
     leads: Vec<MeaningHit>,
     /// The relevance probe's co-files, heaviest first.
@@ -1318,9 +1322,8 @@ struct Candidate {
 }
 
 fn excerpt_candidates(brief: &Brief) -> Vec<Candidate> {
-    let terms = brief.receipt.as_ref().map_or(&[][..], Receipt::terms);
-    let tests_ok = brief.kind == Some(QuestionKind::Tests) || answer::asks_tests(terms);
-    let docs_ok = answer::asks_docs(terms);
+    let tests_ok = brief.wants_tests || brief.kind == Some(QuestionKind::Tests);
+    let docs_ok = brief.wants_docs;
     let leads = brief.leads.iter().map(|lead| Candidate {
         path: lead.path.clone(),
         line: u64::from(lead.start_line),
@@ -2366,6 +2369,15 @@ fn fold(state: &Mutex<Brief>, plan: &Plan, got: &Gathered) {
             .as_ref()
             .and_then(relevance::Verdict::confidence_line);
         brief.absorb(fused, admit_json);
+        let (wants_tests, wants_docs) = answer::cues(&plan.typed);
+        brief.wants_tests = wants_tests || plan.kind == QuestionKind::Tests;
+        brief.wants_docs = wants_docs;
+        // Tests, docs and eval files rank after the code files unless the
+        // question asked for them: a stable partition, nothing is dropped.
+        let (wants_tests, wants_docs) = (brief.wants_tests, brief.wants_docs);
+        brief
+            .files
+            .sort_by_key(|hit| answer::demoted(&hit.path, wants_tests, wants_docs));
         brief.leads = leads.to_vec();
         brief.lexical = lines.iter().map(|hit| hit.path.clone()).collect();
         brief.receipt = match &got.relevance {
@@ -5693,12 +5705,13 @@ mod tests {
         ]);
         let log = Arc::clone(&fake.log);
         let finished = briefed_with(PROSE, fake, verdict("question"), model_low);
+        // The notes file ranks after the code files, so the third slot is code.
         assert_eq!(
             finished.text.as_deref(),
             Some(
                 [
                     "[PIXEL:BRIEF]",
-                    "files: crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready() {; crates/pixel-daemon/src/api.rs:40 — fn op_status; docs/notes.md:12 — daemon startup notes",
+                    "files: crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready() {; crates/pixel-daemon/src/api.rs:40 — fn op_status; crates/pixel-daemon/src/x.rs:1 — x",
                     LOW_CONFIDENCE,
                 ]
                 .join("\n")
@@ -6802,5 +6815,66 @@ mod tests {
                 "src/boot.rs:7 boot — fn run() { watch_ready() }"
             ]
         );
+    }
+
+    fn files_line(text: &str) -> String {
+        text.lines()
+            .find(|line| line.starts_with("files: "))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn ranked_fake() -> Fake {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(RelevanceAnswer {
+            lines: vec![
+                rhit("tests/a.rs", 1, "x"),
+                rhit("docs/x.md", 1, "x"),
+                rhit("src/b.rs", 1, "x"),
+                rhit("eval/run.py", 1, "x"),
+                rhit("src/c.rs", 1, "x"),
+            ],
+            ..on_topic_answer()
+        });
+        fake.meaning = Err("cold".into());
+        fake
+    }
+
+    #[test]
+    fn the_file_list_should_rank_tests_docs_and_eval_after_the_code_without_dropping_them() {
+        let finished = briefed(WEAK, ranked_fake(), no_verdict);
+        let files = files_line(&finished.text.unwrap());
+        let at = |path: &str| {
+            files
+                .find(path)
+                .unwrap_or_else(|| panic!("{path} in {files}"))
+        };
+        assert!(at("src/b.rs") < at("src/c.rs"), "{files}");
+        for later in ["tests/a.rs", "docs/x.md", "eval/run.py"] {
+            assert!(at("src/c.rs") < at(later), "{files}");
+        }
+        // The demoted keep their own order.
+        assert!(at("tests/a.rs") < at("docs/x.md") && at("docs/x.md") < at("eval/run.py"));
+    }
+
+    #[test]
+    fn a_question_about_tests_or_docs_should_keep_those_files_in_place() {
+        let finished = briefed(
+            "which tests cover how the daemon handles startup changes",
+            ranked_fake(),
+            no_verdict,
+        );
+        let files = files_line(&finished.text.unwrap());
+        assert!(files.find("tests/a.rs") < files.find("src/b.rs"), "{files}");
+        // Docs stay demoted when only tests were asked for.
+        assert!(files.find("src/c.rs") < files.find("docs/x.md"), "{files}");
+        let finished = briefed(
+            "what do the docs say about how the daemon handles startup changes",
+            ranked_fake(),
+            no_verdict,
+        );
+        let files = files_line(&finished.text.unwrap());
+        assert!(files.find("docs/x.md") < files.find("src/b.rs"), "{files}");
+        assert!(files.find("src/c.rs") < files.find("tests/a.rs"), "{files}");
     }
 }

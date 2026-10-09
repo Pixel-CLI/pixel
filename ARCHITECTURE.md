@@ -778,7 +778,7 @@ its default and where the environment reads it (only lines that carry a
 probed term). The generic excerpt is cut from the meaning search's own chunk
 (lexical hits only when there is none); tests, docs and changelogs are
 excluded unless the question asks about them, as are `#[cfg(test)]` modules
-and test-named symbols. A plain-language flow or tests question borrows its
+and test-named symbols. The ranked `files:` list puts tests, docs, `eval/` and changelog files after the code files (a stable demotion, nothing dropped) unless the question asks about them. A plain-language flow or tests question borrows its
 symbol anchor from the best non-test chunk. The `confidence: high` line and
 the "Answer from this evidence" directive stay only when the top excerpt's
 file is also among the lexical probe's top two co-files (two independent

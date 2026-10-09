@@ -163,6 +163,11 @@ const DOC_TERMS: &[&str] = &[
     "changelog",
     "guide",
     "manual",
+    "benchmark",
+    "benchmarks",
+    "bench",
+    "eval",
+    "evals",
 ];
 
 /// Whether `terms` (the probed words of the question) name any of `words`.
@@ -192,13 +197,35 @@ pub(crate) fn is_test_path(path: &str) -> bool {
         || name == "tests.rs"
 }
 
-/// Whether `path` is prose a reader opens for documentation, not code.
+/// Whether `path` is prose or measurement a reader opens for documentation,
+/// not code: markdown and text, `docs/`, `changelog.d/`, `eval/`, a
+/// `CHANGELOG*` file.
 pub(crate) fn is_docs_path(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     let extension = name.rsplit('.').next().unwrap_or("");
     matches!(extension, "md" | "mdx" | "rst" | "txt" | "adoc")
+        || name.to_ascii_uppercase().starts_with("CHANGELOG")
         || path.starts_with("docs/")
         || path.starts_with("changelog.d/")
+        || path.starts_with("eval/")
+}
+
+/// What the typed question asks about, which lifts the demotion of the
+/// matching files: `(tests, docs)`.
+pub(crate) fn cues(typed: &str) -> (bool, bool) {
+    let words: Vec<String> = typed
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    (asks_tests(&words), asks_docs(&words))
+}
+
+/// Whether a path ranks after the code files: a test, or documentation and
+/// measurement, that the question did not ask about. The one predicate of
+/// the ranked file list and of the excerpts.
+pub(crate) fn demoted(path: &str, wants_tests: bool, wants_docs: bool) -> bool {
+    (!wants_tests && is_test_path(path)) || (!wants_docs && is_docs_path(path))
 }
 
 /// Whether a symbol is named like a test.
@@ -896,5 +923,38 @@ mod tests {
             !excerpt.iter().any(|line| line.contains("previous")),
             "{excerpt:?}"
         );
+    }
+
+    #[test]
+    fn demoted_should_hold_below_at_and_above_the_cue() {
+        // Below: a plain code question demotes tests, docs, eval and changelogs.
+        for path in [
+            "tests/a.rs",
+            "crates/x/tests/b.rs",
+            "src/a_test.rs",
+            "test_a.py",
+            "web/a.spec.ts",
+            "eval/run.sh",
+            "docs/a.rs",
+            "README.md",
+            "CHANGELOG",
+            "changelog.d/1.md",
+        ] {
+            assert!(demoted(path, false, false), "{path}");
+        }
+        for path in ["src/a.rs", "crates/x/src/latest.rs", "scripts/run.py"] {
+            assert!(!demoted(path, false, false), "{path}");
+        }
+        // At: asking about tests lifts tests only; about docs lifts docs only.
+        assert!(!demoted("tests/a.rs", true, false));
+        assert!(demoted("docs/a.md", true, false));
+        assert!(!demoted("docs/a.md", false, true));
+        assert!(demoted("tests/a.rs", false, true));
+        // Above: both cues lift both.
+        assert!(!demoted("tests/a.rs", true, true) && !demoted("eval/a.py", true, true));
+        assert_eq!(cues("which tests cover the parser"), (true, false));
+        assert_eq!(cues("what do the benchmarks say"), (false, true));
+        assert_eq!(cues("how does the parser work"), (false, false));
+        assert_eq!(cues("CHANGELOG entry for tests"), (true, true));
     }
 }
