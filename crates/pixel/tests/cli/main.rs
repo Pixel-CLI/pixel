@@ -40,6 +40,7 @@ mod rescue_cli;
 mod run_recipe_cli;
 mod scope_task_precision;
 mod search_compat_cli;
+mod setup_cli;
 mod sidecar_trust_cli;
 mod space_cli;
 mod support;

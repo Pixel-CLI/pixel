@@ -857,3 +857,107 @@ fn remove_classify_skill_should_keep_every_dir_when_dry_run() {
     assert!(skill.join("SKILL.md").is_file());
     assert!(backups_in(&home.path().join(".claude")).is_empty());
 }
+
+// -- pixel setup blocks ------------------------------------------------------
+
+/// A file as `pixel setup` leaves it: the user's own paragraph, then the
+/// block it renders, with its markers on lines of their own.
+fn with_setup_block(user_text: &str) -> String {
+    format!(
+        "{user_text}\n{}\n## Pixel\n\n- retrieve with pixel\n{}\n",
+        crate::setup::BLOCK_START,
+        crate::setup::BLOCK_END
+    )
+}
+
+#[test]
+fn strip_setup_blocks_removes_the_block_from_every_agent_file_it_finds() {
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude/CLAUDE.md");
+    let codex = home.path().join(".codex/AGENTS.md");
+    let pi = home.path().join(".pi/agent/APPEND_SYSTEM.md");
+    write(&claude, &with_setup_block("# My rules"));
+    write(&codex, &with_setup_block("# Agent rules"));
+    write(&pi, &with_setup_block("# pi"));
+
+    let step = strip_setup_blocks(home.path(), crate::setup::Scope::Global, false).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&claude).unwrap(), "# My rules\n");
+    assert_eq!(std::fs::read_to_string(&codex).unwrap(), "# Agent rules\n");
+    assert_eq!(std::fs::read_to_string(&pi).unwrap(), "# pi\n");
+    assert!(
+        step.summary.contains("3 file(s)"),
+        "every file the wizard wrote is named: {}",
+        step.summary
+    );
+    assert_eq!(backups_in(&home.path().join(".claude")).len(), 1);
+}
+
+#[test]
+fn strip_setup_blocks_reports_nothing_and_writes_nothing_when_no_block_is_there() {
+    let home = tempfile::tempdir().unwrap();
+    write(
+        &home.path().join(".claude/CLAUDE.md"),
+        "# My rules, untouched\n",
+    );
+
+    let step = strip_setup_blocks(home.path(), crate::setup::Scope::Global, false).unwrap();
+
+    assert!(step.summary.contains("0 file(s)"), "{}", step.summary);
+    assert_eq!(
+        std::fs::read_to_string(home.path().join(".claude/CLAUDE.md")).unwrap(),
+        "# My rules, untouched\n"
+    );
+    assert!(backups_in(&home.path().join(".claude")).is_empty());
+}
+
+#[test]
+fn strip_setup_blocks_leaves_a_malformed_block_for_the_user_to_close() {
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude/CLAUDE.md");
+    let broken = format!("# My rules\n{}\n", crate::setup::BLOCK_START);
+    write(&claude, &broken);
+
+    strip_setup_blocks(home.path(), crate::setup::Scope::Global, false).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&claude).unwrap(),
+        broken,
+        "uninstall removes what pixel wrote and never what it cannot parse"
+    );
+}
+
+#[test]
+fn strip_setup_blocks_covers_the_rule_files_and_only_the_files_of_that_scope() {
+    let home = tempfile::tempdir().unwrap();
+    let rules = home.path().join(".claude/rules/pixel-setup.md");
+    let repo_agents = home.path().join("AGENTS.md");
+    write(&rules, &with_setup_block("# rules"));
+    write(&repo_agents, &with_setup_block("# repo"));
+
+    strip_setup_blocks(home.path(), crate::setup::Scope::Global, false).unwrap();
+    assert_eq!(std::fs::read_to_string(&rules).unwrap(), "# rules\n");
+
+    strip_setup_blocks(home.path(), crate::setup::Scope::Repository, false).unwrap();
+    assert_eq!(std::fs::read_to_string(&repo_agents).unwrap(), "# repo\n");
+    assert_eq!(
+        std::fs::read_to_string(&rules).unwrap(),
+        "# rules\n",
+        "the machine run already took it"
+    );
+}
+
+#[test]
+fn strip_setup_blocks_writes_nothing_on_a_dry_run() {
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude/CLAUDE.md");
+    let original = with_setup_block("# My rules");
+    write(&claude, &original);
+
+    let step = strip_setup_blocks(home.path(), crate::setup::Scope::Global, true).unwrap();
+
+    assert!(step.summary.contains("dry-run"), "{}", step.summary);
+    assert!(step.summary.contains("1 file(s)"), "{}", step.summary);
+    assert_eq!(std::fs::read_to_string(&claude).unwrap(), original);
+    assert!(backups_in(&home.path().join(".claude")).is_empty());
+}

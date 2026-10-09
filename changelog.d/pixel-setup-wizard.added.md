@@ -1,0 +1,1 @@
+**setup:** `pixel setup` writes a managed steering block into each selected agent's instruction file, for the agents and pixel features you pick, after showing every path and the exact text; `--repo <path>` sets up one repository, `--print` renders the default block and changes nothing, and cancelling writes nothing. Hook files stay `pixel install`'s.
