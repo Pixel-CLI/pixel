@@ -761,7 +761,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     bottles, release SBOM, homebrew-core formula,
     nightly diff checkpoints, coverage selection, mutants
     config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
-    reproducible release build environment, the brief-gate bench and excavation counter self-tests with the `eval/brief-gate/` prompt set's schema check, the `eval/` agent A/B harness against fixture CLIs), the
+    reproducible release build environment, the brief-gate bench, excavation counter and live brief A/B driver self-tests with the `eval/brief-gate/` prompt set's schema check, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
     (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`)
     and the Bun Pi impact-command contract (`scripts/test-pi-impact.mjs`);

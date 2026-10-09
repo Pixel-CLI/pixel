@@ -846,6 +846,11 @@ def cmd_run(args):
 # report
 # --------------------------------------------------------------------------
 
+RECEIPT_COLUMNS = ("arm", "prompt_id", "rep", "index", "on_topic", "kind", "ok", "problems", "wall_s", "load1", "native",
+                   "native_end", "tools_total", "pixel", "delegated", "input_total", "output_tokens", "cost_usd",
+                   "num_turns", "t_first_tool_s", "t_answer_s", "brief_fired", "brief_tier", "brief_bytes",
+                   "brief_answered", "brief_ops", "brief_partial", "brief_paths", "brief_names_expected",
+                   "cites_expected", "cites_basename", "cited", "model", "rl_five_hour", "daemon_restarted", "started")
 KEYS = ("native", "tools_total", "pixel", "input_total", "output_tokens", "wall_s", "cost_usd")
 
 
@@ -885,6 +890,33 @@ def contrast(rows_a, rows_b, key, ids):
             "higher": sum(1 for d in deltas if d > 1e-9)}
 
 
+def replicate_sd(valid, ids):
+    """Pooled standard deviation of ``native`` between repetitions of one prompt in one arm."""
+    cells = {}
+    for row in valid:
+        if row["prompt_id"] in ids:
+            cells.setdefault((row["arm"], row["prompt_id"]), []).append(row["native"])
+    variances = [statistics.variance(values) for values in cells.values() if len(values) > 1]
+    return round(math.sqrt(statistics.mean(variances)), 2) if variances else None
+
+
+def brief_code(row):
+    return (row["brief_tier"] or "y") if row["brief_fired"] else "-"
+
+
+def per_prompt(valid, arms):
+    table = []
+    for pid in sorted({r["prompt_id"] for r in valid}):
+        entry = {"prompt_id": pid, "on_topic": next(r["on_topic"] for r in valid if r["prompt_id"] == pid)}
+        for arm in arms:
+            runs = sorted((r for r in valid if r["prompt_id"] == pid and r["arm"] == arm), key=lambda r: r["rep"])
+            entry[arm] = {"native": [r["native"] for r in runs], "brief": [brief_code(r) for r in runs],
+                          "cites": "".join("-" if r["cites_expected"] is None else "Y" if r["cites_expected"] else "n"
+                                           for r in runs)}
+        table.append(entry)
+    return sorted(table, key=lambda e: (not e["on_topic"], e["prompt_id"]))
+
+
 def build_report(rows, manifest=None):
     valid = [r for r in rows if r["ok"]]
     arms = [a for a in ARMS if any(r["arm"] == a for r in rows)]
@@ -912,20 +944,32 @@ def build_report(rows, manifest=None):
                 entry[key] = contrast(a_rows, b_rows, key, ids)
             report["contrasts"].append(entry)
         fired_ids = {r["prompt_id"] for r in b_rows if r["brief_fired"] and r["prompt_id"] in on_ids}
-        if fired_ids:
-            entry = {"from": first, "to": second, "group": "on-topic, brief fired in the to-arm"}
-            for key in ("native", "tools_total", "input_total", "wall_s", "cost_usd", "cites_expected"):
-                entry[key] = contrast(a_rows, b_rows, key, fired_ids)
-            report["contrasts"].append(entry)
+        silent_ids = {r["prompt_id"] for r in b_rows if r["prompt_id"] in on_ids} - fired_ids
+        for label, ids in (("on-topic, brief fired in the to-arm", fired_ids),
+                           ("on-topic, brief never fired in the to-arm", silent_ids)):
+            if ids:
+                entry = {"from": first, "to": second, "group": label}
+                for key in ("native", "tools_total", "input_total", "wall_s", "cost_usd", "cites_expected"):
+                    entry[key] = contrast(a_rows, b_rows, key, ids)
+                report["contrasts"].append(entry)
     if "new" in arms:
-        new_rows = [r for r in valid if r["arm"] == "new" and r["on_topic"]]
+        new_valid = [r for r in valid if r["arm"] == "new"]
         tier_of = lambda r: (r["brief_tier"] or "untiered") if r["brief_fired"] else "no brief"
-        for tier in sorted({tier_of(r) for r in new_rows}):
-            subset = [r for r in new_rows if tier_of(r) == tier]
-            ids = {r["prompt_id"] for r in subset}
-            baseline = [r for r in valid if r["arm"] == "off" and r["prompt_id"] in ids]
-            report["tiers"][tier] = {"new": summary(subset),
-                                     "off_same_prompts": summary(baseline) if baseline else None}
+
+        def add_tier(name, subset):
+            if subset:
+                ids = {r["prompt_id"] for r in subset}
+                baseline = [r for r in valid if r["arm"] == "off" and r["prompt_id"] in ids]
+                report["tiers"][name] = {"new": summary(subset),
+                                         "off_same_prompts": summary(baseline) if baseline else None}
+
+        for group, flag in (("on-topic", True), ("off-topic", False)):
+            in_group = [r for r in new_valid if r["on_topic"] == flag]
+            for tier in sorted({tier_of(r) for r in in_group}):
+                add_tier(f"{group}: {tier}", [r for r in in_group if tier_of(r) == tier])
+        fired = [r for r in new_valid if r["on_topic"] and r["brief_fired"]]
+        add_tier("on-topic: brief names an expected file", [r for r in fired if r["brief_names_expected"]])
+        add_tier("on-topic: brief fired, names none", [r for r in fired if not r["brief_names_expected"]])
     for first, second in (("off", "new"), ("old", "new"), ("off", "old")):
         on = next((c for c in report["contrasts"] if c["from"] == first and c["to"] == second and c["group"] == "on-topic"), None)
         off = next((c for c in report["contrasts"] if c["from"] == first and c["to"] == second and c["group"] == "off-topic"), None)
@@ -942,6 +986,8 @@ def build_report(rows, manifest=None):
             "off_topic_cost_ok": (None if not off or off["native"]["mean_delta"] is None
                                   else off["native"]["mean_delta"] <= OFFTOPIC_EXTRA),
             "off_topic_native_delta": off["native"]["mean_delta"] if off else None})
+    report["noise"] = {name: replicate_sd(valid, ids) for name, ids in groups.items()}
+    report["per_prompt"] = per_prompt(valid, arms)
     if rows:
         report["utilisation"] = {"first_five_hour": next((r["rl_five_hour"] for r in sorted(rows, key=lambda r: r["index"])
                                                           if r["rl_five_hour"] is not None), None),
@@ -956,7 +1002,10 @@ def build_report(rows, manifest=None):
 def fmt(value, digits=2):
     if value is None:
         return "n/a"
-    return f"{value:.{digits}f}".rstrip("0").rstrip(".") if isinstance(value, float) else str(value)
+    if not isinstance(value, float):
+        return str(value)
+    text = f"{value:.{digits}f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def render(report):
@@ -973,15 +1022,17 @@ def render(report):
                      f"{fmt(s['wall_s']['mean'], 1)} | {fmt(s['wall_s']['median'], 1)} | {fmt(s['cost_usd']['mean'])} | "
                      f"{fmt(s['cites']['rate'])} (n {s['cites']['n']}) |")
     if report["tiers"]:
-        lines += ["", "NEW on-topic runs by the brief's tier, against OFF on the same prompts:", "",
-                  "| tier | new runs | new native mean | new native median | off native mean | new tools | new wall s | "
-                  "new cites | off cites |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+        lines += ["", "NEW runs by the brief's tier (and by whether it names an expected file), against OFF on the same prompts:", "",
+                  "| NEW group | runs | native mean | native median | off native mean | off native median | tools mean | "
+                  "input tok | output tok | wall s | cites | off cites |",
+                  "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
         for tier, entry in report["tiers"].items():
             new, off = entry["new"], entry["off_same_prompts"]
             lines.append(f"| {tier} | {new['runs']} | {fmt(new['native']['mean'])} | {fmt(new['native']['median'])} | "
-                         f"{fmt(off['native']['mean']) if off else 'n/a'} | {fmt(new['tools_total']['mean'])} | "
-                         f"{fmt(new['wall_s']['mean'], 1)} | {fmt(new['cites']['rate'])} | "
-                         f"{fmt(off['cites']['rate']) if off else 'n/a'} |")
+                         f"{fmt(off['native']['mean']) if off else 'n/a'} | {fmt(off['native']['median']) if off else 'n/a'} | "
+                         f"{fmt(new['tools_total']['mean'])} | {fmt(new['input_total']['mean'], 0)} | "
+                         f"{fmt(new['output_tokens']['mean'], 0)} | {fmt(new['wall_s']['mean'], 1)} | "
+                         f"{fmt(new['cites']['rate'])} | {fmt(off['cites']['rate']) if off else 'n/a'} |")
     lines += ["", "Paired by prompt (mean of the prompt's valid runs; delta = to - from; 95% bootstrap interval of the mean delta):", "",
               "| from -> to | group | prompts | native delta [95%] | lower / equal / higher | tools delta | input tok delta | "
               "wall s delta | cost delta | cites delta |", "| --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |"]
@@ -1000,6 +1051,21 @@ def render(report):
                          f"CI {c['native_ci95']}); answers not worse {c['answers_not_worse']} (cites delta "
                          f"{fmt(c['cites_delta'])}); off-topic cost ok {c['off_topic_cost_ok']} "
                          f"(delta {fmt(c['off_topic_native_delta'])})")
+    arms = [a for a in ARMS if report["per_prompt"] and a in report["per_prompt"][0]]
+    if report["per_prompt"]:
+        lines += ["", "Per prompt (`native` of each repetition; brief: tier, `y` fired without a tier, `-` silent; "
+                  "cites: Y named an expected file, n did not, - no expected file):", "",
+                  "| prompt | " + " | ".join(f"{a} native" for a in arms) + " | " + " | ".join(f"{a} brief" for a in arms if a != "off")
+                  + " | cites " + "/".join(arms) + " |", "| --- |" + " ---: |" * len(arms) + " --- |" * (len(arms) - 1) + " --- |"]
+        for e in report["per_prompt"]:
+            lines.append(f"| {e['prompt_id']}{'' if e['on_topic'] else ' (off)'} | "
+                         + " | ".join(",".join(map(str, e[a]["native"])) for a in arms) + " | "
+                         + " | ".join(",".join(e[a]["brief"]) for a in arms if a != "off") + " | "
+                         + "/".join(e[a]["cites"] for a in arms) + " |")
+    noise = report.get("noise")
+    if noise:
+        lines += ["", f"Run-to-run standard deviation of `native` between repetitions of the same prompt and arm: "
+                  f"on-topic {noise['on-topic']}, off-topic {noise['off-topic']}."]
     use = report.get("utilisation")
     if use:
         lines += ["", f"models {use['models']}; total list cost ${use['total_cost_usd']}; five-hour utilisation "
@@ -1018,11 +1084,14 @@ def cmd_report(args):
     if args.receipt:
         replacements = [(str(Path(args.work).resolve()), "$WORK"), (str(Path(args.work)), "$WORK"),
                         ("/private" + str(Path(args.work)), "$WORK"), (str(REPO), "$REPO"), (str(Path.home()), "~")]
-        keep = ("session_id", "stderr_tail")
-        slim = [{k: v for k, v in sorted(r.items()) if k not in keep} for r in sorted(rows, key=lambda r: r["index"])]
+        slim = [{**{k: r.get(k) for k in RECEIPT_COLUMNS},
+                 "hook_ms": next((h["ms"] for h in r["hooks"] if h["event"] == "UserPromptSubmit"), None)}
+                for r in sorted(rows, key=lambda r: r["index"])]
         receipt = redact({"manifest": manifest, "report": report, "runs": slim}, replacements)
+        head = json.dumps({k: v for k, v in receipt.items() if k != "runs"}, indent=1, sort_keys=True)
+        body = ",\n".join("  " + json.dumps(run, sort_keys=True, separators=(",", ":")) for run in receipt["runs"])
         Path(args.receipt).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.receipt).write_text(json.dumps(receipt, indent=1, sort_keys=True) + "\n")
+        Path(args.receipt).write_text(head[:-2] + ',\n "runs": [\n' + body + "\n ]\n}\n")
         print(f"\nreceipt: {args.receipt} ({Path(args.receipt).stat().st_size} bytes, no transcripts or answers)")
     return 0
 
@@ -1177,6 +1246,7 @@ class SelfTest(unittest.TestCase):
                                  "on_topic": True, "native": base - drop + rep % 2, "tools_total": base, "pixel": 0,
                                  "input_total": 100, "output_tokens": 5, "wall_s": 10.0, "cost_usd": 0.1,
                                  "brief_fired": arm == "new", "brief_tier": "high" if arm == "new" else None,
+                                 "brief_names_expected": arm == "new",
                                  "cites_expected": True, "rl_five_hour": 0.5, "model": "m", "load1": 3.0})
         rows.append({**rows[0], "prompt_id": "q1", "on_topic": False, "cites_expected": None, "index": 99})
         report = build_report(rows)
@@ -1184,8 +1254,13 @@ class SelfTest(unittest.TestCase):
         self.assertEqual((contrast_row["native"]["prompts"], contrast_row["native"]["mean_delta"]), (4, -3))
         self.assertEqual(contrast_row["native"]["lower"], 4)
         self.assertTrue(report["criteria"][0]["searches_less"] and report["criteria"][0]["answers_not_worse"])
-        self.assertIn("high", report["tiers"])
+        self.assertIn("on-topic: high", report["tiers"])
+        self.assertEqual(report["per_prompt"][0]["new"]["brief"], ["high", "high"])
+        self.assertEqual(report["noise"]["on-topic"], 0.71)
         self.assertIn("native mean", render(report))
+
+    def test_number_format_never_strips_integer_zeros(self):
+        self.assertEqual((fmt(1990.0, 0), fmt(0.20), fmt(22.0, 1), fmt(None), fmt(5)), ("1990", "0.2", "22", "n/a", "5"))
 
     def test_bootstrap_interval_brackets_the_mean(self):
         deltas = [-3, -2, -4, -3, -1, -5]
