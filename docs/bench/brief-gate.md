@@ -278,8 +278,10 @@ against 15.8% on main) and no off-topic one does (main: 1 of 14).
    plain one at the low tier. Ops prompts are the one category that did not
    improve on test (4 of 15 against 3 of 15): this tool's own vocabulary is
    git, release and CI.
-3. **Without the daemon the files are no better than before.** hit@8 is 38.7%
-   on test against 41.9% (46.2% when fired against 68.4%): the in-process route
+3. **Without the daemon the files are no better than before** (the hooks now
+   start one, so this is the first prompt after a break at worst: see "Cold
+   start" below). hit@8 is 38.7% on test against 41.9% (46.2% when fired
+   against 68.4%): the in-process route
    has no `meaning` leads, only the co-file order, and the gate now fires on
    plain prompts the baseline did not answer. With the daemon, hit@8 is 64.5%
    against 38.7%.
@@ -287,6 +289,90 @@ against 15.8% on main) and no off-topic one does (main: 1 of 14).
    the daemon (165 ms without), p95 from 76 ms to 135 ms (202 ms): every plain
    or weak prompt now asks for the relevance block. All of it sits inside the
    750 ms window, and the machine was loaded.
+
+### Cold start: the hooks keep a daemon behind the brief
+
+The "Without the daemon" rows above are what a prompt gets after a break (the
+daemon exits after thirty minutes idle) or an upgrade (a protocol bump leaves an
+older daemon unusable), because the brief only pinged the socket. A session
+starting, and a briefed prompt that finds no daemon, now start the repository's
+daemon in the background (`execution_brief/autostart.rs`, "Keeping a daemon
+behind the brief" in `ARCHITECTURE.md`); the prompt that found none keeps the
+in-process route, the next one gets the daemon. This section measures what that
+buys. It is the **dev** split only (the test split was read once, above, and is
+not touched again), English rows for the headline.
+
+| | |
+| --- | --- |
+| binary | `pixel 0.7.1 / commit: 0b298428a3b3a9bb6bae55f35a0ae7a9d891febe`, clean tree, `CARGO_PROFILE_DEV_DEBUG=0 cargo build --profile dev-release -p pixel-cli` into a target directory of its own; the code is that of `5e586c12` (the next commit changes only the bench script) |
+| repository, set | the fixture of the runs above (clean clone at `85bede7d`, `fixture_match: true`), set SHA-256 `bc6ac042…6276ad`; dev split: 109 rows, 78 English (43 on-topic, 35 off-topic); 0 errors and 0 unstable rows in all ten runs |
+| modes | `on`: daemon started and the `meaning` vectors warmed first (`--warm-meaning`); `off`: daemon stopped and auto-start disabled; `cold`: daemon stopped, auto-start on, no canary and no warm-up, the 109 prompts one after another in file order, back to back (the worst case: a person types for seconds between prompts); `cold-session`: as `cold` after a `SessionStart` hook and 3 s; `cold-nocache`: as `cold` with `.pixel/code-vectors/` deleted first, so the first `meaning` build embeds every chunk |
+| runs | two sequences, `on`, `off`, `cold`, `cold-session`, `cold-nocache`, one session, `--repeat 1` (a cold prompt can only be taken once); load average 6 to 8 on 16 CPUs, shared with other agents: compare latencies within a sequence |
+
+```bash
+B=<the binary above>; F=<the fixture>
+python3 scripts/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon on --warm-meaning --out on.json
+python3 scripts/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon off  --compare on.json --out off.json
+python3 scripts/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon cold --compare on.json --out cold.json
+python3 scripts/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon cold --session-start --session-gap 3 --compare on.json --out cold-session.json
+rm -rf "$F/.pixel/code-vectors"
+python3 scripts/bench-brief-gate.py --pixel "$B" --repo "$F" --split dev --daemon cold --compare on.json --out cold-nocache.json
+```
+
+English dev rows (78; hit@8 over the 32 with `expected_files`; any brief).
+Latency is sequence 1, with sequence 2 in parentheses; every other column was
+the same in both:
+
+| mode | P | R | F1 | FP rate | hit@8 | hit@8 when fired | latency p50 / p95 ms | briefs in process / daemon | in process before the daemon answered | gate identical to `on` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| on | 84.6% | 76.7% | 80.5% | 17.1% | 71.9% | 82.1% | 106 / 170 (103 / 159) | 0 / 106 | 0 | n/a |
+| off | 84.6% | 76.7% | 80.5% | 17.1% | 53.1% | 60.7% | 166 / 199 (160 / 199) | 106 / 0 | 106 | 109 of 109 |
+| cold | 84.6% | 76.7% | 80.5% | 17.1% | 71.9% | 82.1% | 109 / 177 (105 / 164) | 1 / 105 | 1 | 109 of 109 |
+| cold, after a session start | 84.6% | 76.7% | 80.5% | 17.1% | 71.9% | 82.1% | 106 / 171 (108 / 174) | 0 / 106 | 0 | 109 of 109 |
+| cold, no vector cache | 84.6% | 76.7% | 80.5% | 17.1% | 71.9% | 82.1% | 111 / 172 (111 / 179) | 1 / 105 | 1 | 109 of 109 |
+
+"Gate identical" is asserted by `--compare` (printed as `GATE IDENTICAL … 109/109
+prompts, same fired, gate, tier and score`, exit status 2 otherwise): every
+prompt took the same `fired`, `gate`, `tier` and `score` in every mode, so the
+daemon changes the files and never the decision. Latency is the wall time of
+`pixel brief` over the English rows, one call per prompt; briefs counted are
+those that had a route (a declined prompt has none).
+
+The hook itself (`pixel run-hook task-event --provider claude --event <event>`
+with the JSON payload on stdin, the fixture's daemon stopped before each call,
+15 calls per row, scratch script, wall time in ms):
+
+| hook | auto-start off, no daemon | auto-start on, no daemon (starts one) | auto-start on, daemon running |
+| --- | ---: | ---: | ---: |
+| `SessionStart`, median / max | 22 / 29 | 24 / 29 | 24 / 30 |
+| `UserPromptSubmit`, median / max | 186 / 201 | 191 / 204 | 185 / 208 |
+
+What it says:
+
+1. **A cold start costs one local brief.** In both sequences the first
+   prompt that was briefed ran in process, started a daemon, and the next
+   brief, 0.18 to 0.20 s later, found it. After a `SessionStart` none ran in
+   process. hit@8 is 71.9% in every cold mode, against 53.1% in process
+   throughout (`off`), and equal to a daemon that had been up all along.
+2. **The `meaning` vectors come back fast when their cache is on disk.**
+   Every cold brief text equals the `on` brief text, byte for byte
+   (`stdout_sha`, 0 of 106 differ), because the daemon asked its first
+   `meaning` question at start and read the vectors from `.pixel/code-vectors/`
+   before the third prompt (0.4 s). Without that cache (a repository the
+   daemon has never served) two briefs, `bg-006` and `bg-018`, went out without
+   leads (their file order differs); both still named the expected file, so
+   hit@8 did not move. A larger repository builds slower than this fixture's
+   1 161 files, and the briefs that arrive meanwhile are the in-process ones.
+3. **The hook pays 2 to 5 ms for it.** The decision is a few local socket
+   probes on a thread of its own, bounded by 100 ms, and the start itself is a
+   detached process; the differences above are inside the run-to-run spread
+   (the max column), not a measured cost.
+4. **Not measured.** A real stale-protocol daemon (an older binary running
+   against this one) is covered by unit tests with a scripted daemon
+   (retired, then launched), not by a run; Linux; a repository whose daemon
+   takes longer than 0.2 s to bind; the live agent A/B. The numbers are the
+   dev split, the set the gate was fitted on: the gate is unchanged by this
+   work (asserted above), the files are what moved.
 
 ## Excavation: the agent-side metric
 
