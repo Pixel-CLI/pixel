@@ -612,18 +612,28 @@ fn parse_decisions_probs(
         .and_then(Value::as_array)
         .and_then(|a| a.first())
         .ok_or("remote decisions response missing answers[0]")?;
-    if answer.get("type").and_then(Value::as_str) == Some("refusal") {
-        let reason = answer
-            .get("refusal")
-            .and_then(Value::as_str)
-            .unwrap_or("(no reason given)");
-        return Err(format!("remote decisions refused the decision: {reason}"));
+    match answer.get("type").and_then(Value::as_str) {
+        Some("refusal") => {
+            let reason = answer
+                .get("refusal")
+                .and_then(Value::as_str)
+                .unwrap_or("(no reason given)");
+            return Err(format!("remote decisions refused the decision: {reason}"));
+        }
+        Some("choice") => {}
+        Some(answer_type) => {
+            return Err(format!(
+                "remote decisions answer has unsupported type {answer_type:?}"
+            ));
+        }
+        None => return Err("remote decisions answer missing string type".to_string()),
     }
     let probs = answer
         .get("probabilities")
         .and_then(Value::as_array)
         .ok_or("remote decisions answer probabilities is not an array")?;
     let mut out: BTreeMap<String, f64> = labels.iter().map(|l| (l.clone(), 0.0)).collect();
+    let mut seen = BTreeMap::new();
     let mut sum = 0.0f64;
     for entry in probs {
         let label = entry
@@ -633,6 +643,11 @@ fn parse_decisions_probs(
         if !out.contains_key(label) {
             return Err(format!(
                 "remote returned probability for unknown label {label:?} (expected only: {labels:?})"
+            ));
+        }
+        if seen.insert(label, ()).is_some() {
+            return Err(format!(
+                "remote returned duplicate probability for label {label:?}"
             ));
         }
         let p = entry
@@ -719,6 +734,13 @@ mod tests {
                 Some("OPENCODE_API_KEY"),
             ),
             (
+                Preset::Openai,
+                "https://api.openai.com/v1",
+                "gpt-6-luna",
+                "openai",
+                Some("OPENAI_API_KEY"),
+            ),
+            (
                 Preset::Jev,
                 "https://api.typesafe.ai",
                 "jev-latest",
@@ -772,6 +794,7 @@ mod tests {
     #[test]
     fn parse_name_accepts_normalized_preset_names_and_rejects_unknown_ones() {
         assert_eq!(Preset::parse_name("OpenRouter"), Some(Preset::Openrouter));
+        assert_eq!(Preset::parse_name("OpenAI"), Some(Preset::Openai));
         assert_eq!(Preset::parse_name("opencode_go"), Some(Preset::OpencodeGo));
         assert_eq!(Preset::parse_name("  DEEPSEEK  "), Some(Preset::Deepseek));
         assert_eq!(Preset::parse_name("jev"), Some(Preset::Jev));
@@ -1393,6 +1416,34 @@ mod tests {
         assert!((probs["a"] - 8.0 / 9.0).abs() < 1e-9);
         assert!((probs["b"] - 1.0 / 9.0).abs() < 1e-9);
         assert!((probs.values().sum::<f64>() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn decisions_probabilities_reject_duplicate_labels() {
+        let s = spec("t", "", &["a", "b"], &[]);
+        let error = parse_decisions_probs(
+            &decisions_with(json!([
+                {"value": "a", "probability": 0.8},
+                {"value": "a", "probability": 0.2},
+                {"value": "b", "probability": 0.1}
+            ])),
+            &s.labels,
+        )
+        .unwrap_err();
+        assert!(error.contains("duplicate probability"), "{error}");
+        assert!(error.contains("\"a\""), "{error}");
+    }
+
+    #[test]
+    fn decisions_predicate_answers_are_rejected() {
+        let s = spec("t", "", &["a", "b"], &[]);
+        let error = parse_decisions_probs(
+            &json!({"answers": [{"type": "predicate", "probabilities": []}]}),
+            &s.labels,
+        )
+        .unwrap_err();
+        assert!(error.contains("unsupported type"), "{error}");
+        assert!(error.contains("predicate"), "{error}");
     }
 
     #[test]
