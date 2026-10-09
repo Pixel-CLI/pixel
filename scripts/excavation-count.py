@@ -58,7 +58,27 @@ DELEGATE_TOOLS = {"agent", "task", "subagent", "scout"}
 EXPLORE_VERBS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "fdfind", "cat", "bat",
                  "head", "tail", "ls", "tree", "less", "more", "nl"}
 GIT_EXPLORE = {"grep", "ls-files", "ls-tree", "cat-file"}
-WRAPPERS = {"command", "exec", "nice", "time", "env", "sudo", "nohup", "stdbuf", "xargs"}
+# Wrappers that run the command after their options. `short` lists the option
+# letters that take an argument (attached, `-sKILL`, or the next token),
+# `long` the long options that do (`--signal KILL`; `--signal=KILL` is whole),
+# `positional` the arguments before the command (timeout's duration) and
+# `lookup` the options that make the wrapper look a command up instead of run it.
+WRAPPER_SPECS = {
+    "timeout": {"short": "sk", "long": {"--signal", "--kill-after"}, "positional": 1},
+    "nice": {"short": "n", "long": {"--adjustment"}},
+    "env": {"short": "uCSP", "long": {"--unset", "--chdir", "--split-string"}},
+    "command": {"lookup": {"-v", "-V"}},
+    "time": {"short": "fo", "long": {"--format", "--output"}},
+    "exec": {"short": "a"},
+    "sudo": {"short": "ugCDhprRtTU", "long": {"--user", "--group", "--chdir", "--host", "--prompt", "--role", "--type"}},
+    "nohup": {},
+    "stdbuf": {"short": "ioe", "long": {"--input", "--output", "--error"}},
+    "xargs": {"short": "InPLsdEaJRS", "long": {"--arg-file", "--delimiter", "--max-args", "--max-procs",
+                                              "--max-chars", "--max-lines", "--eof"}},
+}
+WRAPPER_ALIASES = {"gtimeout": "timeout", "gnice": "nice", "genv": "env", "gstdbuf": "stdbuf"}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+SHELL_C = re.compile(r"^-[A-Za-z]*c$")
 OPERATORS = {"&&", "||", ";", ";;", "&", "(", ")", "{", "}", "\n"}
 PIXEL_BINARIES = {"pixel", "pixel-dev", "gitpixel"}
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -119,12 +139,40 @@ def split_pipelines(command):
     return [pipeline for pipeline in pipelines if pipeline]
 
 
+def skip_wrapper(name, tokens):
+    """The command tokens after wrapper ``name`` and its options; ``[]`` when
+    it runs none (``command -v rg`` looks `rg` up, a bare ``timeout 5`` has
+    nothing to run)."""
+    spec = WRAPPER_SPECS[name]
+    tokens = list(tokens)
+    while tokens and tokens[0].startswith("-") and tokens[0] != "-":
+        option = tokens.pop(0)
+        if option == "--":
+            break
+        if option in spec.get("lookup", ()):
+            return []
+        if option.startswith("--"):
+            if "=" not in option and option in spec.get("long", ()) and tokens:
+                tokens.pop(0)
+            continue
+        letters = option[1:]
+        for index, letter in enumerate(letters):
+            if letter in spec.get("short", ""):
+                if index == len(letters) - 1 and tokens:
+                    tokens.pop(0)  # `-s KILL`; `-sKILL` carries its own argument
+                break
+    for _ in range(spec.get("positional", 0)):
+        if tokens:
+            tokens.pop(0)
+    return tokens
+
+
 def strip_wrappers(tokens):
     """Drop env assignments, rtk, and the wrappers that run another command."""
     tokens = list(tokens)
     while tokens:
         head = tokens[0]
-        base = os.path.basename(head)
+        base = WRAPPER_ALIASES.get(os.path.basename(head), os.path.basename(head))
         if ASSIGNMENT.match(head):
             tokens.pop(0)
         elif base == "rtk":
@@ -133,10 +181,8 @@ def strip_wrappers(tokens):
                 tokens.pop(0)
             elif tokens and tokens[0] == "read":
                 tokens[0] = "cat"
-        elif base == "timeout" and len(tokens) > 2:
-            tokens = tokens[2:] if not tokens[1].startswith("-") else tokens[2:]
-        elif base in WRAPPERS and len(tokens) > 1:
-            tokens.pop(0)
+        elif base in WRAPPER_SPECS:
+            tokens = skip_wrapper(base, tokens[1:])
         else:
             break
     return tokens
@@ -163,9 +209,13 @@ def classify_pipeline(stages, depth=0):
     if any(writes_a_file(strip_wrappers(stage)) for stage in stages):
         return "edit"
     base = os.path.basename(first[0])
-    if base in ("sh", "bash", "zsh") and "-c" in first and depth < 2:
-        inner = first[first.index("-c") + 1:][:1]
-        return classify_bash(inner[0], depth + 1) if inner else "other"
+    if base in SHELLS and depth < 2:
+        for position, token in enumerate(first[1:], 1):
+            if not token.startswith("-"):
+                break  # a script path: not an inline command
+            if SHELL_C.match(token):  # -c, -lc, -ic: the next token is the command line
+                inner = first[position + 1:][:1]
+                return classify_bash(inner[0], depth + 1) if inner else "other"
     if base in PIXEL_BINARIES:
         return "pixel"
     if base == "sed":
@@ -543,6 +593,50 @@ class SelfTest(unittest.TestCase):
         other = ["cargo test 2>&1 | grep FAIL", "git status", "npm install", "echo rg", "sed s/a/b/ file",
                  "cd crates", "bun run dev", "git log --oneline"]
         for command in other:
+            self.assertEqual(classify_bash(command), "other", command)
+
+    def test_timeout_options_and_duration_are_skipped_before_the_command(self):
+        shapes = ["timeout 5 rg foo", "timeout -s KILL 5 rg foo", "timeout -sKILL 5 rg foo",
+                  "timeout --signal=KILL 5 rg foo", "timeout --signal KILL 5 rg foo", "timeout -k 2 5 rg foo",
+                  "timeout --kill-after=2 5 rg foo", "timeout --kill-after 2 5 rg foo",
+                  "timeout --foreground 5 rg foo", "timeout --preserve-status 5 rg foo", "timeout -v 5 rg foo",
+                  "timeout -k 2 -s KILL --foreground --preserve-status -v 10.5s rg foo", "timeout -vs KILL 5 rg foo",
+                  "timeout -- 5 rg foo", "gtimeout -s KILL 5 rg foo", "rtk timeout -s KILL 5 rg foo",
+                  "timeout -s KILL 5 rg foo | head -3"]
+        for command in shapes:
+            self.assertEqual(classify_bash(command), "explore", command)
+        self.assertEqual(strip_wrappers(shlex.split("timeout -s KILL 5 rg foo")), ["rg", "foo"])
+        self.assertEqual(strip_wrappers(shlex.split("timeout -k 2 -s KILL 5 rg foo")), ["rg", "foo"])
+        self.assertEqual(strip_wrappers(shlex.split("timeout --signal=KILL 5 rg foo")), ["rg", "foo"])
+        for command in ["timeout -s KILL 5 cargo test", "timeout 5", "timeout -s KILL", "timeout -s KILL 5 git status"]:
+            self.assertEqual(classify_bash(command), "other", command)
+        self.assertEqual(classify_bash("timeout -s KILL 5 pixel find-code x"), "pixel")
+        self.assertEqual(classify_bash("timeout -s KILL 5 sed -i s/a/b/ f.rs"), "edit")
+        self.assertEqual(classify_bash("printf x | timeout -s KILL 5 tee out.txt"), "edit")
+
+    def test_the_other_wrappers_skip_their_options_too(self):
+        explore = ["env -i rg foo", "env -u HOME rg foo", "env -C /tmp rg foo", "env -i FOO=1 rg foo", "env FOO=1 BAR=2 rg foo",
+                   "nice rg foo", "nice -n 10 rg foo", "nice -10 rg foo", "nice -n10 rg foo", "nice --adjustment=5 rg foo",
+                   "command rg foo", "command -p rg foo", "time rg foo", "time -p rg foo", "time -f %e rg foo",
+                   "time -o /tmp/t rg foo", "time --format=%e rg foo", "exec rg foo", "exec -a name rg foo", "exec -c rg foo",
+                   "sudo rg foo", "sudo -n rg foo", "sudo -u bob rg foo", "sudo -E -u bob rg foo", "sudo --user=bob rg foo",
+                   "nohup rg foo", "stdbuf -oL rg foo", "stdbuf -o L rg foo", "stdbuf --output=L rg foo", "stdbuf -i0 -oL -eL rg foo",
+                   "xargs rg foo", "xargs -n1 rg foo", "xargs -n 1 rg foo", "xargs -I {} cat {}", "xargs -0 -P 4 -n 1 rg foo",
+                   "xargs --max-args=1 rg foo",
+                   "timeout 5 nice -n 10 env -i FOO=1 rg foo", "rtk proxy timeout -s KILL 5 nice -n 10 rg foo",
+                   "time -p timeout -s KILL 5 stdbuf -oL rg foo"]
+        for command in explore:
+            self.assertEqual(classify_bash(command), "explore", command)
+        other = ["command -v rg", "command -V rg", "env", "env -i", "nice -n 10 cargo build", "sudo -u bob cargo build",
+                 "time -p cargo test", "xargs -n1 echo", "exec"]
+        for command in other:
+            self.assertEqual(classify_bash(command), "other", command)
+
+    def test_shell_dash_c_with_clustered_flags_is_unwrapped(self):
+        for command in ["bash -c 'rg foo'", "bash -lc 'rg foo'", "zsh -ic 'rg foo'", "sh -c 'timeout -s KILL 5 rg foo'",
+                        "bash -lc \"cd src && rg foo\""]:
+            self.assertEqual(classify_bash(command), "explore", command)
+        for command in ["bash -lc 'cargo test'", "bash script.sh", "bash -c", "bash -x script.sh"]:
             self.assertEqual(classify_bash(command), "other", command)
 
     def test_pixel_calls_are_their_own_bucket_and_writes_are_edits(self):
