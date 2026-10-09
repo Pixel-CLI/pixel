@@ -569,6 +569,23 @@ impl Evidence for Live {
         }
         Ok(head)
     }
+
+    fn file_excerpt(
+        &self,
+        path: &str,
+        max_lines: usize,
+        deadline: Instant,
+    ) -> Result<String, String> {
+        if Instant::now() >= deadline {
+            return Err("out of time".to_string());
+        }
+        let text = std::fs::read_to_string(self.root.join(path)).map_err(|e| e.to_string())?;
+        let content: String = text.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+        if content.trim().is_empty() {
+            return Err("empty file".to_string());
+        }
+        Ok(content)
+    }
 }
 
 /// A connection to the repository's daemon socket whose reads and writes give

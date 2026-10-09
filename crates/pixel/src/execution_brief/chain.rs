@@ -45,7 +45,7 @@ pub(crate) const BRIEF_WINDOW: Duration = Duration::from_millis(750);
 /// kind op); the shared deadline, not this count, is the invariant.
 pub(crate) const MAX_OPS: usize = 6;
 /// Rendered size cap; lists give way before a line is cut.
-pub(crate) const BRIEF_BYTES: usize = 2048;
+pub(crate) const BRIEF_BYTES: usize = 12288;
 /// Match rows one text search pulls before its files are grouped.
 pub(crate) const SEARCH_ROWS: usize = 200;
 /// Matches one concept search keeps.
@@ -72,6 +72,12 @@ const MAX_ITEM_CHARS: usize = 120;
 /// definition: wide enough for a few source lines, bounded so it cannot
 /// own the whole block.
 const DEF_BODY_CHARS: usize = 480;
+/// How many of the top files carry an excerpt, and how many lines each.
+const MAX_EXCERPT_FILES: usize = 3;
+const EXCERPT_LINES: usize = 80;
+/// One excerpt's cap in the render — three of these plus the lists stay
+/// inside [`BRIEF_BYTES`].
+const EXCERPT_CHARS: usize = 2400;
 /// Chars of the typed prompt kept for `targets_facts` and follow-ups.
 const MAX_TYPED_CHARS: usize = 600;
 /// History rows a rationale question pulls.
@@ -330,6 +336,18 @@ pub(crate) trait Evidence {
     fn line_at(&self, path: &str, line: u64, _deadline: Instant) -> Result<String, String> {
         let _ = (path, line);
         Err("source read unsupported".to_string())
+    }
+    /// The first `max_lines` of `path` — the smallest read that tells the
+    /// model what the file does without it opening the file. A plain read,
+    /// not an index operation; the deadline bounds it like `line_at`.
+    fn file_excerpt(
+        &self,
+        path: &str,
+        max_lines: usize,
+        _deadline: Instant,
+    ) -> Result<String, String> {
+        let _ = (path, max_lines);
+        Err("file excerpt unsupported".to_string())
     }
 }
 
@@ -628,9 +646,19 @@ pub(crate) fn pick_uid<'a>(
     }
 }
 
+/// A code excerpt read from a file the search found: the path plus enough
+/// opening lines to judge what the file does — the difference between a
+/// brief that names evidence and one the model can answer from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Excerpt {
+    pub(crate) path: String,
+    pub(crate) content: String,
+}
+
 /// What the chain has learned, shared between the worker and the hook.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Brief {
+    /// Serialize for --json output (transient ops fields omitted).
     anchors: Vec<String>,
     /// The intent a warm local verdict decided, when one drove the plan.
     intent: Option<String>,
@@ -661,6 +689,9 @@ pub(crate) struct Brief {
     history: Vec<HistoryHit>,
     /// The semantic follow-up command when the index is already warm.
     semantic: Option<String>,
+    /// Code excerpts from the top files the search found — the evidence a
+    /// model answers from instead of re-reading each file itself.
+    excerpts: Vec<Excerpt>,
     /// Cap and advisory strings the ops carried verbatim.
     caps: Vec<String>,
     /// The best follow-up `pixel` command for a partial packet, set by the
@@ -816,6 +847,33 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
                     .unresolved
                     .push(format!("find-symbol {name}: {reason}"));
             }),
+        }
+    }
+    // Evidence the model answers from: the top files' opening lines.
+    // Plain reads, not index ops — each is a stat plus a bounded read, so
+    // the deadline covers them without touching the op budget.
+    if edit(state, |brief| !brief.files.is_empty()) {
+        let paths: Vec<String> = edit(state, |brief| {
+            brief
+                .files
+                .iter()
+                // Hidden directories (.zcode/, .git/) hold drafts and
+                // metadata, not the source an excerpt should carry.
+                .filter(|hit| !hit.path.split('/').any(|part| part.starts_with('.')))
+                .take(MAX_EXCERPT_FILES)
+                .map(|hit| hit.path.clone())
+                .collect()
+        });
+        for path in paths {
+            if Instant::now() >= deadline {
+                edit(state, |brief| brief.cut = true);
+                break;
+            }
+            if let Ok(content) = evidence.file_excerpt(&path, EXCERPT_LINES, deadline) {
+                edit(state, |brief| {
+                    brief.excerpts.push(Excerpt { path, content });
+                });
+            }
         }
     }
     // The routed kind spends the ops the prefix left on the evidence shape
@@ -1226,6 +1284,7 @@ impl Pending {
         let brief = edit(&self.state, |brief| brief.clone());
         render(&brief)
     }
+
 }
 
 /// Start the brief for `prompt` in `root`, or decline: a switched-off brief,
@@ -1315,6 +1374,7 @@ struct Shown {
     excluded: usize,
     caps: usize,
     unresolved: usize,
+    excerpts: usize,
 }
 
 impl Shown {
@@ -1330,14 +1390,18 @@ impl Shown {
             excluded: brief.excluded.len(),
             caps: brief.caps.len(),
             unresolved: brief.unresolved.len(),
+            excerpts: brief.excerpts.len().min(MAX_EXCERPT_FILES),
         }
     }
 
     /// Drop one entry from the longest list (the earlier of equals in the
-    /// order excluded, files, tests, targets, skeleton, history, callers,
-    /// defined, caps, unresolved); `false` when every list is already empty.
+    /// order excerpts, excluded, files, tests, targets, skeleton, history,
+    /// callers, defined, caps, unresolved); `false` when every list is
+    /// already empty. Excerpts go first: they are the biggest lines and the
+    /// file list still names what an excerpt carried.
     fn shrink(&mut self) -> bool {
         let widest = [
+            self.excerpts,
             self.excluded,
             self.files,
             self.tests,
@@ -1356,6 +1420,7 @@ impl Shown {
             return false;
         }
         for slot in [
+            &mut self.excerpts,
             &mut self.excluded,
             &mut self.files,
             &mut self.tests,
@@ -1475,6 +1540,10 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
     ) {
         lines.push(line);
     }
+    for excerpt in brief.excerpts.iter().take(shown.excerpts) {
+        lines.push(format!("--- {} ---", clean(&excerpt.path)));
+        lines.push(clean_n(&excerpt.content, EXCERPT_CHARS));
+    }
     if let Some(line) = list_line(
         "callers (impact d1)",
         brief.callers.iter().map(|hit| {
@@ -1570,6 +1639,9 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
     }
     lines.join("\n")
 }
+
+
+
 
 /// `label: a b c (+N more)`. An empty list prints `none` when the operation
 /// behind it answered, and no line when it never ran.
@@ -2891,6 +2963,7 @@ mod tests {
             targets: vec!["src/new.ts".into()],
             history: vec![history("abc1234", "fix retry")],
             semantic: Some("pixel search-meaning 'handle errors'".into()),
+            excerpts: vec![],
             caps: vec!["context truncated at budget".into()],
             next: Some("pixel impact 'src/handleError.ts#handleError#function'".into()),
             unambiguous_def: true,
@@ -3060,10 +3133,10 @@ mod tests {
     #[test]
     fn render_should_drop_whole_entries_until_it_fits_and_stop_as_soon_as_it_does() {
         let mut brief = full_brief();
-        brief.files = (0..8)
+        brief.files = (0..64)
             .map(|n| rhit_no_text(&format!("{}{n}", "d".repeat(MAX_ITEM_CHARS - 1)), 1))
             .collect();
-        brief.callers = (0..10)
+        brief.callers = (0..80)
             .map(|n| {
                 caller(
                     &format!("{}{n}", "c".repeat(MAX_ITEM_CHARS - 1)),
@@ -3072,7 +3145,7 @@ mod tests {
                 )
             })
             .collect();
-        brief.unresolved = (0..10)
+        brief.unresolved = (0..80)
             .map(|n| format!("{}{n}", "u".repeat(MAX_ITEM_CHARS)))
             .collect();
         let text = render(&brief).unwrap();
@@ -3102,6 +3175,7 @@ mod tests {
             excluded: 1,
             caps: 1,
             unresolved: 1,
+            excerpts: 0,
         };
         let counts = |shown: &Shown| {
             [
@@ -3142,6 +3216,7 @@ mod tests {
             excluded: 0,
             caps: 0,
             unresolved: 3,
+            excerpts: 0,
         };
         assert!(uneven.shrink());
         assert_eq!((uneven.files, uneven.callers, uneven.unresolved), (2, 4, 3));
