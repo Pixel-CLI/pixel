@@ -48,6 +48,12 @@ pub struct Relevance {
     /// few by weight and the best structural ones (see [`CoFile::weight`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cofiles: Vec<CoFile>,
+    /// How many files a keyword of positive weight matched by name or symbol
+    /// (the structural ones), before `cofiles` was cut to its limit. It says
+    /// how widely the task's rare words name things here; `cofiles` alone
+    /// cannot, being cut.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub structural_files: usize,
     /// Every cap that bounded the block, in the words the response envelope
     /// uses; a reader without that envelope still sees them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -113,6 +119,11 @@ pub struct CoFile {
 /// serde hands the field by reference.
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// The same for a count whose absence means zero.
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 /// Typed availability result for a deterministic task-target fact request.
@@ -251,6 +262,7 @@ mod tests {
                     text: None,
                 },
             ],
+            structural_files: 14,
             caps: vec!["task keywords truncated at 12".into()],
         }
     }
@@ -302,6 +314,7 @@ mod tests {
                         "structural": false
                     }
                 ],
+                "structural_files": 14,
                 "caps": ["task keywords truncated at 12"]
             })
         );

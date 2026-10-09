@@ -508,6 +508,10 @@ pub(crate) fn relevance_from(
         .collect();
     candidates.sort_by(rank_order);
     let eligible = candidates.len();
+    let structural_files = candidates
+        .iter()
+        .filter(|candidate| candidate.file.is_structural())
+        .count();
     let mut listed: Vec<Candidate> = Vec::new();
     let mut structural_seen = 0;
     for (at, candidate) in candidates.into_iter().enumerate() {
@@ -592,6 +596,7 @@ pub(crate) fn relevance_from(
         graph: symbol_hits.is_some(),
         keywords: rows,
         cofiles,
+        structural_files,
         caps,
     }
 }
@@ -1185,6 +1190,7 @@ mod tests {
                     })
                     .to_vec(),
                 cofiles: Vec::new(),
+                structural_files: 0,
                 caps: Vec::new(),
             }
         );
@@ -1638,6 +1644,10 @@ mod tests {
             "p8 and the fifth and sixth source files are cut"
         );
         assert_eq!(
+            relevance.structural_files, 6,
+            "the count is taken before the cut: all six source files"
+        );
+        assert_eq!(
             relevance.caps,
             [
                 "co-file list cut: 12 of 15 matching files listed (the 8 heaviest and the 4 heaviest structural ones)"
@@ -2054,6 +2064,7 @@ mod tests {
             ],
             "the directory named for a general word is not structure"
         );
+        assert_eq!(relevance.structural_files, 1, "only src/watchdog.rs");
     }
 
     #[test]
@@ -2083,6 +2094,42 @@ mod tests {
             .unwrap();
         assert_eq!(b.structural_keywords, ["beta"], "by the directory name");
         assert!(b.structural);
+    }
+
+    #[test]
+    fn relevance_from_should_count_every_structural_file_whatever_the_list_holds() {
+        // Twenty source files define `alpha`, one doc says it: the list is
+        // cut at eight, the count is not.
+        let sources: Vec<SymbolHit> = (0..20)
+            .map(|n| symbols_in(&format!("src/s{n:02}.rs"), &["alpha_tool"]))
+            .collect();
+        let probes = probed(&[("alpha", &["docs/a.md"])]);
+        let relevance = relevance_from(&query("alpha"), &probes, Some(&sources), &paths(&[]));
+        assert_eq!(
+            relevance.cofiles.len(),
+            8,
+            "the eight heaviest, structural before the document of equal weight"
+        );
+        assert_eq!(relevance.structural_files, 20);
+        assert_eq!(
+            serde_json::to_value(&relevance).unwrap()["structural_files"],
+            20
+        );
+    }
+
+    #[test]
+    fn relevance_from_should_count_no_structural_file_when_only_text_matched() {
+        let probes = probed(&[("alpha", &["a.md", "b.md"])]);
+        let relevance = relevance_from(&query("alpha"), &probes, None, &paths(&[]));
+        assert_eq!(relevance.cofiles.len(), 2);
+        assert_eq!(relevance.structural_files, 0);
+        assert!(
+            serde_json::to_value(&relevance)
+                .unwrap()
+                .get("structural_files")
+                .is_none(),
+            "a zero count is left out"
+        );
     }
 
     #[test]

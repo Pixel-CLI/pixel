@@ -301,7 +301,8 @@ content probe truncated; 0 for a word in over a quarter of the files and for
 a general word such as `does` or `quel`, listed with `common: true`), and the
 block lists the eight heaviest plus the four heaviest structural ones (a rare
 word in a path or symbol, named in `structural_keywords`), so prose that
-repeats common words cannot crowd out the file the prompt names. The rule was
+repeats common words cannot crowd out the file the prompt names; `structural_files`
+counts every such structural match before the list is cut. The rule was
 chosen against the dev split of the labelled prompts
 (`scripts/bench-relevance-weights.py`). The block reuses the content
 probes the target ranking ran and counts documents against `files_considered`;
