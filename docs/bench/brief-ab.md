@@ -132,6 +132,7 @@ pattern-matched (the one text test is for `[PIXEL:BRIEF]` at the start of the
 | tokens | `input_total` = input + cache creation + cache read summed over the session's requests, and `output_tokens`, from the `result` event; `cost_usd` is the list price the CLI reports |
 | wall time | the driver's own clock, process start to exit |
 | `brief_fired`, `brief_tier` | the hook's `additionalContext` starts with `[PIXEL:BRIEF]`; `confidence: high` or `low` is the tier (the baseline prints none); `coverage: n/m ops answered` is kept |
+| `search`, `reads_brief`, `reads_other`, `first_read` | the refined split, computed by `report` from the saved raw streams (nothing is run): see "Refined split" below |
 | `cites_expected` | the final answer names at least one `expected_files` path, exact after normalisation (`./`, the fixture root, `:line`, trailing punctuation); `cites_basename` is the looser diagnostic. The quality proxy: it does not read the answer |
 
 A run is **valid** when the result is `success`/`completed`, the process exited
@@ -171,7 +172,8 @@ python3 scripts/ab-brief-live.py run   --work $W --run-id <id> --arms off,old,ne
 python3 scripts/ab-brief-live.py report --work $W --run-id <id> --receipt docs/bench/brief-ab/<id>.json
 ```
 
-The raw streams stay in `eval/arena-results/<id>/` (gitignored). The receipt is
+The raw streams stay in `eval/arena-results/<id>/` (gitignored); `report` re-reads
+them for the refined split and starts no session. The receipt is
 the manifest (binary hashes, fixture, prompt ids, flags, claude version and
 hash, machine, times) and one row of numbers per run; it holds no transcript or
 answer, and the work directory is written `$WORK`. Do not rebuild a binary
@@ -337,3 +339,93 @@ silent; cites: Y named an expected file, n did not):
   prompts (about 64), and the set holds 23 plain prompts with expected files over
   both splits. Every prompt costs 6 sessions (3 arms, 2 repetitions), about USD 1.2
   and 1.3 points of the five-hour usage window.
+
+## Refined split: searching, reading what the brief named, reaching the file
+
+`native` counts every Read as exploration, but reading a file the brief named is
+targeted, not excavation. `report` therefore re-reads each saved stream (no new
+session) and splits the calls made before the first edit or answer, parsing the
+`tool_use` inputs:
+
+| Count | Definition |
+| --- | --- |
+| `search` | Grep, Glob, and Bash whose command (first command of a pipeline, through `cd`, `rtk`, `sh -c`) is `rg`, `grep`, `find`, `ls`, `fd`, `git grep` (also `egrep fgrep ag ack tree`, `git ls-files`) |
+| `reads_brief` | a Read, or Bash `cat head tail sed -n nl bat less`, of a file that session's own `[PIXEL:BRIEF]` names: the paths of its parsed sections plus every path-shaped token outside its `excluded` line, normalised (`./`, fixture root, `:line`). An `off` session, and an `old` one whose gate stayed silent, has no brief, so all its reads are `reads_other` |
+| `reads_other` | every other read |
+| `reads_expected`, `reads_non-expected` | reads of an `expected_files` path, and the rest: the split that does not depend on a brief, and so the one to read when comparing `off` with `new` |
+| `first_read` | the 1-based position, among the session's tool calls, of the first read of an expected file; `reached` is the share of sessions that read one at all; the mean is over the sessions that did |
+| output tokens, turns | the session's, from the `result` event |
+
+One Bash call is one call (search wins over read when it holds both). `search` plus
+`reads` equals the earlier `native` in 120 of 120 sessions. A call that names several
+files counts as brief-named when any of them is.
+
+Per arm, means unless noted (sessions: 32 on-topic and 8 off-topic per arm):
+
+| arm / group | search | reads, brief-named | reads, other | reads | reads, non-expected | reached expected | first read (mean / median) | output tok | turns (mean / median) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |
+| off, on-topic | 2.47 | 0 | 2.03 | 2.03 | 0.94 | 0.69 | 3.23 / 3 | 1 678 | 5.5 / 6 |
+| old, on-topic | 2.03 | 0.28 | 1.81 | 2.09 | 0.72 | 0.72 | 2.83 / 2 | 1 581 | 5.12 / 5 |
+| new, on-topic | 2.41 | 0.97 | 0.66 | 1.62 | 0.59 | 0.75 | 2.42 / 2 | 1 597 | 5.03 / 5 |
+| off, off-topic | 1.50 | 0 | 0.75 | 0.75 | n/a | n/a | n/a | 2 232 | 6.25 / 4.5 |
+| old, off-topic | 1.00 | 0 | 0.38 | 0.38 | n/a | n/a | n/a | 1 703 | 4.5 / 4 |
+| new, off-topic | 1.25 | 0 | 0.75 | 0.75 | n/a | n/a | n/a | 1 990 | 5 / 4.5 |
+
+`new` sessions by the brief they received, each cell `new / off` on the same prompts:
+
+| `new` group | sessions | search | reads, brief-named | reads, other | reads | reads, non-expected | reached | first read | output tok | turns |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| on-topic, tier high | 24 | 2.17 / 2.42 | 1.29 / 0 | 0.38 / 2.12 | 1.67 / 2.12 | 0.54 / 0.88 | 0.79 / 0.71 | 2 / 3 | 1 582 / 1 737 | 4.83 / 5.54 |
+| on-topic, tier low | 4 | 3 / 1.75 | 0 / 0 | 0.5 / 1 | 0.5 / 1 | 0.25 / 0.75 | 0.25 / 0.25 | 4 / 3 | 1 340 / 1 123 | 4.5 / 3.75 |
+| on-topic, no brief | 4 | 3.25 / 3.5 | 0 / 0 | 2.5 / 2.5 | 2.5 / 2.5 | 1.25 / 1.5 | 1 / 1 | 4 / 4.25 | 1 944 / 1 881 | 6.75 / 7 |
+| on-topic, brief names an expected file | 24 | 2.29 / 2.5 | 1.29 / 0 | 0.33 / 2 | 1.62 / 2 | 0.54 / 0.88 | 0.75 / 0.62 | 2.11 / 3.2 | 1 546 / 1 673 | 4.92 / 5.5 |
+| off-topic, tier high | 2 | 0 / 0.5 | 0 / 0 | 0.5 / 1 | 0.5 / 1 | n/a | n/a | n/a | 4 014 / 5 147 | 9.5 / 14 |
+| off-topic, no brief | 6 | 1.67 / 1.83 | 0 / 0 | 0.83 / 0.67 | 0.83 / 0.67 | n/a | n/a | n/a | 1 315 / 1 261 | 3.5 / 3.67 |
+
+Paired by prompt, `new` minus `off` (mean of a prompt's two sessions; 95% bootstrap
+interval over prompts, 5 000 resamples, seed 883; `first read` and `reached` use the
+prompts where both arms have a value):
+
+| group | prompts | search | reads, brief-named | reads, other | reads | reads, non-expected | first read (prompts) | reached | output tok | turns |
+| --- | ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| on-topic | 16 | -0.06 [-0.75, +0.72] | +0.97 [+0.53, +1.44] | -1.38 [-2.09, -0.72] | -0.41 [-1.06, +0.16] | -0.34 [-0.94, +0.03] | -0.46 [-1.86, +0.82] (11) | +0.06 [-0.12, +0.28] | -81 [-293, +125] | -0.47 [-1.59, +0.72] |
+| on-topic, brief fired | 14 | -0.04 [-0.82, +0.86] | +1.11 [+0.64, +1.61] | -1.57 [-2.32, -0.86] | -0.46 [-1.18, +0.18] | -0.36 [-0.96, +0.07] | -0.50 [-2.22, +1.06] (9) | +0.07 [-0.14, +0.29] | -102 [-333, +130] | -0.50 [-1.75, +0.82] |
+| off-topic | 4 | -0.25 [-0.50, 0] | 0 | 0 [-0.38, +0.38] | 0 [-0.38, +0.38] | n/a | n/a | n/a | -242 [-851, +176] | -1.25 [-3.38, 0] |
+
+The same table for `old` minus `off`, as the yardstick (on-topic, 16 prompts): search
+-0.44 [-1.00, +0.09], brief-named reads +0.28 [0, +0.62], other reads -0.22
+[-0.84, +0.53], reads +0.06 [-0.41, +0.72], non-expected reads -0.22 [-0.38, -0.09],
+output tokens -97 [-284, +87]. On the 9 prompts where the baseline never fired (identical
+arms): search -0.22 [-0.72, +0.28], reads -0.06 [-0.33, +0.22], non-expected reads
+-0.11 [-0.28, 0], first read -0.60 [-1.10, -0.10] over 5 prompts, output tokens -6
+[-177, +143]. `new` minus `old`: search +0.38 [-0.16, +1.03], brief-named reads +0.69
+[+0.25, +1.16], other reads -1.16 [-2.00, -0.44], reads -0.47 [-1.19, +0.12].
+
+### Reading the split
+
+* **The fall in `native` is in the reads, not the searches.** On-topic, `new` makes
+  the same number of searches as `off` (2.41 against 2.47, difference -0.06
+  [-0.75, +0.72]) and fewer reads (1.62 against 2.03, -0.41 [-1.06, +0.16]). The brief
+  does not remove `rg` and `Grep`; the agent still looks around once or twice and then
+  reads.
+* **Reads move to the named files, and that split overstates the gain.** The 0.97
+  brief-named reads per session (+0.97 [+0.53, +1.44]) and the 1.38 fewer other reads
+  (-1.38 [-2.09, -0.72]) are the only intervals that exclude 0, but an `off` session has
+  no brief to name anything, so part of the shift is the label: its reads of the very same
+  files are "other". The label-free figures are the total (-0.41, interval holds 0), the
+  reads of non-expected files (0.94 to 0.59, -0.34 [-0.94, +0.03], the upper end just
+  above 0) and the reads of expected files (1.09 to 1.03, unchanged).
+* **The agent reaches the right file a little sooner and a little more often.** Among
+  the sessions that read an expected file, the first such read comes at call 2.42 against
+  3.23 (median 2 against 3); with tier `high` it is call 2 against 3, and with a brief that
+  names an expected file 2.11 against 3.2. Paired it is -0.46 [-1.86, +0.82] over 11
+  prompts, and the share of sessions that read an expected file at all goes from 0.69 to
+  0.75 (+0.06 [-0.12, +0.28]). Both are compatible with no effect at this sample size.
+* **Output tokens and turns follow `native`**: -81 tokens [-293, +125] and -0.47 turns
+  [-1.59, +0.72] per prompt, not distinguishable from zero.
+* **Off-topic sessions did not cost more.** The brief fired on bg-145 only (tier `high`,
+  false positive); there `new` read one file in two sessions against two in `off` and ended
+  in 9.5 turns against 14 on average; two sessions per cell is too few to read anything
+  into it.
+* **Where a tier cannot be read**: tier `low` and "no brief" have 4 sessions each and
+  2 prompts each.

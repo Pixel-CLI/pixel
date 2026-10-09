@@ -343,28 +343,28 @@ def hook_context(stdout):
     return context if isinstance(context, str) else None
 
 
-def analyse(stamped, expected=(), roots=(), brief_on=True):
-    """Metrics of one `stream-json` run. ``stamped`` is ``[(seconds since start, raw line)]``."""
+def collect(stamped):
+    """Events, hooks and result of one `stream-json` run. ``stamped`` is ``[(seconds since start, raw line)]``."""
     events, times, seen = [], [], set()
-    init, result, rate, bad = {}, None, {}, 0
-    hooks, started, tool_errors = [], {}, 0
+    found = {"init": {}, "result": None, "rate": {}, "bad": 0, "hooks": [], "tool_errors": 0}
+    started = {}
     for stamp, raw in stamped:
         try:
             record = json.loads(raw)
         except ValueError:
-            bad += 1
+            found["bad"] += 1
             continue
         if not isinstance(record, dict) or record.get("parent_tool_use_id"):
             continue
         kind, sub = record.get("type"), record.get("subtype")
         if kind == "system" and sub == "init":
-            init = record
+            found["init"] = record
         elif kind == "system" and sub == "hook_started":
             started[record.get("hook_id")] = stamp
         elif kind == "system" and sub == "hook_response":
-            hooks.append({"event": record.get("hook_event"), "exit": record.get("exit_code"),
-                          "outcome": record.get("outcome"), "stdout": record.get("stdout"),
-                          "ms": round(1000 * (stamp - started.pop(record.get("hook_id"), stamp)))})
+            found["hooks"].append({"event": record.get("hook_event"), "exit": record.get("exit_code"),
+                                   "outcome": record.get("outcome"), "stdout": record.get("stdout"),
+                                   "ms": round(1000 * (stamp - started.pop(record.get("hook_id"), stamp)))})
         elif kind == "assistant":
             for part in (record.get("message") or {}).get("content") or []:
                 if not isinstance(part, dict):
@@ -380,11 +380,19 @@ def analyse(stamped, expected=(), roots=(), brief_on=True):
             content = (record.get("message") or {}).get("content")
             for part in content if isinstance(content, list) else []:
                 if isinstance(part, dict) and part.get("type") == "tool_result" and part.get("is_error"):
-                    tool_errors += 1
+                    found["tool_errors"] += 1
         elif kind == "rate_limit_event":
-            rate = record.get("rate_limit_info") or {}
+            found["rate"] = record.get("rate_limit_info") or {}
         elif kind == "result":
-            result = record
+            found["result"] = record
+    return {**found, "events": events, "times": times, "unanswered_hooks": len(started)}
+
+
+def analyse(stamped, expected=(), roots=(), brief_on=True):
+    """Metrics of one `stream-json` run."""
+    run = collect(stamped)
+    events, times, init, result, rate = run["events"], run["times"], run["init"], run["result"], run["rate"]
+    hooks, tool_errors, bad, started = run["hooks"], run["tool_errors"], run["bad"], range(run["unanswered_hooks"])
     counted = EXC.count_turn(events)
     headline, end = counted["headline"], counted["at"]["end"]
     by_bucket, tools = {}, 0
@@ -467,6 +475,133 @@ def problems_of(row, result, brief_on):
     if not brief_on and row["brief_fired"]:
         problems.append("off-arm-fired")
     return problems
+
+
+# --------------------------------------------------------------------------
+# Searching versus reading (a read of a file the brief named is targeted)
+# --------------------------------------------------------------------------
+
+SEARCH_VERBS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "fdfind", "ls", "tree"}
+READ_VERBS = {"cat", "bat", "head", "tail", "less", "more", "nl"}
+GIT_SEARCH, GIT_READ = {"grep", "ls-files"}, {"cat-file"}  # excavation-count's GIT_EXPLORE
+NUMERIC_ARG = re.compile(r"^[\d,]+[a-z]?$")
+REF_KEYS = ("ref_search", "ref_reads_brief", "ref_reads_other", "ref_reads", "ref_reads_expected", "ref_reads_unexpected",
+            "ref_first_read_idx", "ref_reached", "output_tokens", "num_turns")
+
+
+def pipeline_kind(stages, depth=0):
+    """``(kind, paths)`` of one pipeline: only its first command explores, any stage can write."""
+    first = EXC.strip_wrappers(stages[0])
+    if not first:
+        return "other", []
+    if any(EXC.writes_a_file(EXC.strip_wrappers(stage)) for stage in stages):
+        return "edit", []
+    base = os.path.basename(first[0])
+    if base in ("sh", "bash", "zsh") and "-c" in first and depth < 2:
+        inner = first[first.index("-c") + 1:][:1]
+        return bash_kind(inner[0], depth + 1) if inner else ("other", [])
+    if base in EXC.PIXEL_BINARIES:
+        return "pixel", []
+    args = [t for t in first[1:] if not t.startswith("-") and not NUMERIC_ARG.match(t)]
+    paths = [t for t in args if "/" in t or "." in t]
+    if base == "sed":
+        quiet = any("n" in f[1:] for f in first[1:] if f.startswith("-") and not f.startswith("--"))
+        return ("read", paths) if quiet or "--quiet" in first or "--silent" in first else ("other", [])
+    if base == "git":
+        sub = next((t for t in first[1:] if not t.startswith("-")), "")
+        return ("search", []) if sub in GIT_SEARCH else ("read", paths) if sub in GIT_READ else ("other", [])
+    if base in SEARCH_VERBS:
+        return "search", []
+    return ("read", paths) if base in READ_VERBS else ("other", [])
+
+
+def bash_kind(command, depth=0):
+    """One Bash call is one call: edit, then search, then read, then pixel, whichever it holds first."""
+    pipelines = EXC.split_pipelines(command or "")
+    if pipelines is None:
+        pipelines = [[(command or "").split()]]
+    kinds = [pipeline_kind(pipeline, depth) for pipeline in pipelines if pipeline]
+    for wanted in ("edit", "search", "read", "pixel"):
+        hits = [k for k in kinds if k[0] == wanted]
+        if hits:
+            return wanted, ([p for k in hits for p in k[1]] if wanted == "read" else [])
+    return "other", []
+
+
+def tool_kind(name, tool_input, roots):
+    """``(kind, repo-relative paths read)`` of one tool call."""
+    lowered = (name or "").lower()
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    if lowered in ("grep", "glob"):
+        return "search", set()
+    if lowered == "read":
+        path = tool_input.get("file_path") or tool_input.get("path") or ""
+        return "read", ({normalise_token(path, roots)} if path else set())
+    if lowered == "bash":
+        kind, paths = bash_kind(tool_input.get("command") or "")
+        return kind, {normalise_token(path, roots) for path in paths}
+    return EXC.classify_tool(name, tool_input)[0], set()
+
+
+def stop_index(events):
+    """Position of the first edit or of the closing answer: the calls before it count (excavation-count's rule)."""
+    answer_at = None
+    for position in range(len(events) - 1, -1, -1):
+        if events[position][0] == "tool":
+            break
+        if events[position][0] == "text":
+            answer_at = position
+    for position, event in enumerate(events):
+        if (event[0] == "tool" and EXC.classify_tool(event[1], event[2])[0] == "edit") or position == answer_at:
+            return position
+    return len(events)
+
+
+def brief_named_paths(context):
+    """Paths a brief names, from the hook's ``additionalContext``: the parsed sections and every path-shaped
+    token outside the ``excluded`` line (a token that is not a path never equals a path that was read)."""
+    if not context or not context.lstrip().startswith(BRIEF_TAG):
+        return set()
+    named = set(GATE.mentioned_paths(GATE.parse_brief(context)))
+    for line in context.splitlines():
+        if not line.startswith("excluded"):
+            named |= {normalise_token(token, ()) for token in PATH_TOKEN.findall(line) if "/" in token or "." in token}
+    return named
+
+
+def refine(events, context, expected, roots):
+    """Searches, reads (of brief-named files and others) and the first read of an expected file, before the stop."""
+    named, wanted = brief_named_paths(context), set(expected)
+    out = {"ref_search": 0, "ref_reads_brief": 0, "ref_reads_other": 0, "ref_reads_expected": 0, "ref_calls": 0,
+           "ref_first_read_idx": None, "ref_first_touch_idx": None, "ref_brief_named": len(named)}
+    for event in events[:stop_index(events)]:
+        if event[0] != "tool":
+            continue
+        out["ref_calls"] += 1
+        kind, paths = tool_kind(event[1], event[2], roots)
+        if kind == "search":
+            out["ref_search"] += 1
+        elif kind == "read":
+            out["ref_reads_brief" if paths & named else "ref_reads_other"] += 1
+            if paths & wanted:
+                out["ref_reads_expected"] += 1
+                out["ref_first_read_idx"] = out["ref_first_read_idx"] or out["ref_calls"]
+        if wanted and out["ref_first_touch_idx"] is None:
+            blob = json.dumps(event[2], sort_keys=True)
+            if any(path in blob for path in wanted):
+                out["ref_first_touch_idx"] = out["ref_calls"]
+    out["ref_reads"] = out["ref_reads_brief"] + out["ref_reads_other"]
+    out["ref_reads_unexpected"] = out["ref_reads"] - out["ref_reads_expected"] if wanted else None
+    out["ref_reached"] = int(out["ref_first_read_idx"] is not None) if wanted else None
+    return out
+
+
+def refine_file(path, expected, roots):
+    """``refine`` over a saved raw stream."""
+    lines = [(0.0, line) for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    run = collect(lines)
+    first = next((h for h in run["hooks"] if h["event"] == "UserPromptSubmit"), None)
+    return refine(run["events"], hook_context(first["stdout"]) if first else None, expected, roots)
 
 
 # --------------------------------------------------------------------------
@@ -850,7 +985,9 @@ RECEIPT_COLUMNS = ("arm", "prompt_id", "rep", "index", "on_topic", "kind", "ok",
                    "native_end", "tools_total", "pixel", "delegated", "input_total", "output_tokens", "cost_usd",
                    "num_turns", "t_first_tool_s", "t_answer_s", "brief_fired", "brief_tier", "brief_bytes",
                    "brief_answered", "brief_ops", "brief_partial", "brief_paths", "brief_names_expected",
-                   "cites_expected", "cites_basename", "cited", "model", "rl_five_hour", "daemon_restarted", "started")
+                   "cites_expected", "cites_basename", "cited", "model", "rl_five_hour", "daemon_restarted", "started",
+                   "ref_search", "ref_reads_brief", "ref_reads_other", "ref_reads_expected", "ref_calls",
+                   "ref_first_read_idx", "ref_first_touch_idx", "ref_brief_named", "ref_reached", "ref_reads_unexpected")
 KEYS = ("native", "tools_total", "pixel", "input_total", "output_tokens", "wall_s", "cost_usd")
 
 
@@ -888,6 +1025,60 @@ def contrast(rows_a, rows_b, key, ids):
     return {"prompts": len(common), "mean_delta": mean(deltas), "ci95": bootstrap_ci(deltas),
             "lower": sum(1 for d in deltas if d < -1e-9), "equal": sum(1 for d in deltas if abs(d) <= 1e-9),
             "higher": sum(1 for d in deltas if d > 1e-9)}
+
+
+def new_groups(valid):
+    """The `new` sessions by group: on/off-topic by the brief's tier, and on-topic by whether it names an expected file."""
+    new_valid = [r for r in valid if r["arm"] == "new"]
+    tier_of = lambda r: (r["brief_tier"] or "untiered") if r["brief_fired"] else "no brief"
+    groups = []
+    for group, flag in (("on-topic", True), ("off-topic", False)):
+        in_group = [r for r in new_valid if r["on_topic"] == flag]
+        groups += [(f"{group}: {tier}", [r for r in in_group if tier_of(r) == tier])
+                   for tier in sorted({tier_of(r) for r in in_group})]
+    fired = [r for r in new_valid if r["on_topic"] and r["brief_fired"]]
+    groups += [("on-topic: brief names an expected file", [r for r in fired if r["brief_names_expected"]]),
+               ("on-topic: brief fired, names none", [r for r in fired if not r["brief_names_expected"]])]
+    return [(name, subset) for name, subset in groups if subset]
+
+
+def refined_summary(rows):
+    out = {"runs": len(rows)}
+    for key in REF_KEYS:
+        values = [r[key] for r in rows if r.get(key) is not None]
+        out[key] = {"mean": mean(values), "median": median(values), "n": len(values)}
+    return out
+
+
+def refined_report(valid, arms, groups):
+    """Searches, brief-named and other reads, first read of an expected file, output tokens and turns."""
+    out = {"arms": {}, "tiers": {}, "contrasts": []}
+    for arm in arms:
+        for name, ids in groups.items():
+            subset = [r for r in valid if r["arm"] == arm and r["prompt_id"] in ids]
+            if subset:
+                out["arms"][f"{arm}/{name}"] = refined_summary(subset)
+    for name, subset in new_groups(valid) if "new" in arms else []:
+        ids = {r["prompt_id"] for r in subset}
+        baseline = [r for r in valid if r["arm"] == "off" and r["prompt_id"] in ids]
+        out["tiers"][name] = {"new": refined_summary(subset),
+                              "off_same_prompts": refined_summary(baseline) if baseline else None}
+    for first, second in (("off", "new"), ("off", "old"), ("old", "new")):
+        if first not in arms or second not in arms:
+            continue
+        a_rows = [r for r in valid if r["arm"] == first]
+        b_rows = [r for r in valid if r["arm"] == second]
+        picks = dict(groups)
+        fired_ids = {r["prompt_id"] for r in b_rows if r["brief_fired"]} & groups["on-topic"]
+        picks["on-topic, brief fired in the to-arm"] = fired_ids
+        picks["on-topic, brief never fired in the to-arm"] = {r["prompt_id"] for r in b_rows} & groups["on-topic"] - fired_ids
+        for name, ids in picks.items():
+            if ids:
+                entry = {"from": first, "to": second, "group": name}
+                for key in REF_KEYS:
+                    entry[key] = contrast(a_rows, b_rows, key, ids)
+                out["contrasts"].append(entry)
+    return out
 
 
 def replicate_sd(valid, ids):
@@ -952,24 +1143,10 @@ def build_report(rows, manifest=None):
                 for key in ("native", "tools_total", "input_total", "wall_s", "cost_usd", "cites_expected"):
                     entry[key] = contrast(a_rows, b_rows, key, ids)
                 report["contrasts"].append(entry)
-    if "new" in arms:
-        new_valid = [r for r in valid if r["arm"] == "new"]
-        tier_of = lambda r: (r["brief_tier"] or "untiered") if r["brief_fired"] else "no brief"
-
-        def add_tier(name, subset):
-            if subset:
-                ids = {r["prompt_id"] for r in subset}
-                baseline = [r for r in valid if r["arm"] == "off" and r["prompt_id"] in ids]
-                report["tiers"][name] = {"new": summary(subset),
-                                         "off_same_prompts": summary(baseline) if baseline else None}
-
-        for group, flag in (("on-topic", True), ("off-topic", False)):
-            in_group = [r for r in new_valid if r["on_topic"] == flag]
-            for tier in sorted({tier_of(r) for r in in_group}):
-                add_tier(f"{group}: {tier}", [r for r in in_group if tier_of(r) == tier])
-        fired = [r for r in new_valid if r["on_topic"] and r["brief_fired"]]
-        add_tier("on-topic: brief names an expected file", [r for r in fired if r["brief_names_expected"]])
-        add_tier("on-topic: brief fired, names none", [r for r in fired if not r["brief_names_expected"]])
+    for name, subset in new_groups(valid) if "new" in arms else []:
+        ids = {r["prompt_id"] for r in subset}
+        baseline = [r for r in valid if r["arm"] == "off" and r["prompt_id"] in ids]
+        report["tiers"][name] = {"new": summary(subset), "off_same_prompts": summary(baseline) if baseline else None}
     for first, second in (("off", "new"), ("old", "new"), ("off", "old")):
         on = next((c for c in report["contrasts"] if c["from"] == first and c["to"] == second and c["group"] == "on-topic"), None)
         off = next((c for c in report["contrasts"] if c["from"] == first and c["to"] == second and c["group"] == "off-topic"), None)
@@ -986,6 +1163,10 @@ def build_report(rows, manifest=None):
             "off_topic_cost_ok": (None if not off or off["native"]["mean_delta"] is None
                                   else off["native"]["mean_delta"] <= OFFTOPIC_EXTRA),
             "off_topic_native_delta": off["native"]["mean_delta"] if off else None})
+    if valid and all("ref_search" in r for r in valid):
+        report["refined"] = refined_report(valid, arms, groups)
+        report["refined"]["check"] = {"sessions": len(valid), "search_plus_reads_differs_from_native": sum(
+            1 for r in valid if r["ref_search"] + r["ref_reads"] != r["native"])}
     report["noise"] = {name: replicate_sd(valid, ids) for name, ids in groups.items()}
     report["per_prompt"] = per_prompt(valid, arms)
     if rows:
@@ -1006,6 +1187,60 @@ def fmt(value, digits=2):
         return str(value)
     text = f"{value:.{digits}f}"
     return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def signed(value, digits=2):
+    return "n/a" if value is None else f"{value:+.{digits}f}"
+
+
+def delta_cell(entry, digits=2):
+    if entry["mean_delta"] is None:
+        return "n/a"
+    ci = f" [{signed(entry['ci95'][0], digits)}, {signed(entry['ci95'][1], digits)}]" if entry["ci95"] else ""
+    return f"{signed(entry['mean_delta'], digits)}{ci}"
+
+
+def pair_cell(new, off, key, digits=2):
+    return f"{fmt(new[key]['mean'], digits)} / {fmt(off[key]['mean'], digits) if off else 'n/a'}"
+
+
+def render_refined(ref):
+    lines = ["", "Refined split: searches, and reads of the files the brief named against other reads (before the first answer; "
+             "SEARCH = Grep, Glob, Bash rg/grep/find/ls/fd/git grep; a read counts as brief-named when its file is one the "
+             "session's own `[PIXEL:BRIEF]` names; `off` sessions have no brief, so all their reads are other):", "",
+             "| arm / group | sessions | search | reads of brief-named | other reads | reads | reads of expected | "
+             "reads of non-expected | reached expected | first read of expected (mean / median, reached) | output tok | "
+             "turns mean / median |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |"]
+    for name, s in ref["arms"].items():
+        lines.append(f"| {name} | {s['runs']} | {fmt(s['ref_search']['mean'])} | {fmt(s['ref_reads_brief']['mean'])} | "
+                     f"{fmt(s['ref_reads_other']['mean'])} | {fmt(s['ref_reads']['mean'])} | {fmt(s['ref_reads_expected']['mean'])} | "
+                     f"{fmt(s['ref_reads_unexpected']['mean'])} | {fmt(s['ref_reached']['mean'])} (n {s['ref_reached']['n']}) | "
+                     f"{fmt(s['ref_first_read_idx']['mean'])} / {fmt(s['ref_first_read_idx']['median'])} | "
+                     f"{fmt(s['output_tokens']['mean'], 0)} | {fmt(s['num_turns']['mean'])} / {fmt(s['num_turns']['median'])} |")
+    lines += ["", "`new` sessions by group, against `off` on the same prompts (each cell `new / off`, means):", "",
+              "| `new` group | sessions | search | reads of brief-named | other reads | reads | reads of non-expected | "
+              "reached expected | first read of expected | output tok | turns |",
+              "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    for name, entry in ref["tiers"].items():
+        new, off = entry["new"], entry["off_same_prompts"]
+        lines.append(f"| {name} | {new['runs']} | {pair_cell(new, off, 'ref_search')} | {pair_cell(new, off, 'ref_reads_brief')} | "
+                     f"{pair_cell(new, off, 'ref_reads_other')} | {pair_cell(new, off, 'ref_reads')} | "
+                     f"{pair_cell(new, off, 'ref_reads_unexpected')} | {pair_cell(new, off, 'ref_reached')} | {pair_cell(new, off, 'ref_first_read_idx')} | "
+                     f"{pair_cell(new, off, 'output_tokens', 0)} | {pair_cell(new, off, 'num_turns')} |")
+    lines += ["", "Paired by prompt (mean of a prompt's sessions per arm; `to` minus `from`; 95% bootstrap interval over prompts; "
+              "the first-read and reached columns use the prompts where both arms have the value):", "",
+              "| from to | group | prompts | search | reads of brief-named | other reads | reads | reads of non-expected | "
+              "first read of expected | reached expected | output tok | turns |",
+              "| --- | --- | ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for c in ref["contrasts"]:
+        lines.append(f"| {c['from']} to {c['to']} | {c['group']} | {c['ref_search']['prompts']} | {delta_cell(c['ref_search'])} | "
+                     f"{delta_cell(c['ref_reads_brief'])} | {delta_cell(c['ref_reads_other'])} | {delta_cell(c['ref_reads'])} | "
+                     f"{delta_cell(c['ref_reads_unexpected'])} | {delta_cell(c['ref_first_read_idx'])} (n {c['ref_first_read_idx']['prompts']}) | "
+                     f"{delta_cell(c['ref_reached'])} | {delta_cell(c['output_tokens'], 0)} | {delta_cell(c['num_turns'])} |")
+    check = ref["check"]
+    lines += ["", f"Check: search + reads equals the earlier `native` in {check['sessions'] - check['search_plus_reads_differs_from_native']} "
+              f"of {check['sessions']} sessions."]
+    return lines
 
 
 def render(report):
@@ -1051,6 +1286,8 @@ def render(report):
                          f"CI {c['native_ci95']}); answers not worse {c['answers_not_worse']} (cites delta "
                          f"{fmt(c['cites_delta'])}); off-topic cost ok {c['off_topic_cost_ok']} "
                          f"(delta {fmt(c['off_topic_native_delta'])})")
+    if report.get("refined"):
+        lines += render_refined(report["refined"])
     arms = [a for a in ARMS if report["per_prompt"] and a in report["per_prompt"][0]]
     if report["per_prompt"]:
         lines += ["", "Per prompt (`native` of each repetition; brief: tier, `y` fired without a tier, `-` silent; "
@@ -1073,12 +1310,24 @@ def render(report):
     return "\n".join(lines)
 
 
+def attach_refined(rows, out, manifest, work, set_path):
+    """Add the ``ref_*`` metrics of each row from its saved raw stream (nothing is run)."""
+    expected = {row["id"]: row.get("expected_files") or [] for row in load_set(set_path)[0]}
+    for row in rows:
+        raw = out / "raw" / row["arm"] / f"{row['prompt_id']}-r{row['rep']}.stream.jsonl"
+        if not raw.exists():
+            continue
+        fixture = ((manifest.get("sides") or {}).get(row["side"]) or {}).get("fixture") or work.fixture(row["side"])
+        row.update(refine_file(raw, expected[row["prompt_id"]], path_roots(fixture)))
+
+
 def cmd_report(args):
     out = Path(args.results) / args.run_id
     rows = read_rows(out / "runs.jsonl")
     if not rows:
         die(f"no runs in {out / 'runs.jsonl'}")
     manifest = json.loads((out / "manifest.json").read_text()) if (out / "manifest.json").exists() else {}
+    attach_refined(rows, out, manifest, Work(args.work), args.set)
     report = build_report(rows, manifest)
     print(render(report))
     if args.receipt:
@@ -1088,10 +1337,12 @@ def cmd_report(args):
                  "hook_ms": next((h["ms"] for h in r["hooks"] if h["event"] == "UserPromptSubmit"), None)}
                 for r in sorted(rows, key=lambda r: r["index"])]
         receipt = redact({"manifest": manifest, "report": report, "runs": slim}, replacements)
-        head = json.dumps({k: v for k, v in receipt.items() if k != "runs"}, indent=1, sort_keys=True)
         body = ",\n".join("  " + json.dumps(run, sort_keys=True, separators=(",", ":")) for run in receipt["runs"])
+        parts = [' "manifest": ' + json.dumps(receipt["manifest"], indent=1, sort_keys=True).replace("\n", "\n "),
+                 ' "report": ' + json.dumps(receipt["report"], sort_keys=True, separators=(",", ":")),
+                 ' "runs": [\n' + body + "\n ]"]
         Path(args.receipt).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.receipt).write_text(head[:-2] + ',\n "runs": [\n' + body + "\n ]\n}\n")
+        Path(args.receipt).write_text("{\n" + ",\n".join(parts) + "\n}\n")
         print(f"\nreceipt: {args.receipt} ({Path(args.receipt).stat().st_size} bytes, no transcripts or answers)")
     return 0
 
@@ -1258,6 +1509,78 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(report["per_prompt"][0]["new"]["brief"], ["high", "high"])
         self.assertEqual(report["noise"]["on-topic"], 0.71)
         self.assertIn("native mean", render(report))
+
+    def test_bash_calls_are_split_into_searches_and_reads(self):
+        roots = ["/private/w/fx"]
+        cases = [("Grep", {"pattern": "x"}, ("search", set())), ("Glob", {"pattern": "*.rs"}, ("search", set())),
+                 ("Bash", {"command": "rg -n foo crates | head"}, ("search", set())),
+                 ("Bash", {"command": "ls -la crates/pixel"}, ("search", set())),
+                 ("Bash", {"command": "git grep -n foo"}, ("search", set())),
+                 ("Bash", {"command": "rg foo && cat crates/a.rs"}, ("search", set())),
+                 ("Bash", {"command": "cat crates/a.rs"}, ("read", {"crates/a.rs"})),
+                 ("Bash", {"command": "sed -n '1,50p' ./crates/a.rs"}, ("read", {"crates/a.rs"})),
+                 ("Bash", {"command": "head -n 20 /private/w/fx/crates/a.rs"}, ("read", {"crates/a.rs"})),
+                 ("Bash", {"command": "cd crates && cat a.rs b.rs"}, ("read", {"a.rs", "b.rs"})),
+                 ("Bash", {"command": "cargo test | grep FAIL"}, ("other", set())),
+                 ("Bash", {"command": "echo hi > out.txt"}, ("edit", set())),
+                 ("Read", {"file_path": "/private/w/fx/crates/a.rs"}, ("read", {"crates/a.rs"})),
+                 ("Read", {}, ("read", set()))]
+        for name, tool_input, want in cases:
+            self.assertEqual(tool_kind(name, tool_input, roots), want, (name, tool_input))
+
+    def test_refine_separates_reads_of_brief_named_files_and_finds_the_first_expected_read(self):
+        roots = path_roots("/private/tmp/w/new/pixel")
+        run = collect(stream(
+            init_record(), *hook_pair("UserPromptSubmit", BRIEF_OUT), tool_use("t1", "Grep", pattern="x"),
+            tool_use("t2", "Read", file_path="/tmp/w/new/pixel/crates/a/src/lib.rs"),
+            tool_use("t3", "Read", file_path="/private/tmp/w/new/pixel/crates/b/other.rs"),
+            tool_use("t4", "Bash", command="cat ./crates/c.rs"), tool_use("t5", "Edit", file_path="x"),
+            tool_use("t6", "Read", file_path="crates/a/src/lib.rs"), text("done")))
+        first = next(h for h in run["hooks"] if h["event"] == "UserPromptSubmit")
+        got = refine(run["events"], hook_context(first["stdout"]), ["crates/a/src/lib.rs"], roots)
+        self.assertEqual((got["ref_search"], got["ref_reads_brief"], got["ref_reads_other"], got["ref_reads_expected"]),
+                         (1, 1, 2, 1))
+        self.assertEqual((got["ref_calls"], got["ref_first_read_idx"], got["ref_first_touch_idx"], got["ref_reached"],
+                          got["ref_reads_unexpected"]), (4, 2, 2, 1, 2))
+        silent = refine(run["events"], None, ["crates/zzz.rs"], roots)
+        self.assertEqual((silent["ref_reads_brief"], silent["ref_reads_other"], silent["ref_reached"]), (0, 3, 0))
+        self.assertIsNone(silent["ref_first_read_idx"])
+        off_topic = refine(run["events"], None, [], roots)
+        self.assertIsNone(off_topic["ref_reached"])
+        self.assertIsNone(off_topic["ref_reads_unexpected"])
+
+    def test_brief_named_paths_skip_the_excluded_line_and_non_briefs(self):
+        context = json.loads(BRIEF_OUT)["hookSpecificOutput"]["additionalContext"] + "\nexcluded (generated): a/skip.json"
+        named = brief_named_paths(context)
+        self.assertIn("crates/a/src/lib.rs", named)
+        self.assertNotIn("a/skip.json", named)
+        self.assertEqual(brief_named_paths("not a brief crates/a/src/lib.rs"), set())
+
+    def test_refined_report_pairs_the_split_by_prompt(self):
+        rows, index = [], 0
+        for prompt in ("p1", "p2", "p3"):
+            for arm in ("off", "new"):
+                for rep in (1, 2):
+                    index += 1
+                    new = arm == "new"
+                    rows.append({"arm": arm, "prompt_id": prompt, "rep": rep, "index": index, "ok": True, "problems": [],
+                                 "on_topic": True, "native": 5 if not new else 4, "tools_total": 5, "pixel": 0,
+                                 "input_total": 100, "output_tokens": 50, "wall_s": 9.0, "cost_usd": 0.1,
+                                 "brief_fired": new, "brief_tier": "high" if new else None, "brief_names_expected": new,
+                                 "cites_expected": True, "rl_five_hour": 0.5, "model": "m", "load1": 1.0,
+                                 "num_turns": 6 if not new else 5, "ref_search": 3 if not new else 3,
+                                 "ref_reads_brief": 1 if new else 0, "ref_reads_other": 2 if not new else 0,
+                                 "ref_reads": 2 if not new else 1, "ref_reads_expected": 1, "ref_reads_unexpected": 1 if not new else 0,
+                                 "ref_first_read_idx": 3 if not new else 1, "ref_reached": 1})
+        refined = build_report(rows)["refined"]
+        contrast_row = next(c for c in refined["contrasts"] if c["to"] == "new" and c["group"] == "on-topic")
+        self.assertEqual((contrast_row["ref_search"]["mean_delta"], contrast_row["ref_reads_brief"]["mean_delta"],
+                          contrast_row["ref_reads_other"]["mean_delta"], contrast_row["ref_first_read_idx"]["mean_delta"]),
+                         (0, 1, -2, -2))
+        self.assertEqual(contrast_row["ref_reads_unexpected"]["mean_delta"], -1)
+        self.assertEqual(refined["tiers"]["on-topic: high"]["new"]["ref_reads_brief"]["mean"], 1)
+        self.assertEqual(refined["check"]["search_plus_reads_differs_from_native"], 0)
+        self.assertIn("reads of brief-named", render(build_report(rows)))
 
     def test_number_format_never_strips_integer_zeros(self):
         self.assertEqual((fmt(1990.0, 0), fmt(0.20), fmt(22.0, 1), fmt(None), fmt(5)), ("1990", "0.2", "22", "n/a", "5"))
