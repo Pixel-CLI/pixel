@@ -702,9 +702,10 @@ long untagged paste:
   (`targets_facts`, limit 8; in process over the index and graph when no
   daemon answers) weighs each keyword by how rare it is in the repository
   (`row_weight`) and each file the keywords meet in (`CoFile::weight`); the
-  prompt is on topic when one file holds at least two weighted keywords, one
-  of them a symbol or path word of the file (waived without a graph), and at
-  least `relevance::MIN_COVERAGE` of the prompt's weight. A French word the
+  prompt is on topic when one file holds at least
+  `relevance::MIN_SHARED_KEYWORDS` (four) weighted keywords, one of them a
+  symbol or path word of the file (waived without a graph), and at least
+  `relevance::MIN_COVERAGE` (half) of the prompt's weight. A French word the
   repository lacks entirely weighs nothing. Off topic, a probe that cannot
   answer, or a confident `none` or `ops` from the judge ends the brief at
   once and renders nothing; on topic fuses the `meaning` leads (daemon only,
