@@ -46,7 +46,7 @@ SKILL_SHA=$(shasum -a 256 "$SKILL_PATH" | awk '{print $1}') || exit 1
 herdr agent list | jq -r '.result.agents[] | select(.name // "" | startswith("arena")) | .pane_id' | while read p; do herdr pane close "$p"; done
 ROOT=$(mktemp -d /tmp/pi-herdr-arena-XXXX)
 mkdir -p "$ROOT/ws"
-PANE=$(herdr pane split --direction right --cwd "$ROOT/ws" | jq -r '.result.pane_id // .pane_id')
+PANE=$(herdr pane split --direction right --cwd "$ROOT/ws" | jq -r '.result.pane.pane_id // .result.pane_id // .pane_id')
 ```
 
 Never run the test agent inside this repository: its writes land in
