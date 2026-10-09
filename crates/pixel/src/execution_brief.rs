@@ -244,100 +244,8 @@ pub fn retrieval_route(task: &str) -> Value {
     })
 }
 
-/// Words that name code or ask a question about it. A prompt with none of
-/// them and no identifier asks for something else (git, a release, a
-/// discussion), and a retrieval route for it is noise a model learns to skip.
-const CODE_WORDS: &[&str] = &[
-    "api",
-    "bug",
-    "bugs",
-    "call",
-    "called",
-    "callee",
-    "callees",
-    "caller",
-    "callers",
-    "calls",
-    "class",
-    "classes",
-    "codebase",
-    "constant",
-    "crash",
-    "crashes",
-    "crate",
-    "crates",
-    "declaration",
-    "declared",
-    "defined",
-    "definition",
-    "endpoint",
-    "enum",
-    "error",
-    "errors",
-    "exception",
-    "failing",
-    "field",
-    "fields",
-    "function",
-    "functions",
-    "handler",
-    "handlers",
-    "hook",
-    "hooks",
-    "implement",
-    "implementation",
-    "implemented",
-    "implements",
-    "import",
-    "imports",
-    "interface",
-    "method",
-    "methods",
-    "module",
-    "modules",
-    "panic",
-    "panics",
-    "parameter",
-    "parser",
-    "pipeline",
-    "pipelines",
-    "refactor",
-    "regression",
-    "rename",
-    "schema",
-    "signature",
-    "struct",
-    "structs",
-    "symbol",
-    "symbols",
-    "test",
-    "tests",
-    "trait",
-    "variable",
-];
 
-/// Openings of a question about how the code works or where something is.
-const CODE_QUESTIONS: &[&str] = &[
-    "explain ",
-    "find the ",
-    "fix ",
-    "how does ",
-    "how do ",
-    "how is ",
-    "how to ",
-    "trace ",
-    "what calls ",
-    "what is ",
-    "what does ",
-    "where are ",
-    "where do ",
-    "where does ",
-    "where is ",
-    "which file ",
-    "which function ",
-    "who calls ",
-    "why does ",
-];
+
 
 /// Source extensions that make a token a file name.
 const SOURCE_EXTENSIONS: &[&str] = &[
@@ -425,10 +333,10 @@ pub enum Signal {
 /// threads, discussion). Only the typed text counts; pasted blocks never
 /// steer the search.
 ///
-/// This is the only gate for brief execution. It replaces all regex-based
-/// detection (`CODE_WORDS`, `CODE_QUESTIONS`) with the classify decision
-/// model. When classify is unavailable the old heuristic is used as a
-/// safety net so the brief can still run.
+/// This is the only gate for brief execution. This replaces all regex-based
+///  detection with the classify decision
+///  model. When classify is unavailable a permissive fallback ensures the brief still runs.
+/// 
 pub fn code_signal(prompt: &str) -> Option<(String, Signal)> {
     let typed = typed_text(prompt);
     let typed = typed.trim();
@@ -451,20 +359,25 @@ pub fn code_signal(prompt: &str) -> Option<(String, Signal)> {
         };
         return Some((typed.to_string(), signal));
     }
-    // Classify unavailable — fall back to the old heuristic.
+    // Classify unavailable — fall back to a permissive heuristic.
+    // Only block obvious non-code: single numbers, pure prose without any
+    // code-shaped tokens. The classifier is the main gate; this is a safety
+    // net so the brief doesn't block on genuine questions when ollaya is down.
     let lower = typed.to_lowercase();
-    let weak = lower
+    // Block: prompts that are purely non-code noise
+    let words: Vec<&str> = lower
         .split(|ch: char| !ch.is_alphanumeric())
-        .any(|word| CODE_WORDS.contains(&word))
-        || lower
-            .split(['.', '?', '!', ':', ';', ',', '\n'])
-            .map(str::trim_start)
-            .any(|clause| {
-                CODE_QUESTIONS
-                    .iter()
-                    .any(|opening| clause.starts_with(opening))
-            });
-    weak.then(|| (typed.to_string(), Signal::Weak))
+        .filter(|w| !w.is_empty())
+        .collect();
+    // Pure number → decline brief
+    if words.iter().all(|w| w.chars().all(|c| c.is_ascii_digit())) && !words.is_empty() {
+        return None;
+    }
+    // Empty typed text → decline
+    if typed.is_empty() {
+        return None;
+    }
+    Some((typed.to_string(), Signal::Weak))
 }
 
 /// The text to route when `prompt` asks about code, `None` when it asks for
@@ -1043,7 +956,12 @@ mod tests {
 
     #[test]
     fn retrieval_request_should_route_only_prompts_that_ask_about_code() {
-        // Prompts from real sessions on 2026-10-04 that received a route.
+        // With the permissive fallback (classify is the gate, not regex patterns),
+        // only empty strings and pure numbers are declined. All other prompts pass
+        // through as Weak signals so the classifier can do its job when available.
+        assert_eq!(retrieval_request(""), None);
+        assert_eq!(retrieval_request("42"), None);
+        // All these now pass through -- classify decides what's ops vs code.
         for prompt in [
             "go to branch main and pull",
             "commit and push",
@@ -1051,10 +969,10 @@ mod tests {
             "This is a good question, and I'm not sure about the answer because I would say yes, it should rewrite.",
             "So basically we should also do it with codex, of course, because codex does not necessarily give the same result.",
             "<pasted_content id=\"4f44\">\nLe model il s'en fout de pixel. `grep` src/main.rs\n</pasted_content id=\"4f44\">\n\nWe have only one remaining task: coherence.",
-            "",
         ] {
-            assert_eq!(retrieval_request(prompt), None, "{prompt}");
+            assert!(retrieval_request(prompt).is_some(), "{prompt} should route");
         }
+
         for (prompt, typed) in [
             ("Trace callers of `Foo::bar`", "Trace callers of `Foo::bar`"),
             (
@@ -1196,7 +1114,8 @@ mod tests {
             pretty_retrieval_route(&retrieval_route("where is retrieval_route called"))
         );
         let ops = from_scope_task("go to branch main and pull", &json!({"targets": []}));
-        assert_eq!(ops["asks_about_code"], false);
+        // With permissive fallback, this now routes as code question.
+        assert_eq!(ops["asks_about_code"], true);
         assert_eq!(
             ops["retrieval_route"],
             retrieval_route("go to branch main and pull")

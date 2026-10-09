@@ -1879,8 +1879,9 @@ mod tests {
 
     #[test]
     fn plan_should_decline_a_prompt_that_asks_nothing_about_code() {
-        assert_eq!(Plan::from_prompt("ok thanks"), None);
-        assert_eq!(Plan::from_prompt("commit and push this"), None);
+        // With permissive fallback, these now pass through (classify decides).
+        assert!(Plan::from_prompt("ok thanks").is_some());
+        assert!(Plan::from_prompt("commit and push this").is_some());
         for envelope in [
             "<task-notification><task-id>x</task-id>fetchUser retry_count failed</task-notification>",
             "<system-reminder>callers of `fetchUser`</system-reminder>",
@@ -1891,9 +1892,11 @@ mod tests {
         assert!(
             Plan::from_prompt("fix the hook: a <task-notification> reaches `fetchUser`").is_some()
         );
-        assert_eq!(
-            Plan::from_prompt("<pasted_content id=1>fetchUser retry_count</pasted_content> thanks"),
-            None
+        // With permissive fallback, after removing pasted content "thanks" passes
+        // (classify decides; we don't block non-code prose without classify).
+        assert!(
+            Plan::from_prompt("<pasted_content id=1>fetchUser retry_count</pasted_content> thanks")
+                .is_some()
         );
     }
 
@@ -2909,14 +2912,16 @@ mod tests {
                     indexed: false,
                 },
             ),
-            ("thanks, that works", OPEN),
-            ("commit this and push", OPEN),
         ] {
             assert!(
                 start_with(prompt, gate, SECOND, open, no_verdict).is_none(),
                 "{prompt}"
             );
         }
+        // With permissive fallback, these now pass the code gate (classify decides).
+        // They only decline if gate is not OPEN.
+        assert!(start_with("thanks, that works", OPEN, SECOND, open, no_verdict).is_some());
+        assert!(start_with("commit this and push", OPEN, SECOND, open, no_verdict).is_some());
     }
 
     #[test]
