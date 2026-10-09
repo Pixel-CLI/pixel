@@ -1044,6 +1044,8 @@ fn relevance_answer(block: &Relevance, french: bool) -> RelevanceAnswer {
     RelevanceAnswer {
         input: RelevanceInput {
             graph: block.graph,
+            files_considered: block.files_considered,
+            structural_files: block.structural_files,
             keywords: block
                 .keywords
                 .iter()
@@ -2127,5 +2129,49 @@ mod tests {
             "the text index does not cover HEAD"
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Blocks recorded from a daemon on the brief-gate fixture, with the score
+    /// and tier `scripts/research-gate/gate_reference.py` gives them (see
+    /// `gate_parity.json`'s `why` fields for what each one covers).
+    const PARITY: &str = include_str!("gate_parity.json");
+
+    #[test]
+    fn the_rust_score_should_equal_the_reference_scorers_on_recorded_blocks() {
+        use crate::execution_brief::relevance::{GateInput, judge};
+        let fixture: Vec<Value> = serde_json::from_str(PARITY).unwrap();
+        assert!(fixture.len() >= 5, "{}", fixture.len());
+        let mut tiers = Vec::new();
+        for entry in &fixture {
+            let raw = entry["prompt"].as_str().unwrap();
+            let block: Relevance = serde_json::from_value(entry["block"].clone()).unwrap();
+            // The text the brief judges, as `brief_signal` hands it over.
+            let typed =
+                crate::execution_brief::brief_task(&crate::execution_brief::typed_text(raw))
+                    .to_string();
+            let answer = relevance_answer(&block, is_french(&typed));
+            let verdict = judge(&GateInput {
+                relevance: &answer.input,
+                typed: &typed,
+            });
+            let expected = entry["expected"]["score"].as_f64().unwrap();
+            let score = verdict.score.unwrap();
+            assert!(
+                (score - expected).abs() < 1e-9,
+                "{}: rust {score}, reference {expected}",
+                entry["why"]
+            );
+            assert_eq!(
+                verdict.tier.as_str(),
+                entry["expected"]["tier"].as_str().unwrap(),
+                "{}",
+                entry["why"]
+            );
+            tiers.push(verdict.tier.as_str());
+        }
+        // The fixture covers every tier.
+        for tier in ["high", "low", "off"] {
+            assert!(tiers.contains(&tier), "{tier} missing from {tiers:?}");
+        }
     }
 }

@@ -38,7 +38,7 @@ use regex::Regex;
 
 use super::decision_log::{self, Record};
 use super::intent::Verdict;
-use super::relevance::{self, GateInput, Lead, RelevanceInput, Tier};
+use super::relevance::{self, Basis, GateInput, RelevanceInput, Tier};
 use super::routes::QuestionKind;
 use super::{SOURCE_EXTENSIONS, Signal, brief_signal, names_code};
 
@@ -808,9 +808,13 @@ pub(crate) struct Brief {
 }
 
 impl Brief {
-    /// The tier the relevance decision put the prompt in, when it was made.
+    /// The tier the relevance decision put the prompt in; `None` when it was
+    /// not made, or when the model did not apply (no code graph).
     fn tier(&self) -> Option<Tier> {
-        self.relevance.as_ref().map(|verdict| verdict.tier)
+        self.relevance
+            .as_ref()
+            .filter(|verdict| verdict.basis != Basis::NoGraph)
+            .map(|verdict| verdict.tier)
     }
 
     /// Fold search hits into the brief: one entry per (path, line) so
@@ -1449,7 +1453,7 @@ impl Pending {
             reason: brief.admission.reason().map(str::to_string),
             tier: brief.tier().map(Tier::as_str),
             model: gate_model_source(),
-            score: brief.relevance.as_ref().map(|verdict| verdict.score),
+            score: brief.relevance.as_ref().and_then(|verdict| verdict.score),
             best_file: brief
                 .relevance
                 .as_ref()
@@ -1727,23 +1731,17 @@ where
                 Reply::Meaning(leads) => got.meaning = Some(leads),
                 Reply::Judge(verdict) => got.judged = Some(verdict),
             }
-            // The model reads both answers: score once the meaning search
-            // has answered, or was never going to.
-            if got.meaning.is_some() || !ask_meaning {
-                score(&mut got, typed, model);
-            }
+            score(&mut got, typed, model);
             if settled(&got) {
                 break;
             }
         }
     });
-    // Out of time with the meaning search still silent: score without it.
-    score(&mut got, typed, model);
     got
 }
 
-/// Put the relevance answer through `model` once, with the leads the meaning
-/// search gave so far; a no-op until the relevance probe has answered.
+/// Put the relevance answer through `model`, once; a no-op until the
+/// relevance probe has answered.
 fn score(got: &mut Gathered, typed: &str, model: Model) {
     if got.scored.is_some() {
         return;
@@ -1751,19 +1749,8 @@ fn score(got: &mut Gathered, typed: &str, model: Model) {
     let Some(Ok(answer)) = &got.relevance else {
         return;
     };
-    let leads: Vec<Lead> = match &got.meaning {
-        Some(Ok(hits)) => hits
-            .iter()
-            .map(|hit| Lead {
-                path: hit.path.clone(),
-                score: hit.score,
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
     let verdict = model(&GateInput {
         relevance: &answer.input,
-        leads: &leads,
         typed,
     });
     got.scored = Some(verdict);
@@ -1787,9 +1774,13 @@ fn refusal(
             if let Some(verdict) = verdict.filter(|verdict| verdict.denies_brief()) {
                 return Some(Admission::Denied(judge_reason(verdict)));
             }
+            // Without a code graph the model does not apply: a weak prompt
+            // keeps the behaviour it had before the gate.
             got.scored
                 .as_ref()
-                .filter(|scored| enforce_weak && scored.tier == Tier::Off)
+                .filter(|scored| {
+                    enforce_weak && scored.tier == Tier::Off && scored.basis != Basis::NoGraph
+                })
                 .map(|scored| Admission::Closed(off_topic_reason(scored)))
         }
         Signal::Prose => match (&got.relevance, &got.scored) {
@@ -1810,10 +1801,14 @@ fn judge_reason(verdict: &Verdict) -> String {
 }
 
 fn off_topic_reason(scored: &relevance::Verdict) -> String {
-    format!(
-        "off topic: score {:.2}, the best file covers {}/{} key terms",
-        scored.score, scored.features.shared, scored.features.informative
-    )
+    match (scored.basis, scored.score) {
+        (Basis::Model, Some(score)) => format!(
+            "off topic: score {score:.2}, {}/{} key terms in the best file",
+            scored.features.shared, scored.features.informative
+        ),
+        (Basis::NoKeywords, _) => "off topic: no keyword to weigh".to_string(),
+        _ => "no code graph: the model does not apply".to_string(),
+    }
 }
 
 /// Keep the decisions the probes reached: the relevance verdict and the judge's.
@@ -1854,6 +1849,7 @@ fn fold(state: &Mutex<Brief>, plan: &Plan, got: &Gathered) {
     edit(state, |brief| {
         note(brief, got);
         brief.admission = match &got.scored {
+            Some(scored) if scored.basis == Basis::NoGraph => Admission::Unjudged,
             Some(scored) if scored.tier != Tier::Off => Admission::Open,
             Some(scored) => Admission::Closed(off_topic_reason(scored)),
             None => Admission::Unjudged,
@@ -4048,6 +4044,8 @@ mod tests {
         RelevanceAnswer {
             input: RelevanceInput {
                 graph: true,
+                files_considered: 1000,
+                structural_files: 30,
                 keywords: vec![
                     keyword("daemon", 2.0),
                     keyword("changes", 2.0),
@@ -4076,6 +4074,8 @@ mod tests {
         RelevanceAnswer {
             input: RelevanceInput {
                 graph: true,
+                files_considered: 1000,
+                structural_files: 0,
                 keywords: vec![
                     keyword("weather", 3.0),
                     keyword("tomorrow", 3.0),
@@ -4092,11 +4092,12 @@ mod tests {
     fn verdict_in(tier: Tier, input: &GateInput) -> relevance::Verdict {
         relevance::Verdict {
             tier,
-            score: match tier {
+            basis: Basis::Model,
+            score: Some(match tier {
                 Tier::High => 2.0,
                 Tier::Low => 1.0,
                 Tier::Off => -1.0,
-            },
+            }),
             best_file: input
                 .relevance
                 .cofiles
@@ -4123,11 +4124,13 @@ mod tests {
         verdict_in(Tier::Off, input)
     }
 
-    /// A high verdict whose score is the number of meaning leads it was given.
-    fn model_counting(input: &GateInput) -> relevance::Verdict {
-        let mut verdict = verdict_in(Tier::High, input);
-        verdict.score = input.leads.len() as f64;
-        verdict
+    /// A model that finds nothing to say: the code graph did not answer.
+    fn model_no_graph(input: &GateInput) -> relevance::Verdict {
+        relevance::Verdict {
+            basis: Basis::NoGraph,
+            score: None,
+            ..verdict_in(Tier::Off, input)
+        }
     }
 
     fn lead(path: &str, line: u32, snippet: &str) -> MeaningHit {
@@ -4259,7 +4262,7 @@ mod tests {
         assert_eq!((record.tier, record.score), (Some("off"), Some(-1.0)));
         assert_eq!(
             record.reason.as_deref(),
-            Some("off topic: score -1.00, the best file covers 3/3 key terms")
+            Some("off topic: score -1.00, 3/3 key terms in the best file")
         );
         assert_eq!((record.answered, record.bytes), (0, 0));
     }
@@ -4546,7 +4549,6 @@ mod tests {
                     tier,
                     &GateInput {
                         relevance: &answer.input,
-                        leads: &[],
                         typed: PROSE,
                     },
                 )
@@ -4578,7 +4580,7 @@ mod tests {
         assert_eq!(
             refusal(Signal::Prose, &off, false, false),
             Some(Admission::Closed(
-                "off topic: score -1.00, the best file covers 3/3 key terms".into()
+                "off topic: score -1.00, 3/3 key terms in the best file".into()
             ))
         );
         let failed = gathered(Some(Err("cold".into())), None, Tier::Off);
@@ -4649,7 +4651,7 @@ mod tests {
         assert_eq!(
             refusal(Signal::Weak, &off(), true, true),
             Some(Admission::Closed(
-                "off topic: score -1.00, the best file covers 3/3 key terms".into()
+                "off topic: score -1.00, 3/3 key terms in the best file".into()
             ))
         );
         for tier in [Tier::High, Tier::Low] {
@@ -5153,7 +5155,6 @@ mod tests {
                 Tier::Low,
                 &GateInput {
                     relevance: &on_topic_answer().input,
-                    leads: &[],
                     typed: PROSE,
                 },
             )),
@@ -5229,93 +5230,111 @@ mod tests {
     }
 
     #[test]
-    fn gather_should_hand_the_model_the_meaning_leads_once_that_search_has_answered() {
+    fn gather_should_score_the_relevance_answer_without_waiting_for_the_meaning_search() {
         let mut fake = Fake::new();
         fake.relevance = Ok(on_topic_answer());
-        fake.meaning = Ok(vec![lead(DAEMON, 1, "x"), lead("b.rs", 2, "y")]);
-        fake.meaning_pause = Duration::from_millis(120);
-        let state = Mutex::new(Brief::default());
+        fake.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
+        fake.meaning_pause = Duration::from_millis(400);
+        let started = Instant::now();
+        let mut scored_after = None;
         let got = gather(
             PROSE,
             &fake,
             &no_verdict,
-            model_counting,
-            &state,
-            Instant::now() + SECOND,
-            &mut |_| false,
-        );
-        assert_eq!(
-            got.scored.unwrap().score,
-            2.0,
-            "scored after the leads came"
-        );
-        // A failed meaning search scores the prompt on the relevance alone.
-        let mut failed = Fake::new();
-        failed.relevance = Ok(on_topic_answer());
-        failed.meaning = Err("cold".into());
-        let got = gather(
-            PROSE,
-            &failed,
-            &no_verdict,
-            model_counting,
+            model_high,
             &Mutex::new(Brief::default()),
-            Instant::now() + SECOND,
-            &mut |_| false,
+            started + SECOND,
+            &mut |got| {
+                if got.scored.is_some() && scored_after.is_none() {
+                    scored_after = Some(started.elapsed());
+                }
+                false
+            },
         );
-        assert_eq!(got.scored.unwrap().score, 0.0);
-        // And nothing is scored without a relevance answer.
-        let mut cold = Fake::new();
-        cold.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
+        assert!(
+            scored_after.is_some_and(|after| after < Duration::from_millis(300)),
+            "{scored_after:?}"
+        );
+        assert!(matches!(got.meaning, Some(Ok(_))));
+        assert_eq!(got.scored.unwrap().tier, Tier::High);
+    }
+
+    #[test]
+    fn gather_should_leave_a_prompt_unscored_when_the_relevance_probe_failed() {
+        let mut fake = Fake::new();
+        fake.relevance = Err("cold".into());
+        fake.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
         let got = gather(
             PROSE,
-            &cold,
+            &fake,
             &no_verdict,
-            model_counting,
+            model_high,
             &Mutex::new(Brief::default()),
             Instant::now() + SECOND,
             &mut |_| false,
         );
         assert!(got.scored.is_none());
+        assert!(matches!(got.relevance, Some(Err(_))));
     }
 
     #[test]
-    fn gather_should_score_without_the_leads_when_the_meaning_search_outlives_the_window() {
+    fn a_weak_prompt_the_model_does_not_apply_to_should_keep_its_pre_gate_brief() {
+        // No code graph: the model says nothing, so the brief is the one the
+        // probes' files make, with no tier claimed and no confidence line.
         let mut fake = Fake::new();
         fake.relevance = Ok(on_topic_answer());
-        fake.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
-        fake.meaning_pause = Duration::from_millis(400);
-        let got = gather(
-            PROSE,
-            &fake,
-            &no_verdict,
-            model_counting,
-            &Mutex::new(Brief::default()),
-            Instant::now() + Duration::from_millis(120),
-            &mut |_| false,
+        let finished = briefed_with(
+            "how does the login flow work",
+            fake,
+            no_verdict,
+            model_no_graph,
         );
-        assert!(got.meaning.is_none());
-        assert_eq!(got.scored.unwrap().score, 0.0);
+        let text = finished.text.unwrap();
+        assert!(text.contains(&format!("{DAEMON}:280")), "{text}");
+        assert!(
+            text.contains("\nkind: lookup\n"),
+            "the full route ran: {text}"
+        );
+        assert!(!text.contains("confidence"), "{text}");
+        assert_eq!(finished.record.gate, "unjudged");
+        assert_eq!(finished.record.tier, None);
+        assert_eq!(finished.record.score, None);
     }
 
     #[test]
-    fn gather_should_score_at_once_when_the_budget_refused_the_meaning_search() {
+    fn a_prose_prompt_the_model_does_not_apply_to_should_get_no_brief() {
         let mut fake = Fake::new();
         fake.relevance = Ok(on_topic_answer());
-        let state = Mutex::new(Brief {
-            ops: MAX_OPS - 1,
-            ..Brief::default()
-        });
-        let got = gather(
-            PROSE,
-            &fake,
-            &no_verdict,
-            model_counting,
-            &state,
-            Instant::now() + SECOND,
-            &mut |_| false,
+        let finished = briefed_with(PROSE, fake, no_verdict, model_no_graph);
+        assert_eq!(finished.text, None);
+        assert_eq!(finished.record.gate, "closed");
+        assert_eq!(
+            finished.record.reason.as_deref(),
+            Some("no code graph: the model does not apply")
         );
-        assert!(got.meaning.is_none());
-        assert!(got.scored.is_some());
+    }
+
+    #[test]
+    fn off_topic_reason_should_say_what_the_model_saw() {
+        let mut verdict = verdict_in(
+            Tier::Off,
+            &GateInput {
+                relevance: &off_topic_answer().input,
+                typed: PROSE,
+            },
+        );
+        assert_eq!(
+            off_topic_reason(&verdict),
+            "off topic: score -1.00, 3/3 key terms in the best file"
+        );
+        verdict.basis = Basis::NoKeywords;
+        verdict.score = None;
+        assert_eq!(off_topic_reason(&verdict), "off topic: no keyword to weigh");
+        verdict.basis = Basis::NoGraph;
+        assert_eq!(
+            off_topic_reason(&verdict),
+            "no code graph: the model does not apply"
+        );
     }
 
     #[test]
