@@ -19,6 +19,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cycles;
+use crate::relevance;
 use pixel_context::estimate_tokens;
 use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
@@ -71,7 +72,10 @@ const MAX_SEED_SYMBOLS: usize = 24;
 const EVIDENCE_MAX_LINES_PER_TARGET: usize = 2;
 /// Most keywords a `targets` content probe runs, expansions included.
 const MAX_PROBE_KEYWORDS: usize = 6;
-const TARGETS_FACTS_ALGORITHM_VERSION: u32 = 1;
+/// Identifies the `targets_facts` algorithm in `inputs.algorithm_version`,
+/// so a reader knows which `facts` keys to expect. 1: the target list. 2:
+/// adds `facts.relevance` (per-keyword document frequency and co-files).
+const TARGETS_FACTS_ALGORITHM_VERSION: u32 = 2;
 
 /// `context` and `uses`: edges returned per direction before elision.
 const EDGE_LIMIT: usize = 20;
@@ -1556,56 +1560,18 @@ impl Service {
         // live tree before any lexical probe runs.
         let path_hits = engine::path_rank(&all_paths, &query.path_tokens);
 
-        // S3: per-keyword content match counts (capped probes keep this ms-scale).
-        let mut content_hits: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
-        // Epistemics: every probe cap that fires is NAMED here and forces
-        // lower_bound on the report envelope — a truncated probe must never
-        // feed an "exhaustive" claim.
-        let mut probe_caps: Vec<String> = Vec::new();
-        // Phase 3 item 1 (targets evidence): keep the first ~2 match lines per
-        // (file, keyword) so the caller can verify a target's content match
-        // without re-searching. Near-zero cost — the lines are already fetched.
-        let mut evidence: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-
+        // S3: per-keyword content match counts (capped probes keep this
+        // ms-scale). Every probe cap that fires is NAMED in the report
+        // envelope and forces lower_bound: a truncated probe must never feed
+        // an "exhaustive" claim.
         let probe_keywords = probe_keywords(
             &query.keywords,
             engine::expand_keywords(&query.keywords, query.language),
         );
-
-        for kw in &probe_keywords {
-            // Word-bounded so "auth" cannot count every "author" as signal.
-            // Keywords are [a-z0-9_]+ by construction (tokenize_task), but
-            // escape defensively anyway.
-            let pattern = format!(r"(?i)\b{}\b", regex_escape_keyword(kw));
-            if let Ok((matches, probe_stats)) = self
-                .index
-                .read()
-                .expect("index lock poisoned")
-                .search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
-            {
-                if probe_stats.truncated {
-                    probe_caps.push(format!(
-                        "content probe truncated at {CONTENT_PROBE_LIMIT} matches for keyword \
-                         '{kw}'; files beyond the cap carry no content signal"
-                    ));
-                }
-                let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-                for m in matches {
-                    *counts.entry(m.path.clone()).or_default() += 1;
-                    let lines = evidence.entry(m.path.clone()).or_default();
-                    if lines.len() < EVIDENCE_MAX_LINES_PER_TARGET {
-                        lines.push(json!({
-                            "line": m.line_number,
-                            "text": m.line,
-                            "keyword": kw,
-                        }));
-                    }
-                }
-                if !counts.is_empty() {
-                    content_hits.insert(kw.clone(), counts.into_iter().collect());
-                }
-            }
-        }
+        let probes = probe_content(
+            &self.index.read().expect("index lock poisoned"),
+            &probe_keywords,
+        );
 
         let mut symbol_hits = Vec::new();
         let mut graph_neighbors: Vec<(String, String)> = Vec::new();
@@ -1623,7 +1589,7 @@ impl Service {
                 &probe_keywords,
                 query.language,
                 &symbol_hits,
-                &content_hits,
+                &probes.hits,
             )
             .into_iter()
             .take(MAX_SEED_FILES)
@@ -1666,6 +1632,32 @@ impl Service {
             envelope =
                 Some(graph_targets::envelope_for_names(store, &names).map_err(|e| e.to_string())?);
         }
+
+        // Fact packets also say how widely the task's words occur here; the
+        // probes above are reused, only what they did not run is probed.
+        let relevance = if fact_mode {
+            let graph = if graph_available {
+                self.graph.as_ref()
+            } else {
+                None
+            };
+            let index = self.index.read().expect("index lock poisoned");
+            Some(relevance::relevance_for(
+                &index,
+                graph,
+                &query,
+                &all_paths,
+                Some(&probes),
+            )?)
+        } else {
+            None
+        };
+        let probe_caps = probes.caps(&probe_keywords);
+        let ContentProbes {
+            hits: content_hits,
+            lines: evidence,
+            ..
+        } = probes;
 
         let opts = engine::TargetsOptions {
             limit: limit.unwrap_or(engine::DEFAULT_LIMIT),
@@ -1780,6 +1772,9 @@ impl Service {
         // read/edit boundary, so do not carry that imperative prose forward.
         if fact_mode && let Some(object) = out.as_object_mut() {
             object.remove("closed_world");
+        }
+        if let Some(relevance) = &relevance {
+            relevance::attach(&mut out, relevance)?;
         }
         // Issue #814: the symbol-level regions manifest. The daemon gathers
         // the P0 symbols and the call/import edges between them; the analysis
@@ -3676,6 +3671,139 @@ fn probe_keywords(keywords: &[String], expansions: Vec<String>) -> Vec<String> {
     probe
 }
 
+/// One line that matched a content probe, kept so a reader can check the match
+/// without searching again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ProbeLine {
+    pub line: u64,
+    pub text: String,
+    pub keyword: String,
+}
+
+/// What the bounded content probes of a keyword list found. `targets` ranks
+/// and justifies files with it; `relevance` counts documents with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ContentProbes {
+    /// Every keyword probed, with or without a match.
+    pub probed: BTreeSet<String>,
+    /// keyword → matches per file, path ascending. Only keywords with a match.
+    pub hits: BTreeMap<String, Vec<(String, u32)>>,
+    /// Keywords whose probe stopped at [`CONTENT_PROBE_LIMIT`]: their `hits`
+    /// are the files of a path-ordered prefix, not all of them.
+    pub truncated: BTreeSet<String>,
+    /// path → the first lines that matched, at most
+    /// [`EVIDENCE_MAX_LINES_PER_TARGET`], across keywords in probe order.
+    pub lines: BTreeMap<String, Vec<ProbeLine>>,
+}
+
+impl ContentProbes {
+    /// The cap sentences of the probes that truncated, in `order`.
+    pub(crate) fn caps(&self, order: &[String]) -> Vec<String> {
+        order
+            .iter()
+            .filter(|keyword| self.truncated.contains(*keyword))
+            .map(|keyword| probe_cap(keyword))
+            .collect()
+    }
+
+    /// Only what the probes of `keywords` found. A second consumer reuses
+    /// these without inheriting the first one's choice of extra probes.
+    pub(crate) fn restricted_to(&self, keywords: &[String]) -> Self {
+        let wanted = |keyword: &String| keywords.contains(keyword);
+        let mut lines: BTreeMap<String, Vec<ProbeLine>> = BTreeMap::new();
+        for (path, kept) in &self.lines {
+            let kept: Vec<ProbeLine> = kept
+                .iter()
+                .filter(|line| wanted(&line.keyword))
+                .cloned()
+                .collect();
+            if !kept.is_empty() {
+                lines.insert(path.clone(), kept);
+            }
+        }
+        Self {
+            probed: self.probed.iter().filter(|k| wanted(k)).cloned().collect(),
+            hits: self
+                .hits
+                .iter()
+                .filter(|(keyword, _)| wanted(keyword))
+                .map(|(keyword, files)| (keyword.clone(), files.clone()))
+                .collect(),
+            truncated: self
+                .truncated
+                .iter()
+                .filter(|k| wanted(k))
+                .cloned()
+                .collect(),
+            lines,
+        }
+    }
+
+    /// Fold the probes of other keywords in; each path keeps at most
+    /// [`EVIDENCE_MAX_LINES_PER_TARGET`] lines, the earlier ones first.
+    pub(crate) fn absorb(&mut self, other: ContentProbes) {
+        self.probed.extend(other.probed);
+        self.hits.extend(other.hits);
+        self.truncated.extend(other.truncated);
+        for (path, lines) in other.lines {
+            let kept = self.lines.entry(path).or_default();
+            let room = EVIDENCE_MAX_LINES_PER_TARGET.saturating_sub(kept.len());
+            kept.extend(lines.into_iter().take(room));
+        }
+    }
+}
+
+/// The cap sentence for a probe that stopped at [`CONTENT_PROBE_LIMIT`].
+pub(crate) fn probe_cap(keyword: &str) -> String {
+    format!(
+        "content probe truncated at {CONTENT_PROBE_LIMIT} matches for keyword \
+         '{keyword}'; files beyond the cap carry no content signal"
+    )
+}
+
+/// Run a bounded, word-bounded content probe per keyword over `index`.
+///
+/// Word-bounded so "auth" cannot count every "author" as signal. A probe the
+/// index cannot run is skipped: it is not recorded in `probed`.
+pub(crate) fn probe_content(index: &IndexSet, keywords: &[String]) -> ContentProbes {
+    let mut probes = ContentProbes::default();
+    for keyword in keywords {
+        // Keywords are [a-z0-9_]+ by construction (tokenize_task), but
+        // escape defensively anyway.
+        let pattern = format!(r"(?i)\b{}\b", regex_escape_keyword(keyword));
+        let Ok((matches, stats)) =
+            index.search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
+        else {
+            continue;
+        };
+        probes.probed.insert(keyword.clone());
+        if stats.truncated {
+            probes.truncated.insert(keyword.clone());
+        }
+        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        for m in matches {
+            *counts.entry(m.path.clone()).or_default() += 1;
+            // Phase 3 item 1 (targets evidence): keep the first ~2 match
+            // lines per file so the caller can verify a content match without
+            // re-searching. Near-zero cost: the lines are already fetched.
+            let lines = probes.lines.entry(m.path).or_default();
+            if lines.len() < EVIDENCE_MAX_LINES_PER_TARGET {
+                lines.push(ProbeLine {
+                    line: m.line_number,
+                    text: m.line,
+                    keyword: keyword.clone(),
+                });
+            }
+        }
+        if !counts.is_empty() {
+            probes
+                .hits
+                .insert(keyword.clone(), counts.into_iter().collect());
+        }
+    }
+    probes
+}
+
 /// Whether a task names tests or specs as a word: the per-path test
 /// penalty is lifted for such a task.
 fn task_mentions_tests(task: &str) -> bool {
@@ -3838,8 +3966,9 @@ fn regex_escape_keyword(kw: &str) -> String {
 fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     let mut caps: Vec<String> = Vec::new();
 
-    // Op-declared named caps (top-level and inside the targets envelope).
-    for path in ["/caps", "/envelope/caps"] {
+    // Op-declared named caps (top-level, inside the targets envelope, and
+    // inside the envelope of a `targets_facts` packet).
+    for path in ["/caps", "/envelope/caps", "/facts/envelope/caps"] {
         if let Some(arr) = v.pointer(path).and_then(Value::as_array) {
             caps.extend(arr.iter().filter_map(Value::as_str).map(String::from));
         }
@@ -7365,6 +7494,15 @@ mod tests {
         assert_eq!(inputs["task"], "change login");
         assert_eq!(inputs["limit"], 8);
         assert_eq!(inputs["algorithm_version"], TARGETS_FACTS_ALGORITHM_VERSION);
+        assert_eq!(
+            inputs["algorithm_version"], 2,
+            "version 2 is the first with `facts.relevance`"
+        );
+        assert_eq!(
+            first.data()["facts"]["relevance"]["files_considered"],
+            1,
+            "the block is part of the deterministic facts"
+        );
         assert!(!inputs["activity_reranking"].as_bool().unwrap());
         assert!(!inputs["semantic_fallback"].as_bool().unwrap());
         assert_eq!(
