@@ -783,11 +783,13 @@ best chunk of the file the list ranks first leads, then the best of each
 other file; tests, docs and changelogs are
 excluded unless the question asks about them, as are `#[cfg(test)]` modules
 and test-named symbols. The ranked `files:` list puts tests, docs, `eval/` and changelog files after the code files (a stable demotion, nothing dropped) unless the question asks about them. A plain-language flow or tests question borrows its
-symbol anchor from the best non-test chunk. The `confidence: high` line and
-the "Answer from this evidence" directive stay only when the top excerpt's
-file is also among the lexical probe's top two co-files (two independent
-retrievers agree); otherwise the block says `confidence: medium — verify the
-excerpt answers the question` and drops the directive.
+symbol anchor from the best non-test chunk. The `confidence: high` line and the "Answer from this evidence"
+directive of a confident brief are off by default: it says `confidence:
+medium — verify the excerpt answers the question` (`the files`, without an
+excerpt) and drops the directive. `PIXEL_BRIEF_DIRECTIVE=1` restores them,
+and then only when the top excerpt's file is also among the lexical probe's
+top two co-files (two independent retrievers agree); measured on the dev
+split, that agreement was right 4 times in 7.
 `scripts/bench-brief-excerpt.py` measures excerpt@1 and the directive's
 precision. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
 explicit cue (config, setting, env, flag, option, default), not `install` or

@@ -145,6 +145,8 @@ const GENERATED_EXTENSIONS: &[&str] = &["json", "lock"];
 const GENERATED_DIRS: &[&str] = &["output", "dist", "node_modules"];
 /// The confidence line of a brief whose excerpt rests on one retriever.
 const MEDIUM_CONFIDENCE: &str = "confidence: medium — verify the excerpt answers the question";
+/// The same for a brief with files and no excerpt.
+const MEDIUM_FILES_CONFIDENCE: &str = "confidence: medium — verify the files answer the question";
 /// The footer of such a brief: the verification rule without the directive.
 const UNCORROBORATED_FOOTER: &str = "0 hits or 0 callers: verify with rg before concluding.";
 const FOOTER: &str = "Answer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.";
@@ -829,6 +831,9 @@ pub(crate) struct Brief {
     /// benchmarks: files of that kind are not demoted.
     wants_tests: bool,
     wants_docs: bool,
+    /// `PIXEL_BRIEF_DIRECTIVE` is on: a confident brief may tell the agent to
+    /// answer from its evidence.
+    directive: bool,
     /// The meaning search's leads, best first.
     leads: Vec<MeaningHit>,
     /// The relevance probe's co-files, heaviest first.
@@ -902,8 +907,7 @@ impl Brief {
         if !answer::receipt_enabled() {
             return Vec::new();
         }
-        // No excerpt means nothing was cut to disagree with.
-        let agreed = self.agreed() != Some(false) && self.unresolved.is_empty();
+        let agreed = self.keeps_directive() && self.unresolved.is_empty();
         self.receipt
             .as_ref()
             .map(|receipt| receipt.lines(agreed))
@@ -931,6 +935,18 @@ impl Brief {
                             .any(|path| *path == top.path)
                 }),
         )
+    }
+
+    /// Whether the brief may keep `confidence: high` and tell the agent to
+    /// answer from its evidence: a strong prompt's brief always does; a
+    /// confident one only with the directive switched on and, when it carries
+    /// an excerpt, only when two retrievers agree on its file.
+    fn keeps_directive(&self) -> bool {
+        if self.signal == Some(Signal::Strong) || self.tier() != Some(Tier::High) {
+            return true;
+        }
+        // No excerpt means nothing was cut to disagree with.
+        self.directive && self.agreed() != Some(false)
     }
 
     fn has_excerpts(&self) -> bool {
@@ -2483,6 +2499,7 @@ fn fold(state: &Mutex<Brief>, plan: &Plan, got: &Gathered) {
         brief
             .files
             .sort_by_key(|hit| answer::demoted(&hit.path, wants_tests, wants_docs));
+        brief.directive = answer::directive_enabled();
         brief.leads = leads.to_vec();
         brief.lexical = lines.iter().map(|hit| hit.path.clone()).collect();
         brief.receipt = match &got.relevance {
@@ -2814,10 +2831,12 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
     if let Some(confidence) = &brief.confidence {
         // An excerpt the two retrievers do not both stand behind is shown
         // with a medium confidence, not the high one.
-        lines.push(if brief.agreed() == Some(false) {
+        lines.push(if brief.keeps_directive() {
+            confidence.clone()
+        } else if brief.has_excerpts() {
             MEDIUM_CONFIDENCE.to_string()
         } else {
-            confidence.clone()
+            MEDIUM_FILES_CONFIDENCE.to_string()
         });
     }
     lines.extend(brief.excerpt_block(shown));
@@ -2913,10 +2932,10 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
         }
     } else {
         lines.push(
-            if brief.agreed() == Some(false) {
-                UNCORROBORATED_FOOTER
-            } else {
+            if brief.keeps_directive() {
                 FOOTER
+            } else {
+                UNCORROBORATED_FOOTER
             }
             .to_string(),
         );
@@ -4924,11 +4943,11 @@ mod tests {
                     "[PIXEL:BRIEF]",
                     "kind: lookup",
                     "searched: content+symbols+paths for daemon, changes, startup (3 terms, 1000 files) · meaning search returned 2 chunks",
-                    "result: the matches below are the best across both searches; answer from them if they suffice, search further only if they don't",
+                    "result: the matches below are the best across both searches; verify they answer the question",
                     "files: crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready() {; crates/pixel-daemon/src/api.rs:40 — fn op_status; docs/notes.md:12 — daemon startup notes",
-                    HIGH_CONFIDENCE,
+                    MEDIUM_FILES_CONFIDENCE,
                     "coverage: 2/2 ops answered",
-                    FOOTER,
+                    UNCORROBORATED_FOOTER,
                 ]
                 .join("\n")
                 .as_str()
@@ -6853,7 +6872,31 @@ mod tests {
         }];
         brief.lexical = lexical.iter().map(ToString::to_string).collect();
         brief.confidence = Some(HIGH_CONFIDENCE.to_string());
+        brief.directive = true;
         brief
+    }
+
+    #[test]
+    fn the_directive_should_be_off_unless_the_switch_is_on() {
+        let mut brief = agreeing_brief(&["a.rs", DAEMON]);
+        assert_eq!(brief.agreed(), Some(true));
+        assert!(brief.keeps_directive());
+        brief.directive = false;
+        assert!(!brief.keeps_directive());
+        let (text, _) = fit(&brief).unwrap();
+        assert!(text.contains(MEDIUM_CONFIDENCE), "{text}");
+        assert!(!text.contains("confidence: high"), "{text}");
+        assert!(!text.contains("Answer from this evidence"), "{text}");
+        assert!(!text.contains("answer from them"), "{text}");
+        assert!(text.contains(UNCORROBORATED_FOOTER), "{text}");
+        // A brief without an excerpt says it about its files.
+        brief.excerpts.clear();
+        let (text, _) = fit(&brief).unwrap();
+        assert!(text.contains(MEDIUM_FILES_CONFIDENCE), "{text}");
+        assert!(!text.contains("Answer from this evidence"), "{text}");
+        // Strong prompts and low-tier briefs are not high-tier prose: unchanged.
+        brief.signal = Some(Signal::Strong);
+        assert!(brief.keeps_directive());
     }
 
     #[test]

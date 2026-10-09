@@ -44,6 +44,20 @@ pub(crate) fn toggle_on(value: Option<&str>) -> bool {
     !matches!(value, Some("0" | "false" | "off"))
 }
 
+/// Environment switch of the directive ("Answer from this evidence"): off
+/// unless set to `1`, `true` or `on`. Two retrievers agreeing on the top
+/// file was measured to be right too rarely to tell an agent to stop looking.
+pub(crate) const DIRECTIVE_ENV: &str = "PIXEL_BRIEF_DIRECTIVE";
+
+/// Whether an environment value switches the directive on.
+pub(crate) fn directive_on(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "on"))
+}
+
+pub(crate) fn directive_enabled() -> bool {
+    directive_on(std::env::var(DIRECTIVE_ENV).ok().as_deref())
+}
+
 pub(crate) fn receipt_enabled() -> bool {
     toggle_on(std::env::var(RECEIPT_ENV).ok().as_deref())
 }
@@ -700,6 +714,17 @@ mod tests {
                 })
                 .collect(),
             cofiles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_directive_should_be_off_unless_switched_on() {
+        assert!(!directive_on(None));
+        for off in ["", "0", "false", "off", "yes"] {
+            assert!(!directive_on(Some(off)), "{off}");
+        }
+        for on in ["1", "true", "on"] {
+            assert!(directive_on(Some(on)), "{on}");
         }
     }
 
