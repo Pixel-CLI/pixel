@@ -450,34 +450,55 @@ def judge_note(stderr):
 DECISION_FIELDS = ("gate", "tier", "score", "reason", "route", "daemon")
 
 
-def read_decision(repo, since_ms):
-    """The newest line of the repo's decision log written at or after
-    ``since_ms`` (its ``ts``, in milliseconds), reduced to the fields a run compares; ``None``
-    for a binary that writes no log, or a log with nothing newer."""
+DECISION_LOG = Path(".pixel") / "brief-decisions.jsonl"
+
+
+def log_mark(repo):
+    """What marks the end of the repo's decision log now: its last line, or
+    ``None`` for no log or an empty one.
+
+    The log is rewritten in place and trimmed to its last 500 lines, so its
+    size, an offset in it or a line count can stand still (or move) while a
+    call appended nothing (or something); its last line changes exactly when a
+    call appends a record, because every record carries its own time and hash.
+    """
     try:
-        text = (Path(repo) / ".pixel" / "brief-decisions.jsonl").read_text(encoding="utf-8")
+        text = (Path(repo) / DECISION_LOG).read_text(encoding="utf-8")
     except OSError:
         return None
-    for line in reversed(text.splitlines()):
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict) or not isinstance(record.get("ts"), int):
-            continue
-        if record["ts"] < since_ms:
-            return None
-        return {key: record.get(key) for key in DECISION_FIELDS}
-    return None
+    lines = [line for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else None
+
+
+def read_decision(repo, mark):
+    """The decision a call appended to the repo's decision log, reduced to the
+    fields a run compares; ``mark`` is the [`log_mark`] taken before the call.
+
+    ``None`` when the call appended nothing (the last line is still the mark:
+    a binary that writes no log, ``PIXEL_BRIEF_LOG=0``, a call that died before
+    it logged), the log is gone, or the line it appended is not a JSON object.
+    A time compared with the clock would hand the previous prompt's record to a
+    call that wrote none whenever both fell in the same millisecond.
+    """
+    now = log_mark(repo)
+    if now is None or now == mark:
+        return None
+    try:
+        record = json.loads(now)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    return {key: record.get(key) for key in DECISION_FIELDS}
 
 
 def measure_row(pixel, repo, row, repeat, timeout, env=None):
     runs = []
-    decision, since_ms = None, int(time.time() * 1000)
+    decision, mark = None, log_mark(repo)
     for index in range(repeat):
         runs.append(run_brief(pixel, repo, row["text"], timeout, env))
         if index == 0:
-            decision = read_decision(repo, since_ms)
+            decision = read_decision(repo, mark)
     code, out, err, _ = runs[0]
     block = parse_brief(out)
     return {"id": row["id"], "fired": block["fired"], "rc": code, "block": block,
@@ -985,22 +1006,59 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(brief_env(auto_start=False)["PIXEL_DAEMON_AUTO_START"], "0")
         self.assertEqual(brief_env(auto_start=True)["PIXEL_DAEMON_AUTO_START"], "1")
 
-    def test_a_decision_is_read_only_when_it_belongs_to_the_call(self):
+    def test_a_decision_is_read_only_when_the_call_appended_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
-            self.assertIsNone(read_decision(repo, 0))  # no log at all
+            self.assertIsNone(log_mark(repo))
+            self.assertIsNone(read_decision(repo, None), "no log at all")
             (repo / ".pixel").mkdir()
-            log = repo / ".pixel" / "brief-decisions.jsonl"
-            old = {"ts": 100, "gate": "on", "route": "daemon"}
-            new = {"ts": 300, "gate": "high", "tier": "high", "score": 2.5, "route": "local",
-                   "daemon": "launched", "typed": "dropped"}
-            log.write_text("\n".join(["not json", json.dumps(old), json.dumps(new)]) + "\n")
-            self.assertEqual(read_decision(repo, 300),
+            log = repo / DECISION_LOG
+            # The previous prompt's record carries the very millisecond the next
+            # call starts in: a time comparison would hand it to a call that wrote none.
+            previous = {"ts": int(time.time() * 1000), "gate": "closed", "tier": "off", "score": -1.0,
+                        "route": "daemon", "daemon": "running"}
+            log.write_text("not json\n" + json.dumps(previous) + "\n")
+            mark = log_mark(repo)
+            self.assertEqual(mark, json.dumps(previous))
+            self.assertIsNone(read_decision(repo, mark), "a call that wrote no record has no decision")
+            appended = {"ts": previous["ts"], "gate": "high", "tier": "high", "score": 2.5,
+                        "route": "local", "daemon": "launched", "typed": "dropped"}
+            with log.open("a") as handle:
+                handle.write(json.dumps(appended) + "\n")
+            self.assertEqual(read_decision(repo, mark),
                              {"gate": "high", "tier": "high", "score": 2.5, "reason": None,
                               "route": "local", "daemon": "launched"})
-            self.assertIsNone(read_decision(repo, 301), "the newest line is older than the call")
-            log.write_text(json.dumps(new) + "\ngarbage\n")
-            self.assertEqual(read_decision(repo, 0)["route"], "local", "a torn last line is skipped")
+            with log.open("a") as handle:
+                handle.write("garbage\n")
+            self.assertIsNone(read_decision(repo, mark), "a last line that is not a record is no decision")
+            log.write_text(json.dumps([1, 2]) + "\n")
+            self.assertIsNone(read_decision(repo, mark), "nor is a JSON value that is not an object")
+            log.unlink()
+            self.assertIsNone(read_decision(repo, mark), "the log is gone")
+            log.write_text(json.dumps(appended) + "\n")
+            self.assertEqual(read_decision(repo, None)["route"], "local", "the first record of a new log")
+
+    def test_a_decision_is_found_when_the_log_rotates_at_its_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".pixel").mkdir()
+            log = repo / DECISION_LOG
+
+            def line(number, gate="closed", route="daemon"):
+                # Every line the same length, so a rotation leaves the size where it was.
+                return json.dumps({"ts": 1_000 + number, "gate": gate, "route": route,
+                                   "typed": f"prompt {number:04d}"}, sort_keys=True)
+            full = [line(n) for n in range(500)]
+            log.write_text("\n".join(full) + "\n")
+            size, mark = log.stat().st_size, log_mark(repo)
+            self.assertEqual(mark, full[-1])
+            self.assertIsNone(read_decision(repo, mark), "a full log and a call that wrote none")
+            appended = line(500, gate="opened", route="local_")
+            self.assertEqual(len(appended), len(full[0]))
+            log.write_text("\n".join(full[1:] + [appended]) + "\n")  # the writer drops the oldest line
+            self.assertEqual(log.stat().st_size, size, "the rotation moved neither the size nor the line count")
+            self.assertEqual(read_decision(repo, mark)["gate"], "opened")
+            self.assertEqual(len(log.read_text().splitlines()), 500)
 
     def test_the_route_summary_counts_the_briefs_that_ran_before_the_daemon_answered(self):
         local = {"route": "local", "daemon": "launched"}

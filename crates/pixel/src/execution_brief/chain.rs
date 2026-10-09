@@ -25,8 +25,9 @@
 //! whether the prompt is about this repository at all. Off topic ends the
 //! brief at once and renders nothing; on topic fuses the meaning leads with
 //! the files the prompt's words meet in, and the routed kind goes on from
-//! there. A weakly code-shaped prompt gets the same probes as its retriever and
-//! records the decision without enforcing it ([`ENFORCE_GATE_ON_WEAK`]).
+//! there. A weakly code-shaped prompt gets the same probes as its retriever;
+//! the same decision silences it when [`ENFORCE_GATE_ON_WEAK`] is set, and a
+//! code graph that did not answer leaves its pre-gate brief in place.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
