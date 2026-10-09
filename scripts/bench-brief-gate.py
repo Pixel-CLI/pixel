@@ -705,6 +705,9 @@ def run_bench(args):
     if problems:
         raise SystemExit("the prompt set is invalid:\n  " + "\n  ".join(problems[:20]))
     cold = args.daemon == "cold"
+    if cold and args.repeat != 1:
+        raise SystemExit("--daemon cold runs each prompt once: a repeat would find the daemon "
+                         "the first call started")
     chosen = select_rows(rows, args.split, in_file_order=cold)
     repo_sha = git_output(repo, "rev-parse", "HEAD")
     dirty = bool(git_output(repo, "status", "--porcelain"))
