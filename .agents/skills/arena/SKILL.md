@@ -37,6 +37,12 @@ scratch workspace.
 ## 1. Close the previous test pane, then create a fresh workspace and pane
 
 ```bash
+SKILL_CHECKOUT=$(git rev-parse --show-toplevel) || {
+  echo "arena: resolve the invoking skill checkout before starting" >&2
+  exit 1
+}
+SKILL_PATH="$SKILL_CHECKOUT/.agents/skills/arena/SKILL.md"
+SKILL_SHA=$(shasum -a 256 "$SKILL_PATH" | awk '{print $1}') || exit 1
 herdr agent list | jq -r '.result.agents[] | select(.name // "" | startswith("arena")) | .pane_id' | while read p; do herdr pane close "$p"; done
 ROOT=$(mktemp -d /tmp/pi-herdr-arena-XXXX)
 mkdir -p "$ROOT/ws"
@@ -62,9 +68,18 @@ To test working-tree extension changes, pass every extension file explicitly;
 `--extension` does not accept a directory:
 
 ```bash
-cd /Users/livio/Documents/pi-ultimate
+TARGET_REPO="${ARENA_REPO_ROOT:-$SKILL_CHECKOUT}"
+cd "$TARGET_REPO" || {
+  echo "arena: cannot enter target repository: $TARGET_REPO" >&2
+  exit 1
+}
+EXTENSION_ARGS=()
+for f in extensions/*.ts extensions/*/index.ts; do
+  [ -e "$f" ] || continue
+  EXTENSION_ARGS+=(--extension "$PWD/$f")
+done
 herdr agent start "$RUN" --kind pi --pane "$PANE" --timeout 60000 -- --no-session \
-  $(for f in extensions/*.ts extensions/*/index.ts; do printf -- "--extension %q " "$PWD/$f"; done)
+  "${EXTENSION_ARGS[@]}"
 ```
 
 ## 3. Send the selected prompt
@@ -79,7 +94,12 @@ submitted; do not resend it.
 ## 4. Wait for idle, then record the local receipt
 
 ```bash
-herdr agent wait "$RUN" --until idle --timeout 120000
+WAIT_RESULT=""
+if WAIT_RESULT=$(herdr agent wait "$RUN" --until idle --until done --timeout 120000); then
+  WAIT_STATUS=$(printf '%s\n' "$WAIT_RESULT" | jq -r '.result.status // .result.state // .status // .state // "done"')
+else
+  WAIT_STATUS=wait-failed
+fi
 ENDED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 STATS_FILE="${ARENA_STATS_FILE:-$ROOT/arena-runs.jsonl}"
 mkdir -p "$(dirname "$STATS_FILE")"
@@ -87,8 +107,8 @@ jq -nc \
   --arg run "$RUN" --arg type "$PROMPT_TYPE" --arg prompt "$PROMPT" \
   --arg root "$ROOT" --arg started "$STARTED_AT" --arg ended "$ENDED_AT" \
   --arg revision "$(git rev-parse HEAD 2>/dev/null || true)" \
-  --arg skill_sha "$(shasum -a 256 "$PWD/.agents/skills/arena/SKILL.md" | awk '{print $1}')" \
-  '{run_id:$run,prompt_type:$type,prompt:$prompt,workspace:$root,started_at:$started,ended_at:$ended,status:"idle",revision:$revision,skill_sha256:$skill_sha,scenario_id:$type,artifacts_path:($root + "/ws")}' \
+  --arg skill_sha "$SKILL_SHA" --arg status "$WAIT_STATUS" \
+  '{run_id:$run,prompt_type:$type,prompt:$prompt,workspace:$root,started_at:$started,ended_at:$ended,status:$status,revision:$revision,skill_sha256:$skill_sha,scenario_id:$type,artifacts_path:($root + "/ws")}' \
   >> "$STATS_FILE"
 ```
 
