@@ -28,8 +28,6 @@ mod agent;
 mod detect;
 mod feature;
 mod files;
-#[cfg(test)]
-mod goldens;
 mod plan;
 mod render;
 
@@ -51,6 +49,13 @@ pub fn preview(features: &[Feature]) -> String {
 pub fn strip_block(text: &str) -> String {
     files::strip(text)
 }
+
+// Test modules come last in their file (`test-hygiene.md`; the workspace
+// boundary test in `crates/pixel-git/tests/boundary.rs` enforces it, and
+// caught this one in CI). `goldens` holds tests only, so it is declared here
+// with the others rather than beside the modules it reads.
+#[cfg(test)]
+mod goldens;
 
 #[cfg(test)]
 mod tests {
