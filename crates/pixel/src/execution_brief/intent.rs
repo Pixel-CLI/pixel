@@ -21,8 +21,6 @@ use crate::prompt_intent::{INTENT_CONTEXT, INTENTS};
 /// The label the hook adds to the task-intent table: the prompt is not a
 /// coding task at all, so the brief has nothing to answer.
 const NONE_LABEL: &str = "none";
-/// The label of the task-intent table that names repository operation.
-const OPS_LABEL: &str = "ops";
 const NONE_CRITERION: &str = "not a coding task: chat, a git or release request, prose, or anything the other labels do not cover";
 
 /// Poll granularity while the classify child answers.
@@ -98,17 +96,6 @@ impl Verdict {
     /// otherwise silence a prompt that needed evidence).
     pub(crate) fn denies_brief(&self) -> bool {
         self.label == NONE_LABEL && self.confidence >= MIN_DENY_PROBABILITY
-    }
-
-    /// A plain-language prompt the evidence found on topic is still refused
-    /// when the judge confidently says it is not a coding task (`none`) or
-    /// that it operates the repository (`ops`): with no code identifier to
-    /// vouch for it, the model's conviction outweighs a word overlap. A
-    /// code-shaped prompt keeps the lighter [`Verdict::denies_brief`], where
-    /// `ops` only steers.
-    pub(crate) fn denies_prose(&self) -> bool {
-        matches!(self.label.as_str(), NONE_LABEL | OPS_LABEL)
-            && self.confidence >= MIN_DENY_PROBABILITY
     }
 
     /// The prompt asks about a change or about dependents: the chain runs
@@ -281,35 +268,6 @@ mod tests {
             let v = verdict(label);
             assert!(!v.denies_brief(), "{label}");
             assert!(!v.change_intent(), "{label}");
-        }
-    }
-
-    #[test]
-    fn denies_prose_should_refuse_a_confident_none_or_ops_and_nothing_else() {
-        let verdict = |label: &str, confidence: f64| Verdict {
-            label: label.to_string(),
-            confidence,
-        };
-        for label in ["none", "ops"] {
-            assert!(verdict(label, 0.9).denies_prose(), "{label}");
-            assert!(
-                verdict(label, MIN_DENY_PROBABILITY).denies_prose(),
-                "{label} at the threshold"
-            );
-            assert!(
-                !verdict(label, MIN_DENY_PROBABILITY - 0.01).denies_prose(),
-                "{label} below the threshold"
-            );
-        }
-        for label in [
-            "bugfix",
-            "feature",
-            "refactor",
-            "investigate",
-            "question",
-            "review",
-        ] {
-            assert!(!verdict(label, 0.99).denies_prose(), "{label}");
         }
     }
 

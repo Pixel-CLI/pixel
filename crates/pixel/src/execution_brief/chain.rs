@@ -38,7 +38,7 @@ use regex::Regex;
 
 use super::decision_log::{self, Record};
 use super::intent::Verdict;
-use super::relevance::{self, RelevanceInput};
+use super::relevance::{self, GateInput, Lead, RelevanceInput, Tier};
 use super::routes::QuestionKind;
 use super::{SOURCE_EXTENSIONS, Signal, brief_signal, names_code};
 
@@ -60,10 +60,17 @@ pub(crate) const BRIEF_BYTES: usize = 2048;
 /// Size cap of a brief built for a plain-language prompt; its own constant
 /// so an experiment can widen it without touching code-shaped briefs.
 pub(crate) const PROSE_BRIEF_BYTES: usize = 2048;
-/// Whether an off-topic relevance decision silences a weakly code-shaped
-/// prompt's brief. The decision is computed and logged either way; the
-/// evaluation decides when it starts to bind.
-pub(crate) const ENFORCE_GATE_ON_WEAK: bool = false;
+/// Whether an off-tier relevance decision silences a weakly code-shaped
+/// prompt's brief, as it does a plain-language one. The decision is computed
+/// and logged either way.
+pub(crate) const ENFORCE_GATE_ON_WEAK: bool = true;
+/// Files a low-tier brief names.
+const LOW_FILES: usize = 3;
+/// Rendered size cap of a low-tier brief: a maybe stays short.
+pub(crate) const LOW_BRIEF_BYTES: usize = 700;
+/// The model that decides the tier of a prompt: [`relevance::judge`] in
+/// production, a fixed answer in a test.
+pub(crate) type Model = fn(&GateInput) -> relevance::Verdict;
 /// Leads a meaning search returns: as many files as a brief shows.
 const MEANING_LIMIT: usize = MAX_FILES;
 /// Rank constant of the reciprocal-rank fusion of the meaning leads and the
@@ -801,6 +808,11 @@ pub(crate) struct Brief {
 }
 
 impl Brief {
+    /// The tier the relevance decision put the prompt in, when it was made.
+    fn tier(&self) -> Option<Tier> {
+        self.relevance.as_ref().map(|verdict| verdict.tier)
+    }
+
     /// Fold search hits into the brief: one entry per (path, line) so
     /// distinct same-file sites — the production line and the test line —
     /// both survive. `admit_json` (config questions only) lets `.json`
@@ -1354,6 +1366,11 @@ impl Declined {
     }
 }
 
+/// The model that decided the tier, as the log names it.
+fn gate_model_source() -> &'static str {
+    super::gate_model::SOURCE
+}
+
 /// The record of a prompt that got no brief.
 pub(crate) fn declined_record(declined: Declined, prompt: &str) -> Record {
     let typed = super::typed_text(prompt);
@@ -1367,6 +1384,8 @@ pub(crate) fn declined_record(declined: Declined, prompt: &str) -> Record {
         score: None,
         best_file: None,
         features: None,
+        tier: None,
+        model: gate_model_source(),
         judge: None,
         kind: None,
         ops: 0,
@@ -1428,6 +1447,8 @@ impl Pending {
             gate: brief.admission.label(),
             enforced: gate_enforced(self.signal, brief.silenced, ENFORCE_GATE_ON_WEAK),
             reason: brief.admission.reason().map(str::to_string),
+            tier: brief.tier().map(Tier::as_str),
+            model: gate_model_source(),
             score: brief.relevance.as_ref().map(|verdict| verdict.score),
             best_file: brief
                 .relevance
@@ -1475,6 +1496,7 @@ pub(crate) fn try_start(prompt: &str, root: &Path) -> Result<Pending, Declined> 
         BRIEF_WINDOW,
         move |deadline| super::evidence::open(&root, deadline),
         super::intent::judge,
+        relevance::judge,
         log,
     )
 }
@@ -1493,20 +1515,21 @@ where
     F: FnOnce(Instant) -> Box<dyn Evidence> + Send + 'static,
     J: Fn(&str, Instant) -> Option<Verdict> + Send + Sync + 'static,
 {
-    try_start_with(prompt, gate, window, open, judge, None).ok()
+    try_start_with(prompt, gate, window, open, judge, relevance::judge, None).ok()
 }
 
-/// [`try_start`] with its gate, window, evidence source, intent judge and
-/// decision log given. The judge runs on a weakly code-shaped or plain
-/// prompt, beside the relevance probe and the meaning search; a denying
-/// verdict ends the brief before any evidence op, and no verdict means the
-/// heuristic plan.
+/// [`try_start`] with its gate, window, evidence source, intent judge, tier
+/// model and decision log given. The judge runs on a weakly code-shaped or
+/// plain prompt, beside the relevance probe and the meaning search; on a
+/// weak prompt a denying verdict ends the brief before any evidence op, and
+/// no verdict means the heuristic plan.
 pub(crate) fn try_start_with<F, J>(
     prompt: &str,
     gate: Gate,
     window: Duration,
     open: F,
     judge: J,
+    model: Model,
     log: Option<PathBuf>,
 ) -> Result<Pending, Declined>
 where
@@ -1542,7 +1565,16 @@ where
     std::thread::Builder::new()
         .name("pixel-brief".into())
         .spawn(move || {
-            work(&typed, signal, deadline, &worker, &finished, open, &judge);
+            let job = Job {
+                typed: &typed,
+                signal,
+                deadline,
+                state: &worker,
+                finished: &finished,
+                judge: &judge,
+                model,
+            };
+            work(&job, open);
             let _ = finished.send(());
         })
         .map_err(|_| Declined::NoWorker)?;
@@ -1557,19 +1589,32 @@ where
     })
 }
 
-/// The worker of one brief: plan, ask, run.
-fn work<F, J>(
-    typed: &str,
+/// What the worker of one brief is given.
+struct Job<'a, J> {
+    typed: &'a str,
     signal: Signal,
     deadline: Instant,
-    state: &Mutex<Brief>,
-    finished: &Sender<()>,
-    open: F,
-    judge: &J,
-) where
+    state: &'a Mutex<Brief>,
+    finished: &'a Sender<()>,
+    judge: &'a J,
+    model: Model,
+}
+
+/// The worker of one brief: plan, ask, run.
+fn work<F, J>(job: &Job<J>, open: F)
+where
     F: FnOnce(Instant) -> Box<dyn Evidence>,
     J: Fn(&str, Instant) -> Option<Verdict> + Sync,
 {
+    let Job {
+        typed,
+        signal,
+        deadline,
+        state,
+        finished,
+        judge,
+        model,
+    } = *job;
     if signal == Signal::Strong {
         let plan = Plan::from_typed(typed, has_change_intent(typed), None);
         let evidence = open(deadline);
@@ -1589,6 +1634,7 @@ fn work<F, J>(
         typed,
         evidence.as_ref(),
         judge,
+        model,
         state,
         deadline,
         &mut settled,
@@ -1606,6 +1652,12 @@ fn work<F, J>(
     };
     let plan = Plan::from_typed(typed, change_intent, label.as_deref());
     fold(state, &plan, &got);
+    // A maybe is a short list of files and nothing else: no kind route, no
+    // definition read, no fallback search.
+    if edit(state, |brief| brief.tier()) == Some(Tier::Low) {
+        edit(state, |brief| brief.finished = true);
+        return;
+    }
     run(&plan, evidence.as_ref(), state, deadline);
 }
 
@@ -1635,6 +1687,7 @@ fn gather<J>(
     typed: &str,
     evidence: &dyn Evidence,
     judge: &J,
+    model: Model,
     state: &Mutex<Brief>,
     deadline: Instant,
     settled: &mut dyn FnMut(&Gathered) -> bool,
@@ -1670,28 +1723,57 @@ where
             receive.recv_timeout(deadline.saturating_duration_since(Instant::now()))
         {
             match reply {
-                Reply::Relevance(answer) => {
-                    got.scored = answer
-                        .as_ref()
-                        .ok()
-                        .map(|answer| relevance::judge(&answer.input));
-                    got.relevance = Some(answer);
-                }
+                Reply::Relevance(answer) => got.relevance = Some(answer),
                 Reply::Meaning(leads) => got.meaning = Some(leads),
                 Reply::Judge(verdict) => got.judged = Some(verdict),
+            }
+            // The model reads both answers: score once the meaning search
+            // has answered, or was never going to.
+            if got.meaning.is_some() || !ask_meaning {
+                score(&mut got, typed, model);
             }
             if settled(&got) {
                 break;
             }
         }
     });
+    // Out of time with the meaning search still silent: score without it.
+    score(&mut got, typed, model);
     got
+}
+
+/// Put the relevance answer through `model` once, with the leads the meaning
+/// search gave so far; a no-op until the relevance probe has answered.
+fn score(got: &mut Gathered, typed: &str, model: Model) {
+    if got.scored.is_some() {
+        return;
+    }
+    let Some(Ok(answer)) = &got.relevance else {
+        return;
+    };
+    let leads: Vec<Lead> = match &got.meaning {
+        Some(Ok(hits)) => hits
+            .iter()
+            .map(|hit| Lead {
+                path: hit.path.clone(),
+                score: hit.score,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let verdict = model(&GateInput {
+        relevance: &answer.input,
+        leads: &leads,
+        typed,
+    });
+    got.scored = Some(verdict);
 }
 
 /// Why `signal`'s prompt gets no brief, if it does not. `complete`: no more
 /// answers are coming, so a probe that never answered counts as "cannot tell".
-/// Plain language must be shown on topic by the repository; a weak prompt is
-/// refused by the judge, and by the relevance decision only when `enforce_weak`.
+/// Plain language must be shown on topic by the repository, the intent judge
+/// having no say in it; a weak prompt is refused by the judge, and by the
+/// relevance decision when `enforce_weak`.
 fn refusal(
     signal: Signal,
     got: &Gathered,
@@ -1707,28 +1789,19 @@ fn refusal(
             }
             got.scored
                 .as_ref()
-                .filter(|scored| enforce_weak && !scored.on_topic)
+                .filter(|scored| enforce_weak && scored.tier == Tier::Off)
                 .map(|scored| Admission::Closed(off_topic_reason(scored)))
         }
-        Signal::Prose => {
-            match (&got.relevance, &got.scored) {
-                (Some(Err(reason)), _) => {
-                    return Some(Admission::Closed(format!("relevance: {reason}")));
-                }
-                (_, Some(scored)) if !scored.on_topic => {
-                    return Some(Admission::Closed(off_topic_reason(scored)));
-                }
-                (None, _) if complete => {
-                    return Some(Admission::Closed(
-                        "relevance: no answer before the deadline".to_string(),
-                    ));
-                }
-                _ => {}
+        Signal::Prose => match (&got.relevance, &got.scored) {
+            (Some(Err(reason)), _) => Some(Admission::Closed(format!("relevance: {reason}"))),
+            (_, Some(scored)) if scored.tier == Tier::Off => {
+                Some(Admission::Closed(off_topic_reason(scored)))
             }
-            verdict
-                .filter(|verdict| verdict.denies_prose())
-                .map(|verdict| Admission::Denied(judge_reason(verdict)))
-        }
+            (None, _) if complete => Some(Admission::Closed(
+                "relevance: no answer before the deadline".to_string(),
+            )),
+            _ => None,
+        },
     }
 }
 
@@ -1738,15 +1811,8 @@ fn judge_reason(verdict: &Verdict) -> String {
 
 fn off_topic_reason(scored: &relevance::Verdict) -> String {
     format!(
-        "off topic: the best file covers {}/{} key terms, {:.2} of the weight, {}",
-        scored.features.shared,
-        scored.features.informative,
-        scored.score,
-        if scored.features.structural {
-            "with a symbol or path match"
-        } else {
-            "in text only"
-        }
+        "off topic: score {:.2}, the best file covers {}/{} key terms",
+        scored.score, scored.features.shared, scored.features.informative
     )
 }
 
@@ -1788,7 +1854,7 @@ fn fold(state: &Mutex<Brief>, plan: &Plan, got: &Gathered) {
     edit(state, |brief| {
         note(brief, got);
         brief.admission = match &got.scored {
-            Some(scored) if scored.on_topic => Admission::Open,
+            Some(scored) if scored.tier != Tier::Off => Admission::Open,
             Some(scored) => Admission::Closed(off_topic_reason(scored)),
             None => Admission::Unjudged,
         };
@@ -1798,7 +1864,10 @@ fn fold(state: &Mutex<Brief>, plan: &Plan, got: &Gathered) {
             brief.answered += answers;
             brief.searched = true;
         }
-        brief.confidence = got.scored.as_ref().map(relevance::Verdict::confidence_line);
+        brief.confidence = got
+            .scored
+            .as_ref()
+            .and_then(relevance::Verdict::confidence_line);
         brief.absorb(fused, admit_json);
     });
 }
@@ -1924,11 +1993,60 @@ pub(crate) fn render(brief: &Brief) -> Option<String> {
     if brief.silenced || brief.answered == 0 {
         return None;
     }
+    if brief.tier() == Some(Tier::Low) {
+        return render_low(brief);
+    }
     let cap = byte_cap(brief.signal);
     let mut shown = Shown::of(brief);
     let mut text = render_with(brief, shown);
     while text.len() > cap && shown.shrink() {
         text = render_with(brief, shown);
+    }
+    Some(text)
+}
+
+/// One entry of a `files:` line: `path:line`, and the matched text after a
+/// dash when the source carried it (cut to `text_chars`). A hit with no line
+/// of its own is a bare path.
+fn file_entry(hit: &RichHit, text_chars: usize) -> String {
+    let site = if hit.line == 0 {
+        clean(&hit.path)
+    } else {
+        format!("{}:{}", clean(&hit.path), hit.line)
+    };
+    match &hit.text {
+        Some(text) if text_chars > 0 => format!("{site} — {}", clean_n(text, text_chars)),
+        _ => site,
+    }
+}
+
+/// The compact block of a low-tier prompt: at most [`LOW_FILES`] files and
+/// the line that says it is a maybe, within [`LOW_BRIEF_BYTES`]. Texts give
+/// way first, from the full width to half and then to none, and files only
+/// when paths alone are too long; `None` when there is no file to name.
+fn render_low(brief: &Brief) -> Option<String> {
+    let shown = brief.files.len().min(LOW_FILES);
+    if shown == 0 {
+        return None;
+    }
+    let confidence = brief.confidence.as_deref().unwrap_or_default();
+    let block = |files: usize, text_chars: usize| {
+        let entries: Vec<String> = brief
+            .files
+            .iter()
+            .take(files)
+            .map(|hit| file_entry(hit, text_chars))
+            .collect();
+        format!("{BRIEF_TAG}\nfiles: {}\n{confidence}", entries.join("; "))
+    };
+    let mut text = block(1, 0);
+    for files in (1..=shown).rev() {
+        for text_chars in [MAX_ITEM_CHARS, MAX_ITEM_CHARS / 2, 0] {
+            text = block(files, text_chars);
+            if text.len() <= LOW_BRIEF_BYTES {
+                return Some(text);
+            }
+        }
     }
     Some(text)
 }
@@ -2526,7 +2644,7 @@ mod tests {
         /// source at all.
         source: Option<String>,
         pause: Duration,
-        log: Mutex<Vec<String>>,
+        log: Arc<Mutex<Vec<String>>>,
     }
 
     impl Fake {
@@ -2551,7 +2669,7 @@ mod tests {
                 semantic: None,
                 source: None,
                 pause: Duration::ZERO,
-                log: Mutex::new(Vec::new()),
+                log: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -3924,27 +4042,20 @@ mod tests {
         }
     }
 
-    /// The words of a prompt the repository talks about, as many as one file
-    /// must share for the gate to open.
-    const TOPIC_WORDS: [&str; 6] = ["daemon", "changes", "startup", "restart", "files", "watch"];
-
     /// The repository talks about the prompt: one structural file holds all
-    /// its words (2 each), a note holds all but one as text.
+    /// its words (2 each), a note holds two of them as text.
     fn on_topic_answer() -> RelevanceAnswer {
-        let count = relevance::MIN_SHARED_KEYWORDS;
-        let topic = &TOPIC_WORDS[..count];
         RelevanceAnswer {
             input: RelevanceInput {
                 graph: true,
-                keywords: topic.iter().map(|word| keyword(word, 2.0)).collect(),
+                keywords: vec![
+                    keyword("daemon", 2.0),
+                    keyword("changes", 2.0),
+                    keyword("startup", 2.0),
+                ],
                 cofiles: vec![
-                    cofile(DAEMON, topic, 2.0 * count as f64, true),
-                    cofile(
-                        "docs/notes.md",
-                        &topic[..count - 1],
-                        2.0 * (count - 1) as f64,
-                        false,
-                    ),
+                    cofile(DAEMON, &["daemon", "changes", "startup"], 6.0, true),
+                    cofile("docs/notes.md", &["daemon", "startup"], 4.0, false),
                 ],
             },
             lines: vec![
@@ -3954,11 +4065,10 @@ mod tests {
         }
     }
 
-    /// The `confidence:` line of a brief the whole of `on_topic_answer` covers.
-    fn full_confidence() -> String {
-        let count = relevance::MIN_SHARED_KEYWORDS;
-        format!("confidence: high — {count}/{count} key terms covered; start with the first file")
-    }
+    /// The `confidence:` line of a high-tier brief the stub models decide.
+    const HIGH_CONFIDENCE: &str =
+        "confidence: high — 3/3 key terms covered; start with the first file";
+    const LOW_CONFIDENCE: &str = "confidence: low — possibly related; verify before relying on it";
 
     /// The repository does not talk about the prompt: two of its words are
     /// nowhere (the cap), the third is everywhere (0), and no file holds any.
@@ -3975,6 +4085,49 @@ mod tests {
             },
             lines: Vec::new(),
         }
+    }
+
+    /// The verdict of a model that puts every prompt in `tier`: the
+    /// pipeline's tests do not depend on the constants of the real one.
+    fn verdict_in(tier: Tier, input: &GateInput) -> relevance::Verdict {
+        relevance::Verdict {
+            tier,
+            score: match tier {
+                Tier::High => 2.0,
+                Tier::Low => 1.0,
+                Tier::Off => -1.0,
+            },
+            best_file: input
+                .relevance
+                .cofiles
+                .first()
+                .map(|file| file.path.clone()),
+            features: relevance::Features {
+                keywords: 3,
+                informative: 3,
+                shared: 3,
+                ..relevance::Features::default()
+            },
+        }
+    }
+
+    fn model_high(input: &GateInput) -> relevance::Verdict {
+        verdict_in(Tier::High, input)
+    }
+
+    fn model_low(input: &GateInput) -> relevance::Verdict {
+        verdict_in(Tier::Low, input)
+    }
+
+    fn model_off(input: &GateInput) -> relevance::Verdict {
+        verdict_in(Tier::Off, input)
+    }
+
+    /// A high verdict whose score is the number of meaning leads it was given.
+    fn model_counting(input: &GateInput) -> relevance::Verdict {
+        let mut verdict = verdict_in(Tier::High, input);
+        verdict.score = input.leads.len() as f64;
+        verdict
     }
 
     fn lead(path: &str, line: u32, snippet: &str) -> MeaningHit {
@@ -4000,15 +4153,33 @@ mod tests {
         dir
     }
 
-    /// Start `prompt` on `fake` with `judge` and wait for the brief.
+    /// Start `prompt` on `fake` with `judge` and `model`, and wait for the brief.
+    fn briefed_with(
+        prompt: &str,
+        fake: Fake,
+        judge: impl Fn(&str, Instant) -> Option<Verdict> + Send + Sync + 'static,
+        model: Model,
+    ) -> Finished {
+        try_start_with(
+            prompt,
+            OPEN,
+            SECOND,
+            move |_| Box::new(fake),
+            judge,
+            model,
+            None,
+        )
+        .expect("the prompt starts a brief")
+        .finish_with_record()
+    }
+
+    /// [`briefed_with`] a model that finds the prompt on topic.
     fn briefed(
         prompt: &str,
         fake: Fake,
         judge: impl Fn(&str, Instant) -> Option<Verdict> + Send + Sync + 'static,
     ) -> Finished {
-        start_with(prompt, OPEN, SECOND, move |_| Box::new(fake), judge)
-            .expect("the prompt starts a brief")
-            .finish_with_record()
+        briefed_with(prompt, fake, judge, model_high)
     }
 
     #[test]
@@ -4021,12 +4192,14 @@ mod tests {
         ]);
         let fake = Arc::new(fake);
         let seen = Arc::clone(&fake);
-        let finished = start_with(
+        let finished = try_start_with(
             PROSE,
             OPEN,
             SECOND,
             move |_| Box::new(Shared(fake)),
             no_verdict,
+            model_high,
+            None,
         )
         .unwrap()
         .finish_with_record();
@@ -4039,7 +4212,7 @@ mod tests {
                     "[PIXEL:BRIEF]",
                     "kind: lookup",
                     "files: crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready() {; crates/pixel-daemon/src/api.rs:40 — fn op_status; docs/notes.md:12 — daemon startup notes",
-                    full_confidence().as_str(),
+                    HIGH_CONFIDENCE,
                     "coverage: 2/2 ops answered",
                     FOOTER,
                 ]
@@ -4060,36 +4233,52 @@ mod tests {
             (Some("prose"), "open", true)
         );
         assert_eq!(record.best_file.as_deref(), Some(DAEMON));
-        assert!((record.score.unwrap() - 1.0).abs() < f64::EPSILON);
+        assert_eq!((record.tier, record.score), (Some("high"), Some(2.0)));
         assert_eq!((record.ops, record.answered), (2, 2));
         let features = record.features.as_ref().unwrap();
-        assert_eq!(
-            (features.shared, features.informative),
-            (
-                relevance::MIN_SHARED_KEYWORDS,
-                relevance::MIN_SHARED_KEYWORDS
-            )
-        );
-        assert!(features.structural);
+        assert_eq!((features.shared, features.informative), (3, 3));
         assert_eq!(record.bytes, finished.text.unwrap().len());
         assert_eq!(record.typed, PROSE);
         assert_eq!(record.sha256, decision_log::sha256_hex(PROSE));
     }
 
     #[test]
-    fn a_prose_prompt_off_topic_should_render_nothing_without_waiting_for_the_slow_meaning_search()
-    {
+    fn a_prose_prompt_the_model_puts_off_should_render_nothing_and_say_why() {
         let mut fake = Fake::new();
         fake.relevance = Ok(off_topic_answer());
         fake.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
+        let finished = briefed_with(
+            "what's the weather going to be like tomorrow",
+            fake,
+            no_verdict,
+            model_off,
+        );
+        assert_eq!(finished.text, None);
+        let record = finished.record;
+        assert_eq!((record.signal, record.gate), (Some("prose"), "closed"));
+        assert_eq!((record.tier, record.score), (Some("off"), Some(-1.0)));
+        assert_eq!(
+            record.reason.as_deref(),
+            Some("off topic: score -1.00, the best file covers 3/3 key terms")
+        );
+        assert_eq!((record.answered, record.bytes), (0, 0));
+    }
+
+    #[test]
+    fn a_prose_prompt_whose_relevance_probe_fails_should_not_wait_for_the_slow_meaning_search() {
+        let mut fake = Fake::new();
+        fake.relevance = Err("cold".into());
+        fake.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
         fake.meaning_pause = Duration::from_millis(1200);
         let started = Instant::now();
-        let finished = start_with(
-            "what's the weather going to be like tomorrow",
+        let finished = try_start_with(
+            PROSE,
             OPEN,
             Duration::from_secs(5),
             move |_| Box::new(fake),
             no_verdict,
+            model_high,
+            None,
         )
         .unwrap()
         .finish_with_record();
@@ -4099,43 +4288,31 @@ mod tests {
             started.elapsed()
         );
         assert_eq!(finished.text, None);
-        let record = finished.record;
-        assert_eq!((record.signal, record.gate), (Some("prose"), "closed"));
-        assert_eq!(
-            record.reason.as_deref(),
-            Some("off topic: the best file covers 0/2 key terms, 0.00 of the weight, in text only")
-        );
-        assert_eq!((record.answered, record.bytes), (0, 0));
+        assert_eq!(finished.record.gate, "closed");
+        assert_eq!(finished.record.reason.as_deref(), Some("relevance: cold"));
     }
 
     #[test]
-    fn a_prose_prompt_a_confident_none_or_ops_verdict_refuses_should_render_nothing() {
-        for label in ["none", "ops"] {
+    fn the_intent_judge_should_have_no_say_in_whether_a_prose_prompt_is_briefed() {
+        for label in ["none", "ops", "question"] {
             let mut fake = Fake::new();
             fake.relevance = Ok(on_topic_answer());
             fake.meaning = Ok(vec![lead(DAEMON, 280, "fn watch_ready")]);
             let finished = briefed(PROSE, fake, verdict(label));
-            assert_eq!(finished.text, None, "{label}");
-            assert_eq!(finished.record.gate, "denied", "{label}");
-            assert_eq!(
-                finished.record.reason,
-                Some(format!("judge: {label} (0.90)")),
-                "{label}"
+            let text = finished
+                .text
+                .unwrap_or_else(|| panic!("{label} silenced it"));
+            assert!(
+                text.contains(&format!("\nintent: {label} (0.90)\n")),
+                "{text}"
             );
+            assert_eq!(finished.record.gate, "open", "{label}");
             assert_eq!(
                 finished.record.judge,
                 Some((label.to_string(), 0.9)),
                 "{label}"
             );
         }
-        let mut fake = Fake::new();
-        fake.relevance = Ok(on_topic_answer());
-        let finished = briefed(PROSE, fake, verdict("question"));
-        let text = finished
-            .text
-            .expect("a question verdict lets the brief through");
-        assert!(text.contains("\nintent: question (0.90)\n"), "{text}");
-        assert_eq!(finished.record.gate, "open");
     }
 
     #[test]
@@ -4242,23 +4419,15 @@ mod tests {
     }
 
     #[test]
-    fn a_weak_prompt_an_off_topic_decision_flags_should_still_get_its_brief_while_unenforced() {
-        // Flipping `ENFORCE_GATE_ON_WEAK` flips this test: the decision is
-        // logged either way, and the const says whether it binds.
+    fn a_weak_prompt_the_model_puts_off_should_get_no_brief() {
         let mut fake = Fake::new();
         fake.relevance = Ok(off_topic_answer());
         fake.concept = Ok(found(vec![hit("src/login.ts", 3)]));
-        let finished = briefed("how does the login flow work", fake, no_verdict);
-        let text = finished.text.unwrap();
-        assert!(text.contains("\nfiles: src/login.ts:3\n"), "{text}");
-        assert!(
-            text.contains(
-                "\nconfidence: low — 0/2 key terms covered; verify with rg before relying on these files\n"
-            ),
-            "{text}"
-        );
+        let finished = briefed_with("how does the login flow work", fake, no_verdict, model_off);
+        assert_eq!(finished.text, None);
         assert_eq!(finished.record.gate, "closed");
-        assert!(!finished.record.enforced);
+        assert_eq!(finished.record.tier, Some("off"));
+        assert!(finished.record.enforced);
     }
 
     #[test]
@@ -4304,6 +4473,7 @@ mod tests {
             PROSE,
             &fake,
             &no_verdict,
+            model_high,
             &state,
             Instant::now() + SECOND,
             &mut |_| false,
@@ -4321,6 +4491,7 @@ mod tests {
             PROSE,
             &both,
             &no_verdict,
+            model_high,
             &fresh,
             Instant::now() + SECOND,
             &mut |_| false,
@@ -4341,10 +4512,12 @@ mod tests {
         fake.relevance = Ok(off_topic_answer());
         let state = Mutex::new(Brief::default());
         let mut seen = 0;
+        fake.relevance = Err("cold".into());
         let got = gather(
             PROSE,
             &fake,
             &no_verdict,
+            model_high,
             &state,
             Instant::now() + SECOND,
             &mut |_| {
@@ -4359,14 +4532,25 @@ mod tests {
         assert_eq!(replies, 1);
     }
 
+    /// What the probes answered, scored by a model that puts the prompt in `tier`.
     fn gathered(
         relevance: Option<Result<RelevanceAnswer, String>>,
         judged: Option<Option<Verdict>>,
+        tier: Tier,
     ) -> Gathered {
         let scored = relevance
             .as_ref()
             .and_then(|answer| answer.as_ref().ok())
-            .map(|answer| relevance::judge(&answer.input));
+            .map(|answer| {
+                verdict_in(
+                    tier,
+                    &GateInput {
+                        relevance: &answer.input,
+                        leads: &[],
+                        typed: PROSE,
+                    },
+                )
+            });
         Gathered {
             relevance,
             scored,
@@ -4384,30 +4568,33 @@ mod tests {
 
     #[test]
     fn refusal_should_let_a_strong_prompt_through_whatever_the_probes_say() {
-        let got = gathered(Some(Ok(off_topic_answer())), said("none", 0.99));
+        let got = gathered(Some(Ok(off_topic_answer())), said("none", 0.99), Tier::Off);
         assert_eq!(refusal(Signal::Strong, &got, true, true), None);
     }
 
     #[test]
-    fn refusal_should_close_a_prose_prompt_the_repository_does_not_cover() {
-        let off = gathered(Some(Ok(off_topic_answer())), None);
+    fn refusal_should_close_a_prose_prompt_the_model_puts_off() {
+        let off = gathered(Some(Ok(off_topic_answer())), None, Tier::Off);
         assert_eq!(
             refusal(Signal::Prose, &off, false, false),
             Some(Admission::Closed(
-                "off topic: the best file covers 0/2 key terms, 0.00 of the weight, in text only"
-                    .into()
+                "off topic: score -1.00, the best file covers 3/3 key terms".into()
             ))
         );
-        let failed = gathered(Some(Err("cold".into())), None);
+        let failed = gathered(Some(Err("cold".into())), None, Tier::Off);
         assert_eq!(
             refusal(Signal::Prose, &failed, false, false),
             Some(Admission::Closed("relevance: cold".into()))
         );
+        for tier in [Tier::High, Tier::Low] {
+            let on = gathered(Some(Ok(on_topic_answer())), None, tier);
+            assert_eq!(refusal(Signal::Prose, &on, true, false), None, "{tier:?}");
+        }
     }
 
     #[test]
     fn refusal_should_wait_for_a_missing_relevance_answer_until_nothing_more_is_coming() {
-        let silent = gathered(None, Some(None));
+        let silent = gathered(None, Some(None), Tier::Off);
         assert_eq!(refusal(Signal::Prose, &silent, false, false), None);
         assert_eq!(
             refusal(Signal::Prose, &silent, true, false),
@@ -4418,64 +4605,31 @@ mod tests {
     }
 
     #[test]
-    fn refusal_should_deny_prose_only_on_a_confident_none_or_ops() {
-        let on = || Some(Ok(on_topic_answer()));
+    fn refusal_should_leave_a_prose_prompt_to_the_model_whatever_the_intent_judge_says() {
+        for label in ["none", "ops"] {
+            let on = gathered(Some(Ok(on_topic_answer())), said(label, 0.99), Tier::High);
+            assert_eq!(refusal(Signal::Prose, &on, true, false), None, "{label}");
+        }
+        let unanswered = gathered(None, said("none", 0.99), Tier::High);
         assert_eq!(
-            refusal(
-                Signal::Prose,
-                &gathered(on(), said("none", 0.5)),
-                true,
-                false
-            ),
-            Some(Admission::Denied("judge: none (0.50)".into()))
-        );
-        assert_eq!(
-            refusal(
-                Signal::Prose,
-                &gathered(on(), said("ops", 0.9)),
-                true,
-                false
-            ),
-            Some(Admission::Denied("judge: ops (0.90)".into()))
-        );
-        assert_eq!(
-            refusal(
-                Signal::Prose,
-                &gathered(on(), said("none", 0.49)),
-                true,
-                false
-            ),
-            None
-        );
-        assert_eq!(
-            refusal(
-                Signal::Prose,
-                &gathered(on(), said("bugfix", 0.99)),
-                true,
-                false
-            ),
-            None
-        );
-        // The judge may refuse before the relevance answer has arrived.
-        assert_eq!(
-            refusal(
-                Signal::Prose,
-                &gathered(None, said("none", 0.9)),
-                false,
-                false
-            ),
-            Some(Admission::Denied("judge: none (0.90)".into()))
+            refusal(Signal::Prose, &unanswered, false, false),
+            None,
+            "a judge that answers first does not close the brief"
         );
     }
 
     #[test]
     fn refusal_should_deny_a_weak_prompt_only_on_none_and_close_it_only_when_enforced() {
-        let on = || Some(Ok(on_topic_answer()));
-        let off = || Some(Ok(off_topic_answer()));
+        let on = |tier| Some(Ok(on_topic_answer())).map(|answer| (answer, tier));
+        let on_gathered = |judged, tier| {
+            let (answer, tier) = on(tier).unwrap();
+            gathered(Some(answer), judged, tier)
+        };
+        let off = || gathered(Some(Ok(off_topic_answer())), None, Tier::Off);
         assert_eq!(
             refusal(
                 Signal::Weak,
-                &gathered(on(), said("none", 0.9)),
+                &on_gathered(said("none", 0.9), Tier::High),
                 true,
                 false
             ),
@@ -4484,36 +4638,35 @@ mod tests {
         assert_eq!(
             refusal(
                 Signal::Weak,
-                &gathered(on(), said("ops", 0.99)),
+                &on_gathered(said("ops", 0.99), Tier::High),
                 true,
                 false
             ),
             None,
             "ops steers a weak prompt, it never silences it"
         );
+        assert_eq!(refusal(Signal::Weak, &off(), true, false), None);
         assert_eq!(
-            refusal(Signal::Weak, &gathered(off(), None), true, false),
-            None
-        );
-        assert_eq!(
-            refusal(Signal::Weak, &gathered(off(), None), true, true),
+            refusal(Signal::Weak, &off(), true, true),
             Some(Admission::Closed(
-                "off topic: the best file covers 0/2 key terms, 0.00 of the weight, in text only"
-                    .into()
+                "off topic: score -1.00, the best file covers 3/3 key terms".into()
             ))
         );
-        assert_eq!(
-            refusal(Signal::Weak, &gathered(on(), None), true, true),
-            None
-        );
-        let failed = gathered(Some(Err("cold".into())), None);
+        for tier in [Tier::High, Tier::Low] {
+            assert_eq!(
+                refusal(Signal::Weak, &on_gathered(None, tier), true, true),
+                None,
+                "{tier:?}"
+            );
+        }
+        let failed = gathered(Some(Err("cold".into())), None, Tier::Off);
         assert_eq!(
             refusal(Signal::Weak, &failed, true, true),
             None,
             "a probe that cannot tell never silences a weak prompt"
         );
         assert_eq!(
-            refusal(Signal::Weak, &gathered(None, None), true, true),
+            refusal(Signal::Weak, &gathered(None, None, Tier::Off), true, true),
             None
         );
     }
@@ -4655,7 +4808,7 @@ mod tests {
         };
         let open = |_: Instant| -> Box<dyn Evidence> { Box::new(Fake::new()) };
         let why = |prompt: &str, gate: Gate| {
-            try_start_with(prompt, gate, SECOND, open, no_verdict, None)
+            try_start_with(prompt, gate, SECOND, open, no_verdict, model_high, None)
                 .err()
                 .map(Declined::as_str)
         };
@@ -4704,6 +4857,7 @@ mod tests {
             SECOND,
             move |_| Box::new(fake),
             no_verdict,
+            model_high,
             Some(path.clone()),
         )
         .unwrap()
@@ -4725,6 +4879,7 @@ mod tests {
             SECOND,
             move |_| Box::new(other),
             no_verdict,
+            model_high,
             None,
         )
         .unwrap()
@@ -4741,7 +4896,16 @@ mod tests {
         let open = |_: Instant| -> Box<dyn Evidence> { Box::new(Fake::new()) };
         for prompt in ["ok", "thanks, that works"] {
             assert!(
-                try_start_with(prompt, OPEN, SECOND, open, no_verdict, Some(path.clone())).is_err()
+                try_start_with(
+                    prompt,
+                    OPEN,
+                    SECOND,
+                    open,
+                    no_verdict,
+                    model_high,
+                    Some(path.clone())
+                )
+                .is_err()
             );
         }
         let text = std::fs::read_to_string(&path).unwrap();
@@ -4767,6 +4931,7 @@ mod tests {
                 SECOND,
                 open,
                 no_verdict,
+                model_high,
                 Some(path.clone())
             )
             .is_err()
@@ -4791,6 +4956,7 @@ mod tests {
             SECOND,
             move |_| Box::new(fake),
             no_verdict,
+            model_high,
             Some(path.clone()),
         )
         .unwrap()
@@ -4886,12 +5052,12 @@ mod tests {
     }
 
     #[test]
-    fn a_judge_that_refuses_before_the_relevance_probe_answers_should_be_the_reason() {
+    fn a_weak_prompt_the_judge_refuses_before_the_relevance_probe_answers_should_say_so() {
         let mut fake = Fake::new();
         fake.relevance = Ok(on_topic_answer());
         fake.pause = Duration::from_millis(300);
         let started = Instant::now();
-        let finished = briefed(PROSE, fake, verdict("none"));
+        let finished = briefed("how does the login flow work", fake, verdict("none"));
         assert!(
             started.elapsed() < Duration::from_millis(250),
             "{:?}",
@@ -4903,5 +5069,279 @@ mod tests {
             finished.record.reason.as_deref(),
             Some("judge: none (0.90)")
         );
+    }
+
+    #[test]
+    fn a_prose_prompt_in_the_low_tier_should_render_a_compact_maybe_and_run_no_route() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![
+            lead(DAEMON, 280, "fn watch_ready() {"),
+            lead("crates/pixel-daemon/src/api.rs", 40, "fn op_status"),
+            lead("crates/pixel-daemon/src/x.rs", 1, "x"),
+            lead("crates/pixel-daemon/src/y.rs", 2, "y"),
+        ]);
+        let log = Arc::clone(&fake.log);
+        let finished = briefed_with(PROSE, fake, verdict("question"), model_low);
+        assert_eq!(
+            finished.text.as_deref(),
+            Some(
+                [
+                    "[PIXEL:BRIEF]",
+                    "files: crates/pixel-daemon/src/daemon.rs:280 — fn watch_ready() {; crates/pixel-daemon/src/api.rs:40 — fn op_status; docs/notes.md:12 — daemon startup notes",
+                    LOW_CONFIDENCE,
+                ]
+                .join("\n")
+                .as_str()
+            )
+        );
+        // The two probes only: no kind route, no search, no definition read.
+        assert_eq!(
+            sorted(log.lock().unwrap().clone()),
+            [
+                format!("meaning {PROSE} limit 8"),
+                format!("relevance {PROSE}")
+            ]
+        );
+        let record = finished.record;
+        assert_eq!(
+            (record.gate, record.tier, record.kind),
+            ("open", Some("low"), None)
+        );
+        assert_eq!((record.ops, record.answered), (2, 2));
+        assert!(record.bytes <= LOW_BRIEF_BYTES, "{}", record.bytes);
+    }
+
+    #[test]
+    fn a_weak_prompt_in_the_low_tier_should_get_the_compact_maybe_and_no_concept_search() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.concept = Ok(found(vec![hit("src/login.ts", 3)]));
+        let log = Arc::clone(&fake.log);
+        let finished = briefed_with("how does the login flow work", fake, no_verdict, model_low);
+        let text = finished.text.unwrap();
+        assert!(text.ends_with(LOW_CONFIDENCE), "{text}");
+        assert!(!text.contains("src/login.ts"), "{text}");
+        assert!(!text.contains("kind:"), "{text}");
+        assert!(
+            !log.lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.starts_with("concept")),
+            "{:?}",
+            log.lock().unwrap()
+        );
+        assert_eq!(finished.record.signal, Some("weak"));
+    }
+
+    #[test]
+    fn a_low_tier_prompt_with_no_file_to_name_should_render_nothing() {
+        let mut fake = Fake::new();
+        let mut answer = on_topic_answer();
+        answer.input.cofiles.clear();
+        answer.lines.clear();
+        fake.relevance = Ok(answer);
+        let finished = briefed_with(PROSE, fake, no_verdict, model_low);
+        assert_eq!(finished.text, None);
+        assert_eq!(finished.record.tier, Some("low"));
+    }
+
+    fn low_brief(files: Vec<RichHit>) -> Brief {
+        Brief {
+            signal: Some(Signal::Prose),
+            relevance: Some(verdict_in(
+                Tier::Low,
+                &GateInput {
+                    relevance: &on_topic_answer().input,
+                    leads: &[],
+                    typed: PROSE,
+                },
+            )),
+            confidence: Some(LOW_CONFIDENCE.to_string()),
+            answered: 1,
+            files,
+            ..Brief::default()
+        }
+    }
+
+    #[test]
+    fn render_low_should_name_at_most_three_files_and_the_maybe_line() {
+        let brief = low_brief(vec![
+            rhit("a.rs", 1, "one"),
+            rhit_no_text("b.rs", 0),
+            rhit("c.rs", 3, "three"),
+            rhit("d.rs", 4, "four"),
+        ]);
+        assert_eq!(
+            render(&brief).unwrap(),
+            [
+                "[PIXEL:BRIEF]",
+                "files: a.rs:1 — one; b.rs; c.rs:3 — three",
+                LOW_CONFIDENCE,
+            ]
+            .join("\n")
+        );
+        assert_eq!(render_low(&low_brief(Vec::new())), None);
+    }
+
+    #[test]
+    fn render_low_should_shorten_texts_before_it_drops_a_file_and_stay_within_its_cap() {
+        let long = |name: &str| {
+            rhit(
+                &format!("{}/{name}.rs", "d".repeat(100)),
+                7,
+                &"t".repeat(300),
+            )
+        };
+        let three = low_brief(vec![long("a"), long("b"), long("c")]);
+        let text = render_low(&three).unwrap();
+        // 3 x (105-char path + 120-char text) does not fit; half the text does.
+        assert!(text.len() <= LOW_BRIEF_BYTES, "{}", text.len());
+        assert_eq!(text.matches(".rs:7").count(), 3, "{text}");
+        assert!(text.contains(&"t".repeat(60)), "{text}");
+        assert!(!text.contains(&"t".repeat(61)), "{text}");
+        assert!(text.ends_with(LOW_CONFIDENCE), "{text}");
+        // Wide characters make paths alone too long for three, then two.
+        let wide = |name: &str| rhit_no_text(&format!("{}{name}", "日".repeat(118)), 3);
+        let text = render_low(&low_brief(vec![wide("a"), wide("b"), wide("c")])).unwrap();
+        assert!(text.len() <= LOW_BRIEF_BYTES, "{}", text.len());
+        assert_eq!(text.matches('日').count(), 118, "one file left: {text}");
+        // A single file whose path and text are both made of 4-byte characters
+        // loses its text last.
+        let one = low_brief(vec![rhit(&"😀".repeat(118), 9, &"😀".repeat(900))]);
+        let text = render_low(&one).unwrap();
+        assert!(text.len() <= LOW_BRIEF_BYTES, "{}", text.len());
+        let files_line = text.lines().nth(1).unwrap();
+        assert!(!files_line.contains(" — "), "{text}");
+        assert!(
+            files_line.ends_with(&format!("{}:9", "😀".repeat(118))),
+            "{text}"
+        );
+        assert!(text.ends_with(LOW_CONFIDENCE), "{text}");
+        assert_eq!(LOW_BRIEF_BYTES, 700);
+        assert_eq!(LOW_FILES, 3);
+    }
+
+    #[test]
+    fn a_brief_without_a_relevance_decision_should_have_no_tier() {
+        assert_eq!(Brief::default().tier(), None);
+        assert_eq!(low_brief(Vec::new()).tier(), Some(Tier::Low));
+    }
+
+    #[test]
+    fn gather_should_hand_the_model_the_meaning_leads_once_that_search_has_answered() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![lead(DAEMON, 1, "x"), lead("b.rs", 2, "y")]);
+        fake.meaning_pause = Duration::from_millis(120);
+        let state = Mutex::new(Brief::default());
+        let got = gather(
+            PROSE,
+            &fake,
+            &no_verdict,
+            model_counting,
+            &state,
+            Instant::now() + SECOND,
+            &mut |_| false,
+        );
+        assert_eq!(
+            got.scored.unwrap().score,
+            2.0,
+            "scored after the leads came"
+        );
+        // A failed meaning search scores the prompt on the relevance alone.
+        let mut failed = Fake::new();
+        failed.relevance = Ok(on_topic_answer());
+        failed.meaning = Err("cold".into());
+        let got = gather(
+            PROSE,
+            &failed,
+            &no_verdict,
+            model_counting,
+            &Mutex::new(Brief::default()),
+            Instant::now() + SECOND,
+            &mut |_| false,
+        );
+        assert_eq!(got.scored.unwrap().score, 0.0);
+        // And nothing is scored without a relevance answer.
+        let mut cold = Fake::new();
+        cold.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
+        let got = gather(
+            PROSE,
+            &cold,
+            &no_verdict,
+            model_counting,
+            &Mutex::new(Brief::default()),
+            Instant::now() + SECOND,
+            &mut |_| false,
+        );
+        assert!(got.scored.is_none());
+    }
+
+    #[test]
+    fn gather_should_score_without_the_leads_when_the_meaning_search_outlives_the_window() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        fake.meaning = Ok(vec![lead(DAEMON, 1, "x")]);
+        fake.meaning_pause = Duration::from_millis(400);
+        let got = gather(
+            PROSE,
+            &fake,
+            &no_verdict,
+            model_counting,
+            &Mutex::new(Brief::default()),
+            Instant::now() + Duration::from_millis(120),
+            &mut |_| false,
+        );
+        assert!(got.meaning.is_none());
+        assert_eq!(got.scored.unwrap().score, 0.0);
+    }
+
+    #[test]
+    fn gather_should_score_at_once_when_the_budget_refused_the_meaning_search() {
+        let mut fake = Fake::new();
+        fake.relevance = Ok(on_topic_answer());
+        let state = Mutex::new(Brief {
+            ops: MAX_OPS - 1,
+            ..Brief::default()
+        });
+        let got = gather(
+            PROSE,
+            &fake,
+            &no_verdict,
+            model_counting,
+            &state,
+            Instant::now() + SECOND,
+            &mut |_| false,
+        );
+        assert!(got.meaning.is_none());
+        assert!(got.scored.is_some());
+    }
+
+    #[test]
+    fn fold_should_open_the_admission_for_both_tiers_and_record_an_off_tier_without_silencing() {
+        let plan = Plan::from_typed(PROSE, false, None);
+        for (tier, open) in [(Tier::High, true), (Tier::Low, true), (Tier::Off, false)] {
+            let state = Mutex::new(Brief::default());
+            let got = gathered(Some(Ok(on_topic_answer())), None, tier);
+            fold(&state, &plan, &got);
+            let brief = edit(&state, |brief| brief.clone());
+            assert_eq!(brief.admission == Admission::Open, open, "{tier:?}");
+            assert!(!brief.silenced, "{tier:?}: fold never silences");
+            assert_eq!(brief.tier(), Some(tier));
+            assert_eq!(brief.confidence.is_some(), open, "{tier:?}");
+        }
+    }
+
+    #[test]
+    fn a_decision_should_name_the_model_that_made_it() {
+        let finished = briefed(PROSE, Fake::new(), no_verdict);
+        assert_eq!(
+            finished.record.model,
+            crate::execution_brief::gate_model::SOURCE
+        );
+        let declined = declined_record(Declined::NotAboutCode, "hello there");
+        assert_eq!(declined.model, crate::execution_brief::gate_model::SOURCE);
+        assert_eq!(declined.tier, None);
     }
 }
