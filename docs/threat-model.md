@@ -102,7 +102,9 @@ resident code index (ARCHITECTURE.md, "Daemon and wire contract"). A request
 reads no file, embeds one question and starts no download; the index is built
 on one background thread from the files `search-meaning` would read, under its
 caps (`RESIDENT_MAX_FILES`, 512 KiB per file), and never from a path
-`credential_path` names. A same-user client can make the daemon read and
+`credential_path` names. Repeated edits do not grow it for the daemon's
+lifetime: a rebuild renumbers the token vocabulary from the live chunks once
+the tokens of edited-away text outnumber them (`VOCAB_SLACK`). A same-user client can make the daemon read and
 embed the repository by sending it, which it could do with `search`.
 
 ### 3.3 Installed hooks (B2, B3, B5)
@@ -509,12 +511,14 @@ hold.
   recall directory is 0700 (`pixel_recall::ensure_recall_dir`); the error
   sink is 0700/0600 (`pixel-session`); `pixel-ops` state directories are
   created 0700 (`durable::ensure_dir`); `brief-decisions.jsonl`, which keeps
-  the typed text of each prompt the brief judged, is created 0600
-  (`decision_log::append`), holds the last 500 lines, never a pasted block
-  (`typed_text`) or more than the last paragraph of a long untagged paste
-  (`brief_task`), masks credential shapes before it cuts the text at 600
-  characters (`decision_log::logged_typed`: `pixel_git::redact` and a key
-  mask), and is off with `PIXEL_BRIEF_LOG=0|false|off`.
+  the typed text of each prompt the brief judged, is created 0600 and
+  written without following a link at the file or at `.pixel` itself
+  (`decision_log::append`, `nofollow::open_lock`), holds the last 500
+  lines, never a pasted block (`typed_text`) or more than the last
+  paragraph of a long untagged paste (`brief_task`), masks credential shapes
+  before it cuts the text at 600 characters (`decision_log::logged_typed`:
+  `pixel_git::redact` and a key mask), and is off with
+  `PIXEL_BRIEF_LOG=0|false|off`.
 - **Status**: Partial.
 - **Residual**: the recall corpus and the error sink store transcripts and
   argv unredacted (the sink keeps the whole output of every failed `sniper
@@ -686,7 +690,7 @@ hold.
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
 | Hook payload cap | `hook_input::read_bounded` | the `read_bounded` tests in `hook_input.rs` |
 | Prompt-submit intent judge | `execution_brief::intent::judge` | subprocess JSON, empty stdout and invalid UTF-8 fallback tests in `intent.rs` |
-| Typed prompts in the brief log | `decision_log::{logged_typed, mask_keys, append}` | `logged_typed_should_mask_a_credential_and_cut_at_the_bound`, `logged_typed_should_keep_only_the_last_paragraph_of_a_pasted_log`, `mask_keys_should_hide_a_prefixed_key_and_a_long_run_and_keep_prose`, `append_should_be_owner_only_and_not_create_a_missing_directory` (`decision_log.rs`), `the_decision_log_should_stay_off_when_pixel_brief_log_says_so` (`prompt_brief_cli.rs`) |
+| Typed prompts in the brief log | `decision_log::{logged_typed, mask_keys, append}` | `logged_typed_should_mask_a_credential_and_cut_at_the_bound`, `logged_typed_should_keep_only_the_last_paragraph_of_a_pasted_log`, `mask_keys_should_hide_a_prefixed_key_and_a_long_run_and_keep_prose`, `append_should_be_owner_only_and_not_create_a_missing_directory`, `append_should_refuse_a_link_at_the_log_and_leave_its_target_alone`, `append_should_refuse_a_linked_directory_and_write_nothing_through_it` (`decision_log.rs`), `the_decision_log_should_stay_off_when_pixel_brief_log_says_so` (`prompt_brief_cli.rs`) |
 | Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask` (`main.rs`) |
 | Keys over clear text | `sends_in_clear_text` | `a_key_never_leaves_the_machine_over_cleartext_http`, `only_plain_http_to_another_host_counts_as_clear_text` |
 | Untrusted shard files | `Shard::open` | `malformed_shard_rejected_gracefully`, `corrupt_posting_cannot_escape_section_or_overflow_delta` (`shard.rs`) |

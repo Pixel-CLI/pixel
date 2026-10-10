@@ -9,12 +9,13 @@
 //! The log holds the typed text only (never a pasted block), masked with the
 //! same credential scrub every captured git stderr passes, and a hash of the
 //! whole typed text to count repeats. It keeps the last [`MAX_LINES`] lines,
-//! is written with the owner-only mode, and `PIXEL_BRIEF_LOG=0` switches it
-//! off. Writing is best effort: a failure never reaches the prompt.
+//! is written with the owner-only mode, never through a symbolic link, and
+//! `PIXEL_BRIEF_LOG=0` switches it off. Writing is best effort: a failure
+//! never reaches the prompt.
 
-use std::fs::OpenOptions;
+use std::fs::Permissions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
@@ -31,8 +32,6 @@ pub(crate) const LOG_ENV: &str = "PIXEL_BRIEF_LOG";
 pub(crate) const MAX_LINES: usize = 500;
 /// Characters of the typed text a line carries.
 pub(crate) const LOGGED_TYPED_CHARS: usize = 600;
-/// Owner-only: the file holds what the user typed.
-const LOG_MODE: u32 = 0o600;
 
 /// What the brief decided about one prompt, as the log and `pixel brief
 /// --json` show it.
@@ -224,18 +223,38 @@ fn with_line(existing: &str, line: &str, cap: usize) -> String {
     out
 }
 
+/// Refuse a log whose directory is a symbolic link: a clone can commit
+/// `.pixel` as one, and the log would then be written wherever it points,
+/// before any store has checked the directory. A missing directory is the
+/// `NotFound` of its metadata.
+fn refuse_linked_dir(path: &Path) -> io::Result<()> {
+    let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    if std::fs::symlink_metadata(dir)?.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{} is a symbolic link; the brief does not log through it",
+                dir.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Add `line` to the log at `path`, keeping its last `cap` lines. Takes an
-/// exclusive lock so two hooks never interleave a trim, and never creates the
-/// directory: a repository without `.pixel` is not one the brief ran in.
+/// exclusive lock so two hooks never interleave a trim, never creates the
+/// directory (a repository without `.pixel` is not one the brief ran in), and
+/// never follows a link at the file or its directory: the file holds what the
+/// user typed, and a planted link would send it, and the trim, elsewhere. An
+/// existing file is brought to the owner-only mode through its descriptor.
 pub(crate) fn append(path: &Path, line: &str, cap: usize) -> io::Result<()> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(LOG_MODE)
-        .open(path)?;
+    refuse_linked_dir(path)?;
+    let mut file = pixel_git::nofollow::open_lock(path)?;
     file.lock_exclusive()?;
+    // Best effort: a file pixel cannot chmod still takes the line.
+    let _ = file.set_permissions(Permissions::from_mode(pixel_git::nofollow::PRIVATE_MODE));
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     let existing = String::from_utf8_lossy(&bytes);
@@ -416,6 +435,32 @@ mod tests {
     }
 
     #[test]
+    fn mask_keys_should_hide_a_prefixed_key_and_a_long_run_and_keep_prose() {
+        // A known prefix from PREFIXED_KEY_CHARS on, the whitespace kept.
+        assert_eq!(
+            mask_keys("key\tsk-abcdef123456\nnext"),
+            "key\t<redacted>\nnext"
+        );
+        assert_eq!(mask_keys("x ghp_12345678"), "x <redacted>");
+        assert_eq!(mask_keys("x ghp_1234567"), "x ghp_1234567");
+        // Surrounding punctuation does not hide a key.
+        assert_eq!(mask_keys("(AKIAABCDEFGHIJ), ok"), "<redacted> ok");
+        // A bare run from KEY_RUN_CHARS on, whatever it starts with.
+        let run = "a".repeat(KEY_RUN_CHARS);
+        assert_eq!(mask_keys(&format!("{run} end")), "<redacted> end");
+        let short = "a".repeat(KEY_RUN_CHARS - 1);
+        assert_eq!(mask_keys(&format!("{short} end")), format!("{short} end"));
+        // A long path is not a key: `/` is not a key character.
+        let path = "src/execution_brief/decision_log.rs";
+        assert!(path.len() >= KEY_RUN_CHARS);
+        assert_eq!(mask_keys(path), path);
+        assert_eq!(
+            mask_keys("how does the daemon start"),
+            "how does the daemon start"
+        );
+    }
+
+    #[test]
     fn enabled_should_turn_off_for_zero_false_and_off_only() {
         assert!(enabled(None));
         assert!(enabled(Some("1")));
@@ -477,6 +522,50 @@ mod tests {
         let missing = dir.join("absent").join(LOG_FILE);
         assert!(append(&missing, "x", 3).is_err());
         assert!(!dir.join("absent").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn append_should_tighten_an_existing_file_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("tighten");
+        let path = dir.join(LOG_FILE);
+        std::fs::write(&path, "old\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        append(&path, "new", 3).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\nnew\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn append_should_refuse_a_link_at_the_log_and_leave_its_target_alone() {
+        let dir = scratch("linked-file");
+        let target = dir.join("elsewhere.txt");
+        std::fs::write(&target, "keep me\n").unwrap();
+        let path = dir.join(LOG_FILE);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(append(&path, "leak", 3).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me\n");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn append_should_refuse_a_linked_directory_and_write_nothing_through_it() {
+        let dir = scratch("linked-dir");
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let sidecar = dir.join(".pixel");
+        std::os::unix::fs::symlink(&real, &sidecar).unwrap();
+        assert!(append(&sidecar.join(LOG_FILE), "leak", 3).is_err());
+        assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

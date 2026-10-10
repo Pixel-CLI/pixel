@@ -33,7 +33,9 @@ use std::time::{Duration, Instant};
 
 use pixel_proto::{MeaningHit, MeaningPool, MeaningResult, MeaningUnavailableReason};
 use pixel_recall::code_resident::{RESIDENT_MAX_FILES, Resident, ResidentStats};
-use pixel_recall::code_search::{DEFAULT_LIMIT, SEMANTIC_LEADS_UNVERIFIED, VectorCache};
+use pixel_recall::code_search::{
+    DEFAULT_LIMIT, MAX_FILE_BYTES, SEMANTIC_LEADS_UNVERIFIED, VectorCache,
+};
 use pixel_recall::embed::Embedder;
 use serde_json::Value;
 
@@ -451,8 +453,9 @@ fn caps_for(stats: &ResidentStats, max_files: usize) -> Vec<String> {
     }
     if stats.skipped_files > 0 {
         caps.push(format!(
-            "{} eligible file(s) are not indexed: unreadable, over 512 KiB, binary or not UTF-8",
-            stats.skipped_files
+            "{} eligible file(s) are not indexed: unreadable, over {} KiB, binary or not UTF-8",
+            stats.skipped_files,
+            MAX_FILE_BYTES / 1024
         ));
     }
     if stats.credential_files > 0 {
