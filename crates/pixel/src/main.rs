@@ -59,6 +59,7 @@ mod operation_metrics;
 mod overview_intent;
 mod plan_cmd;
 mod plan_state;
+mod plugin_cmd;
 mod prompt_continuation;
 mod prompt_intent;
 mod prompt_key;
@@ -1566,6 +1567,15 @@ enum Command {
     Flow {
         #[command(subcommand)]
         cmd: FlowCmd,
+    },
+    /// Manage plugins: external commands that `pixel <name> [args…]` runs
+    /// when the core has no such command. A repo plugin
+    /// (`<repo>/.pixel/plugins/<name>/`) runs only after `pixel plugin
+    /// trust <name>`; your own live in `~/.pixel/plugins/`; an executable
+    /// `pixel-<name>` on PATH is a plugin too.
+    Plugin {
+        #[command(subcommand)]
+        cmd: plugin_cmd::PluginCmd,
     },
 }
 
@@ -4579,6 +4589,12 @@ fn logged_args(args: &[String]) -> String {
         .windows(2)
         .position(|pair| pair[0] == "config" && pair[1] == "remote-key")
         .map(|at| at + 3);
+    // `plugin add https://user:token@host/…` carries the credential of a
+    // private plugin repository in its URL.
+    let plugin_add_from = args
+        .windows(2)
+        .position(|pair| pair[0] == "plugin" && pair[1] == "add")
+        .map(|at| at + 2);
     #[cfg(feature = "readify")]
     let url_name = ai_cli_readify::auth::AUTH_URL_VAR;
     #[cfg(not(feature = "readify"))]
@@ -4598,6 +4614,8 @@ fn logged_args(args: &[String]) -> String {
                 format!("{url_name}=<redacted>")
             } else if secret_from.is_some_and(|from| i >= from) && !arg.starts_with("--") {
                 "<redacted>".to_string()
+            } else if plugin_add_from.is_some_and(|from| i >= from) {
+                pixel_plugin::redact_source(arg)
             } else {
                 arg.clone()
             }
@@ -4770,9 +4788,14 @@ fn with_request_id_tip(mut error: clap::Error) -> clap::Error {
 fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
-    let matches = Cli::command()
-        .try_get_matches()
-        .unwrap_or_else(|error| with_request_id_tip(error).exit());
+    let matches = Cli::command().try_get_matches().unwrap_or_else(|error| {
+        // An unknown subcommand may be a plugin; its exit code is the
+        // plugin's own, or 1/2 for a refusal or a moved-command hint.
+        if let Some(code) = plugin_cmd::dispatch(&error, &argv) {
+            std::process::exit(code);
+        }
+        with_request_id_tip(error).exit()
+    });
     let command_label = matches.subcommand_name().unwrap_or("unknown").to_string();
     let path = operation_path(&matches).unwrap_or_else(|| PathBuf::from("."));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
@@ -7034,6 +7057,7 @@ fn run_command(
             })
         }
         Command::Ultraflow(options) => ultraflow_cmd::run(options),
+        Command::Plugin { cmd } => plugin_cmd::run(cmd),
         Command::Flow { cmd } => {
             use pixel_flow::FlowAction;
             let json = match &cmd {
@@ -9066,6 +9090,37 @@ mod renamed_command_tests {
         assert_eq!(
             logged_args(&args(&["search-content", "config", "src"])),
             "search-content config src",
+            "other commands are logged verbatim"
+        );
+    }
+
+    #[test]
+    fn a_plugin_source_url_is_logged_without_its_credentials() {
+        let argv = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            logged_args(&argv(&[
+                "plugin",
+                "add",
+                "https://user:ghp_secret@github.com/acme/private.git",
+                "--name",
+                "x"
+            ])),
+            "plugin add https://github.com/acme/private.git --name x"
+        );
+        assert_eq!(
+            logged_args(&argv(&[
+                "--metrics",
+                "off",
+                "plugin",
+                "add",
+                "https://t@h.test/p"
+            ])),
+            "--metrics off plugin add https://h.test/p",
+            "a global option before the command does not move the mask"
+        );
+        assert_eq!(
+            logged_args(&argv(&["search-content", "https://a:b@c.test/d"])),
+            "search-content https://a:b@c.test/d",
             "other commands are logged verbatim"
         );
     }

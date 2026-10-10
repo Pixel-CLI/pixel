@@ -35,7 +35,7 @@ model providers, and the website under `website/`.
 | --- | --- | --- |
 | Source and history of indexed repositories | the working tree, read through `pixel-git::GitRunner` and the walkers in `pixel-index`/`pixel-graph` | confidentiality of code the user did not mean to share; integrity of what the agent is told about it |
 | Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `config.yaml`, `tasks/`, `env-snapshots/` | what the agent reads as ground truth; `actions.jsonl` and `env-snapshots/` can hold secrets; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
-| Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
+| Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.pixel/plugins/`, `~/.pixel/trusted.toml` and `~/.pixel/plugins.toml` (the plugin host's installs, trust records and network opt-ins), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
 | Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
 | User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project), `.env` values edited by `pixel edit-env` | credential theft, billing abuse |
@@ -270,6 +270,41 @@ as that user; the temporary config and output files are not an OS security
 sandbox.
 The selected endpoint receives the benchmark's source context. CLI-reported
 model names do not attest the gateway's underlying implementation.
+
+### 3.12 Plugins (B1, B2)
+
+`pixel <name> [args…]`, for a name the core binary does not have, runs a
+plugin (`crates/pixel-plugin`, dispatched from `plugin_cmd::dispatch`):
+a trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), a user plugin
+(`~/.pixel/plugins/<name>/`), then an executable `pixel-<name>` on PATH. The
+plugin replaces the pixel process (`exec`) and runs with the user's
+privileges, network included; `pixel plugin list|add|remove|enable|trust`
+manage them. Controls, in the order a lookup applies them:
+
+- **Trust for repo plugins.** The repository chooses what its own `.pixel/`
+  holds, so a repo plugin runs only after `pixel plugin trust <name>`
+  recorded `name` and a SHA-256 over every file of the directory (paths,
+  contents, executable bits, symlink target text) in `~/.pixel/trusted.toml`
+  (`pixel_plugin::dir_digest`, `TrustStore`). Any change to the directory
+  fails the comparison and the plugin is refused again. An untrusted repo
+  plugin does not fall through to a user plugin or PATH of the same name.
+- **`run` stays inside the directory.** `pixel_plugin::contained_program`
+  canonicalises `<dir>/<run>` and requires it to be a file under the
+  canonical directory, so a symlink pointing out of it is refused; the
+  manifest parser also refuses an absolute `run` or a `..` component.
+- **Network opt-in.** A manifest with `network = true` runs only after
+  `pixel plugin enable <name>` (`~/.pixel/plugins.toml`), for every tier.
+- **`add` takes data, not code from the URL.** A git source must start with
+  `https://`, `ssh://`, `file://` or `git@` (`ext::` and `fd::` transports
+  run commands), is cloned shallowly through `GitRunner` (timeout, redacted
+  stderr) into a temporary directory, and only the plugin directory is
+  copied (`.git` left behind). A URL's userinfo is removed before the source
+  is recorded or shown, and `logged_args` removes it from the action log.
+- **PATH lookup skips empty entries**, which a shell reads as the working
+  directory, so a file in the repository is not found as `pixel-<name>`.
+- **Environment.** A plugin receives `PIXEL_API`, `PIXEL_REPO_ROOT`,
+  `PIXEL_GRAPH_DB` and `PIXEL_BIN`; it inherits the rest of the caller's environment unchanged; Pixel adds no
+  secret to it.
 
 ## 4. Threats
 
@@ -646,12 +681,33 @@ hold.
 - **Residual**: both are local, best-effort and writable by the same user;
   they help debugging, not forensics.
 
+### T25. A repository or a plugin source runs code through the plugin host (E, B1, B2)
+
+- **Scenario**: a cloned repository ships `.pixel/plugins/<name>/` and the
+  agent, or the user, types `pixel <name>`; or a plugin is added from a
+  hostile URL, or its `run` is a symlink to a binary elsewhere on the machine.
+- **Mitigation**: section 3.12. Repo plugins need a content-bound trust
+  record; `run` must resolve inside the plugin directory; `network = true`
+  needs an explicit opt-in; `add` accepts only fixed git URL schemes and
+  copies a plugin directory, not history or hooks.
+- **Status**: Partial.
+- **Residual**: trust is bound to content, not to an author, and the user
+  (or an agent acting for them) decides what to trust: `pixel plugin trust`
+  is as strong as the review before it. The digest is checked immediately
+  before the exec, not held open, so a process able to write the plugin
+  directory in between can win that race (it could equally edit the
+  trusted file or the user's shell profile). A user plugin and a PATH plugin
+  are the user's own code and are not gated. A plugin runs with the user's
+  privileges and network once allowed; `network` is a declaration gated by
+  `enable`, not a sandbox, and the host cannot stop a plugin that declares
+  `false` from using the network.
+
 ### Summary
 
 | Status | Threats |
 | --- | --- |
 | Mitigated | T4, T10, T16, T17 |
-| Partial | T2, T3, T5, T6, T8, T14, T15, T19, T20, T21, T22 |
+| Partial | T2, T3, T5, T6, T8, T14, T15, T19, T20, T21, T22, T25 |
 | Accepted | T1, T7, T9, T12, T18, T23, T24 |
 | Withdrawn | T11, T13 |
 
@@ -665,7 +721,8 @@ hold.
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
 | Hook payload cap | `hook_input::read_bounded` | the `read_bounded` tests in `hook_input.rs` |
 | Prompt-submit intent judge | `execution_brief::intent::judge` | subprocess JSON, empty stdout and invalid UTF-8 fallback tests in `intent.rs` |
-| Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask` (`main.rs`) |
+| Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask`, `a_plugin_source_url_is_logged_without_its_credentials` (`main.rs`) |
+| Repo plugin trust | `pixel_plugin::resolve`, `dir_digest`, `contained_program` | `a_repo_plugin_is_refused_until_trusted_and_again_after_an_edit`, `every_kind_of_change_moves_the_digest`, `a_run_that_escapes_through_a_symlink_is_refused` (`pixel-plugin`); `plugin_cli.rs` |
 | Keys over clear text | `sends_in_clear_text` | `a_key_never_leaves_the_machine_over_cleartext_http`, `only_plain_http_to_another_host_counts_as_clear_text` |
 | Untrusted shard files | `Shard::open` | `malformed_shard_rejected_gracefully`, `corrupt_posting_cannot_escape_section_or_overflow_delta` (`shard.rs`) |
 | Source parsing | `pixel_graph::extract::extract_file` | `graph_extract` fuzz target |
