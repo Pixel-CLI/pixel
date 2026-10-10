@@ -536,6 +536,9 @@ def run(args):
         if want not in ("brief", "no-brief"):
             raise SystemExit(f"--require wants NAME=brief or NAME=no-brief, got {spec!r}")
         required[name] = want == "brief"
+    unknown = sorted(set(required) - set(arms))
+    if unknown:  # a misspelt arm would leave its runs unchecked and the A/B unvalidated
+        raise SystemExit(f"--require names no arm: {', '.join(unknown)} (arms: {', '.join(arms)})")
     counted, failures, dropped = {}, [], {}
     for name, paths in arms.items():
         counted[name] = []
@@ -732,6 +735,10 @@ class SelfTest(unittest.TestCase):
             payload = json.loads((Path(tmp) / "out.json").read_text())
             self.assertEqual(len(payload["arms"]["on"]), 1)
             self.assertEqual(payload["dropped"], {"on": [str(bad)]})
+            args.require = ["onn=brief"]
+            with self.assertRaises(SystemExit) as refused:
+                run(args)
+            self.assertIn("--require names no arm: onn", str(refused.exception))
 
     def test_the_answer_is_the_closing_text_and_ends_a_question_turn(self):
         with tempfile.TemporaryDirectory() as tmp:
