@@ -458,11 +458,19 @@ stays so references to the later threats hold.
 - **Mitigation**: the one thing an install delivers to an agent unasked is
   the `[PIXEL:BRIEF]` block of `task-event` on `prompt-submit`: it quotes file
   paths, symbol names and a definition from the repository as evidence, capped
-  at 2 KiB, with a 750 ms deadline, off with `PIXEL_BRIEF=0`. A prompt in
-  plain language gets one only when the repository's own vocabulary covers it
-  (`execution_brief::relevance`), and its first files come from the daemon's
-  `facts.relevance` and `meaning` ops: the same bound, the same deadline, the
-  same data. No prompt is deployed. The bundled prompt a user copies by hand
+  at 2 KiB (`BRIEF_BYTES`), with a 750 ms deadline, off with `PIXEL_BRIEF=0`.
+  A prompt in plain language gets one only when the repository's own
+  vocabulary covers it (`execution_brief::relevance`), and its first files
+  come from the daemon's `facts.relevance` and `meaning` ops: the same
+  deadline, the same data. A confident brief of such a prompt (or of a weak
+  one) also quotes multi-line source excerpts, comments included: per chunk
+  the signature, its first doc line and up to six body lines, or a flow's
+  hops, a test's first assertion, a config constant, under a 3584-byte cap
+  (`PROSE_BRIEF_BYTES`, below Pi's 4000-byte limit). `Evidence::lines_at`
+  reads them only from files the searches named, refuses a credential-shaped
+  path, and `PIXEL_BRIEF_ANSWER=0` drops them; the "Answer from this
+  evidence" directive stays off unless `PIXEL_BRIEF_DIRECTIVE=1`, so by
+  default the block asks the agent to verify them. No prompt is deployed. The bundled prompt a user copies by hand
   states that Pixel output is data, not instructions
   (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
   skill and Pi command label graph output as repository data, not

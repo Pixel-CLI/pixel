@@ -799,8 +799,9 @@ explicit cue (config, setting, env, flag, option, default), not `install` or
 `hook`. That
 block's cap is `PROSE_BRIEF_BYTES` (3584, under Pi's 4000-byte extension
 cap; `PLAIN_PROSE_BRIEF_BYTES`, 2 KiB, without answer evidence); over the
-cap the second file's excerpt lines go first, then the first's, never the
-receipt. Strong, low-tier and partial briefs carry neither.
+cap the last excerpt block's lines go first, then the block before it, the
+first block last, never the receipt. Strong and low-tier briefs carry
+neither, nor does one the budget cut or the window ended before it finished.
 `PIXEL_BRIEF_RECEIPT=0|false|off` and `PIXEL_BRIEF_ANSWER=0|false|off` remove
 the receipt and the excerpts. Every decision, a refusal included, is one line
 of `.pixel/brief-decisions.jsonl` (see "On-disk state"), with `receipt`,
