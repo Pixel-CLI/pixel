@@ -197,6 +197,12 @@ while a campaign runs.
   (`coverage` below `n/n`).
 * **No local daemon state is reset between runs**: the daemon and the index
   persist, and the hook writes session records under the fixture's `.pixel/`.
+* **Not a sandbox.** The isolation above is of configuration (settings, hooks,
+  tools, environment), not of the host: every session runs Bash unattended with
+  the operator's account, files and network, and `dontAsk` with Bash allowed lets
+  a prompt or a fixture file steer it. Run it only with the shipped prompt set on
+  the pinned fixture; a set or a fixture from anyone else belongs in a disposable
+  VM or container with its own credentials.
 * **Cost**: a session is about USD 0.3 at list price on the default model; the
   five-hour window of a subscription is shared with everything else the user
   runs.
@@ -262,7 +268,7 @@ Paired by prompt (mean of a prompt's two sessions per arm; difference `to` minus
 
 | from to | group | prompts | native difference | lighter / equal / heavier | wall s | input tok | cites |
 | --- | --- | ---: | --- | --- | ---: | ---: | ---: |
-| off to new | on-topic | 16 | -0.47 [-1.59, +0.72] | 8 / 5 / 3 | -2.9 | -5 | +0.06 |
+| off to new | on-topic | 16 | -0.47 [-1.59, +0.72] | 8 / 5 / 3 | -2.9 | -5 000 | +0.06 |
 | off to new | on-topic, brief fired | 14 | -0.50 [-1.75, +0.82] | 7 / 4 / 3 | -3.4 | -3 138 | +0.07 |
 | off to new | off-topic | 4 | -0.25 [-0.75, 0] | 1 / 3 / 0 | +0.2 | -43 672 | n/a |
 | off to old | on-topic | 16 | -0.38 [-1.19, +0.53] | 8 / 4 / 4 | -2.5 | -16 776 | +0.03 |
@@ -312,8 +318,9 @@ silent; cites: Y named an expected file, n did not):
   `new` makes 4.03 native calls against 4.50 with no brief (median 4 against 5,
   8 prompts lighter, 3 heavier), but the interval is -1.59 to +0.72, and the
   baseline, which injected nothing on 9 of those prompts, differs from `off` by
-  -0.28 on them. With a per-session standard deviation of 1.43 and 16 prompts
-  the run could only have shown a drop of about 1.2 calls or more. It neither
+  -0.28 on them. With per-prompt differences spread by 2.4 calls (standard
+  deviation) over 16 prompts, the run could only have shown a drop of about 1.2
+  calls or more. It neither
   shows the candidate to help nor rules out a drop of about half a call.
 * **Where it helped**: bg-086 (5,12 to 3,3), bg-203 (6,5 to 4,2), bg-215, bg-093,
   bg-048. **Where it cost**: bg-178, whose two `off` sessions answered after one
@@ -328,14 +335,14 @@ silent; cites: Y named an expected file, n did not):
   brief names an expected file in its first 8 paths made 3.92 calls against 4.50;
   tier `high` made 3.83 against 4.54. Tier `low` (4 sessions) and the 4 sessions
   with no brief (bg-120, bg-130) are too few to read.
-* **No extra tokens or time**: input tokens per prompt -5 (mean, cache reads
+* **No extra tokens or time**: input tokens per prompt -5 000 (mean, cache reads
   included), wall time -2.9 s, list cost +USD 0.01. The off-topic cost check is
   noise-bound (4 prompts, 2 of them without any tool call).
 * **What this cannot say**: that the brief makes the agent lighter at equal
   quality in general. The per-prompt differences have a standard deviation of 2.4
-  calls, of which session noise (1.43 per session) explains little: the effect
-  differs by prompt (bg-086 against bg-178). More repetitions of the same prompts
-  would not narrow the interval much; halving it takes about four times the
+  calls, of which session noise (1.43 per session) explains about a third of the
+  variance (1.43² against 2.4²): the effect differs by prompt (bg-086 against
+  bg-178). More repetitions of the same prompts would not narrow the interval much; halving it takes about four times the
   prompts (about 64), and the set holds 23 plain prompts with expected files over
   both splits. Every prompt costs 6 sessions (3 arms, 2 repetitions), about USD 1.2
   and 1.3 points of the five-hour usage window.
