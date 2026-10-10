@@ -100,7 +100,7 @@ PY
     test "$(actions search-content)" -gt "$searches_before"
     if [ "$agent" != pi ]; then
         # pi's guard blocks instead of rerouting; pi_decision reports it.
-        compat=$(actions search-compat)
+        compat=$(actions search-like-rg)
         if [ "$compat" -gt "$compat_before" ]; then
             echo "NOTE $agent guard routed the native grep through pixel"
         else
@@ -110,7 +110,7 @@ PY
     echo "PASS $agent session received the Pixel prompt and ran pixel from its shell"
 }
 before_searches=$(actions search-content)
-before_compat=$(actions search-compat)
+before_compat=$(actions search-like-rg)
 serve claude
 ANTHROPIC_BASE_URL="http://127.0.0.1:$port" CLAUDE_CODE_OAUTH_TOKEN=smoke-fake-oauth \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1 \
@@ -119,7 +119,7 @@ ANTHROPIC_BASE_URL="http://127.0.0.1:$port" CLAUDE_CODE_OAUTH_TOKEN=smoke-fake-o
 python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"])' /evidence/claude.json > /evidence/claude.out
 verify claude 'deterministic repository facts' "$before_searches" "$before_compat"
 before_searches=$(actions search-content)
-before_compat=$(actions search-compat)
+before_compat=$(actions search-like-rg)
 before_hooks=$(hook_runs codex)
 serve codex
 # The trust entry is what accepting Codex's project prompt writes.
@@ -136,12 +136,12 @@ echo "NOTE codex ran $(( $(hook_runs codex) - before_hooks )) Pixel hook(s)"
 # Codex runs a hook only once the user has reviewed it (`/hooks`); the bypass
 # stands in for that review, to tell an unreviewed hook from a broken one.
 before_hooks=$(hook_runs codex)
-before_compat=$(actions search-compat)
+before_compat=$(actions search-like-rg)
 grep_session codex-hooks-trusted codex_exec --dangerously-bypass-hook-trust
 echo "NOTE with hook review bypassed, codex ran $(( $(hook_runs codex) - before_hooks )) Pixel hook(s)" \
-    "and its guard routed $(( $(actions search-compat) - before_compat )) grep(s) through pixel"
+    "and its guard routed $(( $(actions search-like-rg) - before_compat )) grep(s) through pixel"
 before_searches=$(actions search-content)
-before_compat=$(actions search-compat)
+before_compat=$(actions search-like-rg)
 serve pi
 cat > "$HOME/.pi/agent/models.json" <<JSON
 {"providers": {"smoke": {"baseUrl": "http://127.0.0.1:$port", "api": "anthropic-messages",

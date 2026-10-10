@@ -53,7 +53,6 @@ mod evaluate_cmd;
 mod execution_brief;
 mod hook_input;
 mod impact_read;
-mod index_cmd;
 mod install_intro;
 mod operation_metrics;
 mod overview_intent;
@@ -69,7 +68,6 @@ mod search_compat;
 mod search_filter;
 mod serve_trace;
 mod sniper_cmd;
-mod space_cmd;
 mod task_bridge;
 mod task_commands;
 mod task_config;
@@ -530,27 +528,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Human notes on the map: durable annotations keyed by file + symbol
-    /// name (or concept norm). Survive rebuilds; merged into `resolve` and
-    /// `targets` results. `pixel note set <file> <target> <note>`,
-    /// `get`/`rm <file> <target>`, `list [file]`.
-    Note {
-        /// set | get | rm | list
-        action: String,
-        /// File the note is attached to (repo-relative or absolute).
-        file: Option<String>,
-        /// Symbol name or concept norm the note targets.
-        target: Option<String>,
-        /// Note text (required for `set`).
-        note: Option<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
     /// Structural repo map: every indexed file with its symbols. `--markdown`
     /// emits the exportable document form — the human-editable projection of
-    /// the graph that `note` annotations key onto.
+    /// the graph.
     #[command(alias = "map")]
     RepoMap {
         #[arg(default_value = ".")]
@@ -743,29 +723,6 @@ enum Command {
         #[command(subcommand)]
         cmd: workspace_cmd::WorkspaceCmd,
     },
-    /// Freeze this repo's index into a single shareable `.pxpack` bundle —
-    /// the file CI builds once and teammates install instead of re-indexing.
-    IndexPack {
-        /// Output file (e.g. index.pxpack).
-        #[arg(long)]
-        out: PathBuf,
-        /// Also pack history.db (the on-demand facts index).
-        #[arg(long)]
-        include_history: bool,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// Install a packed index into this repo's `.pixel/` — from a path or
-    /// an https:// URL.
-    IndexUnpack {
-        /// Pack file path or URL.
-        source: String,
-        /// Replace the index while a daemon is running.
-        #[arg(long)]
-        force: bool,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
     /// Manage version-pinned reference corpora (.pixel/reference.json) for
     /// multi-repo analysis on top of workspaces and index packs.
     Reference {
@@ -801,22 +758,6 @@ enum Command {
         top: u32,
         #[arg(long)]
         json: bool,
-    },
-    /// Audit how much disk the pixel index (`.pixel/`) takes across every
-    /// project under this tree: per-project shard size plus the accumulated
-    /// total, and a one-shot `--delete` cleanup of the rebuildable shards.
-    Space {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Emit structured JSON instead of the table.
-        #[arg(long)]
-        json: bool,
-        /// Remove every found index shard after a single confirmation.
-        #[arg(long)]
-        delete: bool,
-        /// Skip the deletion confirmation (assume yes).
-        #[arg(long)]
-        yes: bool,
     },
     /// Make a repository ready for agent work: index, graph, and warm daemon.
     #[command(alias = "ready")]
@@ -1216,20 +1157,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// M5: journal a session event (fire-and-forget).
-    #[command(alias = "journal")]
-    RecordEvent {
-        kind: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Repo-relative path the event concerns.
-        #[arg(long)]
-        file: Option<String>,
-        #[arg(long)]
-        detail: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
     // -----------------------------------------------------------------
     // M5/M6 — install / doctor / migrate / hook
     // -----------------------------------------------------------------
@@ -1461,26 +1388,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Per-region blame attribution: who introduced/owns each region of a file.
-    #[command(alias = "provenance")]
-    WhoWrote {
-        /// Repo-relative file to attribute.
-        file: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Restrict to lines a,b (1-based inclusive), e.g. --lines 10,40.
-        #[arg(long, value_parser = parse_line_range)]
-        lines: Option<(u32, u32)>,
-        /// Author query (case-insensitive substring on name or email) —
-        /// adds a did-they-touch-this verdict.
-        #[arg(long)]
-        author: Option<String>,
-        /// Max regions emitted (default 200); truncation sets lower_bound.
-        #[arg(long, default_value_t = 200)]
-        limit_regions: usize,
-        #[arg(long)]
-        json: bool,
-    },
     /// One-call read-only branch inventory: ahead/behind, merged, stale,
     /// unpushed — the deterministic "did you push everything?" answer.
     #[command(alias = "branches")]
@@ -1498,13 +1405,6 @@ enum Command {
         stale_days: u64,
         #[arg(long)]
         json: bool,
-    },
-    /// Additive-only, key-level .env mutations with snapshots and restore.
-    /// Values are NEVER printed in any output.
-    #[command(alias = "env")]
-    EditEnv {
-        #[command(subcommand)]
-        cmd: EnvCmd,
     },
     /// Deterministic todo list generation from code analysis.
     Plan {
@@ -1648,65 +1548,6 @@ enum ClassifyHistoryCmd {
 }
 
 #[derive(Subcommand)]
-enum EnvCmd {
-    /// List .env files under root — key NAMES only, never values.
-    Inventory {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Set one key (snapshot-first; every other line byte-preserved).
-    Set {
-        #[arg(long)]
-        file: PathBuf,
-        #[arg(long)]
-        key: String,
-        #[arg(long)]
-        value: String,
-        /// Create the file if it does not exist.
-        #[arg(long)]
-        create_file: bool,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Restore from a snapshot (latest if --snapshot omitted; undoable).
-    Restore {
-        #[arg(long)]
-        file: PathBuf,
-        #[arg(long)]
-        snapshot: Option<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// List snapshots recorded for a file.
-    Snapshots {
-        #[arg(long)]
-        file: PathBuf,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Verify required keys exist (names only).
-    Check {
-        #[arg(long)]
-        file: PathBuf,
-        /// Required key name; repeat the flag once per key.
-        #[arg(long = "require")]
-        require: Vec<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
 enum FlowCmd {
     /// Create a new flow. Refuses to overwrite — use `revise` to update.
     Save {
@@ -1832,7 +1673,6 @@ fn flow_vars(
     Ok(var_map)
 }
 
-/// Parse a 1-based inclusive line range "a,b" for `provenance --lines`.
 /// `pixel search-meaning --max-files` help: an optional budget, and the
 /// ceiling that applies without one, spelled from its constant.
 fn max_files_help() -> String {
@@ -1843,21 +1683,6 @@ fn max_files_help() -> String {
          directory)",
         pixel_recall::code_search::UNBUDGETED_FILE_CEILING
     )
-}
-
-fn parse_line_range(s: &str) -> Result<(u32, u32), String> {
-    let (a, b) = s
-        .split_once(',')
-        .ok_or_else(|| format!("expected 'start,end', got '{s}'"))?;
-    let a: u32 = a
-        .trim()
-        .parse()
-        .map_err(|e| format!("bad start line: {e}"))?;
-    let b: u32 = b.trim().parse().map_err(|e| format!("bad end line: {e}"))?;
-    if a == 0 || b < a {
-        return Err(format!("invalid range {a},{b}: need 1 <= start <= end"));
-    }
-    Ok((a, b))
 }
 
 #[derive(Subcommand)]
@@ -1920,14 +1745,6 @@ enum ConfigCmd {
     Classify {
         #[arg(value_parser = ["on", "off"])]
         value: String,
-    },
-    /// Open the global YAML configuration in $VISUAL or $EDITOR (default: vi).
-    Edit {
-        /// Edit repository overrides instead of global settings.
-        #[arg(long)]
-        repo: bool,
-        #[arg(default_value = ".")]
-        path: PathBuf,
     },
     /// Live 🟩 metrics footer: `pixel config metrics` reports the effective
     /// setting and its layer; `on|off` persists it to `<root>/.pixel/
@@ -4673,7 +4490,6 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "file-history",
     "search-history",
     "dig-history",
-    "who-wrote",
     "list-branches",
     "token-savings",
 ];
@@ -5491,63 +5307,6 @@ fn run_command(
             })?;
             Ok(())
         }
-        Command::Note {
-            action,
-            file,
-            target,
-            note,
-            path,
-            json,
-        } => {
-            let data = execute(
-                &path,
-                Request::Note {
-                    action: action.clone(),
-                    file,
-                    target,
-                    note,
-                },
-                false,
-            )?;
-            finish_graph_cmd(data, json, |d| {
-                if let Some(notes) = d.get("notes").and_then(Value::as_array) {
-                    // `note list` output: grouped by file.
-                    if notes.is_empty() {
-                        return Some("no notes\n".to_string());
-                    }
-                    let mut output = String::new();
-                    for n in notes {
-                        output.push_str(&format!(
-                            "{}  {}  {}\n",
-                            n.get("file_path").and_then(Value::as_str).unwrap_or("?"),
-                            n.get("target").and_then(Value::as_str).unwrap_or("?"),
-                            n.get("note").and_then(Value::as_str).unwrap_or("?"),
-                        ));
-                    }
-                    return Some(output);
-                }
-                if let Some(n) = d.get("note") {
-                    // `note get` / `note set` echo.
-                    return Some(match n.as_str() {
-                        Some(text) => format!(
-                            "{}  {}  {}\n",
-                            d.get("file").and_then(Value::as_str).unwrap_or("?"),
-                            d.get("target").and_then(Value::as_str).unwrap_or("?"),
-                            text
-                        ),
-                        None => "no note\n".to_string(),
-                    });
-                }
-                if d.get("removed").is_some() {
-                    return Some(format!(
-                        "removed {}\n",
-                        d.get("removed").and_then(Value::as_bool).unwrap_or(false)
-                    ));
-                }
-                None
-            })?;
-            Ok(())
-        }
         Command::RepoMap {
             path,
             markdown,
@@ -5945,31 +5704,7 @@ fn run_command(
         Command::Audit { path, top, json } => {
             audit_cmd::run(audit_cmd::AuditOptions { path, top, json })
         }
-        Command::Space {
-            path,
-            json,
-            delete,
-            yes,
-        } => space_cmd::run(path, json, delete, yes),
         Command::Workspace { cmd } => workspace_cmd::run(cmd),
-        Command::IndexPack {
-            out,
-            include_history,
-            path,
-        } => index_cmd::run(index_cmd::IndexCmd::Pack {
-            out,
-            include_history,
-            path,
-        }),
-        Command::IndexUnpack {
-            source,
-            force,
-            path,
-        } => index_cmd::run(index_cmd::IndexCmd::Unpack {
-            source,
-            force,
-            path,
-        }),
         Command::Reference { cmd } => reference_cmd::run(cmd),
         Command::Status {
             path,
@@ -6493,24 +6228,6 @@ fn run_command(
             )?;
             print_data(&data, json)
         }
-        Command::RecordEvent {
-            kind,
-            path,
-            file,
-            detail,
-            json,
-        } => {
-            let data = execute(
-                &path,
-                Request::Journal {
-                    kind,
-                    path: file,
-                    detail,
-                },
-                false,
-            )?;
-            print_data(&data, json)
-        }
         // -------------------------------------------------------------
         // M5/M6 — install / doctor / migrate / hook
         // -------------------------------------------------------------
@@ -6846,7 +6563,6 @@ fn run_command(
             None => config_cmd::overview(Path::new(".")),
             Some(ConfigCmd::Setup) => config_cmd::setup(),
             Some(ConfigCmd::Classify { value }) => config_cmd::set_classify_enabled(value == "on"),
-            Some(ConfigCmd::Edit { repo, path }) => config_cmd::edit(&path, repo),
             Some(ConfigCmd::Metrics {
                 value,
                 global,
@@ -6924,24 +6640,6 @@ fn run_command(
             let data = pixel_ops::rewrite::rewrite(&root, &opts)?;
             print_data(&data, json)
         }
-        Command::WhoWrote {
-            file,
-            path,
-            lines,
-            author,
-            limit_regions,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::provenance::ProvenanceOptions {
-                file,
-                lines,
-                author,
-                limit_regions,
-            };
-            let data = pixel_ops::provenance::provenance(&root, &opts)?;
-            print_data(&data, json)
-        }
         Command::ListBranches {
             path,
             fetch,
@@ -6956,47 +6654,6 @@ fn run_command(
                 stale_days,
             };
             let data = pixel_ops::branches::branches(&root, &opts)?;
-            print_data(&data, json)
-        }
-        Command::EditEnv { cmd } => {
-            use pixel_ops::envfile::EnvAction;
-            let (path, json, action) = match cmd {
-                EnvCmd::Inventory { path, json } => (path, json, EnvAction::Inventory),
-                EnvCmd::Set {
-                    file,
-                    key,
-                    value,
-                    create_file,
-                    path,
-                    json,
-                } => (
-                    path,
-                    json,
-                    EnvAction::Set {
-                        file,
-                        key,
-                        value,
-                        create_file,
-                    },
-                ),
-                EnvCmd::Restore {
-                    file,
-                    snapshot,
-                    path,
-                    json,
-                } => (path, json, EnvAction::Restore { file, snapshot }),
-                EnvCmd::Snapshots { file, path, json } => {
-                    (path, json, EnvAction::Snapshots { file })
-                }
-                EnvCmd::Check {
-                    file,
-                    require,
-                    path,
-                    json,
-                } => (path, json, EnvAction::Check { file, require }),
-            };
-            let root = discover_root(&path)?;
-            let data = pixel_ops::envfile::envfile(&root, &action)?;
             print_data(&data, json)
         }
         Command::Plan {
@@ -8466,14 +8123,6 @@ mod tests {
                 "session-123".into(),
                 "/repo".into(),
                 "--json".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "task-state".into(),
-                "reset".into(),
-                "--session".into(),
-                "session-123".into(),
-                "/repo".into(),
             ],
             vec![
                 "pixel".to_string(),

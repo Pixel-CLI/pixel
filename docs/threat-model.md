@@ -34,11 +34,11 @@ model providers, and the website under `website/`.
 | Asset | Where | Why it matters |
 | --- | --- | --- |
 | Source and history of indexed repositories | the working tree, read through `pixel-git::GitRunner` and the walkers in `pixel-index`/`pixel-graph` | confidentiality of code the user did not mean to share; integrity of what the agent is told about it |
-| Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `config.yaml`, `tasks/`, `env-snapshots/` | what the agent reads as ground truth; `actions.jsonl` and `env-snapshots/` can hold secrets; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
+| Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `config.yaml`, `tasks/` | what the agent reads as ground truth; `actions.jsonl` can hold secrets; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
 | Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
-| User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project), `.env` values edited by `pixel edit-env` | credential theft, billing abuse |
+| User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project) | credential theft, billing abuse |
 | Benchmark credentials | OAuth storage or an explicitly selected Claude gateway settings file read by `eval/claude_skill_pair.py` | credentials must reach only the selected model connection and stay out of benchmark receipts |
 | Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
 | CI | `.github/workflows/*.yml`, the `PROJECTS_TOKEN` secret, the self-hosted runner named by the `PIXEL_RUNNER_LABELS` repository variable | a foothold in CI is a step towards the release chain |
@@ -76,8 +76,7 @@ arguments. Paths and patterns are passed to library code, never to a shell.
 Outside the hooks (3.3), two paths run a shell on purpose: `pixel self-update
 --build "<cmd>"` (`sh -c`, default `cargo build --release -p pixel-cli`) and
 the update prompt's `update_notice::run_upgrade` (`sh -c` on the command
-`update_notice::upgrade_hint` builds); `pixel config edit` starts
-`$VISUAL`/`$EDITOR`. Each invocation is recorded in `.pixel/actions.jsonl`
+`update_notice::upgrade_hint` builds). Each invocation is recorded in `.pixel/actions.jsonl`
 through `logged_args` (`crates/pixel/src/main.rs`). Stdout is capped at
 256 KB (`PIXEL_OUTPUT_CAP_BYTES`).
 
@@ -217,8 +216,6 @@ repository file.
 - Model downloads: `minishlab/potion-*` (`pixel_recall::embed::POTION_REPO`)
   and, with the `fastembed` feature, `intfloat/multilingual-e5-small`, from
   Hugging Face into `~/.local/share/pixel/models/`.
-- `pixel index-unpack <path|url>` (`crates/pixel/src/index_cmd.rs`,
-  `FETCH_CAP` 2 GiB).
 - `pixel reference setup`: `git clone`/`git fetch` (through `GitRunner`) from
   each repository URL recorded in `.pixel/reference.json`; the manifest is
   user-authored, so no destination is invented and no URL is guessed.
@@ -355,7 +352,7 @@ boundary it crosses.
   so the first `pixel` command in the clone finds an index, a graph, a
   history database, task manifests or a configuration it did not build.
 - **Mitigation** (0.7.0, GHSA-c9f5-vxc4-wjph): before the index, graph and
-  history stores read anything, and before `pixel index-unpack` installs,
+  history stores read anything,
   `pixel_git::sidecar::check` refuses a `.pixel` that is a symbolic link or
   holds files git tracks, and names the command that removes it. Files under
   `.pixel/` are opened with `O_NOFOLLOW` or created fresh and renamed into
@@ -501,9 +498,8 @@ hold.
 - **Residual**: the recall corpus and the error sink store transcripts and
   argv unredacted (the sink keeps the whole output of every failed `sniper
   run`, structured RSpec/RuboCop/Minitest runs included, for 7 days and
-  at most 200 outputs); `edit-env` snapshots are plain copies of the `.env`;
-  `logged_args` masks only `config remote-key` values and `auth_url`, so a
-  secret passed as `--var` to `pixel flow` or `--value` to `pixel edit-env`
+  at most 200 outputs); `logged_args` masks only `config remote-key` values
+  and `auth_url`, so a secret passed as `--var` to `pixel flow`
   reaches `actions.jsonl` in clear (a 0600 file).
 
 ### T16. A configured key is sent to the wrong endpoint (I, B6)
@@ -551,18 +547,9 @@ hold.
 
 ### T19. A packed index is tampered with (T, B6)
 
-- **Scenario**: `pixel index-unpack https://…` installs a bundle built by
-  someone else.
-- **Mitigation**: each member's xxh3 is checked against the bundle's own
-  manifest; only the files `pixel index pack` writes are accepted as members
-  (since 0.7.0); the target `.pixel/` passes `pixel_git::sidecar::check` and
-  the staging directory is created without following links; a live index is
-  not overwritten without `--force`.
-- **Status**: Partial.
-- **Residual**: the check proves integrity against corruption, not
-  authenticity: a bundle is exactly as trustworthy as whoever produced it and
-  where it was fetched from (`http://` is accepted), and it lands in
-  `.pixel/` with the trust of T6.
+- **Status**: Retired. `pixel index-pack` and `pixel index-unpack` were
+  removed (issue #878), so no command installs an index bundle built by
+  someone else. The numbering of the threats after it is unchanged.
 
 ### T20. The update path installs a tampered binary (T, E, B7)
 
@@ -651,7 +638,7 @@ hold.
 | Status | Threats |
 | --- | --- |
 | Mitigated | T4, T10, T16, T17 |
-| Partial | T2, T3, T5, T6, T8, T14, T15, T19, T20, T21, T22 |
+| Partial | T2, T3, T5, T6, T8, T14, T15, T20, T21, T22 |
 | Accepted | T1, T7, T9, T12, T18, T23, T24 |
 | Withdrawn | T11, T13 |
 

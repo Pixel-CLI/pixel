@@ -120,7 +120,7 @@ request (`deterministic repository facts`, the agent prompt's heading, for Claud
 in the project's `.pixel/actions.jsonl` from the model's pixel call. Reported,
 not asserted:
 
-- Claude: whether the guard routed the native `grep` (a new `search-compat`
+- Claude: whether the guard routed the native `grep` (a new `search-like-rg`
   row), and whether the prompt arrived only as a `<persisted-output>` preview
   because the hook output exceeded Claude Code's 10 000-character inline limit.
 - Codex: how many Pixel hooks ran (`run-hook … --provider codex` rows), then a
@@ -128,7 +128,7 @@ not asserted:
   user's `/hooks` review, which tells an unreviewed hook from a broken one.
 - pi: the guard's last `bash` decision in `.pixel/pi-policy.jsonl` under the
   default policy, then again under `pixel config policy enforce`. pi's guard
-  blocks rather than reroutes, so it never writes `search-compat` rows.
+  blocks rather than reroutes, so it never writes `search-like-rg` rows.
 
 A scripted model shows the harness wiring — prompt delivery, hooks, guards, the
 binary on the agent's PATH — not whether a real model follows the prompt.
