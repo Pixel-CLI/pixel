@@ -9,6 +9,7 @@
 use std::fmt::Write as _;
 
 use super::chain::RichHit;
+use super::decision_log;
 use super::relevance::RelevanceInput;
 
 /// Environment switch of the search receipt (`0`, `false` or `off` removes it).
@@ -41,12 +42,6 @@ const TEST_SPAN: usize = 40;
 /// Lines a config excerpt shows.
 const MAX_CONFIG_LINES: usize = 4;
 
-/// Whether an environment value leaves a feature on: only an explicit off
-/// word turns it off.
-pub(crate) fn toggle_on(value: Option<&str>) -> bool {
-    !matches!(value, Some("0" | "false" | "off"))
-}
-
 /// Environment switch of the directive ("Answer from this evidence"): off
 /// unless set to `1`, `true` or `on`. Two retrievers agreeing on the top
 /// file was measured to be right too rarely to tell an agent to stop looking.
@@ -62,11 +57,11 @@ pub(crate) fn directive_enabled() -> bool {
 }
 
 pub(crate) fn receipt_enabled() -> bool {
-    toggle_on(std::env::var(RECEIPT_ENV).ok().as_deref())
+    decision_log::enabled(std::env::var(RECEIPT_ENV).ok().as_deref())
 }
 
 pub(crate) fn answer_enabled() -> bool {
-    toggle_on(std::env::var(ANSWER_ENV).ok().as_deref())
+    decision_log::enabled(std::env::var(ANSWER_ENV).ok().as_deref())
 }
 
 /// What the search of one brief covered, taken from the probes that answered
@@ -730,16 +725,6 @@ mod tests {
         }
         for on in ["1", "true", "on"] {
             assert!(directive_on(Some(on)), "{on}");
-        }
-    }
-
-    #[test]
-    fn toggle_should_stay_on_unless_an_off_word_is_given() {
-        assert!(toggle_on(None));
-        assert!(toggle_on(Some("1")));
-        assert!(toggle_on(Some("")));
-        for off in ["0", "false", "off"] {
-            assert!(!toggle_on(Some(off)), "{off}");
         }
     }
 

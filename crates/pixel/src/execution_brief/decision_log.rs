@@ -198,8 +198,9 @@ impl Record {
     }
 }
 
-/// Whether the environment value leaves the log on.
-fn enabled(value: Option<&str>) -> bool {
+/// Whether an environment value leaves a feature on (this log, the brief's
+/// receipt and excerpts): only an explicit off word turns it off.
+pub(crate) fn enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0" | "false" | "off"))
 }
 
