@@ -317,7 +317,10 @@ vectors have been asked for, each new generation rebuilds them at once
 hash as before. The read plane (`read_evidence` kind `meaning`, the evidence
 bridge) ranks from the same shared vectors and never builds them; the
 bridge's writable service starts the build for a bundle that asks. The
-memory held is about 2 KiB per chunk at 256 dimensions (`pool.resident_bytes`).
+memory held is about 2 KiB per chunk at 256 dimensions (`pool.resident_bytes`);
+a rebuild renumbers the token vocabulary from the live chunks once it holds
+more than twice their tokens (`VOCAB_SLACK`), so the tokens of edited-away
+text do not accumulate for the daemon's lifetime.
 
 ## Request path from the CLI
 
