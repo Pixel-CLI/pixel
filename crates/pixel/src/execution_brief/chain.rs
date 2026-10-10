@@ -153,7 +153,7 @@ const UNCORROBORATED_FOOTER: &str = "0 hits or 0 callers: verify with rg before 
 /// The ZERO step: the excerpt shown is strong enough to answer from.
 const ZERO_LINE: &str = "Answer from these lines; open a file only if they don't answer.";
 /// The ONE-READ step: the ranges are the next, single action.
-const READ_LINE: &str = "Read these ranges (in parallel, one turn) before any search; search only if they don't answer.";
+const READ_LINE: &str = "Read these ranges (in parallel, one turn) before any search. If they don't answer, search as usual.";
 const FOOTER: &str = "Answer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.";
 
 static QUOTED: LazyLock<Regex> = LazyLock::new(|| {
@@ -840,6 +840,8 @@ pub(crate) struct Brief {
     /// tells the agent to answer from the excerpt. `None` when no rule is
     /// validated or `PIXEL_BRIEF_ZERO` is off.
     zero_rule: Option<answer::ZeroRule>,
+    /// A code-shaped prompt resolved one short definition, shown as the answer.
+    strong_zero: bool,
     /// The ranges to read, best first.
     reads: Vec<ReadRange>,
     /// The meaning search's leads, best first.
@@ -933,6 +935,9 @@ impl Brief {
     /// meaning search's best chunk, in the lexical probe's best co-file, with
     /// at least two probed keywords inside it).
     fn zero(&self) -> bool {
+        if self.signal == Some(Signal::Strong) {
+            return self.strong_zero && !self.short() && self.unresolved.is_empty();
+        }
         let Some(rule) = self.zero_rule else {
             return false;
         };
@@ -1462,6 +1467,35 @@ fn read_evidence(
     ranges
 }
 
+/// The ZERO step of a code-shaped prompt: the only definition that resolved,
+/// when it spans at most [`answer::STRONG_ZERO_LINES`] lines, becomes the
+/// answer excerpt.
+fn strong_answer(evidence: &dyn Evidence, state: &Mutex<Brief>, brief: &Brief, deadline: Instant) {
+    let Some(def) = brief.defined.first().filter(|_| brief.unambiguous_def) else {
+        return;
+    };
+    let span = def.end_line + 1 - def.start_line.min(def.end_line + 1);
+    if !(1..=answer::STRONG_ZERO_LINES).contains(&span) {
+        return;
+    }
+    let Ok(body) = evidence.lines_at(&def.path, def.start_line, def.end_line, deadline) else {
+        return;
+    };
+    let lines = answer::body_excerpt(def.start_line, &body);
+    if lines.is_empty() {
+        return;
+    }
+    edit(state, |brief| {
+        brief.strong_zero = true;
+        brief.excerpts = vec![Excerpt {
+            label: format!("{}:{}", def.path, def.start_line),
+            path: def.path.clone(),
+            lines,
+            ..Excerpt::default()
+        }];
+    });
+}
+
 /// The ranges of a code-shaped prompt: the resolved definition (at most 60
 /// lines), then up to two more from its callers' declarations, else from the
 /// best chunk of the top fused files. Nothing when no definition resolved.
@@ -1472,6 +1506,9 @@ fn strong_reads(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, dead
     };
     if pixel_index::index::credential_path(Path::new(&def.path)) {
         return;
+    }
+    if answer::STRONG_ZERO && answer::zero_enabled() {
+        strong_answer(evidence, state, &brief, deadline);
     }
     let mut ranges = vec![ReadRange {
         path: def.path.clone(),
@@ -2882,6 +2919,12 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
         brief.signal,
         receipt || brief.has_excerpts() || !brief.read_ranges().is_empty(),
     );
+    // A shown answer may use the full block.
+    let cap = if brief.zero() {
+        cap.max(PROSE_BRIEF_BYTES)
+    } else {
+        cap
+    };
     let mut shown = Shown::of(brief);
     let mut text = render_with(brief, shown);
     while text.len() > cap && shown.shrink() {
@@ -7512,5 +7555,86 @@ mod tests {
         });
         strong_reads(&plan, &fake, &none, Instant::now() + SECOND);
         assert!(none.into_inner().unwrap().reads.is_empty());
+    }
+
+    #[test]
+    fn every_brief_that_ends_on_ranges_should_say_to_search_as_usual_if_they_fail() {
+        assert_eq!(
+            READ_LINE,
+            "Read these ranges (in parallel, one turn) before any search. If they don't answer, search as usual."
+        );
+        let range = || ReadRange {
+            path: "a.rs".into(),
+            first: 1,
+            last: 9,
+            symbol: None,
+        };
+        let mut high = zeroing_brief(&[DAEMON], 1);
+        high.reads = vec![range()];
+        let mut strong = Brief {
+            signal: Some(Signal::Strong),
+            finished: true,
+            answered: 1,
+            reads: vec![range()],
+            ..Brief::default()
+        };
+        strong.defined = vec![symbol("a.rs", "f")];
+        let mut low = low_brief(vec![rhit("a.rs", 1, "x")]);
+        low.finished = true;
+        low.reads = vec![range()];
+        for (name, brief) in [("high", high), ("strong", strong), ("low", low)] {
+            let (text, _) = fit(&brief).unwrap();
+            assert!(text.ends_with(READ_LINE), "{name}: {text}");
+            assert!(
+                text.contains("read: a.rs:1-9") || text.contains("read: "),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_code_shaped_prompt_with_one_short_definition_can_show_it_as_the_answer() {
+        let mut fake = Fake::new();
+        let body: Vec<String> = (0..5).map(|n| format!("    step_{n}();")).collect();
+        fake.sources = vec![("src/f.rs".to_string(), {
+            let mut lines = vec!["fn before() {}".to_string()];
+            lines.push("pub fn f() {".into());
+            lines.extend(body);
+            lines.push("}".into());
+            lines
+        })];
+        let mut brief = Brief {
+            signal: Some(Signal::Strong),
+            finished: true,
+            answered: 1,
+            unambiguous_def: true,
+            ..Brief::default()
+        };
+        brief.defined = vec![SymbolHit {
+            start_line: 2,
+            end_line: 8,
+            ..symbol("src/f.rs", "f")
+        }];
+        let state = Mutex::new(brief.clone());
+        strong_answer(&fake, &state, &brief, Instant::now() + SECOND);
+        let shown = state.into_inner().unwrap();
+        assert!(shown.zero());
+        let text = fit(&shown).unwrap().0;
+        assert!(text.contains("\nanswer src/f.rs:2:\n"), "{text}");
+        assert!(text.contains("  2| pub fn f() {"), "{text}");
+        assert!(text.ends_with(ZERO_LINE), "{text}");
+        assert!(!text.contains("read: "), "{text}");
+        // Ambiguous, too long, or unreadable: nothing is shown.
+        let mut ambiguous = brief.clone();
+        ambiguous.unambiguous_def = false;
+        let mut long = brief.clone();
+        long.defined[0].end_line = 80;
+        for case in [ambiguous, long] {
+            let state = Mutex::new(case.clone());
+            strong_answer(&fake, &state, &case, Instant::now() + SECOND);
+            assert!(!state.into_inner().unwrap().zero());
+        }
+        // The shipped build keeps the step off: 1 of 2 firings was right on dev.
+        assert!(!answer::STRONG_ZERO);
     }
 }

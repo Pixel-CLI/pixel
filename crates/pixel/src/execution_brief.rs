@@ -372,6 +372,38 @@ pub(crate) fn typed_text(prompt: &str) -> String {
     typed
 }
 
+/// Whether a whitespace-free `word` is a link: `http://`, `https://` or
+/// `www.`, behind any opening punctuation.
+fn is_url(word: &str) -> bool {
+    let word = word
+        .trim_start_matches(['(', '<', '[', '"', '\'', '`'])
+        .to_ascii_lowercase();
+    word.starts_with("http://") || word.starts_with("https://") || word.starts_with("www.")
+}
+
+/// `text` without its links: the query string of a pasted URL
+/// (`?utm_source=x`) is not a code identifier. Whitespace is kept as typed.
+pub(crate) fn strip_urls(text: &str) -> String {
+    fn flush(word: &mut String, out: &mut String) {
+        if !is_url(word) {
+            out.push_str(word);
+        }
+        word.clear();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            flush(&mut word, &mut out);
+            out.push(ch);
+        } else {
+            word.push(ch);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
 /// The first `tag` that ends at a tag boundary (`>` or whitespace), so a
 /// longer name such as `</pasted_contentious>` is not taken for it.
 fn find_tag(haystack: &str, tag: &str) -> Option<usize> {
@@ -440,7 +472,7 @@ impl Signal {
 /// threads, discussion). Only the typed text counts; pasted blocks never
 /// steer the search.
 pub fn code_signal(prompt: &str) -> Option<(String, Signal)> {
-    let typed = typed_text(prompt);
+    let typed = strip_urls(&typed_text(prompt));
     let typed = typed.trim();
     if explicit_identifier(typed).is_some() || typed.split_whitespace().any(names_code) {
         return Some((typed.to_string(), Signal::Strong));
@@ -637,7 +669,7 @@ pub fn brief_signal(prompt: &str) -> Option<(String, Signal)> {
     if let Some(found) = code_signal(prompt) {
         return Some(found);
     }
-    let typed = typed_text(prompt);
+    let typed = strip_urls(&typed_text(prompt));
     let task = brief_task(&typed);
     let keywords = brief_keywords(task);
     (keywords.len() >= MIN_PROSE_KEYWORDS && !is_ops_request(&keywords))
@@ -1291,6 +1323,47 @@ mod tests {
                 "{prompt}"
             );
         }
+    }
+
+    #[test]
+    fn strip_urls_should_drop_links_and_keep_the_rest_as_typed() {
+        assert_eq!(
+            strip_urls("see https://x.io/a?utm_source=b now"),
+            "see  now"
+        );
+        assert_eq!(strip_urls("(www.example.com/p) and HTTP://Y.org"), " and ");
+        assert_eq!(strip_urls("a\n<https://x.io>\nb"), "a\n\nb");
+        assert_eq!(
+            strip_urls("fix handle_error in src/a.rs"),
+            "fix handle_error in src/a.rs"
+        );
+        assert_eq!(strip_urls("wwwhere is www_thing"), "wwwhere is www_thing");
+    }
+
+    #[test]
+    fn a_link_alone_should_never_be_taken_for_a_code_identifier() {
+        for prompt in [
+            "https://example.com/post?utm_source=newsletter&utm_medium=email",
+            "look at www.example.com/landing?utm_source=x",
+            "<https://github.com/org/repo/pull/12?utm_source=slack>",
+        ] {
+            assert_eq!(code_signal(prompt), None, "{prompt}");
+            assert_eq!(brief_signal(prompt), None, "{prompt}");
+        }
+    }
+
+    #[test]
+    fn a_link_beside_a_real_identifier_should_leave_the_identifier_alone_strong() {
+        let (typed, signal) =
+            code_signal("why does retry_loop fail, see https://x.io/p?utm_source=y").unwrap();
+        assert_eq!(signal, Signal::Strong);
+        assert!(
+            !typed.contains("utm_source") && !typed.contains("x.io"),
+            "{typed}"
+        );
+        assert!(typed.contains("retry_loop"), "{typed}");
+        // The link alone would have been the only code-shaped token.
+        assert!(code_signal("see https://x.io/p?utm_source=y").is_none());
     }
 
     #[test]

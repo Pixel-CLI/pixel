@@ -55,6 +55,26 @@ pub(crate) fn zero_enabled() -> bool {
 /// distinct probed keywords inside the chunk.
 pub(crate) type ZeroRule = (usize, usize, usize);
 
+/// The ZERO step of a code-shaped prompt: the one definition that resolved
+/// (`unambiguous_def`) is shown as the answer when it spans at most
+/// [`STRONG_ZERO_LINES`] lines.
+///
+/// Measured on the dev split of `eval/brief-gate/answer_spans.jsonl`: it
+/// fired twice and was right once (precision 0.5), so it stays off.
+pub(crate) const STRONG_ZERO: bool = false;
+pub(crate) const STRONG_ZERO_LINES: u64 = 40;
+
+/// The body of a definition as numbered excerpt rows; `lines[0]` is line `start`.
+pub(crate) fn body_excerpt(start: u64, lines: &[String]) -> Vec<String> {
+    let rows: Vec<(u64, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| (start + index as u64, line.as_str()))
+        .collect();
+    numbered(&rows)
+}
+
 /// The rule the brief applies. `None`: no rule tried on the dev split of
 /// `eval/brief-gate/answer_spans.jsonl` kept the span precision at 0.9 with
 /// two firings (the strict rule `(0, 0, 2)` fired once, right; the loosest

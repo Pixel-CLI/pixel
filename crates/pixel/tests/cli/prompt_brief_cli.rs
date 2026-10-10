@@ -155,7 +155,7 @@ fn rename_prompt_should_carry_files_definition_and_callers_in_the_hook_context()
                 "coverage: 4/4 ops answered",
                 "read: packages/ui/handleError.ts:1-3 — handleError",
                 "also: apps/web/page.tsx:2-4 — Page",
-                "Read these ranges (in parallel, one turn) before any search; search only if they don't answer.",
+                "Read these ranges (in parallel, one turn) before any search. If they don't answer, search as usual.",
             ]
             .join("\n"),
             "{provider}"

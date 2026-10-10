@@ -800,14 +800,14 @@ would switch it off if one is set). ONE READ, otherwise: the excerpts are
 hidden, the confidence is medium, and the tail is `read: <path>:<first>-<last>
 — <symbol>` for the best function-level chunk of the first fused file, up to
 two `also:` lines for the next two fused files, and "Read these ranges (in
-parallel, one turn) before any search; search only if they don't answer." Each
+parallel, one turn) before any search. If they don't answer, search as usual." Each
 file is cut into function-level chunks (items, merged up to 45 lines), scored
 by BM25 over the file's own chunks for the probed keywords (a tie goes to the
 meaning search's chunk, which also gets half the best score on top), and
 capped at 60 lines around the densest keyword region; tests and docs are
 skipped unless asked. A code-shaped prompt that resolved `defined:` reads the
 definition's range, then its callers' declarations, then the best chunk of the
-top fused files. Ranges come from lines actually read at HEAD, never from a
+top fused files. Its ZERO step (one unambiguous definition of at most 40 lines shown as the answer, `answer::STRONG_ZERO`) is off: 1 of 2 firings was right on dev. The typed text loses its links (`strip_urls`) before the signal is decided, so a pasted `utm_source` is not a code identifier. Ranges come from lines actually read at HEAD, never from a
 credential-shaped path.
 `scripts/bench-brief-excerpt.py` measures excerpt@1 and `scripts/bench-brief-spans.py` the
 ZERO precision and the share of gold spans inside the `read:` ranges. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
