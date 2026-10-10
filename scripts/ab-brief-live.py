@@ -79,8 +79,9 @@ DEFAULT_WORK = Path(tempfile.gettempdir()) / "pixel-brief-ab"
 DEFAULT_RESULTS = REPO / "eval" / "arena-results"
 
 # arm -> (side whose binary, fixture and daemon it uses, whether the brief is on)
-ARMS = {"off": ("old", False), "old": ("old", True), "new": ("new", True)}
-SIDES = ("old", "new")
+ARMS = {"off": ("old", False), "old": ("old", True), "new": ("new", True),
+        "a887": ("new", True), "b891": ("zero", True)}  # a887/b891: the PR 887 and PR 891 candidates side by side
+SIDES = ("old", "new", "zero")
 TOOLS = "Read,Grep,Glob,Bash"
 DENIED = "Edit,Write,NotebookEdit,Agent,Task"
 HOOK_ARGS = "run-hook task-event --provider claude --event prompt-submit"
@@ -1365,6 +1366,170 @@ def cmd_report(args):
 
 
 # --------------------------------------------------------------------------
+# Smoke test: gold answer spans and the ranges a brief tells the agent to read
+# --------------------------------------------------------------------------
+
+RANGE_LINE = re.compile(r"^(read|also):\s*(\S+?):(\d+)(?:-(\d+))?(?:\s|$)", re.MULTILINE)  # `read: path:a-b - symbol`
+SED_RANGE = re.compile(r"sed\s+-n\s+['\"]?(\d+),(\d+)p['\"]?\s+(\S+)")
+UNBOUNDED = 10 ** 9
+SMOKE_KEYS = ("calls", "search", "reads", "wall_s", "input_total", "output_tokens", "cost_usd")
+
+
+def brief_ranges(context):
+    """``(path, first line, last line, "read" | "also")`` of each range a brief asks the agent to read."""
+    if not context or not context.lstrip().startswith(BRIEF_TAG):
+        return []
+    return [(m.group(2), int(m.group(3)), int(m.group(4) or m.group(3)), m.group(1)) for m in RANGE_LINE.finditer(context)]
+
+
+def overlaps(first, last, other_first, other_last):
+    return first <= other_last and other_first <= last
+
+
+def read_ranges(events, roots):
+    """``(path, first, last, ranged)`` of each read before the stop: Read with offset/limit, `sed -n a,bp`, else the whole file."""
+    out = []
+    for event in events[:stop_index(events)]:
+        if event[0] != "tool" or not isinstance(event[2], dict):
+            continue
+        kind, paths = tool_kind(event[1], event[2], roots)
+        if kind != "read":
+            continue
+        if event[1].lower() == "read":
+            offset, limit = event[2].get("offset"), event[2].get("limit")
+            first = int(offset or 1)
+            last = first + int(limit) - 1 if limit else UNBOUNDED
+            out += [(path, first, last, bool(offset or limit)) for path in paths]
+            continue
+        sed = SED_RANGE.search(event[2].get("command") or "")
+        for path in paths:
+            if sed and normalise_token(sed.group(3), roots) == path:
+                out.append((path, int(sed.group(1)), int(sed.group(2)), True))
+            else:
+                out.append((path, 1, UNBOUNDED, False))
+    return out
+
+
+def cites_gold_line(answer, spans, roots):
+    """The answer gives a line (`path:12`, `path:12-30`, `path#L12`) inside a gold span of that path."""
+    for path, first, last in spans:
+        for match in re.finditer(re.escape(path) + r"(?:[:#]L?|,?\s*lines?\s+)(\d+)(?:\s*[-\u2013]\s*L?(\d+))?", answer or ""):
+            low = int(match.group(1))
+            if overlaps(low, int(match.group(2) or low), first, last):
+                return True
+    return False
+
+
+def smoke_row(raw, spans, roots):
+    """Per-session smoke metrics from a saved stream; ``spans`` is ``[(path, first, last)]`` of the gold answer."""
+    run = collect([(0.0, line) for line in Path(raw).read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()])
+    first = next((h for h in run["hooks"] if h["event"] == "UserPromptSubmit"), None)
+    context = hook_context(first["stdout"]) if first else None
+    gold_paths = sorted({path for path, _, _ in spans})
+    refined = refine(run["events"], context, gold_paths, roots)
+    ranges, reads = brief_ranges(context), read_ranges(run["events"], roots)
+    answer = (run["result"] or {}).get("result") or ""
+    return {
+        "calls": refined["ref_calls"], "search": refined["ref_search"], "reads": refined["ref_reads"],
+        "brief_tier": parse_confidence(context) if ranges or (context or "").startswith(BRIEF_TAG) else None,
+        "brief_ranges": len(ranges),
+        "brief_names_gold_path": bool(set(gold_paths) & brief_named_paths(context)),
+        "brief_range_overlaps_gold": any(rp == gp and overlaps(ra, rb, ga, gb)
+                                         for rp, ra, rb, _ in ranges for gp, ga, gb in spans),
+        "read_hits_range": any(rp == p and overlaps(s, e, ra, rb) for p, s, e, _ in reads for rp, ra, rb, _ in ranges),
+        "read_hits_range_ranged": any(rp == p and overlaps(s, e, ra, rb)
+                                      for p, s, e, ranged in reads if ranged for rp, ra, rb, _ in ranges),
+        "read_hits_gold": any(gp == p and overlaps(s, e, ga, gb) for p, s, e, _ in reads for gp, ga, gb in spans),
+        "cites_gold_path": bool(cited_paths(answer, gold_paths, roots)[0]),
+        "cites_gold_line": cites_gold_line(answer, spans, roots)}
+
+
+def smoke_summary(rows):
+    out = {"sessions": len(rows)}
+    for key in SMOKE_KEYS:
+        out[key] = mean([r[key] for r in rows if r.get(key) is not None])
+    for key in ("brief_fired", "brief_range_overlaps_gold", "read_hits_range", "read_hits_range_ranged", "read_hits_gold",
+                "cites_gold_path", "cites_gold_line"):
+        out[key] = mean([float(bool(r[key])) for r in rows])
+    return out
+
+
+def cmd_smoke(args):
+    out = Path(args.results) / args.run_id
+    rows = read_rows(out / "runs.jsonl")
+    if not rows:
+        die(f"no runs in {out / 'runs.jsonl'}")
+    manifest = json.loads((out / "manifest.json").read_text()) if (out / "manifest.json").exists() else {}
+    prompts = {row["id"]: row for row in load_set(args.set)[0]}
+    spans_of = {}
+    for line in Path(args.spans).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            entry = json.loads(line)
+            spans_of[entry["id"]] = [(s["path"], s["start_line"], s["end_line"]) for s in entry["answer_spans"]]
+    work = Work(args.work)
+    arms = [a for a in ARMS if any(r["arm"] == a for r in rows)]
+    sessions = []
+    for row in sorted(rows, key=lambda r: r["index"]):
+        fixture = ((manifest.get("sides") or {}).get(row["side"]) or {}).get("fixture") or work.fixture(row["side"])
+        raw = out / "raw" / row["arm"] / f"{row['prompt_id']}-r{row['rep']}.stream.jsonl"
+        metrics = smoke_row(raw, spans_of[row["prompt_id"]], path_roots(fixture))
+        sessions.append({"arm": row["arm"], "prompt_id": row["prompt_id"], "type": prompts[row["prompt_id"]]["kind"],
+                         "rep": row["rep"], "ok": row["ok"], "problems": row["problems"], "brief_fired": row["brief_fired"],
+                         "wall_s": row["wall_s"], "input_total": row["input_total"], "output_tokens": row["output_tokens"],
+                         "cost_usd": row["cost_usd"], "num_turns": row["num_turns"], **metrics})
+    valid = [s for s in sessions if s["ok"]]
+    lines = [f"sessions {len(sessions)}, valid {len(valid)}", "",
+             "| arm / type | sessions | tool calls | search | reads | brief fired | brief range overlaps gold | read hits a brief range | "
+             "read hits gold | cites gold path | cites gold line | wall s | input tok | output tok | cost |",
+             "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    summaries = {}
+    for arm in arms:
+        for kind in ("plain", "identifier", None):
+            subset = [s for s in valid if s["arm"] == arm and (kind is None or s["type"] == kind)]
+            if subset:
+                t = summaries[f"{arm}/{kind or 'all'}"] = smoke_summary(subset)
+                lines.append(f"| {arm} / {kind or 'all'} | {t['sessions']} | {fmt(t['calls'])} | {fmt(t['search'])} | {fmt(t['reads'])} | "
+                             f"{fmt(t['brief_fired'])} | {fmt(t['brief_range_overlaps_gold'])} | {fmt(t['read_hits_range'])} | "
+                             f"{fmt(t['read_hits_gold'])} | {fmt(t['cites_gold_path'])} | {fmt(t['cites_gold_line'])} | {fmt(t['wall_s'], 1)} | "
+                             f"{fmt(t['input_total'], 0)} | {fmt(t['output_tokens'], 0)} | {fmt(t['cost_usd'])} |")
+    first, second = arms[0], arms[-1]
+    lines += ["", f"Per prompt (`{first}` / `{second}` in each cell; tier, ranges overlap gold = ovl; R = a Read hit a brief range, "
+              f"G = a Read hit the gold span, P / L = answer cites the gold path / a line inside the span):", "",
+              f"| prompt | type | calls | search | reads | tier | ovl | R | G | P | L | wall s | input tok | calls delta | wall delta |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: |"]
+    flag = lambda v: "Y" if v else "n"
+    for pid in sorted({s["prompt_id"] for s in valid}):
+        pair = {s["arm"]: s for s in valid if s["prompt_id"] == pid}
+        a, b = pair.get(first), pair.get(second)
+        if not (a and b):
+            continue
+        cell = lambda key, f=str: f"{f(a[key])} / {f(b[key])}"
+        lines.append(f"| {pid} | {a['type']} | {cell('calls')} | {cell('search')} | {cell('reads')} | "
+                     f"{a['brief_tier'] or '-'} / {b['brief_tier'] or '-'} | {cell('brief_range_overlaps_gold', flag)} | "
+                     f"{cell('read_hits_range', flag)} | {cell('read_hits_gold', flag)} | {cell('cites_gold_path', flag)} | "
+                     f"{cell('cites_gold_line', flag)} | {a['wall_s']:.0f} / {b['wall_s']:.0f} | "
+                     f"{a['input_total']} / {b['input_total']} | {b['calls'] - a['calls']:+d} | {b['wall_s'] - a['wall_s']:+.0f} |")
+    use = [r["rl_five_hour"] for r in sorted(rows, key=lambda r: r["index"]) if r.get("rl_five_hour") is not None]
+    lines += ["", f"models {sorted({r['model'] for r in rows if r['model']})}; list cost USD {sum(r['cost_usd'] or 0 for r in rows):.2f}; "
+              f"five-hour utilisation {use[0] if use else 'n/a'} -> {use[-1] if use else 'n/a'}"]
+    print("\n".join(lines))
+    if args.receipt:
+        replacements = [(str(Path(args.work).resolve()), "$WORK"), (str(Path(args.work)), "$WORK"),
+                        ("/private" + str(Path(args.work)), "$WORK"), (str(REPO), "$REPO"), (str(Path.home()), "~")]
+        receipt = redact({"manifest": manifest, "summary": summaries, "sessions": sessions,
+                          "spans_sha256": sha256_file(args.spans)}, replacements)
+        body = ",\n".join("  " + json.dumps(x, sort_keys=True, separators=(",", ":")) for x in receipt["sessions"])
+        parts = [' "manifest": ' + json.dumps(receipt["manifest"], indent=1, sort_keys=True).replace("\n", "\n "),
+                 ' "spans_sha256": ' + json.dumps(receipt["spans_sha256"]),
+                 ' "summary": ' + json.dumps(receipt["summary"], sort_keys=True, separators=(",", ":")),
+                 ' "sessions": [\n' + body + "\n ]"]
+        Path(args.receipt).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.receipt).write_text("{\n" + ",\n".join(parts) + "\n}\n")
+        print(f"\nreceipt: {args.receipt}")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Tests
 # --------------------------------------------------------------------------
 
@@ -1606,6 +1771,24 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(refined["check"]["search_plus_reads_differs_from_native"], 0)
         self.assertIn("reads of brief-named", render(build_report(rows)))
 
+    def test_smoke_helpers_read_ranges_gold_spans_and_citations(self):
+        context = ("[PIXEL:BRIEF]\nkind: lookup\nread: crates/a/src/lib.rs:10-20 \u2014 f\nalso: crates/b.rs:5-5 \u2014 g\n"
+                   "Read these ranges (in parallel, one turn) before any search; search only if they don't answer.")
+        self.assertEqual(brief_ranges(context), [("crates/a/src/lib.rs", 10, 20, "read"), ("crates/b.rs", 5, 5, "also")])
+        self.assertEqual(brief_ranges("read: crates/a.rs:1-2 \u2014 x"), [])
+        roots = path_roots("/private/tmp/w/z/pixel")
+        events = [("tool", "Read", {"file_path": "/tmp/w/z/pixel/crates/a/src/lib.rs", "offset": 15, "limit": 3}),
+                  ("tool", "Read", {"file_path": "crates/b.rs"}),
+                  ("tool", "Bash", {"command": "sed -n '30,40p' crates/c.rs"}), ("text", "done")]
+        self.assertEqual(read_ranges(events, roots), [("crates/a/src/lib.rs", 15, 17, True), ("crates/b.rs", 1, UNBOUNDED, False),
+                                                       ("crates/c.rs", 30, 40, True)])
+        spans = [("crates/a/src/lib.rs", 12, 18)]
+        self.assertTrue(cites_gold_line("see crates/a/src/lib.rs:14", spans, roots))
+        self.assertTrue(cites_gold_line("crates/a/src/lib.rs#L10-13", spans, roots))
+        self.assertFalse(cites_gold_line("crates/a/src/lib.rs:40", spans, roots))
+        self.assertFalse(cites_gold_line("crates/a/src/lib.rs only", spans, roots))
+        self.assertTrue(overlaps(1, 5, 5, 9) and not overlaps(1, 4, 5, 9))
+
     def test_number_format_never_strips_integer_zeros(self):
         self.assertEqual((fmt(1990.0, 0), fmt(0.20), fmt(22.0, 1), fmt(None), fmt(5)), ("1990", "0.2", "22", "n/a", "5"))
 
@@ -1693,6 +1876,11 @@ def build_parser():
     common(report)
     report.add_argument("--run-id", required=True)
     report.add_argument("--receipt", default=None, help="write the compact redacted receipt here")
+    smoke = sub.add_parser("smoke-report", help="smoke test: gold answer spans and the brief's read ranges, per arm and prompt")
+    common(smoke)
+    smoke.add_argument("--run-id", required=True)
+    smoke.add_argument("--spans", required=True, help="answer_spans.jsonl (gold spans, joined to the set by id)")
+    smoke.add_argument("--receipt", default=None)
     return parser
 
 
@@ -1700,7 +1888,8 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.self_test:
         return self_test()
-    handlers = {"setup": cmd_setup, "select": cmd_select, "probe": cmd_probe, "run": cmd_run, "report": cmd_report}
+    handlers = {"setup": cmd_setup, "select": cmd_select, "probe": cmd_probe, "run": cmd_run, "report": cmd_report,
+                "smoke-report": cmd_smoke}
     if args.command not in handlers:
         build_parser().print_help()
         return 2

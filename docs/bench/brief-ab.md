@@ -436,3 +436,62 @@ arms): search -0.22 [-0.72, +0.28], reads -0.06 [-0.33, +0.22], non-expected rea
   into it.
 * **Where a tier cannot be read**: tier `low` and "no brief" have 4 sessions each and
   2 prompts each.
+
+## Smoke test: the #887 brief against the #891 brief (`smoke-887-891`)
+
+Sixteen sessions, no intervals: does a brief that tells the agent which ranges to
+read change what it does? Same flags, environment whitelist and default model
+(`claude-opus-5-5`, Claude Code 2.1.295) as `ab-20261009`; one repetition,
+randomised order, 4 concurrent. Arms `a887` (the `44bbaaac` binary above) and `b891`
+(`pixel 0.7.1`, commit `1cfc4b1edb23ff774f0cc7d999173e0ecc2d8907`, SHA-256
+`8bea492a9e84a975f64e8fe83ff0064498f5d9a3f831de89ad10456dfa898880`: its briefs end with
+`read: path:a-b — symbol` and `also:` lines and "Read these ranges (in parallel, one
+turn) before any search"). Each has its own fixture at `85bede7d` (tree `8b95943a`),
+daemon and meaning vectors warmed before the first run. Prompts: 8 English `test` rows
+that have gold spans in `eval/brief-gate/answer_spans.jsonl` (SHA-256 `ea0348e5...e6b`,
+from the `feat/889-brief-receipt` branch), 4 `plain` and 4 `identifier`, the first by
+`sha256("brief-ab-883:" + id)` in each kind: `bg-032 bg-120 bg-161 bg-086` and
+`bg-104 bg-094 bg-211 bg-073`. Quota: five-hour window 0.07 before, 0.12 after; list
+cost USD 4.27. Command: `run --run-id smoke-887-891 --arms a887,b891 --reps 1 --split
+test --prompts <ids> --concurrency 4`, then `smoke-report --spans <answer_spans.jsonl>
+--receipt docs/bench/brief-ab/smoke-887-891.json`.
+
+Per session, from the parsed `tool_use`: calls before the first answer, searches, reads;
+`R` a Read (or `sed -n`) overlapping one of the brief's `read:`/`also:` ranges (a whole-file
+Read overlaps); `G` a read overlapping the gold span; `P` / `L` the answer cites a gold
+path / a line inside the gold span; `ovl` a brief range overlaps the gold span.
+Because the #887 brief prints no ranges, its `R` and `ovl` are `n` by construction.
+
+| arm / type | sessions | calls | search | reads | brief fired | ranges overlap gold | read hits a range | read hits gold | cites gold path | cites gold line | wall s | input tok | output tok | cost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| a887 plain | 4 | 4 | 2 | 2 | 0.75 | 0 | 0 | 1 | 0.75 | 0.5 | 23.4 | 136 704 | 1 621 | 0.30 |
+| a887 identifier | 4 | 2 | 0.5 | 1.5 | 1 | 0 | 0 | 0.75 | 1 | 1 | 13.4 | 59 307 | 1 078 | 0.22 |
+| a887 all | 8 | 3 | 1.25 | 1.75 | 0.88 | 0 | 0 | 0.88 | 0.88 | 0.75 | 18.4 | 98 005 | 1 349 | 0.26 |
+| b891 plain | 4 | 4.25 | 1.75 | 2.5 | 0.75 | 0 | 0.5 | 1 | 0.75 | 0.5 | 19.8 | 137 762 | 1 685 | 0.31 |
+| b891 identifier | 4 | 2.5 | 0.5 | 2 | 1 | 1 | 1 | 1 | 1 | 1 | 15.3 | 61 470 | 1 240 | 0.24 |
+| b891 all | 8 | 3.38 | 1.12 | 2.25 | 0.88 | 0.5 | 0.75 | 1 | 0.88 | 0.75 | 17.6 | 99 616 | 1 462 | 0.27 |
+
+Per prompt (`a887` / `b891`):
+
+| prompt | type | calls | search | reads | tier | ovl | R | G | P | L | wall s | input tok | calls delta | wall delta |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: |
+| bg-032 | plain | 6 / 6 | 3 / 3 | 3 / 3 | high / medium | n / n | n / Y | Y / Y | n / n | n / n | 40 / 23 | 217 964 / 193 850 | +0 | -17 |
+| bg-086 | plain | 3 / 3 | 2 / 1 | 1 / 2 | high / medium | n / n | n / Y | Y / Y | Y / Y | Y / n | 18 / 17 | 106 366 / 106 363 | +0 | -1 |
+| bg-120 | plain | 5 / 5 | 2 / 2 | 3 / 3 | - / - | n / n | n / n | Y / Y | Y / Y | Y / Y | 20 / 22 | 151 138 / 151 194 | +0 | +2 |
+| bg-161 | plain | 2 / 3 | 1 / 1 | 1 / 2 | high / medium | n / n | n / n | Y / Y | Y / Y | n / Y | 16 / 17 | 71 348 / 99 640 | +1 | +1 |
+| bg-073 | identifier | 2 / 2 | 0 / 0 | 2 / 2 | - / - | n / Y | n / Y | Y / Y | Y / Y | Y / Y | 19 / 19 | 52 798 / 52 859 | +0 | +1 |
+| bg-094 | identifier | 2 / 2 | 0 / 0 | 2 / 2 | - / - | n / Y | n / Y | Y / Y | Y / Y | Y / Y | 11 / 13 | 52 386 / 52 502 | +0 | +2 |
+| bg-104 | identifier | 1 / 3 | 1 / 1 | 0 / 2 | - / - | n / Y | n / Y | n / Y | Y / Y | Y / Y | 8 / 12 | 44 235 / 52 448 | +2 | +4 |
+| bg-211 | identifier | 3 / 3 | 1 / 1 | 2 / 2 | - / - | n / Y | n / Y | Y / Y | Y / Y | Y / Y | 16 / 17 | 87 808 / 88 072 | +0 | +1 |
+
+Reading, at n = 8 and one repetition (differences of one call are within the run-to-run
+spread of 1.4 measured above): the agent follows the #891 brief's ranges (a Read hit a
+range in 6 of 8 sessions, 4 of 4 identifier prompts where a range overlaps the gold
+span), but it does not make fewer calls: 3.38 against 3.00 on average, one more read and
+no fewer searches. Both arms cite the gold path in 7 of 8 answers; the line inside the
+gold span is cited in 6 of 8 by each, differently distributed (bg-086 lost, bg-161 won).
+On the 4 plain prompts neither brief's ranges overlap the gold span, so there is
+nothing for the agent to be saved by; on bg-104 the #887 agent answered after a single
+search without reading (gold not read, path and line cited) while the #891 agent
+followed two ranges and read the gold span. Wall time and input tokens are equal within
+noise (17.6 against 18.4 s, 99.6k against 98.0k).

@@ -1,0 +1,178 @@
+{
+ "manifest": {
+  "argv": [
+   "<claude>",
+   "-p",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-hook-events",
+   "--setting-sources",
+   "project,local",
+   "--settings",
+   "<settings>",
+   "--strict-mcp-config",
+   "--disable-slash-commands",
+   "--no-session-persistence",
+   "--permission-mode",
+   "dontAsk",
+   "--tools",
+   "Read,Grep,Glob,Bash",
+   "--allowedTools",
+   "Read,Grep,Glob,Bash",
+   "--disallowedTools",
+   "Edit,Write,NotebookEdit,Agent,Task",
+   "--max-budget-usd",
+   "2"
+  ],
+  "arms": {
+   "a887": {
+    "brief": true,
+    "side": "new"
+   },
+   "b891": {
+    "brief": true,
+    "side": "zero"
+   }
+  },
+  "budget_usd": 2.0,
+  "claude": {
+   "path": "~/.local/bin/claude",
+   "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+   "version": "2.1.295 (Claude Code)"
+  },
+  "concurrency": 4,
+  "effort_flag": null,
+  "ends": [
+   {
+    "binary_hashes_end": {
+     "new": "ac2dc892f43c1f06919c5cefc75300d3b2f9b50270c2004b2e6448270b3c21ea",
+     "zero": "8bea492a9e84a975f64e8fe83ff0064498f5d9a3f831de89ad10456dfa898880"
+    },
+    "elapsed_s": 80,
+    "ended": "2026-10-10T15:15:07Z",
+    "fixtures_end": {
+     "new": [
+      "85bede7d9a3c4e385e0a2045241a6466efbd8cbd",
+      "8b95943aa1bd077f1690c3f3d7aa07283e75b97c",
+      ""
+     ],
+     "zero": [
+      "85bede7d9a3c4e385e0a2045241a6466efbd8cbd",
+      "8b95943aa1bd077f1690c3f3d7aa07283e75b97c",
+      ""
+     ]
+    },
+    "load_end": [
+     3.44,
+     7.28,
+     10.16
+    ],
+    "stopped": null
+   }
+  ],
+  "env_kept": [
+   "HOME",
+   "USER",
+   "LOGNAME",
+   "SHELL",
+   "TMPDIR",
+   "LANG",
+   "LC_ALL",
+   "LC_CTYPE",
+   "TERM",
+   "TZ",
+   "__CF_USER_TEXT_ENCODING",
+   "NODE_USE_SYSTEM_CA"
+  ],
+  "env_set": [
+   "PATH (side bin first)",
+   "DISABLE_AUTOUPDATER=1",
+   "PIXEL_DAEMON_AUTO_START=0",
+   "PIXEL_BRIEF=0 (off arm only)"
+  ],
+  "fixture_sha": "85bede7d9a3c4e385e0a2045241a6466efbd8cbd",
+  "hook": "'<binary-of-the-side>' run-hook task-event --provider claude --event prompt-submit",
+  "machine": {
+   "cpus": 16,
+   "load_start": [
+    4.41,
+    8.58,
+    10.86
+   ],
+   "ollaya_warm": false,
+   "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+   "python": "3.14.7"
+  },
+  "max_utilization": 0.9,
+  "model_flag": null,
+  "prompt_set_sha256": "bc6ac042d64b1c96c56d1c83b4052853e0947a3dd7ca0c9b2b655e6f036276ad",
+  "prompts": {
+   "off_topic": [],
+   "on_topic": [
+    "bg-032",
+    "bg-120",
+    "bg-161",
+    "bg-086",
+    "bg-104",
+    "bg-094",
+    "bg-211",
+    "bg-073"
+   ]
+  },
+  "protocol": "docs/bench/brief-ab.md",
+  "repo_dirty": true,
+  "repo_head": "26d578a37ff0afb6d560e7f9c4141979abd0ea0d",
+  "reps": 1,
+  "run_id": "smoke-887-891",
+  "script": "scripts/ab-brief-live.py",
+  "script_sha256": "9e5c060c57701c3d080d386e295e41abe4a43aa922db3c719f0d7fff42b21bd1",
+  "seed": 883,
+  "select_seed": "brief-ab-883",
+  "sides": {
+   "new": {
+    "binary_sha256": "ac2dc892f43c1f06919c5cefc75300d3b2f9b50270c2004b2e6448270b3c21ea",
+    "commit": "44bbaaac9f88609070df363fb8a4886ecbd1b66e",
+    "fixture": "$WORK/new/pixel",
+    "fixture_head": "85bede7d9a3c4e385e0a2045241a6466efbd8cbd",
+    "fixture_tree": "8b95943aa1bd077f1690c3f3d7aa07283e75b97c",
+    "set_up": "2026-10-10T15:12:16Z",
+    "version": "pixel 0.7.1",
+    "warm_calls": 8
+   },
+   "zero": {
+    "binary_sha256": "8bea492a9e84a975f64e8fe83ff0064498f5d9a3f831de89ad10456dfa898880",
+    "commit": "1cfc4b1edb23ff774f0cc7d999173e0ecc2d8907",
+    "fixture": "$WORK/zero/pixel",
+    "fixture_head": "85bede7d9a3c4e385e0a2045241a6466efbd8cbd",
+    "fixture_tree": "8b95943aa1bd077f1690c3f3d7aa07283e75b97c",
+    "set_up": "2026-10-10T15:12:34Z",
+    "version": "pixel 0.7.1",
+    "warm_calls": 6
+   }
+  },
+  "split": "test",
+  "started": "2026-10-10T15:13:47Z",
+  "timeout_s": 900
+ },
+ "spans_sha256": "ea0348e58272ad888a3b45645b469b5607f50b54fa7159cebadd98a853b37e6b",
+ "summary": {"a887/all":{"brief_fired":0.875,"brief_range_overlaps_gold":0.0,"calls":3,"cites_gold_line":0.75,"cites_gold_path":0.875,"cost_usd":0.26,"input_total":98005.375,"output_tokens":1349.25,"read_hits_gold":0.875,"read_hits_range":0.0,"read_hits_range_ranged":0.0,"reads":1.75,"search":1.25,"sessions":8,"wall_s":18.4},"a887/identifier":{"brief_fired":1.0,"brief_range_overlaps_gold":0.0,"calls":2,"cites_gold_line":1.0,"cites_gold_path":1.0,"cost_usd":0.22,"input_total":59306.75,"output_tokens":1077.75,"read_hits_gold":0.75,"read_hits_range":0.0,"read_hits_range_ranged":0.0,"reads":1.5,"search":0.5,"sessions":4,"wall_s":13.385},"a887/plain":{"brief_fired":0.75,"brief_range_overlaps_gold":0.0,"calls":4,"cites_gold_line":0.5,"cites_gold_path":0.75,"cost_usd":0.301,"input_total":136704,"output_tokens":1620.75,"read_hits_gold":1.0,"read_hits_range":0.0,"read_hits_range_ranged":0.0,"reads":2,"search":2,"sessions":4,"wall_s":23.415},"b891/all":{"brief_fired":0.875,"brief_range_overlaps_gold":0.5,"calls":3.375,"cites_gold_line":0.75,"cites_gold_path":0.875,"cost_usd":0.273,"input_total":99616,"output_tokens":1462.5,"read_hits_gold":1.0,"read_hits_range":0.75,"read_hits_range_ranged":0.75,"reads":2.25,"search":1.125,"sessions":8,"wall_s":17.567},"b891/identifier":{"brief_fired":1.0,"brief_range_overlaps_gold":1.0,"calls":2.5,"cites_gold_line":1.0,"cites_gold_path":1.0,"cost_usd":0.24,"input_total":61470.25,"output_tokens":1239.75,"read_hits_gold":1.0,"read_hits_range":1.0,"read_hits_range_ranged":1.0,"reads":2,"search":0.5,"sessions":4,"wall_s":15.297},"b891/plain":{"brief_fired":0.75,"brief_range_overlaps_gold":0.0,"calls":4.25,"cites_gold_line":0.5,"cites_gold_path":0.75,"cost_usd":0.306,"input_total":137761.75,"output_tokens":1685.25,"read_hits_gold":1.0,"read_hits_range":0.5,"read_hits_range_ranged":0.5,"reads":2.5,"search":1.75,"sessions":4,"wall_s":19.837}},
+ "sessions": [
+  {"arm":"a887","brief_fired":true,"brief_names_gold_path":true,"brief_range_overlaps_gold":false,"brief_ranges":0,"brief_tier":"high","calls":3,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.35097079999999997,"input_total":106366,"num_turns":4,"ok":true,"output_tokens":1560,"problems":[],"prompt_id":"bg-086","read_hits_gold":true,"read_hits_range":false,"read_hits_range_ranged":false,"reads":1,"rep":1,"search":2,"type":"plain","wall_s":18.12},
+  {"arm":"b891","brief_fired":true,"brief_names_gold_path":true,"brief_range_overlaps_gold":false,"brief_ranges":3,"brief_tier":"medium","calls":3,"cites_gold_line":false,"cites_gold_path":true,"cost_usd":0.349101,"input_total":106363,"num_turns":4,"ok":true,"output_tokens":1511,"problems":[],"prompt_id":"bg-086","read_hits_gold":true,"read_hits_range":true,"read_hits_range_ranged":true,"reads":2,"rep":1,"search":1,"type":"plain","wall_s":17.36},
+  {"arm":"b891","brief_fired":true,"brief_names_gold_path":true,"brief_range_overlaps_gold":true,"brief_ranges":1,"brief_tier":null,"calls":2,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.2298692,"input_total":52502,"num_turns":3,"ok":true,"output_tokens":745,"problems":[],"prompt_id":"bg-094","read_hits_gold":true,"read_hits_range":true,"read_hits_range_ranged":true,"reads":2,"rep":1,"search":0,"type":"identifier","wall_s":12.7},
+  {"arm":"a887","brief_fired":true,"brief_names_gold_path":true,"brief_range_overlaps_gold":false,"brief_ranges":0,"brief_tier":null,"calls":2,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.2294542,"input_total":52386,"num_turns":3,"ok":true,"output_tokens":757,"problems":[],"prompt_id":"bg-094","read_hits_gold":true,"read_hits_range":false,"read_hits_range_ranged":false,"reads":2,"rep":1,"search":0,"type":"identifier","wall_s":10.67},
+  {"arm":"b891","brief_fired":true,"brief_names_gold_path":true,"brief_range_overlaps_gold":true,"brief_ranges":1,"brief_tier":null,"calls":3,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.2638508,"input_total":88072,"num_turns":4,"ok":true,"output_tokens":1425,"problems":[],"prompt_id":"bg-211","read_hits_gold":true,"read_hits_range":true,"read_hits_range_ranged":true,"reads":2,"rep":1,"search":1,"type":"identifier","wall_s":17.11},
+  {"arm":"a887","brief_fired":true,"brief_names_gold_path":true,"brief_range_overlaps_gold":false,"brief_ranges":0,"brief_tier":null,"calls":3,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.261519,"input_total":87808,"num_turns":4,"ok":true,"output_tokens":1352,"problems":[],"prompt_id":"bg-211","read_hits_gold":true,"read_hits_range":false,"read_hits_range_ranged":false,"reads":2,"rep":1,"search":1,"type":"identifier","wall_s":15.83},
+  {"arm":"b891","brief_fired":true,"brief_names_gold_path":false,"brief_range_overlaps_gold":false,"brief_ranges":3,"brief_tier":"medium","calls":6,"cites_gold_line":false,"cites_gold_path":false,"cost_usd":0.32890800000000003,"input_total":193850,"num_turns":7,"ok":true,"output_tokens":2041,"problems":[],"prompt_id":"bg-032","read_hits_gold":true,"read_hits_range":true,"read_hits_range_ranged":true,"reads":3,"rep":1,"search":3,"type":"plain","wall_s":23.18},
+  {"arm":"a887","brief_fired":true,"brief_names_gold_path":false,"brief_range_overlaps_gold":false,"brief_ranges":0,"brief_tier":"high","calls":6,"cites_gold_line":false,"cites_gold_path":false,"cost_usd":0.32280179999999997,"input_total":217964,"num_turns":7,"ok":true,"output_tokens":1883,"problems":[],"prompt_id":"bg-032","read_hits_gold":true,"read_hits_range":false,"read_hits_range_ranged":false,"reads":3,"rep":1,"search":3,"type":"plain","wall_s":39.74},
+  {"arm":"a887","brief_fired":true,"brief_names_gold_path":true,"brief_range_overlaps_gold":false,"brief_ranges":0,"brief_tier":null,"calls":1,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.1524856,"input_total":44235,"num_turns":2,"ok":true,"output_tokens":706,"problems":[],"prompt_id":"bg-104","read_hits_gold":false,"read_hits_range":false,"read_hits_range_ranged":false,"reads":0,"rep":1,"search":1,"type":"identifier","wall_s":8.42},
+  {"arm":"b891","brief_fired":true,"brief_names_gold_path":true,"brief_range_overlaps_gold":true,"brief_ranges":1,"brief_tier":null,"calls":3,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.2232176,"input_total":52448,"num_turns":4,"ok":true,"output_tokens":973,"problems":[],"prompt_id":"bg-104","read_hits_gold":true,"read_hits_range":true,"read_hits_range_ranged":true,"reads":2,"rep":1,"search":1,"type":"identifier","wall_s":12.1},
+  {"arm":"b891","brief_fired":true,"brief_names_gold_path":false,"brief_range_overlaps_gold":false,"brief_ranges":3,"brief_tier":"medium","calls":3,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.21363639999999998,"input_total":99640,"num_turns":4,"ok":true,"output_tokens":1334,"problems":[],"prompt_id":"bg-161","read_hits_gold":true,"read_hits_range":false,"read_hits_range_ranged":false,"reads":2,"rep":1,"search":1,"type":"plain","wall_s":16.99},
+  {"arm":"a887","brief_fired":true,"brief_names_gold_path":false,"brief_range_overlaps_gold":false,"brief_ranges":0,"brief_tier":"high","calls":2,"cites_gold_line":false,"cites_gold_path":true,"cost_usd":0.1988526,"input_total":71348,"num_turns":3,"ok":true,"output_tokens":1366,"problems":[],"prompt_id":"bg-161","read_hits_gold":true,"read_hits_range":false,"read_hits_range_ranged":false,"reads":1,"rep":1,"search":1,"type":"plain","wall_s":15.66},
+  {"arm":"b891","brief_fired":true,"brief_names_gold_path":true,"brief_range_overlaps_gold":true,"brief_ranges":1,"brief_tier":null,"calls":2,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.2431238,"input_total":52859,"num_turns":3,"ok":true,"output_tokens":1816,"problems":[],"prompt_id":"bg-073","read_hits_gold":true,"read_hits_range":true,"read_hits_range_ranged":true,"reads":2,"rep":1,"search":0,"type":"identifier","wall_s":19.28},
+  {"arm":"a887","brief_fired":true,"brief_names_gold_path":true,"brief_range_overlaps_gold":false,"brief_ranges":0,"brief_tier":null,"calls":2,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.2364698,"input_total":52798,"num_turns":3,"ok":true,"output_tokens":1496,"problems":[],"prompt_id":"bg-073","read_hits_gold":true,"read_hits_range":false,"read_hits_range_ranged":false,"reads":2,"rep":1,"search":0,"type":"identifier","wall_s":18.62},
+  {"arm":"a887","brief_fired":false,"brief_names_gold_path":false,"brief_range_overlaps_gold":false,"brief_ranges":0,"brief_tier":null,"calls":5,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.3296008,"input_total":151138,"num_turns":6,"ok":true,"output_tokens":1674,"problems":[],"prompt_id":"bg-120","read_hits_gold":true,"read_hits_range":false,"read_hits_range_ranged":false,"reads":3,"rep":1,"search":2,"type":"plain","wall_s":20.14},
+  {"arm":"b891","brief_fired":false,"brief_names_gold_path":false,"brief_range_overlaps_gold":false,"brief_ranges":0,"brief_tier":null,"calls":5,"cites_gold_line":true,"cites_gold_path":true,"cost_usd":0.332842,"input_total":151194,"num_turns":6,"ok":true,"output_tokens":1855,"problems":[],"prompt_id":"bg-120","read_hits_gold":true,"read_hits_range":false,"read_hits_range_ranged":false,"reads":3,"rep":1,"search":2,"type":"plain","wall_s":21.82}
+ ]
+}
