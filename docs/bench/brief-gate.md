@@ -169,7 +169,7 @@ text test is for the brief's tag inside a hook attachment (below).
 
 | Counted | What |
 | --- | --- |
-| `native` | Grep, Glob, Read, pi's `read`/`grep`/`find`/`ls`, and Bash calls whose command starts with a search or read (`grep`, `rg`, `ag`, `ack`, `find`, `fd`, `cat`, `bat`, `head`, `tail`, `ls`, `tree`, `nl`, `sed -n`, `git grep`, `git ls-files`), through `rtk`, `cd x &&`, env assignments, `time`, `sh -c`, pipelines (only a pipeline's first command counts: `cargo test \| grep FAIL` filters, it does not search) |
+| `native` | Grep, Glob, Read, pi's `read`/`grep`/`find`/`ls`, and Bash calls whose command starts with a search or read (`grep`, `rg`, `ag`, `ack`, `find`, `fd`, `cat`, `bat`, `head`, `tail`, `ls`, `tree`, `nl`, `sed -n`, `git grep`, `git ls-files`), through `rtk`, `cd x &&`, env assignments, the wrappers that run another command with their options skipped (`timeout -s KILL 5`, `env -i`, `nice -n 10`, `time -p`, `sudo -u bob`, `stdbuf -oL`, `xargs -n1`, `command -p`; `command -v` only looks a command up), `sh -c` / `bash -lc`, pipelines (only a pipeline's first command counts: `cargo test \| grep FAIL` filters, it does not search) |
 | `pixel` | calls to the pixel CLI: its own retrieval, reported apart so a run that swaps `rg` for `pixel search-content` does not look like less work |
 | `delegated` | subagent spawns (`Agent`, `Task`, pi's `subagent`); their exploration is in their own transcripts |
 
