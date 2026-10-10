@@ -112,7 +112,8 @@ struct Chunk {
     symbol: Option<String>,
     snippet: String,
     /// The embedding scaled to unit length, so a cosine is a dot product.
-    vector: Box<[f32]>,
+    /// Shared, so a renumbered vocabulary ([`compact`]) copies no vector.
+    vector: Arc<[f32]>,
     /// `(token id, count)` sorted by id: the chunk as a BM25 document,
     /// filename-stem tokens included.
     terms: Box<[(u32, u32)]>,
@@ -120,8 +121,10 @@ struct Chunk {
     len: u32,
 }
 
-/// The tokens of every chunk, numbered. Append-only across refreshes, so the
-/// ids a reused file carries stay valid.
+/// The tokens of every chunk, numbered. A refresh extends a copy, so the ids
+/// a reused file carries stay valid; the tokens of edited and removed text
+/// stay with them until [`compact`] renumbers the vocabulary from the live
+/// chunks.
 #[derive(Clone, Default)]
 struct Vocab {
     ids: HashMap<Box<str>, u32>,
@@ -266,6 +269,7 @@ impl Resident {
         stats.vector_cache_errors = embedding.vector_cache_errors;
         kept.extend(fresh);
         kept.sort_by(|a, b| a.path.cmp(&b.path));
+        let (kept, vocab) = compact(kept, vocab);
 
         stats.files = kept.len();
         stats.chunks = kept.iter().map(|file| file.chunks.len()).sum();
@@ -539,7 +543,7 @@ fn embed_parsed(
                 end_line: chunk.end_line,
                 symbol: chunk.symbol,
                 snippet: chunk.snippet,
-                vector: vector.into_boxed_slice(),
+                vector: Arc::from(vector),
                 terms: chunk.terms,
                 len: chunk.len,
             });
@@ -558,6 +562,80 @@ fn embed_parsed(
             vector_cache_errors: coverage.vector_cache_errors,
         },
     ))
+}
+
+/// A vocabulary is renumbered once it holds more than this many times the
+/// tokens its chunks use: what edited and removed text left behind then
+/// costs at most as much as the live tokens, however long the index lives.
+const VOCAB_SLACK: usize = 2;
+
+/// Whether a vocabulary of `held` tokens, `used` of them by live chunks,
+/// is to be renumbered ([`VOCAB_SLACK`]).
+fn is_sparse(held: usize, used: usize) -> bool {
+    held > used * VOCAB_SLACK
+}
+
+/// `files` and `vocab` as they are, or, when the vocabulary is sparse
+/// ([`is_sparse`]), renumbered to the tokens the chunks use. New ids keep
+/// the order of the old ones, so every chunk's terms stay sorted; vectors
+/// are shared, not copied. Ranking is unchanged: BM25 reads counts, not ids.
+fn compact(files: Vec<Arc<FileChunks>>, vocab: Vocab) -> (Vec<Arc<FileChunks>>, Vocab) {
+    let mut live = vec![false; vocab.ids.len()];
+    for chunk in files.iter().flat_map(|file| &file.chunks) {
+        for &(id, _) in &chunk.terms {
+            live[id as usize] = true;
+        }
+    }
+    let used = live.iter().filter(|is_live| **is_live).count();
+    if !is_sparse(live.len(), used) {
+        return (files, vocab);
+    }
+    let mut renumbered: Vec<Option<u32>> = vec![None; live.len()];
+    for (new, (old, _)) in live
+        .iter()
+        .enumerate()
+        .filter(|(_, is_live)| **is_live)
+        .enumerate()
+    {
+        renumbered[old] = Some(u32::try_from(new).expect("fewer than 2^32 distinct tokens"));
+    }
+    let ids = vocab
+        .ids
+        .into_iter()
+        .filter_map(|(token, old)| renumbered[old as usize].map(|new| (token, new)))
+        .collect();
+    let files = files
+        .iter()
+        .map(|file| {
+            Arc::new(FileChunks {
+                path: file.path.clone(),
+                hash: file.hash,
+                chunks: file
+                    .chunks
+                    .iter()
+                    .map(|chunk| Chunk {
+                        start_line: chunk.start_line,
+                        end_line: chunk.end_line,
+                        symbol: chunk.symbol.clone(),
+                        snippet: chunk.snippet.clone(),
+                        vector: Arc::clone(&chunk.vector),
+                        terms: chunk
+                            .terms
+                            .iter()
+                            .map(|&(old, count)| {
+                                (
+                                    renumbered[old as usize].expect("a live token was renumbered"),
+                                    count,
+                                )
+                            })
+                            .collect(),
+                        len: chunk.len,
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+    (files, Vocab { ids })
 }
 
 /// Scale `vector` to unit length; a zero vector is left as it is.
@@ -1151,6 +1229,94 @@ mod tests {
         let mut copy = vocab.clone();
         assert_eq!(copy.intern("gamma".into()), 2);
         assert_eq!(vocab.get("gamma"), None, "a refresh extends a copy");
+    }
+
+    /// The distinct tokens the chunks of `resident` use.
+    fn live_tokens(resident: &Resident) -> usize {
+        resident
+            .files
+            .iter()
+            .flat_map(|file| &file.chunks)
+            .flat_map(|chunk| chunk.terms.iter().map(|&(id, _)| id))
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
+    /// Edited-away text leaves its tokens behind only until they outnumber
+    /// the live ones: across any number of refreshes the vocabulary holds at
+    /// most twice the tokens the chunks use, and the renumbered index ranks
+    /// as a fresh build does, to the bit.
+    #[test]
+    fn build_should_keep_the_vocabulary_within_twice_the_live_tokens_across_refreshes() {
+        let dir = billing_tree();
+        let (mut resident, _) = build(dir.path(), None, "fixture-a", VectorCache::Disabled);
+        let mut renumbered = 0;
+        for round in 0..40 {
+            write(
+                dir.path(),
+                "src/weather.rs",
+                &function(
+                    &format!("Forecast storm{round} gale{round} hail{round} sleet{round}"),
+                    &format!("forecast_{round}"),
+                ),
+            );
+            let before = resident.vocab.ids.len();
+            resident = build(
+                dir.path(),
+                Some(&resident),
+                "fixture-a",
+                VectorCache::Disabled,
+            )
+            .0;
+            renumbered += usize::from(resident.vocab.ids.len() < before);
+            assert!(
+                resident.vocab.ids.len() <= 2 * live_tokens(&resident),
+                "round {round}: {} tokens held, {} live",
+                resident.vocab.ids.len(),
+                live_tokens(&resident)
+            );
+        }
+        assert!(renumbered > 0, "the edits made the vocabulary sparse");
+
+        let (fresh, _) = build(dir.path(), None, "fixture-a", VectorCache::Disabled);
+        assert_eq!(fresh.vocab.ids.len(), live_tokens(&fresh));
+        for query in [
+            "storm39 gale39 forecast",
+            "charge the invoice card",
+            "storm3",
+        ] {
+            assert_eq!(
+                search(&resident, query, DEFAULT_LIMIT),
+                search(&fresh, query, DEFAULT_LIMIT),
+                "{query}"
+            );
+        }
+    }
+
+    /// A refresh that leaves the vocabulary dense renumbers nothing: the
+    /// unchanged files are the previous index's, not copies.
+    #[test]
+    fn build_should_share_unchanged_files_while_the_vocabulary_is_dense() {
+        let dir = billing_tree();
+        let (first, _) = build(dir.path(), None, "fixture-a", VectorCache::Disabled);
+        let (second, _) = build(dir.path(), Some(&first), "fixture-a", VectorCache::Disabled);
+        assert_eq!(second.files.len(), first.files.len());
+        assert!(
+            first
+                .files
+                .iter()
+                .zip(&second.files)
+                .all(|(a, b)| Arc::ptr_eq(a, b))
+        );
+    }
+
+    #[test]
+    fn is_sparse_should_hold_above_twice_the_live_tokens_only() {
+        assert!(!is_sparse(5, 3));
+        assert!(!is_sparse(6, 3), "exactly twice is dense");
+        assert!(is_sparse(7, 3));
+        assert!(is_sparse(1, 0));
+        assert!(!is_sparse(0, 0));
     }
 
     /// The stats count what is held and its footprint grows with it.

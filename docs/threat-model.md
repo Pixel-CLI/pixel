@@ -102,7 +102,9 @@ resident code index (ARCHITECTURE.md, "Daemon and wire contract"). A request
 reads no file, embeds one question and starts no download; the index is built
 on one background thread from the files `search-meaning` would read, under its
 caps (`RESIDENT_MAX_FILES`, 512 KiB per file), and never from a path
-`credential_path` names. A same-user client can make the daemon read and
+`credential_path` names. Repeated edits do not grow it for the daemon's
+lifetime: a rebuild renumbers the token vocabulary from the live chunks once
+the tokens of edited-away text outnumber them (`VOCAB_SLACK`). A same-user client can make the daemon read and
 embed the repository by sending it, which it could do with `search`.
 
 ### 3.3 Installed hooks (B2, B3, B5)
