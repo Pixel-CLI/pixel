@@ -211,6 +211,11 @@ def measure(dump, rule, common_words):
             hit_returned += bool(returned & set(expected))
             hit_structural += bool(structural & set(expected))
             hit_rows[row["id"]] = bool(returned & set(expected))
+    if len(on_scores) < 2 or len(off_scores) < 2:
+        # Every class mean, d' (a sample variance) and the TPR divide by
+        # these counts: name the split instead of a ZeroDivisionError.
+        sys.exit(f"{rule.name}: the split needs at least two on-topic and two "
+                 f"off-topic prompts, got {len(on_scores)} and {len(off_scores)}")
     return {
         "rule": rule.name,
         "rows": rows,

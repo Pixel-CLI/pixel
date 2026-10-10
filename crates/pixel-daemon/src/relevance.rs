@@ -683,6 +683,14 @@ fn gather(
             continue;
         }
         for synonym in synonyms {
+            // A form already probed (a task keyword, or a synonym an earlier
+            // keyword shares) has a known answer: reading it costs no probe.
+            if probes.probed.contains(synonym) {
+                if probes.hits.contains_key(synonym) {
+                    break;
+                }
+                continue;
+            }
             if spent == RELEVANCE_EXPANSION_PROBES {
                 left_without.push(keyword.clone());
                 break;
@@ -717,7 +725,8 @@ fn gather(
 /// the block is the same whether or not a ranking ran first. A keyword with
 /// no match as typed gets its thesaurus synonyms probed in thesaurus order,
 /// until one has a content match, within [`RELEVANCE_EXPANSION_PROBES`] probes
-/// for the whole task; the cap names the keywords left without.
+/// for the whole task (a synonym already probed, as a keyword or for an
+/// earlier keyword, costs none); the cap names the keywords left without.
 ///
 /// # Errors
 ///
@@ -2713,6 +2722,36 @@ mod tests {
             relevance.caps,
             ["synonym probes capped at 6: not every synonym of 'ajouter', 'supprimer' was probed"]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn relevance_on_should_spend_no_synonym_probe_on_a_form_already_probed() {
+        // `profil` and `compte` share their three synonyms (profile, account,
+        // user), none in the repository. Probing them again for `compte`
+        // would spend the cap of six before `connexion` reached `login`.
+        let root = repo("on-shared", LOGIN_REPO);
+        let (index, graph) = open(&root);
+        let relevance = relevance_on(&index, Some(&graph), "profil compte connexion").unwrap();
+        for unmatched in ["profil", "compte"] {
+            assert_eq!(
+                evidence(&relevance, unmatched).via_expansion,
+                None,
+                "{unmatched}"
+            );
+        }
+        assert_eq!(
+            evidence(&relevance, "connexion").via_expansion.as_deref(),
+            Some("login")
+        );
+        assert!(relevance.caps.is_empty(), "{:?}", relevance.caps);
+
+        // `connexion` finds `login` (1 probe); `authentification` misses
+        // `auth` (2) and stops at `login`, already found, without probing
+        // `authentication`; `corriger` then has the four probes it needs.
+        let relevance =
+            relevance_on(&index, Some(&graph), "connexion authentification corriger").unwrap();
+        assert!(relevance.caps.is_empty(), "{:?}", relevance.caps);
         let _ = std::fs::remove_dir_all(&root);
     }
 
