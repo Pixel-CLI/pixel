@@ -489,7 +489,7 @@ def problems_of(row, result, brief_on):
 
 SEARCH_VERBS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "fdfind", "ls", "tree"}
 READ_VERBS = {"cat", "bat", "head", "tail", "less", "more", "nl"}
-GIT_SEARCH, GIT_READ = {"grep", "ls-files"}, {"cat-file"}  # excavation-count's GIT_EXPLORE
+GIT_SEARCH, GIT_READ = {"grep", "ls-files", "ls-tree"}, {"cat-file"}  # split excavation-count's GIT_EXPLORE
 NUMERIC_ARG = re.compile(r"^[\d,]+[a-z]?$")
 REF_KEYS = ("ref_search", "ref_reads_brief", "ref_reads_other", "ref_reads", "ref_reads_expected", "ref_reads_unexpected",
             "ref_first_read_idx", "ref_reached", "output_tokens", "num_turns")
@@ -1527,12 +1527,16 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(report["noise"]["on-topic"], 0.71)
         self.assertIn("native mean", render(report))
 
+    def test_the_git_split_covers_the_counter_vocabulary(self):
+        self.assertEqual(GIT_SEARCH | GIT_READ, EXC.GIT_EXPLORE)
+
     def test_bash_calls_are_split_into_searches_and_reads(self):
         roots = ["/private/w/fx"]
         cases = [("Grep", {"pattern": "x"}, ("search", set())), ("Glob", {"pattern": "*.rs"}, ("search", set())),
                  ("Bash", {"command": "rg -n foo crates | head"}, ("search", set())),
                  ("Bash", {"command": "ls -la crates/pixel"}, ("search", set())),
                  ("Bash", {"command": "git grep -n foo"}, ("search", set())),
+                 ("Bash", {"command": "bash -lc 'git ls-tree HEAD'"}, ("search", set())),
                  ("Bash", {"command": "rg foo && cat crates/a.rs"}, ("search", set())),
                  ("Bash", {"command": "cat crates/a.rs"}, ("read", {"crates/a.rs"})),
                  ("Bash", {"command": "sed -n '1,50p' ./crates/a.rs"}, ("read", {"crates/a.rs"})),
