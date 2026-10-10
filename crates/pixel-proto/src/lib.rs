@@ -18,6 +18,7 @@ pub mod error;
 pub mod evaluate;
 pub mod evidence;
 pub mod facts;
+pub mod meaning;
 pub mod op;
 pub mod query;
 pub mod recovery;
@@ -29,7 +30,11 @@ pub use envelope::{ENVELOPE_PROTOCOL_VERSION, Envelope};
 pub use epistemics::Epistemics;
 pub use error::{ErrorCode, PixelError};
 pub use evidence::{CapHit, EvidenceBasis, SourceCoverage, SourceEpistemics};
-pub use facts::{TargetsFactsInputs, TargetsFactsResult, TargetsFactsUnavailableReason};
+pub use facts::{
+    CoFile, KeywordEvidence, Relevance, TargetsFactsInputs, TargetsFactsResult,
+    TargetsFactsUnavailableReason,
+};
+pub use meaning::{MeaningHit, MeaningPool, MeaningResult, MeaningUnavailableReason};
 pub use op::Op;
 pub use query::{QueryKind, QueryPlan, QueryResult, QueryStatus, compile_query};
 pub use recovery::{

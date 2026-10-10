@@ -11,6 +11,7 @@
 
 pub mod ask;
 pub mod code_chunks;
+pub mod code_resident;
 pub mod code_search;
 pub mod code_vectors;
 pub mod embed;

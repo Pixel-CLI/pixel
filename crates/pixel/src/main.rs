@@ -5,6 +5,7 @@
 //! per-root daemon over its Unix socket when one is up, else in-process.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -371,6 +372,10 @@ enum Command {
         prompt: String,
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Print the decision (signal, gate, score, judge, cost) and the
+        /// rendered brief as one JSON object, also when no brief was made.
+        #[arg(long)]
+        json: bool,
     },
     /// Build a deterministic, bounded execution brief from scope-task evidence.
     ExecutionBrief {
@@ -2015,6 +2020,11 @@ enum DaemonCmd {
         path: PathBuf,
         #[arg(long)]
         foreground: bool,
+        /// Once the daemon answers, ask it a question so its resident
+        /// `meaning` vectors start building: what the hooks pass, because a
+        /// daemon nobody asks keeps them cold.
+        #[arg(long, hide = true, conflicts_with = "foreground")]
+        warm_meaning: bool,
     },
     /// Stop a running daemon.
     Stop {
@@ -2108,23 +2118,15 @@ fn auto_start_daemon(root: &Path, req: &Request) -> Result<Response, InProcessRe
         // background and retry once. This makes the fast path transparent —
         // no need for the user to run `pixel daemon start` manually.
         // `PIXEL_DAEMON_AUTO_START=0` disables auto-start.
-        if !config_cmd::feature_enabled(Some(root), "daemon_auto_start", "PIXEL_DAEMON_AUTO_START")
-        {
+        if !config_cmd::feature_enabled(
+            Some(root),
+            config_cmd::DAEMON_AUTO_START_FEATURE,
+            config_cmd::DAEMON_AUTO_START_ENV,
+        ) {
             return Err(InProcessReason::AutoStartDisabled);
         }
-        let exe = std::env::current_exe().map_err(|_| InProcessReason::StartFailed)?;
         let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        let mut command = std::process::Command::new(exe);
-        command
-            .arg("daemon")
-            .arg("start")
-            .arg(&abs)
-            .arg("--foreground")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0);
-        command.spawn().map_err(|_| InProcessReason::StartFailed)?;
+        spawn_daemon(&abs).map_err(|_| InProcessReason::StartFailed)?;
         // Wait up to 5s for the socket to come up.
         for _ in 0..50 {
             if let DaemonRoute::Served(resp) = try_daemon_inner(root, req) {
@@ -2134,6 +2136,68 @@ fn auto_start_daemon(root: &Path, req: &Request) -> Result<Response, InProcessRe
         }
         Err(InProcessReason::StartTimedOut)
     }
+}
+
+/// Run this binary with `args` as a background process of its own: no
+/// standard streams, and a process group of its own so a terminal or an agent
+/// supervisor that tears down the caller's group leaves it alone.
+fn spawn_detached(args: &[OsString]) -> std::io::Result<()> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0);
+    command.spawn().map(drop)
+}
+
+/// The arguments that run the daemon of `root` in the foreground.
+fn daemon_args(root: &Path) -> Vec<OsString> {
+    vec![
+        "daemon".into(),
+        "start".into(),
+        root.as_os_str().to_owned(),
+        "--foreground".into(),
+    ]
+}
+
+/// The arguments of the start process the hooks launch: `pixel daemon start`
+/// for `root` in the background, which retires a stale daemon, waits for the
+/// new one and asks it the question that wakes its `meaning` vectors.
+fn daemon_warm_args(root: &Path) -> Vec<OsString> {
+    vec![
+        "daemon".into(),
+        "start".into(),
+        root.as_os_str().to_owned(),
+        "--warm-meaning".into(),
+    ]
+}
+
+/// Start the daemon of `root` (an absolute path) in the background. The one
+/// spelling of that command: the CLI's auto-start, `pixel daemon start` and
+/// the hooks all come here.
+fn spawn_daemon(root: &Path) -> std::io::Result<()> {
+    spawn_detached(&daemon_args(root))
+}
+
+/// The question that wakes the daemon's `meaning` vectors: any non-empty one
+/// does, and the answer (`unavailable` while they build) is not read.
+const MEANING_WARM_QUERY: &str = "how is this repository organised";
+
+/// Ask the daemon of `root` one `meaning` question so its resident vectors
+/// start building. Best effort: a daemon that is gone, slow or without the
+/// model changes nothing.
+fn kick_meaning(root: &Path) {
+    let _ = open_daemon_stream(root).and_then(|mut stream| {
+        roundtrip(
+            &mut stream,
+            &Request::Meaning {
+                query: MEANING_WARM_QUERY.to_string(),
+                limit: Some(1),
+            },
+        )
+    });
 }
 
 fn open_daemon_stream(root: &Path) -> Option<UnixStream> {
@@ -2152,7 +2216,7 @@ fn open_daemon_stream(root: &Path) -> Option<UnixStream> {
 }
 
 /// What answers on a root's daemon socket, from this CLI's point of view.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DaemonProbe {
     /// Nothing answers a Ping.
     Absent,
@@ -2302,7 +2366,14 @@ fn execute_targets_facts_read_only(
     if probe_daemon(&root) != DaemonProbe::Current {
         return unavailable();
     }
-    match send_to_daemon(&root, &Request::TargetsFacts { task, limit }) {
+    match send_to_daemon(
+        &root,
+        &Request::TargetsFacts {
+            task,
+            limit,
+            relevance_only: false,
+        },
+    ) {
         DaemonRoute::Served(response) => unwrap_response(*response).or_else(|_| unavailable()),
         DaemonRoute::Absent | DaemonRoute::Declined => unavailable(),
     }
@@ -3931,23 +4002,10 @@ fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), Stri
         DaemonProbe::Stale => retire_stale_daemon_within(&path, STALE_DAEMON_EXIT_CAP),
         DaemonProbe::Absent => {}
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let abs = path
         .canonicalize()
         .map_err(|e| format!("bad path {}: {e}", path.display()))?;
-    let mut command = std::process::Command::new(exe);
-    command
-        .arg("daemon")
-        .arg("start")
-        .arg(&abs)
-        .arg("--foreground")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    // Detach from the caller's process group so terminal/agent supervisors
-    // do not tear down the daemon when the short-lived start command exits.
-    command.process_group(0);
-    command.spawn().map_err(|e| format!("spawn daemon: {e}"))?;
+    spawn_daemon(&abs).map_err(|e| format!("spawn daemon: {e}"))?;
     // Wait for the socket to come up (index build can take a moment).
     for _ in 0..100 {
         if daemon_ping(&abs) {
@@ -4790,6 +4848,13 @@ fn run() -> Result<(), String> {
                     ..
                 }
             }
+            // The start a hook launches is not an operation of the user's.
+            | Command::Daemon {
+                cmd: DaemonCmd::Start {
+                    warm_meaning: true,
+                    ..
+                }
+            }
             | Command::ListErrors {
                 cmd: sniper_cmd::SniperCmd::Run { .. }
             }
@@ -5242,11 +5307,24 @@ fn run_command(
             }
             Ok(())
         }
-        Command::Brief { prompt, path } => {
+        Command::Brief { prompt, path, json } => {
             let root = discover_root(&path)?;
-            let brief = execution_brief::chain::start(&prompt, &root)
-                .and_then(execution_brief::chain::Pending::finish);
-            if let Some(text) = brief {
+            if json {
+                let finished = execution_brief::chain::try_start(&prompt, &root)
+                    .map(execution_brief::chain::Pending::finish_with_record);
+                let (record, text) = match finished {
+                    Ok(finished) => (finished.record, finished.text),
+                    Err(declined) => (
+                        execution_brief::chain::declined_record(declined, &prompt),
+                        None,
+                    ),
+                };
+                let mut decision = record.to_json();
+                decision["brief"] = text.map_or(Value::Null, Value::from);
+                write_stdout(&format!("{decision}\n"))
+            } else if let Some(text) = execution_brief::chain::start(&prompt, &root)
+                .and_then(execution_brief::chain::Pending::finish)
+            {
                 write_stdout(&text)
             } else {
                 Ok(())
@@ -6153,8 +6231,17 @@ fn run_command(
             Ok(())
         }
         Command::Daemon { cmd } => match cmd {
-            DaemonCmd::Start { path, foreground } => {
-                daemon_start(discover_root(&path)?, foreground, false)
+            DaemonCmd::Start {
+                path,
+                foreground,
+                warm_meaning,
+            } => {
+                let root = discover_root(&path)?;
+                daemon_start(root.clone(), foreground, false)?;
+                if warm_meaning {
+                    kick_meaning(&root);
+                }
+                Ok(())
             }
             DaemonCmd::Stop { path } => daemon_stop(discover_root(&path)?),
             DaemonCmd::Status { path } => daemon_status(discover_root(&path)?),

@@ -70,8 +70,28 @@ pub enum Op {
     /// Deterministic prompt-start file facts from already-published indexes.
     /// This operation never builds or refreshes either index; unavailable or
     /// stale inputs are reported in a typed successful result.
+    ///
+    /// With `relevance_only` the answer carries `facts.relevance` and the
+    /// caps that bound it, and no target list: the same freshness gate, the
+    /// same `inputs`, the same block as the full answer, without ranking
+    /// targets. A daemon that predates the flag ignores it and answers in
+    /// full, so a reader checks `facts.relevance`, not the flag.
     TargetsFacts {
         task: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        relevance_only: bool,
+    },
+    /// Natural-language retrieval over the code chunks whose embeddings stay
+    /// resident in the daemon: ranked leads (file, lines, symbol, snippet),
+    /// never a verdict on relevance. Answers `unavailable` with a reason
+    /// instead of waiting while the vectors are cold, stale or rebuilding
+    /// (a background build is started), so a deadline-bounded caller falls
+    /// back. Never downloads the model.
+    Meaning {
+        query: String,
+        /// Leads returned; the daemon's default when absent, capped.
         #[serde(default)]
         limit: Option<usize>,
     },
@@ -424,6 +444,7 @@ impl Op {
             Op::Search { .. } => "search",
             Op::Targets { .. } => "targets",
             Op::TargetsFacts { .. } => "targets_facts",
+            Op::Meaning { .. } => "meaning",
             Op::Symbol { .. } => "symbol",
             Op::Skeleton { .. } => "skeleton",
             Op::Context { .. } => "context",
@@ -481,6 +502,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "search",
     "targets",
     "targets_facts",
+    "meaning",
     "symbol",
     "skeleton",
     "context",
@@ -527,6 +549,12 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
 /// Describes what Pixel offers without directing the agent: native tools
 /// stay the default, and Pixel is one option among them.
 pub const SESSION_USAGE: &str = "pixel offers deterministic repository retrieval and git commands: `pixel search-content`, `pixel find-code`, `pixel impact <symbol>` for callers and blast radius, `pixel dig-history` for past code, and `pixel what-changed`. Use one when it answers a question faster than your native tools; native search and reads remain available. `pixel --help` lists every command.";
+
+/// The `skip_serializing_if` predicate for a flag whose absence means false;
+/// serde hands the field by reference.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[cfg(test)]
 mod tests {
@@ -587,6 +615,7 @@ mod tests {
         let op = Op::TargetsFacts {
             task: "fix login flow".into(),
             limit: Some(12),
+            relevance_only: false,
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(
@@ -605,7 +634,61 @@ mod tests {
             Op::TargetsFacts {
                 task: "fix login flow".into(),
                 limit: None,
+                relevance_only: false,
             }
+        );
+    }
+
+    /// `limit` is optional on the wire; the daemon applies its default.
+    #[test]
+    fn meaning_round_trips_with_defaulted_limit() {
+        let op = Op::Meaning {
+            query: "how is the index refreshed".into(),
+            limit: Some(5),
+        };
+        let value = serde_json::to_value(&op).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "meaning", "query": "how is the index refreshed", "limit": 5})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), op);
+
+        let defaulted: Op =
+            serde_json::from_value(json!({"op": "meaning", "query": "refresh"})).unwrap();
+        assert_eq!(
+            defaulted,
+            Op::Meaning {
+                query: "refresh".into(),
+                limit: None,
+            }
+        );
+    }
+
+    #[test]
+    fn targets_facts_names_relevance_only_on_the_wire_only_when_asked() {
+        let asked = Op::TargetsFacts {
+            task: "how does install work".into(),
+            limit: Some(8),
+            relevance_only: true,
+        };
+        let value = serde_json::to_value(&asked).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "targets_facts", "task": "how does install work", "limit": 8, "relevance_only": true})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), asked);
+
+        // A request that does not ask is the request an older daemon knows.
+        let plain = Op::TargetsFacts {
+            task: "how does install work".into(),
+            limit: Some(8),
+            relevance_only: false,
+        };
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("relevance_only")
+                .is_none()
         );
     }
 
@@ -838,8 +921,16 @@ mod tests {
                 Op::TargetsFacts {
                     task: "".into(),
                     limit: None,
+                    relevance_only: false,
                 },
                 "targets_facts",
+            ),
+            (
+                Op::Meaning {
+                    query: "".into(),
+                    limit: None,
+                },
+                "meaning",
             ),
             (Op::Symbol { name: "".into() }, "symbol"),
             (Op::Skeleton { file: "".into() }, "skeleton"),
@@ -1101,6 +1192,7 @@ mod tests {
             "search",
             "targets",
             "targets_facts",
+            "meaning",
             "symbol",
             "skeleton",
             "context",

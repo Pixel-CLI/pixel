@@ -58,7 +58,9 @@ const TEST_WORDS: &[&str] = &[
     "assertion",
     "assertions",
 ];
-/// Words that ask about configuration, installation or hooks.
+/// Words that explicitly ask about a setting: a configuration, an
+/// environment variable, a flag or option, a default value. A topic that
+/// merely sits near configuration (`install`, `hook`) does not route here.
 const CONFIG_WORDS: &[&str] = &[
     "config",
     "configs",
@@ -67,18 +69,23 @@ const CONFIG_WORDS: &[&str] = &[
     "configures",
     "configuring",
     "configuration",
-    "install",
-    "installs",
-    "installed",
-    "installing",
-    "installation",
-    "hook",
-    "hooks",
     "setting",
     "settings",
-    "setup",
     "env",
     "environment",
+    "flag",
+    "flags",
+    "option",
+    "options",
+    "default",
+    "defaults",
+];
+/// Flow words a plain-language question may carry without naming a symbol:
+/// the narrower list, since `path`, `through` and the noun `flow` ("the
+/// login flow") are everyday words.
+const PROSE_FLOW_WORDS: &[&str] = &[
+    "reach", "reaches", "reached", "reaching", "call", "calls", "called", "calling", "caller",
+    "callers", "callee", "callees", "trace", "traces", "traced", "tracing",
 ];
 /// Words that ask why code exists or when it arrived.
 const RATIONALE_WORDS: &[&str] = &[
@@ -156,8 +163,15 @@ impl QuestionKind {
         // flow word is still a reach question — the route derives the
         // destination from the prose or answers with the endpoint's
         // callers — unless a defect word makes it a bug report.
-        let flow = asks(FLOW_WORDS)
-            && (symbol_anchors >= 2 || (symbol_anchors == 1 && !asks(BUGFIX_WORDS)));
+        // A question that names no symbol still asks for a flow when it says
+        // so in plain words; the chain then borrows the anchor from the
+        // meaning search's best chunk.
+        let flow = (asks(FLOW_WORDS)
+            && (symbol_anchors >= 2 || (symbol_anchors == 1 && !asks(BUGFIX_WORDS))))
+            || (symbol_anchors == 0
+                && asks(PROSE_FLOW_WORDS)
+                && !asks(TEST_WORDS)
+                && !asks(BUGFIX_WORDS));
         if flow {
             Self::Flow
         } else if asks(TEST_WORDS) {
@@ -273,10 +287,19 @@ mod tests {
         );
         for prompt in [
             "how is the hook configured",
-            "why does the install fail",
             "which env setting controls it",
+            "what is the default value of the timeout",
+            "which flag turns the brief off",
         ] {
             assert_eq!(kind_of(prompt), QuestionKind::Config, "{prompt}");
+        }
+        // A topic near configuration is not a question about a setting.
+        for prompt in [
+            "how does install handle existing claude files",
+            "how does the hook decide what to inject",
+            "why does the install fail",
+        ] {
+            assert_ne!(kind_of(prompt), QuestionKind::Config, "{prompt}");
         }
         for prompt in [
             "when was retry_loop introduced",
@@ -288,6 +311,20 @@ mod tests {
         // Tests and config outrank rationale.
         assert_eq!(kind_of("which tests were added when"), QuestionKind::Tests);
         assert_eq!(kind_of("where is fetchUser defined"), QuestionKind::Lookup);
+    }
+
+    #[test]
+    fn heuristic_should_route_a_plain_reach_question_to_flow_without_a_symbol() {
+        for prompt in [
+            "how does the prompt hook reach the brief renderer",
+            "trace what happens when a prompt is submitted",
+            "what calls the watchdog",
+        ] {
+            assert_eq!(kind_of(prompt), QuestionKind::Flow, "{prompt}");
+        }
+        // Tests and defects keep their own routes.
+        assert_eq!(kind_of("which tests call the parser"), QuestionKind::Tests);
+        assert_ne!(kind_of("the call crashes on startup"), QuestionKind::Flow);
     }
 
     #[test]
