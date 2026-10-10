@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
 //! What lets a confident brief be answered from: the search receipt (which
 //! searches ran, over what) and answer-sized excerpts built from the evidence
 //! the chain gathered. Every function here is pure: the chain reads the
