@@ -915,6 +915,11 @@ def check_set(args):
     repo_files = tracked_files(args.repo) if args.repo else None
     if args.repo and not repo_files:
         raise SystemExit(f"{args.repo}: no tracked files (is it a git checkout?)")
+    if args.repo:
+        repo_sha = git_output(args.repo, "rev-parse", "HEAD")
+        if repo_sha != FIXTURE_SHA:
+            print(f"WARNING: {args.repo} HEAD {repo_sha} is not the fixture {FIXTURE_SHA}: "
+                  "expected_files are checked against a different tree", file=sys.stderr)
     problems = validate_rows(rows, repo_files)
     print(json.dumps(summarize_set(rows), sort_keys=True))
     for problem in problems:
