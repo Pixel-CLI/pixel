@@ -68,6 +68,7 @@ mod rescue_cmd;
 mod search_compat;
 mod search_filter;
 mod serve_trace;
+mod setup_cmd;
 mod sniper_cmd;
 mod space_cmd;
 mod task_bridge;
@@ -1231,6 +1232,65 @@ enum Command {
         json: bool,
     },
     // -----------------------------------------------------------------
+    // Setup — the interactive agent/feature wizard
+    // -----------------------------------------------------------------
+    /// Choose which agent CLIs pixel writes for and which features to switch
+    /// on, review every file it would write, then write them.
+    ///
+    /// Writes a managed block (`<!-- pixel:setup:start -->` … `:end -->`) into
+    /// each selected agent's instruction file and stores the settings the
+    /// selected features need. Nothing is written before the confirmation, and
+    /// cancelling writes nothing. Hook files are not touched: `pixel install`
+    /// owns them, and a feature that implies one names that command instead.
+    ///
+    /// ## Examples
+    ///
+    /// Set up this machine:
+    ///
+    /// ```text
+    /// pixel setup
+    /// ```
+    ///
+    /// Set up one repository (its own agents, its own instruction files):
+    ///
+    /// ```text
+    /// pixel setup --repo .
+    /// ```
+    ///
+    /// Print the block the default answers produce, changing nothing:
+    ///
+    /// ```text
+    /// pixel setup --print
+    /// ```
+    Setup {
+        /// Print the block the default answers produce, without prompting or
+        /// writing anything.
+        #[arg(long)]
+        print: bool,
+        /// Set up this repository instead of the machine. Its root is the
+        /// base both the agent detection and every write resolve against.
+        #[arg(long, value_name = "PATH")]
+        repo: Option<PathBuf>,
+        // TEMPORARY (dev-flags) start: three development-only args, removed
+        // before the release. The removal recipe is in `setup_cmd.rs`; the
+        // three lines below and the `dev:` field at the construction site are
+        // the whole command-surface part of it.
+        /// Answer the agent question with 1-based indices into the list
+        /// `pixel setup --help` prints, comma-separated. Temporary.
+        #[arg(long, value_name = "LIST", hide = true)]
+        selected_agents: Option<String>,
+        /// Answer the feature question with 1-based indices into the list
+        /// `pixel setup --help` prints, comma-separated. Temporary.
+        #[arg(long, value_name = "LIST", hide = true)]
+        selected_features: Option<String>,
+        /// Redirect every write under `tests/setup/` in this repository
+        /// instead of a real home or repository, and leave the real global
+        /// configuration alone. Temporary.
+        #[arg(long, hide = true)]
+        dummy_apply: bool,
+        // TEMPORARY (dev-flags) end.
+    },
+    // -----------------------------------------------------------------
     // M5/M6 — install / doctor / migrate / hook
     // -----------------------------------------------------------------
     /// Idempotently deploy agent integrations while preserving native retrieval.
@@ -1257,10 +1317,11 @@ enum Command {
         #[arg(long)]
         repo: Option<PathBuf>,
     },
-    /// Remove everything `pixel install` wrote: managed blocks from
-    /// agent-config files, hook entries from all settings files, hook
-    /// scripts, the Pi impact package, the rule source file, and the
-    /// pixel binary itself. Idempotent: safe to re-run.
+    /// Remove everything `pixel install` and `pixel setup` wrote: managed
+    /// blocks from agent-config files, the `pixel:setup` block from every
+    /// instruction file the wizard owns, hook entries from all settings
+    /// files, hook scripts, the Pi impact package, the rule source file, and
+    /// the pixel binary itself. Idempotent: safe to re-run.
     Uninstall {
         #[arg(long)]
         json: bool,
@@ -6514,6 +6575,24 @@ fn run_command(
         // -------------------------------------------------------------
         // M5/M6 — install / doctor / migrate / hook
         // -------------------------------------------------------------
+        Command::Setup {
+            print,
+            repo,
+            selected_agents,
+            selected_features,
+            dummy_apply,
+        } => setup_cmd::run(setup_cmd::SetupOptions {
+            repo,
+            print,
+            // TEMPORARY (dev-flags): this one field, the three args above and
+            // the three clap args in the `Setup` variant are the whole removal
+            // in the command surface.
+            dev: setup_cmd::DevOptions {
+                selected_agents,
+                selected_features,
+                dummy_apply,
+            },
+        }),
         Command::Install { json, shell, repo } => {
             let is_global_install = repo.is_none();
             let config_root = repo.clone();

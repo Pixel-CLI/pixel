@@ -45,6 +45,23 @@ Homebrew installed: update those with `mise`/`brew`, try a local build with
 
 ## 2. Wire it into your agent
 
+Prefer a guided setup? `pixel setup` asks which of your agent CLIs to write for
+and which pixel features to switch on, shows every file and the exact text it
+would write, and writes nothing until you confirm:
+
+```bash
+pixel setup              # this machine, and every agent it finds
+pixel setup --repo .     # one repository, its own agents and files
+pixel setup --print      # the block the default answers produce, changing nothing
+```
+
+It writes a managed block (`<!-- pixel:setup:start -->` … `:end -->`) into each
+selected agent's instruction file, and stores the settings the features you pick
+need. It does not touch hook files -- `pixel install` owns those, and a feature
+that needs one names that command. `pixel uninstall` removes the block with
+everything else. The files it writes for each agent, for the default answers,
+are checked in under [`tests/setup/.agents/`](../tests/setup/README.md).
+
 `pixel install` deploys no prompt. To give an agent Pixel's full protocol
 anyway, copy
 [`crates/pixel-install/assets/pixel-agent-prompt.md`](../crates/pixel-install/assets/pixel-agent-prompt.md)

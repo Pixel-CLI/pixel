@@ -527,6 +527,56 @@ fn set_classify_enabled_at(path: &Path, enabled: bool) -> Result<(), String> {
     })
 }
 
+/// Store one key in the global configuration, creating the intermediate
+/// mappings it needs. Used by `pixel setup`, which resolves a feature to a key
+/// path and never reads the document back.
+///
+/// A path that is not a mapping is an error rather than an overwrite: the
+/// configuration is the user's, and a key nested under a scalar is a bug in the
+/// caller, not an invitation to replace what is there.
+pub fn set_global_key(key: &[&str], value: Value) -> Result<(), String> {
+    let Some((leaf, parents)) = key.split_last() else {
+        return Err("set_global_key needs a key".into());
+    };
+    let path = global_config_path().ok_or("no HOME for the global config")?;
+    let mut current = crate::config_file::load(&path)?;
+    // Only the *intermediate* components have to be mappings. The leaf is the
+    // key being set, so whatever it holds now is the value this call replaces:
+    // checking it too would refuse to overwrite `brief: true` with `brief:
+    // true`, and a second `pixel setup` run would fail after it had already
+    // written the instruction files.
+    for part in parents {
+        let next = current.get(*part).cloned().unwrap_or(Value::Null);
+        if !next.is_null() && !next.is_object() {
+            return Err(format!(
+                "{}: {part} holds a value, not a mapping, so {}, then {leaf}, cannot be nested under it",
+                path.display(),
+                key.join(".")
+            ));
+        }
+        current = next;
+    }
+    write_doc(&path, |doc| set_key_path(doc, key, value.clone()))
+}
+
+/// Put `value` at `key` in `doc`, creating the mappings along the way. The
+/// caller has checked that every step is a mapping or absent.
+fn set_key_path(doc: &mut Value, key: &[&str], value: Value) {
+    let mut cursor = doc;
+    for (depth, part) in key.iter().enumerate() {
+        if depth + 1 == key.len() {
+            cursor[*part] = value;
+            return;
+        }
+        if !cursor[*part].is_object() {
+            cursor[*part] = json!({});
+        }
+        cursor = cursor
+            .get_mut(*part)
+            .expect("just created or verified as a mapping");
+    }
+}
+
 /// Terminal adapter shared by explicit setup and interactive global installation.
 #[cfg_attr(test, mutants::skip)] // Terminal and provider adapters; draft/save policy tested with injected I/O.
 pub fn setup() -> Result<(), String> {
@@ -2812,6 +2862,78 @@ mod tests {
         assert_eq!(classify_remote_base(), None);
 
         restore_home(saved);
+    }
+    #[test]
+    fn set_global_key_should_create_the_mappings_it_nests_under_and_keep_the_rest() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        write(
+            &home.0.join(".pixel").join("config.yaml"),
+            "metrics: \"off\"\n",
+        );
+
+        set_global_key(&["classify", "enabled"], json!(true)).unwrap();
+        set_global_key(&["brief"], json!(true)).unwrap();
+
+        let doc = crate::config_file::load(&home.0.join(".pixel").join("config.yaml")).unwrap();
+        assert_eq!(doc["classify"]["enabled"], json!(true));
+        assert_eq!(doc["brief"], json!(true));
+        assert_eq!(doc["metrics"], json!("off"), "the rest of the file stays");
+        restore_home(saved_home);
+    }
+
+    #[test]
+    fn set_global_key_should_overwrite_a_leaf_that_already_holds_a_value() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        // The state a second `pixel setup` run meets: `pixel config setup` (or
+        // the first run) already stored every key the wizard is about to set.
+        write(
+            &home.0.join(".pixel").join("config.yaml"),
+            "brief: true\nmetrics: \"on\"\nclassify:\n  enabled: true\n",
+        );
+
+        set_global_key(&["brief"], json!(true)).unwrap();
+        set_global_key(&["metrics"], json!("on")).unwrap();
+        set_global_key(&["classify", "enabled"], json!(true)).unwrap();
+
+        let doc = crate::config_file::load(&home.0.join(".pixel").join("config.yaml")).unwrap();
+        assert_eq!(
+            doc["brief"],
+            json!(true),
+            "a re-run sets the same leaf again"
+        );
+        assert_eq!(doc["metrics"], json!("on"));
+        assert_eq!(doc["classify"]["enabled"], json!(true));
+        restore_home(saved_home);
+    }
+
+    #[test]
+    fn set_global_key_should_refuse_to_nest_under_a_scalar_rather_than_replace_it() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved_home = home_env();
+        point_home(&home.0);
+        write(
+            &home.0.join(".pixel").join("config.yaml"),
+            "classify: \"not-a-mapping\"\n",
+        );
+
+        let err = set_global_key(&["classify", "enabled"], json!(true)).unwrap_err();
+
+        assert!(err.contains("classify"), "{err}");
+        assert!(err.contains("not a mapping"), "{err}");
+        let doc = crate::config_file::load(&home.0.join(".pixel").join("config.yaml")).unwrap();
+        assert_eq!(
+            doc["classify"],
+            json!("not-a-mapping"),
+            "the user's value is not overwritten by a failed write"
+        );
+        restore_home(saved_home);
     }
 }
 

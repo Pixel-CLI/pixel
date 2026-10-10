@@ -123,8 +123,10 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         // 1. Remove shell wrappers from the shell's profile (~/.zshrc,
         //    ~/.bashrc, or fish's ~/.config/fish/conf.d/pixel.fish).
         install::remove_shell_wrappers(&home, options.shell.as_deref(), dry_run)?,
-        // 2. Strip managed blocks from all agent-config Markdown files.
+        // 2. Strip managed blocks from all agent-config Markdown files, and
+        //    the `pixel setup` block from the files the wizard owns.
         strip_agent_configs(&home, dry_run)?,
+        strip_setup_blocks(&home, crate::setup::Scope::Global, dry_run)?,
         // 3. Remove pixel run-hook entries from Claude settings.json + delete hook
         //    scripts from ~/.claude/hooks/.
         remove_claude_hooks(&home, &exe, dry_run)?,
@@ -261,6 +263,7 @@ fn uninstall_project(
         crate::pi_project::remove(repo, dry_run)?,
         crate::warp::retire(repo, dry_run)?,
         crate::pixel_first::uninstall_rules(repo, dry_run)?,
+        strip_setup_blocks(repo, crate::setup::Scope::Repository, dry_run)?,
         backups_step(&find_backups(&project_backup_dirs(repo)), dry_run),
     ];
 
@@ -356,6 +359,66 @@ fn remove_project_claude_guard(repo: &Path, exe: &Path, dry_run: bool) -> Result
 // -------------------------------------------------------------------------
 // Step 1: strip managed blocks from agent-config Markdown files
 // -------------------------------------------------------------------------
+
+/// Remove the `pixel:setup` blocks `pixel setup` wrote, in `base` for
+/// `scope`, from exactly the files its own agent targets name.
+///
+/// The file list comes from [`crate::setup::AgentTarget`] rather than a second
+/// list here: a target added to the wizard has to be removed by the same
+/// uninstall run that installed it, and a copied list is how a block survives
+/// an uninstall.
+fn strip_setup_blocks(
+    base: &Path,
+    scope: crate::setup::Scope,
+    dry_run: bool,
+) -> Result<InstallStep> {
+    let mut targets: Vec<PathBuf> = crate::setup::AgentTarget::ALL
+        .iter()
+        .filter_map(|agent| agent.instruction_path(base, scope))
+        .collect();
+    // The per-agent rule files, where that feature wrote one.
+    targets.extend(crate::setup::rule_files(base));
+    targets.sort();
+    targets.dedup();
+
+    let mut stripped = 0usize;
+    let mut backups: Vec<String> = Vec::new();
+    for path in &targets {
+        let Ok(original) = fs::read_to_string(path) else {
+            continue;
+        };
+        if !original.contains(crate::setup::BLOCK_START) {
+            continue;
+        }
+        let cleaned = crate::setup::strip_block(&original);
+        if cleaned == original {
+            // A malformed block, or a marker only quoted in prose: the strip
+            // is a no-op, and a no-op must not be written or counted as a
+            // repair.
+            continue;
+        }
+        if !dry_run {
+            let bk = config::backup_if_changing(path, cleaned.as_bytes())?;
+            fs::write(path, &cleaned)?;
+            if bk.is_some() {
+                backups.push(path.display().to_string());
+            }
+        }
+        stripped += 1;
+    }
+    let summary = format!("stripped the pixel setup block from {stripped} file(s)");
+    let detail = if backups.is_empty() {
+        None
+    } else {
+        Some(format!("files=[{}]", backups.join(",")))
+    };
+    Ok(InstallStep {
+        id: "setup-blocks".into(),
+        status: CheckStatus::Green,
+        summary: install::dry_run_summary(dry_run, &summary),
+        detail,
+    })
+}
 
 fn strip_agent_configs(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let targets = config::find_agent_configs(home);

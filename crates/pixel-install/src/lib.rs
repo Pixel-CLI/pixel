@@ -31,6 +31,7 @@ mod pi_project;
 mod pixel_first;
 mod repo_git;
 mod routing;
+pub mod setup;
 pub mod uninstall;
 mod warp;
 
@@ -54,6 +55,8 @@ pub enum InstallError {
     UnterminatedManagedBlock,
     #[error("invalid settings.json at {path}: {reason}")]
     InvalidSettings { path: PathBuf, reason: String },
+    #[error("setup: {0}")]
+    Setup(String),
     #[error("unknown doctor check `{0}` — `pixel doctor --list` names every check")]
     UnknownDoctorCheck(String),
     #[error("doctor check `{0}` is both selected by --only and excluded by --skip")]
