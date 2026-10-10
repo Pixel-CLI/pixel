@@ -253,13 +253,15 @@ pub(crate) fn is_test_symbol(name: &str) -> bool {
 }
 
 /// Whether line `at` (1-based) of `source` sits inside a `#[cfg(test)] mod`.
+/// Only an inline module counts: `#[cfg(test)] mod tests;` declares one whose
+/// body lives in another file, so the lines after it are still production.
 pub(crate) fn in_test_module(source: &[String], at: u64) -> bool {
     let end = usize::try_from(at).unwrap_or(usize::MAX).min(source.len());
     (0..end).any(|index| {
         source[index].trim() == "#[cfg(test)]"
             && source.get(index + 1).is_some_and(|next| {
-                let next = next.trim_start();
-                next.starts_with("mod ") || next.starts_with("pub mod ")
+                let next = next.trim();
+                (next.starts_with("mod ") || next.starts_with("pub mod ")) && !next.ends_with(';')
             })
     })
 }
@@ -1011,6 +1013,24 @@ mod tests {
         );
         assert!(!in_test_module(&source, 1));
         assert!(in_test_module(&source, 6));
+    }
+
+    #[test]
+    fn in_test_module_should_not_take_a_declared_test_mod_for_the_lines_after_it() {
+        // `mod tests;` near the top of a lib.rs keeps its body in tests.rs:
+        // the production code below it is not test code.
+        let source = lines(&[
+            "#[cfg(test)]",
+            "mod tests;",
+            "",
+            "pub fn real() {}",
+            "#[cfg(test)]",
+            "pub mod helpers {",
+            "    fn a() {}",
+            "}",
+        ]);
+        assert!(!in_test_module(&source, 4));
+        assert!(in_test_module(&source, 7));
     }
 
     #[test]
