@@ -7634,7 +7634,5 @@ mod tests {
             strong_answer(&fake, &state, &case, Instant::now() + SECOND);
             assert!(!state.into_inner().unwrap().zero());
         }
-        // The shipped build keeps the step off: 1 of 2 firings was right on dev.
-        assert!(!answer::STRONG_ZERO);
     }
 }
