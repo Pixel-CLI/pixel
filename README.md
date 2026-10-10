@@ -170,6 +170,8 @@ flowchart TD
     class X stop
 ```
 
+`plan-rollback` and `fast-forward` ship as plugins, like `workspace`, `flow`, `coverage`, `token-savings`, `index-stats` and `squash-branch`: `pixel plugin add https://github.com/Pixel-CLI/pixel-plugins --name plan-rollback`, and the `pixel-plan-rollback` binary from `cargo install --git https://github.com/Pixel-CLI/pixel-plugins pixel-plan-rollback`.
+
 - Red is the LLM — reasoning, meaning, edits
 - Orange is `pixel classify` — a model system one like Jev
 - Green is Pixel-CLI — deterministic

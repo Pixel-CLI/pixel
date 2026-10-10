@@ -179,7 +179,7 @@ fn native_commands(command: &str) -> Option<u64> {
         | "pack-context" | "list-signatures" | "repo-map" | "scope-task" | "who-calls"
         | "impact" | "call-path" | "what-changed" | "list-areas" | "list-flows"
         | "commit-history" | "search-history" | "dig-history" | "file-history" | "who-wrote"
-        | "diff" | "list-branches" | "fetch" | "new-branch" | "fast-forward" | "push" => Some(1),
+        | "diff" | "list-branches" | "fetch" | "new-branch" | "push" => Some(1),
         "repo-state" | "review-changes" | "commit" => Some(3),
         "commit-and-push" => Some(4),
         // Recovery/task/flow/reconcile depend on the actual guarded plan; do not

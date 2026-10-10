@@ -274,7 +274,12 @@ pub(crate) fn authenticate(account: Option<&str>, reprobe: impl Fn() -> bool) ->
     steps.push(format!("replayed {CLAUDE_AUTH_FLOW} --execute"));
     if !run_flow(&flow_args) {
         terminal.stop();
-        steps.push("the browser flow failed".to_string());
+        // `pixel flow` is a plugin: exit 2 with no output is also what a
+        // machine without it gives (`pixel plugin list` shows which).
+        steps.push(
+            "the browser flow failed (`pixel flow` is the `flow` plugin: `pixel plugin list`)"
+                .to_string(),
+        );
         return AuthChain::ended(steps, AuthOutcome::FlowFailed, false);
     }
     match terminal.wait_for_exit(LOGIN_BUDGET) {

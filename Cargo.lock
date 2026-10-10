@@ -2048,7 +2048,6 @@ dependencies = [
  "pixel-ops",
  "pixel-plugin",
  "pixel-proto",
- "pixel-rank",
  "pixel-recall",
  "pixel-release",
  "pixel-session",

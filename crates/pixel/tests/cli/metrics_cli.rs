@@ -95,6 +95,14 @@ impl Fixture {
     }
 }
 
+/// The versioned workflow summary of the fixture's action log, the one the
+/// `token-savings` plugin prints under `workflow_metrics`.
+fn workflow_metrics(fixture: &Fixture) -> Value {
+    let log = pixel_actionlog::ActionLog::path_for_root(&fixture.0);
+    let events = pixel_actionlog::tail(&log, 1_000_000).unwrap();
+    serde_json::to_value(pixel_actionlog::summarize_metrics(&events)).unwrap()
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         if !std::thread::panicking() {
@@ -317,10 +325,7 @@ fn time_history_preserves_assumptions_legacy_unavailability_and_exact_lines() {
         writeln!(log, "{event}").unwrap();
     }
     drop(log);
-    let report = fixture.run(&["token-savings", ".", "--json", "--metrics=off"]);
-    assert_success(&report);
-    let data: Value = serde_json::from_slice(&report.stdout).unwrap();
-    let summary = &data["workflow_metrics"];
+    let summary = &workflow_metrics(&fixture);
     assert_eq!(summary["duplicate_records"], 1);
     assert_eq!(summary["legacy_records"], 1);
     assert_eq!(summary["time_unavailable_records"], 1);
@@ -967,21 +972,19 @@ fn legacy_savings_and_error_details_survive_with_workflow_summary() {
         text.contains("regex") || text.contains("pattern"),
         "error lost: {text}"
     );
-    let report = fixture.run(&["token-savings", ".", "--json", "--metrics=off"]);
-    assert_success(&report);
-    let data: Value = serde_json::from_slice(&report.stdout).unwrap();
-    assert_eq!(data["total_pool_chars"], 80);
-    assert_eq!(data["total_snippet_chars"], 20);
-    assert_eq!(data["overall_savings"], 0.75);
-    assert_eq!(data["workflow_metrics"]["legacy_records"], 1);
+    // The snippet-vs-pool report over the same log is the `token-savings`
+    // plugin's (its own tests pin 80/20/0.75 for this record); what the core
+    // owns is the workflow summary it reads.
+    let summary = workflow_metrics(&fixture);
+    assert_eq!(summary["legacy_records"], 1);
     assert!(
-        data["workflow_metrics"]["versions"]["workflow-v2"]["complete"]["operations"]
+        summary["versions"]["workflow-v2"]["complete"]["operations"]
             .as_u64()
             .unwrap()
             >= 1
     );
     assert!(
-        data["workflow_metrics"]["versions"]["workflow-v2"]["unavailable"]["operations"]
+        summary["versions"]["workflow-v2"]["unavailable"]["operations"]
             .as_u64()
             .unwrap()
             >= 1

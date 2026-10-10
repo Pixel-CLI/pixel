@@ -320,3 +320,149 @@ fn add_reports_a_bad_source_and_keeps_the_credentials_of_a_url_out_of_the_log() 
         std::fs::read_to_string(world.repo().join(".pixel/actions.jsonl")).unwrap_or_default();
     assert!(!log.contains("ghp_topsecret"), "{log}");
 }
+
+/// The pre-rename spellings that stood for a command now shipped as a
+/// plugin, with the plugin they resolve to.
+const MOVED_ALIASES: [(&str, &str); 6] = [
+    ("replay-flow", "flow"),
+    ("rescue", "plan-rollback"),
+    ("rewrite", "squash-branch"),
+    ("savings", "token-savings"),
+    ("stats", "index-stats"),
+    ("update", "fast-forward"),
+];
+
+fn moved_hint(name: &str) -> String {
+    format!(
+        "pixel: \"{name}\" moved to a plugin: pixel plugin add https://github.com/Pixel-CLI/pixel-plugins --name {name}\n"
+    )
+}
+
+#[test]
+fn the_alias_list_is_every_rename_that_points_at_a_moved_command() {
+    let derived: Vec<(&str, &str)> = pixel_proto::commands::RENAMED_COMMANDS
+        .iter()
+        .copied()
+        .filter(|(_, new)| pixel_plugin::MOVED_COMMANDS.contains(new))
+        .collect();
+    assert_eq!(derived, MOVED_ALIASES);
+}
+
+#[test]
+fn a_moved_command_and_each_of_its_aliases_without_a_plugin_print_the_hint_and_exit_two() {
+    let world = World::new("hints");
+    for name in pixel_plugin::MOVED_COMMANDS {
+        let out = world.pixel(&[name, "anything", "--json"]);
+        assert_eq!(out.status.code(), Some(2), "{name}: {out:?}");
+        assert_eq!(stderr(&out), moved_hint(name), "{name}");
+        assert_eq!(stdout(&out), "", "{name}");
+    }
+    for (alias, name) in MOVED_ALIASES {
+        let out = world.pixel(&[alias, "--help"]);
+        assert_eq!(out.status.code(), Some(2), "{alias}: {out:?}");
+        assert_eq!(
+            stderr(&out),
+            moved_hint(name),
+            "{alias} names the canonical plugin, not itself"
+        );
+        assert_eq!(stdout(&out), "", "{alias}");
+    }
+}
+
+#[test]
+fn the_pruned_surface_lists_no_moved_command() {
+    let world = World::new("help");
+    let help = ok(&world.pixel(&["--help"]));
+    let commands = help
+        .split("Commands:")
+        .nth(1)
+        .and_then(|rest| rest.split("Options:").next())
+        .unwrap();
+    let listed: Vec<&str> = commands
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert!(listed.contains(&"plugin"), "{listed:?}");
+    for name in pixel_plugin::MOVED_COMMANDS {
+        assert!(
+            !listed.contains(&name),
+            "{name} is still listed: {listed:?}"
+        );
+    }
+}
+
+/// A plugin that reports how it was called, on PATH as `pixel-<name>`.
+fn path_plugin(world: &World, name: &str) {
+    let exe = world.scratch.join(format!("bin/pixel-{name}"));
+    std::fs::write(&exe, RUN_SCRIPT).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn a_moved_command_runs_the_plugin_by_name_and_by_alias_with_its_own_args_and_exit_code() {
+    let world = World::new("moved-run");
+    for name in pixel_plugin::MOVED_COMMANDS {
+        path_plugin(&world, name);
+    }
+    for name in pixel_plugin::MOVED_COMMANDS {
+        let out = world.pixel(&[name, "list", "--json"]);
+        assert!(
+            ok(&out).starts_with("args=list --json\napi=1\n"),
+            "{name}: {out:?}"
+        );
+        assert_eq!(stderr(&out), "", "{name}: no note for the current name");
+        assert_eq!(
+            world.pixel(&[name, "fail"]).status.code(),
+            Some(7),
+            "{name}"
+        );
+    }
+    for (alias, name) in MOVED_ALIASES {
+        let out = world.pixel(&[alias, "list", "--json"]);
+        assert!(
+            ok(&out).starts_with("args=list --json\napi=1\n"),
+            "{alias}: {out:?}"
+        );
+        assert_eq!(
+            stderr(&out),
+            format!("note: '{alias}' is now '{name}'; the old name stays accepted until 1.0\n"),
+            "{alias}"
+        );
+        assert_eq!(
+            world.pixel(&[alias, "fail"]).status.code(),
+            Some(7),
+            "{alias}"
+        );
+        let help = world.pixel(&[alias, "--help"]);
+        assert_eq!(stderr(&help), "", "{alias} --help prints no rename note");
+    }
+}
+
+#[test]
+fn an_alias_resolves_to_the_plugin_of_the_canonical_name_only() {
+    let world = World::new("moved-canonical");
+    // `pixel-rescue` is not the plugin `rescue` stands for; `pixel-plan-rollback` is.
+    path_plugin(&world, "rescue");
+    let out = world.pixel(&["rescue", "x"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert_eq!(stderr(&out), moved_hint("plan-rollback"));
+    path_plugin(&world, "plan-rollback");
+    assert!(ok(&world.pixel(&["rescue", "x"])).starts_with("args=x\n"));
+}
+
+#[test]
+fn a_plugin_installed_with_plugin_add_serves_the_moved_name() {
+    let world = World::new("moved-add");
+    let source = world.source("flow", "");
+    ok(&world.pixel(&["plugin", "add", source.to_str().unwrap()]));
+    assert!(ok(&world.pixel(&["flow", "list"])).starts_with("args=list\napi=1\n"));
+    let by_alias = world.pixel(&["replay-flow", "list"]);
+    assert!(
+        ok(&by_alias).starts_with("args=list\napi=1\n"),
+        "{by_alias:?}"
+    );
+    // Another moved command is still only a hint.
+    assert_eq!(stderr(&world.pixel(&["coverage"])), moved_hint("coverage"));
+}

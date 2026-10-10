@@ -38,7 +38,7 @@ MCP server. `pixel install` registers no MCP server with any agent.
 
 | Crate | Role | Depends on (pixel crates) |
 | --- | --- | --- |
-| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry point under `run-hook` (alias `hook`: `task-event`), `rescue`, `recall`, and `sniper` sub-commands. | every library crate except `pixel-context` (reached through the daemon) and `pixel-bench` |
+| `pixel-cli` (bin `pixel`, in `crates/pixel`) | Command-line surface. Parses argv with clap, talks to the daemon or runs the service in-process, prints text or JSON. Also hosts the hook entry point under `run-hook` (alias `hook`: `task-event`), `recall`, and `sniper` sub-commands. | every library crate except `pixel-context` (reached through the daemon), `pixel-rank` (reached through the daemon) and `pixel-bench` |
 | `pixel-proto` | The shared contract crate: `Envelope`, `PixelError` and `ErrorCode`, `Epistemics`, `SnapshotInfo`, `Budget`, `Warning`, the `Op` request enum, and `commands::RENAMED_COMMANDS`, the old-to-new CLI subcommand names the CLI accepts as hidden aliases until 1.0. No I/O, no business logic. Every other crate that speaks the wire format depends on it, and it depends on nothing internal. | none |
 | `pixel-daemon` | Transport-agnostic `Service` (`api.rs`) and the Unix-socket NDJSON daemon with filesystem watching (`daemon.rs`). Dispatches each `Op` to the right library, attaches snapshot and epistemics metadata, and is the one place a retrieval envelope is built. Also hosts the recall daemon service. | index, graph, context, rank, proto, ops, facts, session, recall, git |
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
@@ -50,10 +50,10 @@ MCP server. `pixel install` registers no MCP server with any agent.
 | `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through `GitRunner` (timeout, output cap, redacted stderr); `crates/pixel-git/tests/boundary.rs` fails the build on a `Command::new("git")` in any other crate's non-test code. Also owns the trust boundary of `.pixel/`: `sidecar` refuses a `.pixel` that is a link or that git tracks and creates owner-only directories without following a link, `nofollow` opens files without following a link at their name, and `repo_path` confines a stored path to the repository root. | none |
 | `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, pi, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features) and the `search-meaning` code chunker, which reuses the graph's tree-sitter extraction. | git, graph, index, rank |
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | git |
-| `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` and `pixel token-savings` reporting. | git |
+| `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` reporting, and `summarize_metrics`, which the `token-savings` plugin prints. | git |
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
-| `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
+| `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. The core reads them for `ultraflow` and `plan`; `pixel flow …` itself is the `flow` plugin, which links this crate. | none |
 | `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: Claude and Codex task lifecycle hooks, cleanup of their retired retrieval hooks and prompts and the `claude()` shell wrapper, removal of the Pi `APPEND_SYSTEM.md` retrieval block, and the explicit Pi `/pixel-impact` package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`) when Pi is present. No prompt is deployed and no other host is wired: the retired OpenCode, Devin, Antigravity, zcode, Cursor and Copilot CLI artifacts and the deployed agent prompts are removed. An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo`: native-default migration for Claude and Codex, and removal of the retired Devin and Pi project guards and `AGENTS.md` retrieval blocks (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `intro` animation (frames only; `pixel` owns the tty) and ends on the `banner` summary. | proto, daemon, index, facts, git |
 | `pixel-ultraflow` | The classify-driven browser loop over saved flows: the observation (`agent-browser snapshot -i` parsed into numbered slots, `elements`), the indexed action space of operation-target pairs (`action`), the decision seam (`decide`), the discovery loop and its single-cycle unit (`discover`), the composition of what worked into a `pixel-flow` document whose `conditional` steps carry the conditions that tell its branches apart (`compose`), and the replay that decides those conditions with `pixel classify` and re-decides a step whose page moved on (`replay`). Drives `pixel-flow`'s browser seam; the engine is a trait, so the whole loop is tested without a model, a network or a page. | flow |
 | `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (a local directory, or a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL), `remove`, `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. Home, repo root and PATH are fields of `Host`, never read from the process. | git |
@@ -62,7 +62,7 @@ MCP server. `pixel install` registers no MCP server with any agent.
 Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context`, `pixel-flow`, `pixel-ultraflow` (which depends on `pixel-flow` alone) and `pixel-release`; `pixel-session`, `pixel-actionlog` and `pixel-plugin` depend on `pixel-git` only). `pixel-daemon` is
 the integration point and is the only library crate allowed to depend on
 almost everything. The CLI depends on the daemon plus whatever it needs for
-commands that never touch the daemon (install, flow, actionlog, release-check).
+commands that never touch the daemon (install, ultraflow, actionlog, release-check).
 
 ## Command surface
 
@@ -83,7 +83,6 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel scope-task` | Sniper target list: task description in, closed prioritized file list out (P0 = start here, P1 = likely, P2 = droppable). `--read-only` instead returns a typed deterministic fact envelope only from a compatible running daemon; it never starts a daemon, builds/refreshes indexes, or writes the targets manifest. `--regions` also writes `.pixel/regions.json` beside `targets.json`: symbol line ranges + context reference, conservative conflict pairs with reasons, merge-order layers from the condensed call graph, and declared shared files — evidence for orchestration, never an action recommendation. |
 | `pixel brief` | Print the bounded `[PIXEL:BRIEF]` evidence context for a code-related prompt in an indexed repository; optional `[path]` selects the repository, and no applicable brief prints nothing. |
 | `pixel execution-brief` | Build a task-specific ordered retrieval route from scope-task evidence: one populated first command, one retry for an empty or irrelevant result, a bounded native fallback, a maximum 40-line read, and minimal validation. |
-| `pixel plan-rollback` | Surgical revert planner: locate the files a problem points at, list recent versions with the likely-breaking commit flagged, recommend a last-known-good candidate. |
 | `pixel ai-cli-readify` | Provider readiness for the four agent CLIs (Codex, Claude Code, Antigravity, Devin): probe Ollama Cloud, then probe each agent in its own lane, reporting an agent blocked when the provider did not answer; `--apply` points the agents' configs at the provider that answered; `--approve --workspace <dir>` clears the named folder's startup gate through Codex's own `config/batchWrite` RPC and Claude's `~/.claude.json`. |
 | `pixel find-symbol` | Look up symbols by name in the code graph |
 | `pixel list-signatures` | All signatures in a file — the skeleton view at ~10% of Read cost |
@@ -100,16 +99,13 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel list-areas` | Functional-area clusters |
 | `pixel what-changed` | Symbols/flows affected by working-tree changes |
 | `pixel rebuild-graph` | Force (re)build of the code graph db |
-| `pixel workspace` | Multi-repo registry (`.pixel/workspace.json` members add/remove/list); `--workspace` fans `impact`/`who-calls` out across registered repos with per-repo provenance |
 | `pixel index-pack` | Freeze the index into one checksummed `.pxpack` bundle — CI builds once, teammates install instead of re-indexing |
 | `pixel index-unpack` | Install a packed index bundle from a path or https:// URL, hash-verified, refusing to overwrite a live index without `--force` |
 | `pixel reference` | Manage version-pinned reference corpora (`.pixel/reference.json`) for multi-repo analysis on top of workspaces and index packs |
 | `pixel status` | Index + graph freshness status |
-| `pixel coverage` | Per-language index coverage: files on disk vs files indexed, with unrecognized extensions surfaced — the "what did the index miss?" answer |
 | `pixel audit` | What an agent reads to learn what the largest source files contain: each whole file against its `list-signatures` outline in tokens (bytes / 4, floored), the total and the per-file median, files changed since indexing or with no signatures left out and counted, then per-language coverage. Builds the graph on a first run only; local, read-only, sends nothing |
 | `pixel space` | Audit how much disk the pixel index (`.pixel/`) takes across every project under this tree: per-project shard size plus the accumulated total (`--json` for structured output), and remove the rebuildable shards with `--delete` (one confirmation, or `--yes`). Local and read-only until `--delete` |
 | `pixel prepare-repo` | Make a repository ready for agent work: index, graph, and warm daemon |
-| `pixel index-stats` | Show raw shard metadata (legacy) |
 | `pixel daemon` | Manage the per-root background daemon |
 | `pixel recall` | Search and browse LLM CLI transcripts (machine-wide corpus) |
 | `pixel list-errors` | One-look error capture: query the sniper error sink |
@@ -126,7 +122,6 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel push` | Leased push to a remote (crash-safe, idempotent) |
 | `pixel commit-and-push` | Publish + push in one op (commit then leased push) |
 | `pixel new-branch` | Create a new branch from HEAD (or --from <ref>) |
-| `pixel fast-forward` | Fast-forward merge to a target OID (refuses non-ff + dirty intersection) |
 | `pixel fetch` | Fetch from a remote (idempotent) |
 | `pixel find-code` | Engine 1: resolve a phrase to code via the concept index |
 | `pixel search-history` | M3: history-wide fact + diff search |
@@ -143,14 +138,11 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel config` | Show effective settings and their sources; `setup` offers guided terminal configuration (also offered on interactive global install); `classify on\|off` controls the global classify kill switch (disabled by default); `classify-engine` stores the engine preference (`local\|remote\|jev\|clef-ollama\|clef-cloudflare\|auto`), `remote-preset <preset> [--model --base]` the provider it runs, `remote-key <preset>` its key; `edit [--repo]` opens commented YAML in `$VISUAL`/`$EDITOR`. Global `~/.pixel/config.yaml`, repository `.pixel/config.yaml`; legacy JSON remains supported. |
 | `pixel task-state` | Alias `task`: begin, contract, prepare, verify, review, finish, status, events, route, replay, evaluate, cancel and recover a durable task; show/reset retain the Claude packet interface |
 | `pixel action-log` | Self-assessment: pixel's own action log (what ran, what went wrong). |
-| `pixel token-savings` | Token-savings report: for retrieval-shaped commands (search/query/ context/resolve) that recorded snippet-vs-pool volumes, aggregate the fraction of the candidate pool the agent did NOT have to read. |
-| `pixel squash-branch` | Squash every commit on the current branch since its base into ONE commit (crash-safe, backup-ref'd), optionally force-pushing with lease |
 | `pixel who-wrote` | Per-region blame attribution: who introduced/owns each region of a file |
 | `pixel list-branches` | One-call read-only branch inventory: ahead/behind, merged, stale, unpushed — the deterministic "did you push everything?" answer |
 | `pixel edit-env` | Additive-only, key-level .env mutations with snapshots and restore. |
 | `pixel plan` | Deterministic todo list generation from code analysis; emits blocking verification gates (auth session, env keys, provider keys, real DB state) detected in the plan's file set; persists findings in `.pixel/plan.json` so `--status`/`--done N`/`--undone N`/`--prune` track execution state across re-plans without the daemon |
 | `pixel ultraflow` | The classify-driven browser loop over saved flows. `discover --url --goal` asks `pixel classify` one question per cycle whose options are the operation-target pairs the page currently offers, so one answer is one executable action; a typed field is filled from a declared `--var` or from a string the goal itself contains, never from an invented value. What worked composes into a `pixel flow` document under the flow store (`--save`), and `--repeat N` records a `conditional` where two runs diverged, worded so the branch is a page condition rather than a position. `replay <name>` follows that document, deciding each `conditional` and the flow's success signal with `pixel classify` (the text matcher is the disclosed fallback), and re-decides a step whose page no longer matches — `--update` records the new branch into the flow, so the next replay is deterministic where this one had to think. Drives `agent-browser --session comet`, the session `pixel flow run` uses. Each question is bounded by the *engine's* option budget, not the schema ceiling (`Decider::option_budget`: the local `winnow:e4b` accepts 64 labels, measured — a page with more controls has its tail reported in the trace rather than dropped quietly) |
-| `pixel flow` | Save, retrieve, list, revise, run, and replay proven agent-browser paths (auth flows, config flows) so the agent follows a deterministic shortcut instead of re-discovering the UI from scratch every time. `run <name>` drives agent-browser with the plain executor; for a classify-decided replay with repair, use `pixel ultraflow replay` |
 | `pixel plugin` | Manage plugins: `list`, `add <path\|git-url> [--name]`, `remove`, `enable` (network plugins), `trust` (repo plugins). An unknown subcommand runs the plugin of that name (see "Request path from the CLI") |
 | `pixel help` | Print this message or the help of the given subcommand(s). |
 
@@ -172,7 +164,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `tasks/source-manifests/<content_id>.json`, `tasks/source-cache.json`, `tasks/session-locks/`, `tasks/session-context/`, `tasks/route-locks/`, `tasks/enforced-sessions/` | `pixel-task` and task bridge | Immutable source manifests, metadata digest cache, atomic provider/session task binding, bounded latest prompts for first-edit activation, per-decision classification locks, and one empty marker per provider/session whose task recorded enforced gates: when the ledger cannot answer within the hook deadline, only a marked session or `task.enforcement: enforce` keeps edits and completion denied. |
 | `task-hook-observations.json`, `task-hook-observations.lock` | CLI task bridge | Last real host invocation per provider; doctor reports observed activity separately from installation and trust. |
 | `plan.json` | CLI `plan` | The persisted `pixel plan` checklist, so `--status`/`--done`/`--prune` survive a re-plan. |
-| `workspace.json` | CLI `workspace` | The registered member repositories. |
+| `workspace.json` | the `workspace` plugin | The registered member repositories. The CLI only reads it, for `--workspace` on `impact` and `who-calls`. |
 | `plugins/<name>/` | `pixel-plugin` | Repo plugins: a directory with `pixel-plugin.toml` that someone (or the repository) put there. Read only, and run only after `pixel plugin trust <name>` recorded the digest of its files in `~/.pixel/trusted.toml`. |
 | `config.yaml` (legacy `config.json`) | CLI `config` | Repository-level settings over `~/.pixel/config.yaml` (`pixel config edit --repo`). |
 
@@ -347,8 +339,16 @@ plugin, then `pixel-<name>` on PATH) and replaces the process with it
 plugin, a network plugin not enabled, or a `run` that leaves its directory
 stops with exit 1 and the command that fixes it; a name in
 `pixel_plugin::MOVED_COMMANDS` that no plugin provides prints the
-`pixel plugin add` hint and exits 2 (the eight are still built in, so the
-hint is reachable only once a command leaves the core); any other name keeps clap's error.
+`pixel plugin add` hint and exits 2; any other name keeps clap's error.
+The eight commands that left the core for `Pixel-CLI/pixel-plugins` (#878) are
+`workspace`, `flow`, `plan-rollback`, `coverage`, `token-savings`,
+`index-stats`, `squash-branch` and `fast-forward`; their pre-rename spellings
+(`rescue`, `stats`, `update`, `savings`, `rewrite`, `replay-flow`, from
+`RENAMED_COMMANDS`) resolve to the plugin of the current name, with the same
+one-line rename note on stderr. The core keeps what other commands read:
+`workspace.json` for `--workspace`, the flow store for `ultraflow` and `plan`,
+and the library crates (`pixel-ops`, `pixel-flow`, `pixel-facts`, …) the
+plugins link at a pinned revision.
 
 So the CLI's `--json` output is the envelope's `result` with the honesty
 fields merged in, not the raw envelope. Anything that needs the full
@@ -703,7 +703,7 @@ Time accounting is separate from byte accounting. An optional `time_estimate`
 records `estimator_version: sequential-v1`, `round_trip_ms`, `native_command_ms: 0`,
 `sequential_steps`, and signed `saved_ms`. Legacy records lacking these fields
 remain unavailable for time comparisons; they are not silently recalculated.
-`pixel token-savings` adds `time_estimates` groups keyed by token/time estimator
+The `token-savings` plugin's report adds `time_estimates` groups keyed by token/time estimator
 versions, effective assumptions and coverage, preserving earlier summaries.
 
 Time savings are a separate `sequential-v1` workflow estimate, not measured

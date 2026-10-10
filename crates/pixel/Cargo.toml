@@ -33,7 +33,6 @@ pixel-git = { path = "../pixel-git" }
 pixel-recall = { path = "../pixel-recall", default-features = false }
 pixel-daemon = { path = "../pixel-daemon" }
 pixel-graph = { path = "../pixel-graph" }
-pixel-rank = { path = "../pixel-rank" }
 pixel-session = { path = "../pixel-session" }
 pixel-ops = { path = "../pixel-ops" }
 pixel-facts = { path = "../pixel-facts" }

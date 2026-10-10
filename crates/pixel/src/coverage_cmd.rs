@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! `pixel coverage` — per-language graph coverage.
+//! Per-language graph coverage, as `pixel audit` reports it (the standalone
+//! `coverage` command is the `coverage` plugin now).
 //!
 //! Compares the files the index policy can see on disk (via
 //! [`pixel_index::policy_walk`], the same walk the builders use) with the
@@ -14,22 +15,14 @@
 //! when no daemon is running.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use pixel_daemon::api::GRAPH_DB_FILE;
 use pixel_graph::extract::lang_of;
 use pixel_graph::store::GraphStore;
 use pixel_index::index::{SHARD_DIR, policy_walk};
-use serde::Serialize;
-use serde_json::json;
 
-#[derive(Debug, Clone)]
-pub struct CoverageOptions {
-    pub path: PathBuf,
-    pub json: bool,
-}
-
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default)]
 pub(crate) struct Row {
     pub(crate) on_disk: u64,
     pub(crate) indexed: u64,
@@ -70,102 +63,6 @@ pub(crate) fn collect(root: &Path) -> Result<(BTreeMap<String, Row>, u64, bool),
         }
     }
     Ok((rows, unrecognized, graph_present))
-}
-
-pub fn run(opts: CoverageOptions) -> Result<(), String> {
-    let root = opts
-        .path
-        .canonicalize()
-        .map_err(|e| format!("coverage: {}: {e}", opts.path.display()))?;
-    let (rows, unrecognized, graph_present) = collect(&root)?;
-    let (disk_total, indexed_total): (u64, u64) = (
-        rows.values().map(|r| r.on_disk).sum(),
-        rows.values().map(|r| r.indexed).sum(),
-    );
-    if opts.json {
-        let languages: Vec<_> = rows
-            .iter()
-            .map(|(lang, r)| {
-                json!({
-                    "lang": lang,
-                    "on_disk": r.on_disk,
-                    "indexed": r.indexed,
-                    "coverage_pct": pct(r.indexed, r.on_disk),
-                    "symbols": r.symbols,
-                })
-            })
-            .collect();
-        let out = json!({
-            "root": root.display().to_string(),
-            "graph_present": graph_present,
-            "languages": languages,
-            "unrecognized_files": unrecognized,
-            "totals": {
-                "on_disk": disk_total,
-                "indexed": indexed_total,
-                "coverage_pct": pct(indexed_total, disk_total),
-            },
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
-        );
-        return Ok(());
-    }
-
-    print!(
-        "{}",
-        render_human(&rows, unrecognized, graph_present, &root)
-    );
-    Ok(())
-}
-
-/// The plain-text table, as a pure string so the conditional lines are
-/// assertable — the `unrecognized` footnote and the no-graph note are the
-/// parts that change what the user does next.
-fn render_human(
-    rows: &BTreeMap<String, Row>,
-    unrecognized: u64,
-    graph_present: bool,
-    root: &Path,
-) -> String {
-    if rows.is_empty() {
-        return format!("no recognized source files under {}\n", root.display());
-    }
-    let (disk_total, indexed_total): (u64, u64) = (
-        rows.values().map(|r| r.on_disk).sum(),
-        rows.values().map(|r| r.indexed).sum(),
-    );
-    let mut out = format!(
-        "{:<10} {:>8} {:>8} {:>9} {:>8}\n",
-        "language", "on-disk", "indexed", "coverage", "symbols"
-    );
-    for (lang, r) in rows {
-        out.push_str(&format!(
-            "{:<10} {:>8} {:>8} {:>8.1}% {:>8}\n",
-            lang,
-            r.on_disk,
-            r.indexed,
-            pct(r.indexed, r.on_disk),
-            r.symbols
-        ));
-    }
-    out.push_str(&format!(
-        "{:<10} {:>8} {:>8} {:>8.1}%\n",
-        "total",
-        disk_total,
-        indexed_total,
-        pct(indexed_total, disk_total)
-    ));
-    if unrecognized > 0 {
-        out.push_str(&format!(
-            "{unrecognized} file(s) with unrecognized extensions (never indexed)\n"
-        ));
-    }
-    if !graph_present {
-        out.push_str("note: no graph.db — indexed counts are zero; run `pixel build-index`\n");
-    }
-    out
 }
 
 pub(crate) fn pct(part: u64, whole: u64) -> f64 {
@@ -223,47 +120,5 @@ mod tests {
         assert_eq!(rows["rust"].on_disk, 2);
         assert_eq!(rows["rust"].indexed, 1);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// `run` on a path that does not exist must fail — a body replaced by
-    /// `Ok(())` would swallow that error.
-    #[test]
-    fn run_errors_on_a_missing_path() {
-        let missing = std::env::temp_dir().join(format!("px-cov-missing-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&missing);
-        let err = run(CoverageOptions {
-            path: missing,
-            json: false,
-        })
-        .unwrap_err();
-        assert!(err.contains("coverage"), "{err}");
-    }
-
-    #[test]
-    fn render_human_names_unrecognized_files_and_a_missing_graph() {
-        let mut rows = BTreeMap::new();
-        rows.insert(
-            "rust".to_string(),
-            Row {
-                on_disk: 2,
-                indexed: 1,
-                symbols: 3,
-            },
-        );
-        let root = Path::new("/repo");
-        let out = render_human(&rows, 4, false, root);
-        assert!(out.contains("rust"));
-        assert!(out.contains("50.0%"));
-        assert!(
-            out.contains("4 file(s) with unrecognized extensions"),
-            "{out}"
-        );
-        assert!(out.contains("no graph.db"), "{out}");
-        // Neither footnote when both conditions are absent.
-        let clean = render_human(&rows, 0, true, root);
-        assert!(!clean.contains("unrecognized"), "{clean}");
-        assert!(!clean.contains("no graph.db"), "{clean}");
-        // Empty input gets its own line, not a table header.
-        assert!(render_human(&BTreeMap::new(), 0, false, root).contains("no recognized"));
     }
 }
