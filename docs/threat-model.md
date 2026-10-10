@@ -511,7 +511,8 @@ hold.
   recall directory is 0700 (`pixel_recall::ensure_recall_dir`); the error
   sink is 0700/0600 (`pixel-session`); `pixel-ops` state directories are
   created 0700 (`durable::ensure_dir`); `brief-decisions.jsonl`, which keeps
-  the typed text of each prompt the brief judged, is created 0600 and
+  the typed text of each prompt the brief judged, is created 0600, takes no
+  line when an existing file cannot be brought to 0600, and is
   written without following a link at the file or at `.pixel` itself
   (`decision_log::append`, `nofollow::open_lock`), holds the last 500
   lines, never a pasted block (`typed_text`) or more than the last
