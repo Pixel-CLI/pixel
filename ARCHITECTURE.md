@@ -769,8 +769,10 @@ complete, is meant to be answered from without a tool call: it opens with a
 search receipt (`searched: content+symbols+paths for <probed terms> (<n>
 terms, <files> files)`, ` · meaning search returned <n> chunks` only when
 that search answered, `ignored (too common)`, and the `result:` line that
-tells the agent to answer from the matches below) and carries answer-sized
-excerpts after the confidence line (`answer <path>:<line>:`, `execution_brief/answer.rs`).
+tells the agent to verify the matches below) and gathers answer-sized
+excerpts (`execution_brief/answer.rs`), shown after the confidence line as
+`answer <path>:<line>:` only for the ZERO step below, otherwise used to fix
+the ranges to read.
 The excerpt is the signature, the first doc-comment line and six lines of the
 densest keyword region of a chunk, up to three chunks (`Evidence::lines_at`,
 a bounded read outside the op count, refused for a credential-shaped path),
@@ -786,15 +788,23 @@ best chunk of the file the list ranks first leads, then the best of each
 other file; tests, docs and changelogs are
 excluded unless the question asks about them, as are `#[cfg(test)]` modules
 and test-named symbols. The ranked `files:` list puts tests, docs, `eval/` and changelog files after the code files (a stable demotion, nothing dropped) unless the question asks about them. A plain-language flow or tests question borrows its
-symbol anchor from the best non-test chunk. The `confidence: high` line and the "Answer from this evidence"
-directive of a confident brief are off by default: it says `confidence:
-medium — verify the excerpt answers the question` (`the files`, without an
-excerpt) and drops the directive. `PIXEL_BRIEF_DIRECTIVE=1` restores them,
-and then only when the top excerpt's file is also among the lexical probe's
-top two co-files (two independent retrievers agree); measured on the dev
-split, that agreement was right 4 times in 7.
-`scripts/bench-brief-excerpt.py` measures excerpt@1 and the directive's
-precision. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
+symbol anchor from the best non-test chunk. A confident (high-tier) or maybe (low-tier) brief of such a prompt always
+ends on one concrete instruction. ZERO: the excerpt is shown, `confidence:
+high` is kept and the last line is "Answer from these lines; open a file only
+if they don't answer", only when a strict rule holds (`answer::ZERO_RULE`:
+the top chunk is the meaning search's best, in the lexical probe's best
+co-file, with at least two probed keywords inside). No rule tried on the dev
+split of `eval/brief-gate/answer_spans.jsonl` kept span precision at 0.9 with
+two firings, so `ZERO_RULE` is `None` and ZERO never fires (`PIXEL_BRIEF_ZERO=0`
+would switch it off if one is set). ONE READ, otherwise: the excerpts are
+hidden, the confidence is medium, and the tail is `read: <path>:<first>-<last>
+— <symbol>` (the whole declaration around the best chunk, at most 60 lines),
+up to two `also:` lines from other declarations, and "Read these ranges (in
+parallel, one turn) before any search; search only if they don't answer."
+Ranges come from lines actually read at HEAD, never from a credential-shaped
+path.
+`scripts/bench-brief-excerpt.py` measures excerpt@1 and `scripts/bench-brief-spans.py` the
+ZERO precision and the share of gold spans inside the `read:` ranges. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
 explicit cue (config, setting, env, flag, option, default), not `install` or
 `hook`. That
 block's cap is `PROSE_BRIEF_BYTES` (3584, under Pi's 4000-byte extension

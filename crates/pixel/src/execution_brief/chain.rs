@@ -72,11 +72,6 @@ pub(crate) const PLAIN_PROSE_BRIEF_BYTES: usize = 2048;
 const ANSWER_FILES: usize = 4;
 /// Files a generic excerpt covers.
 const EXCERPT_FILES: usize = 3;
-/// Lexical co-files an excerpt's file must be among for the brief to keep
-/// its directive to answer from the evidence. Measured on the dev split of
-/// `eval/brief-gate`: the top three let a wrong excerpt keep it (precision
-/// 0.67), the top two did not (1.0).
-const AGREE_TOP: usize = 2;
 /// Whether an off-tier relevance decision silences a weakly code-shaped
 /// prompt's brief, as it does a plain-language one. The decision is computed
 /// and logged either way.
@@ -85,6 +80,8 @@ pub(crate) const ENFORCE_GATE_ON_WEAK: bool = true;
 const LOW_FILES: usize = 3;
 /// Rendered size cap of a low-tier brief: a maybe stays short.
 pub(crate) const LOW_BRIEF_BYTES: usize = 700;
+/// The same when the brief names ranges to read.
+pub(crate) const LOW_READ_BRIEF_BYTES: usize = 1200;
 /// The model that decides the tier of a prompt: [`relevance::judge`] in
 /// production, a fixed answer in a test.
 pub(crate) type Model = fn(&GateInput) -> relevance::Verdict;
@@ -143,12 +140,18 @@ const CONCEPT_STOPWORDS: &[&str] = &[
 const GENERATED_EXTENSIONS: &[&str] = &["json", "lock"];
 /// Directories that hold build output or vendored code.
 const GENERATED_DIRS: &[&str] = &["output", "dist", "node_modules"];
-/// The confidence line of a brief whose excerpt rests on one retriever.
-const MEDIUM_CONFIDENCE: &str = "confidence: medium — verify the excerpt answers the question";
-/// The same for a brief with files and no excerpt.
+/// The confidence line of a confident brief whose evidence did not earn the
+/// ZERO step: the ranges below are the way to confirm it.
+const MEDIUM_CONFIDENCE: &str = "confidence: medium — confirm in the ranges below";
+/// The same for a brief with files and no range to read.
 const MEDIUM_FILES_CONFIDENCE: &str = "confidence: medium — verify the files answer the question";
-/// The footer of such a brief: the verification rule without the directive.
+/// The footer of a brief with neither a ZERO step nor a range: the
+/// verification rule without the directive.
 const UNCORROBORATED_FOOTER: &str = "0 hits or 0 callers: verify with rg before concluding.";
+/// The ZERO step: the excerpt shown is strong enough to answer from.
+const ZERO_LINE: &str = "Answer from these lines; open a file only if they don't answer.";
+/// The ONE-READ step: the ranges are the next, single action.
+const READ_LINE: &str = "Read these ranges (in parallel, one turn) before any search; search only if they don't answer.";
 const FOOTER: &str = "Answer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.";
 
 static QUOTED: LazyLock<Regex> = LazyLock::new(|| {
@@ -831,9 +834,10 @@ pub(crate) struct Brief {
     /// benchmarks: files of that kind are not demoted.
     wants_tests: bool,
     wants_docs: bool,
-    /// `PIXEL_BRIEF_DIRECTIVE` is on: a confident brief may tell the agent to
-    /// answer from its evidence.
-    directive: bool,
+    /// The ZERO rule in force: a confident brief whose top chunk passes it
+    /// tells the agent to answer from the excerpt. `None` when no rule is
+    /// validated or `PIXEL_BRIEF_ZERO` is off.
+    zero_rule: Option<answer::ZeroRule>,
     /// The meaning search's leads, best first.
     leads: Vec<MeaningHit>,
     /// The relevance probe's co-files, heaviest first.
@@ -907,46 +911,91 @@ impl Brief {
         if !answer::receipt_enabled() {
             return Vec::new();
         }
-        let agreed = self.keeps_directive() && self.unresolved.is_empty();
         self.receipt
             .as_ref()
-            .map(|receipt| receipt.lines(agreed))
+            .map(|receipt| receipt.lines(self.confident()))
             .unwrap_or_default()
     }
 
-    /// Whether two independent retrievers name the file of the top excerpt:
-    /// the meaning search cut it from its own chunk, and the lexical probe
-    /// has the same file among its top two co-files. `None` when the brief
-    /// carries no excerpt, so nothing was claimed or withheld.
-    fn agreed(&self) -> Option<bool> {
-        if self.short() || self.excerpts.is_empty() {
-            return None;
-        }
-        Some(
-            self.excerpts
-                .iter()
-                .find(|excerpt| !excerpt.path.is_empty())
-                .is_some_and(|top| {
-                    top.from_meaning
-                        && self
-                            .lexical
-                            .iter()
-                            .take(AGREE_TOP)
-                            .any(|path| *path == top.path)
-                }),
-        )
+    /// The best chunk's excerpt: the first block cut from a file.
+    fn top_chunk(&self) -> Option<&Excerpt> {
+        self.excerpts
+            .iter()
+            .find(|excerpt| !excerpt.path.is_empty())
     }
 
-    /// Whether the brief may keep `confidence: high` and tell the agent to
-    /// answer from its evidence: a strong prompt's brief always does; a
-    /// confident one only with the directive switched on and, when it carries
-    /// an excerpt, only when two retrievers agree on its file.
-    fn keeps_directive(&self) -> bool {
+    /// The ZERO step fires: a complete high-tier brief of a plain-language
+    /// or weak prompt whose top chunk passes [`answer::zero_holds`] (the
+    /// meaning search's best chunk, in the lexical probe's best co-file, with
+    /// at least two probed keywords inside it).
+    fn zero(&self) -> bool {
+        let Some(rule) = self.zero_rule else {
+            return false;
+        };
+        self.signal != Some(Signal::Strong)
+            && self.tier() == Some(Tier::High)
+            && !self.short()
+            && self.unresolved.is_empty()
+            && self.top_chunk().is_some_and(|top| {
+                let rank = self.lexical.iter().position(|path| *path == top.path);
+                answer::rule_holds(top, rank, rule)
+            })
+    }
+
+    /// Whether the brief may keep `confidence: high`: a strong prompt's brief
+    /// always does; a confident one only when the ZERO step fires.
+    fn confident(&self) -> bool {
         if self.signal == Some(Signal::Strong) || self.tier() != Some(Tier::High) {
             return true;
         }
-        // No excerpt means nothing was cut to disagree with.
-        self.directive && self.agreed() != Some(false)
+        self.zero()
+    }
+
+    /// The ranges the ONE-READ step names: the best chunk's declaration, then
+    /// up to two more from other declarations, each `(path, first, last,
+    /// symbol)`. Empty for a strong prompt, a cut packet, or a tier below low.
+    fn read_ranges(&self) -> Vec<(String, u64, u64, Option<String>)> {
+        if self.signal == Some(Signal::Strong)
+            || !matches!(self.tier(), Some(Tier::High | Tier::Low))
+            || self.short()
+        {
+            return Vec::new();
+        }
+        let mut ranges: Vec<(String, u64, u64, Option<String>)> = Vec::new();
+        for excerpt in self.excerpts.iter().filter(|e| !e.path.is_empty()) {
+            let Some((first, last)) = excerpt.read else {
+                continue;
+            };
+            if ranges.len() < 3
+                && !ranges
+                    .iter()
+                    .any(|(path, from, _, _)| *path == excerpt.path && *from == first)
+            {
+                ranges.push((excerpt.path.clone(), first, last, excerpt.symbol.clone()));
+            }
+        }
+        ranges
+    }
+
+    /// The `read:` and `also:` lines and the instruction under them.
+    fn read_lines(&self) -> Vec<String> {
+        let ranges = self.read_ranges();
+        if ranges.is_empty() {
+            return Vec::new();
+        }
+        let mut lines: Vec<String> = ranges
+            .iter()
+            .enumerate()
+            .map(|(index, (path, first, last, symbol))| {
+                let label = if index == 0 { "read" } else { "also" };
+                let symbol = symbol
+                    .as_deref()
+                    .map_or_else(String::new, |name| format!(" — {}", clean(name)));
+                format!("{label}: {}:{first}-{last}{symbol}", clean(path))
+            })
+            .collect();
+        lines.push(READ_LINE.to_string());
+        lines
     }
 
     fn has_excerpts(&self) -> bool {
@@ -955,7 +1004,9 @@ impl Brief {
 
     fn excerpt_counts(&self) -> [usize; EXCERPT_FILES] {
         let mut counts = [0; EXCERPT_FILES];
-        if !self.short() {
+        // Excerpts are shown only for the ZERO step; otherwise they only
+        // fix the ranges to read.
+        if self.zero() {
             for (slot, excerpt) in counts.iter_mut().zip(&self.excerpts) {
                 *slot = excerpt.lines.len();
             }
@@ -1197,13 +1248,14 @@ fn answer_evidence(evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Inst
     }
     let brief = edit(state, |brief| brief.clone());
     if brief.signal == Some(Signal::Strong)
-        || brief.tier() != Some(Tier::High)
+        || !matches!(brief.tier(), Some(Tier::High | Tier::Low))
         || brief.cut
         || brief.kind == Some(QuestionKind::Rationale)
     {
         return;
     }
-    let own = match brief.kind {
+    // A maybe runs no kind route: its chunks only fix the ranges to read.
+    let own = match brief.kind.filter(|_| brief.tier() == Some(Tier::High)) {
         Some(QuestionKind::Flow) => flow_excerpt(evidence, state, &brief, deadline),
         Some(QuestionKind::Tests) => tests_excerpt(evidence, &brief, deadline),
         Some(QuestionKind::Config) => {
@@ -1211,9 +1263,8 @@ fn answer_evidence(evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Inst
             let lines = answer::config_excerpt(&brief.files, terms);
             (!lines.is_empty()).then(|| Excerpt {
                 label: "config".to_string(),
-                path: String::new(),
-                from_meaning: false,
                 lines,
+                ..Excerpt::default()
             })
         }
         _ => None,
@@ -1267,9 +1318,8 @@ fn flow_excerpt(
     }
     Some(Excerpt {
         label: "flow".to_string(),
-        path: String::new(),
-        from_meaning: false,
         lines,
+        ..Excerpt::default()
     })
 }
 
@@ -1290,9 +1340,8 @@ fn caller_excerpt(evidence: &dyn Evidence, brief: &Brief, deadline: Instant) -> 
     let lines = answer::flow_excerpt(&hops);
     (!lines.is_empty()).then(|| Excerpt {
         label: "callers".to_string(),
-        path: String::new(),
-        from_meaning: false,
         lines,
+        ..Excerpt::default()
     })
 }
 
@@ -1319,9 +1368,8 @@ fn tests_excerpt(evidence: &dyn Evidence, brief: &Brief, deadline: Instant) -> O
     }
     (!lines.is_empty()).then(|| Excerpt {
         label: "tests".to_string(),
-        path: String::new(),
-        from_meaning: false,
         lines,
+        ..Excerpt::default()
     })
 }
 
@@ -1418,6 +1466,10 @@ struct Chunk {
     meaning_rank: usize,
     density: usize,
     lines: Vec<String>,
+    /// The declaration around the excerpt: its bounds and its name.
+    read: Option<(u64, u64)>,
+    sig: Option<u64>,
+    symbol: Option<String>,
 }
 
 /// The chunks of the best files, cut where the question's keywords are
@@ -1450,9 +1502,11 @@ fn generic_excerpts(
             from_line + LEXICAL_CHUNK_LINES
         };
         let start = from_line.saturating_sub(answer::WINDOW_BEFORE).max(1);
-        let rust = candidate.path.ends_with(".rs") && last <= MAX_PREFIX_LINES;
+        // Far enough past the chunk to see the end of the declaration.
+        let read_to = from_line + answer::READ_CAP as u64 + 2;
+        let rust = candidate.path.ends_with(".rs") && read_to <= MAX_PREFIX_LINES;
         let from = if rust { 1 } else { start };
-        let Ok(source) = evidence.lines_at(&candidate.path, from, last, deadline) else {
+        let Ok(source) = evidence.lines_at(&candidate.path, from, read_to, deadline) else {
             continue;
         };
         if rust
@@ -1481,10 +1535,18 @@ fn generic_excerpts(
             continue;
         }
         let density = answer::distinct_terms(&body, terms);
-        let lines = answer::chunk_excerpt(start, window, (first, last), terms);
+        let (lines, sig) = answer::chunk_excerpt(start, window, (first, last), terms);
         if lines.is_empty() {
             continue;
         }
+        let read = match sig {
+            Some(sig) => answer::declaration_range(start, window, sig),
+            None => (first, last.min(first + answer::READ_CAP as u64 - 1)),
+        };
+        let symbol = candidate.symbol.clone().or_else(|| {
+            let at = usize::try_from(sig?.checked_sub(start)?).ok()?;
+            answer::symbol_of_signature(window.get(at)?)
+        });
         chunks.push(Chunk {
             candidate: Candidate {
                 line: first,
@@ -1493,6 +1555,9 @@ fn generic_excerpts(
             meaning_rank: rank,
             density,
             lines,
+            read: Some(read),
+            sig,
+            symbol,
         });
     }
     // Rank by density, best first; ties keep the meaning order.
@@ -1534,6 +1599,11 @@ fn generic_excerpts(
             path: path.clone(),
             from_meaning: chunk.candidate.meaning,
             lines: chunk.lines.clone(),
+            sig: chunk.sig,
+            read: chunk.read,
+            symbol: chunk.symbol.clone(),
+            meaning_rank: chunk.candidate.meaning.then_some(chunk.meaning_rank),
+            density: chunk.density,
         });
     }
     blocks
@@ -2255,6 +2325,7 @@ where
     // A maybe is a short list of files and nothing else: no kind route, no
     // definition read, no fallback search.
     if edit(state, |brief| brief.tier()) == Some(Tier::Low) {
+        answer_evidence(evidence.as_ref(), state, deadline);
         edit(state, |brief| brief.finished = true);
         return;
     }
@@ -2499,7 +2570,7 @@ fn fold(state: &Mutex<Brief>, plan: &Plan, got: &Gathered) {
         brief
             .files
             .sort_by_key(|hit| answer::demoted(&hit.path, wants_tests, wants_docs));
-        brief.directive = answer::directive_enabled();
+        brief.zero_rule = answer::ZERO_RULE.filter(|_| answer::zero_enabled());
         brief.leads = leads.to_vec();
         brief.lexical = lines.iter().map(|hit| hit.path.clone()).collect();
         brief.receipt = match &got.relevance {
@@ -2670,7 +2741,10 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
         return render_low(brief).map(|text| (text, AnswerStats::default()));
     }
     let receipt = !brief.receipt_lines().is_empty();
-    let cap = byte_cap(brief.signal, receipt || brief.has_excerpts());
+    let cap = byte_cap(
+        brief.signal,
+        receipt || brief.has_excerpts() || !brief.read_ranges().is_empty(),
+    );
     let mut shown = Shown::of(brief);
     let mut text = render_with(brief, shown);
     while text.len() > cap && shown.shrink() {
@@ -2710,6 +2784,7 @@ fn render_low(brief: &Brief) -> Option<String> {
         return None;
     }
     let confidence = brief.confidence.as_deref().unwrap_or_default();
+    let reads = brief.read_lines();
     let block = |files: usize, text_chars: usize| {
         let entries: Vec<String> = brief
             .files
@@ -2717,13 +2792,23 @@ fn render_low(brief: &Brief) -> Option<String> {
             .take(files)
             .map(|hit| file_entry(hit, text_chars))
             .collect();
-        format!("{BRIEF_TAG}\nfiles: {}\n{confidence}", entries.join("; "))
+        let mut text = format!("{BRIEF_TAG}\nfiles: {}\n{confidence}", entries.join("; "));
+        for line in &reads {
+            text.push('\n');
+            text.push_str(line);
+        }
+        text
+    };
+    let cap = if reads.is_empty() {
+        LOW_BRIEF_BYTES
+    } else {
+        LOW_READ_BRIEF_BYTES
     };
     let mut text = block(1, 0);
     for files in (1..=shown).rev() {
         for text_chars in [MAX_ITEM_CHARS, MAX_ITEM_CHARS / 2, 0] {
             text = block(files, text_chars);
-            if text.len() <= LOW_BRIEF_BYTES {
+            if text.len() <= cap {
                 return Some(text);
             }
         }
@@ -2829,14 +2914,13 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
         lines.push(line);
     }
     if let Some(confidence) = &brief.confidence {
-        // An excerpt the two retrievers do not both stand behind is shown
-        // with a medium confidence, not the high one.
-        lines.push(if brief.keeps_directive() {
+        // Evidence that did not earn the ZERO step is a medium confidence.
+        lines.push(if brief.confident() {
             confidence.clone()
-        } else if brief.has_excerpts() {
-            MEDIUM_CONFIDENCE.to_string()
-        } else {
+        } else if brief.read_ranges().is_empty() {
             MEDIUM_FILES_CONFIDENCE.to_string()
+        } else {
+            MEDIUM_CONFIDENCE.to_string()
         });
     }
     lines.extend(brief.excerpt_block(shown));
@@ -2930,9 +3014,17 @@ fn render_with(brief: &Brief, shown: Shown) -> String {
         if let Some(next) = &brief.next {
             lines.push(format!("next: {}", clean_n(next, DEF_BODY_CHARS)));
         }
-    } else {
+    }
+    // The brief ends on one concrete instruction: answer from the excerpt
+    // (ZERO), or read the named ranges (ONE READ).
+    let reads = brief.read_lines();
+    if brief.zero() {
+        lines.push(ZERO_LINE.to_string());
+    } else if !reads.is_empty() {
+        lines.extend(reads);
+    } else if !brief.partial() {
         lines.push(
-            if brief.keeps_directive() {
+            if brief.confident() {
                 FOOTER
             } else {
                 UNCORROBORATED_FOOTER
@@ -5842,9 +5934,17 @@ mod tests {
                 .as_str()
             )
         );
-        // The two probes only: no kind route, no search, no definition read.
+        // The two probes only: no kind route, no search, no definition read
+        // (the files are only read to fix the ranges to name).
+        let probes: Vec<String> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| !call.starts_with("lines_at "))
+            .cloned()
+            .collect();
         assert_eq!(
-            sorted(log.lock().unwrap().clone()),
+            sorted(probes),
             [
                 format!("meaning {PROSE} limit 8"),
                 format!("relevance {PROSE}")
@@ -6386,26 +6486,18 @@ mod tests {
     fn the_excerpt_should_hold_the_signature_the_doc_line_and_the_body_within_the_cap() {
         let finished = briefed(WEAK, confident_fake(), no_verdict);
         let text = finished.text.unwrap();
+        // The shipped build has no validated ZERO rule: the excerpt is not
+        // shown, it fixes the declaration to read.
+        assert!(!text.contains("\nanswer "), "{text}");
         assert!(
-            text.contains("\nanswer crates/pixel-daemon/src/daemon.rs:280:\n"),
+            text.contains("\nread: crates/pixel-daemon/src/daemon.rs:280-286 — watch_ready\n"),
             "{text}"
         );
-        assert!(
-            text.contains("  279| /// Wait until the daemon answers its socket."),
-            "{text}"
-        );
-        assert!(
-            text.contains("  280| pub fn watch_ready(root: &Path) -> bool {"),
-            "{text}"
-        );
-        assert!(text.contains("  281|     let mut waited = 0;"), "{text}");
+        assert!(text.ends_with(READ_LINE), "{text}");
+        assert!(text.contains(MEDIUM_CONFIDENCE), "{text}");
         assert!(text.len() <= PROSE_BRIEF_BYTES, "{} bytes", text.len());
-        assert!(finished.record.answer);
-        assert!(
-            (1..=text.len()).contains(&finished.record.excerpt_bytes),
-            "{}",
-            finished.record.excerpt_bytes
-        );
+        assert!(!finished.record.answer);
+        assert_eq!(finished.record.excerpt_bytes, 0);
         assert_eq!(finished.record.bytes, text.len());
     }
 
@@ -6573,17 +6665,14 @@ mod tests {
         strong.signal = Some(Signal::Strong);
         let mut cut = ready();
         cut.cut = true;
+        // A maybe gathers its chunks too, only to fix the ranges to read.
         let mut low = ready();
         low.relevance = low.relevance.map(|verdict| relevance::Verdict {
             tier: Tier::Low,
             ..verdict
         });
-        for (name, brief) in [
-            ("rationale", rationale),
-            ("strong", strong),
-            ("cut", cut),
-            ("low", low),
-        ] {
+        assert_eq!(answered(low, &fake).excerpts.len(), 1);
+        for (name, brief) in [("rationale", rationale), ("strong", strong), ("cut", cut)] {
             assert!(answered(brief, &fake).excerpts.is_empty(), "{name}");
         }
     }
@@ -6685,9 +6774,12 @@ mod tests {
                     label: format!("src/f{n}.rs:3"),
                     path: format!("src/f{n}.rs"),
                     from_meaning: true,
+                    meaning_rank: Some(n),
+                    density: 3,
                     lines: (0..10)
                         .map(|line| format!("{line}| {}", "x".repeat(105)))
                         .collect(),
+                    ..Excerpt::default()
                 })
                 .collect(),
             ops: 3,
@@ -6701,6 +6793,9 @@ mod tests {
     fn an_oversized_brief_should_drop_the_second_excerpt_first_and_keep_the_receipt() {
         let mut brief = high_brief();
         brief.caps = vec!["c".repeat(110); 10];
+        // The ZERO step fires, so the excerpts are shown.
+        brief.zero_rule = Some((0, 0, 2));
+        brief.lexical = vec!["src/f0.rs".into()];
         let (text, stats) = fit(&brief).unwrap();
         assert!(text.len() <= PROSE_BRIEF_BYTES, "{}", text.len());
         assert!(
@@ -6751,19 +6846,6 @@ mod tests {
             "{text}"
         );
         assert_eq!(stats, AnswerStats::default());
-    }
-
-    #[test]
-    fn an_unresolved_note_should_keep_the_evidence_but_never_the_directive() {
-        let mut brief = agreeing_brief(&[DAEMON]);
-        brief.unresolved = vec!["find-symbol x: 2 candidates".into()];
-        brief.receipt = Receipt::new(&on_topic_answer().input, Some(2));
-        let (text, stats) = fit(&brief).unwrap();
-        assert!(stats.receipt && stats.answer, "{text}");
-        assert!(text.contains("packet partial"), "{text}");
-        assert!(!text.contains("Answer from this evidence"), "{text}");
-        assert!(!text.contains("answer from them"), "{text}");
-        assert!(text.contains("verify they answer the question"), "{text}");
     }
 
     fn lead_at(path: &str, line: u32, symbol: Option<&str>) -> MeaningHit {
@@ -6862,72 +6944,155 @@ mod tests {
         );
     }
 
-    fn agreeing_brief(lexical: &[&str]) -> Brief {
+    /// A high-tier brief whose top chunk is `DAEMON:280`: the meaning
+    /// search's best, holding `density` keywords, and the lexical probe's
+    /// co-files are `lexical`. The ZERO rule `(0, 0, 2)` is in force.
+    fn zeroing_brief(lexical: &[&str], density: usize) -> Brief {
         let mut brief = high_brief();
         brief.excerpts = vec![Excerpt {
             label: format!("{DAEMON}:280"),
             path: DAEMON.to_string(),
             from_meaning: true,
+            meaning_rank: Some(0),
+            density,
+            sig: Some(280),
+            read: Some((280, 288)),
+            symbol: Some("watch_ready".to_string()),
             lines: vec!["280| pub fn watch_ready()".into()],
         }];
         brief.lexical = lexical.iter().map(ToString::to_string).collect();
         brief.confidence = Some(HIGH_CONFIDENCE.to_string());
-        brief.directive = true;
+        brief.zero_rule = Some((0, 0, 2));
         brief
     }
 
     #[test]
-    fn the_directive_should_be_off_unless_the_switch_is_on() {
-        let mut brief = agreeing_brief(&["a.rs", DAEMON]);
-        assert_eq!(brief.agreed(), Some(true));
-        assert!(brief.keeps_directive());
-        brief.directive = false;
-        assert!(!brief.keeps_directive());
-        let (text, _) = fit(&brief).unwrap();
-        assert!(text.contains(MEDIUM_CONFIDENCE), "{text}");
-        assert!(!text.contains("confidence: high"), "{text}");
-        assert!(!text.contains("Answer from this evidence"), "{text}");
-        assert!(!text.contains("answer from them"), "{text}");
-        assert!(text.contains(UNCORROBORATED_FOOTER), "{text}");
-        // A brief without an excerpt says it about its files.
-        brief.excerpts.clear();
-        let (text, _) = fit(&brief).unwrap();
-        assert!(text.contains(MEDIUM_FILES_CONFIDENCE), "{text}");
-        assert!(!text.contains("Answer from this evidence"), "{text}");
-        // Strong prompts and low-tier briefs are not high-tier prose: unchanged.
-        brief.signal = Some(Signal::Strong);
-        assert!(brief.keeps_directive());
+    fn the_zero_step_should_fire_only_when_the_whole_rule_holds() {
+        let zero = zeroing_brief(&[DAEMON, "b.rs"], 2);
+        assert!(zero.zero() && zero.confident());
+        let (text, stats) = fit(&zero).unwrap();
+        assert!(text.contains(HIGH_CONFIDENCE), "{text}");
+        assert!(
+            text.contains(&format!("\nanswer {DAEMON}:280:\n")),
+            "{text}"
+        );
+        assert!(text.ends_with(ZERO_LINE), "{text}");
+        assert!(!text.contains("read: "), "{text}");
+        assert!(text.contains("answer from them if they suffice"), "{text}");
+        assert!(stats.answer);
+
+        // One keyword short, the file second among the lexical co-files, a
+        // lexical-only chunk, a lower meaning rank, no rule: each is a miss.
+        let mut misses = vec![
+            zeroing_brief(&[DAEMON], 1),
+            zeroing_brief(&["b.rs", DAEMON], 2),
+        ];
+        let mut lexical = zeroing_brief(&[DAEMON], 2);
+        lexical.excerpts[0].from_meaning = false;
+        let mut ranked = zeroing_brief(&[DAEMON], 2);
+        ranked.excerpts[0].meaning_rank = Some(1);
+        let mut ruleless = zeroing_brief(&[DAEMON], 2);
+        ruleless.zero_rule = None;
+        let mut noted = zeroing_brief(&[DAEMON], 2);
+        noted.unresolved = vec!["find-symbol x: 2 candidates".into()];
+        misses.extend([lexical, ranked, ruleless, noted]);
+        for (index, brief) in misses.iter().enumerate() {
+            assert!(!brief.zero(), "miss {index}");
+            let (text, _) = fit(brief).unwrap();
+            assert!(!text.contains(ZERO_LINE), "miss {index}: {text}");
+            assert!(!text.contains("\nanswer "), "miss {index}: {text}");
+            assert!(!text.contains("confidence: high"), "miss {index}: {text}");
+            assert!(text.ends_with(READ_LINE), "miss {index}: {text}");
+        }
     }
 
     #[test]
-    fn the_directive_should_stay_only_when_both_retrievers_name_the_excerpt_file() {
-        let agreed = agreeing_brief(&["a.rs", DAEMON]);
-        assert_eq!(agreed.agreed(), Some(true));
-        let (text, _) = fit(&agreed).unwrap();
-        assert!(text.contains(HIGH_CONFIDENCE), "{text}");
-        assert!(text.contains(FOOTER), "{text}");
-        assert!(text.contains("answer from them if they suffice"), "{text}");
+    fn no_zero_rule_should_ship_until_one_is_validated() {
+        // Dev split of eval/brief-gate/answer_spans.jsonl: the strict rule
+        // fired once, the loosest five times and was right twice.
+        assert!(answer::ZERO_RULE.is_none());
+        assert!(Brief::default().zero_rule.is_none());
+        assert!(answer::zero_enabled() || std::env::var(answer::ZERO_ENV).is_ok());
+    }
 
-        // The file is only the third lexical co-file: one retriever.
-        let alone = agreeing_brief(&["a.rs", "b.rs", DAEMON]);
-        assert_eq!(alone.agreed(), Some(false));
-        let (text, _) = fit(&alone).unwrap();
+    #[test]
+    fn a_brief_that_did_not_earn_zero_should_end_on_the_ranges_to_read() {
+        let mut brief = zeroing_brief(&["b.rs"], 2);
+        brief.excerpts.push(Excerpt {
+            label: "crates/pixel/src/other.rs:1".into(),
+            path: "crates/pixel/src/other.rs".into(),
+            read: Some((1, 40)),
+            symbol: None,
+            lines: vec!["1| fn other() {".into()],
+            ..Excerpt::default()
+        });
+        // The same declaration twice, and a fourth chunk: both are dropped.
+        brief.excerpts.push(brief.excerpts[0].clone());
+        let (text, stats) = fit(&brief).unwrap();
         assert!(text.contains(MEDIUM_CONFIDENCE), "{text}");
-        assert!(!text.contains("confidence: high"), "{text}");
-        assert!(!text.contains("Answer from this evidence"), "{text}");
-        assert!(!text.contains("answer from them"), "{text}");
-        assert!(text.contains(UNCORROBORATED_FOOTER), "{text}");
-        assert!(text.contains("verify they answer the question"), "{text}");
-        assert!(text.contains(&format!("answer {DAEMON}:280:")), "{text}");
+        assert!(!text.contains("\nanswer "), "{text}");
+        assert!(!stats.answer);
+        let tail: Vec<&str> = text.lines().rev().take(3).collect();
+        assert_eq!(
+            tail,
+            [
+                READ_LINE,
+                "also: crates/pixel/src/other.rs:1-40",
+                &format!("read: {DAEMON}:280-288 — watch_ready"),
+            ]
+        );
+        assert_eq!(text.matches("read: ").count(), 1, "{text}");
+        assert!(text.len() <= PROSE_BRIEF_BYTES);
+    }
 
-        // A lexical-only excerpt has no second retriever to agree with it.
-        let mut lexical = agreeing_brief(&[DAEMON]);
-        lexical.excerpts[0].from_meaning = false;
-        assert_eq!(lexical.agreed(), Some(false));
-        // No excerpt, nothing withheld: the brief keeps its #887 shape.
-        let mut none = agreeing_brief(&[]);
-        none.excerpts.clear();
-        assert_eq!(none.agreed(), None);
+    #[test]
+    fn a_partial_brief_should_name_its_gap_and_still_end_on_the_instruction() {
+        let mut brief = zeroing_brief(&[DAEMON], 2);
+        brief.unresolved = vec!["find-symbol x: 2 candidates".into()];
+        brief.next = Some("pixel find-code 'x'".into());
+        let (text, _) = fit(&brief).unwrap();
+        assert!(text.contains("packet partial"), "{text}");
+        assert!(text.contains("\nnext: pixel find-code 'x'\n"), "{text}");
+        assert!(text.ends_with(READ_LINE), "{text}");
+        assert!(!text.contains("answer from them"), "{text}");
+    }
+
+    #[test]
+    fn no_range_should_be_named_for_a_strong_prompt_a_cut_packet_or_a_rationale() {
+        let mut strong = zeroing_brief(&[DAEMON], 2);
+        strong.signal = Some(Signal::Strong);
+        let mut cut = zeroing_brief(&[DAEMON], 2);
+        cut.cut = true;
+        for brief in [strong, cut] {
+            assert!(brief.read_ranges().is_empty());
+            let text = fit(&brief).map(|(text, _)| text).unwrap_or_default();
+            assert!(!text.contains("read: "), "{text}");
+        }
+        // Without a range the brief keeps a verification footer.
+        let mut bare = zeroing_brief(&[DAEMON], 2);
+        bare.excerpts[0].read = None;
+        bare.zero_rule = None;
+        let (text, _) = fit(&bare).unwrap();
+        assert!(text.contains(MEDIUM_FILES_CONFIDENCE), "{text}");
+        assert!(text.ends_with(UNCORROBORATED_FOOTER), "{text}");
+    }
+
+    #[test]
+    fn a_maybe_should_name_the_range_to_read_inside_its_cap() {
+        let mut brief = low_brief(vec![rhit("a.rs", 1, "one"), rhit("b.rs", 2, "two")]);
+        brief.finished = true;
+        brief.excerpts = vec![Excerpt {
+            label: "a.rs:10".into(),
+            path: "a.rs".into(),
+            read: Some((10, 30)),
+            symbol: Some("run".into()),
+            ..Excerpt::default()
+        }];
+        let (text, _) = fit(&brief).unwrap();
+        assert!(text.contains("\nread: a.rs:10-30 — run\n"), "{text}");
+        assert!(text.ends_with(READ_LINE), "{text}");
+        assert!(text.contains(LOW_CONFIDENCE), "{text}");
+        assert!(text.len() <= LOW_READ_BRIEF_BYTES, "{}", text.len());
     }
 
     #[test]

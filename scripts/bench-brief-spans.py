@@ -11,7 +11,12 @@ briefs that fired,
 
 * span_hit@excerpt: some line of an ``answer`` block lies inside a gold span;
 * span_hit@brief: that, or a ``defined:`` range overlaps a gold span;
-* pointer: a ``files:`` entry points inside a gold span.
+* pointer: a ``files:`` entry points inside a gold span;
+* zero: briefs that end on the ZERO instruction ("Answer from these lines"),
+  and how many of them show an excerpt overlapping a gold span (precision);
+* read@1 / read@1-3: a ``read:`` (first) or ``read:``/``also:`` (all) range
+  overlaps a gold span (``*_in``: contains the whole span);
+* answered: ZERO correct, or no ZERO and a read@1-3 range overlapping.
 
 The labels belong to the fixture checkout (the SHA in ``bench-brief-gate.py``),
 so run against an indexed checkout of it with a warm daemon::
@@ -67,14 +72,35 @@ def parse(brief):
     return excerpt, defined, pointers
 
 
+def read_ranges(brief):
+    """``(path, first, last)`` of each ``read:`` / ``also:`` line, in order."""
+    found = []
+    for line in brief.split("\n"):
+        match = re.match(r"(?:read|also): (\S+):(\d+)-(\d+)", line)
+        if match:
+            found.append((match.group(1), int(match.group(2)), int(match.group(3))))
+    return found
+
+
 def hits(spans, brief):
     excerpt, defined, pointers = parse(brief)
+    ranges = read_ranges(brief)
+    over = lambda sp, r: sp["path"] == r[0] and r[1] <= sp["end_line"] and r[2] >= sp["start_line"]
+    within = lambda sp, r: sp["path"] == r[0] and r[1] <= sp["start_line"] and r[2] >= sp["end_line"]
     inside = lambda sp, path, n: sp["path"] == path and sp["start_line"] <= n <= sp["end_line"]
     in_excerpt = any(inside(sp, path, n) for sp in spans for path, lines in excerpt.items() for n in lines)
     in_defined = any(sp["path"] == path and start <= sp["end_line"] and end >= sp["start_line"]
                      for sp in spans for path, start, end in defined)
     pointed = any(inside(sp, path, n) for sp in spans for path, n in pointers)
-    return {"excerpt": in_excerpt, "brief": in_excerpt or in_defined, "pointer": pointed}
+    zero = "Answer from these lines" in brief
+    read1 = any(over(sp, ranges[0]) for sp in spans) if ranges else False
+    read3 = any(over(sp, r) for sp in spans for r in ranges)
+    return {"excerpt": in_excerpt, "brief": in_excerpt or in_defined, "pointer": pointed,
+            "zero": zero, "zero_ok": zero and in_excerpt, "read1": read1, "read3": read3,
+            "read1_in": any(within(sp, ranges[0]) for sp in spans) if ranges else False,
+            "read3_in": any(within(sp, r) for sp in spans for r in ranges),
+            "has_read": bool(ranges),
+            "answered": (zero and in_excerpt) or (not zero and read3)}
 
 
 def summarize(rows):
@@ -82,6 +108,10 @@ def summarize(rows):
     count = lambda key: sum(row[key] for row in fired)
     return {"n": len(rows), "fired": len(fired), "span_hit@excerpt": count("excerpt"),
             "span_hit@brief": count("brief"), "pointer": count("pointer"),
+            "zero": count("zero"), "zero_ok": count("zero_ok"), "has_read": count("has_read"),
+            "read@1": count("read1"), "read@1-3": count("read3"),
+            "read@1_in": count("read1_in"), "read@1-3_in": count("read3_in"),
+            "answered": count("answered"),
             "bytes_p50": sorted(r["bytes"] for r in fired)[len(fired) // 2] if fired else None}
 
 
@@ -132,10 +162,20 @@ class Tests(unittest.TestCase):
 
     def test_hits_should_tell_excerpt_defined_and_pointer_apart(self):
         span = lambda path, a, b: [{"path": path, "start_line": a, "end_line": b}]
-        self.assertEqual(hits(span("a.rs", 31, 40), self.BRIEF), {"excerpt": True, "brief": True, "pointer": False})
-        self.assertEqual(hits(span("a.rs", 15, 16), self.BRIEF), {"excerpt": False, "brief": True, "pointer": False})
-        self.assertEqual(hits(span("c.rs", 8, 12), self.BRIEF), {"excerpt": False, "brief": False, "pointer": True})
-        self.assertEqual(hits(span("z.rs", 1, 9), self.BRIEF), {"excerpt": False, "brief": False, "pointer": False})
+        pick = lambda got: (got["excerpt"], got["brief"], got["pointer"])
+        self.assertEqual(pick(hits(span("a.rs", 31, 40), self.BRIEF)), (True, True, False))
+        self.assertEqual(pick(hits(span("a.rs", 15, 16), self.BRIEF)), (False, True, False))
+        self.assertEqual(pick(hits(span("c.rs", 8, 12), self.BRIEF)), (False, False, True))
+        self.assertEqual(pick(hits(span("z.rs", 1, 9), self.BRIEF)), (False, False, False))
+
+    def test_hits_should_score_the_zero_line_and_the_read_ranges(self):
+        brief = "answer a.rs:30:\n  30| fn g() {\nread: a.rs:28-40 — g\nalso: b.rs:1-9 — h\nAnswer from these lines; open."
+        span = lambda path, a, b: [{"path": path, "start_line": a, "end_line": b}]
+        got = hits(span("a.rs", 30, 31), brief)
+        self.assertTrue(got["zero"] and got["zero_ok"] and got["read1"] and got["read1_in"] and got["answered"])
+        got = hits(span("b.rs", 5, 6), brief)
+        self.assertTrue(not got["read1"] and got["read3"] and got["read3_in"] and not got["zero_ok"])
+        self.assertEqual(read_ranges(brief), [("a.rs", 28, 40), ("b.rs", 1, 9)])
 
 
 if __name__ == "__main__":

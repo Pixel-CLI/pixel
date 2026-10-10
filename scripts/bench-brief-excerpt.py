@@ -35,7 +35,7 @@ import unittest
 from pathlib import Path
 
 DEFAULT_SET = Path(__file__).resolve().parent.parent / "eval" / "brief-gate" / "prompts.jsonl"
-DIRECTIVE = "Answer from this evidence"
+DIRECTIVE = "Answer from these lines"
 SITE = re.compile(r"^(\S+?):\d+\b")
 HEADER = re.compile(r"^answer (\S+):$")
 

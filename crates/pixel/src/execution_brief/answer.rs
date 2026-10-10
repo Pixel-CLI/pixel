@@ -42,18 +42,33 @@ const TEST_SPAN: usize = 40;
 /// Lines a config excerpt shows.
 const MAX_CONFIG_LINES: usize = 4;
 
-/// Environment switch of the directive ("Answer from this evidence"): off
-/// unless set to `1`, `true` or `on`. Two retrievers agreeing on the top
-/// file was measured to be right too rarely to tell an agent to stop looking.
-pub(crate) const DIRECTIVE_ENV: &str = "PIXEL_BRIEF_DIRECTIVE";
+/// Environment kill switch of the ZERO step (`0`, `false` or `off`): the
+/// brief then never tells the agent to answer from its excerpt.
+pub(crate) const ZERO_ENV: &str = "PIXEL_BRIEF_ZERO";
 
-/// Whether an environment value switches the directive on.
-pub(crate) fn directive_on(value: Option<&str>) -> bool {
-    matches!(value, Some("1" | "true" | "on"))
+pub(crate) fn zero_enabled() -> bool {
+    decision_log::enabled(std::env::var(ZERO_ENV).ok().as_deref())
 }
 
-pub(crate) fn directive_enabled() -> bool {
-    directive_on(std::env::var(DIRECTIVE_ENV).ok().as_deref())
+/// A ZERO rule: the best rank of the top chunk among the meaning search's,
+/// the best rank of its file among the lexical co-files, and the fewest
+/// distinct probed keywords inside the chunk.
+pub(crate) type ZeroRule = (usize, usize, usize);
+
+/// The rule the brief applies. `None`: no rule tried on the dev split of
+/// `eval/brief-gate/answer_spans.jsonl` kept the span precision at 0.9 with
+/// two firings (the strict rule `(0, 0, 2)` fired once, right; the loosest
+/// fired 5 times, right twice), so the ZERO step never fires.
+pub(crate) const ZERO_RULE: Option<ZeroRule> = None;
+
+/// The ZERO rule `rule`: the top excerpt is the meaning search's chunk of
+/// rank at most `rule.0`, lies in a lexical co-file of rank at most
+/// `rule.1`, and holds at least `rule.2` distinct probed keywords.
+pub(crate) fn rule_holds(top: &Excerpt, lexical_rank: Option<usize>, rule: ZeroRule) -> bool {
+    top.from_meaning
+        && top.meaning_rank.is_some_and(|rank| rank <= rule.0)
+        && lexical_rank.is_some_and(|rank| rank <= rule.1)
+        && top.density >= rule.2
 }
 
 pub(crate) fn receipt_enabled() -> bool {
@@ -156,9 +171,20 @@ fn names(list: &[String]) -> String {
 }
 
 /// One block of answer evidence: a label and its source lines.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Excerpt {
     pub(crate) label: String,
+    /// The signature line the excerpt was cut under, when it found one.
+    pub(crate) sig: Option<u64>,
+    /// The whole declaration around it, for a `read:` range.
+    pub(crate) read: Option<(u64, u64)>,
+    /// What it declares.
+    pub(crate) symbol: Option<String>,
+    /// Rank of the chunk among the meaning search's, best first; `None`
+    /// for a lexical hit.
+    pub(crate) meaning_rank: Option<usize>,
+    /// Distinct probed keywords inside the chunk.
+    pub(crate) density: usize,
     /// The file the block was cut from, empty for a kind block that spans
     /// several.
     pub(crate) path: String,
@@ -205,6 +231,7 @@ pub(crate) fn is_test_path(path: &str) -> bool {
     path.split('/')
         .any(|part| matches!(part, "tests" | "test" | "__tests__" | "e2e"))
         || name.contains("_test.")
+        || name.contains("_tests.")
         || name.contains(".test.")
         || name.contains(".spec.")
         || name.starts_with("test_")
@@ -378,7 +405,7 @@ fn doc_above(window: &[String], sig: usize) -> Option<usize> {
 /// [`BODY_LINES`] lines of the matched region. `window[0]` is line `start`.
 #[cfg(test)]
 pub(crate) fn lookup_excerpt(start: u64, window: &[String], matched: u64) -> Vec<String> {
-    excerpt_around(start, window, matched, BODY_LINES)
+    excerpt_around(start, window, matched, BODY_LINES).0
 }
 
 /// Body lines of a chunk excerpt, after its signature and doc line.
@@ -416,9 +443,9 @@ pub(crate) fn chunk_excerpt(
     window: &[String],
     chunk: (u64, u64),
     terms: &[String],
-) -> Vec<String> {
+) -> (Vec<String>, Option<u64>) {
     if window.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     let index = |line: u64| usize::try_from(line.saturating_sub(start)).unwrap_or(0);
     let first = index(chunk.0).min(window.len() - 1);
@@ -453,9 +480,14 @@ pub(crate) fn enclosing_start(start: u64, window: &[String], line: u64) -> u64 {
         .map_or(line, |index| start + index as u64)
 }
 
-fn excerpt_around(start: u64, window: &[String], matched: u64, body: usize) -> Vec<String> {
+fn excerpt_around(
+    start: u64,
+    window: &[String],
+    matched: u64,
+    body: usize,
+) -> (Vec<String>, Option<u64>) {
     if window.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     let at = usize::try_from(matched.saturating_sub(start))
         .unwrap_or(0)
@@ -489,7 +521,70 @@ fn excerpt_around(start: u64, window: &[String], matched: u64, body: usize) -> V
         .iter()
         .map(|&index| (start + index as u64, window[index].as_str()))
         .collect();
-    numbered(&rows)
+    (numbered(&rows), sig.map(|index| start + index as u64))
+}
+
+/// Lines a `read:` range may span.
+pub(crate) const READ_CAP: usize = 60;
+
+/// The whole declaration that starts at line `sig` of `window` (whose first
+/// line is `start`): a braced body to its closing brace, an indented body to
+/// its last line, a `const` to its `;`; at most [`READ_CAP`] lines.
+pub(crate) fn declaration_range(start: u64, window: &[String], sig: u64) -> (u64, u64) {
+    let first = usize::try_from(sig.saturating_sub(start)).unwrap_or(0);
+    if first >= window.len() {
+        return (sig, sig);
+    }
+    let indented = window[first].trim_end().ends_with(':');
+    let base = indent_of(&window[first]);
+    let (mut depth, mut opened, mut end) = (0_i32, false, first);
+    for (offset, line) in window[first..].iter().take(READ_CAP).enumerate() {
+        let index = first + offset;
+        if indented && offset > 0 && !line.trim().is_empty() && indent_of(line) <= base {
+            break;
+        }
+        end = index;
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    opened = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        let text = line.trim_end();
+        if (opened && depth <= 0) || (!opened && !indented && text.ends_with(';')) {
+            break;
+        }
+    }
+    (start + first as u64, start + end as u64)
+}
+
+/// The name a signature line declares: the token after its keyword.
+pub(crate) fn symbol_of_signature(line: &str) -> Option<String> {
+    const KEYWORDS: &[&str] = &[
+        "fn",
+        "struct",
+        "enum",
+        "trait",
+        "const",
+        "static",
+        "type",
+        "def",
+        "class",
+        "function",
+        "func",
+        "interface",
+        "impl",
+    ];
+    let mut tokens = line.split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == ':'));
+    tokens.find(|token| KEYWORDS.contains(token))?;
+    tokens
+        .find(|token| !token.is_empty() && !matches!(*token, "mut" | "pub" | "async"))
+        .map(|name| name.trim_matches(':').to_string())
+        .filter(|name| !name.is_empty())
 }
 
 /// One step of a flow: a function, where it is defined, and its first line.
@@ -718,13 +813,11 @@ mod tests {
     }
 
     #[test]
-    fn the_directive_should_be_off_unless_switched_on() {
-        assert!(!directive_on(None));
-        for off in ["", "0", "false", "off", "yes"] {
-            assert!(!directive_on(Some(off)), "{off}");
-        }
-        for on in ["1", "true", "on"] {
-            assert!(directive_on(Some(on)), "{on}");
+    fn the_zero_switch_should_stay_on_unless_an_off_word_is_given() {
+        assert!(decision_log::enabled(None));
+        assert!(decision_log::enabled(Some("1")));
+        for off in ["0", "false", "off"] {
+            assert!(!decision_log::enabled(Some(off)), "{off}");
         }
     }
 
@@ -1095,7 +1188,7 @@ mod tests {
         source.push("    wait_for_brief_window(window);".into());
         source.extend((0..5).map(|n| format!("    let tail_{n} = {n};")));
         source.push("}".into());
-        let found = chunk_excerpt(10, &source, (10, 10 + 28), &terms(&["brief", "window"]));
+        let found = chunk_excerpt(10, &source, (10, 10 + 28), &terms(&["brief", "window"])).0;
         assert_eq!(found[0], "10| /// Decide the gate.");
         assert_eq!(found[1], "11| pub fn decide() {");
         let text = found.join("\n");
@@ -1104,7 +1197,7 @@ mod tests {
         assert!(!text.contains("step_0"), "{text}");
         assert!(found.len() <= 2 + CHUNK_BODY_LINES, "{found:?}");
         // No keyword inside: the head of the chunk, as before.
-        let head = chunk_excerpt(10, &source, (10, 38), &terms(&["absent"]));
+        let head = chunk_excerpt(10, &source, (10, 38), &terms(&["absent"])).0;
         assert_eq!(head[2], "12|     let step_0 = 0;");
     }
 
@@ -1118,10 +1211,83 @@ mod tests {
             "    brief();",
             "}",
         ]);
-        let found = chunk_excerpt(1, &source, (1, 3), &terms(&["brief"])).join("\n");
+        let found = chunk_excerpt(1, &source, (1, 3), &terms(&["brief"]))
+            .0
+            .join("\n");
         assert!(
             found.contains("fn a()") && !found.contains("fn b()"),
             "{found}"
         );
+    }
+
+    #[test]
+    fn declaration_range_should_cover_a_braced_body_a_const_and_an_indented_body() {
+        let braced = lines(&[
+            "fn a() {",
+            "    if x {",
+            "        y();",
+            "    }",
+            "}",
+            "fn b() {}",
+        ]);
+        assert_eq!(declaration_range(10, &braced, 10), (10, 14));
+        let konst = lines(&[
+            "pub const LIMITS: [u32; 2] = [",
+            "    1,",
+            "    2,",
+            "];",
+            "fn next() {}",
+        ]);
+        assert_eq!(declaration_range(1, &konst, 1), (1, 4));
+        let one = lines(&["const A: u32 = 1;", "const B: u32 = 2;"]);
+        assert_eq!(declaration_range(1, &one, 1), (1, 1));
+        let python = lines(&[
+            "def f():",
+            "    a = 1",
+            "",
+            "    return a",
+            "def g():",
+            "    pass",
+        ]);
+        assert_eq!(declaration_range(1, &python, 1), (1, 4));
+        // The cap: a body that never closes stops at READ_CAP lines.
+        let open: Vec<String> = std::iter::once("fn long() {".to_string())
+            .chain((0..100).map(|n| format!("    step({n});")))
+            .collect();
+        assert_eq!(declaration_range(1, &open, 1), (1, READ_CAP as u64));
+        assert_eq!(declaration_range(1, &[], 5), (5, 5));
+    }
+
+    #[test]
+    fn symbol_of_signature_should_name_what_the_line_declares() {
+        for (line, name) in [
+            ("pub(crate) async fn run_it(x: u8) {", "run_it"),
+            ("pub const SWEEP_INTERVAL: Duration = x;", "SWEEP_INTERVAL"),
+            ("    def watch(self):", "watch"),
+            ("export function load() {", "load"),
+            ("impl Service {", "Service"),
+            ("pub struct Brief {", "Brief"),
+        ] {
+            assert_eq!(symbol_of_signature(line).as_deref(), Some(name), "{line}");
+        }
+        assert_eq!(symbol_of_signature("let x = 1;"), None);
+    }
+
+    #[test]
+    fn a_rule_should_need_the_meaning_rank_the_lexical_rank_and_the_keywords() {
+        let top = |rank: Option<usize>, density: usize, meaning: bool| Excerpt {
+            from_meaning: meaning,
+            meaning_rank: rank,
+            density,
+            ..Excerpt::default()
+        };
+        let rule = (0, 0, 2);
+        assert!(rule_holds(&top(Some(0), 2, true), Some(0), rule));
+        assert!(!rule_holds(&top(Some(1), 2, true), Some(0), rule));
+        assert!(!rule_holds(&top(Some(0), 1, true), Some(0), rule));
+        assert!(!rule_holds(&top(Some(0), 2, true), Some(1), rule));
+        assert!(!rule_holds(&top(Some(0), 2, true), None, rule));
+        assert!(!rule_holds(&top(None, 2, false), Some(0), rule));
+        assert!(rule_holds(&top(Some(1), 1, true), Some(1), (1, 1, 1)));
     }
 }
