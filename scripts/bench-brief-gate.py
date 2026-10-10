@@ -28,7 +28,9 @@ privacy lint, and with ``--repo`` that every expected file exists there);
 """
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import math
 import os
@@ -472,12 +474,13 @@ def restore_daemon(pixel, repo, running):
     that changed the daemon and then failed is put back too. A failure here is
     reported, not raised: it must not hide the error that ended the run.
     """
+    want = "running" if running else "stopped"
     try:
-        if daemon_running(pixel, repo) != running:
-            set_daemon(pixel, repo, "on" if running else "off")
+        if daemon_running(pixel, repo) != running and set_daemon(pixel, repo, "on" if running else "off") != running:
+            print(f"WARNING: could not restore the daemon of {repo} to {want}: it did not reach that state",
+                  file=sys.stderr)
     except (OSError, subprocess.SubprocessError) as error:
-        print(f"WARNING: could not restore the daemon of {repo} to "
-              f"{'running' if running else 'stopped'}: {error}", file=sys.stderr)
+        print(f"WARNING: could not restore the daemon of {repo} to {want}: {error}", file=sys.stderr)
 
 
 def ollaya_warm():
@@ -863,6 +866,22 @@ class SelfTest(unittest.TestCase):
             self.assertEqual(check_canary(stub, repo, 10)[0], False)  # the stub only answers `install`
             self.assertIn("exit 0", check_canary(stub, repo, 10)[1])
 
+    def test_a_restore_that_does_not_reach_the_state_warns(self):
+        saved = {name: globals()[name] for name in ("daemon_running", "set_daemon")}
+        globals()["daemon_running"] = lambda pixel, repo: False  # stays stopped whatever is asked
+        globals()["set_daemon"] = lambda pixel, repo, mode: False
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                restore_daemon("pixel", "repo", True)
+            self.assertIn("could not restore the daemon of repo to running", err.getvalue())
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                restore_daemon("pixel", "repo", False)  # already there: nothing to say
+            self.assertEqual(err.getvalue(), "")
+        finally:
+            globals().update(saved)
+
     def test_a_setup_that_fails_after_changing_the_daemon_still_restores_it(self):
         if not DEFAULT_SET.is_file():
             self.skipTest("no prompt set next to this script")
@@ -917,8 +936,9 @@ def check_set(args):
         raise SystemExit(f"{args.repo}: no tracked files (is it a git checkout?)")
     if args.repo:
         repo_sha = git_output(args.repo, "rev-parse", "HEAD")
-        if repo_sha != FIXTURE_SHA:
-            print(f"WARNING: {args.repo} HEAD {repo_sha} is not the fixture {FIXTURE_SHA}: "
+        dirty = bool(git_output(args.repo, "status", "--porcelain"))
+        if repo_sha != FIXTURE_SHA or dirty:
+            print(f"WARNING: {args.repo} HEAD {repo_sha} (dirty={dirty}) is not the fixture {FIXTURE_SHA}: "
                   "expected_files are checked against a different tree", file=sys.stderr)
     problems = validate_rows(rows, repo_files)
     print(json.dumps(summarize_set(rows), sort_keys=True))
