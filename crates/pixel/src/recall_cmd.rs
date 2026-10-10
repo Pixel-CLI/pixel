@@ -128,22 +128,6 @@ pub enum RecallCmd {
         #[arg(long)]
         json: bool,
     },
-    /// MAX TEST: rank remembered keywords by rarity — the term with the
-    /// fewest matches pins the session you're hunting for fastest.
-    Maxtest {
-        /// Comma-separated keywords (matched as whole words).
-        keywords: String,
-        #[arg(long)]
-        agent: Option<String>,
-        #[arg(long)]
-        repo: Option<String>,
-        #[arg(long)]
-        since: Option<String>,
-        #[arg(long)]
-        until: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
     /// Bulk-export ingested sessions, one file per session, into a folder.
     Export {
         #[arg(long)]
@@ -270,14 +254,6 @@ pub fn run_recall(cmd: RecallCmd) -> Result<(), String> {
             lexical_only,
             json,
         ),
-        RecallCmd::Maxtest {
-            keywords,
-            agent,
-            repo,
-            since,
-            until,
-            json,
-        } => run_maxtest(&keywords, agent, repo, since, until, json),
         RecallCmd::Context {
             query,
             budget,
@@ -734,98 +710,6 @@ fn run_ask(
     }
     for g in &result.groups {
         println!("{}", pixel_recall::ask::format_group(g));
-    }
-    Ok(())
-}
-
-fn run_maxtest(
-    keywords: &str,
-    agent: Option<String>,
-    repo: Option<String>,
-    since: Option<String>,
-    until: Option<String>,
-    json: bool,
-) -> Result<(), String> {
-    let terms: Vec<&str> = keywords
-        .split(',')
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .collect();
-    if terms.is_empty() {
-        return Err("no keywords given (comma-separated list expected)".to_string());
-    }
-    if terms.len() > 10 {
-        return Err("at most 10 keywords".to_string());
-    }
-    let mut store = open_store()?;
-    let mut segments = SegmentSet::open(&pixel_recall::segments_dir())?;
-    let written = lazy_catch_up(&mut store);
-    index_after_catch_up(&store, &mut segments, written)?;
-    let now = now_ms();
-    let filters = SearchFilters {
-        agent,
-        repo_prefix: repo.as_deref().map(expand_repo),
-        since_ms: since.as_deref().map(|s| parse_time(s, now)).transpose()?,
-        until_ms: until.as_deref().map(|s| parse_time(s, now)).transpose()?,
-        ..Default::default()
-    };
-    // Escape each keyword: maxtest terms are literals, not regexes.
-    let mut ranked: Vec<(String, usize, std::collections::HashSet<i64>)> = Vec::new();
-    for term in &terms {
-        let escaped = regex::escape(term);
-        let (turns, sessions) =
-            pixel_recall::search::count_matches(&store, &segments, &escaped, true, &filters)?;
-        ranked.push((term.to_string(), turns, sessions));
-    }
-    ranked.sort_by_key(|(_, _, sessions)| sessions.len());
-    if json {
-        let out = json!({
-            "ranking": ranked.iter().map(|(t, turns, sess)| json!({
-                "term": t, "turns": turns, "sessions": sess.len(),
-            })).collect::<Vec<_>>(),
-        });
-        println!("{out}");
-        return Ok(());
-    }
-    println!("keyword ranking (rarest first — rarest pins the session):");
-    for (term, turns, sessions) in &ranked {
-        if sessions.is_empty() {
-            println!("  {term:24} 0 matches — term does not appear in the corpus");
-        } else {
-            println!("  {term:24} {} sessions, {} turns", sessions.len(), turns);
-        }
-    }
-    // The pin: intersect the two rarest non-empty terms (or take the single
-    // rarest) and show those sessions for recognition.
-    let nonempty: Vec<&(String, usize, std::collections::HashSet<i64>)> =
-        ranked.iter().filter(|(_, _, s)| !s.is_empty()).collect();
-    let pin: Vec<i64> = match nonempty.as_slice() {
-        [] => Vec::new(),
-        [only] => only.2.iter().copied().collect(),
-        [first, second, ..] => first.2.intersection(&second.2).copied().collect(),
-    };
-    if pin.is_empty() {
-        println!(
-            "\nno session contains the rarest terms together — widen the window or try other keywords"
-        );
-        return Ok(());
-    }
-    println!("\npinned sessions ({}):", pin.len());
-    let mut pinned: Vec<SessionRow> = Vec::new();
-    for id in pin.iter().take(10) {
-        if let Some(row) = store.session_by_id(*id).map_err(|e| e.to_string())? {
-            pinned.push(row);
-        }
-    }
-    pinned.sort_by_key(|a| std::cmp::Reverse(a.ts_last));
-    for row in &pinned {
-        println!("  {}", session_line(row));
-    }
-    if pin.len() > 10 {
-        println!(
-            "  … and {} more (narrow with --repo/--since)",
-            pin.len() - 10
-        );
     }
     Ok(())
 }

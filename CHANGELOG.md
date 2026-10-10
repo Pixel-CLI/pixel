@@ -540,7 +540,6 @@ pixel 0.5.0 makes the call graph answer questions with proof, reach beyond one r
 | `changes` | `what-changed` |
 | `clusters` | `list-areas` |
 | `context` | `pack-context` |
-| `env` | `edit-env` |
 | `excavate` | `dig-history` |
 | `graph` | `rebuild-graph` |
 | `history` | `commit-history` |
@@ -548,12 +547,10 @@ pixel 0.5.0 makes the call graph answer questions with proof, reach beyond one r
 | `hook` | `run-hook` |
 | `index` | `build-index` |
 | `inspect` | `repo-state` |
-| `journal` | `record-event` |
 | `lifecycle` | `file-history` |
 | `log` | `action-log` |
 | `map` | `repo-map` |
 | `processes` | `list-flows` |
-| `provenance` | `who-wrote` |
 | `publish` | `commit` |
 | `query` | `run-recipe` |
 | `ready` | `prepare-repo` |

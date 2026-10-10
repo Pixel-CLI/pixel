@@ -461,27 +461,6 @@ pub fn format_hit(h: &SearchHit) -> String {
     )
 }
 
-/// Count matching turns and the distinct sessions containing them —
-/// unbounded (no limit/offset), used by the MAX TEST.
-pub fn count_matches(
-    store: &RecallStore,
-    segments: &SegmentSet,
-    pattern: &str,
-    whole_word: bool,
-    filters: &SearchFilters,
-) -> Result<(usize, HashSet<i64>), String> {
-    let mut turns = 0usize;
-    let mut sessions: HashSet<i64> = HashSet::new();
-    // usize::MAX limit: visit never stops early.
-    let result = search(store, segments, pattern, whole_word, filters, 0, usize::MAX)?;
-    for hit in result.hits {
-        turns += 1;
-        sessions.insert(hit.session_id);
-    }
-    debug_assert!(!result.truncated);
-    Ok((turns, sessions))
-}
-
 /// ±`SNIPPET_RADIUS` chars around the first match, on char boundaries,
 /// newlines flattened.
 pub(crate) fn snippet_around(text: &str, m_start: usize, m_end: usize) -> (String, bool) {
@@ -601,43 +580,6 @@ mod tests {
         assert_eq!(candidate_count(&segments, "needle"), Some(3));
         assert_eq!(candidate_count(&segments, "haystack"), Some(1));
         assert_eq!(candidate_count(&segments, "."), None);
-    }
-
-    #[test]
-    fn count_matches_should_count_every_matching_turn_and_its_sessions() {
-        let (_tmp, mut store, mut segments) = corpus();
-        let session_ids = |store: &RecallStore| -> HashSet<i64> {
-            store
-                .connection()
-                .prepare("SELECT id FROM sessions")
-                .unwrap()
-                .query_map([], |r| r.get(0))
-                .unwrap()
-                .map(Result::unwrap)
-                .collect()
-        };
-        let matching = session_ids(&store);
-        add_session(
-            &mut store,
-            "pi",
-            "cccc3333",
-            &[(Role::User, "nothing to find here")],
-        );
-        segments.index_new(&store).unwrap();
-        let unrelated: Vec<i64> = session_ids(&store).difference(&matching).copied().collect();
-        assert_eq!(unrelated.len(), 1);
-        let (turns, sessions) = count_matches(
-            &store,
-            &segments,
-            "needle",
-            false,
-            &SearchFilters::default(),
-        )
-        .unwrap();
-        assert_eq!(turns, 3);
-        assert_eq!(sessions, matching);
-        assert_eq!(sessions.len(), 2);
-        assert!(!sessions.contains(&unrelated[0]));
     }
 
     /// A pattern without required literals scans the corpus in ts order and

@@ -275,7 +275,9 @@ pub struct RunRecord {
     pub changed_since_last_run: Option<Vec<String>>,
 }
 
-/// The one-record ingest envelope `gitpixel sniper report` reads from stdin.
+/// The one-record ingest envelope: no `pixel` command parses it since
+/// `list-errors report` was removed (#878); the store entry points it routes
+/// to stay for library callers.
 /// A record without a `type` field is an error record; `"type": "event"` and
 /// `"type": "run"` route to the other tables.
 #[derive(Debug, Clone)]

@@ -18,7 +18,7 @@
 //! as `off`, both for that report only.
 //!
 //! YAML files live under `.pixel/` in the repository and home directory.
-//! Legacy JSON remains readable until install/edit creates the YAML equivalent.
+//! Legacy JSON remains readable until install or setup creates the YAML equivalent.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -214,37 +214,6 @@ pub fn ensure_template(root: Option<&Path>) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn edit(path: &Path, repo: bool) -> Result<(), String> {
-    let root = if repo {
-        Some(crate::discover_root(path)?)
-    } else {
-        None
-    };
-    let path = ensure_template(root.as_deref())?;
-    let editor = std::env::var("VISUAL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("EDITOR")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or_else(|| "vi".into());
-    let args = shell_words::split(&editor).map_err(|_| "invalid quoting in VISUAL/EDITOR")?;
-    let (program, args) = args.split_first().ok_or("empty editor command")?;
-    let status = std::process::Command::new(program)
-        .args(args)
-        .arg(&path)
-        .status()
-        .map_err(|e| format!("launch editor: {e}"))?;
-    if !status.success() {
-        return Err(format!("editor exited with {status}"));
-    }
-    validate(&path)?;
-    println!("configuration: {}", path.display());
-    Ok(())
-}
-
 fn validate(path: &Path) -> Result<(), String> {
     let doc = crate::config_file::load(path)?;
     for (key, _) in FEATURES {
@@ -369,7 +338,7 @@ pub fn overview(path: &Path) -> Result<(), String> {
         }
     }
     println!("Setup: pixel config setup (interactive global settings)");
-    println!("Edit: pixel config edit (global), pixel config edit --repo (repository)");
+    println!("Edit: ~/.pixel/config.yaml (global), <repository>/.pixel/config.yaml (repository)");
     Ok(())
 }
 
@@ -533,7 +502,8 @@ pub fn setup() -> Result<(), String> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Err(
-            "setup needs a terminal; use pixel config edit or pixel config classify off".into(),
+            "setup needs a terminal; edit ~/.pixel/config.yaml or run pixel config classify off"
+                .into(),
         );
     }
     let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());

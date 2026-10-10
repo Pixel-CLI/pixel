@@ -169,7 +169,6 @@ The most used commands, by job. `pixel --help` lists all of them, and [ARCHITECT
 | `git log -S "x"` | `pixel dig-history --phrase "x"` |
 | `git log --grep "x"` | `pixel search-history "x"` |
 | `git log --follow f` | `pixel file-history --file f` |
-| `git blame f` | `pixel who-wrote f` |
 | "it worked before" | `pixel plan-rollback "<problem>"`: flags the breaking commit, writes nothing without `--apply` |
 
 ### Git changes

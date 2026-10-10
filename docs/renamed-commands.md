@@ -23,7 +23,6 @@ with a note and does nothing.
 | `changes` | `what-changed` |
 | `clusters` | `list-areas` |
 | `context` | `pack-context` |
-| `env` | `edit-env` |
 | `excavate` | `dig-history` |
 | `graph` | `rebuild-graph` |
 | `history` | `commit-history` |
@@ -31,12 +30,10 @@ with a note and does nothing.
 | `hook` | `run-hook` |
 | `index` | `build-index` |
 | `inspect` | `repo-state` |
-| `journal` | `record-event` |
 | `lifecycle` | `file-history` |
 | `log` | `action-log` |
 | `map` | `repo-map` |
 | `processes` | `list-flows` |
-| `provenance` | `who-wrote` |
 | `publish` | `commit` |
 | `query` | `run-recipe` |
 | `ready` | `prepare-repo` |
