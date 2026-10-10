@@ -216,6 +216,14 @@ reviews:
         run on the standard library; flag a module-level third-party import.
         It does not use `bench_common.py`, which resolves the GitNexus CLI
         for `scripts/bench-vs/` and has nothing this harness needs.
+        Exemption: `scripts/research-gate/**` fits and calibrates the brief
+        gate's logistic model offline (issue #883); nothing in `pixel` or CI
+        runs it. Its fitting scripts (`gate_compact.py`, `gate_export.py`,
+        `gate_forward.py`, `gate_pick_compact.py`) import numpy and
+        scikit-learn at module level, as its README states. The reference
+        scorer `gate_reference.py`, the executable definition of the
+        features, and `make_input.py` stay on the standard library: flag a
+        third-party import there.
     - path: "{scripts/**/*.sh,.agents/skills/**/*.sh}"
       instructions: |
         Most scripts are POSIX `#!/bin/sh` with `set -eu` and are run from

@@ -35,13 +35,16 @@ No exemplars (kNN), no LLM, no French feature.
 
 ## Reproduce
 
+The fitting scripts (`gate_compact.py`, `gate_export.py`, `gate_forward.py`, `gate_pick_compact.py`)
+need numpy and scikit-learn; `gate_reference.py` and `make_input.py` run on the standard library.
+
 ```bash
 # 1. the fixture the prompts were labelled against, indexed
-git worktree add --detach /tmp/fixture 85bede7d9a3c4e385e0a2045241a6466efbd8cbd
-pixel prepare-repo /tmp/fixture
+git worktree add --detach /tmp/relevance-fixture 85bede7d9a3c4e385e0a2045241a6466efbd8cbd
+pixel prepare-repo /tmp/relevance-fixture
 # 2. the block of every dev prompt, from this tree (fit commit in the JSON)
 git show origin/feat/883-brief-eval:eval/brief-gate/prompts.jsonl > /tmp/prompts.jsonl   # sha256 in the JSON
-PIXEL_WEIGHT_FIXTURE=/tmp/fixture PIXEL_WEIGHT_PROMPTS=/tmp/prompts.jsonl PIXEL_WEIGHT_SPLIT=dev \
+PIXEL_WEIGHT_FIXTURE=/tmp/relevance-fixture PIXEL_WEIGHT_PROMPTS=/tmp/prompts.jsonl PIXEL_WEIGHT_SPLIT=dev \
   PIXEL_WEIGHT_OUT=/tmp/relevance-dump-dev5.json \
   cargo test -p pixel-daemon dump_the_raw_material -- --ignored
 # 3. fit, calibrate on out-of-fold scores, export (cross-checks the reference scorer on the way)
