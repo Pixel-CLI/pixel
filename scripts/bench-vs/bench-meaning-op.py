@@ -104,6 +104,10 @@ def warm_up(sock_path, query):
         reason = result.get("reason") or reply.get("error", {}).get("message", "?")
         if not reasons or reasons[-1] != reason:
             reasons.append(reason)
+        # The op never downloads the model: waiting cannot make it ready.
+        if reason == "model_missing":
+            sys.exit("the op answers model_missing: run `pixel search-meaning` once "
+                     "to download the model, then retry")
         time.sleep(0.25)
     sys.exit(f"the op never became ready within {WARMUP_DEADLINE_S}s: {reasons}")
 
