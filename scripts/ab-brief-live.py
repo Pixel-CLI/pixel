@@ -503,9 +503,13 @@ def pipeline_kind(stages, depth=0):
     if any(EXC.writes_a_file(EXC.strip_wrappers(stage)) for stage in stages):
         return "edit", []
     base = os.path.basename(first[0])
-    if base in ("sh", "bash", "zsh") and "-c" in first and depth < 2:
-        inner = first[first.index("-c") + 1:][:1]
-        return bash_kind(inner[0], depth + 1) if inner else ("other", [])
+    if base in EXC.SHELLS and depth < 2:
+        for position, token in enumerate(first[1:], 1):
+            if not token.startswith("-"):
+                break  # a script path: not an inline command
+            if EXC.SHELL_C.match(token):  # -c, -lc, -ic, as excavation-count reads them
+                inner = first[position + 1:][:1]
+                return bash_kind(inner[0], depth + 1) if inner else ("other", [])
     if base in EXC.PIXEL_BINARIES:
         return "pixel", []
     args = [t for t in first[1:] if not t.startswith("-") and not NUMERIC_ARG.match(t)]
@@ -1535,6 +1539,9 @@ class SelfTest(unittest.TestCase):
                  ("Bash", {"command": "head -n 20 /private/w/fx/crates/a.rs"}, ("read", {"crates/a.rs"})),
                  ("Bash", {"command": "cd crates && cat a.rs b.rs"}, ("read", {"a.rs", "b.rs"})),
                  ("Bash", {"command": "cargo test | grep FAIL"}, ("other", set())),
+                 ("Bash", {"command": "bash -lc 'rg foo crates'"}, ("search", set())),
+                 ("Bash", {"command": "dash -c 'cat crates/a.rs'"}, ("read", {"crates/a.rs"})),
+                 ("Bash", {"command": "bash script.sh -c x"}, ("other", set())),
                  ("Bash", {"command": "echo hi > out.txt"}, ("edit", set())),
                  ("Read", {"file_path": "/private/w/fx/crates/a.rs"}, ("read", {"crates/a.rs"})),
                  ("Read", {}, ("read", set()))]
