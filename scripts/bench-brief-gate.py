@@ -37,7 +37,9 @@ privacy lint, and with ``--repo`` that every expected file exists there);
 """
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import math
 import os
@@ -263,6 +265,8 @@ def validate_rows(rows, repo_files=None):
                         problems.append(f"{rid}: expected file {path} is not repo-relative")
                     elif repo_files is not None and path not in repo_files:
                         problems.append(f"{rid}: expected file {path} does not exist in the repo")
+            if not (isinstance(row.get("evidence"), str) and row["evidence"].strip()):
+                problems.append(f"{rid}: expected_files without its `evidence`")
         for label in ("text", "evidence"):
             if isinstance(row.get(label), str):
                 problems.extend(f"{rid}: {p}" for p in privacy_problems(label, row[label]))
@@ -598,6 +602,22 @@ def session_start(pixel, repo, timeout=30):
     return done.returncode, (time.perf_counter() - started) * 1000
 
 
+def restore_daemon(pixel, repo, running):
+    """Put the repo's daemon back to ``running`` if it is not there now.
+
+    Reads the current state rather than trusting what the run set, so a setup
+    that changed the daemon and then failed is put back too. A failure here is
+    reported, not raised: it must not hide the error that ended the run.
+    """
+    want = "running" if running else "stopped"
+    try:
+        if daemon_running(pixel, repo) != running and set_daemon(pixel, repo, "on" if running else "off") != running:
+            print(f"WARNING: could not restore the daemon of {repo} to {want}: it did not reach that state",
+                  file=sys.stderr)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"WARNING: could not restore the daemon of {repo} to {want}: {error}", file=sys.stderr)
+
+
 def ollaya_warm():
     try:
         with socket.create_connection(OLLAYA_ADDR, timeout=0.3):
@@ -733,13 +753,14 @@ def run_bench(args):
     repo_sha = git_output(repo, "rev-parse", "HEAD")
     dirty = bool(git_output(repo, "status", "--porcelain"))
     load_before = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
+    started_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     daemon_before = daemon_running(pixel, repo)
-    # `cold` starts from no daemon, like `off`; only the binary's auto-start differs.
-    daemon_now = set_daemon(pixel, repo, "on" if args.daemon == "on" else "off")
     env = brief_env(auto_start=cold)
     started_at = time.perf_counter()
     session, warmed = None, None
     try:
+        # `cold` starts from no daemon, like `off`; only the binary's auto-start differs.
+        daemon_now = set_daemon(pixel, repo, "on" if args.daemon == "on" else "off")
         if cold:
             if daemon_now:
                 raise SystemExit("a cold run needs no daemon, and one still answers after `daemon stop`")
@@ -770,13 +791,12 @@ def run_bench(args):
                 time.sleep(args.gap)
         daemon_after = daemon_running(pixel, repo)
     finally:
-        if set_daemon(pixel, repo, "on" if daemon_before else "off") != daemon_before:
-            print(f"WARNING: could not restore the daemon to its state before the run ({daemon_before})")
+        restore_daemon(pixel, repo, daemon_before)
     set_in_repo = (repo / "eval" / "brief-gate").exists()
     result = {
         "meta": {
             "command": ["python3", *sys.argv],
-            "started_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "started_utc": started_utc,
             "pixel": str(pixel), "pixel_version": version_of(pixel),
             "repo": str(repo), "repo_sha": repo_sha, "repo_dirty": dirty,
             "fixture_sha": FIXTURE_SHA, "fixture_match": repo_sha == FIXTURE_SHA and not dirty,
@@ -975,6 +995,11 @@ class SelfTest(unittest.TestCase):
         self.assertTrue(any("duplicate id" in p for p in dup))
         unbalanced = validate_rows([row_fixture(id=f"u{i}", text=f"t{i}") for i in range(4)])
         self.assertTrue(any("unbalanced" in p for p in unbalanced))
+        self.assertEqual(validate_rows([row_fixture(expected_files=["a/x.rs"])]),
+                         ["t-1: expected_files without its `evidence`"])
+        self.assertEqual(validate_rows([row_fixture(expected_files=["a/x.rs"], evidence=" ")]),
+                         ["t-1: expected_files without its `evidence`"])
+        self.assertEqual(validate_rows([row_fixture(expected_files=["a/x.rs"], evidence="a/x.rs:3 defines it")]), [])
 
     def test_privacy_lint_catches_what_a_public_set_must_not_hold(self):
         for value in ("mail me at someone@example.org", "see /Users/someone/project", "ssh 192.168.0.12",
@@ -1126,6 +1151,79 @@ class SelfTest(unittest.TestCase):
             self.assertEqual(check_canary(stub, repo, 10)[0], False)  # the stub only answers `install`
             self.assertIn("exit 0", check_canary(stub, repo, 10)[1])
 
+    def test_check_set_warns_on_a_dirty_fixture_at_the_fixture_commit(self):
+        if not DEFAULT_SET.is_file():
+            self.skipTest("no prompt set next to this script")
+        saved = globals()["git_output"]
+        answers = {"rev-parse": FIXTURE_SHA, "status": " M crates/a.rs", "ls-files": "crates/a.rs"}
+        globals()["git_output"] = lambda repo, *args: answers[args[0]]
+        args = argparse.Namespace(set=str(DEFAULT_SET), repo="fixture")
+        try:
+            for status, warned in ((" M crates/a.rs", True), ("", False)):
+                answers["status"] = status
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    check_set(args)
+                self.assertEqual("is not the fixture" in err.getvalue(), warned, status)
+        finally:
+            globals()["git_output"] = saved
+
+    def test_a_restore_that_does_not_reach_the_state_warns(self):
+        saved = {name: globals()[name] for name in ("daemon_running", "set_daemon")}
+        globals()["daemon_running"] = lambda pixel, repo: False  # stays stopped whatever is asked
+        globals()["set_daemon"] = lambda pixel, repo, mode: False
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                restore_daemon("pixel", "repo", True)
+            self.assertIn("could not restore the daemon of repo to running", err.getvalue())
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                restore_daemon("pixel", "repo", False)  # already there: nothing to say
+            self.assertEqual(err.getvalue(), "")
+        finally:
+            globals().update(saved)
+
+    def test_a_setup_that_fails_after_changing_the_daemon_still_restores_it(self):
+        if not DEFAULT_SET.is_file():
+            self.skipTest("no prompt set next to this script")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            repo, state = tmp / "repo", tmp / "daemon-state"
+            (repo / ".pixel").mkdir(parents=True)
+            (repo / ".pixel" / "base.shard").write_text("x")
+            state.write_text("off")
+            stub = tmp / "pixel"
+            stub.write_text(
+                "#!/bin/sh\n"
+                f"state='{state}'\n"
+                'case "$1 $2" in\n'
+                '  "daemon start") echo on > "$state";;\n'
+                '  "daemon stop") echo off > "$state";;\n'
+                '  "daemon status") if [ "$(cat "$state")" = on ]; then echo "daemon running"; '
+                'else echo "daemon not running"; fi;;\n'
+                "esac\n")
+            stub.chmod(0o755)
+            real, calls = set_daemon, []
+
+            def started_then_failed(pixel, repo, mode):  # the setup call changes the daemon, then its wait fails
+                calls.append(mode)
+                real(pixel, repo, mode)
+                if len(calls) == 1:
+                    raise subprocess.TimeoutExpired("pixel daemon status", 30)
+                return mode == "on"
+
+            args = argparse.Namespace(pixel=str(stub), repo=str(repo), set=str(DEFAULT_SET), split="dev",
+                                      daemon="on", timeout=10.0, warmup=1, repeat=1, out=None)
+            globals()["set_daemon"] = started_then_failed
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    run_bench(args)
+            finally:
+                globals()["set_daemon"] = real
+            self.assertEqual(calls, ["on", "off"])
+            self.assertEqual(state.read_text().strip(), "off")
+
 
 def self_test():
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(SelfTest)
@@ -1138,6 +1236,12 @@ def check_set(args):
     repo_files = tracked_files(args.repo) if args.repo else None
     if args.repo and not repo_files:
         raise SystemExit(f"{args.repo}: no tracked files (is it a git checkout?)")
+    if args.repo:
+        repo_sha = git_output(args.repo, "rev-parse", "HEAD")
+        dirty = bool(git_output(args.repo, "status", "--porcelain"))
+        if repo_sha != FIXTURE_SHA or dirty:
+            print(f"WARNING: {args.repo} HEAD {repo_sha} (dirty={dirty}) is not the fixture {FIXTURE_SHA}: "
+                  "expected_files are checked against a different tree", file=sys.stderr)
     problems = validate_rows(rows, repo_files)
     print(json.dumps(summarize_set(rows), sort_keys=True))
     for problem in problems:
@@ -1172,6 +1276,10 @@ def main(argv=None):
     parser.add_argument("--check-set", action="store_true", help="validate the set (and its files with --repo) and exit")
     parser.add_argument("--self-test", action="store_true", help="run the parser and metric tests and exit")
     args = parser.parse_args(argv)
+    if args.repeat < 1:
+        parser.error("--repeat must be at least 1")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
     if args.self_test:
         return self_test()
     if args.check_set:
