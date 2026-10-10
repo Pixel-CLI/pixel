@@ -35,6 +35,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import importlib.util
+import itertools
 import json
 import math
 import os
@@ -126,8 +127,13 @@ def die(message):
     raise SystemExit(f"ab-brief-live: {message}")
 
 
-def run_cmd(argv, **kwargs):
-    return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", **kwargs)
+def run_cmd(argv, timeout=120, **kwargs):
+    """A helper command (git, daemon, hook, prepare-repo); a hang ends the driver naming it, not a stalled campaign."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              check=False, timeout=timeout, **kwargs)
+    except subprocess.TimeoutExpired:
+        die(f"{shlex.join(map(str, argv))}: no exit after {timeout}s")
 
 
 def ollaya_warm():
@@ -313,7 +319,7 @@ def normalise_token(token, roots):
     for root in roots:
         if token.startswith(root + "/"):
             token = token[len(root) + 1:]
-    return token[2:] if token.startswith("./") else token
+    return token.removeprefix("./")
 
 
 def cited_paths(answer, expected, roots):
@@ -715,7 +721,7 @@ def cmd_setup(args):
         for argv in (["git", "clone", "-q", "--no-checkout", source_repo, str(fixture)],
                      ["git", "-C", str(fixture), "checkout", "-q", "--detach", FIXTURE_SHA],
                      ["git", "-C", str(fixture), "remote", "remove", "origin"]):
-            done = run_cmd(argv)
+            done = run_cmd(argv, timeout=900)
             if done.returncode != 0:
                 die(f"{' '.join(argv)}: {done.stderr.strip()}")
     head, tree, dirty = fixture_state(fixture)
@@ -723,7 +729,8 @@ def cmd_setup(args):
         die(f"fixture {fixture} is at {head} (dirty: {bool(dirty)}), not clean {FIXTURE_SHA}")
     if (fixture / "eval" / "brief-gate").exists():
         die(f"{fixture} holds eval/brief-gate: the prompt set would index itself")
-    done = run_cmd([str(destination), "prepare-repo", str(fixture), "--metrics", "off"], env=side_env(work, side))
+    done = run_cmd([str(destination), "prepare-repo", str(fixture), "--metrics", "off"], timeout=3600,
+                   env=side_env(work, side))
     if done.returncode != 0:
         die(f"prepare-repo failed: {done.stdout[-400:]} {done.stderr[-400:]}")
     ensure_daemon(work, side)
@@ -959,8 +966,14 @@ def cmd_run(args):
     started = time.time()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         futures = [pool.submit(campaign.unit, u[0], u[1], u[2], i, len(units)) for i, u in todo]
-        for future in futures:
-            future.result()
+        try:
+            for future in futures:
+                future.result()
+        except BaseException:  # a unit that died (daemon gone, helper hung) stops the launches still queued
+            campaign.stop.set()
+            for future in futures:
+                future.cancel()
+            raise
     end = {"ended": now_iso(), "elapsed_s": round(time.time() - started), "load_end": [round(x, 2) for x in os.getloadavg()],
            "binary_hashes_end": {s: sha256_file(work.binary(s)) for s in sorted({ARMS[a][0] for a in arms})},
            "fixtures_end": {s: fixture_state(work.fixture(s)) for s in sorted({ARMS[a][0] for a in arms})},
@@ -1355,8 +1368,8 @@ def stream(*records):
     return [(0.1 * i, json.dumps(r)) for i, r in enumerate(records)]
 
 
-def init_record(tools=TOOLS.split(",")):
-    return {"type": "system", "subtype": "init", "tools": tools, "mcp_servers": [], "skills": [],
+def init_record(tools=None):
+    return {"type": "system", "subtype": "init", "tools": tools or TOOLS.split(","), "mcp_servers": [], "skills": [],
             "model": "claude-test", "apiKeySource": "none", "claude_code_version": "9.9"}
 
 
@@ -1439,7 +1452,7 @@ class SelfTest(unittest.TestCase):
         expected = ["crates/pixel-daemon/src/daemon.rs", ".github/workflows/board-sync.yml"]
         answer = ("`/tmp/w/old/pixel/crates/pixel-daemon/src/daemon.rs:29`, (.github/workflows/board-sync.yml), "
                   "and pixel-daemon/src/daemon.rs")
-        exact, loose = cited_paths(answer, expected, roots)
+        exact, _ = cited_paths(answer, expected, roots)
         self.assertEqual(exact, sorted(expected))
         self.assertEqual(cited_paths("only daemon.rs is relevant", expected, roots), ([], True))
         self.assertEqual(cited_paths("crates/pixel-daemon/src/daemon.rs.bak", expected, roots), ([], False))
@@ -1476,7 +1489,7 @@ class SelfTest(unittest.TestCase):
 
     def test_agent_command_isolates_settings_and_tools(self):
         argv = claude_argv("claude", "s.json", "m", "high", 2)
-        pairs = dict(zip(argv, argv[1:]))
+        pairs = dict(itertools.pairwise(argv))
         self.assertEqual((pairs["--setting-sources"], pairs["--tools"], pairs["--permission-mode"]),
                          ("project,local", TOOLS, "dontAsk"))
         for flag in ("--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--include-hook-events"):
@@ -1568,7 +1581,7 @@ class SelfTest(unittest.TestCase):
                                  "input_total": 100, "output_tokens": 50, "wall_s": 9.0, "cost_usd": 0.1,
                                  "brief_fired": new, "brief_tier": "high" if new else None, "brief_names_expected": new,
                                  "cites_expected": True, "rl_five_hour": 0.5, "model": "m", "load1": 1.0,
-                                 "num_turns": 6 if not new else 5, "ref_search": 3 if not new else 3,
+                                 "num_turns": 6 if not new else 5, "ref_search": 3,
                                  "ref_reads_brief": 1 if new else 0, "ref_reads_other": 2 if not new else 0,
                                  "ref_reads": 2 if not new else 1, "ref_reads_expected": 1, "ref_reads_unexpected": 1 if not new else 0,
                                  "ref_first_read_idx": 3 if not new else 1, "ref_reached": 1})
@@ -1591,6 +1604,12 @@ class SelfTest(unittest.TestCase):
         self.assertLess(low, statistics.mean(deltas))
         self.assertGreater(high, statistics.mean(deltas))
         self.assertIsNone(bootstrap_ci([1]))
+
+    def test_a_hung_helper_command_ends_the_driver_naming_it(self):
+        with self.assertRaises(SystemExit) as caught:
+            run_cmd([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.5)
+        self.assertIn("no exit after 0.5s", str(caught.exception))
+        self.assertEqual(run_cmd([sys.executable, "-c", "print('ok')"]).stdout, "ok\n")
 
     def test_redaction_replaces_paths_in_nested_values(self):
         self.assertEqual(redact({"a": ["/w/x", {"b": "/w"}]}, [("/w", "$WORK")]), {"a": ["$WORK/x", {"b": "$WORK"}]})
