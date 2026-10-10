@@ -866,6 +866,23 @@ class SelfTest(unittest.TestCase):
             self.assertEqual(check_canary(stub, repo, 10)[0], False)  # the stub only answers `install`
             self.assertIn("exit 0", check_canary(stub, repo, 10)[1])
 
+    def test_check_set_warns_on_a_dirty_fixture_at_the_fixture_commit(self):
+        if not DEFAULT_SET.is_file():
+            self.skipTest("no prompt set next to this script")
+        saved = globals()["git_output"]
+        answers = {"rev-parse": FIXTURE_SHA, "status": " M crates/a.rs", "ls-files": "crates/a.rs"}
+        globals()["git_output"] = lambda repo, *args: answers[args[0]]
+        args = argparse.Namespace(set=str(DEFAULT_SET), repo="fixture")
+        try:
+            for status, warned in ((" M crates/a.rs", True), ("", False)):
+                answers["status"] = status
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    check_set(args)
+                self.assertEqual("is not the fixture" in err.getvalue(), warned, status)
+        finally:
+            globals()["git_output"] = saved
+
     def test_a_restore_that_does_not_reach_the_state_warns(self):
         saved = {name: globals()[name] for name in ("daemon_running", "set_daemon")}
         globals()["daemon_running"] = lambda pixel, repo: False  # stays stopped whatever is asked
