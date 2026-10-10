@@ -19,6 +19,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cycles;
+use crate::meaning::Meaning;
+use crate::relevance;
 use pixel_context::estimate_tokens;
 use pixel_facts::FactsStore;
 use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow};
@@ -50,7 +52,9 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// `read_only`, and `status` reports `embedding`; an older daemon would
 /// drop the flag and run the facts-ingest path a prompt hook must never
 /// start.
-pub const PROTOCOL_VERSION: u64 = 15;
+/// 16: the `meaning` request, which an older daemon rejects as an unknown
+/// variant.
+pub const PROTOCOL_VERSION: u64 = 16;
 
 /// Rows a `search` returns when the request names no `limit`.
 pub const SEARCH_DEFAULT_ROWS: usize = 100;
@@ -71,7 +75,10 @@ const MAX_SEED_SYMBOLS: usize = 24;
 const EVIDENCE_MAX_LINES_PER_TARGET: usize = 2;
 /// Most keywords a `targets` content probe runs, expansions included.
 const MAX_PROBE_KEYWORDS: usize = 6;
-const TARGETS_FACTS_ALGORITHM_VERSION: u32 = 1;
+/// Identifies the `targets_facts` algorithm in `inputs.algorithm_version`,
+/// so a reader knows which `facts` keys to expect. 1: the target list. 2:
+/// adds `facts.relevance` (per-keyword document frequency and co-files).
+const TARGETS_FACTS_ALGORITHM_VERSION: u32 = 2;
 
 /// `context` and `uses`: edges returned per direction before elision.
 const EDGE_LIMIT: usize = 20;
@@ -317,6 +324,10 @@ pub struct Service {
     /// drops the graph handle, the re-walk hashes only files whose
     /// (mtime, len) changed instead of the whole tree.
     hash_cache: pixel_graph::build::TreeHashCache,
+    /// The resident chunk vectors behind `meaning`, built on a background
+    /// thread. Shared with every read replica, which ranks from it and never
+    /// builds it.
+    meaning: Arc<Meaning>,
 }
 
 /// How long a cached [`SnapshotInfo`] may be served. One concurrent burst
@@ -401,6 +412,7 @@ impl Service {
             .canonicalize()
             .map_err(|e| ServeError::Msg(format!("bad root {}: {e}", root.display())))?;
         let index = IndexSet::open_or_build(&root, Box::new(TrigramExtractor))?;
+        let meaning = Meaning::new(&root);
         Ok(Service {
             root,
             index: Arc::new(RwLock::new(index)),
@@ -421,6 +433,7 @@ impl Service {
             snapshot_cache: None,
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
+            meaning,
         })
     }
 
@@ -446,6 +459,7 @@ impl Service {
             snapshot_cache: None,
             activity_cache: None,
             hash_cache: pixel_graph::build::TreeHashCache::default(),
+            meaning: Arc::clone(&self.meaning),
         }
     }
 
@@ -481,6 +495,9 @@ impl Service {
             "search" => self.op_search(query, Some(limit), None, None, None, None),
             "resolve" => self.op_resolve(query, Some(limit)),
             "impact" => self.op_impact(query, "upstream", Some(2)),
+            // Ranks from the resident vectors the writable service builds;
+            // a replica never builds, embeds a chunk or reads a file.
+            "meaning" => self.meaning.answer(state.generation, query, Some(limit)),
             _ => Err(format!("unsupported evidence query kind: {kind}")),
         };
         if let Some(graph) = &self.graph {
@@ -555,11 +572,13 @@ impl Service {
                 );
                 self.graph = None;
                 state.publish_after_failure();
+                self.meaning.nudge(state.generation);
                 return;
             }
             self.graph = None;
         }
         state.publish();
+        self.meaning.nudge(state.generation);
     }
 
     /// Count a watcher-driven graph update that failed. The cached handle is
@@ -1029,7 +1048,12 @@ impl Service {
                 )
             }),
             Request::Targets { task, limit, max_tier, precision, regions } => self.op_targets(&task, limit, max_tier.as_deref(), precision, regions),
-            Request::TargetsFacts { task, limit } => self.op_targets_facts(&task, limit),
+            Request::TargetsFacts {
+                task,
+                limit,
+                relevance_only,
+            } => self.op_targets_facts(&task, limit, relevance_only),
+            Request::Meaning { query, limit } => self.op_meaning(&query, limit),
             Request::Symbol { name } => self.op_symbol(&name),
             Request::Skeleton { file } => self.op_skeleton(&file),
             Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
@@ -1463,7 +1487,13 @@ impl Service {
     }
 
     /// Serve deterministic targets facts only from a fresh published snapshot.
-    fn op_targets_facts(&mut self, task: &str, limit: Option<usize>) -> Result<Value, String> {
+    /// With `relevance_only` the facts are the relevance block and its caps.
+    fn op_targets_facts(
+        &mut self,
+        task: &str,
+        limit: Option<usize>,
+        relevance_only: bool,
+    ) -> Result<Value, String> {
         let limit = limit.unwrap_or(pixel_rank::DEFAULT_LIMIT);
         let publication = Arc::clone(&self.publication);
         let state = publication.read().expect("publication lock poisoned");
@@ -1524,7 +1554,15 @@ impl Service {
             semantic_fallback: false,
         };
         self.graph = Some(graph);
-        let facts = self.op_targets_mode(task, Some(limit), None, false, true, false)?;
+        let facts = if relevance_only {
+            // The same gate and inputs as the full answer; the ranking of
+            // targets, the part of the work a gate on relevance does not read,
+            // is skipped.
+            let index = self.index.read().expect("index lock poisoned");
+            relevance::facts_of_relevance_only(&index, self.graph.as_ref(), task)?
+        } else {
+            self.op_targets_mode(task, Some(limit), None, false, true, false)?
+        };
         serde_json::to_value(TargetsFactsResult::Available { inputs, facts })
             .map_err(|error| error.to_string())
     }
@@ -1556,56 +1594,18 @@ impl Service {
         // live tree before any lexical probe runs.
         let path_hits = engine::path_rank(&all_paths, &query.path_tokens);
 
-        // S3: per-keyword content match counts (capped probes keep this ms-scale).
-        let mut content_hits: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
-        // Epistemics: every probe cap that fires is NAMED here and forces
-        // lower_bound on the report envelope — a truncated probe must never
-        // feed an "exhaustive" claim.
-        let mut probe_caps: Vec<String> = Vec::new();
-        // Phase 3 item 1 (targets evidence): keep the first ~2 match lines per
-        // (file, keyword) so the caller can verify a target's content match
-        // without re-searching. Near-zero cost — the lines are already fetched.
-        let mut evidence: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-
+        // S3: per-keyword content match counts (capped probes keep this
+        // ms-scale). Every probe cap that fires is NAMED in the report
+        // envelope and forces lower_bound: a truncated probe must never feed
+        // an "exhaustive" claim.
         let probe_keywords = probe_keywords(
             &query.keywords,
             engine::expand_keywords(&query.keywords, query.language),
         );
-
-        for kw in &probe_keywords {
-            // Word-bounded so "auth" cannot count every "author" as signal.
-            // Keywords are [a-z0-9_]+ by construction (tokenize_task), but
-            // escape defensively anyway.
-            let pattern = format!(r"(?i)\b{}\b", regex_escape_keyword(kw));
-            if let Ok((matches, probe_stats)) = self
-                .index
-                .read()
-                .expect("index lock poisoned")
-                .search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
-            {
-                if probe_stats.truncated {
-                    probe_caps.push(format!(
-                        "content probe truncated at {CONTENT_PROBE_LIMIT} matches for keyword \
-                         '{kw}'; files beyond the cap carry no content signal"
-                    ));
-                }
-                let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-                for m in matches {
-                    *counts.entry(m.path.clone()).or_default() += 1;
-                    let lines = evidence.entry(m.path.clone()).or_default();
-                    if lines.len() < EVIDENCE_MAX_LINES_PER_TARGET {
-                        lines.push(json!({
-                            "line": m.line_number,
-                            "text": m.line,
-                            "keyword": kw,
-                        }));
-                    }
-                }
-                if !counts.is_empty() {
-                    content_hits.insert(kw.clone(), counts.into_iter().collect());
-                }
-            }
-        }
+        let probes = probe_content(
+            &self.index.read().expect("index lock poisoned"),
+            &probe_keywords,
+        );
 
         let mut symbol_hits = Vec::new();
         let mut graph_neighbors: Vec<(String, String)> = Vec::new();
@@ -1623,7 +1623,7 @@ impl Service {
                 &probe_keywords,
                 query.language,
                 &symbol_hits,
-                &content_hits,
+                &probes.hits,
             )
             .into_iter()
             .take(MAX_SEED_FILES)
@@ -1666,6 +1666,32 @@ impl Service {
             envelope =
                 Some(graph_targets::envelope_for_names(store, &names).map_err(|e| e.to_string())?);
         }
+
+        // Fact packets also say how widely the task's words occur here; the
+        // probes above are reused, only what they did not run is probed.
+        let relevance = if fact_mode {
+            let graph = if graph_available {
+                self.graph.as_ref()
+            } else {
+                None
+            };
+            let index = self.index.read().expect("index lock poisoned");
+            Some(relevance::relevance_for(
+                &index,
+                graph,
+                &query,
+                &all_paths,
+                Some(&probes),
+            )?)
+        } else {
+            None
+        };
+        let probe_caps = probes.caps(&probe_keywords);
+        let ContentProbes {
+            hits: content_hits,
+            lines: evidence,
+            ..
+        } = probes;
 
         let opts = engine::TargetsOptions {
             limit: limit.unwrap_or(engine::DEFAULT_LIMIT),
@@ -1780,6 +1806,9 @@ impl Service {
         // read/edit boundary, so do not carry that imperative prose forward.
         if fact_mode && let Some(object) = out.as_object_mut() {
             object.remove("closed_world");
+        }
+        if let Some(relevance) = &relevance {
+            relevance::attach(&mut out, relevance)?;
         }
         // Issue #814: the symbol-level regions manifest. The daemon gathers
         // the P0 symbols and the call/import edges between them; the analysis
@@ -2806,6 +2835,38 @@ impl Service {
         Ok(out)
     }
 
+    /// `meaning`: ranked leads for a natural-language question, from the
+    /// resident chunk vectors. It starts the background build when they are
+    /// cold or stale and answers without waiting for it, so a caller on a
+    /// deadline gets `unavailable` and a reason instead of a slow answer.
+    fn op_meaning(&mut self, query: &str, limit: Option<usize>) -> Result<Value, String> {
+        let generation = self.publication_generation();
+        if !self.read_only {
+            self.meaning.ensure(generation);
+        }
+        self.meaning.answer(generation, query, limit)
+    }
+
+    /// Start the background build of the `meaning` vectors if they are cold
+    /// or stale. The evidence bridge calls it for a bundle that asks for
+    /// them: its read replicas rank from the vectors and never build.
+    pub(crate) fn warm_meaning(&self) {
+        self.meaning.ensure(self.publication_generation());
+    }
+
+    fn publication_generation(&self) -> u64 {
+        self.publication
+            .read()
+            .expect("publication lock poisoned")
+            .generation
+    }
+
+    /// Replace the `meaning` index, so a test never loads the real model.
+    #[cfg(test)]
+    pub(crate) fn set_meaning(&mut self, meaning: Arc<Meaning>) {
+        self.meaning = meaning;
+    }
+
     fn op_status(&mut self) -> Result<Value, String> {
         let s = self.index.read().expect("index lock poisoned").status();
         let db = self.graph_db_path();
@@ -3676,6 +3737,139 @@ fn probe_keywords(keywords: &[String], expansions: Vec<String>) -> Vec<String> {
     probe
 }
 
+/// One line that matched a content probe, kept so a reader can check the match
+/// without searching again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ProbeLine {
+    pub line: u64,
+    pub text: String,
+    pub keyword: String,
+}
+
+/// What the bounded content probes of a keyword list found. `targets` ranks
+/// and justifies files with it; `relevance` counts documents with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ContentProbes {
+    /// Every keyword probed, with or without a match.
+    pub probed: BTreeSet<String>,
+    /// keyword → matches per file, path ascending. Only keywords with a match.
+    pub hits: BTreeMap<String, Vec<(String, u32)>>,
+    /// Keywords whose probe stopped at [`CONTENT_PROBE_LIMIT`]: their `hits`
+    /// are the files of a path-ordered prefix, not all of them.
+    pub truncated: BTreeSet<String>,
+    /// path → the first lines that matched, at most
+    /// [`EVIDENCE_MAX_LINES_PER_TARGET`], across keywords in probe order.
+    pub lines: BTreeMap<String, Vec<ProbeLine>>,
+}
+
+impl ContentProbes {
+    /// The cap sentences of the probes that truncated, in `order`.
+    pub(crate) fn caps(&self, order: &[String]) -> Vec<String> {
+        order
+            .iter()
+            .filter(|keyword| self.truncated.contains(*keyword))
+            .map(|keyword| probe_cap(keyword))
+            .collect()
+    }
+
+    /// Only what the probes of `keywords` found. A second consumer reuses
+    /// these without inheriting the first one's choice of extra probes.
+    pub(crate) fn restricted_to(&self, keywords: &[String]) -> Self {
+        let wanted = |keyword: &String| keywords.contains(keyword);
+        let mut lines: BTreeMap<String, Vec<ProbeLine>> = BTreeMap::new();
+        for (path, kept) in &self.lines {
+            let kept: Vec<ProbeLine> = kept
+                .iter()
+                .filter(|line| wanted(&line.keyword))
+                .cloned()
+                .collect();
+            if !kept.is_empty() {
+                lines.insert(path.clone(), kept);
+            }
+        }
+        Self {
+            probed: self.probed.iter().filter(|k| wanted(k)).cloned().collect(),
+            hits: self
+                .hits
+                .iter()
+                .filter(|(keyword, _)| wanted(keyword))
+                .map(|(keyword, files)| (keyword.clone(), files.clone()))
+                .collect(),
+            truncated: self
+                .truncated
+                .iter()
+                .filter(|k| wanted(k))
+                .cloned()
+                .collect(),
+            lines,
+        }
+    }
+
+    /// Fold the probes of other keywords in; each path keeps at most
+    /// [`EVIDENCE_MAX_LINES_PER_TARGET`] lines, the earlier ones first.
+    pub(crate) fn absorb(&mut self, other: ContentProbes) {
+        self.probed.extend(other.probed);
+        self.hits.extend(other.hits);
+        self.truncated.extend(other.truncated);
+        for (path, lines) in other.lines {
+            let kept = self.lines.entry(path).or_default();
+            let room = EVIDENCE_MAX_LINES_PER_TARGET.saturating_sub(kept.len());
+            kept.extend(lines.into_iter().take(room));
+        }
+    }
+}
+
+/// The cap sentence for a probe that stopped at [`CONTENT_PROBE_LIMIT`].
+pub(crate) fn probe_cap(keyword: &str) -> String {
+    format!(
+        "content probe truncated at {CONTENT_PROBE_LIMIT} matches for keyword \
+         '{keyword}'; files beyond the cap carry no content signal"
+    )
+}
+
+/// Run a bounded, word-bounded content probe per keyword over `index`.
+///
+/// Word-bounded so "auth" cannot count every "author" as signal. A probe the
+/// index cannot run is skipped: it is not recorded in `probed`.
+pub(crate) fn probe_content(index: &IndexSet, keywords: &[String]) -> ContentProbes {
+    let mut probes = ContentProbes::default();
+    for keyword in keywords {
+        // Keywords are [a-z0-9_]+ by construction (tokenize_task), but
+        // escape defensively anyway.
+        let pattern = format!(r"(?i)\b{}\b", regex_escape_keyword(keyword));
+        let Ok((matches, stats)) =
+            index.search_page_in(&pattern, 0, Some(CONTENT_PROBE_LIMIT), None)
+        else {
+            continue;
+        };
+        probes.probed.insert(keyword.clone());
+        if stats.truncated {
+            probes.truncated.insert(keyword.clone());
+        }
+        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        for m in matches {
+            *counts.entry(m.path.clone()).or_default() += 1;
+            // Phase 3 item 1 (targets evidence): keep the first ~2 match
+            // lines per file so the caller can verify a content match without
+            // re-searching. Near-zero cost: the lines are already fetched.
+            let lines = probes.lines.entry(m.path).or_default();
+            if lines.len() < EVIDENCE_MAX_LINES_PER_TARGET {
+                lines.push(ProbeLine {
+                    line: m.line_number,
+                    text: m.line,
+                    keyword: keyword.clone(),
+                });
+            }
+        }
+        if !counts.is_empty() {
+            probes
+                .hits
+                .insert(keyword.clone(), counts.into_iter().collect());
+        }
+    }
+    probes
+}
+
 /// Whether a task names tests or specs as a word: the per-path test
 /// penalty is lifted for such a task.
 fn task_mentions_tests(task: &str) -> bool {
@@ -3774,6 +3968,7 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "resolve",
     "targets",
     "targets_facts",
+    "meaning",
     "impact",
     "uses",
     "trace",
@@ -3838,8 +4033,9 @@ fn regex_escape_keyword(kw: &str) -> String {
 fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     let mut caps: Vec<String> = Vec::new();
 
-    // Op-declared named caps (top-level and inside the targets envelope).
-    for path in ["/caps", "/envelope/caps"] {
+    // Op-declared named caps (top-level, inside the targets envelope, and
+    // inside the envelope of a `targets_facts` packet).
+    for path in ["/caps", "/envelope/caps", "/facts/envelope/caps"] {
         if let Some(arr) = v.pointer(path).and_then(Value::as_array) {
             caps.extend(arr.iter().filter_map(Value::as_str).map(String::from));
         }
@@ -3891,6 +4087,7 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         "search" => "text index",
         "targets" | "resolve" => "text index + code graph",
         "changes" | "review_gate" => "code graph + working-tree diff",
+        "meaning" => "resident code-chunk embeddings + chunk BM25",
         _ => "code graph",
     };
     let mut basis = String::from(source);
@@ -3912,13 +4109,7 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     // extraction limits always apply, `closed_world` is never true: a
     // "0 callers" answer means "no callers found", not "this symbol has no
     // callers". This is Pixel's "I say when I don't know" value prop.
-    let extraction_limits = vec![
-        "callbacks passed as arguments (e.g. schema.plugin(fn), emitter.on('event', fn))"
-            .to_string(),
-        "dynamic dispatch (e.g. obj[methodName]())".to_string(),
-        "macro-generated calls".to_string(),
-        "eval / new Function".to_string(),
-    ];
+    let extraction_limits = extraction_limits_for(op_name);
     if caps.is_empty() {
         basis.push_str(
             "; static analysis cannot guarantee completeness: tree-sitter may miss callbacks, \
@@ -3960,6 +4151,27 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
         })
         .collect();
     (epistemics, warnings)
+}
+
+/// The blind spots an op's answer carries into `epistemics.extraction_limits`.
+/// Graph answers share the static-analysis ones; `meaning` ranks embeddings
+/// and names its own.
+fn extraction_limits_for(op_name: &str) -> Vec<String> {
+    if op_name == "meaning" {
+        return vec![
+            "embedding similarity ranks chunks; it does not separate related from unrelated code"
+                .to_string(),
+            "only eligible source and document files are embedded (extension, size and ignore rules)"
+                .to_string(),
+        ];
+    }
+    vec![
+        "callbacks passed as arguments (e.g. schema.plugin(fn), emitter.on('event', fn))"
+            .to_string(),
+        "dynamic dispatch (e.g. obj[methodName]())".to_string(),
+        "macro-generated calls".to_string(),
+        "eval / new Function".to_string(),
+    ]
 }
 
 /// Drop matches whose path is credential-shaped before any byte or row
@@ -7239,11 +7451,22 @@ mod tests {
         let response = service.handle(Request::TargetsFacts {
             task: "change login".into(),
             limit: Some(8),
+            relevance_only: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
         assert_eq!(response.data()["status"], "unavailable");
         assert_eq!(response.data()["reason"], "graph_missing");
+        let relevance_only = service.handle(Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+            relevance_only: true,
+        });
+        assert_eq!(
+            relevance_only.data(),
+            response.data(),
+            "the relevance-only path refuses on the same gate, with the same reason"
+        );
         assert!(
             !graph_path.exists(),
             "a fact request must not create a missing graph"
@@ -7275,11 +7498,22 @@ mod tests {
         let response = service.handle(Request::TargetsFacts {
             task: "change login".into(),
             limit: Some(8),
+            relevance_only: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
         assert_eq!(response.data()["status"], "unavailable");
         assert_eq!(response.data()["reason"], "graph_stale");
+        let relevance_only = service.handle(Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+            relevance_only: true,
+        });
+        assert_eq!(
+            relevance_only.data(),
+            response.data(),
+            "the relevance-only path refuses on the same gate, with the same reason"
+        );
         assert_eq!(
             std::fs::read(&graph_path).unwrap(),
             graph_before,
@@ -7314,11 +7548,22 @@ mod tests {
         let response = service.handle(Request::TargetsFacts {
             task: "change session".into(),
             limit: Some(8),
+            relevance_only: false,
         });
 
         assert!(response.ok, "availability is a typed result: {response:?}");
         assert_eq!(response.data()["status"], "unavailable");
         assert_eq!(response.data()["reason"], "index_stale");
+        let relevance_only = service.handle(Request::TargetsFacts {
+            task: "change session".into(),
+            limit: Some(8),
+            relevance_only: true,
+        });
+        assert_eq!(
+            relevance_only.data(),
+            response.data(),
+            "the relevance-only path refuses on the same gate, with the same reason"
+        );
         assert_eq!(
             std::fs::read(&graph_path).unwrap(),
             graph_before,
@@ -7353,6 +7598,7 @@ mod tests {
         let request = || Request::TargetsFacts {
             task: "change login".into(),
             limit: Some(8),
+            relevance_only: false,
         };
         let first = service.handle(request());
         let second = service.handle(request());
@@ -7365,6 +7611,15 @@ mod tests {
         assert_eq!(inputs["task"], "change login");
         assert_eq!(inputs["limit"], 8);
         assert_eq!(inputs["algorithm_version"], TARGETS_FACTS_ALGORITHM_VERSION);
+        assert_eq!(
+            inputs["algorithm_version"], 2,
+            "version 2 is the first with `facts.relevance`"
+        );
+        assert_eq!(
+            first.data()["facts"]["relevance"]["files_considered"],
+            1,
+            "the block is part of the deterministic facts"
+        );
         assert!(!inputs["activity_reranking"].as_bool().unwrap());
         assert!(!inputs["semantic_fallback"].as_bool().unwrap());
         assert_eq!(
@@ -7378,6 +7633,32 @@ mod tests {
         assert!(
             first.data()["facts"].get("closed_world").is_none(),
             "fact packets must not carry the targets-manifest read/edit boundary"
+        );
+        let only = || Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+            relevance_only: true,
+        };
+        let (fast, fast_again) = (service.handle(only()), service.handle(only()));
+        assert_eq!(fast.data(), fast_again.data(), "the fast path repeats too");
+        assert_eq!(fast.data()["status"], "available");
+        assert_eq!(
+            fast.data()["inputs"],
+            *inputs,
+            "same gate, same declared inputs"
+        );
+        assert_eq!(
+            fast.data()["facts"]["relevance"],
+            first.data()["facts"]["relevance"],
+            "the block is the one the full answer carries"
+        );
+        assert!(
+            fast.data()["facts"].get("targets").is_none(),
+            "the fast path ranks no targets"
+        );
+        assert_eq!(
+            fast.epistemics.as_ref().map(|e| e.lower_bound),
+            first.epistemics.as_ref().map(|e| e.lower_bound),
         );
         assert_eq!(
             std::fs::read(&graph_path).unwrap(),
@@ -7455,6 +7736,8 @@ mod tests {
         .unwrap();
 
         let mut svc = Service::open(&root).unwrap();
+        // Never the real model: this walk only needs the envelope.
+        svc.set_meaning(crate::meaning::testing::meaning(&root));
         let uid = {
             let sym = svc.handle(Request::Symbol {
                 name: "alpha".into(),
@@ -7500,6 +7783,14 @@ mod tests {
                 "targets_facts",
                 Request::TargetsFacts {
                     task: "alpha beta".into(),
+                    limit: Some(5),
+                    relevance_only: false,
+                },
+            ),
+            (
+                "meaning",
+                Request::Meaning {
+                    query: "alpha beta".into(),
                     limit: Some(5),
                 },
             ),
@@ -7608,6 +7899,7 @@ mod tests {
                 "search" => "text index",
                 "targets" | "resolve" => "text index + code graph",
                 "changes" => "code graph + working-tree diff",
+                "meaning" => "resident code-chunk embeddings",
                 _ => "code graph",
             };
             assert!(

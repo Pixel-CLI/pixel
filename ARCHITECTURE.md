@@ -48,7 +48,7 @@ MCP server. `pixel install` registers no MCP server with any agent.
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
 | `pixel-ops` | Safe git mutation infrastructure ported from usable-git: snapshot store, repository lock, operation journal, recovery keys. Implements `inspect`, `review`, `history`, `diff`, `publish`, `push`, `ship`, `branch`, `update`, `sync`, `reconcile`, `rewrite`, `provenance`, `branches`, `env`. | git |
 | `pixel-git` | The single git subprocess wrapper for the workspace. Replaced three earlier ad-hoc wrappers. Any crate that shells out to git goes through `GitRunner` (timeout, output cap, redacted stderr); `crates/pixel-git/tests/boundary.rs` fails the build on a `Command::new("git")` in any other crate's non-test code. Also owns the trust boundary of `.pixel/`: `sidecar` refuses a `.pixel` that is a link or that git tracks and creates owner-only directories without following a link, `nofollow` opens files without following a link at their name, and `repo_path` confines a stored path to the repository root. | none |
-| `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, pi, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features) and the `search-meaning` code chunker, which reuses the graph's tree-sitter extraction. | git, graph, index, rank |
+| `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, pi, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features) and the `search-meaning` code chunker, which reuses the graph's tree-sitter extraction, and the resident code index (`code_resident`) the daemon's `meaning` op ranks from. | git, graph, index, rank |
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | git |
 | `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` and `pixel token-savings` reporting. | git |
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
@@ -161,8 +161,9 @@ Per repository, under `.pixel/` (git-ignored):
 | `base.shard`, `delta.shard`, `state.json`, `build.lock` | `pixel-index` | Base shard for all tracked files at a pinned commit, delta shard for files changed between that commit and HEAD, and `state.json` as the delta-layer sidecar (tombstones for superseded base paths). The dirty working-tree overlay is in memory only. First process to hold `build.lock` builds; others wait. |
 | `graph.v2.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. The name moves with the schema (`pixel_daemon::api::GRAPH_DB_FILE`); user-facing messages still say `graph.db`. |
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
-| `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
+| `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback; the daemon's `meaning` build (below) reads it and, for its first build only, writes it, so the two share vectors. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
+| `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the typed text (never a pasted block, credential shapes masked, cut at 600 characters) and its SHA-256. The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
 | `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker `reconcile` writes and clears (no hook reads it), and the pre-mutation copies `env` takes. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
 | `task-runtime.json` | CLI `task-state show/reset` and Claude hooks | Existing bounded Claude context packets; independent of completion evidence. |
@@ -230,7 +231,8 @@ Once it is live, `Corpus::watch_ready` re-reads every path `git status`
 lists, every path the index overlay held (an edit discarded meanwhile leaves
 `git status` clean) and every path a HEAD move since the open changed, since
 edits made meanwhile raised no event. The daemon exits after
-thirty minutes idle.
+thirty minutes idle; the brief's hooks start it again when they find none
+(see "Agent integration").
 
 Two version numbers exist and must not be conflated:
 
@@ -267,7 +269,7 @@ variants no producer reaches are listed on `pixel_proto::ErrorCode`.
 Invariants enforced by `Service::handle`:
 
 - Success carries `result`, failure carries `error`. Never both.
-- Every retrieval op (`search`, `resolve`, `targets`, `impact`, `uses`,
+- Every retrieval op (`search`, `resolve`, `targets`, `meaning`, `impact`, `uses`,
   `trace`, `changes`, `context`, `symbol`, `processes`, `clusters`, `plan`) gets an
   `epistemics` object. Ops that hit a cap name it in `basis` and mirror it as
   a warning. Ops that attested nothing get a conservative not-closed-world
@@ -285,12 +287,75 @@ Invariants enforced by `Service::handle`:
   (`SnapshotInfo::compact`), so an untracked `vendor/bundle` of 15 000 paths
   does not inflate a `symbol` answer to 240 KB.
 
+`targets_facts` answers `{status, inputs, facts}` from a fresh published
+snapshot and refreshes nothing: a stale or missing index or graph answers
+`status: unavailable` with a `reason`. `inputs.algorithm_version`
+(`TARGETS_FACTS_ALGORITHM_VERSION`) says which `facts` keys exist, and 2 adds
+`facts.relevance` (`pixel_proto::Relevance`), the deterministic inputs of an
+on-topic decision about a prompt: per task keyword, how many files contain it
+as a word, define a symbol named with it, or carry it in a path (a keyword the
+repository lacks as typed borrows the counts of its first thesaurus synonym
+that matches, within `RELEVANCE_EXPANSION_PROBES` probes), and the co-files:
+each file the keywords meet in is weighted by the sum of
+`relevance::keyword_weight` over them (inverse document frequency capped at
+`IDF_CAP`, computed from the largest channel count, a lower bound when the
+content probe truncated; 0 for a word in over a quarter of the files and for
+a general word such as `does` or `quel`, listed with `common: true`), and the
+block lists the eight heaviest plus the four heaviest structural ones (a rare
+word in a path or symbol, named in `structural_keywords`), so prose that
+repeats common words cannot crowd out the file the prompt names; `structural_files`
+counts every such structural match before the list is cut. The rule was
+chosen against the dev split of the labelled prompts
+(`scripts/bench-relevance-weights.py`). The block reuses the content
+probes the target ranking ran and counts documents against `files_considered`;
+`pixel_daemon::relevance::relevance_on` computes the same block in process for a
+reader with no daemon. Credential-shaped paths are never counted or listed.
+Each cap that bounds the block is in `relevance.caps`, in `facts.envelope.caps`
+and, through `derive_epistemics`, in the response's `epistemics` and `warnings`.
+`relevance_only: true` on the request (omitted from the wire when false, so an
+older daemon sees the request it knows) asks for the block without the ranking:
+the same freshness gate and `inputs`, then `facts` is `{envelope, relevance}`
+with no `targets`, the block byte-identical to the full answer's and its caps
+in the same three places. A daemon that predates the flag ignores it and
+answers in full, so a reader checks `facts.relevance` and
+`inputs.algorithm_version >= 2`, never the flag.
+
 Adding an op is one variant on `pixel_proto::Op`, one arm in
 `Service::dispatch` and one entry in `pixel_proto::SESSION_CAPABILITIES`.
 Unit tests in `pixel-proto` check both: `op_name_matches_serde_tag` (the
 `Op::op_name` of every variant is its serde tag) and
 `session_capabilities_track_every_real_op` (the capability list and the enum
 agree).
+
+`meaning` (`pixel-daemon/src/meaning.rs`, `pixel-recall/src/code_resident.rs`)
+answers a natural-language question from the code chunks of the repository,
+their vectors kept resident in the daemon: each eligible file cut along its
+symbols exactly as `search-meaning` cuts it (`RESIDENT_MAX_FILES` files at
+most, credential-shaped paths never read), each chunk with its unit-length
+`f32` vector, term counts and line range. A hit is the best chunk of a file
+(`path`, `start_line`, `end_line`, `symbol`, fused `score`, one-line
+`snippet`), ranked by `search-meaning`'s own fusion (`rank_files`: semantic
+rank plus chunk BM25, tests, configuration and docs demoted), so it ranks
+as that command does, in a few milliseconds instead of a CLI process's 250 ms. It
+ranks; it never decides relevance, and says so in `caps`
+(`SEMANTIC_LEADS_UNVERIFIED`) and `epistemics`. A request never builds,
+reads a file or waits: the vectors are built on one background thread the
+first request starts, from the model `search-meaning` uses and never
+downloaded here, and a request that cannot rank answers `status:
+"unavailable"` with a `reason` (`cold`, `warming`, `stale`, `refreshing`,
+`model_missing`, `failed`) and starts the build, so a caller on a deadline
+falls back. The build is stamped with the publication generation (the
+counter watcher batches and graph builds advance) read before its first
+file, so an edit mid-build leaves it stale, never wrongly fresh; once the
+vectors have been asked for, each new generation rebuilds them at once
+(coalescing, at most eight builds per run), reusing every file whose bytes
+hash as before. The read plane (`read_evidence` kind `meaning`, the evidence
+bridge) ranks from the same shared vectors and never builds them; the
+bridge's writable service starts the build for a bundle that asks. The
+memory held is about 2 KiB per chunk at 256 dimensions (`pool.resident_bytes`);
+a rebuild renumbers the token vocabulary from the live chunks once it holds
+more than twice their tokens (`VOCAB_SLACK`), so the tokens of edited-away
+text do not accumulate for the daemon's lifetime.
 
 ## Request path from the CLI
 
@@ -306,7 +371,10 @@ agree).
    `pixel daemon start <root> --foreground` in the background and polls the
    socket for up to five seconds. A daemon on a newer protocol is left alone
    and the command runs in process. `PIXEL_DAEMON_AUTO_START=0`, or
-   `daemon_auto_start: false` in the config, disables the spawn.
+   `daemon_auto_start: false` in the config, disables the spawn. One function
+   (`spawn_daemon`) spells that spawn for this path, `pixel daemon start` and
+   the hooks, and `--warm-meaning` (hidden; background start only) makes the
+   start process ask the new daemon one `meaning` question once it answers.
 3. If the daemon path fails, the CLI opens `Service` in-process and calls
    `handle` directly. Both paths return the same `Envelope`.
 4. `unwrap_response` turns a failure envelope into an `Err(message)` that
@@ -338,6 +406,11 @@ envelope talks to the daemon socket directly.
 - The text index is git-anchored: base shards correspond to a commit, delta
   shards to changes since, and an overlay covers the dirty working tree.
   `pixel status` reports whether each layer is fresh.
+- The resident `meaning` vectors are as fresh as the publication generation
+  they were built for (`pool.generation`, `pool.age_ms`): a request at a newer
+  generation is `unavailable` (`stale`, then `refreshing`) until the rebuild
+  lands. They read the tree, not the watcher's change list, so a file the
+  watcher missed is picked up by the next rebuild.
 - The graph is built lazily on the first graph command and updated per file
   by the daemon watcher. Without a daemon (CI, `PIXEL_DAEMON_AUTO_START=0`,
   a copied `.pixel/`), the first graph command after an edit compares the
@@ -506,10 +579,11 @@ releases deployed, then handles each agent through its own extension point:
   plugin ships no skill and registers no hooks.
 - **Pi**: when Pi's agent directory (`$PI_CODING_AGENT_DIR`, else
   `~/.pi/agent`) exists or `pi` is on `PATH`, a local Pi package under
-  `~/.local/share/pixel/pi-package/` (`package.json` and
+  `~/.local/share/pixel/pi-package/` (`package.json`,
   `extensions/pixel-impact.ts`, which registers the explicit
-  `/pixel-impact <symbol>` command) and its absolute path in the `packages`
-  list of Pi's `settings.json`, which keeps every other key and package. A
+  `/pixel-impact <symbol>` command, and `extensions/pixel-brief.ts`, whose
+  `before_agent_start` hook runs `pixel brief`) and its absolute path in the
+  `packages` list of Pi's `settings.json`, which keeps every other key and package. A
   managed copy an earlier release wrote to `extensions/pixel-impact.ts` is
   removed so Pi does not register the command twice; a foreign file there is
   left and reported yellow. A settings file that does not parse, or an agent
@@ -521,15 +595,22 @@ releases deployed, then handles each agent through its own extension point:
   them into context, as a second Pixel-owned package
   (`~/.local/share/pixel/pi-classify/`, declared in the same `packages` list).
   Uninstall removes both packages and their entries.
-- **OpenCode, Devin, Antigravity, zcode, Cursor, Copilot CLI**: nothing is
-  written. Install removes what earlier releases wrote when it is still there:
-  the OpenCode `AGENTS.md` block and `plugins/pixel.js` guard (in
-  `~/.config/opencode`, `$XDG_CONFIG_HOME` honoured), Devin's hooks in
-  `~/.config/devin/config.json`, the Antigravity plugin, its config entry and
-  the global `pixel-guard` in `~/.gemini/config/hooks.json` (a user-defined
-  hook under that name is kept), the zcode guard in
-  `~/.zcode/cli/config.json`, `~/.cursor/hooks.json` and
-  `~/.copilot/hooks/pixel.json`. `doctor` reports a leftover as red.
+- **Gemini CLI, OpenCode, Devin, Antigravity**: the prompt brief and nothing
+  else, each only where its configuration already exists. Gemini: a
+  `BeforeAgent` hook in `~/.gemini/settings.json`. OpenCode:
+  `plugins/pixel-brief.js` in `~/.config/opencode` (`$XDG_CONFIG_HOME`
+  honoured), whose `chat.message` hook runs `pixel brief`. Devin: the task
+  events in its hooks file, `prompt-submit` among them. Antigravity: a
+  `pixel-brief` entry in `~/.gemini/config/hooks.json` running on
+  `PreInvocation`. Install also removes what earlier releases wrote when it
+  is still there: the OpenCode `AGENTS.md` block and `plugins/pixel.js`
+  guard, Devin's retired guard hooks in `~/.config/devin/config.json`, the
+  Antigravity plugin, its config entry and the global `pixel-guard` (a
+  user-defined hook under that name is kept).
+- **zcode, Cursor, Copilot CLI**: nothing is written. Install removes the
+  zcode guard in `~/.zcode/cli/config.json`, `~/.cursor/hooks.json` and
+  `~/.copilot/hooks/pixel.json` when an earlier release wrote them. `doctor`
+  reports a leftover as red.
 
 The `policy` key of `pixel config` (`advisory`, `enforce`, `off`) is retired:
 no hook reads it and every value leaves native tools untouched. It stays
@@ -602,7 +683,7 @@ is the only hook `pixel install` registers (Claude Code and Codex):
 
 | Hook event | Command | Effect |
 | --- | --- | --- |
-| `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`, `SubagentStart`, `SubagentStop`, plus `PostToolUseFailure` (Claude) or `Interrupt` (Codex) | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks. Once enforced, a task retains its gates if runtime settings change. On `prompt-submit` it also returns the `[PIXEL:BRIEF]` evidence brief as `additionalContext` (see below). |
+| `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`, `SubagentStart`, `SubagentStop`, plus `PostToolUseFailure` (Claude) or `Interrupt` (Codex) | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks. Once enforced, a task retains its gates if runtime settings change. On `prompt-submit` it also returns the `[PIXEL:BRIEF]` evidence brief as `additionalContext` (see below). On `SessionStart` and a briefed `UserPromptSubmit` it may start the repository's daemon in the background (see "Keeping a daemon behind the brief"). |
 
 The verbs earlier releases registered (`guard`, `composed-guard`,
 `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`,
@@ -611,29 +692,105 @@ old install left in an agent's settings cannot block or fail a host. `pixel
 install` and `pixel uninstall` remove those registrations from every agent
 file above; `crates/pixel-install/src/routing.rs` recognises them by verb.
 
-The brief (`execution_brief/chain.rs`, `execution_brief/evidence.rs`,
-`execution_brief/routes.rs`) is built
-on every Claude Code and Codex `prompt-submit` task event for a code-shaped
-prompt. Pi gets none (`start_brief` in
-`task_hook.rs` skips `TaskProvider::Pi`), and no other host registers a prompt
-hook. It runs at most six ops under one 750 ms deadline: `search-content -F
--l` on the first anchor, `find-symbol` to resolve a uid, `impact <uid>` only
-for change or caller intent, `find-code` when no anchor found a file, then
+The brief (`execution_brief/chain.rs`, `evidence.rs`, `relevance.rs`,
+`decision_log.rs`, `routes.rs`) is built on every prompt-submit event of a
+host that has a prompt hook: Claude Code, Codex and Devin through
+`task-event`, Gemini through `BeforeAgent`, Antigravity through
+`PreInvocation`. Pi (`extensions/pixel-brief.ts`) and OpenCode
+(`plugins/pixel-brief.js`) run `pixel brief` instead, and `start_brief` in
+`task_hook.rs` skips `TaskProvider::Pi` for that reason. A prompt starts one
+by its shape (`brief_signal`), the typed text only, the last paragraph of a
+long untagged paste:
+
+- **code-shaped** (`Signal::Strong`: a backticked name, `snake_case`,
+  `camelCase`, a path or a source file): the chain below, no model.
+- **weakly code-shaped** (`Weak`: a code word or a code-question opener): the
+  same chain, with the intent judge (`pixel classify --if-warm`, only when
+  its local server is already listening) free to refuse it (`none`, 0.5 or
+  more), and the relevance gate below applied to it too
+  (`ENFORCE_GATE_ON_WEAK`). The probes are its retriever, so the concept
+  search runs only when they found no file.
+- **plain language** (`Prose`: two or more content words, not a git, release
+  or deploy request, not an acknowledgement): the intent judge, the
+  relevance probe and the meaning search run at once on the deadline, and
+  only the gate decides whether the repository is the subject.
+
+The gate (`execution_brief/relevance.rs`, constants in `gate_model.rs`) has
+no language model in it. From the daemon's `facts.relevance` (`targets_facts`
+with `relevance_only`, which skips the target ranking and is accepted only from
+an `algorithm_version` 2 result; in process over the index and graph when no
+daemon answers) and the
+typed prompt it computes four features: `struct_per_mille` (how many files a
+keyword of positive weight names by path or symbol, per thousand indexed
+files, as a log), `question` (the prompt ends on `?` or opens with a question
+word), `ops_share` (the share of keywords that name a git, release or CI
+operation) and `struct_ratio` (the heaviest structural co-file's weight over
+the keywords' total). A fixed logistic model scores them, and two thresholds
+cut the score into a tier. The weights are the daemon's
+(`pixel_daemon::relevance::row_weight`, `CoFile::weight`), never recomputed.
+The model is an L2 logistic regression fitted on the English dev rows of the
+brief-gate set (`scripts/research-gate/results/gate-model.json`, whose SHA-256
+`gate_model.rs` cites and a test checks, with `gate_reference.py` as the
+executable definition the parity test holds the Rust score to). It does not
+apply without a code graph or without a keyword to weigh: such a plain prompt
+gets no brief, and a weak one keeps its pre-gate brief when only the graph is
+missing.
+
+- **high** tier: the full brief below, with
+  `confidence: high — n/m key terms covered; start with the first file`.
+- **low** tier: a compact brief, at most three `path:line — text` files within
+  700 bytes, no kind route and no search, and
+  `confidence: low — possibly related; verify before relying on it`.
+- **off**, a probe that cannot answer, or no answer in time: nothing. The
+  fused leads of the `meaning` op (daemon only, resident vectors,
+  `unavailable` while they build) join the co-files by reciprocal rank in
+  the first `files:` of either brief.
+
+The chain runs at most six ops under one 750 ms deadline: the two probes of
+a Weak or Prose prompt, `search-content -F -l` on the first anchor,
+`find-symbol` to resolve a uid, `impact <uid>` only
+for change or caller intent, `find-code` when nothing found a file, then
 one evidence op the question kind picks (`evaluate`/`trace` for a path,
 `uses` for covering tests, `skeleton` for a file's shape, `history` for
 rationale, `context` for a defect's definition, `targets_facts` for a
 feature) plus a bounded `line_at` or context read for the `defined:` line.
 A `status` probe (facts freshness, embedding warmth) rides along uncounted.
 It reads a warm daemon if one answers this protocol and otherwise the index and
-graph read-only in process; it never starts a daemon and never builds an
-index or graph. Its history request sends `read_only: true`, which only a
+graph read-only in process for that prompt; it never waits for a daemon and
+never builds an index or graph. Its history request sends `read_only: true`, which only a
 version-15 daemon honours, so the hook can never be the request that opens
 the facts warmer. A repository without an index yields no brief. A missing or
 stale graph still yields the text evidence (`files:`), with the reason under
 `unresolved:` (`the graph is not built`, `the graph is stale`) and no callers.
-Output is capped at 2 KiB and says how many ops answered (`coverage: n/m`,
-`packet partial` when the budget cut short). `PIXEL_BRIEF=0|false|off` or
-`brief: false` in `.pixel/config.yaml` switches it off.
+Output is capped at 2 KiB (`BRIEF_BYTES`; `PROSE_BRIEF_BYTES` for plain
+language) and says how many ops answered (`coverage: n/m`, `packet partial`
+when the budget cut short). Every decision, a refusal included, is one line of
+`.pixel/brief-decisions.jsonl` (see "On-disk state").
+`PIXEL_BRIEF=0|false|off` or `brief: false` in `.pixel/config.yaml`
+switches the brief off.
+
+**Keeping a daemon behind the brief.** Without a daemon the brief has no
+`meaning` leads, and a daemon exits after thirty minutes idle or becomes
+unusable when the protocol moves, so the hooks bring one back
+(`execution_brief/autostart.rs`). Both moments decide the same way: the
+brief is on, the repository has an index, and auto-start is on (the CLI's own
+switch, `PIXEL_DAEMON_AUTO_START=0` or `daemon_auto_start: false`); then
+`probe_daemon` says what answers. Nothing answers: launch. An older protocol:
+send it Shutdown, then launch. A newer protocol: leave it to that pixel. A
+current daemon: nothing to launch for a prompt, but a `SessionStart` still
+launches, because the start process is what asks the daemon its first
+question and wakes the `meaning` vectors. The launch is one detached `pixel
+daemon start <root> --warm-meaning` (`spawn_detached`, its own process
+group, no standard streams), which retires a stale daemon and waits for it to
+exit, starts the foreground daemon through `spawn_daemon`, waits for it to
+answer and asks the one question. A prompt that finds no daemon still briefs
+from the index in process; the daemon is for the next one. The hook decides on
+a thread of its own and waits `HOOK_BOUND` (100 ms) for the decision at most,
+so a wedged socket costs a start, never the hook; the decision log records
+what came of it (`daemon`: `launched`, `running`, `skipped: …`,
+`launch failed`) beside where the evidence came from (`route`: `daemon` or
+`local`). The `daemon start --warm-meaning` process is not metered as a user
+command.
 
 `pixel doctor` checks current installation artifacts and distinguishes configured
 or protocol-checked hooks from observed live execution.
@@ -761,7 +918,7 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     bottles, release SBOM, homebrew-core formula,
     nightly diff checkpoints, coverage selection, mutants
     config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
-    reproducible release build environment, the `eval/` agent A/B harness against fixture CLIs), the
+    reproducible release build environment, the brief-gate bench and excavation counter self-tests with the `eval/brief-gate/` prompt set's schema check, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
     (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`)
     and the Bun Pi impact-command contract (`scripts/test-pi-impact.mjs`);

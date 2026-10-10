@@ -34,7 +34,7 @@ model providers, and the website under `website/`.
 | Asset | Where | Why it matters |
 | --- | --- | --- |
 | Source and history of indexed repositories | the working tree, read through `pixel-git::GitRunner` and the walkers in `pixel-index`/`pixel-graph` | confidentiality of code the user did not mean to share; integrity of what the agent is told about it |
-| Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `config.yaml`, `tasks/`, `env-snapshots/` | what the agent reads as ground truth; `actions.jsonl` and `env-snapshots/` can hold secrets; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
+| Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `brief-decisions.jsonl`, `config.yaml`, `tasks/`, `env-snapshots/` | what the agent reads as ground truth; `actions.jsonl`, `brief-decisions.jsonl` (the typed prompt) and `env-snapshots/` can hold secrets; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
 | Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
 | Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
@@ -88,13 +88,24 @@ wire contract"). In `crates/pixel-daemon/src/daemon.rs`: `MAX_REQUEST_LINE`
 (64 KiB), `CONNECTION_DEADLINE` (5 s per connection), a 1 s read timeout,
 `MAX_REQUESTS_PER_CONN` (64), `IDLE_TIMEOUT` (30 min). The socket file is
 set to 0600 after `bind`; on Linux the fallback directory is set to 0700.
-`PROTOCOL_VERSION` (`pixel_daemon::api`, 13) is compared by the CLI's
+`PROTOCOL_VERSION` (`pixel_daemon::api`, 16) is compared by the CLI's
 `classify_ping`: an older daemon is shut down and replaced, a newer one is
 left alone and the command runs in process. Requests are served one at a
 time. The op set includes git mutations (`publish`, `push`, `ship`,
 `branch_op`, `update`, `sync`, `reconcile`), file writes (`rename`), index
 rebuilds and `shutdown`. The CLI starts a daemon on demand
 (`auto_start_daemon`; `PIXEL_DAEMON_AUTO_START=0` turns that off).
+
+`meaning` takes a free-text question (cut to `MEANING_QUERY_MAX_BYTES`, 1 KiB)
+and returns at most `MEANING_MAX_LIMIT` (50) one-line snippets from the
+resident code index (ARCHITECTURE.md, "Daemon and wire contract"). A request
+reads no file, embeds one question and starts no download; the index is built
+on one background thread from the files `search-meaning` would read, under its
+caps (`RESIDENT_MAX_FILES`, 512 KiB per file), and never from a path
+`credential_path` names. Repeated edits do not grow it for the daemon's
+lifetime: a rebuild renumbers the token vocabulary from the live chunks once
+the tokens of edited-away text outnumber them (`VOCAB_SLACK`). A same-user client can make the daemon read and
+embed the repository by sending it, which it could do with `search`.
 
 ### 3.3 Installed hooks (B2, B3, B5)
 
@@ -447,8 +458,11 @@ stays so references to the later threats hold.
 - **Mitigation**: the one thing an install delivers to an agent unasked is
   the `[PIXEL:BRIEF]` block of `task-event` on `prompt-submit`: it quotes file
   paths, symbol names and a definition from the repository as evidence, capped
-  at 2 KiB, with a 750 ms deadline, off with `PIXEL_BRIEF=0`. No prompt is
-  deployed. The bundled prompt a user copies by hand
+  at 2 KiB, with a 750 ms deadline, off with `PIXEL_BRIEF=0`. A prompt in
+  plain language gets one only when the repository's own vocabulary covers it
+  (`execution_brief::relevance`), and its first files come from the daemon's
+  `facts.relevance` and `meaning` ops: the same bound, the same deadline, the
+  same data. No prompt is deployed. The bundled prompt a user copies by hand
   states that Pixel output is data, not instructions
   (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
   skill and Pi command label graph output as repository data, not
@@ -496,7 +510,16 @@ hold.
   0700 and `actions.jsonl` 0600 (`pixel-actionlog`, `open_log_file`); the
   recall directory is 0700 (`pixel_recall::ensure_recall_dir`); the error
   sink is 0700/0600 (`pixel-session`); `pixel-ops` state directories are
-  created 0700 (`durable::ensure_dir`).
+  created 0700 (`durable::ensure_dir`); `brief-decisions.jsonl`, which keeps
+  the typed text of each prompt the brief judged, is created 0600, takes no
+  line when an existing file cannot be brought to 0600, and is
+  written without following a link at the file or at `.pixel` itself
+  (`decision_log::append`, `nofollow::open_lock`), holds the last 500
+  lines, never a pasted block (`typed_text`) or more than the last
+  paragraph of a long untagged paste (`brief_task`), masks credential shapes
+  before it cuts the text at 600 characters (`decision_log::logged_typed`:
+  `pixel_git::redact` and a key mask), and is off with
+  `PIXEL_BRIEF_LOG=0|false|off`.
 - **Status**: Partial.
 - **Residual**: the recall corpus and the error sink store transcripts and
   argv unredacted (the sink keeps the whole output of every failed `sniper
@@ -504,7 +527,9 @@ hold.
   at most 200 outputs); `edit-env` snapshots are plain copies of the `.env`;
   `logged_args` masks only `config remote-key` values and `auth_url`, so a
   secret passed as `--var` to `pixel flow` or `--value` to `pixel edit-env`
-  reaches `actions.jsonl` in clear (a 0600 file).
+  reaches `actions.jsonl` in clear (a 0600 file); the brief log masks key
+  shapes and URL credentials, not a secret typed as ordinary words, which
+  stays in that 0600 file until the log wraps or is deleted.
 
 ### T16. A configured key is sent to the wrong endpoint (I, B6)
 
@@ -661,10 +686,12 @@ hold.
 | --- | --- | --- |
 | Daemon request framing | `daemon::handle_conn`, `read_capped_line` | `oversized_line_is_rejected_without_unbounded_drain`, `expired_connection_deadline_stops_frame_read`, `socket_identity_should_follow_the_file_not_the_path`, `the_daemon_socket_should_be_0600_after_bind` (`daemon.rs`) |
 | Protocol skew | `classify_ping`, `PROTOCOL_VERSION` | `op_name_matches_serde_tag`, `session_capabilities_track_every_real_op` (`pixel-proto`) |
+| Snippets from the semantic index | `Resident::build`, `Meaning::answer` | `build_should_never_index_credential_shaped_paths` (`code_resident.rs`), `answer_should_apply_the_default_limit_and_cap_the_requested_one` and `bounded_query_should_cut_at_a_character_boundary_above_the_cap_only` (`meaning.rs`) |
 | Planted history database | `FactsStore::needs_rebuild`, `_pixel_marker` | `open_should_wipe_a_planted_history_database` (both refusals: no marker, foreign `created_by`; asserts the planted tables are gone and the marker is Pixel's); `concurrent_open_on_poisoned_db_never_ioerrors` covers the rebuild path |
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
 | Hook payload cap | `hook_input::read_bounded` | the `read_bounded` tests in `hook_input.rs` |
 | Prompt-submit intent judge | `execution_brief::intent::judge` | subprocess JSON, empty stdout and invalid UTF-8 fallback tests in `intent.rs` |
+| Typed prompts in the brief log | `decision_log::{logged_typed, mask_keys, append}` | `logged_typed_should_mask_a_credential_and_cut_at_the_bound`, `logged_typed_should_keep_only_the_last_paragraph_of_a_pasted_log`, `mask_keys_should_hide_a_prefixed_key_and_a_long_run_and_keep_prose`, `append_should_be_owner_only_and_not_create_a_missing_directory`, `append_should_refuse_a_link_at_the_log_and_leave_its_target_alone`, `append_should_refuse_a_linked_directory_and_write_nothing_through_it` (`decision_log.rs`), `the_decision_log_should_stay_off_when_pixel_brief_log_says_so` (`prompt_brief_cli.rs`) |
 | Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask` (`main.rs`) |
 | Keys over clear text | `sends_in_clear_text` | `a_key_never_leaves_the_machine_over_cleartext_http`, `only_plain_http_to_another_host_counts_as_clear_text` |
 | Untrusted shard files | `Shard::open` | `malformed_shard_rejected_gracefully`, `corrupt_posting_cannot_escape_section_or_overflow_delta` (`shard.rs`) |

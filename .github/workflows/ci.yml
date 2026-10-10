@@ -526,6 +526,16 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-cancel-stale-runs.py
 
+      # The brief-gate bench parses `pixel brief` output and scores it against
+      # eval/brief-gate/prompts.jsonl; the excavation counter reads agent
+      # transcripts. Parsers, metrics and the set's schema and privacy lint.
+      - name: Brief-gate bench and excavation counter (self-tests, prompt set)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: |
+          python3 scripts/bench-brief-gate.py --self-test
+          python3 scripts/bench-brief-gate.py --check-set
+          python3 scripts/excavation-count.py --self-test
+
       # The workflow's own step, run with a stub script: only a pull request
       # number reaches the shoot script.
       - name: Harness-grid dispatch input contract

@@ -6,9 +6,10 @@
 //! A warm daemon answers when one serves the repository; otherwise the same
 //! facts come from read-only readers over the published index and graph.
 //! Neither route builds an index or a graph, refreshes one, or starts a
-//! daemon: a source that is not current fails its operation and the brief
-//! reports it as unresolved. Every daemon request carries what is left of the
-//! brief's shared window as its socket timeout.
+//! daemon (`autostart.rs` does that, beside the brief, for the next prompt):
+//! a source that is not current fails its operation and the brief reports it
+//! as unresolved. Every daemon request carries what is left of the brief's
+//! shared window as its socket timeout.
 
 use std::collections::HashSet;
 use std::os::unix::net::UnixStream;
@@ -17,6 +18,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use pixel_daemon::Request;
+use pixel_daemon::relevance::{keyword_df, relevance_on, row_weight};
 use pixel_graph::GraphStore;
 use pixel_graph::build::{
     EXTRACTOR_VERSION, EXTRACTOR_VERSION_KEY, FRESHNESS_KEY, freshness_signature_trusting_stat,
@@ -25,17 +27,27 @@ use pixel_index::delta::{DeltaState, delta_shard_path};
 use pixel_index::indexset::IndexSet;
 use pixel_index::shard::Shard;
 use pixel_index::{GramExtractor, TrigramExtractor, gitsync};
+use pixel_proto::{MeaningResult, Relevance};
 use serde_json::Value;
 
 use super::chain::{
-    CONCEPT_ROWS, CallerHit, Evidence, Flow, Found, HistoryHit, MAX_TARGETS, RichFound, RichHit,
-    SEARCH_ROWS, SYMBOL_ROWS, StatusProbe, SymbolHit,
+    CONCEPT_ROWS, CallerHit, Evidence, Flow, Found, HistoryHit, MAX_TARGETS, MeaningHit,
+    RelevanceAnswer, RichFound, RichHit, SEARCH_ROWS, SYMBOL_ROWS, StatusProbe, SymbolHit,
 };
+use super::relevance::{CoFileStat, KeywordStat, RelevanceInput};
 
 /// The path search's bound: the daemon's `evaluate` default and its
 /// `trace` depth, so the local route searches the same radius the
 /// daemon's does.
 const FLOW_DEPTH: u32 = 8;
+
+/// Targets the relevance probe asks `targets_facts` for: as many files as a
+/// brief lists. It asks for the relevance block alone (`relevance_only`); a
+/// daemon that predates the flag ignores it and ranks this many targets too.
+const RELEVANCE_TARGETS: usize = 8;
+
+/// First `targets_facts` algorithm version that carries `facts.relevance`.
+const RELEVANCE_ALGORITHM_VERSION: u64 = 2;
 
 /// Where the facts come from, decided once per brief.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +250,23 @@ impl Live {
         })
     }
 
+    /// `facts.relevance` computed in process over the published text index and,
+    /// when it is current, the graph: what the daemon would have attached to
+    /// `targets_facts`. Without a graph no keyword is structural and the block
+    /// says so.
+    fn local_relevance(&self, typed: &str) -> Result<Relevance, String> {
+        if !index_current(&self.root) {
+            return Err("the text index does not cover HEAD".into());
+        }
+        let set = IndexSet::open_or_build(&self.root, Box::new(TrigramExtractor))
+            .map_err(|error| error.to_string())?;
+        if self.with_graph(|_| Ok(())).is_ok() {
+            self.with_graph(|store| relevance_on(&set, Some(store), typed))
+        } else {
+            relevance_on(&set, None, typed)
+        }
+    }
+
     /// `evaluate` on the daemon, `trace` when it cannot answer: an `Err`,
     /// a technical `{"kind":"error"}` and an `unknown` verdict all hand
     /// the question to the bounded BFS.
@@ -303,6 +332,13 @@ impl Live {
 }
 
 impl Evidence for Live {
+    fn route(&self) -> &'static str {
+        match self.route {
+            Route::Daemon => "daemon",
+            Route::Local => "local",
+        }
+    }
+
     fn files_with(&self, anchor: &str, deadline: Instant) -> Result<Found, String> {
         self.files_matching(anchor, deadline).map(Found::from)
     }
@@ -479,6 +515,7 @@ impl Evidence for Live {
                     &Request::TargetsFacts {
                         task: task.to_string(),
                         limit: Some(MAX_TARGETS),
+                        relevance_only: false,
                     },
                     deadline,
                 )?;
@@ -490,6 +527,45 @@ impl Evidence for Live {
                 })
             }
             Route::Local => Err("task facts need a running daemon".into()),
+        }
+    }
+
+    fn relevance(&self, typed: &str, deadline: Instant) -> Result<RelevanceAnswer, String> {
+        let block = match self.route {
+            Route::Daemon => {
+                let data = self.ask(
+                    &Request::TargetsFacts {
+                        task: typed.to_string(),
+                        limit: Some(RELEVANCE_TARGETS),
+                        relevance_only: true,
+                    },
+                    deadline,
+                )?;
+                relevance_block(&data)?
+            }
+            Route::Local => self.local_relevance(typed)?,
+        };
+        Ok(relevance_answer(&block, is_french(typed)))
+    }
+
+    fn meaning(
+        &self,
+        query: &str,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<Vec<MeaningHit>, String> {
+        match self.route {
+            Route::Daemon => {
+                let data = self.ask(
+                    &Request::Meaning {
+                        query: query.to_string(),
+                        limit: Some(limit),
+                    },
+                    deadline,
+                )?;
+                meaning_hits(&data)
+            }
+            Route::Local => Err("meaning needs a running daemon".into()),
         }
     }
 
@@ -949,6 +1025,112 @@ fn targets_of(data: &Value) -> Option<Vec<String>> {
     Some(paths)
 }
 
+/// The `facts.relevance` block of a `targets_facts` reply, or why there is
+/// none: an unavailable result names its reason, and a result of an algorithm
+/// version before [`RELEVANCE_ALGORITHM_VERSION`] is not trusted even if it
+/// carries something under that name.
+fn relevance_block(data: &Value) -> Result<Relevance, String> {
+    if data.get("status").and_then(Value::as_str) == Some("unavailable") {
+        return Err(data.get("reason").and_then(Value::as_str).map_or_else(
+            || "facts are unavailable".to_string(),
+            |reason| format!("facts: {reason}"),
+        ));
+    }
+    let block = data
+        .get("facts")
+        .and_then(|facts| facts.get("relevance"))
+        .ok_or_else(|| "facts carry no relevance".to_string())?;
+    let version = data
+        .get("inputs")
+        .and_then(|inputs| inputs.get("algorithm_version"))
+        .and_then(Value::as_u64);
+    if version.is_none_or(|version| version < RELEVANCE_ALGORITHM_VERSION) {
+        return Err(format!(
+            "facts algorithm version {} predates relevance",
+            version.map_or_else(|| "unknown".to_string(), |version| version.to_string())
+        ));
+    }
+    serde_json::from_value(block.clone()).map_err(|error| format!("facts.relevance: {error}"))
+}
+
+/// Whether the prompt is French, as the task tokenizer decides it.
+fn is_french(typed: &str) -> bool {
+    pixel_rank::tokenize_task(typed)
+        .is_ok_and(|query| query.language == pixel_rank::TaskLanguage::French)
+}
+
+/// The scorer's input from the daemon's block: each keyword weighs what
+/// `row_weight` says, each co-file what the daemon summed, and a French word
+/// the repository lacks entirely (no match as typed, none through a synonym)
+/// is marked so the scorer gives it no weight. The co-files' lines ride along
+/// in the daemon's order.
+fn relevance_answer(block: &Relevance, french: bool) -> RelevanceAnswer {
+    RelevanceAnswer {
+        input: RelevanceInput {
+            graph: block.graph,
+            files_considered: block.files_considered,
+            structural_files: block.structural_files,
+            keywords: block
+                .keywords
+                .iter()
+                .map(|row| KeywordStat {
+                    keyword: row.keyword.clone(),
+                    weight: row_weight(row, block.files_considered),
+                    french_only: french && keyword_df(row) == 0 && row.via_expansion.is_none(),
+                })
+                .collect(),
+            cofiles: block
+                .cofiles
+                .iter()
+                .map(|cofile| CoFileStat {
+                    path: cofile.path.clone(),
+                    keywords: cofile.keywords.clone(),
+                    weight: cofile.weight,
+                    structural: cofile.structural,
+                })
+                .collect(),
+        },
+        lines: block
+            .cofiles
+            .iter()
+            .map(|cofile| RichHit {
+                path: cofile.path.clone(),
+                line: cofile.line.map_or(0, u64::from),
+                text: cofile
+                    .text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(ToString::to_string),
+            })
+            .collect(),
+    }
+}
+
+/// The leads of a `meaning` reply; vectors that are not ready are an error
+/// naming why, so the brief falls back to the relevance co-files.
+fn meaning_hits(data: &Value) -> Result<Vec<MeaningHit>, String> {
+    let result: MeaningResult = serde_json::from_value(data.clone())
+        .map_err(|error| format!("meaning: unreadable reply: {error}"))?;
+    match result {
+        MeaningResult::Ready { hits, .. } => Ok(hits
+            .into_iter()
+            .map(|hit| MeaningHit {
+                path: hit.path,
+                start_line: hit.start_line,
+                end_line: hit.end_line,
+                symbol: hit.symbol,
+                score: hit.score,
+                snippet: hit.snippet,
+            })
+            .collect()),
+        MeaningResult::Unavailable { reason, detail, .. } => Err(match detail {
+            Some(detail) => format!("meaning {}: {detail}", reason.as_str()),
+            None => format!("meaning {}", reason.as_str()),
+        }),
+    }
+}
+
 /// `pack-context`/`context` replies carry the packed source under
 /// `body`/`context`/`text`; a reply that only names the uid is no
 /// body at all.
@@ -1190,9 +1372,50 @@ mod tests {
                         Some("history") => json!({"candidates": [
                             {"oid": "0123456789abcdef", "subject": "add the retry loop"}
                         ]}),
-                        Some("targets_facts") => json!({"targets": [
-                            {"path": "src/flag.ts"}, {"path": "cfg/app.toml"}
-                        ]}),
+                        Some("targets_facts") => {
+                            let relevance = json!({
+                                "files_considered": 100,
+                                "graph": true,
+                                "structural_files": 12,
+                                "keywords": [
+                                    {"keyword": "daemon", "content_files": 4, "symbol_files": 2},
+                                    {"keyword": "weather"},
+                                    {"keyword": "the", "content_files": 60}
+                                ],
+                                "cofiles": [
+                                    {"path": "src/daemon.ts", "keywords": ["daemon"],
+                                     "weight": 3.006, "structural": true,
+                                     "line": 280, "text": "  fn watch_ready  "},
+                                    {"path": "docs/notes.md", "keywords": ["daemon"],
+                                     "weight": 1.5}
+                                ]
+                            });
+                            let inputs = json!({"algorithm_version": 2, "limit": 4});
+                            // A relevance-only request gets no target list.
+                            if request["relevance_only"] == true {
+                                json!({"status": "available", "inputs": inputs,
+                                       "facts": {"envelope": {}, "relevance": relevance}})
+                            } else {
+                                json!({
+                                    "targets": [{"path": "src/flag.ts"}, {"path": "cfg/app.toml"}],
+                                    "inputs": inputs,
+                                    "facts": {"relevance": relevance}
+                                })
+                            }
+                        }
+                        Some("meaning") => json!({
+                            "status": "ready",
+                            "hits": [
+                                {"path": "src/a.ts", "start_line": 3, "end_line": 12,
+                                 "symbol": "go", "score": 0.5, "snippet": "function go() {"},
+                                {"path": "src/b.ts", "start_line": 7, "end_line": 9,
+                                 "score": 0.25, "snippet": ""}
+                            ],
+                            "pool": {"model": "m", "dims": 4, "files": 2, "chunks": 5,
+                                     "eligible_files": 2, "generation": 1, "age_ms": 10,
+                                     "resident_bytes": 100},
+                            "caps": []
+                        }),
                         _ => json!({}),
                     };
                     let reply = pixel_daemon::Response::success("test", result);
@@ -1401,6 +1624,19 @@ mod tests {
             assert!(!daemon_serves(&root, deadline));
         }
         assert!(!daemon_serves(&root, Instant::now()));
+        let _ = std::fs::remove_file(pixel_daemon::socket_path(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn open_should_name_the_route_it_chose() {
+        let root = scratch("route-name");
+        let deadline = Instant::now() + WINDOW;
+        assert_eq!(open(&root, deadline).route(), "local");
+        {
+            let _daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
+            assert_eq!(open(&root, deadline).route(), "daemon");
+        }
         let _ = std::fs::remove_file(pixel_daemon::socket_path(&root));
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -1693,5 +1929,348 @@ mod tests {
             "the text index does not cover HEAD"
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn daemon_route_should_ask_targets_facts_for_the_relevance_block_and_weigh_it_the_daemons_way()
+    {
+        let root = scratch("daemon-relevance");
+        let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
+        let live = Live::new(&root, Route::Daemon);
+        let deadline = Instant::now() + WINDOW;
+
+        let answer = live
+            .relevance("the daemon and the weather", deadline)
+            .unwrap();
+        assert_eq!(
+            daemon.requests(),
+            [
+                json!({"op": "targets_facts", "task": "the daemon and the weather", "limit": 8,
+                    "relevance_only": true})
+            ]
+        );
+        let input = &answer.input;
+        assert!(input.graph);
+        // `daemon` is in 4 of 100 files: ln(101 / 5); the weather is in none,
+        // which weighs the cap; `the` is in 60 of 100, ubiquitous, nothing.
+        let weights: Vec<(&str, f64)> = input
+            .keywords
+            .iter()
+            .map(|stat| (stat.keyword.as_str(), stat.weight))
+            .collect();
+        assert_eq!(weights.len(), 3);
+        assert_eq!(weights[0].0, "daemon");
+        assert!(
+            (weights[0].1 - (101.0_f64 / 5.0).ln()).abs() < 1e-9,
+            "{weights:?}"
+        );
+        assert_eq!(weights[1].0, "weather");
+        assert!((weights[1].1 - pixel_daemon::relevance::IDF_CAP).abs() < 1e-9);
+        assert_eq!(weights[2].0, "the");
+        assert!(weights[2].1.abs() < f64::EPSILON);
+        assert!(input.keywords.iter().all(|stat| !stat.french_only));
+        // The files carry the weight the daemon summed, in its order.
+        assert_eq!(
+            input.cofiles,
+            [
+                CoFileStat {
+                    path: "src/daemon.ts".into(),
+                    keywords: vec!["daemon".into()],
+                    weight: 3.006,
+                    structural: true,
+                },
+                CoFileStat {
+                    path: "docs/notes.md".into(),
+                    keywords: vec!["daemon".into()],
+                    weight: 1.5,
+                    structural: false,
+                },
+            ]
+        );
+        assert_eq!(
+            answer.lines,
+            [
+                RichHit {
+                    path: "src/daemon.ts".into(),
+                    line: 280,
+                    text: Some("fn watch_ready".into()),
+                },
+                RichHit {
+                    path: "docs/notes.md".into(),
+                    line: 0,
+                    text: None,
+                },
+            ]
+        );
+        drop(daemon);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn daemon_route_should_ask_the_meaning_op_and_read_its_leads() {
+        let root = scratch("daemon-meaning");
+        let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
+        let live = Live::new(&root, Route::Daemon);
+        let deadline = Instant::now() + WINDOW;
+
+        let leads = live.meaning("how the daemon starts", 8, deadline).unwrap();
+        assert_eq!(
+            daemon.requests(),
+            [json!({"op": "meaning", "query": "how the daemon starts", "limit": 8})]
+        );
+        assert_eq!(
+            leads,
+            [
+                MeaningHit {
+                    path: "src/a.ts".into(),
+                    start_line: 3,
+                    end_line: 12,
+                    symbol: Some("go".into()),
+                    score: 0.5,
+                    snippet: "function go() {".into(),
+                },
+                MeaningHit {
+                    path: "src/b.ts".into(),
+                    start_line: 7,
+                    end_line: 9,
+                    symbol: None,
+                    score: 0.25,
+                    snippet: String::new(),
+                },
+            ]
+        );
+        drop(daemon);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn relevance_answer_should_mark_only_a_french_word_the_repository_lacks_entirely() {
+        let row = |content: usize, symbol: usize, filename: usize, via: Option<&str>| {
+            pixel_proto::KeywordEvidence {
+                keyword: "mot".into(),
+                content_files: content,
+                symbol_files: symbol,
+                filename_files: filename,
+                via_expansion: via.map(str::to_string),
+                ..pixel_proto::KeywordEvidence::default()
+            }
+        };
+        let marked = |french: bool, row: pixel_proto::KeywordEvidence| {
+            let block = Relevance {
+                files_considered: 100,
+                keywords: vec![row],
+                ..Relevance::default()
+            };
+            relevance_answer(&block, french).input.keywords[0].french_only
+        };
+        assert!(marked(true, row(0, 0, 0, None)), "absent French");
+        assert!(!marked(false, row(0, 0, 0, None)), "absent English");
+        assert!(
+            !marked(true, row(0, 0, 0, Some("login"))),
+            "found through a synonym"
+        );
+        assert!(!marked(true, row(2, 0, 0, None)), "in the text");
+        assert!(!marked(true, row(0, 3, 0, None)), "in a symbol name");
+        assert!(!marked(true, row(0, 0, 1, None)), "in a path");
+    }
+
+    #[test]
+    fn relevance_answer_should_weigh_a_keyword_by_its_widest_channel() {
+        let block = Relevance {
+            files_considered: 100,
+            keywords: vec![pixel_proto::KeywordEvidence {
+                keyword: "daemon".into(),
+                content_files: 1,
+                symbol_files: 9,
+                filename_files: 2,
+                ..pixel_proto::KeywordEvidence::default()
+            }],
+            ..Relevance::default()
+        };
+        let weight = relevance_answer(&block, false).input.keywords[0].weight;
+        assert!((weight - (101.0_f64 / 10.0).ln()).abs() < 1e-9, "{weight}");
+        // A truncated probe is a lower bound: the daemon weighs the count it
+        // has, and a word it calls common weighs nothing whatever its counts.
+        let row = |truncated: bool, common: bool| Relevance {
+            keywords: vec![pixel_proto::KeywordEvidence {
+                truncated,
+                common,
+                content_files: 3,
+                keyword: "daemon".into(),
+                ..pixel_proto::KeywordEvidence::default()
+            }],
+            files_considered: 100,
+            ..Relevance::default()
+        };
+        let weight_of = |block: &Relevance| relevance_answer(block, false).input.keywords[0].weight;
+        assert!((weight_of(&row(true, false)) - (101.0_f64 / 4.0).ln()).abs() < 1e-9);
+        assert!(weight_of(&row(false, true)).abs() < f64::EPSILON);
+        assert!(weight_of(&row(true, true)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn relevance_block_should_name_why_facts_cannot_answer() {
+        assert_eq!(
+            relevance_block(&json!({"status": "unavailable", "reason": "graph_stale"}))
+                .unwrap_err(),
+            "facts: graph_stale"
+        );
+        assert_eq!(
+            relevance_block(&json!({"status": "unavailable"})).unwrap_err(),
+            "facts are unavailable"
+        );
+        assert_eq!(
+            relevance_block(&json!({"status": "available", "facts": {"targets": []},
+                "inputs": {"algorithm_version": 2}}))
+            .unwrap_err(),
+            "facts carry no relevance"
+        );
+        assert!(
+            relevance_block(&json!({"inputs": {"algorithm_version": 2},
+                "facts": {"relevance": {"files_considered": "x"}}}))
+            .unwrap_err()
+            .starts_with("facts.relevance: ")
+        );
+        // The relevance-only shape: no targets, the block and its envelope.
+        let block = relevance_block(&json!({"status": "available",
+            "inputs": {"algorithm_version": 2},
+            "facts": {"envelope": {}, "relevance": {"files_considered": 7, "graph": true}}}))
+        .unwrap();
+        assert_eq!((block.files_considered, block.graph), (7, true));
+    }
+
+    #[test]
+    fn relevance_block_should_not_trust_a_result_older_than_the_block() {
+        let reply = |inputs: Value| json!({"inputs": inputs, "facts": {"relevance": {"files_considered": 7}}});
+        assert_eq!(
+            relevance_block(&reply(json!({"algorithm_version": 1}))).unwrap_err(),
+            "facts algorithm version 1 predates relevance"
+        );
+        assert_eq!(
+            relevance_block(&reply(json!({}))).unwrap_err(),
+            "facts algorithm version unknown predates relevance"
+        );
+        assert_eq!(
+            relevance_block(&json!({"facts": {"relevance": {"files_considered": 7}}})).unwrap_err(),
+            "facts algorithm version unknown predates relevance"
+        );
+        // Version 2 is the first that carries it; later ones keep it.
+        for version in [2, 3] {
+            let block = relevance_block(&reply(json!({"algorithm_version": version}))).unwrap();
+            assert_eq!(block.files_considered, 7, "{version}");
+        }
+    }
+
+    #[test]
+    fn daemon_route_should_ask_for_the_relevance_block_alone_and_the_task_facts_in_full() {
+        let root = scratch("daemon-relevance-only");
+        let daemon = FakeDaemon::start(&root, pixel_daemon::api::PROTOCOL_VERSION);
+        let live = Live::new(&root, Route::Daemon);
+        let deadline = Instant::now() + WINDOW;
+        let answer = live.relevance("the daemon", deadline).unwrap();
+        assert_eq!(answer.input.structural_files, 12);
+        assert_eq!(answer.input.files_considered, 100);
+        let targets = live.task_facts("the daemon", deadline).unwrap();
+        assert_eq!(targets, ["src/flag.ts", "cfg/app.toml"]);
+        assert_eq!(
+            daemon.requests(),
+            [
+                json!({"op": "targets_facts", "task": "the daemon", "limit": 8,
+                       "relevance_only": true}),
+                json!({"op": "targets_facts", "task": "the daemon", "limit": 4}),
+            ]
+        );
+        drop(daemon);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn meaning_hits_should_turn_vectors_that_are_not_ready_into_an_error_with_the_reason() {
+        assert_eq!(
+            meaning_hits(&json!({"status": "unavailable", "reason": "cold", "caps": []}))
+                .unwrap_err(),
+            "meaning cold"
+        );
+        assert_eq!(
+            meaning_hits(&json!({"status": "unavailable", "reason": "failed",
+                "detail": "no model", "caps": []}))
+            .unwrap_err(),
+            "meaning failed: no model"
+        );
+        assert!(
+            meaning_hits(&json!({"hits": 3}))
+                .unwrap_err()
+                .starts_with("meaning: unreadable reply: ")
+        );
+    }
+
+    #[test]
+    fn is_french_should_follow_the_task_tokenizers_language() {
+        assert!(is_french(
+            "pourquoi la connexion est très lente quand même ?"
+        ));
+        assert!(!is_french("why is the connection so slow"));
+        assert!(!is_french(""));
+    }
+
+    #[test]
+    fn local_route_should_refuse_meaning_and_relevance_without_a_current_index() {
+        let root = scratch("local-prose");
+        let live = Live::new(&root, Route::Local);
+        let deadline = Instant::now() + WINDOW;
+        assert_eq!(
+            live.meaning("how the daemon starts", 8, deadline)
+                .unwrap_err(),
+            "meaning needs a running daemon"
+        );
+        assert_eq!(
+            live.relevance("the daemon starts", deadline).unwrap_err(),
+            "the text index does not cover HEAD"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Blocks recorded from a daemon on the brief-gate fixture, with the score
+    /// and tier `scripts/research-gate/gate_reference.py` gives them (see
+    /// `gate_parity.json`'s `why` fields for what each one covers).
+    const PARITY: &str = include_str!("gate_parity.json");
+
+    #[test]
+    fn the_rust_score_should_equal_the_reference_scorers_on_recorded_blocks() {
+        use crate::execution_brief::relevance::{GateInput, judge};
+        let fixture: Vec<Value> = serde_json::from_str(PARITY).unwrap();
+        assert!(fixture.len() >= 5, "{}", fixture.len());
+        let mut tiers = Vec::new();
+        for entry in &fixture {
+            let raw = entry["prompt"].as_str().unwrap();
+            let block: Relevance = serde_json::from_value(entry["block"].clone()).unwrap();
+            // The text the brief judges, as `brief_signal` hands it over.
+            let typed =
+                crate::execution_brief::brief_task(&crate::execution_brief::typed_text(raw))
+                    .to_string();
+            let answer = relevance_answer(&block, is_french(&typed));
+            let verdict = judge(&GateInput {
+                relevance: &answer.input,
+                typed: &typed,
+            });
+            let expected = entry["expected"]["score"].as_f64().unwrap();
+            let score = verdict.score.unwrap();
+            assert!(
+                (score - expected).abs() < 1e-9,
+                "{}: rust {score}, reference {expected}",
+                entry["why"]
+            );
+            assert_eq!(
+                verdict.tier.as_str(),
+                entry["expected"]["tier"].as_str().unwrap(),
+                "{}",
+                entry["why"]
+            );
+            tiers.push(verdict.tier.as_str());
+        }
+        // The fixture covers every tier.
+        for tier in ["high", "low", "off"] {
+            assert!(tiers.contains(&tier), "{tier} missing from {tiers:?}");
+        }
     }
 }
