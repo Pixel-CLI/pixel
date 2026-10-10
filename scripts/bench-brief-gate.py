@@ -254,6 +254,8 @@ def validate_rows(rows, repo_files=None):
                         problems.append(f"{rid}: expected file {path} is not repo-relative")
                     elif repo_files is not None and path not in repo_files:
                         problems.append(f"{rid}: expected file {path} does not exist in the repo")
+            if not (isinstance(row.get("evidence"), str) and row["evidence"].strip()):
+                problems.append(f"{rid}: expected_files without its `evidence`")
         for label in ("text", "evidence"):
             if isinstance(row.get(label), str):
                 problems.extend(f"{rid}: {p}" for p in privacy_problems(label, row[label]))
@@ -463,6 +465,21 @@ def set_daemon(pixel, repo, mode):
     return daemon_running(pixel, repo)
 
 
+def restore_daemon(pixel, repo, running):
+    """Put the repo's daemon back to ``running`` if it is not there now.
+
+    Reads the current state rather than trusting what the run set, so a setup
+    that changed the daemon and then failed is put back too. A failure here is
+    reported, not raised: it must not hide the error that ended the run.
+    """
+    try:
+        if daemon_running(pixel, repo) != running:
+            set_daemon(pixel, repo, "on" if running else "off")
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"WARNING: could not restore the daemon of {repo} to "
+              f"{'running' if running else 'stopped'}: {error}", file=sys.stderr)
+
+
 def ollaya_warm():
     try:
         with socket.create_connection(OLLAYA_ADDR, timeout=0.3):
@@ -583,9 +600,10 @@ def run_bench(args):
     repo_sha = git_output(repo, "rev-parse", "HEAD")
     dirty = bool(git_output(repo, "status", "--porcelain"))
     load_before = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
+    started_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     daemon_before = daemon_running(pixel, repo)
-    daemon_now = set_daemon(pixel, repo, args.daemon)
     try:
+        daemon_now = set_daemon(pixel, repo, args.daemon)
         ok, why = check_canary(pixel, repo, args.timeout)
         if not ok:
             raise SystemExit("the brief did not fire on a prompt that names a code token "
@@ -597,13 +615,12 @@ def run_bench(args):
         for row in chosen:
             outcomes[row["id"]] = measure_row(pixel, repo, row, args.repeat, args.timeout)
     finally:
-        if daemon_now != daemon_before:
-            set_daemon(pixel, repo, "on" if daemon_before else "off")
+        restore_daemon(pixel, repo, daemon_before)
     set_in_repo = (repo / "eval" / "brief-gate").exists()
     result = {
         "meta": {
             "command": ["python3", *sys.argv],
-            "started_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "started_utc": started_utc,
             "pixel": str(pixel), "pixel_version": version_of(pixel),
             "repo": str(repo), "repo_sha": repo_sha, "repo_dirty": dirty,
             "fixture_sha": FIXTURE_SHA, "fixture_match": repo_sha == FIXTURE_SHA and not dirty,
@@ -786,6 +803,11 @@ class SelfTest(unittest.TestCase):
         self.assertTrue(any("duplicate id" in p for p in dup))
         unbalanced = validate_rows([row_fixture(id=f"u{i}", text=f"t{i}") for i in range(4)])
         self.assertTrue(any("unbalanced" in p for p in unbalanced))
+        self.assertEqual(validate_rows([row_fixture(expected_files=["a/x.rs"])]),
+                         ["t-1: expected_files without its `evidence`"])
+        self.assertEqual(validate_rows([row_fixture(expected_files=["a/x.rs"], evidence=" ")]),
+                         ["t-1: expected_files without its `evidence`"])
+        self.assertEqual(validate_rows([row_fixture(expected_files=["a/x.rs"], evidence="a/x.rs:3 defines it")]), [])
 
     def test_privacy_lint_catches_what_a_public_set_must_not_hold(self):
         for value in ("mail me at someone@example.org", "see /Users/someone/project", "ssh 192.168.0.12",
@@ -841,6 +863,46 @@ class SelfTest(unittest.TestCase):
             self.assertEqual(check_canary(stub, repo, 10)[0], False)  # the stub only answers `install`
             self.assertIn("exit 0", check_canary(stub, repo, 10)[1])
 
+    def test_a_setup_that_fails_after_changing_the_daemon_still_restores_it(self):
+        if not DEFAULT_SET.is_file():
+            self.skipTest("no prompt set next to this script")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            repo, state = tmp / "repo", tmp / "daemon-state"
+            (repo / ".pixel").mkdir(parents=True)
+            (repo / ".pixel" / "base.shard").write_text("x")
+            state.write_text("off")
+            stub = tmp / "pixel"
+            stub.write_text(
+                "#!/bin/sh\n"
+                f"state='{state}'\n"
+                'case "$1 $2" in\n'
+                '  "daemon start") echo on > "$state";;\n'
+                '  "daemon stop") echo off > "$state";;\n'
+                '  "daemon status") if [ "$(cat "$state")" = on ]; then echo "daemon running"; '
+                'else echo "daemon not running"; fi;;\n'
+                "esac\n")
+            stub.chmod(0o755)
+            real, calls = set_daemon, []
+
+            def started_then_failed(pixel, repo, mode):  # the setup call changes the daemon, then its wait fails
+                calls.append(mode)
+                real(pixel, repo, mode)
+                if len(calls) == 1:
+                    raise subprocess.TimeoutExpired("pixel daemon status", 30)
+                return mode == "on"
+
+            args = argparse.Namespace(pixel=str(stub), repo=str(repo), set=str(DEFAULT_SET), split="dev",
+                                      daemon="on", timeout=10.0, warmup=1, repeat=1, out=None)
+            globals()["set_daemon"] = started_then_failed
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    run_bench(args)
+            finally:
+                globals()["set_daemon"] = real
+            self.assertEqual(calls, ["on", "off"])
+            self.assertEqual(state.read_text().strip(), "off")
+
 
 def self_test():
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(SelfTest)
@@ -875,6 +937,10 @@ def main(argv=None):
     parser.add_argument("--check-set", action="store_true", help="validate the set (and its files with --repo) and exit")
     parser.add_argument("--self-test", action="store_true", help="run the parser and metric tests and exit")
     args = parser.parse_args(argv)
+    if args.repeat < 1:
+        parser.error("--repeat must be at least 1")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
     if args.self_test:
         return self_test()
     if args.check_set:
