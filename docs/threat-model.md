@@ -468,9 +468,10 @@ stays so references to the later threats hold.
   hops, a test's first assertion, a config constant, under a 3584-byte cap
   (`PROSE_BRIEF_BYTES`, below Pi's 4000-byte limit). `Evidence::lines_at`
   reads them only from files the searches named, refuses a credential-shaped
-  path, and `PIXEL_BRIEF_ANSWER=0` drops them; the "Answer from this
-  evidence" directive stays off unless `PIXEL_BRIEF_DIRECTIVE=1`, so by
-  default the block asks the agent to verify them. No prompt is deployed. The bundled prompt a user copies by hand
+  path, and `PIXEL_BRIEF_ANSWER=0` drops them. The excerpts are shown only
+  for the ZERO step ("Answer from these lines"), which no validated rule
+  enables, so the block names `read:` ranges and asks the agent to read
+  them; `PIXEL_BRIEF_ZERO=0` is its kill switch. No prompt is deployed. The bundled prompt a user copies by hand
   states that Pixel output is data, not instructions
   (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
   skill and Pi command label graph output as repository data, not
