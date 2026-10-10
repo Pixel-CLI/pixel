@@ -487,8 +487,8 @@ Per prompt (`a887` / `b891`):
 Reading, at n = 8 and one repetition (differences of one call are within the run-to-run
 spread of 1.4 measured above): the agent follows the #891 brief's ranges (a Read hit a
 range in 6 of 8 sessions, 4 of 4 identifier prompts where a range overlaps the gold
-span), but it does not make fewer calls: 3.38 against 3.00 on average, one more read and
-no fewer searches. Both arms cite the gold path in 7 of 8 answers; the line inside the
+span), but it does not make fewer calls: 3.38 against 3.00 on average, half a read more
+and about the same searches (1.12 against 1.25). Both arms cite the gold path in 7 of 8 answers; the line inside the
 gold span is cited in 6 of 8 by each, differently distributed (bg-086 lost, bg-161 won).
 On the 4 plain prompts neither brief's ranges overlap the gold span, so there is
 nothing for the agent to be saved by; on bg-104 the #887 agent answered after a single
