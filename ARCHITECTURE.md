@@ -285,6 +285,39 @@ Invariants enforced by `Service::handle`:
   (`SnapshotInfo::compact`), so an untracked `vendor/bundle` of 15 000 paths
   does not inflate a `symbol` answer to 240 KB.
 
+`targets_facts` answers `{status, inputs, facts}` from a fresh published
+snapshot and refreshes nothing: a stale or missing index or graph answers
+`status: unavailable` with a `reason`. `inputs.algorithm_version`
+(`TARGETS_FACTS_ALGORITHM_VERSION`) says which `facts` keys exist, and 2 adds
+`facts.relevance` (`pixel_proto::Relevance`), the deterministic inputs of an
+on-topic decision about a prompt: per task keyword, how many files contain it
+as a word, define a symbol named with it, or carry it in a path (a keyword the
+repository lacks as typed borrows the counts of its first thesaurus synonym
+that matches, within `RELEVANCE_EXPANSION_PROBES` probes), and the co-files:
+each file the keywords meet in is weighted by the sum of
+`relevance::keyword_weight` over them (inverse document frequency capped at
+`IDF_CAP`, computed from the largest channel count, a lower bound when the
+content probe truncated; 0 for a word in over a quarter of the files and for
+a general word such as `does` or `quel`, listed with `common: true`), and the
+block lists the eight heaviest plus the four heaviest structural ones (a rare
+word in a path or symbol, named in `structural_keywords`), so prose that
+repeats common words cannot crowd out the file the prompt names; `structural_files`
+counts every such structural match before the list is cut. The rule was
+chosen against the dev split of the labelled prompts
+(`scripts/bench-relevance-weights.py`). The block reuses the content
+probes the target ranking ran and counts documents against `files_considered`;
+`pixel_daemon::relevance::relevance_on` computes the same block in process for a
+reader with no daemon. Credential-shaped paths are never counted or listed.
+Each cap that bounds the block is in `relevance.caps`, in `facts.envelope.caps`
+and, through `derive_epistemics`, in the response's `epistemics` and `warnings`.
+`relevance_only: true` on the request (omitted from the wire when false, so an
+older daemon sees the request it knows) asks for the block without the ranking:
+the same freshness gate and `inputs`, then `facts` is `{envelope, relevance}`
+with no `targets`, the block byte-identical to the full answer's and its caps
+in the same three places. A daemon that predates the flag ignores it and
+answers in full, so a reader checks `facts.relevance` and
+`inputs.algorithm_version >= 2`, never the flag.
+
 Adding an op is one variant on `pixel_proto::Op`, one arm in
 `Service::dispatch` and one entry in `pixel_proto::SESSION_CAPABILITIES`.
 Unit tests in `pixel-proto` check both: `op_name_matches_serde_tag` (the
