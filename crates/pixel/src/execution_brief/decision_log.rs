@@ -239,13 +239,13 @@ fn refuse_linked_dir(path: &Path) -> io::Result<()> {
 /// directory (a repository without `.pixel` is not one the brief ran in), and
 /// never follows a link at the file or its directory: the file holds what the
 /// user typed, and a planted link would send it, and the trim, elsewhere. An
-/// existing file is brought to the owner-only mode through its descriptor.
+/// existing file is brought to the owner-only mode through its descriptor; a
+/// file that cannot be (another user's, writable by this one) takes no line.
 pub(crate) fn append(path: &Path, line: &str, cap: usize) -> io::Result<()> {
     refuse_linked_dir(path)?;
     let mut file = pixel_git::nofollow::open_lock(path)?;
     file.lock_exclusive()?;
-    // Best effort: a file pixel cannot chmod still takes the line.
-    let _ = file.set_permissions(Permissions::from_mode(pixel_git::nofollow::PRIVATE_MODE));
+    file.set_permissions(Permissions::from_mode(pixel_git::nofollow::PRIVATE_MODE))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     let existing = String::from_utf8_lossy(&bytes);
