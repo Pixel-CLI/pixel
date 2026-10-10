@@ -95,9 +95,10 @@ pub struct CoFile {
     #[serde(default)]
     pub keywords: Vec<String>,
     /// The sum, over `keywords`, of how selective each is in this repository
-    /// (`pixel_daemon::relevance::keyword_weight`): a word in most files, or
-    /// one whose probe truncated, weighs 0; a rare one up to the cap. Rounded
-    /// to three decimals.
+    /// (`pixel_daemon::relevance::keyword_weight`): a word in over a quarter
+    /// of the files, or a `common` one, weighs 0; a rare one up to the cap. A
+    /// word whose probe truncated is weighed from its lower-bound count.
+    /// Rounded to three decimals.
     #[serde(default)]
     pub weight: f64,
     /// A keyword of positive weight matched the file's own name or one of its
