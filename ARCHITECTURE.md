@@ -56,9 +56,10 @@ MCP server. `pixel install` registers no MCP server with any agent.
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
 | `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: Claude and Codex task lifecycle hooks, cleanup of their retired retrieval hooks and prompts and the `claude()` shell wrapper, removal of the Pi `APPEND_SYSTEM.md` retrieval block, and the explicit Pi `/pixel-impact` package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`) when Pi is present. No prompt is deployed and no other host is wired: the retired OpenCode, Devin, Antigravity, zcode, Cursor and Copilot CLI artifacts and the deployed agent prompts are removed. An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo`: native-default migration for Claude and Codex, and removal of the retired Devin and Pi project guards and `AGENTS.md` retrieval blocks (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `intro` animation (frames only; `pixel` owns the tty) and ends on the `banner` summary. | proto, daemon, index, facts, git |
 | `pixel-ultraflow` | The classify-driven browser loop over saved flows: the observation (`agent-browser snapshot -i` parsed into numbered slots, `elements`), the indexed action space of operation-target pairs (`action`), the decision seam (`decide`), the discovery loop and its single-cycle unit (`discover`), the composition of what worked into a `pixel-flow` document whose `conditional` steps carry the conditions that tell its branches apart (`compose`), and the replay that decides those conditions with `pixel classify` and re-decides a step whose page moved on (`replay`). Drives `pixel-flow`'s browser seam; the engine is a trait, so the whole loop is tested without a model, a network or a page. | flow |
+| `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (a local directory, or a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL), `remove`, `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. Home, repo root and PATH are fields of `Host`, never read from the process. | git |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
 
-Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context`, `pixel-flow`, `pixel-ultraflow` (which depends on `pixel-flow` alone) and `pixel-release`; `pixel-session` and `pixel-actionlog` depend on `pixel-git` only). `pixel-daemon` is
+Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context`, `pixel-flow`, `pixel-ultraflow` (which depends on `pixel-flow` alone) and `pixel-release`; `pixel-session`, `pixel-actionlog` and `pixel-plugin` depend on `pixel-git` only). `pixel-daemon` is
 the integration point and is the only library crate allowed to depend on
 almost everything. The CLI depends on the daemon plus whatever it needs for
 commands that never touch the daemon (install, flow, actionlog, release-check).
@@ -150,6 +151,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel plan` | Deterministic todo list generation from code analysis; emits blocking verification gates (auth session, env keys, provider keys, real DB state) detected in the plan's file set; persists findings in `.pixel/plan.json` so `--status`/`--done N`/`--undone N`/`--prune` track execution state across re-plans without the daemon |
 | `pixel ultraflow` | The classify-driven browser loop over saved flows. `discover --url --goal` asks `pixel classify` one question per cycle whose options are the operation-target pairs the page currently offers, so one answer is one executable action; a typed field is filled from a declared `--var` or from a string the goal itself contains, never from an invented value. What worked composes into a `pixel flow` document under the flow store (`--save`), and `--repeat N` records a `conditional` where two runs diverged, worded so the branch is a page condition rather than a position. `replay <name>` follows that document, deciding each `conditional` and the flow's success signal with `pixel classify` (the text matcher is the disclosed fallback), and re-decides a step whose page no longer matches — `--update` records the new branch into the flow, so the next replay is deterministic where this one had to think. Drives `agent-browser --session comet`, the session `pixel flow run` uses. Each question is bounded by the *engine's* option budget, not the schema ceiling (`Decider::option_budget`: the local `winnow:e4b` accepts 64 labels, measured — a page with more controls has its tail reported in the trace rather than dropped quietly) |
 | `pixel flow` | Save, retrieve, list, revise, run, and replay proven agent-browser paths (auth flows, config flows) so the agent follows a deterministic shortcut instead of re-discovering the UI from scratch every time. `run <name>` drives agent-browser with the plain executor; for a classify-decided replay with repair, use `pixel ultraflow replay` |
+| `pixel plugin` | Manage plugins: `list`, `add <path\|git-url> [--name]`, `remove`, `enable` (network plugins), `trust` (repo plugins). An unknown subcommand runs the plugin of that name (see "Request path from the CLI") |
 | `pixel help` | Print this message or the help of the given subcommand(s). |
 
 ## On-disk state
@@ -171,6 +173,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `task-hook-observations.json`, `task-hook-observations.lock` | CLI task bridge | Last real host invocation per provider; doctor reports observed activity separately from installation and trust. |
 | `plan.json` | CLI `plan` | The persisted `pixel plan` checklist, so `--status`/`--done`/`--prune` survive a re-plan. |
 | `workspace.json` | CLI `workspace` | The registered member repositories. |
+| `plugins/<name>/` | `pixel-plugin` | Repo plugins: a directory with `pixel-plugin.toml` that someone (or the repository) put there. Read only, and run only after `pixel plugin trust <name>` recorded the digest of its files in `~/.pixel/trusted.toml`. |
 | `config.yaml` (legacy `config.json`) | CLI `config` | Repository-level settings over `~/.pixel/config.yaml` (`pixel config edit --repo`). |
 
 A repository can commit `.pixel/`, links included, so nothing in it is
@@ -187,6 +190,13 @@ are used only when `pixel_git::repo_path` finds them inside the root.
 
 Machine-wide:
 
+- `~/.pixel/plugins/<name>/`: the user's plugins (`pixel plugin add` copies
+  one here; `remove` deletes it). `~/.pixel/trusted.toml`: one `[[trusted]]`
+  record (`name`, `sha256` of the plugin directory) per trusted repo plugin,
+  replaced by `pixel plugin trust`. `~/.pixel/plugins.toml`: `enabled`, the
+  network plugins the user allowed, and `[sources]`, where each plugin was
+  installed from (a URL's userinfo removed). All three are written by
+  `pixel-plugin` through a temporary file renamed into place.
 - `~/.local/share/pixel/flows/`: saved flows (`pixel-flow`, `$PIXEL_FLOW_DIR`
   overrides).
 - `~/.local/share/pixel/pi-package/`: the Pi package `pixel install` writes
@@ -328,6 +338,17 @@ agree).
    back to a `{truncated, cap_bytes, note, partial}` wrapper. Human notes
    such as graph-build announcements and lower-bound caveats go to stderr,
    never stdout.
+
+A subcommand clap rejects as unknown never reaches `execute`: `main.rs` asks
+`pixel-plugin` to resolve the word as a plugin (trusted repo plugin, user
+plugin, then `pixel-<name>` on PATH) and replaces the process with it
+(`exec`, so stdio and the exit code are the plugin's) with `PIXEL_API=1`,
+`PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB` and `PIXEL_BIN` set. An untrusted repo
+plugin, a network plugin not enabled, or a `run` that leaves its directory
+stops with exit 1 and the command that fixes it; a name in
+`pixel_plugin::MOVED_COMMANDS` that no plugin provides prints the
+`pixel plugin add` hint and exits 2 (the eight are still built in, so the
+hint is reachable only once a command leaves the core); any other name keeps clap's error.
 
 So the CLI's `--json` output is the envelope's `result` with the honesty
 fields merged in, not the raw envelope. Anything that needs the full

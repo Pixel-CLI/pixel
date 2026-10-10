@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: The Pixel contributors
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "pixel-plugin"
+version = "0.7.1"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+pixel-git = { path = "../pixel-git" }
+sha2 = { workspace = true }
+tempfile = "3"
+thiserror = { workspace = true }
+toml_edit = "0.25.15"
+
+[dev-dependencies]

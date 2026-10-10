@@ -28,6 +28,8 @@ mod json_contract;
 mod list_errors_cli;
 mod metrics_cli;
 mod ollaya_fresh_install_cli;
+#[cfg(unix)]
+mod plugin_cli;
 mod prompt_brief_cli;
 mod publish_cli;
 mod recall_cli;
