@@ -51,7 +51,8 @@ pub struct AskHit {
     pub snippet: String,
 }
 
-pub(crate) const MAX_FILE_BYTES: usize = 512 * 1024;
+/// Largest file `ask` and the resident index read, in bytes (512 KiB).
+pub const MAX_FILE_BYTES: usize = 524_288;
 
 /// Most files a question without a `--max-files` budget embeds: a guard
 /// against a runaway universe, not a budget. A question searches every
