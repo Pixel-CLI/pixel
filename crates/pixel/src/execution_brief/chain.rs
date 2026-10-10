@@ -65,6 +65,8 @@ pub(crate) const BRIEF_BYTES: usize = 2048;
 /// tier). Pi's extension caps injected context at 4000 bytes: stay under.
 pub(crate) const PROSE_BRIEF_BYTES: usize = 3584;
 const _: () = assert!(PROSE_BRIEF_BYTES < 4000);
+/// Size cap of a code-shaped brief that names ranges to read.
+pub(crate) const STRONG_READ_BRIEF_BYTES: usize = 2560;
 /// Size cap of a plain-language brief without answer evidence.
 pub(crate) const PLAIN_PROSE_BRIEF_BYTES: usize = 2048;
 /// Files a brief that carries excerpts lists: the excerpts are the answer,
@@ -838,6 +840,8 @@ pub(crate) struct Brief {
     /// tells the agent to answer from the excerpt. `None` when no rule is
     /// validated or `PIXEL_BRIEF_ZERO` is off.
     zero_rule: Option<answer::ZeroRule>,
+    /// The ranges to read, best first.
+    reads: Vec<ReadRange>,
     /// The meaning search's leads, best first.
     leads: Vec<MeaningHit>,
     /// The relevance probe's co-files, heaviest first.
@@ -951,30 +955,25 @@ impl Brief {
         self.zero()
     }
 
-    /// The ranges the ONE-READ step names: the best chunk's declaration, then
-    /// up to two more from other declarations, each `(path, first, last,
-    /// symbol)`. Empty for a strong prompt, a cut packet, or a tier below low.
+    /// The ranges the ONE-READ step names, best first: `(path, first, last,
+    /// symbol)`. Empty for a cut packet or a brief without a relevance tier
+    /// that resolved no definition.
     fn read_ranges(&self) -> Vec<(String, u64, u64, Option<String>)> {
-        if self.signal == Some(Signal::Strong)
-            || !matches!(self.tier(), Some(Tier::High | Tier::Low))
-            || self.short()
-        {
+        let strong = self.signal == Some(Signal::Strong);
+        if self.short() || !(strong || matches!(self.tier(), Some(Tier::High | Tier::Low))) {
             return Vec::new();
         }
-        let mut ranges: Vec<(String, u64, u64, Option<String>)> = Vec::new();
-        for excerpt in self.excerpts.iter().filter(|e| !e.path.is_empty()) {
-            let Some((first, last)) = excerpt.read else {
-                continue;
-            };
-            if ranges.len() < 3
-                && !ranges
-                    .iter()
-                    .any(|(path, from, _, _)| *path == excerpt.path && *from == first)
-            {
-                ranges.push((excerpt.path.clone(), first, last, excerpt.symbol.clone()));
-            }
-        }
-        ranges
+        self.reads
+            .iter()
+            .map(|read| {
+                (
+                    read.path.clone(),
+                    read.first,
+                    read.last,
+                    read.symbol.clone(),
+                )
+            })
+            .collect()
     }
 
     /// The `read:` and `also:` lines and the instruction under them.
@@ -1226,7 +1225,13 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
             edit(state, |brief| brief.semantic = Some(hint));
         }
     }
-    answer_evidence(evidence, state, deadline);
+    if edit(state, |brief| brief.signal) == Some(Signal::Strong) {
+        if answer::answer_enabled() && !edit(state, |brief| brief.cut) {
+            strong_reads(plan, evidence, state, deadline);
+        }
+    } else {
+        answer_evidence(evidence, state, deadline);
+    }
     edit(state, |brief| brief.finished = true);
 }
 
@@ -1274,7 +1279,12 @@ fn answer_evidence(evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Inst
     let mut excerpts: Vec<Excerpt> = own.into_iter().collect();
     let room = EXCERPT_FILES - excerpts.len();
     excerpts.extend(generic_excerpts(evidence, &brief, room, deadline));
-    edit(state, |brief| brief.excerpts = excerpts);
+    let terms: &[String] = brief.receipt.as_ref().map_or(&[], Receipt::terms);
+    let reads = read_evidence(evidence, &brief, terms, deadline);
+    edit(state, |brief| {
+        brief.excerpts = excerpts;
+        brief.reads = reads;
+    });
 }
 
 /// The ordered call chain of a flow question, one hop per line with the
@@ -1373,6 +1383,150 @@ fn tests_excerpt(evidence: &dyn Evidence, brief: &Brief, deadline: Instant) -> O
     })
 }
 
+/// A range of a file the brief tells the agent to read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReadRange {
+    path: String,
+    first: u64,
+    last: u64,
+    symbol: Option<String>,
+}
+
+/// Ranges one brief names.
+const MAX_READS: usize = 3;
+/// Lines of a file read to find its functions.
+const MAX_READ_FILE_LINES: u64 = 20_000;
+
+/// The best function-level chunk of each of the first three fused files,
+/// scored by BM25 over the file's own chunks for the probed keywords (a tie
+/// goes to the meaning search's chunk, then the lexical hit's); one range per
+/// file, at most 60 lines. Tests and docs are skipped unless the question
+/// asked for them.
+fn read_evidence(
+    evidence: &dyn Evidence,
+    brief: &Brief,
+    terms: &[String],
+    deadline: Instant,
+) -> Vec<ReadRange> {
+    let tests_ok = brief.wants_tests || brief.kind == Some(QuestionKind::Tests);
+    let mut paths: Vec<&str> = Vec::new();
+    for hit in &brief.files {
+        if paths.len() < MAX_READS
+            && !paths.contains(&hit.path.as_str())
+            && !answer::demoted(&hit.path, tests_ok, brief.wants_docs)
+            && !pixel_index::index::credential_path(Path::new(&hit.path))
+        {
+            paths.push(&hit.path);
+        }
+    }
+    let mut ranges = Vec::new();
+    for path in paths {
+        let Ok(lines) = evidence.lines_at(path, 1, MAX_READ_FILE_LINES, deadline) else {
+            continue;
+        };
+        let mut chunks = answer::function_chunks(&lines);
+        if !tests_ok {
+            chunks.retain(|chunk| !answer::in_test_module(&lines, chunk.0));
+        }
+        let preferred: Vec<u64> = brief
+            .leads
+            .iter()
+            .filter(|lead| lead.path == path)
+            .map(|lead| u64::from(lead.start_line))
+            .chain(
+                brief
+                    .files
+                    .iter()
+                    .filter(|hit| hit.path == path)
+                    .map(|hit| hit.line),
+            )
+            .collect();
+        let scores = answer::chunk_scores(&lines, &chunks, terms);
+        let meaning: Vec<u64> = brief
+            .leads
+            .iter()
+            .filter(|lead| lead.path == path)
+            .map(|lead| u64::from(lead.start_line))
+            .collect();
+        let Some(best) = answer::best_chunk(&scores, &chunks, &preferred, &meaning) else {
+            continue;
+        };
+        let (first, last) = answer::read_window(&lines, chunks[best], terms);
+        ranges.push(ReadRange {
+            path: path.to_string(),
+            first,
+            last,
+            symbol: answer::chunk_symbol(&lines, (first, last), terms),
+        });
+    }
+    ranges
+}
+
+/// The ranges of a code-shaped prompt: the resolved definition (at most 60
+/// lines), then up to two more from its callers' declarations, else from the
+/// best chunk of the top fused files. Nothing when no definition resolved.
+fn strong_reads(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Instant) {
+    let brief = edit(state, |brief| brief.clone());
+    let Some(def) = brief.defined.first() else {
+        return;
+    };
+    if pixel_index::index::credential_path(Path::new(&def.path)) {
+        return;
+    }
+    let mut ranges = vec![ReadRange {
+        path: def.path.clone(),
+        first: def.start_line,
+        last: def
+            .end_line
+            .min(def.start_line + answer::READ_CAP as u64 - 1),
+        symbol: Some(def.name.clone()),
+    }];
+    for caller in &brief.callers {
+        if ranges.len() >= MAX_READS || pixel_index::index::credential_path(Path::new(&caller.path))
+        {
+            continue;
+        }
+        if ranges.iter().any(|read| read.path == caller.path) {
+            continue;
+        }
+        let start = caller.line.saturating_sub(answer::WINDOW_BEFORE * 3).max(1);
+        let Ok(window) = evidence.lines_at(
+            &caller.path,
+            start,
+            caller.line + answer::READ_CAP as u64,
+            deadline,
+        ) else {
+            continue;
+        };
+        let sig = answer::enclosing_start(start, &window, caller.line);
+        let (first, last) = answer::declaration_range(start, &window, sig);
+        ranges.push(ReadRange {
+            path: caller.path.clone(),
+            first,
+            last,
+            symbol: Some(caller.via.clone()),
+        });
+    }
+    if ranges.len() < MAX_READS {
+        let terms: Vec<String> = plan
+            .typed
+            .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+            .filter(|word| word.len() >= MIN_CONCEPT_WORD_CHARS)
+            .filter(|word| !CONCEPT_STOPWORDS.contains(&word.to_lowercase().as_str()))
+            .map(ToString::to_string)
+            .collect();
+        let mut rest = brief.clone();
+        rest.files
+            .retain(|hit| !ranges.iter().any(|read| read.path == hit.path));
+        for read in read_evidence(evidence, &rest, &terms, deadline) {
+            if ranges.len() < MAX_READS {
+                ranges.push(read);
+            }
+        }
+    }
+    edit(state, |brief| brief.reads = ranges);
+}
+
 /// Where an excerpt may be cut from: a chunk of the meaning search, or the
 /// declaration around a lexical hit.
 struct Candidate {
@@ -1466,10 +1620,6 @@ struct Chunk {
     meaning_rank: usize,
     density: usize,
     lines: Vec<String>,
-    /// The declaration around the excerpt: its bounds and its name.
-    read: Option<(u64, u64)>,
-    sig: Option<u64>,
-    symbol: Option<String>,
 }
 
 /// The chunks of the best files, cut where the question's keywords are
@@ -1535,18 +1685,11 @@ fn generic_excerpts(
             continue;
         }
         let density = answer::distinct_terms(&body, terms);
-        let (lines, sig) = answer::chunk_excerpt(start, window, (first, last), terms);
+        let (lines, _) = answer::chunk_excerpt(start, window, (first, last), terms);
         if lines.is_empty() {
             continue;
         }
-        let read = match sig {
-            Some(sig) => answer::declaration_range(start, window, sig),
-            None => (first, last.min(first + answer::READ_CAP as u64 - 1)),
-        };
-        let symbol = candidate.symbol.clone().or_else(|| {
-            let at = usize::try_from(sig?.checked_sub(start)?).ok()?;
-            answer::symbol_of_signature(window.get(at)?)
-        });
+
         chunks.push(Chunk {
             candidate: Candidate {
                 line: first,
@@ -1555,9 +1698,6 @@ fn generic_excerpts(
             meaning_rank: rank,
             density,
             lines,
-            read: Some(read),
-            sig,
-            symbol,
         });
     }
     // Rank by density, best first; ties keep the meaning order.
@@ -1599,9 +1739,6 @@ fn generic_excerpts(
             path: path.clone(),
             from_meaning: chunk.candidate.meaning,
             lines: chunk.lines.clone(),
-            sig: chunk.sig,
-            read: chunk.read,
-            symbol: chunk.symbol.clone(),
             meaning_rank: chunk.candidate.meaning.then_some(chunk.meaning_rank),
             density: chunk.density,
         });
@@ -2823,6 +2960,7 @@ fn byte_cap(signal: Option<Signal>, answer: bool) -> usize {
     match (signal, answer) {
         (Some(Signal::Prose | Signal::Weak), true) => PROSE_BRIEF_BYTES,
         (Some(Signal::Prose), false) => PLAIN_PROSE_BRIEF_BYTES,
+        (Some(Signal::Strong), true) => STRONG_READ_BRIEF_BYTES,
         _ => BRIEF_BYTES,
     }
 }
@@ -5578,7 +5716,10 @@ mod tests {
         );
         assert_eq!(byte_cap(Some(Signal::Prose), true), PROSE_BRIEF_BYTES);
         assert_eq!(byte_cap(Some(Signal::Weak), true), PROSE_BRIEF_BYTES);
-        assert_eq!(byte_cap(Some(Signal::Strong), true), BRIEF_BYTES);
+        assert_eq!(
+            byte_cap(Some(Signal::Strong), true),
+            STRONG_READ_BRIEF_BYTES
+        );
         assert_eq!(byte_cap(Some(Signal::Strong), false), BRIEF_BYTES);
         assert_eq!(byte_cap(Some(Signal::Weak), false), BRIEF_BYTES);
         assert_eq!(byte_cap(None, false), BRIEF_BYTES);
@@ -6490,7 +6631,7 @@ mod tests {
         // shown, it fixes the declaration to read.
         assert!(!text.contains("\nanswer "), "{text}");
         assert!(
-            text.contains("\nread: crates/pixel-daemon/src/daemon.rs:280-286 — watch_ready\n"),
+            text.contains("\nread: crates/pixel-daemon/src/daemon.rs:279-286 — watch_ready\n"),
             "{text}"
         );
         assert!(text.ends_with(READ_LINE), "{text}");
@@ -6779,7 +6920,6 @@ mod tests {
                     lines: (0..10)
                         .map(|line| format!("{line}| {}", "x".repeat(105)))
                         .collect(),
-                    ..Excerpt::default()
                 })
                 .collect(),
             ops: 3,
@@ -6955,10 +7095,13 @@ mod tests {
             from_meaning: true,
             meaning_rank: Some(0),
             density,
-            sig: Some(280),
-            read: Some((280, 288)),
-            symbol: Some("watch_ready".to_string()),
             lines: vec!["280| pub fn watch_ready()".into()],
+        }];
+        brief.reads = vec![ReadRange {
+            path: DAEMON.to_string(),
+            first: 280,
+            last: 288,
+            symbol: Some("watch_ready".to_string()),
         }];
         brief.lexical = lexical.iter().map(ToString::to_string).collect();
         brief.confidence = Some(HIGH_CONFIDENCE.to_string());
@@ -7018,16 +7161,12 @@ mod tests {
     #[test]
     fn a_brief_that_did_not_earn_zero_should_end_on_the_ranges_to_read() {
         let mut brief = zeroing_brief(&["b.rs"], 2);
-        brief.excerpts.push(Excerpt {
-            label: "crates/pixel/src/other.rs:1".into(),
+        brief.reads.push(ReadRange {
             path: "crates/pixel/src/other.rs".into(),
-            read: Some((1, 40)),
+            first: 1,
+            last: 40,
             symbol: None,
-            lines: vec!["1| fn other() {".into()],
-            ..Excerpt::default()
         });
-        // The same declaration twice, and a fourth chunk: both are dropped.
-        brief.excerpts.push(brief.excerpts[0].clone());
         let (text, stats) = fit(&brief).unwrap();
         assert!(text.contains(MEDIUM_CONFIDENCE), "{text}");
         assert!(!text.contains("\nanswer "), "{text}");
@@ -7058,9 +7197,10 @@ mod tests {
     }
 
     #[test]
-    fn no_range_should_be_named_for_a_strong_prompt_a_cut_packet_or_a_rationale() {
+    fn no_range_should_be_named_for_a_cut_packet_or_a_strong_prompt_without_a_definition() {
         let mut strong = zeroing_brief(&[DAEMON], 2);
         strong.signal = Some(Signal::Strong);
+        strong.reads.clear();
         let mut cut = zeroing_brief(&[DAEMON], 2);
         cut.cut = true;
         for brief in [strong, cut] {
@@ -7070,7 +7210,7 @@ mod tests {
         }
         // Without a range the brief keeps a verification footer.
         let mut bare = zeroing_brief(&[DAEMON], 2);
-        bare.excerpts[0].read = None;
+        bare.reads.clear();
         bare.zero_rule = None;
         let (text, _) = fit(&bare).unwrap();
         assert!(text.contains(MEDIUM_FILES_CONFIDENCE), "{text}");
@@ -7081,12 +7221,11 @@ mod tests {
     fn a_maybe_should_name_the_range_to_read_inside_its_cap() {
         let mut brief = low_brief(vec![rhit("a.rs", 1, "one"), rhit("b.rs", 2, "two")]);
         brief.finished = true;
-        brief.excerpts = vec![Excerpt {
-            label: "a.rs:10".into(),
+        brief.reads = vec![ReadRange {
             path: "a.rs".into(),
-            read: Some((10, 30)),
+            first: 10,
+            last: 30,
             symbol: Some("run".into()),
-            ..Excerpt::default()
         }];
         let (text, _) = fit(&brief).unwrap();
         assert!(text.contains("\nread: a.rs:10-30 — run\n"), "{text}");
@@ -7275,5 +7414,103 @@ mod tests {
             .filter(|e| e.path.ends_with("other.rs"))
             .count();
         assert_eq!(other, 1, "{:?}", brief.excerpts);
+    }
+
+    fn function_file() -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        for (name, body) in [
+            ("alpha", "unrelated work"),
+            ("beta", "daemon startup changes"),
+            ("gamma", "other things"),
+        ] {
+            lines.push(format!("/// Does {body}."));
+            lines.push(format!("pub fn {name}() {{"));
+            for n in 0..10 {
+                lines.push(format!("    step_{name}_{n}(); // {body}"));
+            }
+            lines.push("}".into());
+            lines.push(String::new());
+        }
+        lines
+    }
+
+    #[test]
+    fn the_range_should_be_the_function_whose_lines_hold_the_most_probed_keywords() {
+        let mut fake = Fake::new();
+        fake.sources = vec![
+            (DAEMON.to_string(), function_file()),
+            ("crates/pixel/src/other.rs".to_string(), function_file()),
+            ("docs/guide.md".to_string(), function_file()),
+        ];
+        let mut brief = high_brief();
+        brief.files = vec![
+            rhit("docs/guide.md", 1, "x"),
+            rhit(DAEMON, 1, "x"),
+            rhit(DAEMON, 20, "x"),
+            rhit("crates/pixel/src/other.rs", 1, "x"),
+        ];
+        let terms: Vec<String> = ["daemon", "startup", "changes"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let reads = read_evidence(&fake, &brief, &terms, Instant::now() + SECOND);
+        // The guide is demoted; one range per file; each the `beta` function.
+        let paths: Vec<&str> = reads.iter().map(|read| read.path.as_str()).collect();
+        assert_eq!(paths, [DAEMON, "crates/pixel/src/other.rs"]);
+        for read in &reads {
+            assert_eq!(read.symbol.as_deref(), Some("beta"), "{read:?}");
+            assert!(read.first <= 15 && read.last >= 25, "{read:?}");
+            assert!(read.last - read.first < 60);
+        }
+        // A question about docs keeps the guide.
+        brief.wants_docs = true;
+        let reads = read_evidence(&fake, &brief, &terms, Instant::now() + SECOND);
+        assert_eq!(reads[0].path, "docs/guide.md");
+    }
+
+    #[test]
+    fn a_strong_prompt_should_read_its_definition_then_its_callers() {
+        let mut fake = Fake::new();
+        fake.sources = vec![(
+            "src/caller.rs".to_string(),
+            vec![
+                "fn caller() {".into(),
+                "    watch_ready();".into(),
+                "}".into(),
+            ],
+        )];
+        let mut brief = Brief {
+            signal: Some(Signal::Strong),
+            finished: true,
+            answered: 1,
+            ..Brief::default()
+        };
+        brief.defined = vec![SymbolHit {
+            start_line: 280,
+            end_line: 400,
+            ..symbol(DAEMON, "watch_ready")
+        }];
+        brief.callers = vec![caller("src/caller.rs", "caller", 2)];
+        let plan = Plan::from_prompt("who calls `watch_ready`").unwrap();
+        let state = Mutex::new(brief);
+        strong_reads(&plan, &fake, &state, Instant::now() + SECOND);
+        let brief = state.into_inner().unwrap();
+        let text = fit(&brief).unwrap().0;
+        assert!(
+            text.contains(&format!("\nread: {DAEMON}:280-339 — watch_ready\n")),
+            "{text}"
+        );
+        assert!(
+            text.contains("\nalso: src/caller.rs:1-3 — caller\n"),
+            "{text}"
+        );
+        assert!(text.ends_with(READ_LINE), "{text}");
+        // No resolved definition, nothing to read.
+        let none = Mutex::new(Brief {
+            signal: Some(Signal::Strong),
+            ..Brief::default()
+        });
+        strong_reads(&plan, &fake, &none, Instant::now() + SECOND);
+        assert!(none.into_inner().unwrap().reads.is_empty());
     }
 }

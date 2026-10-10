@@ -798,11 +798,17 @@ split of `eval/brief-gate/answer_spans.jsonl` kept span precision at 0.9 with
 two firings, so `ZERO_RULE` is `None` and ZERO never fires (`PIXEL_BRIEF_ZERO=0`
 would switch it off if one is set). ONE READ, otherwise: the excerpts are
 hidden, the confidence is medium, and the tail is `read: <path>:<first>-<last>
-— <symbol>` (the whole declaration around the best chunk, at most 60 lines),
-up to two `also:` lines from other declarations, and "Read these ranges (in
-parallel, one turn) before any search; search only if they don't answer."
-Ranges come from lines actually read at HEAD, never from a credential-shaped
-path.
+— <symbol>` for the best function-level chunk of the first fused file, up to
+two `also:` lines for the next two fused files, and "Read these ranges (in
+parallel, one turn) before any search; search only if they don't answer." Each
+file is cut into function-level chunks (items, merged up to 45 lines), scored
+by BM25 over the file's own chunks for the probed keywords (a tie goes to the
+meaning search's chunk, which also gets half the best score on top), and
+capped at 60 lines around the densest keyword region; tests and docs are
+skipped unless asked. A code-shaped prompt that resolved `defined:` reads the
+definition's range, then its callers' declarations, then the best chunk of the
+top fused files. Ranges come from lines actually read at HEAD, never from a
+credential-shaped path.
 `scripts/bench-brief-excerpt.py` measures excerpt@1 and `scripts/bench-brief-spans.py` the
 ZERO precision and the share of gold spans inside the `read:` ranges. A packet cut by the budget carries neither receipt nor excerpt; one with only an unresolved note keeps them but never the directive. A rationale question gets no excerpt. Config routing needs an
 explicit cue (config, setting, env, flag, option, default), not `install` or

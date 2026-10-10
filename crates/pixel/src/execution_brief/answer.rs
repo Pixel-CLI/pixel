@@ -174,12 +174,6 @@ fn names(list: &[String]) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Excerpt {
     pub(crate) label: String,
-    /// The signature line the excerpt was cut under, when it found one.
-    pub(crate) sig: Option<u64>,
-    /// The whole declaration around it, for a `read:` range.
-    pub(crate) read: Option<(u64, u64)>,
-    /// What it declares.
-    pub(crate) symbol: Option<String>,
     /// Rank of the chunk among the meaning search's, best first; `None`
     /// for a lexical hit.
     pub(crate) meaning_rank: Option<usize>,
@@ -585,6 +579,265 @@ pub(crate) fn symbol_of_signature(line: &str) -> Option<String> {
         .find(|token| !token.is_empty() && !matches!(*token, "mut" | "pub" | "async"))
         .map(|name| name.trim_matches(':').to_string())
         .filter(|name| !name.is_empty())
+}
+
+/// Items that start a chunk of a file: at most four columns in.
+const ITEM_KEYWORDS: &[&str] = &[
+    "fn", "struct", "enum", "impl", "trait", "mod", "def", "class", "function", "export", "const",
+    "static", "type",
+];
+/// Lines a merged chunk may reach, and the size at which a block splits anyway.
+const CHUNK_MERGE_LINES: usize = 45;
+const CHUNK_SPLIT_LINES: usize = 60;
+const CHUNK_MIN_LINES: usize = 8;
+
+fn leading_columns(line: &str) -> usize {
+    line.chars()
+        .take_while(|ch| *ch == ' ' || *ch == '\t')
+        .map(|ch| if ch == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+/// Whether `line` starts an item: a declaration within four columns of the
+/// margin, or the attribute of a test.
+fn starts_item(line: &str) -> bool {
+    if leading_columns(line) > 4 {
+        return false;
+    }
+    let mut rest = line.trim_start();
+    if rest.starts_with("#[test]") || rest.starts_with("#[cfg(test)]") {
+        return true;
+    }
+    if let Some(after) = rest.strip_prefix("pub") {
+        rest = match after.strip_prefix('(') {
+            Some(inner) => inner.split_once(')').map_or(after, |(_, tail)| tail),
+            None => after,
+        };
+        rest = rest.trim_start();
+    }
+    for modifier in ["async ", "unsafe "] {
+        rest = rest.strip_prefix(modifier).unwrap_or(rest);
+    }
+    ITEM_KEYWORDS.iter().any(|keyword| {
+        rest.strip_prefix(keyword)
+            .is_some_and(|tail| !tail.starts_with(|ch: char| ch.is_alphanumeric() || ch == '_'))
+    })
+}
+
+/// A file cut into function-level chunks, inclusive 1-based `(first, last)`
+/// lines: blocks that start at an item, each carrying the doc comment and
+/// attributes above it, small neighbours merged up to [`CHUNK_MERGE_LINES`].
+pub(crate) fn function_chunks(lines: &[String]) -> Vec<(u64, u64)> {
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    let mut first = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let len = index - first;
+        let margin = !line.starts_with(' ') || line.starts_with("    ");
+        if len >= CHUNK_MIN_LINES && (starts_item(line) || len >= CHUNK_SPLIT_LINES) && margin {
+            let mut cut = index;
+            while cut > first + 1 && (is_doc(&lines[cut - 1]) || is_attribute(&lines[cut - 1])) {
+                cut -= 1;
+            }
+            blocks.push((first, cut));
+            first = cut;
+        }
+    }
+    if first < lines.len() {
+        blocks.push((first, lines.len()));
+    }
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (from, to) in blocks {
+        match merged.last_mut() {
+            Some((start, end)) if to - *start <= CHUNK_MERGE_LINES => *end = to,
+            _ => merged.push((from, to)),
+        }
+    }
+    merged
+        .into_iter()
+        .filter_map(|(from, to)| {
+            let kept = &lines[from..to];
+            let start = kept.iter().position(|line| !line.trim().is_empty())?;
+            let end = kept.iter().rposition(|line| !line.trim().is_empty())?;
+            let size: usize = kept[start..=end]
+                .iter()
+                .map(|line| line.trim().len() + 1)
+                .sum();
+            (size >= 40).then_some(((from + start + 1) as u64, (from + end + 1) as u64))
+        })
+        .collect()
+}
+
+/// The lowercase word stems of `text`: identifiers split at underscores and
+/// case changes, a plural losing its `s`.
+pub(crate) fn tokens(text: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for piece in text.split(|ch: char| !ch.is_alphanumeric()) {
+        let chars: Vec<char> = piece.chars().collect();
+        let mut word = String::new();
+        for (index, &ch) in chars.iter().enumerate() {
+            let boundary = index > 0
+                && ((ch.is_uppercase() && chars[index - 1].is_lowercase())
+                    || (ch.is_uppercase()
+                        && chars[index - 1].is_uppercase()
+                        && chars.get(index + 1).is_some_and(|next| next.is_lowercase())));
+            if boundary && !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            word.push(ch.to_ascii_lowercase());
+        }
+        if !word.is_empty() {
+            words.push(word);
+        }
+    }
+    words
+        .into_iter()
+        .map(|word| match word.strip_suffix('s') {
+            Some(rest) if word.len() > 3 => rest.to_string(),
+            _ => word,
+        })
+        .collect()
+}
+
+/// The BM25 score of every chunk of `lines` (the chunks of
+/// [`function_chunks`]) for the probed `terms`: idf from the file's own
+/// chunks, saturated term frequency, length normalised.
+pub(crate) fn chunk_scores(lines: &[String], chunks: &[(u64, u64)], terms: &[String]) -> Vec<f64> {
+    let query: Vec<String> = {
+        let mut stems: Vec<String> = terms.iter().flat_map(|term| tokens(term)).collect();
+        stems.sort();
+        stems.dedup();
+        stems
+    };
+    let docs: Vec<Vec<String>> = chunks
+        .iter()
+        .map(|&(first, last)| {
+            let from = usize::try_from(first - 1).unwrap_or(0);
+            let to = usize::try_from(last).unwrap_or(0).min(lines.len());
+            tokens(&lines[from..to].join("\n"))
+        })
+        .collect();
+    let count = docs.len() as f64;
+    let average = (docs.iter().map(Vec::len).sum::<usize>() as f64 / count.max(1.0)).max(1.0);
+    let (k1, b) = (1.2, 0.75);
+    docs.iter()
+        .map(|doc| {
+            query
+                .iter()
+                .map(|word| {
+                    let tf = doc.iter().filter(|token| *token == word).count() as f64;
+                    if tf == 0.0 {
+                        return 0.0;
+                    }
+                    let df = docs.iter().filter(|other| other.contains(word)).count() as f64;
+                    let idf = (1.0 + (count - df + 0.5) / (df + 0.5)).ln();
+                    idf * tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * doc.len() as f64 / average))
+                })
+                .sum()
+        })
+        .collect()
+}
+
+/// Share of the best keyword score the meaning search's chunk adds to its own.
+const MEANING_VOTE: f64 = 0.5;
+
+/// The index of the best chunk: the highest score; a tie goes to a chunk that
+/// holds one of the `preferred` lines (the meaning search's chunk starts, the
+/// lexical hits), then to the earlier chunk. `None` when no chunk scores and
+/// none is preferred.
+pub(crate) fn best_chunk(
+    scores: &[f64],
+    chunks: &[(u64, u64)],
+    preferred: &[u64],
+    meaning: &[u64],
+) -> Option<usize> {
+    let holds = |index: usize| {
+        preferred
+            .iter()
+            .any(|line| (chunks[index].0..=chunks[index].1).contains(line))
+    };
+    // The meaning search's own chunk gets a second vote: half the best
+    // keyword score on top of its own.
+    let top = scores.iter().copied().fold(0.0_f64, f64::max);
+    let boosted: Vec<f64> = (0..chunks.len())
+        .map(|index| {
+            let named = meaning
+                .iter()
+                .any(|line| (chunks[index].0..=chunks[index].1).contains(line));
+            scores[index] + if named { top * MEANING_VOTE } else { 0.0 }
+        })
+        .collect();
+    let scores = &boosted;
+    let best = scores.iter().copied().fold(0.0_f64, f64::max);
+    if best <= 0.0 {
+        return (0..chunks.len()).find(|&index| holds(index));
+    }
+    let tied: Vec<usize> = (0..chunks.len())
+        .filter(|&index| (scores[index] - best).abs() < 1e-9)
+        .collect();
+    tied.iter()
+        .copied()
+        .find(|&index| holds(index))
+        .or(tied.first().copied())
+}
+
+/// The lines to read for the chunk `(first, last)`: all of it up to
+/// [`READ_CAP`] lines, else a window of that size centred on the densest
+/// keyword region.
+pub(crate) fn read_window(lines: &[String], chunk: (u64, u64), terms: &[String]) -> (u64, u64) {
+    let cap = READ_CAP as u64;
+    if chunk.1 - chunk.0 < cap {
+        return chunk;
+    }
+    let query: Vec<String> = terms.iter().flat_map(|term| tokens(term)).collect();
+    let hit = |line: u64| {
+        let text = lines.get(usize::try_from(line - 1).unwrap_or(usize::MAX));
+        text.is_some_and(|text| tokens(text).iter().any(|token| query.contains(token)))
+    };
+    let mut best = (0, chunk.0);
+    for from in chunk.0..=chunk.1 + 1 - cap {
+        let density = (from..from + cap).filter(|line| hit(*line)).count();
+        if density > best.0 {
+            best = (density, from);
+        }
+    }
+    (best.1, best.1 + cap - 1)
+}
+
+/// What the chunk `(first, last)` declares around its densest keyword line:
+/// the nearest signature at or above it, else the first one inside.
+pub(crate) fn chunk_symbol(
+    lines: &[String],
+    chunk: (u64, u64),
+    terms: &[String],
+) -> Option<String> {
+    let query: Vec<String> = terms.iter().flat_map(|term| tokens(term)).collect();
+    let at = |line: u64| usize::try_from(line - 1).unwrap_or(0);
+    let (from, to) = (at(chunk.0), at(chunk.1).min(lines.len().saturating_sub(1)));
+    let dense = (from..=to)
+        .max_by_key(|&index| {
+            let found = tokens(&lines[index]);
+            (
+                query.iter().filter(|word| found.contains(word)).count(),
+                std::cmp::Reverse(index),
+            )
+        })
+        .unwrap_or(from);
+    // A keyword in a doc comment belongs to the declaration below it.
+    let below = (is_doc(&lines[dense]) || is_attribute(&lines[dense]))
+        .then(|| {
+            (dense..=to)
+                .find(|&index| !(is_doc(&lines[index]) || is_attribute(&lines[index])))
+                .filter(|&index| is_signature(&lines[index]))
+        })
+        .flatten();
+    let sig = below
+        .or_else(|| {
+            (from..=dense)
+                .rev()
+                .find(|&index| is_signature(&lines[index]))
+        })
+        .or_else(|| (from..=to).find(|&index| is_signature(&lines[index])))?;
+    symbol_of_signature(&lines[sig])
 }
 
 /// One step of a flow: a function, where it is defined, and its first line.
@@ -1289,5 +1542,87 @@ mod tests {
         assert!(!rule_holds(&top(Some(0), 2, true), None, rule));
         assert!(!rule_holds(&top(None, 2, false), Some(0), rule));
         assert!(rule_holds(&top(Some(1), 1, true), Some(1), (1, 1, 1)));
+    }
+
+    #[test]
+    fn function_chunks_should_split_at_items_merge_small_ones_and_keep_doc_with_its_item() {
+        let mut source: Vec<String> = Vec::new();
+        for name in ["one", "two", "three"] {
+            source.push(format!("/// Doc of {name}."));
+            source.push(format!("pub fn {name}() {{"));
+            source.extend((0..12).map(|n| format!("    work_{n}();")));
+            source.push("}".into());
+        }
+        let chunks = function_chunks(&source);
+        // Each function is 15 lines: three of them merge up to 45 lines.
+        assert_eq!(chunks, [(1, 45)]);
+        let mut long = source.clone();
+        long.extend((0..70).map(|n| format!("    tail_{n}();")));
+        let split = function_chunks(&long);
+        assert!(
+            split.len() >= 2 && split.iter().all(|(a, b)| b - a < 61),
+            "{split:?}"
+        );
+        // The doc comment goes with its function when a block is cut.
+        let big: Vec<String> = (0..9)
+            .map(|n| format!("    let a{n} = {n};"))
+            .chain([
+                "/// Doc of next.".to_string(),
+                "pub fn next() {".to_string(),
+            ])
+            .chain((0..30).map(|n| format!("    more_{n}();")))
+            .collect();
+        let doc_chunks = function_chunks(&big);
+        assert_eq!(doc_chunks[0].0, 1);
+        assert!(function_chunks(&[]).is_empty());
+    }
+
+    #[test]
+    fn tokens_should_split_identifiers_and_drop_plurals() {
+        assert_eq!(
+            tokens("watchReady_tries HTTPServer 2x"),
+            ["watch", "ready", "trie", "http", "server", "2x"]
+        );
+    }
+
+    #[test]
+    fn the_best_chunk_should_score_by_keywords_and_break_a_tie_toward_a_preferred_line() {
+        let lines = lines(&[
+            "fn a() { daemon(); }",
+            "fn b() { startup(); daemon(); }",
+            "fn c() { nothing(); }",
+        ]);
+        let chunks = vec![(1, 1), (2, 2), (3, 3)];
+        let terms = terms(&["daemon", "startup"]);
+        let scores = chunk_scores(&lines, &chunks, &terms);
+        assert_eq!(best_chunk(&scores, &chunks, &[], &[]), Some(1));
+        // Equal scores: the chunk holding a preferred line wins.
+        let tie = vec![1.0, 1.0, 0.5];
+        assert_eq!(best_chunk(&tie, &chunks, &[2], &[]), Some(1));
+        assert_eq!(best_chunk(&tie, &chunks, &[], &[]), Some(0));
+        // Nothing scores: only a preferred chunk is named.
+        let zero = vec![0.0; 3];
+        assert_eq!(best_chunk(&zero, &chunks, &[3], &[]), Some(2));
+        assert_eq!(best_chunk(&zero, &chunks, &[], &[]), None);
+        // The meaning search's chunk outvotes a close keyword score.
+        let close = vec![1.0, 0.8, 0.0];
+        assert_eq!(best_chunk(&close, &chunks, &[], &[]), Some(0));
+        assert_eq!(best_chunk(&close, &chunks, &[], &[2]), Some(1));
+    }
+
+    #[test]
+    fn read_window_should_cap_at_sixty_lines_centred_on_the_keywords() {
+        let mut source: Vec<String> = (0..200).map(|n| format!("    filler_{n}();")).collect();
+        source[120] = "    daemon_startup();".into();
+        source[121] = "    daemon_changes();".into();
+        let terms = terms(&["daemon"]);
+        assert_eq!(read_window(&source, (10, 40), &terms), (10, 40));
+        let (first, last) = read_window(&source, (1, 200), &terms);
+        assert_eq!(last - first + 1, READ_CAP as u64);
+        assert!(first <= 121 && last >= 122, "{first}-{last}");
+        assert_eq!(
+            chunk_symbol(&lines(&["fn a() {}", "    x();"]), (1, 2), &terms),
+            Some("a".into())
+        );
     }
 }

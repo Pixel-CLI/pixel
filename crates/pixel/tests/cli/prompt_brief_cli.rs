@@ -153,7 +153,9 @@ fn rename_prompt_should_carry_files_definition_and_callers_in_the_hook_context()
                 "callers (impact d1): apps/web/page.tsx -> Page:2; apps/web/page.tsx -> Other:5",
                 "excluded (generated): data/out.json",
                 "coverage: 4/4 ops answered",
-                "Answer from this evidence; open a file only if it contradicts you. 0 hits or 0 callers: verify with rg before concluding.",
+                "read: packages/ui/handleError.ts:1-3 — handleError",
+                "also: apps/web/page.tsx:2-4 — Page",
+                "Read these ranges (in parallel, one turn) before any search; search only if they don't answer.",
             ]
             .join("\n"),
             "{provider}"

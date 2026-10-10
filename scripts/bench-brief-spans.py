@@ -148,10 +148,16 @@ def main():
                "tier": got.get("tier"), "directive": "Answer from this evidence" in brief}
         row.update(hits(gold["answer_spans"], brief))
         rows.append(row)
-    result = {"split": args.split, "summary": summarize(rows), "rows": rows}
+    groups = {"strong": [r for r in rows if r["fired"] and r["tier"] is None],
+              "prose": [r for r in rows if r["tier"] in ("high", "low")]}
+    result = {"split": args.split, "summary": summarize(rows), "rows": rows,
+              "by_signal": {name: summarize(group) for name, group in groups.items()}}
     if args.out:
         Path(args.out).write_text(json.dumps(result, indent=1))
     print(json.dumps(result["summary"]))
+    for name, summary in result["by_signal"].items():
+        keys = ("n", "has_read", "read@1", "read@1-3", "answered")
+        print(f"  {name}: " + " ".join(f"{k}={summary[k]}" for k in keys))
 
 
 class Tests(unittest.TestCase):
