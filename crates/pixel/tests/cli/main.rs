@@ -20,7 +20,6 @@ mod doctor_cli;
 mod evaluate_cli;
 mod execution_brief;
 #[cfg(unix)]
-mod flow_cli;
 mod hook_stdin_cap_cli;
 mod impact_read_cli;
 mod install_exit;
@@ -38,7 +37,6 @@ mod regions_cli;
 mod release_check_cli;
 mod rename_cli;
 mod renamed_commands;
-mod rescue_cli;
 mod run_recipe_cli;
 mod scope_task_precision;
 mod search_compat_cli;

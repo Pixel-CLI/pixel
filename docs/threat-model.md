@@ -305,6 +305,16 @@ manage them. Controls, in the order a lookup applies them:
 - **Environment.** A plugin receives `PIXEL_API`, `PIXEL_REPO_ROOT`,
   `PIXEL_GRAPH_DB` and `PIXEL_BIN`; it inherits the rest of the caller's environment unchanged; Pixel adds no
   secret to it.
+- **Moved commands (#878).** `workspace`, `flow`, `plan-rollback`,
+  `coverage`, `token-savings`, `index-stats`, `squash-branch` and
+  `fast-forward` are plugins of `Pixel-CLI/pixel-plugins`
+  (`pixel_plugin::MOVED_COMMANDS`), looked up in the order above like any
+  other name. Without one, `pixel <name>` prints the install hint and exits 2;
+  the pre-rename spellings (`rescue`, `stats`, `update`, `savings`,
+  `rewrite`, `replay-flow`) resolve to the plugin of the current name
+  (`plugin_cmd::moved_name`). The core binary no longer contains their code, so
+  it no longer logs their arguments: the dispatch `exec`s before the action
+  log is written.
 
 ## 4. Threats
 
@@ -537,9 +547,11 @@ hold.
   argv unredacted (the sink keeps the whole output of every failed `sniper
   run`, structured RSpec/RuboCop/Minitest runs included, for 7 days and
   at most 200 outputs); `edit-env` snapshots are plain copies of the `.env`;
-  `logged_args` masks only `config remote-key` values and `auth_url`, so a
-  secret passed as `--var` to `pixel flow` or `--value` to `pixel edit-env`
-  reaches `actions.jsonl` in clear (a 0600 file).
+  `logged_args` masks only `config remote-key` values, `auth_url` and a
+  plugin source's credentials, so a secret passed as `--value` to `pixel
+  edit-env` reaches `actions.jsonl` in clear (a 0600 file). `pixel flow` is a
+  plugin that `exec`s before any log line is written, so its `--var` values
+  do not reach that file.
 
 ### T16. A configured key is sent to the wrong endpoint (I, B6)
 
@@ -701,6 +713,12 @@ hold.
   privileges and network once allowed; `network` is a declaration gated by
   `enable`, not a sandbox, and the host cannot stop a plugin that declares
   `false` from using the network.
+  The eight moved commands lost the property of being fixed built-ins: a
+  `pixel-squash-branch` (force-push with lease), `pixel-fast-forward` or
+  `pixel-plan-rollback` (`--apply` rewrites files) earlier on `PATH`, in
+  `~/.pixel/plugins/` or in a trusted repo plugin is what `pixel squash-branch`
+  runs. They are installed from source with `cargo install` and `pixel plugin
+  add`, so the reviewer of that install is the user.
 
 ### Summary
 

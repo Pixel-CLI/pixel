@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! `pixel workspace` — a named set of repositories that graph ops can fan
-//! out across, and the `--workspace` flag that uses it.
+//! The `--workspace` flag: a named set of repositories that graph ops can
+//! fan out across.
 //!
-//! `.pixel/workspace.json` holds canonicalized member paths. `impact` and
+//! `.pixel/workspace.json` holds canonicalized member paths; the `workspace`
+//! plugin (`pixel workspace add|remove|list|clear`, in `Pixel-CLI/pixel-plugins`)
+//! writes it and this file only reads it. `impact` and
 //! `who-calls` accept `--workspace`: the op runs against every member's own
 //! index (each repo's daemon or in-process service answers independently)
 //! and the results are merged with per-repo attribution. There is no
@@ -15,14 +17,14 @@
 use std::path::{Path, PathBuf};
 
 use pixel_index::index::SHARD_DIR;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use pixel_daemon::api::Request;
 
 const WORKSPACE_FILE: &str = "workspace.json";
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct Registry {
     #[serde(default)]
     members: Vec<PathBuf>,
@@ -43,18 +45,6 @@ fn load(root: &Path) -> Result<Registry, String> {
     }
 }
 
-fn save(root: &Path, registry: &Registry) -> Result<(), String> {
-    let path = registry_path(root);
-    if let Some(dir) = path.parent() {
-        pixel_git::sidecar::private_dir(dir).map_err(|e| format!("workspace dir: {e}"))?;
-    }
-    let bytes = serde_json::to_vec_pretty(registry).map_err(|e| e.to_string())?;
-    // A fresh temporary file renamed over the name: a link committed at
-    // either name is replaced, never written through.
-    pixel_git::nofollow::write_replace(&path, &bytes, pixel_git::nofollow::PRIVATE_MODE)
-        .map_err(|e| format!("workspace write: {e}"))
-}
-
 /// Canonicalized member list. Members that vanished from disk are reported
 /// to the caller as part of the fan-out, not silently dropped here.
 pub fn members(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -67,7 +57,10 @@ pub fn members(root: &Path) -> Result<Vec<PathBuf>, String> {
 pub fn fan_out(root: &Path, op: &dyn Fn() -> Request) -> Result<Vec<Value>, String> {
     let members = members(root)?;
     if members.is_empty() {
-        return Err("no workspace members — `pixel workspace add <repo>` first".to_string());
+        return Err(
+            "no workspace members — `pixel workspace add <repo>` first (the `workspace` plugin)"
+                .to_string(),
+        );
     }
     Ok(members
         .iter()
@@ -105,89 +98,6 @@ pub fn print_fan_out(results: &[Value], json: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run(cmd: WorkspaceCmd) -> Result<(), String> {
-    match cmd {
-        WorkspaceCmd::Add { member, path } => {
-            let member = member
-                .canonicalize()
-                .map_err(|e| format!("workspace add: {}: {e}", member.display()))?;
-            let mut registry = load(&path)?;
-            if !registry.members.contains(&member) {
-                registry.members.push(member.clone());
-                save(&path, &registry)?;
-            }
-            println!("workspace: added {}", member.display());
-            Ok(())
-        }
-        WorkspaceCmd::Remove { member, path } => {
-            let member = member
-                .canonicalize()
-                .map_err(|e| format!("workspace remove: {}: {e}", member.display()))?;
-            let mut registry = load(&path)?;
-            let before = registry.members.len();
-            registry.members.retain(|m| m != &member);
-            if registry.members.len() == before {
-                return Err(format!("workspace: {} is not a member", member.display()));
-            }
-            save(&path, &registry)?;
-            println!("workspace: removed {}", member.display());
-            Ok(())
-        }
-        WorkspaceCmd::List { path, json } => {
-            let members = members(&path)?;
-            if json {
-                let out = json!({"members": members.iter().map(|m| m.display().to_string()).collect::<Vec<_>>()});
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
-                );
-            } else if members.is_empty() {
-                println!("workspace: no members — `pixel workspace add <repo>`");
-            } else {
-                for m in &members {
-                    println!("{}", m.display());
-                }
-            }
-            Ok(())
-        }
-        WorkspaceCmd::Clear { path } => {
-            save(&path, &Registry::default())?;
-            println!("workspace: cleared");
-            Ok(())
-        }
-    }
-}
-
-#[derive(clap::Subcommand)]
-pub enum WorkspaceCmd {
-    /// Register a member repository (canonicalized at add time).
-    Add {
-        /// Repository to add.
-        member: PathBuf,
-        /// Repository holding the workspace registry.
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// Remove a member repository.
-    Remove {
-        member: PathBuf,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// List member repositories.
-    List {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Remove every member.
-    Clear {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,35 +108,20 @@ mod tests {
         dir
     }
 
+    /// The registry as the `workspace` plugin writes it.
     #[test]
-    fn add_dedups_and_remove_reports_non_members() {
+    fn members_reads_the_registry_the_plugin_wrote() {
         let root = scratch("members");
-        let member = scratch("member");
-        run(WorkspaceCmd::Add {
-            member: member.clone(),
-            path: root.clone(),
-        })
-        .unwrap();
-        run(WorkspaceCmd::Add {
-            member: member.clone(),
-            path: root.clone(),
-        })
-        .unwrap();
-        assert_eq!(members(&root).unwrap().len(), 1);
-        let stranger = scratch("stranger");
-        assert!(
-            run(WorkspaceCmd::Remove {
-                member: stranger,
-                path: root.clone(),
-            })
-            .is_err()
+        assert!(members(&root).unwrap().is_empty(), "no file, no members");
+        std::fs::create_dir_all(root.join(SHARD_DIR)).unwrap();
+        std::fs::write(registry_path(&root), r#"{"members": ["/a/one", "/b/two"]}"#).unwrap();
+        assert_eq!(
+            members(&root).unwrap(),
+            [PathBuf::from("/a/one"), PathBuf::from("/b/two")]
         );
-        run(WorkspaceCmd::Remove {
-            member,
-            path: root.clone(),
-        })
-        .unwrap();
-        assert!(members(&root).unwrap().is_empty());
+        std::fs::write(registry_path(&root), "{").unwrap();
+        let err = members(&root).unwrap_err();
+        assert!(err.contains("workspace.json"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

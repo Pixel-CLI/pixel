@@ -30,7 +30,7 @@ pixel list-signatures path/to/a/large/file.py
 
 On Requests' `src/requests/models.py` (1,184 lines) the report's last row read `full read 10365 tok, pixel answer 641 tok (-94%)`, in well under a second: the same two counts as that file's row in `pixel audit`. The two counts are `wc -c` of the file and of the outline, divided by four; the report itself is left out of them.
 
-**Your agent's local operations, after a few days.** `pixel token-savings` reads `.pixel/actions.jsonl`: measured output volumes and versioned token/workflow estimates, each labelled. It does not observe all agent reads, provider usage, billed cost or end-to-end agent time:
+**Your agent's local operations, after a few days.** `pixel token-savings` (a [command plugin](../docs/#command-plugins)) reads `.pixel/actions.jsonl`: measured output volumes and versioned token/workflow estimates, each labelled. It does not observe all agent reads, provider usage, billed cost or end-to-end agent time:
 
 ```bash
 pixel token-savings

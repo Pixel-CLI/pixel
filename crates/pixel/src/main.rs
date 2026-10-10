@@ -65,7 +65,6 @@ mod prompt_intent;
 mod prompt_key;
 mod recall_cmd;
 mod reference_cmd;
-mod rescue_cmd;
 mod search_compat;
 mod search_filter;
 mod serve_trace;
@@ -90,8 +89,7 @@ mod workspace_cmd;
 use pixel_actionlog::{InProcessReason, ServeRoute, ServeStep};
 use pixel_daemon::api::{PROTOCOL_VERSION, Request, Response, Service, failure_response};
 use pixel_daemon::daemon;
-use pixel_index::index::{build, shard_path};
-use pixel_index::shard::Shard;
+use pixel_index::index::build;
 use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtractor};
 use pixel_proto::{
     QueryKind, QueryStatus, TargetsFactsResult, TargetsFactsUnavailableReason, compile_query,
@@ -406,38 +404,6 @@ enum Command {
         #[arg(long)]
         jsonl: bool,
     },
-    /// Surgical revert planner: locate the files a problem points at, list
-    /// recent versions with the likely-breaking commit flagged, recommend a
-    /// last-known-good candidate. Plan only — nothing is written without
-    /// --apply. Never resets; never touches the index or HEAD.
-    #[command(alias = "rescue")]
-    PlanRollback {
-        /// Problem description ("login was working before ...").
-        problem: Option<String>,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Explicit target file(s), repo-relative; skips target discovery.
-        #[arg(long = "file")]
-        files: Vec<String>,
-        /// Commits of per-file history to inspect.
-        #[arg(long, default_value_t = 10)]
-        depth: usize,
-        /// Restore the --file targets to this commit (gated action).
-        #[arg(long)]
-        apply: Option<String>,
-        /// With --apply on dirty files: deterministic 3-way merge that keeps
-        /// in-progress edits (may leave conflict markers).
-        #[arg(long)]
-        merge: bool,
-        /// With --apply: `git stash push` the dirty planned files first.
-        #[arg(long)]
-        stash_first: bool,
-        /// With --apply: overwrite dirty files (loses in-progress work).
-        #[arg(long)]
-        allow_dirty: bool,
-        #[arg(long)]
-        json: bool,
-    },
     /// Probe provider readiness for Codex, Claude Code, Antigravity, and
     /// Devin by sending one real `POST /chat/completions` ("Reply exactly
     /// READY.", a 1024-token reservation, 20 s timeout) to Ollama Cloud. A
@@ -738,12 +704,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Manage the multi-repo workspace (.pixel/workspace.json) that
-    /// `impact --workspace` and `who-calls --workspace` fan out across.
-    Workspace {
-        #[command(subcommand)]
-        cmd: workspace_cmd::WorkspaceCmd,
-    },
     /// Freeze this repo's index into a single shareable `.pxpack` bundle —
     /// the file CI builds once and teammates install instead of re-indexing.
     IndexPack {
@@ -782,14 +742,6 @@ enum Command {
         /// Compact one-line summary for shell prompts / statuslines.
         #[arg(long)]
         statusline: bool,
-    },
-    /// Per-language coverage: files the index policy sees on disk vs files
-    /// the graph actually indexed, with symbol counts per language.
-    Coverage {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
     },
     /// What an agent reads to learn what the largest files contain: each
     /// whole file against its `list-signatures` outline, in tokens, with
@@ -834,12 +786,6 @@ enum Command {
         rebuild_graph: bool,
         #[arg(long)]
         json: bool,
-    },
-    /// Show raw shard metadata (legacy).
-    #[command(alias = "stats")]
-    IndexStats {
-        #[arg(default_value = ".")]
-        path: PathBuf,
     },
     /// Manage the per-root background daemon.
     Daemon {
@@ -1087,23 +1033,6 @@ enum Command {
         /// Base ref (default HEAD).
         #[arg(long)]
         from: Option<String>,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Fast-forward merge to a target OID (refuses non-ff + dirty intersection).
-    #[command(alias = "update")]
-    FastForward {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Reject if HEAD does not match this OID.
-        #[arg(long)]
-        expected_head: String,
-        /// Fast-forward target OID.
-        #[arg(long)]
-        target_oid: String,
         /// Idempotency / recovery key.
         #[arg(long)]
         request_id: String,
@@ -1415,53 +1344,6 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
-    /// Token-savings report: for retrieval-shaped commands (search/query/
-    /// context/resolve) that recorded snippet-vs-pool volumes, aggregate the
-    /// fraction of the candidate pool the agent did NOT have to read. A
-    /// measured counter to semble's '99% fewer tokens' claim — own numbers,
-    /// same format.
-    #[command(alias = "savings")]
-    TokenSavings {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-        /// Only consider events from the last N hours.
-        #[arg(long)]
-        since_hours: Option<u64>,
-    },
-    /// Squash every commit on the current branch since its base into ONE
-    /// commit (crash-safe, backup-ref'd), optionally force-pushing with lease.
-    #[command(alias = "rewrite")]
-    SquashBranch {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Explicit base ref (squash <onto>..HEAD). Default: merge-base with
-        /// the branch upstream, else with the remote default branch.
-        #[arg(long)]
-        onto: Option<String>,
-        /// Squash commit message (default: auto-generated subject list).
-        #[arg(short = 'm', long = "message")]
-        message: Option<String>,
-        /// Push the rewritten branch with --force-with-lease afterwards.
-        #[arg(long)]
-        push: bool,
-        /// Remote name.
-        #[arg(long, default_value = "origin")]
-        remote: String,
-        /// Reject if HEAD does not match this OID.
-        #[arg(long)]
-        expected_head: Option<String>,
-        /// Allow rewriting the default branch and published mainline commits.
-        /// Overrides both default-branch and published-mainline protection.
-        #[arg(long)]
-        allow_default_branch: bool,
-        /// Idempotency / recovery key.
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        json: bool,
-    },
     /// Per-region blame attribution: who introduced/owns each region of a file.
     #[command(alias = "provenance")]
     WhoWrote {
@@ -1559,15 +1441,6 @@ enum Command {
     /// `replay` follows the composed document, and re-decides a step whose
     /// page moved on, recording the new branch with `--update`.
     Ultraflow(ultraflow_cmd::UltraflowOptions),
-    /// Save, retrieve, list, revise, run, and replay proven agent-browser
-    /// paths (auth flows, config flows) so the agent follows a deterministic
-    /// shortcut instead of re-discovering the UI from scratch every time.
-    /// For a classify-decided replay with repair, use `pixel ultraflow replay`.
-    #[command(alias = "replay-flow")]
-    Flow {
-        #[command(subcommand)]
-        cmd: FlowCmd,
-    },
     /// Manage plugins: external commands that `pixel <name> [args…]` runs
     /// when the core has no such command. A repo plugin
     /// (`<repo>/.pixel/plugins/<name>/`) runs only after `pixel plugin
@@ -1714,132 +1587,6 @@ enum EnvCmd {
         #[arg(long)]
         json: bool,
     },
-}
-
-#[derive(Subcommand)]
-enum FlowCmd {
-    /// Create a new flow. Refuses to overwrite — use `revise` to update.
-    Save {
-        /// Flow name (kebab-case recommended, e.g. "github-auth-device-flow").
-        name: String,
-        #[arg(long)]
-        title: String,
-        #[arg(long, default_value = "")]
-        description: String,
-        /// Tag; repeat the flag once per tag (`--tag auth --tag github`).
-        #[arg(long = "tag")]
-        tags: Vec<String>,
-        #[arg(long)]
-        url: Option<String>,
-        /// Path to a JSON file containing the steps array.
-        #[arg(long)]
-        from_file: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Retrieve a flow by name (for the agent to follow deterministically).
-    Get {
-        name: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// List all saved flows, optionally filtered by tag.
-    List {
-        #[arg(long)]
-        tag: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Update an existing flow's metadata and/or steps. Bumps revision.
-    Revise {
-        name: String,
-        #[arg(long)]
-        title: Option<String>,
-        #[arg(long)]
-        description: Option<String>,
-        /// Path to a JSON file containing the new steps array.
-        #[arg(long)]
-        from_file: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Run a flow by driving agent-browser (the plain, deterministic
-    /// executor: refs resolved from fresh snapshots, conditions matched as
-    /// text). For a classify-decided replay with repair, use
-    /// `pixel ultraflow replay`.
-    Run {
-        name: String,
-        /// Variable substitution: `--var key=value`. Repeat per var.
-        #[arg(long = "var")]
-        vars: Vec<String>,
-        /// Shortcut for `--var google_account=<value>` (or `openai_account`
-        /// depending on the flow). Picks which account to use.
-        /// Accepts a full email address (e.g. user@example.com).
-        #[arg(long)]
-        account: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Emit ready-to-run agent-browser commands with variable substitution.
-    /// Pixel does NOT run agent-browser — it outputs the deterministic
-    /// command sequence for the agent to execute (or to hand to
-    /// `pixel flow run`).
-    Replay {
-        name: String,
-        /// Variable substitution: `--var key=value`. Repeat per var.
-        #[arg(long = "var")]
-        vars: Vec<String>,
-        /// Shortcut for `--var google_account=<value>` (or `openai_account`
-        /// depending on the flow). Picks which account to use.
-        /// Accepts a full email address (e.g. user@example.com).
-        #[arg(long)]
-        account: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Delete a flow by name.
-    Delete {
-        name: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Pretty-print the full flow document (human-readable).
-    Show {
-        name: String,
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-/// The variables a flow verb carries: `--var key=value` pairs, plus the
-/// `--account` shortcut resolved to whichever account variable the flow
-/// declares (`openai_account` for Codex, `google_account` for the rest).
-fn flow_vars(
-    name: &str,
-    vars: &[String],
-    account: &Option<String>,
-) -> Result<std::collections::HashMap<String, String>, String> {
-    let mut var_map = std::collections::HashMap::new();
-    for v in vars {
-        let (k, val) = v
-            .split_once('=')
-            .ok_or_else(|| format!("--var expects key=value, got '{v}'"))?;
-        var_map.insert(k.to_string(), val.to_string());
-    }
-    if let Some(acct) = account {
-        // Check which var the flow expects by loading it.
-        let var_name = pixel_flow::load(name)
-            .ok()
-            .and_then(|f| {
-                f.vars.iter().find_map(|v| {
-                    (v.name == "openai_account" || v.name == "google_account")
-                        .then(|| v.name.clone())
-                })
-            })
-            .unwrap_or_else(|| "google_account".to_string());
-        var_map.insert(var_name, acct.clone());
-    }
-    Ok(var_map)
 }
 
 /// Parse a 1-based inclusive line range "a,b" for `provenance --lines`.
@@ -3220,26 +2967,6 @@ fn make_extractor(kind: ExtractorKind, max_gram: usize) -> Box<dyn GramExtractor
     }
 }
 
-fn extractor_for_shard(shard: &Shard) -> Result<Box<dyn GramExtractor>, String> {
-    let id = shard.extractor_id();
-    if id == "trigram" {
-        return Ok(Box::new(TrigramExtractor));
-    }
-    if let Some(rest) = id.strip_prefix("sparse-crc32-")
-        && let Some((min, max)) = rest.split_once('-')
-        && let (Ok(min), Ok(max)) = (min.parse::<usize>(), max.parse::<usize>())
-    {
-        return Ok(Box::new(SparseGramExtractor::with_lengths(
-            Crc32Weigher,
-            min,
-            max,
-        )));
-    }
-    Err(format!(
-        "index built with unsupported extractor {id:?}; re-run `pixel build-index`"
-    ))
-}
-
 /// One stdout line for a `search` match: the compact object in `--json`
 /// mode (with `context` when the CLI enriched the match), else the
 /// `path:line:text` row — or the `--- path:line ---` block once the match
@@ -4581,9 +4308,10 @@ fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
 ///
 /// The auth flow's URL variable is masked for the same reason: its
 /// `code`/`state` query is a bearer token for one login, and
-/// `ai-cli-readify --authenticate` is not the only writer — a `pixel flow
-/// replay` typed by hand would land here too. The name stays readable, the
-/// value never does.
+/// `ai-cli-readify --authenticate` is not the only writer — any command
+/// given `--var auth_url=…` lands here. (`flow` itself is a plugin now and
+/// is never logged by the core.) The name stays readable, the value never
+/// does.
 fn logged_args(args: &[String]) -> String {
     let secret_from = args
         .windows(2)
@@ -4679,9 +4407,7 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "list-areas",
     "what-changed",
     "status",
-    "coverage",
     "audit",
-    "index-stats",
     "recall",
     "list-errors",
     "repo-state",
@@ -4693,7 +4419,6 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "dig-history",
     "who-wrote",
     "list-branches",
-    "token-savings",
 ];
 
 /// Whether the parsed invocation may be executed again by the relaunch:
@@ -5303,145 +5028,6 @@ fn run_command(
                 write_stdout(&execution_brief::pretty(&brief))
             }
         }
-        Command::PlanRollback {
-            problem,
-            path,
-            files,
-            depth,
-            apply,
-            merge,
-            stash_first,
-            allow_dirty,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            if let Some(oid) = apply {
-                let result = rescue_cmd::apply(
-                    &root,
-                    &oid,
-                    &files,
-                    &rescue_cmd::ApplyOptions {
-                        merge,
-                        stash_first,
-                        allow_dirty,
-                    },
-                )?;
-                if json {
-                    return print_data(&result, true);
-                }
-                if let Some(applied) = result["files"].as_array() {
-                    for f in applied {
-                        println!(
-                            "{}: {}{}",
-                            f["path"].as_str().unwrap_or("?"),
-                            f["action"].as_str().unwrap_or("?"),
-                            f["conflicts"]
-                                .as_i64()
-                                .filter(|c| *c > 0)
-                                .map(|c| format!(" ({c} conflict hunk(s) — resolve the markers)"))
-                                .unwrap_or_default(),
-                        );
-                    }
-                }
-                println!("{}", result["note"].as_str().unwrap_or(""));
-                return Ok(());
-            }
-            let problem = problem.ok_or_else(|| "missing problem description".to_string())?;
-            // Locate targets: explicit --file hints win; otherwise the sniper
-            // target engine points the problem at files (P0 slice).
-            let (target_paths, keywords) = if files.is_empty() {
-                let data = execute(
-                    &path,
-                    Request::Targets {
-                        task: problem.clone(),
-                        limit: Some(10),
-                        max_tier: None,
-                        precision: false,
-                        regions: false,
-                    },
-                    false,
-                )?;
-                let all = data["targets"].as_array().cloned().unwrap_or_default();
-                let mut paths: Vec<String> = all
-                    .iter()
-                    .filter(|t| t["tier"] == "P0")
-                    .filter_map(|t| t["path"].as_str().map(str::to_string))
-                    .take(5)
-                    .collect();
-                if paths.is_empty() {
-                    paths = all
-                        .iter()
-                        .filter_map(|t| t["path"].as_str().map(str::to_string))
-                        .take(5)
-                        .collect();
-                }
-                let kws: Vec<String> = data["keywords"]
-                    .as_array()
-                    .map(|ks| {
-                        ks.iter()
-                            .filter_map(|k| k.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (paths, kws)
-            } else {
-                let q = pixel_rank::tokenize_task(&problem).unwrap_or_default();
-                (files.clone(), q.keywords)
-            };
-            if target_paths.is_empty() {
-                return Err(
-                    "could not locate target files for this problem — pass --file <path>"
-                        .to_string(),
-                );
-            }
-            let plan = rescue_cmd::plan(&root, &problem, &target_paths, &keywords, depth)?;
-            if json {
-                return print_data(&plan, true);
-            }
-            for t in plan["targets"].as_array().cloned().unwrap_or_default() {
-                println!(
-                    "{}{}",
-                    t["path"].as_str().unwrap_or("?"),
-                    if t["dirty"].as_bool().unwrap_or(false) {
-                        "  [DIRTY — has uncommitted changes]"
-                    } else {
-                        ""
-                    }
-                );
-                for v in t["versions"].as_array().cloned().unwrap_or_default() {
-                    println!(
-                        "  {}  {}{}",
-                        v["short"].as_str().unwrap_or("?"),
-                        v["subject"].as_str().unwrap_or(""),
-                        if v["suspect"].as_bool().unwrap_or(false) {
-                            "  [SUSPECT]"
-                        } else {
-                            ""
-                        }
-                    );
-                }
-                if let Some(rec) = t["recommended"].as_object() {
-                    println!(
-                        "  → recommended: {} ({})",
-                        rec.get("oid").and_then(Value::as_str).unwrap_or("?"),
-                        rec.get("reason").and_then(Value::as_str).unwrap_or(""),
-                    );
-                }
-                println!();
-            }
-            for c in plan["decision"]["caveats"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-            {
-                eprintln!("⚠ {}", c.as_str().unwrap_or(""));
-            }
-            if let Some(cmd) = plan["decision"]["options"][0]["command"].as_str() {
-                println!("revert: {cmd}");
-            }
-            println!("fix forward: keep current code and fix the bug in place");
-            Ok(())
-        }
         #[cfg(feature = "readify")]
         Command::AiCliReadify {
             apply,
@@ -5962,9 +5548,6 @@ fn run_command(
             print_data(&v, json)?;
             Ok(())
         }
-        Command::Coverage { path, json } => {
-            coverage_cmd::run(coverage_cmd::CoverageOptions { path, json })
-        }
         Command::Audit { path, top, json } => {
             audit_cmd::run(audit_cmd::AuditOptions { path, top, json })
         }
@@ -5974,7 +5557,6 @@ fn run_command(
             delete,
             yes,
         } => space_cmd::run(path, json, delete, yes),
-        Command::Workspace { cmd } => workspace_cmd::run(cmd),
         Command::IndexPack {
             out,
             include_history,
@@ -6161,19 +5743,6 @@ fn run_command(
             }
             let root = discover_root(&path)?;
             pixel_daemon::evidence::serve(&root, std::io::stdin().lock(), std::io::stdout())
-        }
-        Command::IndexStats { path } => {
-            let path = discover_root(&path)?;
-            let shard = Shard::open(&shard_path(&path)).map_err(|e| e.to_string())?;
-            let _ = extractor_for_shard(&shard); // validates extractor id
-            write_stdout(&format!(
-                "files={} grams={} extractor={} commit={}\n",
-                shard.file_count(),
-                shard.gram_count(),
-                shard.extractor_id(),
-                shard.commit_oid().unwrap_or("-")
-            ))?;
-            Ok(())
         }
         Command::Daemon { cmd } => match cmd {
             DaemonCmd::Start { path, foreground } => {
@@ -6372,22 +5941,6 @@ fn run_command(
                 request_id,
             };
             let data = pixel_ops::branch::branch(&root, &opts)?;
-            print_data(&data, json)
-        }
-        Command::FastForward {
-            path,
-            expected_head,
-            target_oid,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::update::UpdateOptions {
-                expected_head,
-                target_oid,
-                request_id,
-            };
-            let data = pixel_ops::update::update(&root, &opts)?;
             print_data(&data, json)
         }
         Command::Fetch {
@@ -6918,35 +6471,6 @@ fn run_command(
             json,
             clear,
         } => run_log(&path, limit, errors_only, json, clear),
-        Command::TokenSavings {
-            path,
-            json,
-            since_hours,
-        } => run_savings(&path, json, since_hours),
-        Command::SquashBranch {
-            path,
-            onto,
-            message,
-            push,
-            remote,
-            expected_head,
-            allow_default_branch,
-            request_id,
-            json,
-        } => {
-            let root = discover_root(&path)?;
-            let opts = pixel_ops::rewrite::RewriteOptions {
-                onto,
-                message,
-                push,
-                remote,
-                request_id,
-                expected_head,
-                allow_default_branch,
-            };
-            let data = pixel_ops::rewrite::rewrite(&root, &opts)?;
-            print_data(&data, json)
-        }
         Command::WhoWrote {
             file,
             path,
@@ -7058,132 +6582,6 @@ fn run_command(
         }
         Command::Ultraflow(options) => ultraflow_cmd::run(options),
         Command::Plugin { cmd } => plugin_cmd::run(cmd),
-        Command::Flow { cmd } => {
-            use pixel_flow::FlowAction;
-            let json = match &cmd {
-                FlowCmd::Save { json, .. }
-                | FlowCmd::Get { json, .. }
-                | FlowCmd::List { json, .. }
-                | FlowCmd::Revise { json, .. }
-                | FlowCmd::Replay { json, .. }
-                | FlowCmd::Run { json, .. }
-                | FlowCmd::Delete { json, .. }
-                | FlowCmd::Show { json, .. } => *json,
-            };
-            let action = match cmd {
-                FlowCmd::Save {
-                    name,
-                    title,
-                    description,
-                    tags,
-                    url,
-                    from_file,
-                    json: _,
-                } => FlowAction::Save {
-                    name,
-                    title,
-                    description,
-                    tags,
-                    url,
-                    from_file: Some(from_file),
-                },
-                FlowCmd::Get { name, json: _ } => FlowAction::Get { name },
-                FlowCmd::List { tag, json: _ } => FlowAction::List { tag },
-                FlowCmd::Revise {
-                    name,
-                    title,
-                    description,
-                    from_file,
-                    json: _,
-                } => FlowAction::Revise {
-                    name,
-                    title,
-                    description,
-                    from_file,
-                },
-                FlowCmd::Replay {
-                    name,
-                    vars,
-                    account,
-                    json: _,
-                } => {
-                    let vars = flow_vars(&name, &vars, &account)?;
-                    FlowAction::Run {
-                        name,
-                        vars,
-                        dry_run: false,
-                    }
-                }
-                FlowCmd::Run {
-                    name,
-                    vars,
-                    account,
-                    json: _,
-                } => {
-                    let vars = flow_vars(&name, &vars, &account)?;
-                    FlowAction::Execute { name, vars }
-                }
-                FlowCmd::Delete { name, json: _ } => FlowAction::Delete { name },
-                FlowCmd::Show { name, json: _ } => FlowAction::Show { name },
-            };
-            let data = pixel_flow::flow(&action)?;
-            if matches!(action, FlowAction::Execute { .. })
-                && data.get("success").and_then(serde_json::Value::as_bool) != Some(true)
-            {
-                return Err(format!(
-                    "flow execution failed: {}",
-                    data.get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("flow did not complete successfully")
-                ));
-            }
-            if json {
-                return print_data(&data, true);
-            }
-            // For replay and show, the output field contains human-readable
-            // text — print it directly to stdout. For everything else, use
-            // the standard print_data path (JSON or pretty).
-            match &action {
-                FlowAction::Run { .. } | FlowAction::Show { .. } => {
-                    if let Some(output) = data.get("output").and_then(|v| v.as_str()) {
-                        println!("{output}");
-                        Ok(())
-                    } else {
-                        print_data(&data, true)
-                    }
-                }
-                FlowAction::Execute { .. } => {
-                    // Print the execution log to stderr, result summary to stdout.
-                    if let Some(log) = data.get("log").and_then(|v| v.as_str()) {
-                        eprintln!("{log}");
-                    }
-                    let success = data
-                        .get("success")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false);
-                    let steps = data
-                        .get("steps_executed")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
-                    let skipped = data
-                        .get("steps_skipped")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
-                    if success {
-                        println!("✓ Flow executed: {} steps, {} skipped", steps, skipped);
-                    } else if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
-                        println!("✗ Flow failed after {} steps: {}", steps, err);
-                    } else {
-                        println!(
-                            "~ Flow completed with warnings: {} steps, {} skipped",
-                            steps, skipped
-                        );
-                    }
-                    Ok(())
-                }
-                _ => print_data(&data, true),
-            }
-        }
     }
 }
 
@@ -7640,136 +7038,6 @@ fn run_log(
             println!("  {line}");
         }
     }
-    Ok(())
-}
-
-/// Per-command aggregate of `pixel savings`: invocations, pool chars,
-/// snippet chars.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct SavingsAgg {
-    count: u64,
-    pool: u64,
-    snippet: u64,
-}
-
-/// The events at or after `cutoff_ms` (all of them without a cutoff).
-fn savings_window(
-    events: &[pixel_actionlog::ActionEvent],
-    cutoff_ms: Option<i64>,
-) -> Vec<pixel_actionlog::ActionEvent> {
-    events
-        .iter()
-        .filter(|e| cutoff_ms.is_none_or(|c| e.ts_ms >= c))
-        .cloned()
-        .collect()
-}
-
-/// Pool and snippet chars per command, over the events that recorded both.
-fn savings_by_command(
-    events: &[pixel_actionlog::ActionEvent],
-) -> std::collections::BTreeMap<String, SavingsAgg> {
-    let mut by_cmd = std::collections::BTreeMap::<String, SavingsAgg>::new();
-    for e in events {
-        let (Some(snippet), Some(pool)) = (e.snippet_cap_chars, e.pool_chars) else {
-            continue; // not retrieval-shaped (or volumes not recorded)
-        };
-        let agg = by_cmd.entry(e.command.clone()).or_default();
-        agg.count += 1;
-        agg.pool = agg.pool.saturating_add(pool);
-        agg.snippet = agg.snippet.saturating_add(snippet);
-    }
-    by_cmd
-}
-
-/// The share of the pool the snippets did not return; 0 for an empty pool.
-fn savings_ratio(snippet: u64, pool: u64) -> f64 {
-    if pool > 0 {
-        1.0 - (snippet as f64 / pool as f64)
-    } else {
-        0.0
-    }
-}
-
-/// Preserve legacy snippet/pool reports, separately aggregate versioned
-/// invocation metrics. Old measurements are never silently reclassified as a workflow version.
-fn run_savings(path: &Path, json: bool, since_hours: Option<u64>) -> Result<(), String> {
-    let root = discover_root(path)?;
-    let log_path = pixel_actionlog::ActionLog::path_for_root(&root);
-    // Over-fetch; savings is a lightweight aggregate read.
-    let events = pixel_actionlog::tail(&log_path, 1_000_000)
-        .map_err(|e| format!("read {}: {e}", log_path.display()))?;
-    let cutoff_ms = since_hours.map(|h| {
-        pixel_actionlog::now_ms().saturating_sub(
-            i64::try_from(h)
-                .unwrap_or(i64::MAX)
-                .saturating_mul(3_600_000),
-        )
-    });
-    let filtered = savings_window(&events, cutoff_ms);
-    let workflow_metrics = pixel_actionlog::summarize_metrics(&filtered);
-    let by_cmd = savings_by_command(&filtered);
-
-    let tot_pool: u64 = by_cmd.values().map(|a| a.pool).sum();
-    let tot_snippet: u64 = by_cmd.values().map(|a| a.snippet).sum();
-    let overall = savings_ratio(tot_snippet, tot_pool);
-
-    if json {
-        let rows: Vec<serde_json::Value> = by_cmd
-            .iter()
-            .map(|(cmd, a)| {
-                let ratio = savings_ratio(a.snippet, a.pool);
-                serde_json::json!({
-                    "command": cmd,
-                    "calls": a.count,
-                    "pool_chars": a.pool,
-                    "snippet_chars": a.snippet,
-                    "savings": ratio,
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::json!({
-                "overall_savings": overall,
-                "total_pool_chars": tot_pool,
-                "total_snippet_chars": tot_snippet,
-                "by_command": rows,
-                "legacy_basis": "legacy snippet/pool byte comparison; not a workflow estimate",
-                "workflow_metrics": workflow_metrics,
-            })
-        );
-        return Ok(());
-    }
-
-    println!("workflow metrics (measured bytes/duration; versioned byte-based token estimates)");
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&workflow_metrics).map_err(|e| e.to_string())?
-    );
-    println!("legacy savings (snippet vs candidate-pool chars; not a workflow estimate)");
-    println!(
-        "{:<14} {:>5}  {:>12}  {:>14}  {:>7}",
-        "command", "calls", "pool_chars", "snippet_chars", "savings"
-    );
-    for (cmd, a) in &by_cmd {
-        let ratio = savings_ratio(a.snippet, a.pool);
-        println!(
-            "{:<14} {:>5}  {:>12}  {:>14}  {:>6.1}%",
-            cmd,
-            a.count,
-            a.pool,
-            a.snippet,
-            ratio * 100.0
-        );
-    }
-    println!(
-        "{:<14} {:>5}  {:>12}  {:>14}  {:>6.1}%",
-        "TOTAL",
-        by_cmd.values().map(|a| a.count).sum::<u64>(),
-        tot_pool,
-        tot_snippet,
-        overall * 100.0
-    );
     Ok(())
 }
 
@@ -8325,8 +7593,6 @@ mod tests {
             // the real flag is `--file`. That drift is exactly what the
             // runtime `rule.parity` doctor check flags.
             r#"pixel dig-history --phrase "<what you're looking for>" [--file <path>] [--json]"#,
-            r#"pixel plan-rollback "<what broke, in the user's words>" /path/to/repo [--json]"#,
-            r#"pixel plan-rollback --apply <oid> --file <path> /path/to/repo [--merge|--stash-first|--allow-dirty]"#,
             r#"pixel find-code "<phrase>" /path/to/repo [--json] [--limit N]"#,
             r#"pixel search-content "<pattern>" /path/to/repo --context 5 [--json] [--limit N]"#,
             r#"pixel sync-branch /path/to/repo [--strategy report|rebase-if-clean] [--push auto|never]"#,
@@ -8343,7 +7609,6 @@ mod tests {
             r#"pixel commit-and-push --files <f1> --files <f2> --message "<msg>" <remote> <refspec> /path/to/repo --request-id <id>"#,
             r#"pixel new-branch <name> /path/to/repo --request-id <id>"#,
             r#"pixel fetch <remote> /path/to/repo [--json]"#,
-            r#"pixel fast-forward /path/to/repo --expected-head <oid> --target-oid <oid> --request-id <id>"#,
             r#"pixel status /path/to/repo"#,
             r#"pixel build-index --history ."#,
             r#"pixel install"#,
@@ -8430,12 +7695,6 @@ mod tests {
                 "worker-start".into(),
                 "task-100-1".into(),
                 "candidate-1".into(),
-            ],
-            vec![
-                "pixel".to_string(),
-                "plan-rollback".into(),
-                "--limit".into(),
-                "3".into(),
             ],
         ] {
             assert!(
@@ -8968,6 +8227,9 @@ mod renamed_command_tests {
         // Every hidden alias the parser accepts must be a documented rename,
         // and every documented rename must parse: a variant renamed again
         // without updating the table fails here, not in a user's script.
+        // The renames of the commands that moved to plugins are the
+        // exception: no variant carries them, `plugin_cmd::dispatch` maps
+        // them to the plugin (`plugin_cli.rs` runs each one).
         let registered = on_big_stack(|| {
             let cli = Cli::command();
             let mut registered = BTreeSet::new();
@@ -8980,6 +8242,7 @@ mod renamed_command_tests {
         });
         let table: BTreeSet<(String, String)> = pixel_proto::commands::RENAMED_COMMANDS
             .iter()
+            .filter(|(_, new)| !pixel_plugin::MOVED_COMMANDS.contains(new))
             .map(|(old, new)| ((*old).to_string(), (*new).to_string()))
             .collect();
         assert_eq!(registered, table);
@@ -9023,14 +8286,7 @@ mod renamed_command_tests {
         for words in [
             &["pixel", "new-branch", "feat/x"][..],
             &["pixel", "commit", "--files", "a", "-m", "msg"][..],
-            &[
-                "pixel",
-                "fast-forward",
-                "--expected-head",
-                "a",
-                "--target-oid",
-                "b",
-            ][..],
+            &["pixel", "push", "origin", "feat/x"][..],
         ] {
             let text = rendered(words);
             assert!(text.contains("--request-id <REQUEST_ID>"), "{text}");
@@ -9329,10 +8585,6 @@ mod renamed_command_tests {
         assert_eq!(rename_note(&argv(&["pixel", "prepare-repo"]), true), None);
     }
 }
-
-#[cfg(test)]
-#[path = "main_tests/flow_vars_tests.rs"]
-mod flow_vars_tests;
 
 #[cfg(test)]
 #[path = "main_tests/render_data_tests.rs"]

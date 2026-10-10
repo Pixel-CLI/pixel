@@ -118,6 +118,10 @@ OpenCode has no Pixel plugin package published yet, so it is not in the table: `
 
 Any other agent: paste [`PIXEL.md`](https://github.com/Pixel-CLI/pixel/blob/main/PIXEL.md), the plain-Markdown protocol, into whatever instruction surface it offers. [Manual setup](https://github.com/Pixel-CLI/pixel/blob/main/docs/manual-setup.md) covers wiring the full prompt by hand.
 
+### Command plugins
+
+Eight commands are plugins, not part of the binary: `workspace`, `flow`, `plan-rollback`, `coverage`, `token-savings`, `index-stats`, `squash-branch` and `fast-forward`. Without one installed, `pixel <name>` prints how to get it and exits 2. Install the command (`pixel plugin add https://github.com/Pixel-CLI/pixel-plugins --name flow`) and its binary (`cargo install --git https://github.com/Pixel-CLI/pixel-plugins pixel-flow`); `pixel plugin list` shows what is installed. The old names (`rescue`, `stats`, `update`, `savings`, `rewrite`, `replay-flow`) run the plugin of the current name.
+
 ## The workflow
 
 Codex and Claude use native search and editing by default. Choose Pixel commands when their facts help with a specific task:
@@ -170,7 +174,7 @@ The most used commands, by job. `pixel --help` lists all of them, and [ARCHITECT
 | `git log --grep "x"` | `pixel search-history "x"` |
 | `git log --follow f` | `pixel file-history --file f` |
 | `git blame f` | `pixel who-wrote f` |
-| "it worked before" | `pixel plan-rollback "<problem>"`: flags the breaking commit, writes nothing without `--apply` |
+| "it worked before" | `pixel plan-rollback "<problem>"` (a [command plugin](#command-plugins)): flags the breaking commit, writes nothing without `--apply` |
 
 ### Git changes
 
@@ -208,7 +212,7 @@ Pixel does not cover every job. Use the native command for grep flags Pixel lack
 
 ## Token savings
 
-`pixel token-savings` reports, for the retrieval commands you ran, the fraction of the candidate pool the agent did not have to read. It measures what reached the agent's context, not your invoice. The replay of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark on Pixel's own repository is on the [benchmarks page](../benchmarks/#reading-code), with its method.
+`pixel token-savings` (a [command plugin](#command-plugins)) reports, for the retrieval commands you ran, the fraction of the candidate pool the agent did not have to read. It measures what reached the agent's context, not your invoice. The replay of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark on Pixel's own repository is on the [benchmarks page](../benchmarks/#reading-code), with its method.
 
 Each Pixel command also prints a `🟩 Pixel` line on stderr with its measured duration and two estimates: tokens saved against the native workflow, and time saved against sequential round trips. Both are estimates, and zero or negative values are valid. `--metrics=off` or `PIXEL_METRICS=0` turns the line off.
 

@@ -106,7 +106,6 @@ class Audit:
         assert (self.repo / ".pixel").is_dir(), "index did not create repository state"
         self.call("rebuild-graph", ["rebuild-graph", "--json"], contains="symbols", json_output=True)
         self.call("status", ["status", "--json"], json_output=True)
-        self.call("index-stats", ["index-stats"], contains="files")
         self.call("search-content", ["search-content", "login_user", "--no-daemon"], contains="login_user")
         self.call("search-like-rg", ["search-like-rg", "grep", "--", "-n", "login_user", "lib.rs"], contains="login_user")
         self.call("run-recipe", ["run-recipe", "login_user", "--no-daemon", "--json"], contains="login_user", json_output=True)
@@ -141,12 +140,10 @@ class Audit:
         self.call("search-history", ["search-history", "removed_manual_history", "--json"], contains="removed_manual_history", json_output=True)
         self.call("file-history", ["file-history", "--file", "removed.md", "--json"], contains="removed.md", json_output=True)
         self.call("dig-history", ["dig-history", "--phrase", "removed_manual_history", "--json"], contains="removed_manual_history", json_output=True)
-        self.call("plan-rollback", ["plan-rollback", "login", "--file", "lib.rs", "--json"], contains="lib.rs", json_output=True)
         self.call("who-wrote", ["who-wrote", "lib.rs", "--json"], contains="fixture", json_output=True)
         self.call("list-branches", ["list-branches", "--json"], contains="main", json_output=True)
         self.call("record-event", ["record-event", "read", "--file", "lib.rs", "--detail", "audit fixture", "--json"], json_output=True)
         self.call("action-log", ["action-log", "--json"], json_output="ndjson")
-        self.call("token-savings", ["token-savings", "--json"], json_output=True)
 
     def mutations(self):
         remote = self.root / "remote.git"
@@ -170,13 +167,9 @@ class Audit:
         assert self.git("--git-dir", str(remote), "rev-parse", "refs/heads/audit") == shipped
         self.call("fetch", ["fetch", "origin", "--json"], json_output=True)
         self.call("sync-branch", ["sync-branch", "--strategy", "report", "--push", "none", "--json"], json_output=True)
-        self.git("switch", "-c", "audit-update", self.tip)
-        self.call("fast-forward", ["fast-forward", "--expected-head", self.tip, "--target-oid", shipped, "--request-id", "audit-update", "--json"], json_output=True)
-        assert self.git("rev-parse", "HEAD") == shipped
-        before = (self.repo / "lib.rs").read_bytes()
-        self.call("squash-branch", ["squash-branch", "--onto", self.tip, "--expected-head", shipped, "--request-id", "audit-rewrite", "--json"], json_output=True)
-        assert (self.repo / "lib.rs").read_bytes() == before
-        assert self.git("rev-list", "--count", f"{self.tip}..HEAD") == "1"
+        # fast-forward, squash-branch (and index-stats, plan-rollback,
+        # token-savings) are plugins of Pixel-CLI/pixel-plugins: their
+        # boundaries are audited there, not through this binary.
 
     def environment(self):
         env_file = self.repo / ".env"
