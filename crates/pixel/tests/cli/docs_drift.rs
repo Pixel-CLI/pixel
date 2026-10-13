@@ -66,6 +66,16 @@ fn subcommands_in_help_order() -> Vec<String> {
     names
 }
 
+/// What a document or a printed hint may tell the reader to run: the
+/// subcommands of `pixel --help` and the commands that moved to plugins
+/// (`pixel-plugins`), which `pixel <name>` still answers to, by running the
+/// plugin or by printing how to install it.
+fn documentable_commands() -> BTreeSet<String> {
+    let mut known = subcommands();
+    known.extend(pixel_plugin::MOVED_COMMANDS.iter().map(ToString::to_string));
+    known
+}
+
 /// Every `` `pixel <name>`` reference in `text` (backticked only: prose such
 /// as "the pixel binary" is not a command).
 fn referenced_commands(text: &str) -> BTreeSet<String> {
@@ -212,12 +222,12 @@ fn every_documented_pixel_command_exists() {
     // prod binary's help omits it, while the docs keep documenting it.
     #[cfg(not(feature = "readify"))]
     let known = {
-        let mut known = subcommands();
+        let mut known = documentable_commands();
         known.insert("ai-cli-readify".to_string());
         known
     };
     #[cfg(feature = "readify")]
-    let known = subcommands();
+    let known = documentable_commands();
     let root = repo_root();
     let mut stale = Vec::new();
     let vs_pages = comparison_pages(&root);
@@ -336,7 +346,7 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 /// there still runs through its alias today and fails once the aliases go.
 #[test]
 fn every_command_production_code_prints_is_a_current_subcommand() {
-    let known = subcommands();
+    let known = documentable_commands();
     let crates = repo_root().join("crates");
     let mut sources = Vec::new();
     for krate in std::fs::read_dir(&crates).unwrap().map(Result::unwrap) {

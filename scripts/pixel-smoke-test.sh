@@ -113,7 +113,7 @@ done
 [ ! -e "$HOME/.local/share/pixel/agent-prompt.md" ] && ok "no agent-prompt.md deployed" || no "agent-prompt.md" "retired file remains at ~/.local/share/pixel (run: pixel install)"
 
 echo "=== 5. Mandatory workflows + release gate — help surface ==="
-for cmd in scope-task find-code plan-rollback sync-branch check-release self-update; do
+for cmd in scope-task find-code sync-branch check-release self-update; do
     "$PIXEL" "$cmd" --help 2>&1 | grep -F -q "Usage: $PIXEL_NAME $cmd" && ok "$cmd --help" || no "$cmd --help" "no usage line"
 done
 "$PIXEL" uninstall --help 2>&1 | grep -q -- "--wrappers-only" && ok "uninstall --wrappers-only documented" || no "uninstall --help" "no --wrappers-only"

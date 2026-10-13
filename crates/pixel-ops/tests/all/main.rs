@@ -6,9 +6,7 @@
 
 mod branches;
 mod crash_matrix;
-mod envfile;
 mod fail_closed;
-mod provenance;
 mod publish_property;
 mod reconcile_matrix;
 mod repo_identity;

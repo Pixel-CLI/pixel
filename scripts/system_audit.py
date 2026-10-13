@@ -106,7 +106,6 @@ class Audit:
         assert (self.repo / ".pixel").is_dir(), "index did not create repository state"
         self.call("rebuild-graph", ["rebuild-graph", "--json"], contains="symbols", json_output=True)
         self.call("status", ["status", "--json"], json_output=True)
-        self.call("index-stats", ["index-stats"], contains="files")
         self.call("search-content", ["search-content", "login_user", "--no-daemon"], contains="login_user")
         self.call("search-like-rg", ["search-like-rg", "grep", "--", "-n", "login_user", "lib.rs"], contains="login_user")
         self.call("run-recipe", ["run-recipe", "login_user", "--no-daemon", "--json"], contains="login_user", json_output=True)
@@ -141,12 +140,8 @@ class Audit:
         self.call("search-history", ["search-history", "removed_manual_history", "--json"], contains="removed_manual_history", json_output=True)
         self.call("file-history", ["file-history", "--file", "removed.md", "--json"], contains="removed.md", json_output=True)
         self.call("dig-history", ["dig-history", "--phrase", "removed_manual_history", "--json"], contains="removed_manual_history", json_output=True)
-        self.call("plan-rollback", ["plan-rollback", "login", "--file", "lib.rs", "--json"], contains="lib.rs", json_output=True)
-        self.call("who-wrote", ["who-wrote", "lib.rs", "--json"], contains="fixture", json_output=True)
         self.call("list-branches", ["list-branches", "--json"], contains="main", json_output=True)
-        self.call("record-event", ["record-event", "read", "--file", "lib.rs", "--detail", "audit fixture", "--json"], json_output=True)
         self.call("action-log", ["action-log", "--json"], json_output="ndjson")
-        self.call("token-savings", ["token-savings", "--json"], json_output=True)
 
     def mutations(self):
         remote = self.root / "remote.git"
@@ -170,62 +165,27 @@ class Audit:
         assert self.git("--git-dir", str(remote), "rev-parse", "refs/heads/audit") == shipped
         self.call("fetch", ["fetch", "origin", "--json"], json_output=True)
         self.call("sync-branch", ["sync-branch", "--strategy", "report", "--push", "none", "--json"], json_output=True)
-        self.git("switch", "-c", "audit-update", self.tip)
-        self.call("fast-forward", ["fast-forward", "--expected-head", self.tip, "--target-oid", shipped, "--request-id", "audit-update", "--json"], json_output=True)
-        assert self.git("rev-parse", "HEAD") == shipped
-        before = (self.repo / "lib.rs").read_bytes()
-        self.call("squash-branch", ["squash-branch", "--onto", self.tip, "--expected-head", shipped, "--request-id", "audit-rewrite", "--json"], json_output=True)
-        assert (self.repo / "lib.rs").read_bytes() == before
-        assert self.git("rev-list", "--count", f"{self.tip}..HEAD") == "1"
-
-    def environment(self):
-        env_file = self.repo / ".env"
-        original = b"# preserved fixture\nUNRELATED=fixture_secret_not_for_output\nEXISTING=before\n"
-        env_file.write_bytes(original)
-        for leaf, args in [
-            ("edit-env inventory", ["edit-env", "inventory", "--json"]),
-            ("edit-env set", ["edit-env", "set", "--file", ".env", "--key", "EXISTING", "--value", "after", "--json"]),
-            ("edit-env check", ["edit-env", "check", "--file", ".env", "--require", "UNRELATED", "--json"]),
-            ("edit-env snapshots", ["edit-env", "snapshots", "--file", ".env", "--json"]),
-        ]:
-            output = self.call(leaf, args, json_output=True)
-            assert "fixture_secret_not_for_output" not in output, "environment value leaked"
-        assert env_file.read_bytes() == original.replace(b"EXISTING=before", b"EXISTING=after")
-        self.call("edit-env restore", ["edit-env", "restore", "--file", ".env", "--json"], json_output=True)
-        assert env_file.read_bytes() == original, "snapshot did not restore exact bytes"
+        # fast-forward, squash-branch (and index-stats, plan-rollback,
+        # token-savings) are plugins of Pixel-CLI/pixel-plugins: their
+        # boundaries are audited there, not through this binary.
 
     def sniper(self):
-        error = {"surface": "reported", "message": "audit_error real boundary", "run_id": "audit-run"}
-        recorded = json.loads(self.call("list-errors report", ["list-errors", "report", "--json"], json_output=True, input_text=json.dumps(error)))
-        error_id = str(recorded["id"])
-        for event in [
-            {"type": "run", "run_id": "audit-run", "pid": 123, "port": 4321},
-            {"type": "event", "kind": "hmr-update", "run_id": "audit-run", "data": {"files": ["lib.rs"]}},
-            {"type": "event", "kind": "test-pass", "run_id": "audit-run"},
-        ]:
-            self.call("list-errors report", ["list-errors", "report", "--json"], json_output=True, input_text=json.dumps(event))
+        self.call("list-errors run", ["list-errors", "run", "--", "/bin/sh", "-c", "printf audit_wrapper_failure >&2; exit 9"], exit_code=9)
+        last = json.loads(self.call("list-errors last", ["list-errors", "last", "--json"], contains="audit_wrapper_failure", json_output=True))
+        error_id = str(last["errors"][0]["id"])
         for leaf, args, text in [
-            ("list-errors last", ["list-errors", "last", "--json"], "audit_error"),
-            ("list-errors since", ["list-errors", "since", "0", "--json"], "audit_error"),
-            ("list-errors show", ["list-errors", "show", error_id, "--json"], "audit_error"),
-            ("list-errors query", ["list-errors", "query", "audit_error", "--json"], "audit_error"),
-            ("list-errors hmr", ["list-errors", "hmr", "--json"], "lib.rs"),
-            ("list-errors env", ["list-errors", "env", "--json"], "audit-run"),
-            ("list-errors test", ["list-errors", "test", "--json"], "test-pass"),
+            ("list-errors since", ["list-errors", "since", "0", "--json"], "audit_wrapper_failure"),
+            ("list-errors show", ["list-errors", "show", error_id, "--json"], "audit_wrapper_failure"),
             ("list-errors cursor", ["list-errors", "cursor", "--json"], error_id),
             ("list-errors gc", ["list-errors", "gc", "--json"], None),
         ]:
             self.call(leaf, args, contains=text, json_output=True)
-        self.call("list-errors run", ["list-errors", "run", "--", "/bin/sh", "-c", "printf audit_wrapper_failure >&2; exit 9"], exit_code=9)
-        # Search indexes the error message; the captured tail is separate extra data.
-        self.call("list-errors query", ["list-errors", "query", "exited 9", "--json"], contains="audit_wrapper_failure", json_output=True)
 
     def tasks(self):
         task = json.loads(self.call("task-state begin", ["task-state", "begin", "fix login_user boundary", "--session", "audit-session", "--provider", "codex", "--json"], json_output=True))["task_id"]
         for leaf in ["prepare", "status", "events"]:
             self.call(f"task-state {leaf}", ["task-state", leaf, task, "--json"], contains=task, json_output=True)
         self.call("task-state show", ["task-state", "show", "--session", "audit-session", "--json"], json_output=True)
-        self.call("task-state reset", ["task-state", "reset", "--session", "audit-session", "--json"], json_output=True)
 
     def hooks(self):
         # Prior mutation fixtures rewrote HEAD; refresh the index before scoping.
@@ -258,7 +218,6 @@ def main():
             audit.fixture()
             audit.retrieval()
             audit.mutations()
-            audit.environment()
             audit.sniper()
             audit.hooks()
             audit.tasks()

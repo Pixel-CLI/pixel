@@ -15,6 +15,11 @@ and never appears in hook responses or `search-like-rg` output. Protocol op
 names and JSON fields did not change. `migrate` was removed: it now exits 0
 with a note and does nothing.
 
+Six of the new names (`flow`, `plan-rollback`, `squash-branch`,
+`token-savings`, `index-stats`, `fast-forward`) are plugins now: `rescue`,
+`rewrite`, `savings`, `stats`, `update` and `replay-flow` run the plugin of the
+new name when it is installed, and otherwise print how to install it (exit 2).
+
 | Old name | New name |
 | --- | --- |
 | `ask` | `search-meaning` |
@@ -23,7 +28,6 @@ with a note and does nothing.
 | `changes` | `what-changed` |
 | `clusters` | `list-areas` |
 | `context` | `pack-context` |
-| `env` | `edit-env` |
 | `excavate` | `dig-history` |
 | `graph` | `rebuild-graph` |
 | `history` | `commit-history` |
@@ -31,12 +35,10 @@ with a note and does nothing.
 | `hook` | `run-hook` |
 | `index` | `build-index` |
 | `inspect` | `repo-state` |
-| `journal` | `record-event` |
 | `lifecycle` | `file-history` |
 | `log` | `action-log` |
 | `map` | `repo-map` |
 | `processes` | `list-flows` |
-| `provenance` | `who-wrote` |
 | `publish` | `commit` |
 | `query` | `run-recipe` |
 | `ready` | `prepare-repo` |

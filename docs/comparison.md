@@ -51,8 +51,8 @@ Answers arrive ~2.8× faster (153 ms vs 432 ms p50) and 2.4× smaller (4.5 KB vs
 11.0 KB). ([measurement](bench/vs-gitnexus.md#blast-radius-impact--impact--29-cases-4-repos-3-languages))
 
 **Git history as a first-class surface.** `search-history`, `dig-history`,
-`file-history`, `who-wrote`, `plan-rollback` — "when did this break", "who owns
-this", "what was the last good version", from an indexed history. None of the
+`file-history`, `plan-rollback` — "when did this break", "what was the last
+good version", from an indexed history. None of the
 other three implements this.
 
 **Repo operations in the same tool.** `repo-state`, `review-changes`, `commit`,
@@ -178,14 +178,14 @@ does not restore the GitNexus block.
 | `query` | `semble search` | — | `pixel search-meaning` / `find-code` |
 | — | `semble find_related` | — | no equivalent |
 | — | — | `stacklit derive` | `pixel list-areas` / `repo-map` |
-| — | — | `get_dependencies`, `get_hot_files` | partial (`list-flows`, `who-wrote`) |
+| — | — | `get_dependencies`, `get_hot_files` | partial (`list-flows`) |
 | `analyze` | implicit on first search | `stacklit generate` | `pixel build-index` |
 | `cypher`, `pdg_query`, `explain` | — | — | no equivalent |
 | `route_map`, `shape_check`, `api_impact` | — | — | no equivalent |
 | `group_list`, `group_sync` | — | — | no equivalent |
-| — | — | — | `search-history`, `dig-history`, `file-history`, `who-wrote`, `plan-rollback` |
+| — | — | — | `search-history`, `dig-history`, `file-history`, `plan-rollback` |
 | — | — | — | `repo-state`, `review-changes`, `commit`, `push`, `sync-branch` |
-| — | — | — | `scope-task`, `plan`, `note`, `recall` |
+| — | — | — | `scope-task`, `plan`, `recall` |
 
 ## Verify this yourself
 

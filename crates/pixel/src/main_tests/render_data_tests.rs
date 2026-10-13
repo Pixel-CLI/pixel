@@ -284,36 +284,6 @@ fn log_keeps_the_last_n_entries_or_the_last_n_errors() {
 }
 
 #[test]
-fn savings_count_calls_within_the_window_and_rate_the_pool() {
-    let mut events = Vec::new();
-    for (ts, pool) in [(100, 1_000), (200, 400), (300, 600)] {
-        let mut e = logged("find-code", ts, false);
-        e.pool_chars = Some(pool);
-        e.snippet_cap_chars = Some(100);
-        events.push(e);
-    }
-    events.push(logged("status", 300, false));
-    let window = savings_window(&events, Some(200));
-    assert_eq!(
-        window.iter().map(|e| e.ts_ms).collect::<Vec<_>>(),
-        [200, 300, 300]
-    );
-    assert_eq!(savings_window(&events, None).len(), 4);
-    let by_cmd = savings_by_command(&window);
-    assert_eq!(by_cmd.len(), 1);
-    assert_eq!(
-        by_cmd["find-code"],
-        SavingsAgg {
-            count: 2,
-            pool: 1_000,
-            snippet: 200
-        }
-    );
-    assert!((savings_ratio(200, 1_000) - 0.8).abs() < 1e-9);
-    assert!(savings_ratio(5, 0).abs() < f64::EPSILON);
-}
-
-#[test]
 fn a_find_code_match_line_shows_a_route_handler_only_when_recorded() {
     let route = json!({
         "path": "config/routes.rb", "start_line": 3, "kind": "route", "score": 1.0,

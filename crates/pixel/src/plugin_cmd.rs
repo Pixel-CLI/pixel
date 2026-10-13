@@ -122,10 +122,11 @@ fn plan(host: &Host, name: &str, args: &[OsString], env: Env<'_>, moved: &[&str]
 /// this process on success, so only failures and hints return); `None`
 /// leaves clap's error to be shown.
 pub fn dispatch(error: &clap::Error, argv: &[String]) -> Option<i32> {
-    let (index, name) = pixel_plugin::command_word(argv)?;
-    if !names_the_unknown_command(error, name) {
+    let (index, typed) = pixel_plugin::command_word(argv)?;
+    if !names_the_unknown_command(error, typed) {
         return None;
     }
+    let name = moved_name(typed);
     let host = host().ok()?;
     let cwd = std::env::current_dir().ok()?;
     let root = crate::discover_root(Path::new(".")).unwrap_or(cwd);
@@ -140,12 +141,33 @@ pub fn dispatch(error: &clap::Error, argv: &[String]) -> Option<i32> {
     };
     let args = pixel_plugin::os_args(&argv[index + 1..]);
     match plan(&host, name, &args, env, &MOVED_COMMANDS) {
-        Plan::Run(process) => Some(exec(process, name)),
+        Plan::Run(process) => {
+            // The pre-rename spellings of a moved command (`rescue`, `stats`, …)
+            // keep teaching the new one, as they did when they were clap aliases.
+            // `--help` never printed it (clap answered before the note).
+            let help = argv[index + 1..].iter().any(|a| a == "--help" || a == "-h");
+            if !help && let Some(note) = crate::rename_note(argv, true) {
+                eprint!("{note}");
+            }
+            Some(exec(process, name))
+        }
         Plan::Stop(message, code) => {
             eprintln!("pixel: {message}");
             Some(code)
         }
         Plan::Unknown => None,
+    }
+}
+
+/// The moved command `word` stands for: itself when it is one, the command
+/// a pre-rename alias was renamed to (`rescue` is `plan-rollback`, `update`
+/// is `fast-forward`, …) when that is one, else `word` unchanged.
+fn moved_name(word: &str) -> &str {
+    let current = pixel_proto::commands::current_name(word);
+    if MOVED_COMMANDS.contains(&current) {
+        current
+    } else {
+        word
     }
 }
 
@@ -298,5 +320,25 @@ mod tests {
         );
         let usage = parse_error("pixel search-content");
         assert!(!names_the_unknown_command(&usage, "search-content"));
+    }
+
+    #[test]
+    fn a_moved_command_alias_resolves_to_its_plugin_and_nothing_else_does() {
+        for (alias, name) in [
+            ("rescue", "plan-rollback"),
+            ("stats", "index-stats"),
+            ("update", "fast-forward"),
+            ("savings", "token-savings"),
+            ("rewrite", "squash-branch"),
+            ("replay-flow", "flow"),
+        ] {
+            assert_eq!(moved_name(alias), name);
+        }
+        for name in MOVED_COMMANDS {
+            assert_eq!(moved_name(name), name, "a moved command is itself");
+        }
+        // A rename that points at a command still in the core is not ours.
+        assert_eq!(moved_name("ready"), "ready");
+        assert_eq!(moved_name("made-up-cmd"), "made-up-cmd");
     }
 }

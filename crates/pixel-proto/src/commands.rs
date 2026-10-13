@@ -22,7 +22,6 @@ pub const RENAMED_COMMANDS: &[(&str, &str)] = &[
     ("changes", "what-changed"),
     ("clusters", "list-areas"),
     ("context", "pack-context"),
-    ("env", "edit-env"),
     ("excavate", "dig-history"),
     ("graph", "rebuild-graph"),
     ("history", "commit-history"),
@@ -30,12 +29,10 @@ pub const RENAMED_COMMANDS: &[(&str, &str)] = &[
     ("hook", "run-hook"),
     ("index", "build-index"),
     ("inspect", "repo-state"),
-    ("journal", "record-event"),
     ("lifecycle", "file-history"),
     ("log", "action-log"),
     ("map", "repo-map"),
     ("processes", "list-flows"),
-    ("provenance", "who-wrote"),
     ("publish", "commit"),
     ("query", "run-recipe"),
     ("ready", "prepare-repo"),
@@ -121,7 +118,7 @@ mod tests {
 
     #[test]
     fn lookups_map_between_the_two_spellings() {
-        assert_eq!(RENAMED_COMMANDS.len(), 45);
+        assert_eq!(RENAMED_COMMANDS.len(), 42);
         assert_eq!(renamed_to("ready"), Some("prepare-repo"));
         assert_eq!(renamed_to("hook"), Some("run-hook"));
         assert_eq!(
