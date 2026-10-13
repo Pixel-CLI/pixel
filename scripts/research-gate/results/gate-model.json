@@ -1,0 +1,242 @@
+{
+  "name": "english compact gate, four features",
+  "scope": "English prompts only; French dev rows are scored for information and were not used",
+  "fit": {
+    "relevance_commit": "3b010008bd38365687633eaad413c28d6acfd2b4",
+    "tracked_files_clean": true,
+    "prompts_path": "eval/brief-gate/prompts.jsonl (PR #884, commit dd0f68d5)",
+    "prompts_sha256": "bc6ac042d64b1c96c56d1c83b4052853e0947a3dd7ca0c9b2b655e6f036276ad",
+    "fixture_sha": "85bede7d9a3c4e385e0a2045241a6466efbd8cbd",
+    "split": "dev",
+    "rows": {
+      "english": 78,
+      "scored_in_fit": 78,
+      "english_without_block": 0,
+      "on_topic": 43,
+      "off_topic": 35,
+      "french_info_only": 31
+    },
+    "estimator": "L2 logistic regression, C=0.3, class_weight balanced, features standardised on the fit rows, lbfgs",
+    "validation": "stratified 5-fold repeated 20 times (seed 7), and leave-one-source-out",
+    "commands": [
+      "git worktree add --detach <fixture> 85bede7d9a3c4e385e0a2045241a6466efbd8cbd && pixel prepare-repo <fixture>",
+      "PIXEL_WEIGHT_FIXTURE=<fixture> PIXEL_WEIGHT_PROMPTS=<prompts.jsonl> PIXEL_WEIGHT_SPLIT=dev PIXEL_WEIGHT_OUT=<dump.json> cargo test -p pixel-daemon dump_the_raw_material -- --ignored",
+      "python3 scripts/research-gate/gate_export.py <dump.json> <prompts.jsonl> scripts/research-gate/results/gate-model.json"
+    ]
+  },
+  "score": "intercept_raw + sum(raw_coefficient[i] * feature[i]); a log-odds under a balanced prior, not a calibrated probability",
+  "intercept_raw": -3.989180734547075,
+  "features": [
+    {
+      "name": "struct_per_mille",
+      "definition": "ln(1 + 1000 * structural_files / files_considered); 0 when files_considered is 0",
+      "sources": [
+        "facts.relevance.structural_files",
+        "facts.relevance.files_considered"
+      ],
+      "why": "how widely the prompt's rare words name files and symbols here, as a share of the repository (the same value at any size)",
+      "mean": 3.5333009663657275,
+      "std": 1.5459058145693108,
+      "coefficient": 0.9332117342382574,
+      "raw_coefficient": 0.6036666176187778
+    },
+    {
+      "name": "question",
+      "definition": "1 when the trimmed prompt ends with '?' or one of its first three words is in constants.question_words, else 0",
+      "sources": [
+        "the typed prompt, pasted blocks removed"
+      ],
+      "why": "the shape of a question about the code",
+      "mean": 0.5641025641025641,
+      "std": 0.4958738360465057,
+      "coefficient": 0.8134712573342008,
+      "raw_coefficient": 1.6404802959959135
+    },
+    {
+      "name": "ops_share",
+      "definition": "(number of keyword rows whose keyword is in constants.ops_vocab) / (number of keyword rows); 0 with no rows",
+      "sources": [
+        "facts.relevance.keywords[].keyword"
+      ],
+      "why": "git, release and CI operations are not code questions",
+      "mean": 0.0747914122914123,
+      "std": 0.18170659068612272,
+      "coefficient": -0.8926313531590143,
+      "raw_coefficient": -4.9124874875943965
+    },
+    {
+      "name": "struct_ratio",
+      "definition": "B / Q, 0 when Q <= 0. B = the largest cofiles[].weight among co-files with structural true (0 if none); Q = the sum over keywords[] of row_weight(row), row_weight = 0 when row.common, else with df = max(content_files, symbol_files, filename_files): 0 when df * 4 > files_considered, IDF_CAP (4.0) when df is 0, else min(ln((files_considered + 1) / (df + 1)), 4.0)",
+      "sources": [
+        "facts.relevance.cofiles[].weight",
+        "facts.relevance.cofiles[].structural",
+        "facts.relevance.keywords[]",
+        "facts.relevance.files_considered"
+      ],
+      "why": "how strongly the rare words, taken together, land on a file named for them",
+      "mean": 0.7691858148412557,
+      "std": 0.33075743669804064,
+      "coefficient": 0.5518632837448763,
+      "raw_coefficient": 1.6684833733570454
+    }
+  ],
+  "intercept_standardised": -0.014883883797238989,
+  "thresholds": {
+    "high": {
+      "score": 1.2977559735774065,
+      "target_fpr": 0.05,
+      "rule": "score > high: full brief",
+      "out_of_fold": {
+        "tpr": 0.6046511627906976,
+        "fpr": 0.02857142857142857,
+        "false_positives": 1,
+        "true_positives": 26
+      },
+      "leave_one_source_out": {
+        "tpr": 0.46511627906976744,
+        "fpr": 0.02857142857142857,
+        "false_positives": 1,
+        "true_positives": 20
+      }
+    },
+    "low": {
+      "score": 0.7311871601470513,
+      "target_fpr": 0.1,
+      "rule": "high >= score > low: compact 'possibly related' brief; score <= low: none",
+      "out_of_fold": {
+        "tpr": 0.7209302325581395,
+        "fpr": 0.08571428571428572,
+        "false_positives": 3,
+        "true_positives": 31
+      },
+      "leave_one_source_out": {
+        "tpr": 0.6976744186046512,
+        "fpr": 0.11428571428571428,
+        "false_positives": 4,
+        "true_positives": 30
+      }
+    },
+    "calibration": "the 5 % and 10 % points of the pooled out-of-fold scores of the off-topic English dev rows (35 of them: at most 1 and 3 above); a prompt is above a threshold when its score is strictly greater"
+  },
+  "metrics": {
+    "cv_mean": {
+      "auc": 0.9221262458471762,
+      "tpr5": 0.5883720930232557,
+      "tpr10": 0.705813953488372
+    },
+    "cv_sd": {
+      "auc": 0.005870536242155901,
+      "tpr5": 0.04101207462453116,
+      "tpr10": 0.022396930563090924
+    },
+    "leave_one_source_out": {
+      "auc": 0.9335548172757475,
+      "tpr5": 0.6511627906976745,
+      "tpr10": 0.6976744186046512
+    }
+  },
+  "constants": {
+    "ops_vocab": [
+      "amend",
+      "branch",
+      "branches",
+      "bump",
+      "changelog",
+      "checkout",
+      "cherry",
+      "ci",
+      "clone",
+      "commit",
+      "commits",
+      "conflict",
+      "deploy",
+      "fetch",
+      "force",
+      "git",
+      "main",
+      "master",
+      "merge",
+      "merged",
+      "origin",
+      "pipeline",
+      "pr",
+      "publish",
+      "pull",
+      "push",
+      "rebase",
+      "release",
+      "remote",
+      "revert",
+      "squash",
+      "stash",
+      "tag",
+      "tags",
+      "upstream",
+      "version",
+      "workflow"
+    ],
+    "question_words": [
+      "are",
+      "can",
+      "could",
+      "do",
+      "does",
+      "how",
+      "is",
+      "should",
+      "what",
+      "when",
+      "where",
+      "which",
+      "who",
+      "why",
+      "would"
+    ],
+    "idf_cap": 4.0,
+    "ubiquitous_inverse_share": 4,
+    "words": "lowercase runs of [a-z0-9_] in the prompt"
+  },
+  "edge_cases": [
+    "no block, or a block without keywords (tokenize_task found nothing to search): the prompt is off, no score",
+    "the typed prompt has its <pasted_content ...>...</pasted_content> blocks (and an unclosed trailing one) removed before 'question' is read; the block must be computed from the same text",
+    "the fit rows all had graph: true; without a graph structural_files counts path matches only and the model should not be used",
+    "row_weight is pixel_daemon::relevance::row_weight; 'common' is the row's flag"
+  ],
+  "information": {
+    "tiers_at_the_two_thresholds": {
+      "french_on_topic": {
+        "rows": 18,
+        "tiers": {
+          "high": 0,
+          "low": 0,
+          "off": 18
+        }
+      },
+      "french_off_topic": {
+        "rows": 13,
+        "tiers": {
+          "high": 0,
+          "low": 0,
+          "off": 13
+        }
+      },
+      "english_on_topic": {
+        "rows": 43,
+        "tiers": {
+          "high": 27,
+          "low": 4,
+          "off": 12
+        }
+      },
+      "english_off_topic": {
+        "rows": 35,
+        "tiers": {
+          "high": 1,
+          "low": 2,
+          "off": 32
+        }
+      }
+    },
+    "note": "the French rows are scored by the English model and were not used to fit or to calibrate"
+  }
+}
