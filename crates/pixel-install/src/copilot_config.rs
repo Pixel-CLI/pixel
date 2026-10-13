@@ -27,7 +27,7 @@ const MANAGED_KEY: &str = "_pixel_managed";
 const MANAGED_MARKER: &str = "pixel-managed-copilot-hooks-v1";
 
 /// The user-level hooks directory. `None` when Copilot has never run on
-/// this machine — `pixel install` must not fabricate config for a tool
+/// this machine — `pixel setup` must not fabricate config for a tool
 /// that is not installed.
 pub(crate) fn copilot_hooks_dir(home: &Path) -> Option<PathBuf> {
     home.join(".copilot").is_dir().then(|| home.join(HOOKS_DIR))
@@ -45,7 +45,7 @@ fn is_pixel_owned(content: &str) -> bool {
         == Some(MANAGED_MARKER)
 }
 
-/// `pixel uninstall` step: remove `~/.copilot/hooks/pixel.json` — but only
+/// `pixel setup --remove` step: remove `~/.copilot/hooks/pixel.json` — but only
 /// when Pixel wrote it. A foreign document is preserved and reported.
 pub(crate) fn remove_copilot_hooks(home: &Path, dry_run: bool) -> Result<InstallStep> {
     let path = home.join(HOOKS_DIR).join(HOOKS_FILE);
@@ -104,7 +104,7 @@ fn hooks_document(exe: &Path) -> serde_json::Value {
     })
 }
 
-/// `pixel install` step: deploy `~/.copilot/hooks/pixel.json`. Idempotent —
+/// `pixel setup` step: deploy `~/.copilot/hooks/pixel.json`. Idempotent —
 /// rewritten only when the content differs (e.g. the binary moved) and the
 /// existing document is one Pixel wrote.
 #[cfg(test)]

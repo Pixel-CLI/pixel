@@ -7,9 +7,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
+mod answer;
+pub(crate) mod autostart;
 pub(crate) mod chain;
+pub(crate) mod decision_log;
 mod evidence;
+mod gate_model;
 pub(crate) mod intent;
+pub(crate) mod relevance;
 pub(crate) mod routes;
 
 const MAX_CAPS: usize = 32;
@@ -367,6 +372,38 @@ pub(crate) fn typed_text(prompt: &str) -> String {
     typed
 }
 
+/// Whether a whitespace-free `word` is a link: `http://`, `https://` or
+/// `www.`, behind any opening punctuation.
+fn is_url(word: &str) -> bool {
+    let word = word
+        .trim_start_matches(['(', '<', '[', '"', '\'', '`'])
+        .to_ascii_lowercase();
+    word.starts_with("http://") || word.starts_with("https://") || word.starts_with("www.")
+}
+
+/// `text` without its links: the query string of a pasted URL
+/// (`?utm_source=x`) is not a code identifier. Whitespace is kept as typed.
+pub(crate) fn strip_urls(text: &str) -> String {
+    fn flush(word: &mut String, out: &mut String) {
+        if !is_url(word) {
+            out.push_str(word);
+        }
+        word.clear();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            flush(&mut word, &mut out);
+            out.push(ch);
+        } else {
+            word.push(ch);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
 /// The first `tag` that ends at a tag boundary (`>` or whitespace), so a
 /// longer name such as `</pasted_contentious>` is not taken for it.
 fn find_tag(haystack: &str, tag: &str) -> Option<usize> {
@@ -413,6 +450,21 @@ pub enum Signal {
     /// Only a code word or a code-question opener matched: close enough to
     /// ask, ambiguous enough that a model verdict can help.
     Weak,
+    /// Plain language with at least [`MIN_PROSE_KEYWORDS`] content words that
+    /// is not a repository operation. Whether it is about this repository is
+    /// not something its shape can say: the evidence decides.
+    Prose,
+}
+
+impl Signal {
+    /// The signal as the decision log spells it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Strong => "strong",
+            Self::Weak => "weak",
+            Self::Prose => "prose",
+        }
+    }
 }
 
 /// The typed text of `prompt` and how strongly it asks about code, or `None`
@@ -420,7 +472,7 @@ pub enum Signal {
 /// threads, discussion). Only the typed text counts; pasted blocks never
 /// steer the search.
 pub fn code_signal(prompt: &str) -> Option<(String, Signal)> {
-    let typed = typed_text(prompt);
+    let typed = strip_urls(&typed_text(prompt));
     let typed = typed.trim();
     if explicit_identifier(typed).is_some() || typed.split_whitespace().any(names_code) {
         return Some((typed.to_string(), Signal::Strong));
@@ -444,6 +496,184 @@ pub fn code_signal(prompt: &str) -> Option<(String, Signal)> {
 /// something else. The typed text of [`code_signal`], whichever strength.
 pub fn retrieval_request(prompt: &str) -> Option<String> {
     code_signal(prompt).map(|(typed, _)| typed)
+}
+
+/// Typed text longer than this many characters, over at least
+/// [`PASTE_TAIL_LINES`] lines, is a prompt with an untagged paste in front of
+/// the question: only its last paragraph is the task.
+const PASTE_TAIL_CHARS: usize = 600;
+const PASTE_TAIL_LINES: usize = 4;
+/// Content words a plain-language prompt needs before the relevance gate is
+/// asked: one word is a reply, not a task.
+const MIN_PROSE_KEYWORDS: usize = 2;
+
+/// Words that name a repository operation (git, a release, a deploy, CI)
+/// in English and French, folded to ASCII as the tokenizer folds them, plus
+/// the few function words a short prompt leaves behind when its language is
+/// not detected. A prompt made only of these asks to operate the repository,
+/// not to read it. Deliberately short: anything it misses meets the
+/// relevance gate, which decides on evidence.
+const OPS_WORDS: &[&str] = &[
+    "amend",
+    "back",
+    "bascule",
+    "basculer",
+    "branch",
+    "branche",
+    "branches",
+    "bump",
+    "checkout",
+    "cherry",
+    "ci",
+    "clone",
+    "commit",
+    "commite",
+    "commiter",
+    "commits",
+    "deploie",
+    "deployer",
+    "deploy",
+    "deployed",
+    "fetch",
+    "fusionne",
+    "fusionner",
+    "git",
+    "go",
+    "main",
+    "master",
+    "merge",
+    "merged",
+    "origin",
+    "pick",
+    "pousse",
+    "pousser",
+    "prod",
+    "production",
+    "publie",
+    "publier",
+    "publish",
+    "pull",
+    "push",
+    "rebase",
+    "release",
+    "releases",
+    "relance",
+    "relancer",
+    "remote",
+    "reset",
+    "revert",
+    "ship",
+    "squash",
+    "stash",
+    "staging",
+    "sur",
+    "switch",
+    "tag",
+    "tags",
+    "tire",
+    "upstream",
+    "version",
+    "versions",
+    "vers",
+];
+
+/// Words that acknowledge, greet or judge the last answer. They are content
+/// words to the tokenizer and carry nothing about the repository.
+const CHATTER_WORDS: &[&str] = &[
+    "awesome",
+    "bonjour",
+    "bravo",
+    "cheers",
+    "cool",
+    "excellent",
+    "fine",
+    "genial",
+    "good",
+    "great",
+    "hello",
+    "looks",
+    "merci",
+    "nice",
+    "okay",
+    "parfait",
+    "perfect",
+    "salut",
+    "sorry",
+    "super",
+    "sure",
+    "thank",
+    "thanks",
+    "thx",
+    "works",
+    "worked",
+    "yeah",
+    "yep",
+];
+
+/// The part of the typed text that is the task: the last paragraph when the
+/// text is long and spread over lines (an untagged paste before the
+/// question), the whole text otherwise. Text with no blank line is one
+/// paragraph and stays whole.
+pub(crate) fn brief_task(typed: &str) -> &str {
+    let typed = typed.trim();
+    if typed.chars().count() > PASTE_TAIL_CHARS && typed.lines().count() >= PASTE_TAIL_LINES {
+        last_paragraph(typed)
+    } else {
+        typed
+    }
+}
+
+/// The text after the last blank line.
+fn last_paragraph(text: &str) -> &str {
+    let mut start = 0;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        offset += line.len();
+        if line.trim().is_empty() {
+            start = offset;
+        }
+    }
+    text[start..].trim()
+}
+
+/// The content words of a task: the tokenizer's keywords without the
+/// acknowledgements and greetings of a conversation.
+fn brief_keywords(task: &str) -> Vec<String> {
+    pixel_rank::tokenize_task(task)
+        .map(|query| query.keywords)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|word| !CHATTER_WORDS.contains(&word.as_str()))
+        .collect()
+}
+
+/// A version number as the tokenizer leaves one: digits, or `v` and digits.
+fn is_version_shaped(word: &str) -> bool {
+    let digits = word.strip_prefix('v').unwrap_or(word);
+    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+}
+
+/// Every keyword names an operation or a version: git, a release, a deploy.
+fn is_ops_request(keywords: &[String]) -> bool {
+    keywords
+        .iter()
+        .all(|word| OPS_WORDS.contains(&word.as_str()) || is_version_shaped(word))
+}
+
+/// The task of `prompt` and why it may deserve a brief, or `None` when it
+/// cannot: [`code_signal`] first, and failing that [`Signal::Prose`] for
+/// plain language with at least [`MIN_PROSE_KEYWORDS`] content words that is
+/// not a repository operation. Only the typed text counts, and of a long
+/// text with a paste in front only its last paragraph.
+pub fn brief_signal(prompt: &str) -> Option<(String, Signal)> {
+    if let Some(found) = code_signal(prompt) {
+        return Some(found);
+    }
+    let typed = strip_urls(&typed_text(prompt));
+    let task = brief_task(&typed);
+    let keywords = brief_keywords(task);
+    (keywords.len() >= MIN_PROSE_KEYWORDS && !is_ops_request(&keywords))
+        .then(|| (task.to_string(), Signal::Prose))
 }
 
 fn route_command(subcommand: &str, args: &[String]) -> String {
@@ -1096,6 +1326,47 @@ mod tests {
     }
 
     #[test]
+    fn strip_urls_should_drop_links_and_keep_the_rest_as_typed() {
+        assert_eq!(
+            strip_urls("see https://x.io/a?utm_source=b now"),
+            "see  now"
+        );
+        assert_eq!(strip_urls("(www.example.com/p) and HTTP://Y.org"), " and ");
+        assert_eq!(strip_urls("a\n<https://x.io>\nb"), "a\n\nb");
+        assert_eq!(
+            strip_urls("fix handle_error in src/a.rs"),
+            "fix handle_error in src/a.rs"
+        );
+        assert_eq!(strip_urls("wwwhere is www_thing"), "wwwhere is www_thing");
+    }
+
+    #[test]
+    fn a_link_alone_should_never_be_taken_for_a_code_identifier() {
+        for prompt in [
+            "https://example.com/post?utm_source=newsletter&utm_medium=email",
+            "look at www.example.com/landing?utm_source=x",
+            "<https://github.com/org/repo/pull/12?utm_source=slack>",
+        ] {
+            assert_eq!(code_signal(prompt), None, "{prompt}");
+            assert_eq!(brief_signal(prompt), None, "{prompt}");
+        }
+    }
+
+    #[test]
+    fn a_link_beside_a_real_identifier_should_leave_the_identifier_alone_strong() {
+        let (typed, signal) =
+            code_signal("why does retry_loop fail, see https://x.io/p?utm_source=y").unwrap();
+        assert_eq!(signal, Signal::Strong);
+        assert!(
+            !typed.contains("utm_source") && !typed.contains("x.io"),
+            "{typed}"
+        );
+        assert!(typed.contains("retry_loop"), "{typed}");
+        // The link alone would have been the only code-shaped token.
+        assert!(code_signal("see https://x.io/p?utm_source=y").is_none());
+    }
+
+    #[test]
     fn typed_text_should_drop_every_pasted_block_and_an_unclosed_one() {
         assert_eq!(
             typed_text(
@@ -1184,5 +1455,185 @@ mod tests {
             pasted["retrieval_route"],
             retrieval_route("Why does the parser panic?")
         );
+    }
+
+    /// `pad` padded so the whole text is `len` characters over four lines,
+    /// the last two forming the final paragraph.
+    fn pasted_text(len: usize) -> String {
+        let rest = "\n\nwhy is the daemon slow\nafter startup";
+        format!("{}{rest}", "p".repeat(len - rest.len()))
+    }
+
+    #[test]
+    fn brief_task_should_keep_the_whole_text_up_to_the_character_and_line_bounds() {
+        let tail = "why is the daemon slow\nafter startup";
+        // Exactly 600 characters over four lines is not past the bound.
+        let at = pasted_text(PASTE_TAIL_CHARS);
+        assert_eq!(at.chars().count(), 600);
+        assert_eq!(at.lines().count(), 4);
+        assert_eq!(brief_task(&at), at);
+        // One more character and the paste in front is dropped.
+        let over = pasted_text(PASTE_TAIL_CHARS + 1);
+        assert_eq!(brief_task(&over), tail);
+        assert_eq!(brief_task(&pasted_text(1000)), tail);
+        // Three lines are one paragraph and a question: still whole.
+        let three = format!("{}\n\nwhy is it slow", "p".repeat(PASTE_TAIL_CHARS));
+        assert_eq!(three.lines().count(), PASTE_TAIL_LINES - 1);
+        assert_eq!(brief_task(&three), three);
+        // Four lines is the lower bound that counts.
+        let four = format!("{}\n\nwhy is\nit slow", "p".repeat(PASTE_TAIL_CHARS));
+        assert_eq!(four.lines().count(), PASTE_TAIL_LINES);
+        assert_eq!(brief_task(&four), "why is\nit slow");
+    }
+
+    #[test]
+    fn brief_task_should_trim_and_keep_a_long_text_without_a_blank_line_whole() {
+        let block = "log line\n".repeat(80);
+        assert_eq!(brief_task(&block), block.trim());
+        assert_eq!(brief_task("  short question  "), "short question");
+        assert_eq!(brief_task(""), "");
+    }
+
+    #[test]
+    fn last_paragraph_should_start_after_the_last_blank_line_of_any_kind() {
+        assert_eq!(last_paragraph("a\n\nb"), "b");
+        assert_eq!(last_paragraph("a\n   \nb\nc"), "b\nc");
+        assert_eq!(last_paragraph("a\r\n\r\nb"), "b");
+        assert_eq!(last_paragraph("a\n\nb\n\nc"), "c");
+        assert_eq!(last_paragraph("a\nb"), "a\nb");
+    }
+
+    #[test]
+    fn brief_signal_should_return_a_code_shaped_prompt_exactly_as_code_signal_does() {
+        for prompt in [
+            "Trace callers of `Foo::bar`",
+            "where is retrieval_route called",
+            "fix the failing test",
+            "How does task preparation refresh stale source evidence?",
+            "make TaskHookEvent cheaper",
+        ] {
+            assert!(code_signal(prompt).is_some(), "{prompt}");
+            assert_eq!(brief_signal(prompt), code_signal(prompt), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn brief_signal_should_take_plain_language_as_prose() {
+        for prompt in [
+            "the metrics line is missing when i run the pie harness",
+            "so it would be nice if search content could print how many files matched",
+            "comment on modifie un fichier point env sans perdre aucune cle",
+            "relance la ci qui a plante",
+            // Nothing in the shape says these are off topic: the evidence does.
+            "what's the weather going to be like tomorrow",
+            "quel temps fera-t-il demain",
+        ] {
+            assert_eq!(
+                brief_signal(prompt),
+                Some((prompt.to_string(), Signal::Prose)),
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn brief_signal_should_refuse_operations_acknowledgements_and_one_word_replies() {
+        for prompt in [
+            "commit and push",
+            "go to branch main and pull",
+            "release 0.6.2",
+            "pousse sur main",
+            "merge main and push it",
+            "deploy v12 to production",
+            "thanks, that works",
+            "thanks, that looks good",
+            "merci parfait",
+            "daemon",
+            "thanks daemon",
+            "",
+            "   ",
+        ] {
+            assert_eq!(brief_signal(prompt), None, "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn brief_signal_should_need_two_content_words_and_not_one() {
+        assert_eq!(MIN_PROSE_KEYWORDS, 2);
+        assert_eq!(
+            brief_signal("daemon startup").map(|found| found.1),
+            Some(Signal::Prose)
+        );
+        assert_eq!(brief_signal("daemon"), None);
+        assert_eq!(brief_signal("the daemon"), None);
+        // An operation word beside a content word is a content word's prompt.
+        assert_eq!(
+            brief_signal("push daemon startup").map(|found| found.1),
+            Some(Signal::Prose)
+        );
+    }
+
+    #[test]
+    fn brief_signal_should_ignore_a_pasted_block_and_judge_the_last_paragraph_of_a_paste() {
+        let tagged = "<pasted_content id=\"1\">\nthe daemon startup race watch\n</pasted_content id=\"1\">\nthanks";
+        assert_eq!(brief_signal(tagged), None);
+        // An untagged paste of a thread, then "thoughts?": one content word.
+        let untagged = format!(
+            "{}\n\nthoughts?",
+            "slack message about the daemon startup\n".repeat(30)
+        );
+        assert!(untagged.chars().count() > PASTE_TAIL_CHARS);
+        assert_eq!(brief_signal(&untagged), None);
+        // The same paste with a real question after it.
+        let asked = format!(
+            "{}\n\nwhy is the daemon slow after startup",
+            "chat line\n".repeat(80)
+        );
+        assert_eq!(
+            brief_signal(&asked),
+            Some((
+                "why is the daemon slow after startup".to_string(),
+                Signal::Prose
+            ))
+        );
+    }
+
+    #[test]
+    fn is_ops_request_should_need_every_keyword_to_be_an_operation_or_a_version() {
+        let words = |text: &[&str]| text.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(is_ops_request(&words(&["commit", "push"])));
+        assert!(is_ops_request(&words(&["release", "2026"])));
+        assert!(is_ops_request(&words(&["deploy", "v12"])));
+        assert!(is_ops_request(&words(&["pousse", "sur", "main"])));
+        assert!(!is_ops_request(&words(&["commit", "parser"])));
+        assert!(!is_ops_request(&words(&["parser", "push"])));
+        assert!(!is_ops_request(&words(&["parser", "daemon"])));
+    }
+
+    #[test]
+    fn is_version_shaped_should_take_digits_with_an_optional_leading_v() {
+        for word in ["2026", "v12", "7", "v7"] {
+            assert!(is_version_shaped(word), "{word}");
+        }
+        for word in ["", "v", "vx", "12a", "release", "v1x"] {
+            assert!(!is_version_shaped(word), "{word}");
+        }
+    }
+
+    #[test]
+    fn brief_keywords_should_drop_conversation_and_keep_content_words() {
+        assert_eq!(
+            brief_keywords("thanks, the daemon startup works"),
+            ["daemon", "startup"]
+        );
+        assert!(brief_keywords("merci, parfait").is_empty());
+        assert!(brief_keywords("").is_empty());
+    }
+
+    #[test]
+    fn signal_should_name_itself_for_the_decision_log() {
+        assert_eq!(Signal::Strong.as_str(), "strong");
+        assert_eq!(Signal::Weak.as_str(), "weak");
+        assert_eq!(Signal::Prose.as_str(), "prose");
     }
 }

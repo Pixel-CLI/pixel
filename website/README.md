@@ -56,7 +56,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   your repo, which lands on `#install`. Installation is four steps: step 1 (get the binary)
   full width, its one terminal switching between Script, Read it first,
   and Your agent (which says the agent runs steps 2 and 3), then
-  `pixel install`, the optional `pixel doctor .` and the optional
+  `pixel setup`, the optional `pixel doctor .` and the optional
   `pixel audit` (`#your-number`) in one row. Every command has its own
   Copy, never a chained one. On phones the variant tabs scroll on one line
   and commands wrap. The chapter ends on the proofs an evaluator checks
@@ -211,23 +211,23 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `layouts/_default/_markup/render-codeblock.html`.
   `crates/pixel/tests/cli/docs_drift.rs` reads it and `benchmarks.md`, so
   every `` `pixel <command>` `` quoted in either must exist. Keep it in step with `README.md` when install or
-  wiring changes. Its "What pixel install wires" table is the
+  wiring changes. Its "What pixel setup wires" table is the
   `agents-install` shortcode, from `data/agents.toml`.
 - `data/agents.toml`: the agents the site names, in the home's order, and
   what Pixel does for each: `wiring` (`install`, `plugin`, `rules` or `none`), the
-  files `pixel install` and `pixel install --repo` write, the plugin command
+  files `pixel setup` and `pixel setup --repo` write, the plugin command
   or rules file, the `pixel doctor` checks. The hero, the Compatibility
   grid, the `/docs/` wiring table and the `/for/` section all read it.
-  `crates/pixel/tests/cli/docs_drift.rs` runs a real `pixel install` and
-  `pixel install --repo` into empty directories and fails when the files
+  `crates/pixel/tests/cli/docs_drift.rs` runs a real `pixel setup` and
+  `pixel setup --repo` into empty directories and fails when the files
   they write differ from the lists, when a check id is not one of
   `pixel doctor`'s or an agent check of the doctor belongs to no agent, and
   when `static/llms.txt` misses an agent page: a pull request that changes
-  what `pixel install` writes updates this file in the same commit.
+  what `pixel setup` writes updates this file in the same commit.
 - `content/for/`: one page per agent (`/for/<slug>/`), each a front matter
   naming its `agent` and the `{{% agent-setup %}}` shortcode
   (`layouts/shortcodes/agent-setup.html`), which writes the setup sections
-  from the data: install, what `pixel install` writes, the plugin or rules
+  from the data: install, what `pixel setup` writes, the plugin or rules
   file, the per-repository cleanup, the check, the removal.
   `layouts/for/single.html` adds the breadcrumb (visible and as
   `BreadcrumbList` JSON-LD) and the other agents; `layouts/for/list.html`

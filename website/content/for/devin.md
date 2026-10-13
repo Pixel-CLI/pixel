@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Devin"
-description: "Pixel reaches Devin as an optional plugin; pixel install writes nothing for it and removes the hooks earlier releases wrote: how to add the plugin, check it and remove it."
+description: "Pixel reaches Devin as an optional plugin; pixel setup writes nothing for it and removes the hooks earlier releases wrote: how to add the plugin, check it and remove it."
 agent: "devin"
 ---
 

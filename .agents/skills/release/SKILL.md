@@ -176,7 +176,7 @@ convention in this repo:
 - **minor** (`0.2.x` → `0.3.0`): something a user of the previous minor must
   act on — a removed command or flag with no alias, a changed JSON output or
   protocol field, a changed on-disk format under `.pixel/`, an install layout
-  that `pixel install` does not migrate.
+  that `pixel setup` does not migrate.
 - `1.0.0` also removes the hidden pre-rename aliases (0.2.5's `Changed`
   entry promises it); do not cut it by accident.
 

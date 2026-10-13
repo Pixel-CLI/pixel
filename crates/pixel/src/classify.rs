@@ -788,7 +788,7 @@ pub struct ClassifyOptions {
     pub remote_model: Option<String>,
     /// Decision engine override: `remote` (an OpenAI-compatible chat
     /// completion) or `ollaya` (a local Ollaya server's native typed-choice
-    /// readout). Without a flag the engine comes from `pixel install`'s
+    /// readout). Without a flag the engine comes from `pixel setup`'s
     /// stored preference, probing the local server and falling back to
     /// remote.
     #[arg(long, value_enum)]

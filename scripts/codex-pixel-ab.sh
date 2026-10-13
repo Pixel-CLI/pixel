@@ -142,7 +142,7 @@ printf '#!/usr/bin/env bash\nprintf "pixel: command not available in the raw con
 chmod +x "$RAW_BIN/pixel"
 
 if [ "$EFFECTIVE_PIXEL_POLICY" != off ]; then
-  "$PIXEL_BIN" install --repo "$PIXEL_DIR" >/dev/null
+  "$PIXEL_BIN" setup --repo "$PIXEL_DIR" >/dev/null
   if [ "$EFFECTIVE_PIXEL_POLICY" = enforce ]; then
     "$PIXEL_BIN" build-index "$PIXEL_DIR" >/dev/null
   fi

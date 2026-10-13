@@ -24,7 +24,7 @@
 #
 # Prerequisites:
 #   - claude CLI installed and authenticated
-#   - pixel installed (`pixel install` run once: the pixel arm is given the
+#   - pixel installed (`pixel setup` run once: the pixel arm is given the
 #     deployed agent prompt the way the `claude` shell wrapper does); PIXEL_BIN
 #     and AGENT_PROMPT override
 #   - repo indexed (done here on first run)
@@ -62,7 +62,7 @@ if [ -z "$PIXEL_BIN" ] || [ ! -x "$PIXEL_BIN" ]; then
   exit 1
 fi
 # The pixel arm must receive what the `claude` shell wrapper written by
-# `pixel install` injects (this script runs `claude` by path, so a fish/zsh
+# `pixel setup` injects (this script runs `claude` by path, so a fish/zsh
 # function never applies): the deployed agent prompt, or the bundled asset
 # when nothing is installed.
 AGENT_PROMPT="${AGENT_PROMPT:-$HOME/.local/share/pixel/agent-prompt.md}"
@@ -70,7 +70,7 @@ AGENT_PROMPT="${AGENT_PROMPT:-$HOME/.local/share/pixel/agent-prompt.md}"
 SUBAGENT_PROMPT="${SUBAGENT_PROMPT:-$HOME/.local/share/pixel/subagent-prompt.md}"
 [ -s "$SUBAGENT_PROMPT" ] || SUBAGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-subagent-prompt.md"
 if [ ! -s "$AGENT_PROMPT" ]; then
-  echo "ERROR: agent prompt not found (run \`pixel install\`, or set AGENT_PROMPT)" >&2
+  echo "ERROR: agent prompt not found (run \`pixel setup\`, or set AGENT_PROMPT)" >&2
   exit 1
 fi
 

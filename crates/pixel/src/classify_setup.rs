@@ -3,7 +3,7 @@
 
 //! The classify-engine install step and configuration.
 //!
-//! `pixel install` proposes the classify engine — local (the Ollaya decision
+//! `pixel setup` proposes the classify engine — local (the Ollaya decision
 //! daemon on this Mac), remote (a hosted LLM behind a key), Jev
 //! (TypeSafe's hosted decision model behind `TYPESAFE_API_KEY`), or Clef-flash
 //! (Cloudflare's decision model, through Ollama or a Cloudflare API token) — with each
@@ -271,7 +271,7 @@ where
     writeln!(stdout, "Classify engine:").map_err(|e| e.to_string())?;
     if !tty {
         print_menu(stdout)?;
-        writeln!(stdout, "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare>` or re-run `pixel install` in a terminal")
+        writeln!(stdout, "classify engine: not configured (non-interactive install) — run `pixel config classify-engine <local|remote|jev|clef-ollama|clef-cloudflare>` or re-run `pixel setup` in a terminal")
             .map_err(|e| e.to_string())?;
         return Ok(());
     }
@@ -313,7 +313,7 @@ where
 /// harness-agnostic, not pi-only; [`pixel_install::config::SKILL_ROOTS`] is
 /// the single list of roots — and, when pi is set up, Pixel's classify Pi
 /// package with its `packages` entry. `.claude` is a target unconditionally
-/// (`pixel install` writes its hooks there before this step runs); the rest
+/// (`pixel setup` writes its hooks there before this step runs); the rest
 /// join only when configured.
 struct ClassifyHelpers {
     skills: Vec<PathBuf>,

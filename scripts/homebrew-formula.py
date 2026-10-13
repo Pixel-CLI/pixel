@@ -157,15 +157,15 @@ def formula(tag: str, base: str, digests: dict, bottles: dict) -> str:
 
   # An upgrade replaces the binary only; the agent wiring it
   # deployed lives in the user's home and is refreshed by
-  # running pixel install.
+  # running pixel setup.
   def caveats
     <<~EOS
       Homebrew upgrades replace the binary only. The agent prompt, shell
-      wrapper and per-agent config keys are written by "pixel install"
+      wrapper and per-agent config keys are written by "pixel setup"
       into your home, not by Homebrew, so they keep the old release's
       text until refreshed:
 
-        pixel install
+        pixel setup
         pixel doctor .
 
       "pixel doctor" reports missing or stale wiring.

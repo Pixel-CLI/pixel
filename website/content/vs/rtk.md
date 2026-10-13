@@ -10,7 +10,7 @@ RTK sits between the agent and its shell: `cargo build`, `git status` or a test 
 
 ## Running both
 
-Install RTK first, then run `pixel install`. In Claude Code, only one `PreToolUse` hook should rewrite a shell call, so Pixel adopts RTK's exact `rtk hook claude` registration: its guard rewrites the searches it knows (`grep`, `rg`) and hands every other call to RTK. The registration it adopted is saved in `.claude/pixel-rtk-hooks.json` and goes back into your settings when you uninstall Pixel. `pixel doctor` reports a backup left without a guard to use it.
+Install RTK first, then run `pixel setup`. In Claude Code, only one `PreToolUse` hook should rewrite a shell call, so Pixel adopts RTK's exact `rtk hook claude` registration: its guard rewrites the searches it knows (`grep`, `rg`) and hands every other call to RTK. The registration it adopted is saved in `.claude/pixel-rtk-hooks.json` and goes back into your settings when you uninstall Pixel. `pixel doctor` reports a backup left without a guard to use it.
 
 ## Choosing
 

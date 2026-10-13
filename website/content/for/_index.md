@@ -1,6 +1,6 @@
 ---
 title: "For your agent"
-description: "How Pixel reaches each coding agent: what pixel install writes and where, the plugin or rules file where it writes nothing, how to check it and how to remove it."
+description: "How Pixel reaches each coding agent: what pixel setup writes and where, the plugin or rules file where it writes nothing, how to check it and how to remove it."
 ---
 
 <!-- The agents and their wiring come from data/agents.toml (layouts/for/list.html). crates/pixel/tests/cli/docs_drift.rs reads every page of this section, so every `pixel <command>` quoted here must exist. -->

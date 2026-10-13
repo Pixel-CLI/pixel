@@ -1,0 +1,1 @@
+**cli:** `pixel install` is now `pixel setup` and `pixel uninstall` is now `pixel setup --remove` (same flags: `--repo`, `--shell`, `--json`, `--dry-run`, `--binary-path`, `--wrappers-only`), with no alias for the old spellings. `pixel doctor` fix lines, the deployed notes and the docs name the new commands; `pixel install` and `pixel uninstall` now manage plugins.

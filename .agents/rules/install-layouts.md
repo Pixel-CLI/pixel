@@ -9,7 +9,7 @@ Loaded when `pixel-install` is in play. `install`, `uninstall` and `doctor`
 run on machines whose layout the author did not choose; test the layouts
 below beside the ordinary one.
 
-- **The repository can be the home directory.** `pixel install --repo "$HOME"`
+- **The repository can be the home directory.** `pixel setup --repo "$HOME"`
   makes the repo's `.claude/settings.json` the global one and puts the
   repo-local and global backups in one place. A repo-scoped install write
   that resolves to a global file is refused (compare with `same_file` before
@@ -23,7 +23,7 @@ below beside the ordinary one.
   project settings without a Pixel install are reported as absent, never as
   red: `doctor` judges what Pixel wrote.
 - **Quote every path in a command the user is told to paste.** A hint like
-  `rm <backup>` or `pixel install --repo <root>` goes through
+  `rm <backup>` or `pixel setup --repo <root>` goes through
   `routing::quoted_executable`, and its test uses a path with a space and an
   apostrophe. `root.display()` in a suggested command names the wrong file
   the first time a path has a space in it.
@@ -32,7 +32,7 @@ below beside the ordinary one.
   a `~/.claude/` file that every other repository reads.
 - **Claude hooks also run under Devin.** Devin CLI loads the hooks of
   `.claude/settings*.json` by default (`read_config_from.claude`), so every
-  `--provider claude` entry `pixel install` writes also fires inside Devin,
+  `--provider claude` entry `pixel setup` writes also fires inside Devin,
   with `DEVIN_PROJECT_DIR` set; an exit 2 blocks the Devin prompt too. A
   Claude-only side effect checks that variable (verified 2026-09: the
   handoff removed in #397 blocked `Add the "story" feature` in both hosts).

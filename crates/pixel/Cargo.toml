@@ -44,6 +44,7 @@ pixel-flow = { path = "../pixel-flow" }
 pixel-ultraflow = { path = "../pixel-ultraflow" }
 pixel-release = { path = "../pixel-release" }
 pixel-task = { path = "../pixel-task" }
+pixel-plugin = { path = "../pixel-plugin" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 fs2 = "0.4.3"
 clap = { version = "4.5", features = ["derive"] }
@@ -51,12 +52,12 @@ serde = "1"
 serde_json = "1"
 serde-saphyr = "1.3"
 yaml-edit = { version = "0.3.2", default-features = false }
-shell-words = "1.1"
 regex = "1.13"
 ignore = "0.4.33"
 libc = "0.2"
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 tar = "0.4"
+sha2 = { workspace = true }
 xxhash-rust = { workspace = true }
 # Runtime now, not only a test dependency: the ai-cli-readify rewrite edits
 # `~/.codex/config.toml` in place and has to preserve every key the user

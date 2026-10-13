@@ -1,0 +1,33 @@
+{"id": "bg-006", "answer_spans": [{"path": "crates/pixel-daemon/src/daemon.rs", "symbol": "Service::watch_ready / watch_ready", "start_line": 276, "end_line": 309}, {"path": "crates/pixel-daemon/src/daemon.rs", "symbol": "Service::watch_ready / watch_ready", "start_line": 570, "end_line": 583}], "confidence": "high"}
+{"id": "bg-014", "answer_spans": [{"path": "crates/pixel/src/execution_brief/chain.rs", "symbol": "BRIEF_WINDOW", "start_line": 40, "end_line": 42}], "confidence": "high"}
+{"id": "bg-015", "answer_spans": [{"path": "crates/pixel-install/src/repo_git.rs", "symbol": "exclude_locally", "start_line": 4, "end_line": 12}, {"path": "crates/pixel-install/src/repo_git.rs", "symbol": "exclude_locally", "start_line": 37, "end_line": 78}], "confidence": "high"}
+{"id": "bg-018", "answer_spans": [{"path": "crates/pixel-task/src/policy.rs", "symbol": "policy::decide", "start_line": 8, "end_line": 72}], "confidence": "high"}
+{"id": "bg-030", "answer_spans": [{"path": "crates/pixel-git/src/redact.rs", "symbol": "redact", "start_line": 16, "end_line": 37}], "confidence": "high"}
+{"id": "bg-036", "answer_spans": [{"path": "crates/pixel/src/config_cmd.rs", "symbol": "config_cmd module doc (metrics footer on stderr)", "start_line": 4, "end_line": 10}], "confidence": "medium"}
+{"id": "bg-037", "answer_spans": [{"path": "Cargo.toml", "symbol": "rust-version", "start_line": 12, "end_line": 12}, {"path": "CONTRIBUTING.md", "symbol": "rust-version", "start_line": 49, "end_line": 49}], "confidence": "high"}
+{"id": "bg-073", "answer_spans": [{"path": "crates/pixel/src/execution_brief.rs", "symbol": "typed_text", "start_line": 347, "end_line": 368}], "confidence": "high"}
+{"id": "bg-074", "answer_spans": [{"path": "crates/pixel/src/execution_brief.rs", "symbol": "code_signal", "start_line": 418, "end_line": 441}], "confidence": "medium"}
+{"id": "bg-094", "answer_spans": [{"path": "crates/pixel/src/main.rs", "symbol": "empty_exact_page_is_complete", "start_line": 3676, "end_line": 3688}], "confidence": "high"}
+{"id": "bg-095", "answer_spans": [{"path": "crates/pixel/src/execution_brief/chain.rs", "symbol": "BRIEF_ENV", "start_line": 38, "end_line": 39}], "confidence": "medium"}
+{"id": "bg-104", "answer_spans": [{"path": "crates/pixel-daemon/src/daemon.rs", "symbol": "IDLE_TIMEOUT uses", "start_line": 29, "end_line": 29}, {"path": "crates/pixel-daemon/src/daemon.rs", "symbol": "IDLE_TIMEOUT uses", "start_line": 483, "end_line": 485}, {"path": "crates/pixel-daemon/src/daemon.rs", "symbol": "IDLE_TIMEOUT uses", "start_line": 550, "end_line": 553}], "confidence": "medium"}
+{"id": "bg-119", "answer_spans": [{"path": "crates/pixel-graph/src/build.rs", "symbol": "EXTRACTOR_VERSION", "start_line": 96, "end_line": 100}, {"path": "crates/pixel-graph/src/build.rs", "symbol": "EXTRACTOR_VERSION", "start_line": 167, "end_line": 167}], "confidence": "high"}
+{"id": "bg-122", "answer_spans": [{"path": "crates/pixel-daemon/src/api.rs", "symbol": "PROTOCOL_VERSION", "start_line": 35, "end_line": 53}], "confidence": "high"}
+{"id": "bg-127", "answer_spans": [{"path": "crates/pixel/src/decide_infisical.rs", "symbol": "decide_infisical module doc", "start_line": 4, "end_line": 14}], "confidence": "medium"}
+{"id": "bg-128", "answer_spans": [{"path": "crates/pixel-proto/src/envelope.rs", "symbol": "Envelope", "start_line": 30, "end_line": 49}], "confidence": "high"}
+{"id": "bg-146", "answer_spans": [{"path": "crates/pixel-index/src/index.rs", "symbol": "credential_path", "start_line": 66, "end_line": 119}], "confidence": "high"}
+{"id": "bg-181", "answer_spans": [{"path": "crates/pixel-git/src/ref_guard.rs", "symbol": "validate_ref", "start_line": 11, "end_line": 44}], "confidence": "high"}
+{"id": "bg-211", "answer_spans": [{"path": "crates/pixel-install/src/config.rs", "symbol": "merge_hook_entry", "start_line": 533, "end_line": 564}], "confidence": "high"}
+{"id": "bg-070", "answer_spans": [{"path": "crates/pixel-recall/src/hybrid.rs", "symbol": "hybrid::fuse", "start_line": 4, "end_line": 9}, {"path": "crates/pixel-recall/src/hybrid.rs", "symbol": "hybrid::fuse", "start_line": 17, "end_line": 29}], "confidence": "high"}
+{"id": "bg-203", "answer_spans": [{"path": "crates/pixel/src/prompt_continuation.rs", "symbol": "is_trivial_continuation", "start_line": 8, "end_line": 70}], "confidence": "high"}
+{"id": "bg-136", "answer_spans": [{"path": "crates/pixel-flow/src/store.rs", "symbol": "flow_dir", "start_line": 13, "end_line": 23}], "confidence": "high"}
+{"id": "bg-209", "answer_spans": [{"path": "crates/pixel/src/main.rs", "symbol": "logged_args", "start_line": 4568, "end_line": 4607}], "confidence": "high"}
+{"id": "bg-093", "answer_spans": [{"path": "crates/pixel-graph/src/impact.rs", "symbol": "risk_level/risk_label", "start_line": 152, "end_line": 164}, {"path": "crates/pixel-graph/src/impact.rs", "symbol": "risk_level/risk_label", "start_line": 166, "end_line": 177}], "confidence": "medium"}
+{"id": "bg-120", "answer_spans": [{"path": "crates/pixel-rank/src/rerank.rs", "symbol": "rerank", "start_line": 54, "end_line": 99}], "confidence": "medium"}
+{"id": "bg-086", "answer_spans": [{"path": "crates/pixel-recall/src/code_chunks.rs", "symbol": "code_chunks", "start_line": 40, "end_line": 59}], "confidence": "medium"}
+{"id": "bg-178", "answer_spans": [{"path": "crates/pixel-ops/src/envfile.rs", "symbol": "envfile module doc", "start_line": 4, "end_line": 20}], "confidence": "medium"}
+{"id": "bg-163", "answer_spans": [{"path": "crates/pixel/src/space_cmd.rs", "symbol": "space_cmd module doc", "start_line": 4, "end_line": 10}], "confidence": "medium"}
+{"id": "bg-180", "answer_spans": [{"path": ".github/workflows/cross-build.yml", "symbol": "cross-build paths filter", "start_line": 24, "end_line": 33}], "confidence": "high"}
+{"id": "bg-032", "answer_spans": [{"path": "crates/pixel-recall/src/sources/mod.rs", "symbol": "sources adapters", "start_line": 4, "end_line": 13}], "confidence": "medium"}
+{"id": "bg-149", "answer_spans": [{"path": "crates/pixel-git/src/nofollow.rs", "symbol": "nofollow module doc", "start_line": 4, "end_line": 14}], "confidence": "medium"}
+{"id": "bg-085", "answer_spans": [{"path": "crates/pixel-index/src/cache.rs", "symbol": "shared base-shard cache doc", "start_line": 4, "end_line": 12}], "confidence": "medium"}
+{"id": "bg-161", "answer_spans": [{"path": "scripts/mutants-nightly-range.py", "symbol": "select_range", "start_line": 31, "end_line": 74}], "confidence": "medium"}

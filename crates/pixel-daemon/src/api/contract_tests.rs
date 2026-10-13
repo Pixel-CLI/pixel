@@ -1084,6 +1084,213 @@ fn status_should_report_the_embedding_warmth_probe() {
     assert!(embedding["model_on_disk"].is_boolean(), "{out}");
 }
 
+/// A question for the fixture's `login.rs`, which only it answers.
+const MEANING_QUERY: &str = "check whether the user is empty";
+
+fn meaning_request(limit: Option<usize>) -> Request {
+    Request::Meaning {
+        query: MEANING_QUERY.into(),
+        limit,
+    }
+}
+
+/// Wait (bounded) until `check` holds of the `meaning` answer.
+fn meaning_until(service: &mut Service, check: impl Fn(&Value) -> bool) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let answer = call(service, meaning_request(Some(3)));
+        if check(&answer) {
+            return answer;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "meaning never reached the expected state: {answer}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// `meaning` never waits for the vectors it ranks from: cold it starts the
+/// build and says `warming` in an ordinary retrieval envelope (a lower bound
+/// naming what it could not do), and once built it ranks, with the same
+/// envelope naming that its leads are unverified.
+#[test]
+fn meaning_should_answer_warming_then_ranked_leads_in_a_lower_bound_envelope() {
+    let root = fixture("meaning-envelope");
+    let mut service = Service::open(&root).unwrap();
+    let (meaning, release) = crate::meaning::testing::gated(&root);
+    service.set_meaning(meaning);
+
+    let warming = call(&mut service, meaning_request(Some(3)));
+    assert_eq!(warming["ok"], true, "{warming}");
+    assert_eq!(warming["op"], "meaning");
+    let cap = "semantic index unavailable (warming): no semantic leads";
+    assert_eq!(
+        warming["result"],
+        json!({"status": "unavailable", "reason": "warming", "caps": [cap]})
+    );
+    assert_eq!(warming["epistemics"]["lower_bound"], true);
+    assert_eq!(warming["epistemics"]["closed_world"], false);
+    assert!(
+        warming["epistemics"]["basis"]
+            .as_str()
+            .unwrap()
+            .starts_with("resident code-chunk embeddings + chunk BM25; caps: "),
+        "{warming}"
+    );
+    assert_eq!(
+        warming["warnings"],
+        json!([{"code": "RESULT_CAPPED", "message": cap}])
+    );
+    assert!(warming["snapshot"]["head"].is_string(), "{warming}");
+
+    drop(release);
+    let ready = meaning_until(&mut service, |answer| answer["result"]["status"] == "ready");
+    let hits = ready["result"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 2, "both files of the fixture: {ready}");
+    assert_eq!(hits[0]["path"], "login.rs");
+    assert_eq!(hits[0]["symbol"], "login");
+    assert_eq!(hits[0]["start_line"], 1);
+    assert_eq!(hits[0]["end_line"], 2);
+    assert!(
+        hits[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .starts_with("pub fn login(")
+    );
+    let mut keys: Vec<&str> = hits[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "end_line",
+            "path",
+            "score",
+            "snippet",
+            "start_line",
+            "symbol"
+        ]
+    );
+    assert!(hits[0]["score"].as_f64().unwrap() > hits[1]["score"].as_f64().unwrap());
+    assert_eq!(ready["result"]["pool"]["files"], 2);
+    assert_eq!(ready["epistemics"]["lower_bound"], true);
+    assert_eq!(
+        ready["epistemics"]["extraction_limits"][0],
+        "embedding similarity ranks chunks; it does not separate related from unrelated code"
+    );
+    assert_eq!(
+        ready["warnings"],
+        json!([{
+            "code": "RESULT_CAPPED",
+            "message": pixel_recall::code_search::SEMANTIC_LEADS_UNVERIFIED
+        }])
+    );
+    assert!(ready["snapshot"]["head"].is_string(), "{ready}");
+}
+
+#[test]
+fn meaning_should_refuse_a_blank_question_as_invalid_input() {
+    let root = fixture("meaning-blank");
+    let mut service = Service::open(&root).unwrap();
+    service.set_meaning(crate::meaning::testing::meaning(&root));
+    let (code, message) = err(
+        &mut service,
+        Request::Meaning {
+            query: "  ".into(),
+            limit: None,
+        },
+    );
+    assert_eq!(code, "INVALID_INPUT");
+    assert!(message.contains("query is empty"), "{message}");
+}
+
+/// A watcher batch publishes a new generation; once the vectors were asked
+/// for they rebuild at once, so the next question finds the edit without
+/// starting the build itself.
+#[test]
+fn a_watcher_batch_should_rebuild_the_vectors_that_were_asked_for() {
+    let root = fixture("meaning-nudge");
+    let mut service = Service::open(&root).unwrap();
+    let meaning = crate::meaning::testing::meaning(&root);
+    service.set_meaning(Arc::clone(&meaning));
+    let generation = |service: &Service| service.publication.read().unwrap().generation;
+    crate::meaning::testing::build(&meaning, generation(&service));
+
+    std::fs::write(root.join("login.rs"), "pub fn logout_session() {}\n").unwrap();
+    service.refresh_files(&[("login.rs", false)]);
+    let published = generation(&service);
+
+    // A pure read: it cannot start the build the nudge should have.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let answer = loop {
+        let answer = meaning
+            .answer(published, "logout session", Some(1))
+            .unwrap();
+        if answer["status"] == "ready" {
+            break answer;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never rebuilt: {answer}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(answer["hits"][0]["symbol"], "logout_session");
+    assert_eq!(answer["pool"]["generation"], published);
+}
+
+/// The evidence plane ranks from the vectors the writable service shares
+/// with its replicas and never builds them: cold, a replica says so and
+/// starts nothing; built, it ranks within the bundle's limit.
+#[test]
+fn read_evidence_should_rank_meaning_from_shared_vectors_and_never_build_them() {
+    let root = fixture("meaning-evidence");
+    let mut service = Service::open(&root).unwrap();
+    let (meaning, opened) = crate::meaning::testing::counting(&root);
+    service.set_meaning(Arc::clone(&meaning));
+
+    let (publication, cold) = service
+        .read_replica()
+        .read_evidence("meaning", MEANING_QUERY, 5);
+    let cold = cold.unwrap();
+    assert_eq!(cold["status"], "unavailable");
+    assert_eq!(cold["reason"], "cold");
+    assert_eq!(
+        opened.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a replica builds nothing"
+    );
+
+    // Nor does a request handed to a replica directly.
+    let mut replica = service.read_replica();
+    let handled = call(&mut replica, meaning_request(Some(1)));
+    assert_eq!(handled["result"]["reason"], "cold", "{handled}");
+    assert_eq!(opened.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    crate::meaning::testing::build(&meaning, publication.generation);
+    let (_, ready) = service
+        .read_replica()
+        .read_evidence("meaning", MEANING_QUERY, 1);
+    let ready = ready.unwrap();
+    assert_eq!(ready["status"], "ready");
+    assert_eq!(ready["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(ready["hits"][0]["path"], "login.rs");
+    assert_eq!(ready["pool"]["generation"], publication.generation);
+
+    let (_, unknown) = service
+        .read_replica()
+        .read_evidence("telepathy", MEANING_QUERY, 1);
+    assert_eq!(
+        unknown.unwrap_err(),
+        "unsupported evidence query kind: telepathy"
+    );
+}
+
 #[test]
 fn graph_if_stale_should_keep_a_fresh_graph_and_say_so() {
     let root = fixture("graph-if-stale");

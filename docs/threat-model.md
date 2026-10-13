@@ -34,11 +34,11 @@ model providers, and the website under `website/`.
 | Asset | Where | Why it matters |
 | --- | --- | --- |
 | Source and history of indexed repositories | the working tree, read through `pixel-git::GitRunner` and the walkers in `pixel-index`/`pixel-graph` | confidentiality of code the user did not mean to share; integrity of what the agent is told about it |
-| Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `config.yaml`, `tasks/`, `env-snapshots/` | what the agent reads as ground truth; `actions.jsonl` and `env-snapshots/` can hold secrets; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
-| Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
+| Per-repository index and sidecars | `.pixel/` (ARCHITECTURE.md, "On-disk state"): `base.shard`, `delta.shard`, `graph.v2.db` (`pixel_daemon::api::GRAPH_DB_FILE`), `history.db`, `code-vectors/`, `targets.json`, `regions.json`, `actions.jsonl`, `brief-decisions.jsonl`, `config.yaml`, `tasks/` | what the agent reads as ground truth; `actions.jsonl` and `brief-decisions.jsonl` (the typed prompt) can hold secrets; `regions.json` is evidence for harness orchestration (agent count, scheduling, merging), never an action recommendation |
+| Machine-wide state | `~/.pixel/config.yaml` (remote keys), `~/.pixel/plugins/`, `~/.pixel/trusted.toml` and `~/.pixel/plugins.toml` (the plugin host's installs, trust records and network opt-ins), `~/.local/share/pixel/flows/` (fill values: passwords, OTPs), `~/.local/share/pixel/recall/` (agent transcripts), `~/.local/share/pixel/models/`, `~/.local/state/pixel/` (`pixel-ops` journals, snapshots, locks; the `pixel-session` error sink) | secrets at rest, and transcripts that quote them |
 | Daemon socket | `pixel_daemon::daemon::socket_path`: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` or `~/.cache/pixel/sockets/` on Linux | any client of the socket can ask for git mutations on the repository |
-| Agent configurations | what `pixel install` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
-| User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project), `.env` values edited by `pixel edit-env` | credential theft, billing abuse |
+| Agent configurations | what `pixel setup` writes: `~/.claude/settings.json`, `$CODEX_HOME/config.toml` and `hooks.json`, the Pi package under `~/.local/share/pixel/pi-package/` and its entry in Pi's `settings.json`, the optional classify helpers once accepted (`skills/pixel-classify/` under the agent config dirs, the Pi package `~/.local/share/pixel/pi-classify/`); per repository with `--repo`, `.claude/settings.local.json` and `.codex/`. It also edits `~/.pi/agent/APPEND_SYSTEM.md`, the OpenCode, Antigravity, zcode, Devin, Cursor and Copilot CLI configs, `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts` and `AGENTS.md`, only to remove what earlier releases wrote | a hook command runs with the user's privileges on every agent tool call |
+| User secrets | provider keys (`OPENROUTER_API_KEY`, `OLLAMA_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`), `PERPLEXITY_API_KEY`, `remote_keys` in the global config, or secrets read from a configured Infisical project) | credential theft, billing abuse |
 | Benchmark credentials | OAuth storage or an explicitly selected Claude gateway settings file read by `eval/claude_skill_pair.py` | credentials must reach only the selected model connection and stay out of benchmark receipts |
 | Release chain | tags `v*`, `.github/workflows/release.yml` and `release-build.yml`, the `HOMEBREW_TAP_TOKEN` and `VT_API_KEY` secrets, the build-provenance attestation, `scripts/install.sh`, the Homebrew tap | a tampered release runs on every user's machine |
 | CI | `.github/workflows/*.yml`, the `PROJECTS_TOKEN` secret, the self-hosted runner named by the `PIXEL_RUNNER_LABELS` repository variable | a foothold in CI is a step towards the release chain |
@@ -47,7 +47,7 @@ model providers, and the website under `website/`.
 
 | Actor | Trust | Reaches Pixel through |
 | --- | --- | --- |
-| The user | trusted: Pixel acts with the user's privileges | the CLI, `pixel install`, the global config |
+| The user | trusted: Pixel acts with the user's privileges | the CLI, `pixel setup`, the global config |
 | The coding agent and the model driving it | semi-trusted: acts with the user's privileges, and can be steered by prompt injection from anything it reads, including Pixel's own output | CLI arguments, hook payloads, the daemon socket |
 | Repository content | untrusted when the repository is not the user's own: files, commit messages, branch names, a committed `.pixel/` or `.codex/`, git configuration that came with an archive | the walkers, tree-sitter, git, every sidecar reader |
 | Other processes of the same user | trusted by the operating system; not distinguished by Pixel | the daemon socket, every file Pixel writes |
@@ -62,7 +62,7 @@ The boundaries a change can cross, referred to below as B1 to B7:
  hostile repo ──B1──▶ pixel (parse, index, git) ──B3──▶ agent context (prompt)
  agent/model  ──B2──▶ pixel CLI / hooks
  same-user process ──B4──▶ daemon socket ──▶ git mutations on the repository
- pixel install ──B5──▶ agent configs (hooks run on every tool call)
+ pixel setup ──B5──▶ agent configs (hooks run on every tool call)
  pixel ◀──B6──▶ network (models, classify, web search, release check)
  contributor ──B7──▶ CI ──▶ release ──▶ every user's machine
 ```
@@ -76,8 +76,7 @@ arguments. Paths and patterns are passed to library code, never to a shell.
 Outside the hooks (3.3), two paths run a shell on purpose: `pixel self-update
 --build "<cmd>"` (`sh -c`, default `cargo build --release -p pixel-cli`) and
 the update prompt's `update_notice::run_upgrade` (`sh -c` on the command
-`update_notice::upgrade_hint` builds); `pixel config edit` starts
-`$VISUAL`/`$EDITOR`. Each invocation is recorded in `.pixel/actions.jsonl`
+`update_notice::upgrade_hint` builds). Each invocation is recorded in `.pixel/actions.jsonl`
 through `logged_args` (`crates/pixel/src/main.rs`). Stdout is capped at
 256 KB (`PIXEL_OUTPUT_CAP_BYTES`).
 
@@ -88,7 +87,7 @@ wire contract"). In `crates/pixel-daemon/src/daemon.rs`: `MAX_REQUEST_LINE`
 (64 KiB), `CONNECTION_DEADLINE` (5 s per connection), a 1 s read timeout,
 `MAX_REQUESTS_PER_CONN` (64), `IDLE_TIMEOUT` (30 min). The socket file is
 set to 0600 after `bind`; on Linux the fallback directory is set to 0700.
-`PROTOCOL_VERSION` (`pixel_daemon::api`, 13) is compared by the CLI's
+`PROTOCOL_VERSION` (`pixel_daemon::api`, 16) is compared by the CLI's
 `classify_ping`: an older daemon is shut down and replaced, a newer one is
 left alone and the command runs in process. Requests are served one at a
 time. The op set includes git mutations (`publish`, `push`, `ship`,
@@ -96,12 +95,23 @@ time. The op set includes git mutations (`publish`, `push`, `ship`,
 rebuilds and `shutdown`. The CLI starts a daemon on demand
 (`auto_start_daemon`; `PIXEL_DAEMON_AUTO_START=0` turns that off).
 
+`meaning` takes a free-text question (cut to `MEANING_QUERY_MAX_BYTES`, 1 KiB)
+and returns at most `MEANING_MAX_LIMIT` (50) one-line snippets from the
+resident code index (ARCHITECTURE.md, "Daemon and wire contract"). A request
+reads no file, embeds one question and starts no download; the index is built
+on one background thread from the files `search-meaning` would read, under its
+caps (`RESIDENT_MAX_FILES`, 512 KiB per file), and never from a path
+`credential_path` names. Repeated edits do not grow it for the daemon's
+lifetime: a rebuild renumbers the token vocabulary from the live chunks once
+the tokens of edited-away text outnumber them (`VOCAB_SLACK`). A same-user client can make the daemon read and
+embed the repository by sending it, which it could do with `search`.
+
 ### 3.3 Installed hooks (B2, B3, B5)
 
 `pixel run-hook task-event` reads one JSON payload from the agent host on
 stdin (ARCHITECTURE.md, hook table). The payload's `cwd`, `tool_input` and
 session fields are agent-controlled. `task-event` is the only hook `pixel
-install` registers: it gates edits and completion for a task contract and, on
+setup` registers: it gates edits and completion for a task contract and, on
 `prompt-submit`, returns the bounded `[PIXEL:BRIEF]` evidence block. It never
 executes `tool_input.command` and never rewrites or approves a command.
 
@@ -217,8 +227,6 @@ repository file.
 - Model downloads: `minishlab/potion-*` (`pixel_recall::embed::POTION_REPO`)
   and, with the `fastembed` feature, `intfloat/multilingual-e5-small`, from
   Hugging Face into `~/.local/share/pixel/models/`.
-- `pixel index-unpack <path|url>` (`crates/pixel/src/index_cmd.rs`,
-  `FETCH_CAP` 2 GiB).
 - `pixel reference setup`: `git clone`/`git fetch` (through `GitRunner`) from
   each repository URL recorded in `.pixel/reference.json`; the manifest is
   user-authored, so no destination is invented and no URL is guessed.
@@ -227,7 +235,7 @@ repository file.
 
 ### 3.9 Install, update, uninstall (B5, B7)
 
-`pixel install` edits agent configs in place, rewriting only its own managed
+`pixel setup` edits agent configs in place, rewriting only its own managed
 blocks and hook entries, refusing files that do not parse, and leaving a
 `<file>.pixel-bak.<nanos>-<seq>` copy of each file it changes
 (`pixel_install::config::backup_if_changing`). Hook commands embed the
@@ -270,6 +278,62 @@ as that user; the temporary config and output files are not an OS security
 sandbox.
 The selected endpoint receives the benchmark's source context. CLI-reported
 model names do not attest the gateway's underlying implementation.
+
+### 3.12 Plugins (B1, B2)
+
+`pixel <name> [args…]`, for a name the core binary does not have, runs a
+plugin (`crates/pixel-plugin`, dispatched from `plugin_cmd::dispatch`):
+a trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), a user plugin
+(`~/.pixel/plugins/<name>/`), then an executable `pixel-<name>` on PATH. The
+plugin replaces the pixel process (`exec`) and runs with the user's
+privileges, network included; `pixel plugin list|add|remove|enable|trust`
+manage them. Controls, in the order a lookup applies them:
+
+- **Trust for repo plugins.** The repository chooses what its own `.pixel/`
+  holds, so a repo plugin runs only after `pixel plugin trust <name>`
+  recorded `name` and a SHA-256 over every file of the directory (paths,
+  contents, executable bits, symlink target text) in `~/.pixel/trusted.toml`
+  (`pixel_plugin::dir_digest`, `TrustStore`). Any change to the directory
+  fails the comparison and the plugin is refused again. An untrusted repo
+  plugin does not fall through to a user plugin or PATH of the same name.
+- **`run` stays inside the directory.** `pixel_plugin::contained_program`
+  canonicalises `<dir>/<run>` and requires it to be a file under the
+  canonical directory, so a symlink pointing out of it is refused; the
+  manifest parser also refuses an absolute `run` or a `..` component.
+- **Network opt-in.** A manifest with `network = true` runs only after
+  `pixel plugin enable <name>` (`~/.pixel/plugins.toml`), for every tier.
+- **`install` takes data, not code from the URL.** A git source must start
+  with `https://`, `ssh://`, `file://` or `git@` (`ext::` and `fd::`
+  transports run commands), is cloned shallowly through `GitRunner` (timeout,
+  redacted stderr) into a temporary directory, and only the plugin directory
+  is copied (`.git` left behind). A URL's userinfo is removed before the
+  source is recorded or shown, and `logged_args` removes it from the action
+  log. `github:<owner>/<repo>[@<ref>]` is parsed first (ASCII names, no
+  option form, no `..`), then built into an `https://github.com` clone URL;
+  `PIXEL_GITHUB_BASE_URL` (the user's own environment) redirects it to a
+  mirror or a `file://` tree and must itself be one of the allowed schemes.
+  A program the repository does not ship is downloaded by `curl` restricted
+  to `https` (redirects included), capped at 256 MiB and 300 s, into the
+  plugin directory only (no symlink on the path is followed), made executable
+  and compared with `<asset>.sha256` when the release publishes one; a
+  mismatch removes the file and leaves the plugin not runnable. A release
+  without a digest is installed unverified and says so.
+- **PATH lookup skips empty entries**, which a shell reads as the working
+  directory, so a file in the repository is not found as `pixel-<name>`.
+- **Environment.** A plugin receives `PIXEL_API`, `PIXEL_REPO_ROOT`,
+  `PIXEL_GRAPH_DB` and `PIXEL_BIN`; it inherits the rest of the caller's environment unchanged; Pixel adds no
+  secret to it.
+- **Moved commands (#878).** `pixel_plugin::MOVED_COMMANDS` maps each command
+  that lives in a `Pixel-CLI` plugin repository (`pixel-git`, `pixel-flow`,
+  `pixel-recall`, `pixel-telemetry`, `pixel-utilities`) to it. A name the core
+  does not build in (`flow`, `plan-rollback`, `token-savings`,
+  `squash-branch`, `fast-forward`) is looked up in the order above like any
+  other name. Without a plugin, `pixel <name>` prints
+  `pixel install github:Pixel-CLI/<repo>` and exits 2; the pre-rename
+  spellings (`rescue`, `update`, `savings`, `rewrite`, `replay-flow`) resolve
+  to the plugin of the current name (`plugin_cmd::moved_name`). The core
+  binary does not contain their code, so it does not log their arguments: the
+  dispatch `exec`s before the action log is written.
 
 ## 4. Threats
 
@@ -355,7 +419,7 @@ boundary it crosses.
   so the first `pixel` command in the clone finds an index, a graph, a
   history database, task manifests or a configuration it did not build.
 - **Mitigation** (0.7.0, GHSA-c9f5-vxc4-wjph): before the index, graph and
-  history stores read anything, and before `pixel index-unpack` installs,
+  history stores read anything,
   `pixel_git::sidecar::check` refuses a `.pixel` that is a symbolic link or
   holds files git tracks, and names the command that removes it. Files under
   `.pixel/` are opened with `O_NOFOLLOW` or created fresh and renamed into
@@ -427,7 +491,7 @@ boundary it crosses.
   bytes instead of being allocated in full; over-cap `task-event` input emits
   its unavailable response, which denies `PreToolUse` on an enforced session;
   the task binds by worktree, provider and session (ARCHITECTURE.md, Agent
-  integration); `pixel install` registers a 10 s timeout (`HOOK_TIMEOUT`).
+  integration); `pixel setup` registers a 10 s timeout (`HOOK_TIMEOUT`).
 - **Status**: Mitigated.
 - **Residual**: the cap bounds allocation, not the wait: a host that writes
   fewer than `MAX_HOOK_INPUT + 1` bytes and holds the pipe open still stalls
@@ -447,8 +511,20 @@ stays so references to the later threats hold.
 - **Mitigation**: the one thing an install delivers to an agent unasked is
   the `[PIXEL:BRIEF]` block of `task-event` on `prompt-submit`: it quotes file
   paths, symbol names and a definition from the repository as evidence, capped
-  at 2 KiB, with a 750 ms deadline, off with `PIXEL_BRIEF=0`. No prompt is
-  deployed. The bundled prompt a user copies by hand
+  at 2 KiB (`BRIEF_BYTES`), with a 750 ms deadline, off with `PIXEL_BRIEF=0`.
+  A prompt in plain language gets one only when the repository's own
+  vocabulary covers it (`execution_brief::relevance`), and its first files
+  come from the daemon's `facts.relevance` and `meaning` ops: the same
+  deadline, the same data. A confident brief of such a prompt (or of a weak
+  one) also quotes multi-line source excerpts, comments included: per chunk
+  the signature, its first doc line and up to six body lines, or a flow's
+  hops, a test's first assertion, a config constant, under a 3584-byte cap
+  (`PROSE_BRIEF_BYTES`, below Pi's 4000-byte limit). `Evidence::lines_at`
+  reads them only from files the searches named, refuses a credential-shaped
+  path, and `PIXEL_BRIEF_ANSWER=0` drops them. The excerpts are shown only
+  for the ZERO step ("Answer from these lines"), which no validated rule
+  enables, so the block names `read:` ranges and asks the agent to read
+  them; `PIXEL_BRIEF_ZERO=0` is its kill switch. No prompt is deployed. The bundled prompt a user copies by hand
   states that Pixel output is data, not instructions
   (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
   skill and Pi command label graph output as repository data, not
@@ -464,7 +540,7 @@ stays so references to the later threats hold.
 ### T13. Withdrawn
 
 Pixel no longer composes a repository's Codex `PreToolUse` hooks behind its own
-wrapper. `pixel install --repo` restores the original registrations from the
+wrapper. `pixel setup --repo` restores the original registrations from the
 private backup of an earlier release only while the backup and the managed
 hook still match their owned contract, skips tracked `.codex/hooks.json` and
 paths that alias the global hook file, and removes duplicate project task
@@ -473,7 +549,7 @@ approved each current definition (T14). A leftover `composed-guard`
 registration answers nothing. The id stays so references to the later threats
 hold.
 
-### T14. `pixel install` damages or weakens agent configurations (T, I, B5)
+### T14. `pixel setup` damages or weakens agent configurations (T, I, B5)
 
 - **Scenario**: an install loses a user's settings, or leaves a copy of a
   config that holds keys readable by others.
@@ -496,15 +572,26 @@ hold.
   0700 and `actions.jsonl` 0600 (`pixel-actionlog`, `open_log_file`); the
   recall directory is 0700 (`pixel_recall::ensure_recall_dir`); the error
   sink is 0700/0600 (`pixel-session`); `pixel-ops` state directories are
-  created 0700 (`durable::ensure_dir`).
+  created 0700 (`durable::ensure_dir`); `brief-decisions.jsonl`, which keeps
+  the typed text of each prompt the brief judged, is created 0600, takes no
+  line when an existing file cannot be brought to 0600, and is
+  written without following a link at the file or at `.pixel` itself
+  (`decision_log::append`, `nofollow::open_lock`), holds the last 500
+  lines, never a pasted block (`typed_text`) or more than the last
+  paragraph of a long untagged paste (`brief_task`), masks credential shapes
+  before it cuts the text at 600 characters (`decision_log::logged_typed`:
+  `pixel_git::redact` and a key mask), and is off with
+  `PIXEL_BRIEF_LOG=0|false|off`.
 - **Status**: Partial.
 - **Residual**: the recall corpus and the error sink store transcripts and
   argv unredacted (the sink keeps the whole output of every failed `sniper
   run`, structured RSpec/RuboCop/Minitest runs included, for 7 days and
-  at most 200 outputs); `edit-env` snapshots are plain copies of the `.env`;
-  `logged_args` masks only `config remote-key` values and `auth_url`, so a
-  secret passed as `--var` to `pixel flow` or `--value` to `pixel edit-env`
-  reaches `actions.jsonl` in clear (a 0600 file).
+  at most 200 outputs); `logged_args` masks only `config remote-key` values,
+  `auth_url` and a plugin source's credentials; `pixel flow` is a plugin that
+  `exec`s before any log line is written, so its `--var` values do not reach
+  `actions.jsonl`. The brief log masks key shapes and URL credentials,
+  not a secret typed as ordinary words, which stays in that 0600 file until
+  the log wraps or is deleted.
 
 ### T16. A configured key is sent to the wrong endpoint (I, B6)
 
@@ -551,18 +638,9 @@ hold.
 
 ### T19. A packed index is tampered with (T, B6)
 
-- **Scenario**: `pixel index-unpack https://…` installs a bundle built by
-  someone else.
-- **Mitigation**: each member's xxh3 is checked against the bundle's own
-  manifest; only the files `pixel index pack` writes are accepted as members
-  (since 0.7.0); the target `.pixel/` passes `pixel_git::sidecar::check` and
-  the staging directory is created without following links; a live index is
-  not overwritten without `--force`.
-- **Status**: Partial.
-- **Residual**: the check proves integrity against corruption, not
-  authenticity: a bundle is exactly as trustworthy as whoever produced it and
-  where it was fetched from (`http://` is accepted), and it lands in
-  `.pixel/` with the trust of T6.
+- **Status**: Retired. `pixel index-pack` and `pixel index-unpack` were
+  removed (issue #878), so no command installs an index bundle built by
+  someone else. The numbering of the threats after it is unchanged.
 
 ### T20. The update path installs a tampered binary (T, E, B7)
 
@@ -646,12 +724,39 @@ hold.
 - **Residual**: both are local, best-effort and writable by the same user;
   they help debugging, not forensics.
 
+### T25. A repository or a plugin source runs code through the plugin host (E, B1, B2)
+
+- **Scenario**: a cloned repository ships `.pixel/plugins/<name>/` and the
+  agent, or the user, types `pixel <name>`; or a plugin is added from a
+  hostile URL, or its `run` is a symlink to a binary elsewhere on the machine.
+- **Mitigation**: section 3.12. Repo plugins need a content-bound trust
+  record; `run` must resolve inside the plugin directory; `network = true`
+  needs an explicit opt-in; `add` accepts only fixed git URL schemes and
+  copies a plugin directory, not history or hooks.
+- **Status**: Partial.
+- **Residual**: trust is bound to content, not to an author, and the user
+  (or an agent acting for them) decides what to trust: `pixel plugin trust`
+  is as strong as the review before it. The digest is checked immediately
+  before the exec, not held open, so a process able to write the plugin
+  directory in between can win that race (it could equally edit the
+  trusted file or the user's shell profile). A user plugin and a PATH plugin
+  are the user's own code and are not gated. A plugin runs with the user's
+  privileges and network once allowed; `network` is a declaration gated by
+  `enable`, not a sandbox, and the host cannot stop a plugin that declares
+  `false` from using the network.
+  The eight moved commands lost the property of being fixed built-ins: a
+  `pixel-squash-branch` (force-push with lease), `pixel-fast-forward` or
+  `pixel-plan-rollback` (`--apply` rewrites files) earlier on `PATH`, in
+  `~/.pixel/plugins/` or in a trusted repo plugin is what `pixel squash-branch`
+  runs. They are installed from source with `cargo install` and `pixel plugin
+  add`, so the reviewer of that install is the user.
+
 ### Summary
 
 | Status | Threats |
 | --- | --- |
 | Mitigated | T4, T10, T16, T17 |
-| Partial | T2, T3, T5, T6, T8, T14, T15, T19, T20, T21, T22 |
+| Partial | T2, T3, T5, T6, T8, T14, T15, T20, T21, T22, T25 |
 | Accepted | T1, T7, T9, T12, T18, T23, T24 |
 | Withdrawn | T11, T13 |
 
@@ -661,11 +766,14 @@ hold.
 | --- | --- | --- |
 | Daemon request framing | `daemon::handle_conn`, `read_capped_line` | `oversized_line_is_rejected_without_unbounded_drain`, `expired_connection_deadline_stops_frame_read`, `socket_identity_should_follow_the_file_not_the_path`, `the_daemon_socket_should_be_0600_after_bind` (`daemon.rs`) |
 | Protocol skew | `classify_ping`, `PROTOCOL_VERSION` | `op_name_matches_serde_tag`, `session_capabilities_track_every_real_op` (`pixel-proto`) |
+| Snippets from the semantic index | `Resident::build`, `Meaning::answer` | `build_should_never_index_credential_shaped_paths` (`code_resident.rs`), `answer_should_apply_the_default_limit_and_cap_the_requested_one` and `bounded_query_should_cut_at_a_character_boundary_above_the_cap_only` (`meaning.rs`) |
 | Planted history database | `FactsStore::needs_rebuild`, `_pixel_marker` | `open_should_wipe_a_planted_history_database` (both refusals: no marker, foreign `created_by`; asserts the planted tables are gone and the marker is Pixel's); `concurrent_open_on_poisoned_db_never_ioerrors` covers the rebuild path |
 | Git argument handling | `validate_ref`, `end_of_options`, `GitRunner` | `rejects_leading_dash` and siblings in `ref_guard.rs`; `only_pixel_git_spawns_git_in_production_code` and `pixel_git_spawns_git_only_in_the_runner` (`crates/pixel-git/tests/boundary.rs`) |
 | Hook payload cap | `hook_input::read_bounded` | the `read_bounded` tests in `hook_input.rs` |
 | Prompt-submit intent judge | `execution_brief::intent::judge` | subprocess JSON, empty stdout and invalid UTF-8 fallback tests in `intent.rs` |
-| Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask` (`main.rs`) |
+| Typed prompts in the brief log | `decision_log::{logged_typed, mask_keys, append}` | `logged_typed_should_mask_a_credential_and_cut_at_the_bound`, `logged_typed_should_keep_only_the_last_paragraph_of_a_pasted_log`, `mask_keys_should_hide_a_prefixed_key_and_a_long_run_and_keep_prose`, `append_should_be_owner_only_and_not_create_a_missing_directory`, `append_should_refuse_a_link_at_the_log_and_leave_its_target_alone`, `append_should_refuse_a_linked_directory_and_write_nothing_through_it` (`decision_log.rs`), `the_decision_log_should_stay_off_when_pixel_brief_log_says_so` (`prompt_brief_cli.rs`) |
+| Secrets in the action log | `logged_args` | `only_the_remote_key_command_starts_the_mask`, `a_plugin_source_url_is_logged_without_its_credentials` (`main.rs`) |
+| Repo plugin trust | `pixel_plugin::resolve`, `dir_digest`, `contained_program` | `a_repo_plugin_is_refused_until_trusted_and_again_after_an_edit`, `every_kind_of_change_moves_the_digest`, `a_run_that_escapes_through_a_symlink_is_refused` (`pixel-plugin`); `plugin_cli.rs` |
 | Keys over clear text | `sends_in_clear_text` | `a_key_never_leaves_the_machine_over_cleartext_http`, `only_plain_http_to_another_host_counts_as_clear_text` |
 | Untrusted shard files | `Shard::open` | `malformed_shard_rejected_gracefully`, `corrupt_posting_cannot_escape_section_or_overflow_delta` (`shard.rs`) |
 | Source parsing | `pixel_graph::extract::extract_file` | `graph_extract` fuzz target |

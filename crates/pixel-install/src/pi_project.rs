@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! The retired Pi project extension of `pixel install --repo`.
+//! The retired Pi project extension of `pixel setup --repo`.
 //!
 //! Releases up to this one wrote a guard extension under the repository's
 //! `.pi/extensions/` (and, up to 0.4.0, under `<repo>/.pi/agent/`, a
 //! directory Pi reads only under `~`). Pi now keeps its native tools: the
 //! only Pixel capability left in Pi is the explicit `/pixel-impact` command
-//! of the global package (`pi_global`). Both `install --repo` and `uninstall
+//! of the global package (`pi_global`). Both `setup --repo` and `setup --remove
 //! --repo` take Pixel's files out of the repository, and doctor reports one
 //! still there. A file Pixel did not write is the user's and stays.
 
@@ -31,7 +31,7 @@ fn is_managed_extension(path: &Path) -> bool {
     fs::read_to_string(path).is_ok_and(|text| text.contains(config::MANAGED_BEGIN))
 }
 
-/// `pixel install --repo` and `pixel uninstall --repo` step: remove the
+/// `pixel setup --repo` and `pixel setup --remove --repo` step: remove the
 /// guard Pixel wrote at [`EXTENSION`] and Pixel's files in [`LEGACY_DIR`].
 pub(crate) fn remove(repo: &Path, dry_run: bool) -> Result<InstallStep> {
     let ext_file = repo.join(EXTENSION);

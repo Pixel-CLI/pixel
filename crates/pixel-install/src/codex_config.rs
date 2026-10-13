@@ -47,7 +47,7 @@ pub const PROMPT_SUBMIT_HOOK_MARKER: &str = "run-hook prompt-submit --provider c
 const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
 
 /// The Codex home directory: `$CODEX_HOME` when the caller did not pin a
-/// home directory (a real `pixel install`, where Codex itself honours the
+/// home directory (a real `pixel setup`, where Codex itself honours the
 /// variable), `<home>/.codex` otherwise (tests and explicit overrides, which
 /// must not depend on the invoking environment).
 pub(crate) fn codex_home(home: &Path, home_was_explicit: bool) -> PathBuf {
@@ -84,7 +84,7 @@ fn managed_range(value: &str) -> Option<std::ops::Range<usize>> {
     Some(start..end)
 }
 
-/// The value `pixel install` writes for a current value of `existing`:
+/// The value `pixel setup` writes for a current value of `existing`:
 /// the block replaces a previous one in place, or is appended after the
 /// user's own text, separated by a blank line.
 #[cfg(test)]
@@ -198,7 +198,7 @@ fn is_retired_codex_hook(command: &str, exe: &Path) -> bool {
         .is_some_and(|verb| !verb.starts_with("task-event --provider codex --event "))
 }
 
-/// `pixel install` step: keep Codex's task-event lifecycle hooks installed,
+/// `pixel setup` step: keep Codex's task-event lifecycle hooks installed,
 /// removing the retired automatic metrics and retrieval guidance hooks.
 pub(crate) fn install_task_hooks(
     codex_home: &Path,
@@ -298,13 +298,13 @@ pub(crate) fn check_task_hooks(
     }
     if has_retired_pixel_hook {
         return Err(format!(
-            "retired automatic Pixel Codex hook remains in {} — run `pixel install`",
+            "retired automatic Pixel Codex hook remains in {} — run `pixel setup`",
             path.display()
         ));
     }
     if !crate::routing::task_hooks_registered(&value, crate::routing::Provider::Codex, exe) {
         return Err(format!(
-            "task lifecycle hooks missing or asynchronous in {} — run `pixel install`",
+            "task lifecycle hooks missing or asynchronous in {} — run `pixel setup`",
             path.display()
         ));
     }
@@ -317,7 +317,7 @@ pub(crate) fn check_task_hooks(
     ))
 }
 
-/// `pixel uninstall` step: take the managed block out of
+/// `pixel setup --remove` step: take the managed block out of
 /// `developer_instructions`, dropping the key when nothing else was in it.
 pub(crate) fn remove_developer_instructions(
     codex_home: &Path,
@@ -411,7 +411,7 @@ const TRUST_LEVEL_KEY: &str = "trust_level";
 
 /// A project's trust state in Codex's own config, from
 /// `[projects."<path>"] trust_level`. Codex composes a project-scoped
-/// `.codex/` layer — the repo-local hooks `pixel install --repo` writes —
+/// `.codex/` layer — the repo-local hooks `pixel setup --repo` writes —
 /// only for a project it trusts, so an installed guard stays dormant while
 /// the entry is missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -864,7 +864,7 @@ pub(crate) fn check_developer_instructions(
     };
     if current.contains(MANAGED_BEGIN) || current.contains(MANAGED_END) {
         return Err(format!(
-            "retired Pixel block remains in {DEVELOPER_INSTRUCTIONS_KEY} in {} — run `pixel install` to remove it",
+            "retired Pixel block remains in {DEVELOPER_INSTRUCTIONS_KEY} in {} — run `pixel setup` to remove it",
             path.display()
         ));
     }

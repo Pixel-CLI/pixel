@@ -2,13 +2,13 @@
 #
 # You can use code search and the code graph without an AI provider or API key.
 # For guided setup, run: pixel config setup
-# To edit this file, run: pixel config edit
+# To edit this file, open it in your editor.
 # To see effective values and overrides, run: pixel config
 #
 # All examples below are commented out: defaults apply until you remove the
 # leading "# " from a setting. Keep the two-space indentation under classify.
 # Global file: ~/.pixel/config.yaml
-# Repository overrides: <repository>/.pixel/config.yaml (pixel config edit --repo)
+# Repository overrides: <repository>/.pixel/config.yaml
 # Priority: environment overrides > repository settings > global settings > defaults.
 # classify and remote_keys are GLOBAL ONLY; repository copies have no effect.
 

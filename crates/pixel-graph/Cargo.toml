@@ -27,7 +27,7 @@ tree-sitter-ruby = "0.23"
 # Swift, Elixir and Lua ship `LANGUAGE: LanguageFn` constants compatible with our
 # tree-sitter 0.26 via `tree-sitter-language`. Kotlin's crate pins an older
 # tree-sitter (`>= 0.21, < 0.23`) and is thus incompatible —— excluded.
-tree-sitter-php = "0.24"
+tree-sitter-php = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-swift = "0.7"
 tree-sitter-elixir = "0.3"

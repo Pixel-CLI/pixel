@@ -17,7 +17,7 @@ use tempfile::TempDir;
 // ---------------------------------------------------------------------------
 // test fixture: a fake "pixel" executable.
 //
-// pixel is a CLI + hooks tool, not an MCP server — `pixel install` no longer
+// pixel is a CLI + hooks tool, not an MCP server — `pixel setup` no longer
 // probes for an `mcp` subcommand or registers a pixel MCP server entry. The
 // fixture below just stands in for a real pixel binary so install has
 // something to write into the guard/session-start hook scripts.
@@ -261,7 +261,7 @@ fn doctor_should_refuse_an_unknown_check_id_before_running_anything() {
 }
 
 /// The fix travels with the finding: a red install check names `pixel
-/// install --shell <shell>`, a red repo check names its repository, a green check none.
+/// setup --shell <shell>`, a red repo check names its repository, a green check none.
 #[test]
 fn doctor_should_attach_a_fix_to_failing_checks_only() {
     let dir = TempDir::new().unwrap();
@@ -291,12 +291,12 @@ fn doctor_should_attach_a_fix_to_failing_checks_only() {
     // `--fix` runs, so the repair rewrites that same profile.
     assert_eq!(
         prompt.fix.as_deref(),
-        Some(format!("pixel install --shell {TEST_SHELL}").as_str())
+        Some(format!("pixel setup --shell {TEST_SHELL}").as_str())
     );
     assert_eq!(
         prompt.repair,
         Some(vec![vec![
-            "install".to_owned(),
+            "setup".to_owned(),
             "--shell".to_owned(),
             TEST_SHELL.to_owned()
         ]])
@@ -342,7 +342,7 @@ fn install_creates_config_with_managed_markers() {
 
     // The new install does NOT rewrite agent-config files — a stale managed
     // block from a previous install is left untouched (its cleanup is the
-    // user's job, or `pixel uninstall`). Original content survives verbatim.
+    // user's job, or `pixel setup --remove`). Original content survives verbatim.
     let claude = fs::read_to_string(home.join("CLAUDE.md")).expect("CLAUDE.md");
     assert_eq!(
         claude, original,
@@ -620,7 +620,7 @@ fn dry_run_install_has_no_copilot_step_without_copilot_config() {
 }
 
 /// Copilot keeps its native tools: on a machine that has run Copilot CLI,
-/// `pixel install` writes no hook file, and the `pixel.json` an earlier
+/// `pixel setup` writes no hook file, and the `pixel.json` an earlier
 /// release deployed is removed while the user's own hook files stay.
 #[test]
 fn install_removes_the_copilot_hooks_an_earlier_release_wrote() {
@@ -675,7 +675,7 @@ fn install_removes_the_copilot_hooks_an_earlier_release_wrote() {
 }
 
 /// Cursor, ZCode and Antigravity keep their native tools: on a machine that
-/// uses them, `pixel install` writes no hook, prompt or plugin, and removes
+/// uses them, `pixel setup` writes no hook, prompt or plugin, and removes
 /// the ones an earlier release wrote while every foreign entry, setting and
 /// line of user text stays. Antigravity's doctor check is red on the
 /// leftovers and green after.
@@ -757,7 +757,7 @@ fn global_install_removes_the_cursor_zcode_and_antigravity_integrations_an_earli
         red.reason.as_deref(),
         Some(
             format!(
-                "retired Pixel Antigravity integration remains: {}, the pixel plugin entry in {}, the pixel-guard in {} — run `pixel install` to remove it",
+                "retired Pixel Antigravity integration remains: {}, the pixel plugin entry in {}, the pixel-guard in {} — run `pixel setup` to remove it",
                 plugin.display(),
                 gemini.join("config.json").display(),
                 gemini.join("hooks.json").display()
@@ -1068,7 +1068,7 @@ fn doctor_install_artifact_checks_red_and_green() {
         prompt_check.reason.as_deref(),
         Some(
             format!(
-                "retired Pixel prompt file(s) remain: {}, {} — run `pixel install` to remove them",
+                "retired Pixel prompt file(s) remain: {}, {} — run `pixel setup` to remove them",
                 home.join(RETIRED_PROMPTS[0]).display(),
                 home.join(RETIRED_PROMPTS[1]).display()
             )
@@ -1077,7 +1077,7 @@ fn doctor_install_artifact_checks_red_and_green() {
     );
     assert_eq!(
         prompt_check.fix.as_deref(),
-        Some(format!("pixel install --shell {TEST_SHELL}").as_str())
+        Some(format!("pixel setup --shell {TEST_SHELL}").as_str())
     );
 
     // 3. Run install: removes the prompts, installs claude task hooks → all
@@ -1204,7 +1204,7 @@ fn uninstall_removes_pixel_managed_copilot_hooks() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
 
-    // A leftover pixel-managed Copilot hooks file (as `pixel install` writes).
+    // A leftover pixel-managed Copilot hooks file (as `pixel setup` writes).
     let hooks = home.join(".copilot").join("hooks").join("pixel.json");
     fs::create_dir_all(hooks.parent().unwrap()).unwrap();
     fs::write(
@@ -1681,7 +1681,7 @@ fn uninstall_reports_every_backup_it_leaves_with_a_command_that_removes_them() {
     assert_eq!(step.detail, None);
 }
 
-/// `pixel uninstall --repo` names the backups it and `pixel install --repo`
+/// `pixel setup --remove --repo` names the backups it and `pixel setup --repo`
 /// left inside the repository, the same way the global uninstall does.
 #[test]
 #[cfg(unix)]
@@ -2071,7 +2071,7 @@ fn routing_isolated_provider_child() {
 //
 // fish reads neither ~/.zshrc nor ~/.bashrc, and rejects POSIX function
 // syntax outright (`claude() { ...; }` is a parse error, `$@` does not exist).
-// Before fish was handled, a fish user's `pixel install` wrote a POSIX block
+// Before fish was handled, a fish user's `pixel setup` wrote a POSIX block
 // into ~/.zshrc: wrappers that never loaded, and a doctor that called them
 // green. These tests pin both halves — the right file, and syntax the target
 // shell actually accepts.
@@ -2185,7 +2185,7 @@ fn doctor_reports_a_clean_home_and_a_stale_wrapper_block() {
         "the stale profile must be named: {stale:?}"
     );
 
-    // `pixel install` is the named fix: it strips the stray block.
+    // `pixel setup` is the named fix: it strips the stray block.
     install_for_shell(home, FISH_SHELL);
     assert_eq!(
         legacy_check(FISH_SHELL).status,
@@ -2200,7 +2200,7 @@ fn doctor_reports_a_clean_home_and_a_stale_wrapper_block() {
     );
 }
 
-/// `pixel uninstall --wrappers-only` removes only the named shell's block —
+/// `pixel setup --remove --wrappers-only` removes only the named shell's block —
 /// the surgical fix for a block in a profile the login shell never loads.
 #[test]
 fn uninstall_wrappers_only_removes_one_shells_block_and_nothing_else() {
@@ -2464,7 +2464,7 @@ fn uninstall_deletes_a_fish_dropin_it_emptied() {
 //
 // Earlier releases deployed both under `~/.local/share/pixel/` for the
 // retired `claude` wrapper and the explicit integrations. No host reads them
-// any more: `pixel install` removes them, a dry run only announces it, and
+// any more: `pixel setup` removes them, a dry run only announces it, and
 // nothing else Pixel keeps in that directory is touched.
 // ---------------------------------------------------------------------------
 
@@ -2619,7 +2619,7 @@ fn install_removes_a_retired_codex_block_and_preserves_surrounding_user_text() {
     );
 }
 
-/// OpenCode keeps its native tools: with OpenCode present, `pixel install`
+/// OpenCode keeps its native tools: with OpenCode present, `pixel setup`
 /// writes no prompt block and no plugin, and removes the ones an earlier
 /// release wrote (the managed block in its global `AGENTS.md`, the managed
 /// `plugins/pixel.js`, stale `opencode.json` entries) while user text, a
@@ -2693,7 +2693,7 @@ fn install_removes_the_opencode_prompt_and_plugin_an_earlier_release_wrote() {
         red.reason.as_deref(),
         Some(
             format!(
-                "retired Pixel OpenCode integration remains: the Pixel block in {} and the guard plugin {} — run `pixel install` to remove it",
+                "retired Pixel OpenCode integration remains: the Pixel block in {} and the guard plugin {} — run `pixel setup` to remove it",
                 agents_md.display(),
                 plugin.display()
             )
@@ -3021,7 +3021,7 @@ fn doctor_flags_a_retired_subagent_prompt_until_install_removes_it() {
         red.reason.as_deref(),
         Some(
             format!(
-                "retired Pixel prompt file(s) remain: {} — run `pixel install` to remove them",
+                "retired Pixel prompt file(s) remain: {} — run `pixel setup` to remove them",
                 subagent_prompt_path(home).display()
             )
             .as_str()
@@ -3092,7 +3092,7 @@ fn uninstall_home(home: &std::path::Path) {
     .expect("uninstall");
 }
 
-/// Whether `pixel install` declared its Pi package in `home`'s Pi settings
+/// Whether `pixel setup` declared its Pi package in `home`'s Pi settings
 /// and wrote the explicit command into it.
 fn pi_impact_package_installed(home: &std::path::Path) -> bool {
     let package = home.join(".local/share/pixel/pi-package");
@@ -3292,7 +3292,7 @@ fn install_removes_the_automatic_prompt_written_by_an_earlier_release() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
-    // What `pixel install` wrote before it treated the file as shared: the
+    // What `pixel setup` wrote before it treated the file as shared: the
     // prompt verbatim, no markers around it.
     let asset = PRE_MARKER_PI_PROMPT;
     let pi_path = pi_prompt_path(home);
@@ -3836,7 +3836,7 @@ fn plugin_manifests_parse_and_point_at_files_that_exist() {
 }
 
 // ---------------------------------------------------------------------------
-// repo-local install tests (`pixel install --repo <path>`)
+// repo-local install tests (`pixel setup --repo <path>`)
 // ---------------------------------------------------------------------------
 
 fn repo_install_options(repo: &std::path::Path, home: &std::path::Path) -> InstallOptions {
@@ -4318,7 +4318,7 @@ fn pixel_commands(value: &serde_json::Value, event: &str) -> Vec<String> {
         .collect()
 }
 
-/// The machine-local paths `pixel install --repo` writes, as `git status`
+/// The machine-local paths `pixel setup --repo` writes, as `git status`
 /// prints them relative to the work tree root.
 const MACHINE_LOCAL: &[&str] = &[
     ".claude/settings.local.json",
@@ -4685,7 +4685,7 @@ fn repo_install_should_keep_machine_local_artifacts_out_of_git() {
 
     let exclude = fs::read_to_string(git_dir.join("info/exclude")).unwrap();
     assert!(
-        exclude.starts_with("# pixel install --repo"),
+        exclude.starts_with("# pixel setup --repo"),
         "no blank line before the block in a new file: {exclude:?}"
     );
     for rel in MACHINE_LOCAL {
@@ -4744,7 +4744,7 @@ fn repo_install_should_anchor_excludes_at_a_nested_repo_path() {
 
     let exclude = fs::read_to_string(top.join(".git/info/exclude")).unwrap();
     assert!(
-        exclude.starts_with("*.log\n# pixel install --repo"),
+        exclude.starts_with("*.log\n# pixel setup --repo"),
         "{exclude:?}"
     );
     assert!(
@@ -4949,7 +4949,7 @@ fn doctor_repo_checks_should_go_red_on_a_broken_pixel_install() {
         devin.reason.as_deref(),
         Some(
             format!(
-                "retired Pixel hooks remain in {} — run `pixel install --repo '{}'` to remove them",
+                "retired Pixel hooks remain in {} — run `pixel setup --repo '{}'` to remove them",
                 repo.join(".devin/hooks.json").display(),
                 repo.display()
             )
@@ -5180,8 +5180,8 @@ fn install_by_a_binary_not_named_pixel_should_replace_its_own_hooks_not_stack_th
     }
 }
 
-/// Going back from a dev build to the release: `pixel install` after
-/// `pixel-dev install` must replace the dev entries, not add its own beside
+/// Going back from a dev build to the release: `pixel setup` after
+/// `pixel-dev setup` must replace the dev entries, not add its own beside
 /// them and run every hook twice.
 #[test]
 #[cfg(unix)]
@@ -5303,11 +5303,11 @@ fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged
     assert_eq!(after.status, CheckStatus::Green, "{after:?}");
 }
 
-/// After a global `pixel-dev install` every hook is present and registered
+/// After a global `pixel-dev setup` every hook is present and registered
 /// once, yet every session on the machine runs the side build: the managed
-/// `pixel` reads that as yellow with `pixel install` as its fix, and the
+/// `pixel` reads that as yellow with `pixel setup` as its fix, and the
 /// same holds for hooks left on a previous release's path by an upgrade.
-/// `pixel install` points them back; the side build itself never judges.
+/// `pixel setup` points them back; the side build itself never judges.
 #[test]
 #[cfg(unix)]
 fn doctor_should_flag_claude_hooks_that_run_another_pixel_binary() {
@@ -5355,7 +5355,7 @@ fn doctor_should_flag_claude_hooks_that_run_another_pixel_binary() {
         taken
             .fix
             .as_deref()
-            .is_some_and(|f| f.starts_with("pixel install")),
+            .is_some_and(|f| f.starts_with("pixel setup")),
         "{taken:?}"
     );
     let own = hooks_seen_by(&dev);
@@ -5380,7 +5380,7 @@ fn doctor_should_flag_claude_hooks_that_run_another_pixel_binary() {
     );
 }
 
-/// `pixel-dev uninstall` removes the entries `pixel-dev install` wrote; it
+/// `pixel-dev setup --remove` removes the entries `pixel-dev setup` wrote; it
 /// used to report success and leave all of them running.
 #[test]
 #[cfg(unix)]
@@ -5457,7 +5457,7 @@ fn uninstall_should_remove_the_pre_rename_guard_entry_and_script() {
 
 /// A Pi guard extension Pixel wrote, in `.pi/extensions/` or (releases up
 /// to 0.4.0) `<repo>/.pi/agent/`, is retired: doctor is red with the
-/// command that removes it, `install --repo` removes it, and a file at that
+/// command that removes it, `setup --repo` removes it, and a file at that
 /// path Pixel did not write is the user's and stays green.
 #[test]
 #[cfg(unix)]
@@ -5486,7 +5486,7 @@ fn doctor_pi_guard_should_flag_a_retired_guard_until_repo_install_removes_it() {
         assert_eq!(c.status, CheckStatus::Red, "{c:?}");
         assert!(
             c.reason.as_deref().is_some_and(|r| r.contains("retired")
-                && r.contains(&format!("pixel install --repo '{}'", repo.display()))),
+                && r.contains(&format!("pixel setup --repo '{}'", repo.display()))),
             "{c:?}"
         );
 
@@ -5656,7 +5656,7 @@ fn repo_install_removes_retired_pixel_first_rules_without_rewriting_user_text() 
 }
 
 /// A global RTK backup with no delegating guard is a leftover (an
-/// `install --repo` build once wrote the repository's there): doctor flags
+/// `setup --repo` build once wrote the repository's there): doctor flags
 /// it in yellow with the command that removes it, and stays green once the
 /// file is gone.
 #[test]
@@ -6231,7 +6231,7 @@ fn doctor_should_flag_a_claude_install_missing_a_task_event_hook() {
         stale
             .fix
             .as_deref()
-            .is_some_and(|f| f.starts_with("pixel install")),
+            .is_some_and(|f| f.starts_with("pixel setup")),
         "{stale:?}"
     );
     install(&options).unwrap();
@@ -6239,7 +6239,7 @@ fn doctor_should_flag_a_claude_install_missing_a_task_event_hook() {
     assert_eq!(fixed.status, CheckStatus::Green, "{fixed:?}");
 }
 
-/// Devin keeps its native tools in a repository too: `install --repo`
+/// Devin keeps its native tools in a repository too: `setup --repo`
 /// writes no Devin hook, and the guard and metrics relay an earlier release
 /// registered in `.devin/config.local.json` (and the legacy
 /// `.devin/hooks.json`) are removed while a foreign group survives. Doctor
@@ -6288,7 +6288,7 @@ fn devin_repo_install_should_remove_the_retired_guard_and_metrics_relay() {
     let devin = check(&red, "repo.devin-hooks");
     assert_eq!(devin.status, CheckStatus::Red, "{devin:?}");
     let fix = format!(
-        "pixel install --repo '{}'",
+        "pixel setup --repo '{}'",
         repo.display().to_string().replace('\'', "'\\''")
     );
     assert_eq!(
@@ -6417,7 +6417,7 @@ fn repo_install_at_home_should_keep_global_task_hooks_singular() {
 }
 
 /// A `pixel mcp` entry an older release wrote into Warp's config points Warp
-/// at a server Pixel no longer ships: doctor must name it, `install --repo`
+/// at a server Pixel no longer ships: doctor must name it, `setup --repo`
 /// must take it out without touching what the user put there, and a config
 /// Git tracks, which install never edits, is reported without a false fix.
 #[test]
@@ -6568,7 +6568,7 @@ fn global_install_removes_the_devin_lifecycle_hooks_an_earlier_release_wrote() {
         red.reason.as_deref(),
         Some(
             format!(
-                "retired Pixel hooks remain in {} — run `pixel install` to remove them",
+                "retired Pixel hooks remain in {} — run `pixel setup` to remove them",
                 devin_config.display()
             )
             .as_str()
@@ -6576,7 +6576,7 @@ fn global_install_removes_the_devin_lifecycle_hooks_an_earlier_release_wrote() {
     );
     assert_eq!(
         red.fix.as_deref(),
-        Some(format!("pixel install --shell {TEST_SHELL}").as_str())
+        Some(format!("pixel setup --shell {TEST_SHELL}").as_str())
     );
 
     install(&options).unwrap();
@@ -6811,7 +6811,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     );
 }
 
-/// The project guard `install --repo` writes is a Codex hook like any other:
+/// The project guard `setup --repo` writes is a Codex hook like any other:
 /// counted per handler, foreign hooks beside it never counted, and green only
 /// once every Pixel handler is reviewed. No hooks file is not a finding.
 #[test]

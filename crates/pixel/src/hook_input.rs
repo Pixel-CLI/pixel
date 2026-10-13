@@ -12,7 +12,7 @@
 //! the rest is never drained. It does not bound the *wait* — a writer that
 //! sends fewer than `cap + 1` bytes and holds the pipe open still stalls the
 //! read exactly as before, and only the host's own hook timeout
-//! (`HOOK_TIMEOUT`, 10 s, registered by `pixel install`) ends that wait.
+//! (`HOOK_TIMEOUT`, 10 s, registered by `pixel setup`) ends that wait.
 //! `task-event` has no silent path, so an over-cap payload takes its
 //! unavailable envelope, which denies `PreToolUse` on an enforced session.
 //!

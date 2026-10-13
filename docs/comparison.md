@@ -51,8 +51,8 @@ Answers arrive ~2.8× faster (153 ms vs 432 ms p50) and 2.4× smaller (4.5 KB vs
 11.0 KB). ([measurement](bench/vs-gitnexus.md#blast-radius-impact--impact--29-cases-4-repos-3-languages))
 
 **Git history as a first-class surface.** `search-history`, `dig-history`,
-`file-history`, `who-wrote`, `plan-rollback` — "when did this break", "who owns
-this", "what was the last good version", from an indexed history. None of the
+`file-history`, `plan-rollback` — "when did this break", "what was the last
+good version", from an indexed history. None of the
 other three implements this.
 
 **Repo operations in the same tool.** `repo-state`, `review-changes`, `commit`,
@@ -155,7 +155,7 @@ are obvious from the table: **semble for search, pixel for graph, history and
 git ops** costs ~5 100 always-on tokens and beats either alone on its own axis.
 Adding stacklit's map is another ~420.
 
-One installer caveat: **`pixel install` deletes GitNexus' generated section**
+One installer caveat: **`pixel setup` deletes GitNexus' generated section**
 from `CLAUDE.md` and `AGENTS.md` (the `# GitNexus — Code Intelligence` block and
 its subsections — `crates/pixel-install/src/config.rs`, `strip_stale_blocks`).
 It is regenerable with `gitnexus analyze`. Removal is bounded to a real
@@ -164,7 +164,7 @@ survives verbatim; there is a regression test for that case. pixel's hook router
 also recognises GitNexus' passive Claude context hook and coexists with it
 (`crates/pixel-install/src/routing.rs`). semble and stacklit are untouched.
 
-`pixel uninstall` removes everything `pixel install` wrote and is idempotent. It
+`pixel setup --remove` removes everything `pixel setup` wrote and is idempotent. It
 does not restore the GitNexus block.
 
 ## Command mapping
@@ -178,14 +178,14 @@ does not restore the GitNexus block.
 | `query` | `semble search` | — | `pixel search-meaning` / `find-code` |
 | — | `semble find_related` | — | no equivalent |
 | — | — | `stacklit derive` | `pixel list-areas` / `repo-map` |
-| — | — | `get_dependencies`, `get_hot_files` | partial (`list-flows`, `who-wrote`) |
+| — | — | `get_dependencies`, `get_hot_files` | partial (`list-flows`) |
 | `analyze` | implicit on first search | `stacklit generate` | `pixel build-index` |
 | `cypher`, `pdg_query`, `explain` | — | — | no equivalent |
 | `route_map`, `shape_check`, `api_impact` | — | — | no equivalent |
 | `group_list`, `group_sync` | — | — | no equivalent |
-| — | — | — | `search-history`, `dig-history`, `file-history`, `who-wrote`, `plan-rollback` |
+| — | — | — | `search-history`, `dig-history`, `file-history`, `plan-rollback` |
 | — | — | — | `repo-state`, `review-changes`, `commit`, `push`, `sync-branch` |
-| — | — | — | `scope-task`, `plan`, `note`, `recall` |
+| — | — | — | `scope-task`, `plan`, `recall` |
 
 ## Verify this yourself
 

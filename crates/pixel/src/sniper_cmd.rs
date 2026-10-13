@@ -1,16 +1,15 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! `gitpixel sniper` — one-look error capture queries. Thin dispatch over
-//! `pixel_session::query` plus the
-//! generic one-record ingest path (`report`) the JS adapters shell to.
+//! `pixel list-errors` — one-look error capture queries. Thin dispatch over
+//! `pixel_session::query`, plus the `run` wrapper that records a failing
+//! command's output.
 
-use std::io::Read;
 use std::path::PathBuf;
 
 use clap::Subcommand;
 use pixel_session::store::{Store, now_ms, resolve_project_root};
-use pixel_session::types::{ReportEnvelope, Surface};
+use pixel_session::types::Surface;
 use pixel_session::{format, query, run};
 
 #[derive(Subcommand)]
@@ -48,41 +47,6 @@ pub enum SniperCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Substring search over stored errors.
-    Query {
-        text: String,
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// "Was my edit applied?" — recent HMR/reload/dep-optimize events.
-    Hmr {
-        /// Only hmr updates touching this file path fragment.
-        #[arg(long)]
-        file: Option<String>,
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Latest run fingerprint; --diff compares against the previous run.
-    Env {
-        #[arg(long)]
-        diff: bool,
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Latest test signal: the newest vitest / Minitest / RSpec failure
-    /// record against the newest test-pass event.
-    Test {
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
     /// Print the current cursor (highest error id).
     Cursor {
         #[arg(long, default_value = ".")]
@@ -94,17 +58,6 @@ pub enum SniperCmd {
     Gc {
         #[arg(long)]
         vacuum: bool,
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Ingest one JSON record ("-" = stdin). Errors by default; use
-    /// {"type":"event",...} or {"type":"run",...} for lifecycle records.
-    Report {
-        /// File to read, or "-" for stdin.
-        #[arg(default_value = "-")]
-        input: String,
         #[arg(long, default_value = ".")]
         repo: PathBuf,
         #[arg(long)]
@@ -204,26 +157,6 @@ pub fn run_sniper(cmd: SniperCmd) -> Result<(), String> {
                 None => Err(format!("no error with id {id}")),
             }
         }
-        SniperCmd::Query { text, repo, json } => {
-            let store = open_store(&repo)?;
-            let list = query::search(&store, &text, 20).map_err(|e| e.to_string())?;
-            emit(&list, json, |l| format::render_error_list(l, now_ms()))
-        }
-        SniperCmd::Hmr { file, repo, json } => {
-            let store = open_store(&repo)?;
-            let status = query::hmr(&store, file.as_deref()).map_err(|e| e.to_string())?;
-            emit(&status, json, |s| format::render_hmr(s, now_ms()))
-        }
-        SniperCmd::Env { diff, repo, json } => {
-            let store = open_store(&repo)?;
-            let env = query::env(&store, diff).map_err(|e| e.to_string())?;
-            emit(&env, json, format::render_env)
-        }
-        SniperCmd::Test { repo, json } => {
-            let store = open_store(&repo)?;
-            let status = query::test_status(&store).map_err(|e| e.to_string())?;
-            emit(&status, json, |s| format::render_test(s, now_ms()))
-        }
         SniperCmd::Cursor { repo, json } => {
             let store = open_store(&repo)?;
             let result = query::cursor(&store).map_err(|e| e.to_string())?;
@@ -233,48 +166,6 @@ pub fn run_sniper(cmd: SniperCmd) -> Result<(), String> {
             let store = open_store(&repo)?;
             let outcome = query::gc(&store, vacuum).map_err(|e| e.to_string())?;
             emit(&outcome, json, format::render_gc)
-        }
-        SniperCmd::Report { input, repo, json } => {
-            let raw = if input == "-" {
-                let mut buf = String::new();
-                std::io::stdin()
-                    .read_to_string(&mut buf)
-                    .map_err(|e| format!("read stdin: {e}"))?;
-                buf
-            } else {
-                std::fs::read_to_string(&input).map_err(|e| format!("read {input}: {e}"))?
-            };
-            let value: serde_json::Value =
-                serde_json::from_str(&raw).map_err(|e| format!("bad json: {e}"))?;
-            let store = open_store(&repo)?;
-            match ReportEnvelope::parse(value)? {
-                ReportEnvelope::Error(input) => {
-                    let recorded = store.record_error(&input).map_err(|e| e.to_string())?;
-                    emit(&recorded, json, |r| {
-                        format!(
-                            "recorded #{}{}\n",
-                            r.id,
-                            if r.deduped {
-                                format!(" (deduped, \u{d7}{})", r.count)
-                            } else {
-                                String::new()
-                            }
-                        )
-                    })
-                }
-                ReportEnvelope::Event(input) => {
-                    let id = store.record_event(&input).map_err(|e| e.to_string())?;
-                    emit(&serde_json::json!({"event_id": id}), json, |_| {
-                        format!("recorded event #{id}\n")
-                    })
-                }
-                ReportEnvelope::Run(input) => {
-                    store.record_run(&input).map_err(|e| e.to_string())?;
-                    emit(&serde_json::json!({"run_id": input.run_id}), json, |_| {
-                        format!("recorded run {}\n", input.run_id)
-                    })
-                }
-            }
         }
         SniperCmd::Run { label, repo, cmd } => {
             let store = open_store(&repo)?;

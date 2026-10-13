@@ -17,7 +17,7 @@
 #
 # This script isolates pixel's OWN prompt/behavior cost: `claude --safe-mode
 # --append-system-prompt-file <agent-prompt.md>` gives an agent with pixel's
-# doctrine (the prompt `pixel install` deploys to
+# doctrine (the prompt `pixel setup` deploys to
 # ~/.local/share/pixel/agent-prompt.md; the bundled asset under crates/ when
 # nothing is installed) as its ONLY instructions and pixel on PATH, but (like
 # the pixel-free baseline) no PreToolUse guard hook — --safe-mode disables
@@ -63,7 +63,7 @@ if [ -z "$PIXEL_BIN" ] || [ ! -x "$PIXEL_BIN" ]; then
   exit 1
 fi
 if [ ! -s "$AGENT_PROMPT" ]; then
-  echo "ERROR: agent prompt not found at $AGENT_PROMPT (run \`pixel install\`, or set AGENT_PROMPT)." >&2
+  echo "ERROR: agent prompt not found at $AGENT_PROMPT (run \`pixel setup\`, or set AGENT_PROMPT)." >&2
   exit 1
 fi
 

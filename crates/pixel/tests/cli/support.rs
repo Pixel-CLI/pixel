@@ -22,7 +22,7 @@
 //!    and drowned the real errors in `pixel action-log --errors-only`.
 //! 4. The binary never reads the developer's home. `HOME` points at an empty
 //!    directory unless the test sets its own: every command compares the
-//!    prompts `pixel install` deployed there with its own and warns on
+//!    prompts `pixel setup` deployed there with its own and warns on
 //!    stderr, so a machine that ran another release's install failed every
 //!    test that reads stderr exactly, while CI, with no install, passed.
 
@@ -43,8 +43,31 @@ pub fn pixel_command() -> Command {
     command
 }
 
+/// The top-level commands `pixel --help` lists: the commands the core
+/// builds in. A rename or a moved name that points at anything else is
+/// answered by the plugin dispatch, not by clap.
+pub fn built_in_commands() -> std::collections::BTreeSet<String> {
+    let out = pixel_command().arg("--help").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    let block = text
+        .split("Commands:")
+        .nth(1)
+        .and_then(|rest| rest.split("Options:").next())
+        .expect("clap help has Commands: then Options:");
+    let names: std::collections::BTreeSet<String> = block
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect();
+    assert!(names.len() > 20, "help parsing broke: {names:?}");
+    names
+}
+
 /// An empty home, one per test process and created once, like
-/// [`neutral_cwd`]: nothing `pixel install` deployed on this machine is in it.
+/// [`neutral_cwd`]: nothing `pixel setup` deployed on this machine is in it.
 pub fn neutral_home() -> &'static Path {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
