@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Brief playground</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script type="module" src="./app.ts"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Brief playground</h1>
+      <span id="repo" class="muted"></span>
+      <label class="compare"><input type="checkbox" id="compare" /> compare two binaries</label>
+    </header>
+    <main>
+      <aside id="prompts-pane">
+        <div class="filters">
+          <input id="search" type="search" placeholder="search prompts" />
+          <select id="f-kind"><option value="">all kinds</option></select>
+          <select id="f-topic">
+            <option value="">on/off topic</option>
+            <option value="true">on topic</option>
+            <option value="false">off topic</option>
+          </select>
+          <select id="f-lang"><option value="">all langs</option></select>
+        </div>
+        <div id="count" class="muted"></div>
+        <ul id="prompt-list"></ul>
+        <details id="add">
+          <summary>add prompt</summary>
+          <form id="add-form">
+            <textarea name="text" rows="3" placeholder="prompt text" required></textarea>
+            <div class="row">
+              <input name="lang" value="en" size="3" />
+              <input name="kind" placeholder="kind" size="10" />
+              <label><input type="checkbox" name="on_topic" checked /> on topic</label>
+              <button type="submit">add + run</button>
+            </div>
+          </form>
+        </details>
+      </aside>
+      <section id="results">
+        <div id="current" class="muted">pick a prompt</div>
+        <div id="columns"></div>
+        <div id="codex" class="panel disabled" aria-disabled="true">
+          <h2>Run in Codex <span class="muted">(coming with #900)</span></h2>
+          <div class="arms">
+            <div class="arm"><h3>with Pixel</h3><p class="muted">calls, time, answer</p></div>
+            <div class="arm"><h3>without Pixel</h3><p class="muted">calls, time, answer</p></div>
+          </div>
+          <button disabled>Run both</button> <button disabled>Abort</button>
+        </div>
+      </section>
+    </main>
+    <dialog id="viewer"><pre id="viewer-body"></pre><form method="dialog"><button>close</button></form></dialog>
+  </body>
+</html>
