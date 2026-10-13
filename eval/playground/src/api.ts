@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { BRIEF_CAP_BYTES, decisionOf, parseBrief, parseJsonRecord } from "./brief";
+import { abortCard, startRun, type Arm, type RunConfig } from "./codex";
 
 export type Config = {
   /** Indexed checkout `pixel brief` runs in. */
@@ -19,6 +20,8 @@ export type Config = {
   /** Binaries offered when `binsFile` is absent. */
   defaultBins: Bin[];
   timeoutMs: number;
+  /** Codex runs (see codex.ts). */
+  codex: RunConfig;
 };
 
 export type Bin = { name: string; path: string };
@@ -45,8 +48,18 @@ export const defaultConfig = (env: Record<string, string | undefined> = process.
     { name: "new-pixel (PR #887)", path: `${WORK_ROOT}/new-pixel` },
   ];
   const fixture = `${WORK_ROOT}/zero/pixel`;
+  const repo = env.PLAYGROUND_REPO ?? (existsSync(fixture) ? fixture : repoRoot);
   return {
-    repo: env.PLAYGROUND_REPO ?? (existsSync(fixture) ? fixture : repoRoot),
+    repo,
+    codex: {
+      // The real binary: the shell's `codex` is a wrapper function.
+      codexBin: env.PLAYGROUND_CODEX ?? `${env.HOME}/.local/bin/codex`,
+      root: env.PLAYGROUND_ROOT ?? "/private/tmp/claude-501/playground",
+      userCodexHome: env.CODEX_HOME_USER ?? `${env.HOME}/.codex`,
+      repo,
+      inject: env.PLAYGROUND_INJECT === "prefix" ? "prefix" : "hook",
+      runTimeoutMs: 300_000,
+    },
     promptsFile: join(repoRoot, "eval/brief-gate/prompts.jsonl"),
     localPromptsFile: join(here, "local-prompts.json"),
     binsFile: join(here, "bins.json"),
@@ -230,7 +243,26 @@ export const readRange = async (cfg: Config, path: string, start: number, end: n
   });
 };
 
+export const runCard = async (cfg: Config, req: Request): Promise<Response> => {
+  const b = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+  const cardId = typeof b?.cardId === "string" ? b.cardId : "";
+  const prompt = typeof b?.prompt === "string" ? b.prompt.trim() : "";
+  const arm = b?.arm;
+  const briefText = typeof b?.briefText === "string" ? b.briefText : "";
+  if (!cardId || !prompt) return fail("cardId and prompt are required");
+  if (arm !== "pixel" && arm !== "none") return fail('arm must be "pixel" or "none"');
+  if (arm === "pixel" && !briefText.trim()) return fail("the pixel arm needs briefText (Send first)");
+  if (!existsSync(cfg.codex.repo)) return fail(`fixture repo not found: ${cfg.codex.repo}`, 500);
+  return startRun({ ...cfg.codex, repo: cfg.repo }, { cardId, prompt, arm: arm as Arm, briefText });
+};
+
 export const handlers = (cfg: Config) => ({
+  run: (req: Request) => runCard(cfg, req),
+  abort: async (req: Request) => {
+    const b = (await req.json().catch(() => null)) as { cardId?: unknown } | null;
+    if (typeof b?.cardId !== "string") return fail("cardId is required");
+    return json({ ok: true, killed: abortCard(b.cardId) });
+  },
   prompts: async () => json(await listPrompts(cfg)),
   addPrompt: async (req: Request) => {
     const body = await req.json().catch(() => null);

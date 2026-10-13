@@ -17,18 +17,46 @@ bun test           # API self-test against a fake pixel binary
 
 ## What it shows
 
-- **Left:** the prompts of `eval/brief-gate/prompts.jsonl` plus the ones you add
-  (`local-prompts.json`, gitignored). Filters: search, kind, on/off topic, language.
-- **Right:** the brief for the selected prompt. The `[PIXEL:BRIEF]` header,
-  `searched:` receipt and `confidence:` line are highlighted; `read:`, `also:` and
-  `files:` entries are clickable `path:line` chips that open the cited range from
-  the fixture. A "why" box shows gate, tier, score, signal, kind and the
-  gate features (`struct_ratio`, `struct_per_mille`, `best_structural_weight`,
-  `total_weight`, the rest under a fold). Byte size is drawn against the 2048 B
-  cap and latency is the wall time of the call.
-- **Compare two binaries:** tick the box in the header for a second column.
-- **Run in Codex:** a disabled placeholder (with Pixel / without Pixel / abort);
-  it lands with #900.
+A horizontal strip of test cards (90vw x 100vh, scroll-snap), a "+ new test"
+card at the end. Cards and their results persist in `localStorage`.
+
+1. **Prompt + Send.** Type a prompt or fill it from the 218-prompt corpus
+   (filter box + dropdown). Send calls `/api/brief`.
+2. **Pixel brief ready to hydrate the LLM.** The `[PIXEL:BRIEF]` header,
+   `searched:` and `confidence:` lines are highlighted; `read:`, `also:` and
+   `files:` entries are clickable `path:line` chips that open the cited range
+   from the fixture. A collapsible "why" shows gate, tier, score, signal, kind,
+   bytes against the 2048 B cap, latency and the gate features.
+3. **Test.** Two panes run Codex on the same prompt: LEFT with the brief, RIGHT
+   with the initial prompt only. Each streams one line per tool call (numbered,
+   `rg`/`grep`/`find` counted as searches, `cat`/`sed -n`/`head` as reads), then
+   the answer; the footer has tool calls, searches/reads, wall time and tokens.
+   **Abort** kills both runs of the card (the whole process group).
+
+## Codex runs
+
+`POST /api/run {cardId, prompt, arm: "pixel"|"none", briefText}` streams SSE
+(`meta`, `codex` = one JSONL event per frame, `end`); `POST /api/abort {cardId}`
+kills the process group. It spawns the real binary
+(`PLAYGROUND_CODEX`, default `~/.local/bin/codex`; the shell's `codex` is a
+wrapper function) as `codex exec --json -s read-only --skip-git-repo-check -C <fixture>`
+with stdin closed (Codex otherwise waits on it) and `PIXEL_BRIEF=0`.
+
+Each arm has its own `CODEX_HOME` under `/private/tmp/claude-501/playground/codex-home-<arm>/`:
+`auth.json` copied from `~/.codex` (mode 600, never read or logged), a
+`config.toml` with only the model scalars of the user's config
+(`model`, `model_reasoning_effort`, `approval_policy`, ...) and the fixture
+trusted; no MCP servers, notify, plugins or marketplaces. The `none` home has
+no hook. The `pixel` home has one `UserPromptSubmit` hook, `cat
+"$PLAYGROUND_BRIEF_ENVELOPE"`, and the server writes the hook envelope
+(`hookSpecificOutput.additionalContext` = the card's brief) to a per-run file
+and passes its path in that variable, with `--dangerously-bypass-hook-trust`
+so `exec` does not wait for a hook review.
+
+Hooks fire under `codex exec` (0.162.1): the brief reaches the first turn as a
+`developer` message in the pixel arm's rollout and is absent from the none
+arm's. `PLAYGROUND_INJECT=prefix` switches to the fallback, the brief
+prepended as `Context from Pixel:` / `Task:`, and the pane says so.
 
 ## Fixture and binaries
 
@@ -56,6 +84,8 @@ without it and the raw text is shown, with no decision record.
 | `POST /api/prompts {text, lang?, kind?, on_topic?}` | add a local prompt |
 | `GET /api/bins` | binaries, whether each exists and supports `--json` |
 | `POST /api/brief {prompt, bin}` | brief text, parsed ranges, decision record, bytes, latency |
+| `POST /api/run {cardId, prompt, arm, briefText}` | SSE stream of one Codex run |
+| `POST /api/abort {cardId}` | kill the card's Codex process groups |
 | `GET /api/file?path=&start=&end=` | a range of the fixture (paths outside it are refused) |
 
 The server listens on 127.0.0.1 only.

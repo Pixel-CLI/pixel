@@ -1,18 +1,21 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
-// Browser side of the brief playground: vanilla DOM, no framework. All text
-// from the API is inserted with textContent, never as HTML.
+// Browser side of the brief playground: a strip of test cards, vanilla DOM.
+// All text from the API is inserted with textContent, never as HTML.
 import type { Decision, ParsedBrief, Range } from "../src/brief";
+import { applyEvent, emptyPane, paneStats, type PaneState } from "../src/events";
 
-type Prompt = {
-  id: string; text: string; lang: string; on_topic: boolean | null;
-  kind: string | null; source: string | null; local: boolean;
-};
+type Prompt = { id: string; text: string; lang: string; on_topic: boolean | null; kind: string | null };
 type BinInfo = { name: string; path: string; exists: boolean; json: boolean | null };
 type BriefResult = {
   ok: boolean; error?: string; raw?: string; json?: boolean; note?: string;
   brief: string | null; bytes: number; cap_bytes: number; latency_ms: number;
   parsed: ParsedBrief | null; decision: Decision | null;
+};
+type Arm = "pixel" | "none";
+type Card = {
+  id: string; prompt: string; bin: string; sentPrompt: string;
+  brief: BriefResult | "loading" | null; panes: Record<Arm, PaneState>; whyOpen: boolean;
 };
 
 type Child = Node | string | null | undefined;
@@ -34,56 +37,44 @@ const store = {
   set: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* optional */ } },
 };
 const api = async <T>(url: string, init?: RequestInit): Promise<T> => (await fetch(url, init)).json() as Promise<T>;
+const post = (body: unknown): RequestInit => ({
+  method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+});
 
-const state = {
-  prompts: [] as Prompt[],
-  bins: [] as BinInfo[],
-  selected: null as Prompt | null,
-  compare: false,
-  binSel: [store.get("binA") ?? "", store.get("binB") ?? ""],
-  results: [null, null] as (BriefResult | "loading" | null)[],
+let corpus: Prompt[] = [];
+let bins: BinInfo[] = [];
+const cards: Card[] = [];
+const views = new Map<string, { updateBrief: () => void; updatePane: (a: Arm) => void; root: HTMLElement }>();
+const controllers = new Map<string, AbortController[]>();
+
+// ---- persistence -----------------------------------------------------------
+
+const KEY = "brief-playground.cards.v2";
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+const save = () => {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => store.set(KEY, JSON.stringify(cards.map((c) => ({ ...c, brief: c.brief === "loading" ? null : c.brief })))), 150);
+};
+const load = (): Card[] => {
+  try {
+    const raw = JSON.parse(store.get(KEY) ?? "[]") as Card[];
+    for (const c of raw) for (const arm of ["pixel", "none"] as const) {
+      // A reload cannot resume a stream: say so rather than show a spinner.
+      if (c.panes[arm].status === "running") c.panes[arm].status = "interrupted";
+    }
+    return raw;
+  } catch { return []; }
 };
 
-// ---- prompt list -----------------------------------------------------------
+const newCard = (): Card => ({
+  id: `card-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+  prompt: "", bin: bins.find((b) => b.exists && b.json)?.path ?? bins.find((b) => b.exists)?.path ?? "",
+  sentPrompt: "", brief: null, panes: { pixel: emptyPane(), none: emptyPane() }, whyOpen: false,
+});
 
-const unique = (xs: (string | null)[]) => [...new Set(xs.filter((x): x is string => !!x))].sort();
-const fillSelect = (sel: HTMLSelectElement, values: string[]) => {
-  const first = sel.options[0]!;
-  sel.replaceChildren(first, ...values.map((v) => h("option", { value: v }, v)));
-};
+// ---- brief rendering -------------------------------------------------------
 
-const visible = () => {
-  const q = $<HTMLInputElement>("search").value.toLowerCase();
-  const kind = $<HTMLSelectElement>("f-kind").value;
-  const topic = $<HTMLSelectElement>("f-topic").value;
-  const lang = $<HTMLSelectElement>("f-lang").value;
-  return state.prompts.filter(
-    (p) =>
-      (!q || p.text.toLowerCase().includes(q) || p.id.includes(q)) &&
-      (!kind || p.kind === kind) &&
-      (!topic || String(p.on_topic) === topic) &&
-      (!lang || p.lang === lang),
-  );
-};
-
-const renderList = () => {
-  const rows = visible();
-  $("count").textContent = `${rows.length} / ${state.prompts.length} prompts`;
-  $("prompt-list").replaceChildren(
-    ...rows.map((p) =>
-      h("li", { class: p.id === state.selected?.id ? "sel" : "", onclick: () => select(p) },
-        h("div", {},
-          h("span", { class: `tag ${p.on_topic ? "on" : "off"}` }, p.on_topic === null ? "?" : p.on_topic ? "on" : "off"),
-          h("span", { class: "tag" }, p.lang),
-          p.kind ? h("span", { class: "tag" }, p.kind) : null,
-          h("span", { class: "muted" }, p.id)),
-        h("div", {}, p.text)),
-    ),
-  );
-};
-
-// ---- brief panel -----------------------------------------------------------
-
+const rangeText = (r: Range) => `${r.path}:${r.start}${r.end > r.start ? `-${r.end}` : ""}`;
 const openRange = async (r: Range) => {
   const res = await api<{ ok: boolean; error?: string; path: string; lines: { n: number; text: string }[]; start: number; end: number }>(
     `/api/file?${new URLSearchParams({ path: r.path, start: String(r.start), end: String(r.end) })}`,
@@ -91,16 +82,13 @@ const openRange = async (r: Range) => {
   const body = $("viewer-body");
   if (!res.ok) body.textContent = res.error ?? "error";
   else body.replaceChildren(
-    h("strong", {}, `${res.path}:${r.start}${r.end > r.start ? `-${r.end}` : ""}\n`),
-    ...res.lines.map((l) =>
-      h("span", { class: l.n >= res.start && l.n <= res.end ? "hit" : "" }, `${String(l.n).padStart(5)}  ${l.text}\n`)),
+    h("strong", {}, `${rangeText(r)}\n`),
+    ...res.lines.map((l) => h("span", { class: l.n >= res.start && l.n <= res.end ? "hit" : "" }, `${String(l.n).padStart(5)}  ${l.text}\n`)),
   );
   $<HTMLDialogElement>("viewer").showModal();
 };
-
 const chip = (r: Range, cls: string) =>
-  h("span", { class: `chip ${cls}`, title: r.label || undefined, onclick: () => void openRange(r) },
-    `${r.path}:${r.start}${r.end > r.start ? `-${r.end}` : ""}`);
+  h("span", { class: `chip ${cls}`, title: r.label || undefined, onclick: () => void openRange(r) }, rangeText(r));
 
 const renderBrief = (p: ParsedBrief) => {
   const pre = h("div", { class: "brief" });
@@ -115,9 +103,8 @@ const renderBrief = (p: ParsedBrief) => {
       ln.append(key(tag));
       for (const r of p.files.filter((x) => text.includes(`${x.path}:${x.start}`))) ln.append(chip(r, "file"));
     } else if (tag === "searched") ln.append(key(tag), h("span", { class: "searched" }, text));
-    else if (tag === "confidence") {
-      ln.append(key(tag), h("span", { class: `conf-${p.confidenceLevel ?? ""}` }, text));
-    } else if (tag === "text") ln.append(text);
+    else if (tag === "confidence") ln.append(key(tag), h("span", { class: `conf-${p.confidenceLevel ?? ""}` }, text));
+    else if (tag === "text") ln.append(text);
     else ln.append(key(tag), text);
     pre.append(ln);
   }
@@ -126,121 +113,246 @@ const renderBrief = (p: ParsedBrief) => {
 
 const GATE_FEATURES = ["struct_ratio", "struct_per_mille", "best_structural_weight", "total_weight"];
 const fmt = (v: unknown) => (typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(3)) : String(v));
-
-const renderWhy = (d: Decision) => {
-  const f = d.features ?? {};
+const renderWhy = (card: Card, r: BriefResult) => {
+  const d = r.decision;
+  const f = d?.features ?? {};
   const rows: [string, string][] = [
-    ["tier", d.tier ?? "none"], ["gate", d.gate ?? "-"], ["score", d.score == null ? "-" : d.score.toFixed(3)],
-    ["signal", d.signal ?? "-"], ["kind", d.kind ?? "-"], ["receipt", String(d.receipt)], ["route", d.route ?? "-"],
-    ...(d.reason ? [["reason", d.reason] as [string, string]] : []),
-    ...(d.bestFile ? [["best file", d.bestFile] as [string, string]] : []),
-    ...GATE_FEATURES.filter((k) => k in f).map((k): [string, string] => [k, fmt(f[k])]),
+    ["tier", d?.tier ?? "none"], ["gate", d?.gate ?? "-"], ["score", d?.score == null ? "-" : d.score.toFixed(3)],
+    ["signal", d?.signal ?? "-"], ["kind", d?.kind ?? "-"], ["receipt", String(d?.receipt ?? "-")],
+    ["bytes", `${r.bytes} / ${r.cap_bytes}`], ["latency", `${r.latency_ms} ms${d?.elapsedMs != null ? ` (binary ${d.elapsedMs} ms)` : ""}`],
+    ...(d?.reason ? [["reason", d.reason] as [string, string]] : []),
+    ...(d?.bestFile ? [["best file", d.bestFile] as [string, string]] : []),
+    ...Object.entries(f).sort(([a], [b]) => Number(!GATE_FEATURES.includes(a)) - Number(!GATE_FEATURES.includes(b)))
+      .map(([k, v]): [string, string] => [k, fmt(v)]),
   ];
-  const others = Object.entries(f).filter(([k]) => !GATE_FEATURES.includes(k));
-  return h("div", { class: "why" },
-    h("strong", {}, "why "),
-    h("span", { class: `pill ${d.gate === "open" ? "open" : d.gate === "closed" ? "closed" : "other"}` }, d.gate ?? "no gate"),
-    h("table", {}, ...rows.map(([k, v]) => h("tr", {}, h("td", {}, k), h("td", {}, v)))),
-    others.length ? h("details", {}, h("summary", { class: "muted" }, `${others.length} other features`),
-      h("table", {}, ...others.map(([k, v]) => h("tr", {}, h("td", {}, k), h("td", {}, fmt(v)))))) : null);
+  const det = h("details", { class: "why", open: card.whyOpen },
+    h("summary", {}, "why ",
+      h("span", { class: `pill ${d?.gate === "open" ? "open" : d?.gate === "closed" ? "closed" : "other"}` }, d?.gate ?? "no record")),
+    h("table", {}, ...rows.map(([k, v]) => h("tr", {}, h("td", {}, k), h("td", {}, v)))));
+  det.addEventListener("toggle", () => { card.whyOpen = det.open; save(); });
+  return det;
 };
 
-const renderResult = (r: BriefResult | "loading" | null): Node => {
-  if (r === null) return h("div", { class: "muted" }, "no run yet");
-  if (r === "loading") return h("div", { class: "muted" }, "running...");
-  if (!r.ok) return h("div", { class: "err" }, r.error ?? "error", r.raw ? h("pre", {}, r.raw) : null);
-  const pct = Math.min(100, Math.round((r.bytes / r.cap_bytes) * 100));
-  return h("div", {},
-    h("div", { class: "metrics" },
-      h("span", {}, `latency ${r.latency_ms} ms${r.decision?.elapsedMs != null ? ` (binary ${r.decision.elapsedMs} ms)` : ""}`),
-      h("span", {}, `${r.bytes} / ${r.cap_bytes} B `, h("span", { class: "bar" }, h("i", { class: r.bytes > r.cap_bytes ? "over" : "", style: `width:${pct}%` })))),
-    r.note ? h("div", { class: "note" }, r.note) : null,
-    r.brief && r.parsed ? renderBrief(r.parsed) : h("div", { class: "muted" }, "no brief (empty output)"),
-    r.decision ? renderWhy(r.decision) : null);
+// ---- panes -----------------------------------------------------------------
+
+const PANE_TITLE: Record<Arm, string> = { pixel: "Codex with the brief", none: "Codex without the brief (initial prompt only)" };
+const secs = (ms: number | null) => (ms == null ? "-" : `${(ms / 1000).toFixed(1)} s`);
+
+const renderPane = (card: Card, arm: Arm) => {
+  const s = card.panes[arm];
+  const stats = paneStats(s);
+  const stream = h("div", { class: "stream" },
+    s.status === "idle" ? h("div", { class: "muted" }, "waiting for Test") : null,
+    ...s.tools.map((t, i) => h("div", { class: `tool ${t.status}` },
+      h("span", { class: "n" }, String(i + 1)), h("span", { class: "s" }, t.status === "running" ? "…" : t.status === "done" ? "✓" : "✗"),
+      h("span", { class: "t" }, t.label))),
+    s.status === "running" && !s.answer ? h("div", { class: "muted" }, s.tools.length ? "working…" : "starting Codex…") : null,
+    s.answer ? h("div", { class: "answer" }, s.answer) : null,
+    s.error ? h("div", { class: "err" }, s.error) : null);
+  const u = s.usage;
+  return h("div", { class: "pane" },
+    h("h2", {}, h("span", { class: "grow" }, PANE_TITLE[arm]), s.label ? h("span", { class: "tag" }, s.label) : null,
+      h("span", { class: "tag" }, s.status), h("span", { class: "tag" }, `${stats.calls} calls`)),
+    stream,
+    h("footer", {},
+      h("span", {}, `${stats.calls} tool calls`), h("span", {}, `${stats.searches} searches / ${stats.reads} reads`),
+      h("span", {}, secs(s.ms)),
+      h("span", {}, u ? `${u.input + u.output} tokens (in ${u.input}, cached ${u.cached}, out ${u.output})` : "tokens -")));
 };
 
-const renderColumns = () => {
-  const n = state.compare ? 2 : 1;
-  $("columns").replaceChildren(
-    ...[0, 1].slice(0, n).map((i) => {
-      const sel = h("select", {
-        onchange: (e: Event) => {
-          state.binSel[i] = (e.target as HTMLSelectElement).value;
-          store.set(i ? "binB" : "binA", state.binSel[i]!);
-          void run(i);
-        },
-      }, ...state.bins.map((b) => h("option", { value: b.path, selected: b.path === state.binSel[i], disabled: !b.exists },
-        `${b.name}${b.exists ? "" : " (missing)"}${b.json === false ? " (no --json)" : ""}`)));
-      return h("div", { class: "panel" },
-        h("div", { class: "col-head" }, h("strong", {}, i ? "B" : "A"), sel,
-          h("button", { onclick: () => void run(i) }, "rerun")),
-        renderResult(state.results[i]!));
-    }),
+const stream = async (card: Card, arm: Arm, signal: AbortSignal) => {
+  const s: PaneState = (card.panes[arm] = { ...emptyPane(), status: "running" });
+  const t0 = performance.now();
+  const view = () => views.get(card.id)?.updatePane(arm);
+  view();
+  const tick = setInterval(() => { s.ms = Math.round(performance.now() - t0); view(); }, 1000);
+  try {
+    const res = await fetch("/api/run", { ...post({ cardId: card.id, prompt: card.sentPrompt, arm, briefText: arm === "pixel" ? (card.brief as BriefResult).brief ?? "" : "" }), signal });
+    if (!res.ok || !res.body) {
+      s.status = "error";
+      s.error = ((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `HTTP ${res.status}`;
+      return;
+    }
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let i: number;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        const event = /^event: (.*)$/m.exec(frame)?.[1];
+        const data = frame.split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("\n");
+        try {
+          if (event === "meta") Object.assign(s, { mode: JSON.parse(data).mode, label: JSON.parse(data).label });
+          else if (event === "codex") applyEvent(s, JSON.parse(data));
+          else if (event === "end") {
+            const end = JSON.parse(data) as { code: number | null; aborted: boolean; ms: number; stderr: string };
+            s.ms = end.ms;
+            s.status = end.aborted ? "aborted" : end.code === 0 && !s.error ? "done" : "error";
+            if (s.status === "error" && !s.error) s.error = end.stderr || `codex exited with ${end.code}`;
+          }
+        } catch { /* a malformed line is skipped */ }
+        view();
+        save();
+      }
+    }
+    if (s.status === "running") s.status = signal.aborted ? "aborted" : "done";
+  } catch (e) {
+    s.status = signal.aborted ? "aborted" : "error";
+    if (!signal.aborted) s.error = String(e);
+  } finally {
+    clearInterval(tick);
+    view();
+    save();
+  }
+};
+
+// ---- card ------------------------------------------------------------------
+
+const send = async (card: Card) => {
+  if (!card.prompt.trim() || !card.bin) return;
+  abort(card);
+  card.sentPrompt = card.prompt.trim();
+  card.brief = "loading";
+  card.panes = { pixel: emptyPane(), none: emptyPane() };
+  views.get(card.id)?.updateBrief();
+  for (const a of ["pixel", "none"] as const) views.get(card.id)?.updatePane(a);
+  try {
+    card.brief = await api<BriefResult>("/api/brief", post({ prompt: card.sentPrompt, bin: card.bin }));
+  } catch (e) {
+    card.brief = { ok: false, error: String(e) } as BriefResult;
+  }
+  views.get(card.id)?.updateBrief();
+  save();
+};
+
+const abort = (card: Card) => {
+  for (const c of controllers.get(card.id) ?? []) c.abort();
+  controllers.delete(card.id);
+  void fetch("/api/abort", post({ cardId: card.id }));
+};
+
+const test = (card: Card) => {
+  abort(card);
+  const ctl = [new AbortController(), new AbortController()];
+  controllers.set(card.id, ctl);
+  void stream(card, "pixel", ctl[0]!.signal);
+  void stream(card, "none", ctl[1]!.signal);
+};
+
+const mountCard = (card: Card, index: number): HTMLElement => {
+  const input = h("textarea", { class: "prompt", rows: "1", placeholder: "type the prompt to test" });
+  input.value = card.prompt;
+  const sendBtn = h("button", { class: "primary", onclick: () => void send(card) }, "Send");
+  input.addEventListener("input", () => { card.prompt = input.value; save(); });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send(card); });
+
+  const search = h("input", { type: "search", placeholder: "pick from corpus: filter" });
+  const pick = h("select", {});
+  const fillPick = () => {
+    const q = search.value.toLowerCase();
+    const rows = corpus.filter((p) => !q || p.text.toLowerCase().includes(q) || p.id.includes(q)).slice(0, 300);
+    pick.replaceChildren(h("option", { value: "" }, `${rows.length} prompts…`),
+      ...rows.map((p) => h("option", { value: p.id }, `${p.id} ${p.on_topic ? "" : "(off) "}${p.text.slice(0, 110)}`)));
+  };
+  search.addEventListener("input", fillPick);
+  pick.addEventListener("change", () => {
+    const p = corpus.find((x) => x.id === pick.value);
+    if (p) { input.value = card.prompt = p.text; save(); }
+  });
+  fillPick();
+
+  const binSel = h("select", { title: "pixel binary", onchange: (e: Event) => { card.bin = (e.target as HTMLSelectElement).value; save(); } },
+    ...bins.map((b) => h("option", { value: b.path, selected: b.path === card.bin, disabled: !b.exists },
+      `${b.name}${b.exists ? "" : " (missing)"}${b.json === false ? " (no --json)" : ""}`)));
+
+  const briefBox = h("div", { class: "box briefbox" });
+  const testBtn = h("button", { class: "primary", onclick: () => test(card) }, "Test");
+  const abortBtn = h("button", { class: "danger", onclick: () => abort(card), title: "kill both Codex runs of this card" }, "Abort");
+  const panes = { pixel: h("div", { style: "display:contents" }), none: h("div", { style: "display:contents" }) };
+  const paneGrid = h("div", { class: "panes" }, panes.pixel, panes.none);
+
+  const updateBrief = () => {
+    const r = card.brief;
+    const ready = r !== null && r !== "loading" && r.ok;
+    const body: Child[] = [];
+    if (r === null) body.push(h("div", { class: "muted" }, "Send a prompt to build its brief."));
+    else if (r === "loading") body.push(h("div", { class: "muted" }, "building the brief…"));
+    else if (!r.ok) body.push(h("div", { class: "err" }, r.error ?? "error"), r.raw ? h("pre", {}, r.raw) : null);
+    else {
+      body.push(r.note ? h("div", { class: "note" }, r.note) : null,
+        r.brief && r.parsed ? renderBrief(r.parsed) : h("div", { class: "muted" }, "no brief for this prompt (empty output): the pixel arm would get nothing"),
+        renderWhy(card, r));
+    }
+    briefBox.replaceChildren(
+      h("h2", {}, h("span", { class: "grow" }, "Pixel brief ready to hydrate the LLM"),
+        ready ? h("span", { class: "muted" }, `${(r as BriefResult).bytes} / ${(r as BriefResult).cap_bytes} B · ${(r as BriefResult).latency_ms} ms`) : null,
+        ready ? testBtn : null),
+      ...body.filter((x): x is Node | string => x != null));
+    testBtn.disabled = !(ready && (r as BriefResult).brief);
+    sendBtn.disabled = r === "loading";
+  };
+  const updatePane = (arm: Arm) => {
+    const old = panes[arm].querySelector(".stream") as HTMLElement | null;
+    const atBottom = !old || old.scrollHeight - old.scrollTop - old.clientHeight < 24;
+    panes[arm].replaceChildren(renderPane(card, arm));
+    const now = panes[arm].querySelector(".stream") as HTMLElement;
+    if (old && !atBottom) now.scrollTop = old.scrollTop;
+    else now.scrollTop = now.scrollHeight;
+    const running = card.panes.pixel.status === "running" || card.panes.none.status === "running";
+    abortBtn.disabled = !running;
+  };
+
+  const root = h("section", { class: "card", "data-card": card.id },
+    h("div", { class: "bar" }, h("strong", {}, `Test ${index + 1}`), h("span", { class: "muted grow" }, ""), binSel, abortBtn,
+      h("button", { title: "remove this card", onclick: () => removeCard(card) }, "×")),
+    h("div", { class: "bar" }, input, sendBtn),
+    h("div", { class: "corpus" }, search, pick),
+    briefBox, paneGrid);
+  views.set(card.id, { updateBrief, updatePane, root });
+  updateBrief();
+  updatePane("pixel");
+  updatePane("none");
+  return root;
+};
+
+const removeCard = (card: Card) => {
+  abort(card);
+  cards.splice(cards.indexOf(card), 1);
+  views.delete(card.id);
+  render();
+  save();
+};
+
+const addCard = () => {
+  cards.push(newCard());
+  render();
+  save();
+  requestAnimationFrame(() => {
+    const last = $("strip").querySelectorAll(".card:not(.new)");
+    last[last.length - 1]?.scrollIntoView({ behavior: "smooth", inline: "start" });
+  });
+};
+
+const render = () => {
+  views.clear();
+  $("strip").replaceChildren(
+    ...cards.map(mountCard),
+    h("section", { class: "card new", onclick: addCard }, "+ new test"),
   );
 };
 
-const run = async (i: number) => {
-  const p = state.selected;
-  const bin = state.binSel[i];
-  if (!p || !bin) return;
-  state.results[i] = "loading";
-  renderColumns();
-  try {
-    state.results[i] = await api<BriefResult>("/api/brief", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: p.text, bin }),
-    });
-  } catch (e) {
-    state.results[i] = { ok: false, error: String(e) } as BriefResult;
-  }
-  if (state.selected === p) renderColumns();
-};
-
-const select = (p: Prompt) => {
-  state.selected = p;
-  state.results = [null, null];
-  $("current").replaceChildren(h("strong", {}, `${p.id}: `), p.text);
-  renderList();
-  void run(0);
-  if (state.compare) void run(1);
-};
-
-// ---- boot ------------------------------------------------------------------
-
 const boot = async () => {
-  const [prompts, bins] = await Promise.all([
+  [corpus, { bins }] = await Promise.all([
     api<Prompt[]>("/api/prompts"),
     api<{ repo: string; bins: BinInfo[] }>("/api/bins"),
   ]);
-  state.prompts = prompts;
-  state.bins = bins.bins;
-  $("repo").textContent = `fixture: ${bins.repo}`;
-  // Binaries with `brief --json` first: they are the useful default for A.
-  const usable = bins.bins.filter((b) => b.exists).sort((a, b) => Number(b.json === true) - Number(a.json === true)).map((b) => b.path);
-  state.binSel[0] = usable.includes(state.binSel[0]!) ? state.binSel[0]! : (usable[0] ?? "");
-  state.binSel[1] = usable.includes(state.binSel[1]!) ? state.binSel[1]! : (usable[1] ?? usable[0] ?? "");
-  fillSelect($("f-kind") as HTMLSelectElement, unique(prompts.map((p) => p.kind)));
-  fillSelect($("f-lang") as HTMLSelectElement, unique(prompts.map((p) => p.lang)));
-  for (const id of ["search", "f-kind", "f-topic", "f-lang"]) $(id).addEventListener("input", renderList);
-  $<HTMLInputElement>("compare").addEventListener("change", (e) => {
-    state.compare = (e.target as HTMLInputElement).checked;
-    renderColumns();
-    if (state.compare && state.selected && !state.results[1]) void run(1);
-  });
-  $<HTMLFormElement>("add-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const f = new FormData(e.target as HTMLFormElement);
-    const res = await api<{ ok: boolean; prompt: Prompt; error?: string }>("/api/prompts", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: f.get("text"), lang: f.get("lang"), kind: f.get("kind"), on_topic: f.get("on_topic") === "on" }),
-    });
-    if (!res.ok) return void alert(res.error);
-    state.prompts.push(res.prompt);
-    (e.target as HTMLFormElement).reset();
-    renderList();
-    select(res.prompt);
-  });
-  renderList();
-  renderColumns();
+  cards.push(...load());
+  if (!cards.length) cards.push(newCard());
+  render();
 };
 
 void boot();

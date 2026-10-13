@@ -67,6 +67,7 @@ beforeAll(() => {
       { name: "gone", path: join(dir, "missing") },
     ],
     timeoutMs: 400,
+    codex: { codexBin: "/bin/false", root: dir, userCodexHome: dir, repo: join(dir, "repo"), inject: "hook", runTimeoutMs: 5000 },
   };
   api = handlers(cfg);
 });
