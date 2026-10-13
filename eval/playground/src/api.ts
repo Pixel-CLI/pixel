@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { BRIEF_CAP_BYTES, decisionOf, parseBrief, parseJsonRecord } from "./brief";
+import { createStatus, type Status } from "./status";
 import { abortCard, startRun, type Arm, type RunConfig } from "./codex";
 
 export type Config = {
@@ -174,6 +175,15 @@ const FLAG_SETS: { flags: string[]; json: boolean }[] = [
 ];
 const rejectsFlag = (r: Spawned) => r.code !== 0 && /unexpected argument|unrecognized|unknown (option|argument)/i.test(r.stderr);
 
+const statusFor = (() => {
+  const m = new WeakMap<Config, ReturnType<typeof createStatus>>();
+  return (cfg: Config) => {
+    let st = m.get(cfg);
+    if (!st) m.set(cfg, (st = createStatus(cfg.repo, executable, spawn, Math.min(5000, cfg.timeoutMs * 4))));
+    return st;
+  };
+})();
+
 export const runBrief = async (cfg: Config, prompt: string, bin: string) => {
   if (!prompt.trim()) return fail("prompt is required");
   if (!bin) return fail("bin is required");
@@ -193,7 +203,9 @@ export const runBrief = async (cfg: Config, prompt: string, bin: string) => {
     if (r.code !== 0) {
       return json({ ok: false, error: `exit ${r.code}: ${r.stderr.trim().slice(0, 500) || "(no stderr)"}`, bin, latency_ms: Math.round(r.ms) }, 502);
     }
-    const base = { ok: true, bin, repo: cfg.repo, latency_ms: Math.round(r.ms), cap_bytes: BRIEF_CAP_BYTES };
+    // The graph state at the moment the brief was built (cached for 10 s).
+    const graph_status: Status = await statusFor(cfg).get(bin);
+    const base = { ok: true, bin, repo: cfg.repo, latency_ms: Math.round(r.ms), cap_bytes: BRIEF_CAP_BYTES, graph_status };
     if (set.json) {
       const rec = parseJsonRecord(r.stdout);
       if (!rec) return json({ ok: false, error: "binary did not print a JSON object", raw: r.stdout.slice(0, 2000), bin }, 502);
@@ -257,6 +269,20 @@ export const runCard = async (cfg: Config, req: Request): Promise<Response> => {
 };
 
 export const handlers = (cfg: Config) => ({
+  status: async (req: Request) => {
+    const bin = new URL(req.url).searchParams.get("bin") ?? "";
+    if (!(await configuredBins(cfg)).some((b) => b.path === bin)) return fail(`unknown binary: ${bin}`, 404);
+    if (!existsSync(executable(bin))) return fail(`binary not found: ${bin}`, 404);
+    const st = statusFor(cfg);
+    return json({ ok: true, ...(await st.get(bin)), refresh: st.refreshState() });
+  },
+  refresh: async (req: Request) => {
+    const b = (await req.json().catch(() => null)) as { bin?: unknown } | null;
+    const bin = typeof b?.bin === "string" ? b.bin : "";
+    if (!(await configuredBins(cfg)).some((x) => x.path === bin)) return fail(`unknown binary: ${bin}`, 404);
+    if (!existsSync(executable(bin))) return fail(`binary not found: ${bin}`, 404);
+    return json({ ok: true, ...statusFor(cfg).startRefresh(bin) });
+  },
   run: (req: Request) => runCard(cfg, req),
   abort: async (req: Request) => {
     const b = (await req.json().catch(() => null)) as { cardId?: unknown } | null;

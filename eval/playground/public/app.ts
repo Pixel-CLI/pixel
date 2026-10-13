@@ -10,7 +10,16 @@ type BinInfo = { name: string; path: string; exists: boolean; json: boolean | nu
 type BriefResult = {
   ok: boolean; error?: string; raw?: string; json?: boolean; note?: string;
   brief: string | null; bytes: number; cap_bytes: number; latency_ms: number;
-  parsed: ParsedBrief | null; decision: Decision | null;
+  parsed: ParsedBrief | null; decision: Decision | null; graph_status?: GraphStatus;
+};
+type Fresh = "ready" | "stale" | "missing" | "unknown";
+type GraphStatus = {
+  graph: Fresh; index: Fresh; detail: string; checked_at: string;
+  graph_age_secs: number | null; index_age_secs: number | null; source: string;
+};
+type StatusResp = GraphStatus & {
+  ok: boolean; error?: string;
+  refresh?: { state: "idle" | "running" | "done" | "error"; bin: string | null; error: string | null };
 };
 type Arm = "pixel" | "none";
 type Card = {
@@ -44,7 +53,38 @@ const post = (body: unknown): RequestInit => ({
 let corpus: Prompt[] = [];
 let bins: BinInfo[] = [];
 const cards: Card[] = [];
-const views = new Map<string, { updateBrief: () => void; updatePane: (a: Arm) => void; root: HTMLElement }>();
+const views = new Map<string, { updateBrief: () => void; updatePane: (a: Arm) => void; updateBadge: () => void; root: HTMLElement }>();
+
+// ---- graph status ----------------------------------------------------------
+
+const statuses = new Map<string, StatusResp>();
+const pollers = new Map<string, ReturnType<typeof setInterval>>();
+const notify = () => views.forEach((v) => v.updateBadge());
+const age = (secs: number | null) =>
+  secs == null ? "age unknown" : secs < 90 ? `${secs} s old` : secs < 5400 ? `${Math.round(secs / 60)} min old` : secs < 172800 ? `${Math.round(secs / 3600)} h old` : `${Math.round(secs / 86400)} d old`;
+const loadStatus = async (bin: string) => {
+  if (!bin) return;
+  try {
+    statuses.set(bin, await api<StatusResp>(`/api/status?${new URLSearchParams({ bin })}`));
+  } catch (e) {
+    statuses.set(bin, { ok: false, error: String(e) } as StatusResp);
+  }
+  notify();
+};
+const poll = (bin: string) => {
+  if (pollers.has(bin)) return;
+  pollers.set(bin, setInterval(async () => {
+    await loadStatus(bin);
+    const st = statuses.get(bin);
+    if (!st?.ok || st.refresh?.state !== "running") { clearInterval(pollers.get(bin)); pollers.delete(bin); }
+  }, 2000));
+};
+const refreshGraph = async (bin: string) => {
+  const r = await api<{ ok: boolean; error?: string }>("/api/refresh", post({ bin }));
+  if (!r.ok) return void alert(r.error);
+  await loadStatus(bin);
+  poll(bin);
+};
 const controllers = new Map<string, AbortController[]>();
 
 // ---- persistence -----------------------------------------------------------
@@ -71,6 +111,15 @@ const newCard = (): Card => ({
   prompt: "", bin: bins.find((b) => b.exists && b.json)?.path ?? bins.find((b) => b.exists)?.path ?? "",
   sentPrompt: "", brief: null, panes: { pixel: emptyPane(), none: emptyPane() }, whyOpen: false,
 });
+
+const badgeEl = (st: StatusResp | GraphStatus | undefined, refreshing = false) => {
+  const state = refreshing ? "refreshing" : (st && "ok" in st && !st.ok ? "unknown" : (st?.graph ?? "unknown"));
+  const cls = state === "ready" ? "ok" : state === "stale" ? "warn" : state === "missing" ? "bad" : "dim";
+  const tip = st && !("ok" in st && !st.ok)
+    ? `${st.detail}\ngraph ${age(st.graph_age_secs)}, index ${st.index} (${age(st.index_age_secs)})\nchecked ${st.checked_at} via ${st.source}`
+    : st && "error" in st ? String(st.error) : "not checked yet";
+  return h("span", { class: `badge ${cls}`, title: tip }, `graph: ${state}`);
+};
 
 // ---- brief rendering -------------------------------------------------------
 
@@ -265,10 +314,19 @@ const mountCard = (card: Card, index: number): HTMLElement => {
   });
   fillPick();
 
-  const binSel = h("select", { title: "pixel binary", onchange: (e: Event) => { card.bin = (e.target as HTMLSelectElement).value; save(); } },
+  const binSel = h("select", { title: "pixel binary", onchange: (e: Event) => { card.bin = (e.target as HTMLSelectElement).value; save(); updateBadge(); void loadStatus(card.bin); } },
     ...bins.map((b) => h("option", { value: b.path, selected: b.path === card.bin, disabled: !b.exists },
       `${b.name}${b.exists ? "" : " (missing)"}${b.json === false ? " (no --json)" : ""}`)));
 
+  const badge = h("span", {});
+  const refreshBtn = h("button", { title: "run prepare-repo in the fixture (one at a time)", onclick: () => void refreshGraph(card.bin) }, "refresh");
+  const updateBadge = () => {
+    const st = statuses.get(card.bin);
+    const running = st?.refresh?.state === "running";
+    badge.replaceChildren(badgeEl(st, running));
+    refreshBtn.disabled = running || !card.bin;
+    refreshBtn.title = st?.refresh?.state === "error" ? `last refresh failed: ${st.refresh.error}` : "run prepare-repo in the fixture (one at a time)";
+  };
   const briefBox = h("div", { class: "box briefbox" });
   const testBtn = h("button", { class: "primary", onclick: () => test(card) }, "Test");
   const abortBtn = h("button", { class: "danger", onclick: () => abort(card), title: "kill both Codex runs of this card" }, "Abort");
@@ -283,7 +341,10 @@ const mountCard = (card: Card, index: number): HTMLElement => {
     else if (r === "loading") body.push(h("div", { class: "muted" }, "building the brief…"));
     else if (!r.ok) body.push(h("div", { class: "err" }, r.error ?? "error"), r.raw ? h("pre", {}, r.raw) : null);
     else {
+      const stale = r.brief ? /graph (is )?stale/i.test(r.brief) : false;
       body.push(r.note ? h("div", { class: "note" }, r.note) : null,
+        stale ? h("div", { class: "note" }, "⚠ this brief was built on a stale graph") : null,
+        r.graph_status ? h("div", { class: "muted" }, "graph when built: ", badgeEl(r.graph_status)) : null,
         r.brief && r.parsed ? renderBrief(r.parsed) : h("div", { class: "muted" }, "no brief for this prompt (empty output): the pixel arm would get nothing"),
         renderWhy(card, r));
     }
@@ -307,13 +368,15 @@ const mountCard = (card: Card, index: number): HTMLElement => {
   };
 
   const root = h("section", { class: "card", "data-card": card.id },
-    h("div", { class: "bar" }, h("strong", {}, `Test ${index + 1}`), h("span", { class: "muted grow" }, ""), binSel, abortBtn,
+    h("div", { class: "bar" }, h("strong", {}, `Test ${index + 1}`), h("span", { class: "muted grow" }, ""), badge, refreshBtn, binSel, abortBtn,
       h("button", { title: "remove this card", onclick: () => removeCard(card) }, "×")),
     h("div", { class: "bar" }, input, sendBtn),
     h("div", { class: "corpus" }, search, pick),
     briefBox, paneGrid);
-  views.set(card.id, { updateBrief, updatePane, root });
+  views.set(card.id, { updateBrief, updatePane, updateBadge, root });
   updateBrief();
+  updateBadge();
+  void loadStatus(card.bin);
   updatePane("pixel");
   updatePane("none");
   return root;

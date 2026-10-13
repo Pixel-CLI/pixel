@@ -37,3 +37,4 @@ details.why { margin-top:6px; font-size:12px; } details.why summary { cursor:poi
 .pane footer { border-top:1px solid var(--soft); padding:5px 10px; font-size:12px; color:var(--muted); display:flex; gap:12px; flex-wrap:wrap; }
 .err { color:var(--bad); } .note { color:var(--warn); font-size:12px; }
 dialog { width:min(900px,92vw); background:#1a1a19; color:var(--fg); border:1px solid var(--line); } dialog pre { margin:0 0 8px; max-height:70vh; overflow:auto; font:12px/1.4 ui-monospace,Menlo,monospace; } dialog .hit { background:var(--chip); display:block; }
+.badge { font-size:11px; font-weight:700; padding:1px 8px; border-radius:9px; color:#111; cursor:help; white-space:nowrap; } .badge.ok { background:var(--ok); } .badge.warn { background:var(--warn); } .badge.bad { background:var(--bad); } .badge.dim { background:var(--soft); color:var(--fg); } .badge.refreshing { background:var(--acc); }

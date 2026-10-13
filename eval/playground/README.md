@@ -84,6 +84,8 @@ without it and the raw text is shown, with no decision record.
 | `POST /api/prompts {text, lang?, kind?, on_topic?}` | add a local prompt |
 | `GET /api/bins` | binaries, whether each exists and supports `--json` |
 | `POST /api/brief {prompt, bin}` | brief text, parsed ranges, decision record, bytes, latency |
+| `GET /api/status?bin=` | graph/index `ready`/`stale`/`missing` from `status --json` (doctor fallback), cached 10 s |
+| `POST /api/refresh {bin}` | `prepare-repo .` in the fixture, one at a time; state shows in `/api/status` |
 | `POST /api/run {cardId, prompt, arm, briefText}` | SSE stream of one Codex run |
 | `POST /api/abort {cardId}` | kill the card's Codex process groups |
 | `GET /api/file?path=&start=&end=` | a range of the fixture (paths outside it are refused) |

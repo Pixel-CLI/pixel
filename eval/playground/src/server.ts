@@ -16,6 +16,8 @@ export const createServer = (cfg: Config, port: number) => {
       "/api/bins": { GET: h.bins },
       "/api/brief": { POST: h.brief },
       "/api/file": { GET: h.file },
+      "/api/status": { GET: h.status },
+      "/api/refresh": { POST: h.refresh },
       "/api/run": { POST: h.run },
       "/api/abort": { POST: h.abort },
     },
