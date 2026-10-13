@@ -81,6 +81,8 @@ fn hook(root: &Path, provider: &str, prompt: &str, env: &[(&str, &str)]) -> Valu
     });
     run_hook(root, provider, "prompt-submit", &payload, |command| {
         command.env_remove("PIXEL_BRIEF");
+        // These tests are about the packet; the region pack has its own.
+        command.env("PIXEL_BRIEF_PACK", "0");
         for (key, value) in env {
             command.env(key, value);
         }
@@ -308,6 +310,7 @@ fn the_brief_command_should_print_the_brief_or_stay_silent() {
     let root = indexed("brief-cmd");
     let output = pixel_command()
         .current_dir(&*root)
+        .env("PIXEL_BRIEF_PACK", "0")
         .args(["brief", RENAME, "--metrics", "off"])
         .output()
         .unwrap();
@@ -342,6 +345,7 @@ fn brief_json(root: &Path, prompt: &str, env: &[(&str, &str)]) -> Value {
     let mut command = pixel_command();
     command
         .current_dir(root)
+        .env("PIXEL_BRIEF_PACK", "0")
         .args(["brief", prompt, "--json", "--metrics", "off"]);
     for (key, value) in env {
         command.env(key, value);

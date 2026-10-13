@@ -158,7 +158,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
-| `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes (and whether it carried the search receipt and answer excerpts, with the excerpt bytes) and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the typed text (never a pasted block, credential shapes masked, cut at 600 characters) and its SHA-256. The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
+| `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes (and whether it carried the search receipt and answer excerpts, with the excerpt bytes, and for a region pack its bytes, hook parts, symbols and whether the text search stood in for a stale graph) and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the typed text (never a pasted block, credential shapes masked, cut at 600 characters) and its SHA-256. The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
 | `reconcile-conflict.json` | `pixel-ops` | Conflict marker `reconcile` writes and clears (no hook reads it). |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
 | `task-runtime.json` | CLI `task-state show` and Claude hooks | Existing bounded Claude context packets; independent of completion evidence. |
@@ -770,6 +770,37 @@ of `.pixel/brief-decisions.jsonl` (see "On-disk state"), with `receipt`,
 `answer` and `excerpt_bytes` for what the block carried.
 `PIXEL_BRIEF=0|false|off` or `brief: false` in `.pixel/config.yaml`
 switches the brief off.
+
+**The region pack** (`execution_brief/region_pack.rs`, built by `pack_evidence`
+after the packet is complete) replaces the packet with the source an agent
+reads before it answers, as line-numbered blocks of exact lines under one
+header that says what was searched and one directive ("Answer from this
+context. Use a tool only if something you need is not shown above."). Its
+targets, at most three symbols: the identifiers of the prompt (graph lookup,
+else the text search's declarations when the graph is stale, unbuilt or
+outdated, marked `graph stale: text fallback`), else the passage it quotes
+(searched whole, then by its longest segment), else the names its words spell
+in the best files (`rank_identifiers`: at least two of the probed words);
+a prompt in plain words also gets the regions `answer_evidence` picked,
+and a best file of at most 240 lines is shown whole. Per symbol: the
+definition with its doc comment (60 lines at most, a value to its last
+line), eight usage sites each in its enclosing function (one per file in
+turn, code before tests, same language as the definition), the functions
+that use it with their call sites and the tests that reach it through them,
+and its tests by name with the first assertion (the first three with their
+bodies). A block is cut at a line, never across parts. The detail of each
+symbol rises (two lines around a site, a neighbourhood, the whole function,
+the neighbours of a constant) while every block still fits. The text may
+exceed one hook's 10 000-character cap: `Pack::text` is the whole of it and
+`split_parts` cuts it at block boundaries into parts of `PART_CHARS` (9 800)
+characters, at most `MAX_PARTS` (3). `PIXEL_BRIEF_PARTS` (1 to 3, default 1)
+is how many the host delivers; `PIXEL_BRIEF_PACK=0|false|off` brings the packet
+back. A pack of regions alone, with no symbol or passage behind it, ends on
+a lead ("not a verified answer") instead of the directive, and one the window
+ended before it finished says so. It is built from lines read at HEAD
+(`Evidence::lines_at`, refused for a credential-shaped path) and spends none of
+the brief's operations. `pack_bytes`, `pack_parts`, `pack_targets` and
+`fallback` are in each decision.
 
 **Keeping a daemon behind the brief.** Without a daemon the brief has no
 `meaning` leads, and a daemon exits after thirty minutes idle or becomes
