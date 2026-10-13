@@ -453,12 +453,19 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
             let value = install::read_settings(&path).map_err(|e| e.to_string())?;
             let mut missing = Vec::new();
+            let parts =
+                crate::routing::prompt_parts(&value, crate::routing::Provider::Claude, &exe);
             if !crate::routing::task_hooks_registered(
                 &value,
                 crate::routing::Provider::Claude,
                 &exe,
             ) {
-                missing.push("task lifecycle gates");
+                // A brief split over several hooks is whole only with every
+                // part: name the one that went missing.
+                missing.push(match &parts {
+                    Err(reason) if reason != crate::routing::NO_PROMPT_HOOK => reason.clone(),
+                    _ => "task lifecycle gates".to_owned(),
+                });
             }
             if !missing.is_empty() {
                 return Err(format!(
@@ -486,6 +493,13 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 &exe,
                 &crate::routing::pixel_hooks_running_other_binaries(&value, &exe),
             );
+            if status == CheckStatus::Green
+                && let Ok(installed) = parts
+                && let Some(drift) =
+                    brief_parts_drift(&path, installed, crate::config::brief_parts(&home, None))
+            {
+                return Ok((CheckStatus::Yellow, drift, Remedy::Catalogue));
+            }
             Ok((status, detail, Remedy::Catalogue))
         },
     );
@@ -1155,6 +1169,23 @@ fn claude_hooks_owner_check(
     )
 }
 
+/// Yellow outcome when the brief is installed in `installed` hooks but the
+/// configuration asks for `configured`: the settings predate the change of
+/// `brief_parts`, and `pixel install` rewrites them.
+fn brief_parts_drift(path: &Path, installed: u8, configured: u8) -> Option<DoctorCheckDetail> {
+    (installed != configured).then(|| DoctorCheckDetail {
+        summary: format!(
+            "the prompt brief is registered in {installed} hook(s) in {}, but `brief_parts` is {configured} — run `pixel install`",
+            path.display()
+        ),
+        detail: Some(serde_json::json!({
+            "path": path.display().to_string(),
+            "installed_parts": installed,
+            "configured_parts": configured,
+        })),
+    })
+}
+
 /// `install.rtk-backup`: yellow when `orphan` names a global RTK backup no
 /// pixel guard delegates to, with the command that removes it.
 fn rtk_backup_check(orphan: Option<PathBuf>) -> (CheckStatus, DoctorCheckDetail, Remedy) {
@@ -1509,7 +1540,7 @@ fn env_non_empty(name: &str) -> bool {
 /// scalar keys the check reads never need more than the mapping shape, but a
 /// malformed file is an error rather than a silent `none` — doctor must not
 /// hide a config it cannot read.
-fn load_pixel_config(home: &Path) -> std::result::Result<Value, String> {
+pub(crate) fn load_pixel_config(home: &Path) -> std::result::Result<Value, String> {
     let yaml = home.join(".pixel/config.yaml");
     if yaml.is_file() {
         let text =

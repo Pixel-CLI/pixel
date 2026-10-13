@@ -69,6 +69,34 @@ pub const POST_COMPACTION_HOOK: &str = "pixel-post-compaction";
 /// 10s is generous enough for cold starts while still bounding hang risk.
 pub const HOOK_TIMEOUT: u64 = 10;
 
+/// Settings key of how many `UserPromptSubmit` hooks carry the prompt brief.
+pub const BRIEF_PARTS_KEY: &str = "brief_parts";
+/// Parts the brief is split over unless `brief_parts` says otherwise. Claude
+/// Code and Codex each cap what one hook injects (about 10,000 characters),
+/// per hook, so a brief larger than that needs several hooks.
+pub const BRIEF_PARTS_DEFAULT: u8 = 3;
+/// Most parts a brief is split over; a value above it reads as this one.
+pub const BRIEF_PARTS_MAX: u8 = 8;
+
+/// How many hooks carry the prompt brief: `brief_parts` in the repository's
+/// `.pixel/config.yaml` when `repo` is given and sets it, else in the global
+/// `~/.pixel/config.yaml`, else [`BRIEF_PARTS_DEFAULT`]. A value outside
+/// `1..=`[`BRIEF_PARTS_MAX`] is clamped into it and a value that is not a
+/// whole number counts as unset; `1` is the single hook of earlier releases.
+pub fn brief_parts(home: &Path, repo: Option<&Path>) -> u8 {
+    repo.into_iter()
+        .chain([home])
+        .find_map(|dir| {
+            crate::doctor::load_pixel_config(dir)
+                .ok()?
+                .get(BRIEF_PARTS_KEY)?
+                .as_u64()
+        })
+        .map_or(BRIEF_PARTS_DEFAULT, |count| {
+            u8::try_from(count.clamp(1, u64::from(BRIEF_PARTS_MAX))).unwrap_or(BRIEF_PARTS_MAX)
+        })
+}
+
 /// The canonical pixel usage-rule file (relative to home). This is the real,
 /// full rule text (the five mandatory scenarios, the doctrine, the git-op
 /// table) that `pixel install` embeds into the managed CLAUDE.md/AGENTS.md
@@ -902,6 +930,60 @@ mod tests {
             &serde_json::json!({"hooks": "x"}),
             "pixel run-hook"
         ));
+    }
+
+    fn write_config(dir: &Path, text: &str) {
+        fs::create_dir_all(dir.join(".pixel")).unwrap();
+        fs::write(dir.join(".pixel/config.yaml"), text).unwrap();
+    }
+
+    #[test]
+    fn brief_parts_should_read_the_repo_layer_then_the_global_one_then_default() {
+        let home = tempfile::TempDir::new().unwrap();
+        let repo = tempfile::TempDir::new().unwrap();
+        assert_eq!(brief_parts(home.path(), None), BRIEF_PARTS_DEFAULT);
+        assert_eq!(BRIEF_PARTS_DEFAULT, 3);
+        assert_eq!(
+            brief_parts(home.path(), Some(repo.path())),
+            BRIEF_PARTS_DEFAULT
+        );
+        write_config(home.path(), "brief_parts: 5\n");
+        assert_eq!(brief_parts(home.path(), None), 5);
+        assert_eq!(brief_parts(home.path(), Some(repo.path())), 5);
+        write_config(repo.path(), "brief_parts: 2\n");
+        assert_eq!(brief_parts(home.path(), Some(repo.path())), 2);
+        assert_eq!(
+            brief_parts(home.path(), None),
+            5,
+            "a repository layer is for a repository install only"
+        );
+        write_config(repo.path(), "metrics: \"on\"\n");
+        assert_eq!(
+            brief_parts(home.path(), Some(repo.path())),
+            5,
+            "a repository layer that does not set it defers to the global one"
+        );
+    }
+
+    #[test]
+    fn brief_parts_should_clamp_into_range_and_ignore_what_is_not_a_count() {
+        let home = tempfile::TempDir::new().unwrap();
+        for (text, expected) in [
+            ("brief_parts: 1\n", 1),
+            ("brief_parts: 0\n", 1),
+            ("brief_parts: 8\n", 8),
+            ("brief_parts: 9\n", BRIEF_PARTS_MAX),
+            ("brief_parts: 4000\n", BRIEF_PARTS_MAX),
+            ("brief_parts: -2\n", BRIEF_PARTS_DEFAULT),
+            ("brief_parts: 2.5\n", BRIEF_PARTS_DEFAULT),
+            ("brief_parts: many\n", BRIEF_PARTS_DEFAULT),
+            ("brief_parts: [1]\n", BRIEF_PARTS_DEFAULT),
+            ("brief_parts: [\n", BRIEF_PARTS_DEFAULT),
+            ("", BRIEF_PARTS_DEFAULT),
+        ] {
+            write_config(home.path(), text);
+            assert_eq!(brief_parts(home.path(), None), expected, "{text:?}");
+        }
     }
 }
 

@@ -144,6 +144,8 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
     if let Some(repo) = &options.repo {
         return install_project(repo, &home, &codex_home, &exe, dry_run);
     }
+    // How many hooks carry the prompt brief: a host caps what each injects.
+    let prompt_parts = crate::config::brief_parts(&home, None);
     let mut steps = vec![
         // Prompts are no longer deployed for any host: retire earlier copies
         // and the automatic block in Pi's APPEND_SYSTEM.md.
@@ -162,7 +164,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             &crate::routing::Provider::Claude.path(&home),
             &exe,
             crate::routing::Provider::Claude,
-            crate::routing::HookScope::TaskEventsOnly,
+            crate::routing::HookScope::TaskEventsOnly { prompt_parts },
             &[],
             dry_run,
         )?,
@@ -170,7 +172,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         // and would now double-inject alongside SessionStart — strip it.
         remove_legacy_wrappers(&home, options.shell.as_deref(), dry_run)?,
         crate::codex_config::remove_developer_instructions(&codex_home, dry_run)?,
-        crate::codex_config::install_task_hooks(&codex_home, &exe, dry_run)?,
+        crate::codex_config::install_task_hooks(&codex_home, &exe, prompt_parts, dry_run)?,
     ];
     // The Gemini CLI brief hook: BeforeAgent in ~/.gemini/settings.json,
     // only where the file already exists.
@@ -207,7 +209,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             &crate::routing::Provider::Devin.path(&home),
             &exe,
             crate::routing::Provider::Devin,
-            crate::routing::HookScope::TaskEventsOnly,
+            crate::routing::HookScope::TaskEventsOnly { prompt_parts: 1 },
             &[],
             dry_run,
         )?);

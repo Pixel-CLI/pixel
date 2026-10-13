@@ -166,6 +166,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
 | `brief-decisions.jsonl` | CLI `brief` (`execution_brief/decision_log.rs`) | One JSON line per prompt the prompt-submit brief judged, or declined for being about nothing: time, signal (`strong`, `weak`, `prose`), gate (`open`, `closed`, `denied`, `unjudged`, `declined`) and its reason, the gate's tier (`high`, `low`, `off`), score and model source, the best file and the features the score read, the intent judge's verdict, ops, bytes (and whether it carried the search receipt and answer excerpts, with the excerpt bytes) and milliseconds spent, the evidence route (`daemon` or `local`) and what the daemon start the prompt gave came to (`launched`, `running`, `skipped: …`, `launch failed`), the typed text (never a pasted block, credential shapes masked, cut at 600 characters) and its SHA-256. The last 500 lines, mode 0600, never creates `.pixel/`; `PIXEL_BRIEF_LOG=0\|false\|off` writes nothing. `pixel brief --json` prints the same record beside the brief. |
+| `brief-parts/<session>-<prompt>.txt` | CLI `run-hook task-event --part` (`brief_parts.rs`) | The whole prompt-submit brief of one prompt, stored by part 1 of a brief split over several hooks and read by parts 2 to N (see "Agent integration"). The name is the first 16 hex digits of the SHA-256 of the host's session id, a dash and the SHA-256 of the prompt, so no host text reaches a file name. Written atomically with mode 0600 (`pixel_git::nofollow::write_replace`), never through a link (`.pixel` or `brief-parts` as a symbolic link is refused); an empty file means the prompt got no brief, so the other parts do not wait. Part 1 deletes the entry before it computes the brief, leaves an empty `.done` file with the same stem once its own output is written, and every part-1 write deletes the entries older than one hour. |
 | `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker `reconcile` writes and clears (no hook reads it), and the pre-mutation copies `env` takes. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
 | `task-runtime.json` | CLI `task-state show/reset` and Claude hooks | Existing bounded Claude context packets; independent of completion evidence. |
@@ -637,6 +638,7 @@ is the only hook `pixel install` registers (Claude Code and Codex):
 | Hook event | Command | Effect |
 | --- | --- | --- |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`, `SubagentStart`, `SubagentStop`, plus `PostToolUseFailure` (Claude) or `Interrupt` (Codex) | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks. Once enforced, a task retains its gates if runtime settings change. On `prompt-submit` it also returns the `[PIXEL:BRIEF]` evidence brief as `additionalContext` (see below). On `SessionStart` and a briefed `UserPromptSubmit` it may start the repository's daemon in the background (see "Keeping a daemon behind the brief"). |
+| `UserPromptSubmit` (Claude Code and Codex, `brief_parts` entries; default 3) | `pixel run-hook task-event --provider <host> --event prompt-submit --part K/N` | The brief split over `N` hooks (see "A brief larger than one hook"). Part 1 is the entry above with the ledger and the brief; parts 2 to `N` only print their slice. |
 
 The verbs earlier releases registered (`guard`, `composed-guard`,
 `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`,
@@ -644,6 +646,55 @@ The verbs earlier releases registered (`guard`, `composed-guard`,
 old install left in an agent's settings cannot block or fail a host. `pixel
 install` and `pixel uninstall` remove those registrations from every agent
 file above; `crates/pixel-install/src/routing.rs` recognises them by verb.
+
+### A brief larger than one hook
+
+Claude Code caps the `additionalContext` of one `UserPromptSubmit` hook at
+10,000 characters (measured: 10,000 arrive whole; 10,001 arrive as a preview of
+about 2,000), and Codex spills a hook's context past 2,500 estimated tokens,
+four bytes each, to a file behind a head and tail preview
+(`additionalContextLimit` in `codex-rs/hooks`; the default applies). Both cap
+*per hook* and run the matching hooks of an event concurrently, so a brief
+larger than one hook may inject is delivered by several, and `pixel install`
+registers `brief_parts` of them (`~/.pixel/config.yaml`, default 3, 1 to 8; 1
+is the single hook of earlier releases): the same command with `--part K/N`,
+one entry each, in order, in `~/.claude/settings.json` and `~/.codex/hooks.json`.
+Every other host keeps one hook: Gemini (`BeforeAgent`) documents no cap on
+its `additionalContext`, and its source (`hookAggregator.ts`, `client.ts`)
+joins and appends the contexts of its hooks without one. Antigravity
+(closed source) and Devin document no cap and none was measured, so they
+keep one hook too.
+
+`brief_parts.rs` and `task_hook.rs` do the rest:
+
+- **Part 1** runs today's path: the ledger, and the brief on its own thread. As
+  soon as the brief is finished (not after the ledger) it stores the whole
+  text under `.pixel/brief-parts/` keyed by the session id and the prompt
+  (`cache_path`, see "On-disk state"), an empty one for a prompt with no
+  brief, and prints slice 1. It says nothing about parts.
+- **Parts 2 to N** read the same payload, derive the same key, wait for the
+  file (`WAIT`, 2 s, polling every 15 ms) and then for part 1's `.done`
+  marker, and print their slice in the same hook envelope: `{}` for a brief
+  too short to reach them, nothing at all when the file does not come in
+  time, the payload names no prompt or repository, or the file is not
+  readable. The marker matters because the host orders what concurrent hooks
+  print by when each finishes (measured: with parts 2 and 3 free to print as
+  soon as the brief was stored, Claude Code put them ahead of part 1); a
+  part 1 that never marks itself done costs only the rest of the 2 s. They
+  run no ledger, so one prompt is one ledger event.
+- **Slicing** (`split`) is deterministic and cuts at line boundaries: a part
+  takes whole lines while they fit in 9,800 characters (`PART_CHARS`; for
+  Codex also 9,800 bytes, `Limits::BYTES`), and a line longer than a part is
+  cut at a character boundary. The slices in order concatenate to the stored
+  brief; a brief longer than `N` parts loses the lines after the last one.
+- **Doctor**: `install.claude-hooks` is red and names the missing part
+  (`brief part 2/3 missing`) when the set is incomplete, mixed with a whole
+  entry or of two sizes, and yellow when the set is complete but not the size
+  `brief_parts` asks for. `install.codex-hook-review` counts every part: Codex
+  skips a hook the user has not reviewed.
+- `PIXEL_BRIEF_TEST_PAD_PARTS=N` (debug builds only) grows the brief to `N`
+  parts each ending in a `PIXEL-PART-MARKER-K-OF-N` line; the CLI tests and
+  the live proof against Claude Code use it to reach an oversized brief.
 
 The brief (`execution_brief/chain.rs`, `evidence.rs`, `relevance.rs`,
 `decision_log.rs`, `routes.rs`) is built on every prompt-submit event of a

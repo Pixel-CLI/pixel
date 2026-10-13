@@ -203,6 +203,7 @@ fn is_retired_codex_hook(command: &str, exe: &Path) -> bool {
 pub(crate) fn install_task_hooks(
     codex_home: &Path,
     exe: &Path,
+    prompt_parts: u8,
     dry_run: bool,
 ) -> Result<InstallStep> {
     let path = codex_home.join(HOOKS_FILE);
@@ -236,7 +237,7 @@ pub(crate) fn install_task_hooks(
     let before = hooks.clone();
     crate::routing::remove_matching_hooks(hooks, |command| is_retired_codex_hook(command, exe));
     if let Err(error) =
-        crate::routing::merge_task_hooks(hooks, crate::routing::Provider::Codex, exe)
+        crate::routing::merge_task_hooks(hooks, crate::routing::Provider::Codex, exe, prompt_parts)
     {
         return Ok(step(CheckStatus::Red, format!("{error} — not touched")));
     }
@@ -303,6 +304,16 @@ pub(crate) fn check_task_hooks(
         ));
     }
     if !crate::routing::task_hooks_registered(&value, crate::routing::Provider::Codex, exe) {
+        // A brief split over several hooks is whole only with every part.
+        if let Err(reason) =
+            crate::routing::prompt_parts(&value, crate::routing::Provider::Codex, exe)
+            && reason != crate::routing::NO_PROMPT_HOOK
+        {
+            return Err(format!(
+                "{reason} in {} — run `pixel install`",
+                path.display()
+            ));
+        }
         return Err(format!(
             "task lifecycle hooks missing or asynchronous in {} — run `pixel install`",
             path.display()
@@ -725,19 +736,24 @@ pub(crate) fn task_hook_suite_is_enabled_and_trusted(
         .copied()
         .chain(std::iter::once(("Interrupt", "interrupt")))
         .all(|(event, name)| {
+            let base = format!("task-event --provider codex --event {name}");
+            // A split prompt brief is as many hooks as it has parts, and
+            // Codex runs only the ones the user reviewed: all of them count.
+            let verbs =
+                match crate::routing::prompt_parts(hooks, crate::routing::Provider::Codex, exe) {
+                    Ok(count) if name == "prompt-submit" && count > 1 => (1..=count)
+                        .map(|part| format!("{base} --part {part}/{count}"))
+                        .collect(),
+                    _ => vec![base],
+                };
             hooks
                 .get("hooks")
                 .and_then(|events| events.get(event))
                 .and_then(JsonValue::as_array)
                 .is_some_and(|groups| {
-                    matching_task_hook_is_approved(
-                        groups,
-                        &doc,
-                        hooks_path,
-                        event,
-                        &format!("task-event --provider codex --event {name}"),
-                        exe,
-                    )
+                    verbs.iter().all(|verb| {
+                        matching_task_hook_is_approved(groups, &doc, hooks_path, event, verb, exe)
+                    })
                 })
         })
 }
@@ -1465,7 +1481,7 @@ mod tests {
         )
         .unwrap();
 
-        install_task_hooks(&home, exe, false).unwrap();
+        install_task_hooks(&home, exe, 1, false).unwrap();
         let hooks = hook_events(&home);
         let post_tool_use = hooks["PostToolUse"].as_array().unwrap();
         assert_eq!(
@@ -1517,7 +1533,7 @@ mod tests {
         );
 
         // Second install verifies instead of duplicating.
-        let step = install_task_hooks(&home, exe, false).unwrap();
+        let step = install_task_hooks(&home, exe, 1, false).unwrap();
         assert!(step.summary.contains("verified"), "{}", step.summary);
         assert_eq!(
             hook_events(&home)["PostToolUse"].as_array().unwrap().len(),
@@ -1532,7 +1548,7 @@ mod tests {
     fn task_hook_check_rejects_retired_pixel_hook_after_non_retired_hooks() {
         let home = scratch_codex_home("check-retired-order");
         let exe = Path::new("/opt/pixel");
-        install_task_hooks(&home, exe, false).unwrap();
+        install_task_hooks(&home, exe, 1, false).unwrap();
 
         let path = home.join(HOOKS_FILE);
         let mut value: serde_json::Value =
@@ -1562,6 +1578,65 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
+    /// The split brief is as many Codex hooks as it has parts, and Codex
+    /// skips a hook the user has not reviewed: the suite counts as trusted
+    /// only when every part carries a current review, and `check_task_hooks`
+    /// names the part that is missing.
+    #[test]
+    fn a_split_prompt_brief_needs_every_part_registered_and_reviewed() {
+        let home = scratch_codex_home("split-brief");
+        let exe = Path::new("/opt/pixel");
+        install_task_hooks(&home, exe, 3, false).unwrap();
+        assert!(check_task_hooks(&home, exe).is_ok());
+        let path = home.join(HOOKS_FILE);
+        let complete: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let mut gap = complete.clone();
+        gap["hooks"]["UserPromptSubmit"]
+            .as_array_mut()
+            .unwrap()
+            .remove(1);
+        fs::write(&path, serde_json::to_vec_pretty(&gap).unwrap()).unwrap();
+        let error = check_task_hooks(&home, exe).unwrap_err();
+        assert!(error.contains("brief part 2/3 missing"), "{error}");
+
+        // Review every hook but the second part: the suite is not trusted.
+        let reviewed = |skip: Option<usize>| {
+            let mut text = String::new();
+            for (event, name) in crate::routing::TASK_HOOK_EVENTS
+                .iter()
+                .copied()
+                .chain(std::iter::once(("Interrupt", "interrupt")))
+            {
+                let groups = complete["hooks"][event].as_array().unwrap();
+                for (index, group) in groups.iter().enumerate() {
+                    if name == "prompt-submit" && skip == Some(index) {
+                        continue;
+                    }
+                    let handler = &group["hooks"][0];
+                    let key = format!(
+                        "{}:{}:{index}:0",
+                        path.display(),
+                        hook_event_label(event).unwrap()
+                    );
+                    text.push_str(&format!(
+                        "[hooks.state.{key:?}]\nenabled = true\ntrusted_hash = {:?}\n\n",
+                        codex_hook_hash(event, group, handler).unwrap()
+                    ));
+                }
+            }
+            text
+        };
+        let suite = |text: &str| {
+            fs::write(home.join(CODEX_CONFIG_FILE), text).unwrap();
+            task_hook_suite_is_enabled_and_trusted(&home, &path, &complete, exe)
+        };
+        assert!(suite(&reviewed(None)), "every part reviewed");
+        assert!(!suite(&reviewed(Some(1))), "the second part is unreviewed");
+        assert!(!suite(&reviewed(Some(2))), "the third part is unreviewed");
+        let _ = fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn carries_pixel_block_detects_either_orphaned_marker() {
         let home = tempfile::tempdir().unwrap();
@@ -1585,8 +1660,8 @@ mod tests {
     #[test]
     fn task_hook_reinstall_refreshes_the_binary_path_without_duplicating_events() {
         let home = scratch_codex_home("refresh");
-        install_task_hooks(&home, Path::new("/old/pixel"), false).unwrap();
-        install_task_hooks(&home, Path::new("/new/pixel"), false).unwrap();
+        install_task_hooks(&home, Path::new("/old/pixel"), 1, false).unwrap();
+        install_task_hooks(&home, Path::new("/new/pixel"), 1, false).unwrap();
         let hooks = hook_events(&home);
         let commands = hooks.to_string();
         assert!(commands.contains("/new/pixel"), "{commands}");
@@ -1613,7 +1688,7 @@ mod tests {
     fn task_hook_install_should_remove_renamed_pixel_callbacks_only() {
         let home = scratch_codex_home("renamed");
         let exe = Path::new("/opt/pixel custom/pixel-next");
-        install_task_hooks(&home, exe, false).unwrap();
+        install_task_hooks(&home, exe, 1, false).unwrap();
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
         value["hooks"]["PostToolUse"] = serde_json::json!([
@@ -1626,7 +1701,7 @@ mod tests {
         )
         .unwrap();
 
-        install_task_hooks(&home, exe, false).unwrap();
+        install_task_hooks(&home, exe, 1, false).unwrap();
         let hooks = hook_events(&home);
         let post = hooks["PostToolUse"].as_array().unwrap();
         assert_eq!(post.len(), 1, "renamed Pixel callback is removed");
@@ -1643,7 +1718,7 @@ mod tests {
     fn task_hook_install_refuses_unparseable_hooks_json() {
         let home = scratch_codex_home("broken");
         fs::write(home.join(HOOKS_FILE), "not json").unwrap();
-        let step = install_task_hooks(&home, Path::new("/x"), false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), 1, false).unwrap();
         assert_eq!(step.status, CheckStatus::Red);
         assert_eq!(
             fs::read_to_string(home.join(HOOKS_FILE)).unwrap(),
@@ -1651,7 +1726,7 @@ mod tests {
             "an unparseable file is never rewritten"
         );
         fs::write(home.join(HOOKS_FILE), "{\"hooks\": [1]}").unwrap();
-        let step = install_task_hooks(&home, Path::new("/x"), false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), 1, false).unwrap();
         assert_eq!(
             step.status,
             CheckStatus::Red,
@@ -1667,7 +1742,7 @@ mod tests {
         // user including root — and is not "absent": it must come back Red,
         // never Ok-treated-as-empty.
         fs::create_dir(home.join(HOOKS_FILE)).unwrap();
-        let step = install_task_hooks(&home, Path::new("/x"), false).unwrap();
+        let step = install_task_hooks(&home, Path::new("/x"), 1, false).unwrap();
         assert_eq!(step.status, CheckStatus::Red, "{}", step.summary);
         assert!(step.summary.contains("not touched"), "{}", step.summary);
         let _ = fs::remove_dir_all(&home);
@@ -1699,7 +1774,7 @@ mod tests {
             check_task_hooks(&home, Path::new("pixel")).is_err(),
             "a partial task lifecycle is not registered"
         );
-        install_task_hooks(&home, Path::new("pixel"), false).unwrap();
+        install_task_hooks(&home, Path::new("pixel"), 1, false).unwrap();
         assert!(check_task_hooks(&home, Path::new("pixel")).is_ok());
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
@@ -1721,7 +1796,7 @@ mod tests {
     #[test]
     fn task_hook_install_keeps_the_task_prompt_event_but_removes_pixel_guidance() {
         let home = scratch_codex_home("half-registered");
-        install_task_hooks(&home, Path::new("pixel"), false).unwrap();
+        install_task_hooks(&home, Path::new("pixel"), 1, false).unwrap();
         assert!(check_task_hooks(&home, Path::new("pixel")).is_ok());
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();

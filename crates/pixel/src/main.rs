@@ -35,6 +35,7 @@ macro_rules! eprint {
 #[cfg(feature = "readify")]
 mod ai_cli_readify;
 mod audit_cmd;
+mod brief_parts;
 mod call_guard;
 mod classify;
 mod classify_eval;
@@ -1883,6 +1884,12 @@ enum HookCmd {
         provider: task_hook::TaskProvider,
         #[arg(long, value_enum)]
         event: task_hook::TaskHookEvent,
+        /// Serve slice K of N of the prompt-submit brief (`--part 2/3`), for a
+        /// host that caps what one hook may inject. Part 1 computes the brief
+        /// and stores it; the others print their slice of it. Without the
+        /// flag the one hook prints the whole brief.
+        #[arg(long, value_name = "K/N")]
+        part: Option<brief_parts::BriefPart>,
     },
     #[command(flatten)]
     Retired(RetiredHookCmd),
@@ -6945,7 +6952,11 @@ fn run_command(
             Ok(())
         }
         Command::RunHook { cmd } => match cmd {
-            HookCmd::TaskEvent { provider, event } => task_hook::run(provider, event),
+            HookCmd::TaskEvent {
+                provider,
+                event,
+                part,
+            } => task_hook::run(provider, event, part),
             // Retired verbs: drain the payload the host wrote, answer nothing.
             HookCmd::Retired(_) => {
                 let _ = hook_input::read_hook_payload();

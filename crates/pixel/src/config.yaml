@@ -21,6 +21,13 @@
 # Environment override: PIXEL_DAEMON_AUTO_START=0
 # daemon_auto_start: false
 
+# How many hooks carry the per-prompt brief, 1 to 8 (default: 3). Claude Code
+# and Codex each cap what one hook may inject (about 10,000 characters), per
+# hook, so a brief larger than that is split over several hooks. Each part is
+# at most 9,800 characters. 1 keeps the single hook of earlier releases. Run
+# pixel install after changing it; pixel doctor flags a mismatch.
+# brief_parts: 3
+
 # Retired: no hook reads it any more; the per-prompt brief has its own switch.
 # Was: suggest relevant code when your coding agent receives a prompt.
 # Environment override: PIXEL_TASK_CONTEXT=0
