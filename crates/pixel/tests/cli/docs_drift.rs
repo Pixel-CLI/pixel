@@ -77,10 +77,6 @@ fn documentable_commands() -> BTreeSet<String> {
             .iter()
             .map(|(name, _)| (*name).to_string()),
     );
-    // Left the core in #899 and belong to no plugin repository: `workspace`
-    // and `coverage` come back to the core and `index-stats` is deleted by the
-    // next #878 change. Until then the code that remains still names them.
-    known.extend(["workspace", "coverage", "index-stats"].map(str::to_string));
     known
 }
 

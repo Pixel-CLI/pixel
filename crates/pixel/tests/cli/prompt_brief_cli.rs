@@ -602,3 +602,340 @@ fn a_prompt_should_start_no_daemon_when_auto_start_is_off() {
     assert_eq!(records[0]["route"], "local");
     assert_eq!(records[0]["daemon"], "skipped: auto-start off");
 }
+
+// A host caps what one hook injects (10,000 characters for Claude Code, 2,500
+// estimated tokens for Codex), so a larger brief is delivered by several hooks:
+// `--part K/N`. `PIXEL_BRIEF_TEST_PAD_PARTS` (debug builds) forces the brief
+// oversized, each part ending in a marker line.
+
+#[cfg(debug_assertions)]
+const PADDED: (&str, &str) = ("PIXEL_BRIEF_TEST_PAD_PARTS", "3");
+
+fn part_payload(root: &Path) -> Value {
+    json!({
+        "session_id": "brief-session",
+        "prompt": RENAME,
+        "cwd": root,
+        "hook_event_name": "UserPromptSubmit",
+    })
+}
+
+/// Spawn `run-hook task-event --event prompt-submit --part <part>` and return
+/// the handle of its output, started now.
+fn spawn_part(
+    root: &Path,
+    provider: &str,
+    part: &str,
+    payload: &Value,
+    env: &[(&str, &str)],
+) -> std::thread::JoinHandle<std::process::Output> {
+    let mut command = pixel_command();
+    command
+        .current_dir(root)
+        .env("PIXEL_METRICS", "0")
+        .env_remove("PIXEL_BRIEF")
+        .args(["run-hook", "task-event", "--provider", provider])
+        .args(["--event", "prompt-submit", "--part", part])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    std::thread::spawn(move || child.wait_with_output().unwrap())
+}
+
+fn printed(output: std::process::Output) -> Option<Value> {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    (!text.trim().is_empty()).then(|| serde_json::from_str(&text).unwrap())
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn the_three_parts_of_an_oversized_brief_concatenate_to_the_whole_one() {
+    let root = indexed("parts");
+    let payload = part_payload(&root);
+    // The whole brief, from the hook with no `--part`: oversized.
+    let whole = hook(&root, "claude", RENAME, &[PADDED]);
+    let whole = context(&whole).to_owned();
+    assert!(whole.starts_with("[PIXEL:BRIEF]"), "{}", &whole[..200]);
+    assert!(
+        whole.chars().count() > 3 * 9_000,
+        "{}",
+        whole.chars().count()
+    );
+
+    // Parts 3 and 2 start first and wait for part 1.
+    let three = spawn_part(&root, "claude", "3/3", &payload, &[PADDED]);
+    let two = spawn_part(&root, "claude", "2/3", &payload, &[PADDED]);
+    std::thread::sleep(Duration::from_millis(200));
+    let one = spawn_part(&root, "claude", "1/3", &payload, &[PADDED]);
+    let parts: Vec<Value> = [one, two, three]
+        .into_iter()
+        .map(|handle| printed(handle.join().unwrap()).expect("every part prints"))
+        .collect();
+
+    let slices: Vec<&str> = parts.iter().map(context).collect();
+    for (k, slice) in (1..=3).zip(&slices) {
+        assert!(
+            slice.chars().count() <= 9_800,
+            "part {k}: {}",
+            slice.chars().count()
+        );
+        assert!(
+            slice.ends_with(&format!("PIXEL-PART-MARKER-{k}-OF-3\n")),
+            "part {k} ends with its marker: {:?}",
+            &slice[slice.len().saturating_sub(60)..]
+        );
+        assert_eq!(
+            parts[usize::try_from(k - 1).unwrap()]["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+    }
+    assert_eq!(slices.concat(), whole, "the parts together are the brief");
+    assert!(
+        slices[0].starts_with("[PIXEL:BRIEF]") && !slices[0].contains("--part"),
+        "part 1 is today's brief and says nothing about parts"
+    );
+    assert!(!slices[1].contains("[PIXEL:BRIEF]") && !slices[2].contains("[PIXEL:BRIEF]"));
+
+    // The stored brief: owner-only, under .pixel, and the whole brief; part 1
+    // left its marker beside it for the others.
+    let dir = root.join(".pixel/brief-parts");
+    let mut stored: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+    stored.sort_by_key(std::fs::DirEntry::file_name);
+    let names: Vec<String> = stored
+        .iter()
+        .map(|entry| {
+            entry
+                .path()
+                .extension()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(names, vec!["done", "txt"], "{stored:?}");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in &stored {
+            assert_eq!(
+                entry.metadata().unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+    assert_eq!(std::fs::read_to_string(stored[1].path()).unwrap(), whole);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn codex_gets_its_brief_in_parts_of_at_most_9800_bytes() {
+    let root = indexed("parts-codex");
+    let payload = part_payload(&root);
+    let env = [PADDED];
+    let handles: Vec<_> = ["3/3", "2/3", "1/3"]
+        .into_iter()
+        .map(|part| spawn_part(&root, "codex", part, &payload, &env))
+        .collect();
+    let mut slices: Vec<String> = handles
+        .into_iter()
+        .map(|handle| {
+            let output = printed(handle.join().unwrap()).expect("every part prints");
+            context(&output).to_owned()
+        })
+        .collect();
+    slices.reverse();
+    for (k, slice) in (1..=3).zip(&slices) {
+        assert!(slice.len() <= 9_800, "part {k}: {} bytes", slice.len());
+        assert!(slice.ends_with(&format!("PIXEL-PART-MARKER-{k}-OF-3\n")));
+    }
+    assert!(slices[0].starts_with("[PIXEL:BRIEF]"));
+}
+
+#[test]
+fn a_part_that_never_gets_the_first_one_prints_nothing_and_exits_cleanly() {
+    let root = indexed("parts-timeout");
+    let started = Instant::now();
+    let output = spawn_part(&root, "claude", "2/3", &part_payload(&root), &[])
+        .join()
+        .unwrap();
+    let waited = started.elapsed();
+    assert!(output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        waited >= Duration::from_millis(1_500),
+        "it waited for part 1: {waited:?}"
+    );
+    assert!(waited < Duration::from_secs(8), "and gave up: {waited:?}");
+    // It ran no ledger and stored nothing.
+    assert!(!root.join(".pixel/brief-parts").exists());
+    assert!(!root.join(".pixel/tasks").exists());
+}
+
+#[test]
+fn parts_of_a_prompt_with_no_brief_print_nothing_much_and_do_not_wait() {
+    let root = indexed("parts-none");
+    let payload = part_payload(&root);
+    // PIXEL_BRIEF=0: part 1 has no brief; it prints `{}` and stores an empty
+    // one, so part 2 answers at once instead of waiting out its bound.
+    let off = [("PIXEL_BRIEF", "0")];
+    let started = Instant::now();
+    let one = spawn_part(&root, "claude", "1/3", &payload, &off)
+        .join()
+        .unwrap();
+    let one = printed(one).expect("part 1 prints the ledger's answer");
+    assert_eq!(one, json!({}));
+    let two = spawn_part(&root, "claude", "2/3", &payload, &off)
+        .join()
+        .unwrap();
+    assert_eq!(printed(two), Some(json!({})));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn only_the_first_part_runs_the_task_ledger() {
+    let root = indexed("parts-ledger");
+    let payload = part_payload(&root);
+    let env = [PADDED];
+    let handles: Vec<_> = ["2/3", "3/3", "1/3"]
+        .into_iter()
+        .map(|part| spawn_part(&root, "claude", part, &payload, &env))
+        .collect();
+    for handle in handles {
+        assert!(handle.join().unwrap().status.success());
+    }
+    // The ledger saw one prompt: the whole-brief hook on the same payload
+    // leaves exactly as many task events behind as one part-1 run did.
+    let after_parts = task_event_files(&root);
+    assert!(after_parts > 0, "the first part reached the ledger");
+    let other = indexed("parts-ledger-whole");
+    let _ = hook(&other, "claude", RENAME, &[PADDED]);
+    assert_eq!(
+        after_parts,
+        task_event_files(&other),
+        "one prompt, one ledger entry"
+    );
+}
+
+/// How many files the task ledger keeps under `.pixel/tasks`, by relative
+/// shape: a prompt that reaches the ledger twice leaves more.
+fn task_event_files(root: &Path) -> usize {
+    fn count(dir: &Path) -> usize {
+        std::fs::read_dir(dir).map_or(0, |entries| {
+            entries
+                .flatten()
+                .map(|entry| {
+                    let path = entry.path();
+                    if path.is_dir() { count(&path) } else { 1 }
+                })
+                .sum()
+        })
+    }
+    count(&root.join(".pixel/tasks"))
+}
+
+#[test]
+fn a_hook_with_arguments_it_cannot_parse_says_so_and_exits_zero() {
+    // Claude Code blocks the prompt when a UserPromptSubmit hook exits 2, the
+    // code clap exits with: a hook fails open whatever it was given.
+    let root = fixture("parts-bad");
+    for bad in ["0/3", "4/3", "1/9", "2", "x/y"] {
+        let output = spawn_part(&root, "claude", bad, &part_payload(&root), &[])
+            .join()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{bad}");
+        assert!(output.stdout.is_empty(), "{bad}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("K/N"),
+            "{bad}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for args in [
+        &[
+            "run-hook",
+            "task-event",
+            "--provider",
+            "claude",
+            "--event",
+            "prompt-submit",
+            "--future-flag",
+        ][..],
+        &[
+            "hook",
+            "task-event",
+            "--provider",
+            "claude",
+            "--event",
+            "prompt-submit",
+            "--part",
+        ][..],
+        &[
+            "run-hook",
+            "task-event",
+            "--provider",
+            "nobody",
+            "--event",
+            "prompt-submit",
+        ][..],
+        &["run-hook", "task-event"][..],
+    ] {
+        let output = pixel_command()
+            .current_dir(&*root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            !output.stderr.is_empty(),
+            "{args:?}: the reason goes to stderr"
+        );
+    }
+    // Only hooks fail open: another command still exits with clap's code.
+    let output = pixel_command()
+        .args(["status", "--no-such-flag"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    // And asking a hook for help is not an error.
+    let help = pixel_command()
+        .args(["run-hook", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(help.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("task-event"));
+}
+
+#[test]
+fn a_part_on_another_event_is_ignored() {
+    let root = indexed("parts-other-event");
+    let payload = json!({"session_id": "brief-session", "cwd": &*root, "hook_event_name": "Stop"});
+    let plain = run_hook(&root, "claude", "stop", &payload, |_| {});
+    let with_part = run_hook(&root, "claude", "stop", &payload, |command| {
+        command.args(["--part", "2/3"]);
+    });
+    assert_eq!(plain, with_part);
+}
