@@ -1,21 +1,79 @@
 ---
 name: arena
-description: Run a live pi agent in a fresh Herdr pane and exercise one of eight standard prompt types, waiting for an idle result and recording local run metadata.
+description: Run one of eight standard prompts in two Codex panes side by side in Herdr, one with Pixel's prompt-submit brief and one without, then compare tool calls, answers and wall time. One command runs, one aborts.
 ---
 
-# arena live run
+# arena: Codex with and without Pixel
 
-This skill is a small live-agent arena. Each run uses a fresh scratch
-workspace and one prompt from the eight-case catalog below. Never kill or
-close anything that is not an earlier `arena*` test pane. On restart, close
-only stale `arena*` panes, then open a fresh one. The pane created by this
-procedure is the only pane this skill owns.
+`arena.sh` (next to this file) runs one case of the catalog below in two
+Codex sessions side by side and writes a receipt. It needs a running Herdr
+server, `jq`, `git`, and Codex at `/Users/livio/.local/bin/codex` (the
+`codex` in an interactive shell is a wrapper function; the script never uses
+it). Override with `ARENA_CODEX_BIN`.
+
+```bash
+S=.agents/skills/arena/arena.sh
+$S list                                   # number, name, prompt
+$S run lookup --pixel-bin /path/to/pixel  # or: $S run 1 ...
+$S status                                 # arena panes and agent state
+$S receipt <run>                          # rebuild a run's receipt after follow-up prompts
+$S abort [lookup]                         # interrupt, close the panes
+```
+
+`run <n|name> [--pixel-bin PATH] [--sha COMMIT] [--timeout SECONDS] [--focus]`:
+
+1. **Workspace per arm**, keyed by commit and binary hash, under
+   `/private/tmp/claude-501/arena/ws/<sha12>-<bin12>/`. Two clones at `--sha`
+   (default `origin/main`): `pixel/ws` is indexed with the pinned binary
+   (`prepare-repo .`, `build-index --history .`) and its daemon warmed;
+   `no-pixel/ws` has no `.pixel/` at all. A run reuses both. The binary is
+   copied next to them, so rebuilding the original does not change a run.
+2. **A new tab `arena:<case>`** in the focused Herdr workspace (or
+   `$HERDR_WORKSPACE_ID`) with two panes titled `arena:<case>:pixel` and
+   `arena:<case>:no-pixel`. The user's own panes are never touched; focus
+   stays where it was unless `--focus` is given.
+3. **Codex in each pane**, one `CODEX_HOME` per arm per run
+   (`/private/tmp/claude-501/arena/runs/<case>-<utc>/<arm>/codex-home`). The
+   login `auth.json` is copied (never printed); `config.toml` copies the
+   user's model, effort, sandbox and approval settings and nothing else (no
+   hooks, MCP servers, plugins, notify). The pixel arm's `hooks.json` holds
+   one hook, the `UserPromptSubmit` entry `pixel install` writes for Codex
+   (`run-hook task-event --provider codex --event prompt-submit`) at the
+   pinned binary; it is a global-home hook, so no repo review is needed (Codex
+   still asks for the one-time hook trust in that private home; the script
+   answers it). The no-pixel arm has no hook and `PIXEL_BRIEF=0`. `pixel` on
+   `PATH` is a shim: the pinned binary in the pixel arm, "command not found"
+   in the no-pixel arm.
+4. **Preflight without a model**: the hook must return `[PIXEL:BRIEF]` and
+   `PIXEL_BRIEF=0` must return nothing, else the run stops.
+5. The case prompt goes to both agents at once (`herdr agent prompt --wait`);
+   the wait ends when both settle or `--timeout` passes.
+6. **Receipt** `runs/<run>/receipt.json`: per arm the brief text found in the
+   Codex rollout, the ordered tool calls, the final answer, token counts and
+   Codex's own turn time; plus total wall time and an `isolation` block
+   (pixel arm saw the brief, no-pixel arm did not). A short side-by-side
+   summary is printed.
+
+Both panes stay open for inspection and for follow-up prompts. `abort`
+sends Ctrl-C twice to each arena agent, closes only panes titled `arena:*`
+(`abort <case>` only that case) and stops the per-home Codex app-server daemons and deletes the copied logins
+of those runs; it is idempotent. A run still waiting in another shell ends
+with a partial receipt (`prompt_exit` 1, no final answer). `status` lists the arena panes with their state.
+
+Caveats. The first run for a new commit or binary indexes the history
+(`build-index --history`), which takes minutes; later runs reuse it. Herdr
+can reset a pane label when the shell retitles it, so `status` and `abort`
+also match the pane ids recorded in `runs/*/run.json`. The repository's own `AGENTS.md` is loaded by both arms (the same
+clone). The copied login shares its refresh token with `~/.codex`; a refresh
+during a run can rotate it, so run `codex login` again if the main session
+reports a signed-out state. Do not store receipts with credentials: they
+hold none, but the raw rollouts under `codex-home/sessions` hold the full
+transcripts.
 
 ## Prompt catalog
 
-Run one case at a time and record its `PROMPT_TYPE` in the local receipt.
-Keep the prompt's contract intact when adapting the target filename to the
-scratch workspace.
+One case per run; `arena.sh` reads this list, so edit a prompt here and
+nowhere else. Keep a prompt's contract intact when adapting it.
 
 1. `lookup` — recover an exact identifier, constant, signature, or initializer.
    `What is the maximum rendered byte budget for the prompt-submitted execution brief, and what operation/time limits enforce it?`
@@ -33,97 +91,3 @@ scratch workspace.
    `What constraints did the commit that introduced the execution brief record, and which files changed with it?`
 8. `architecture` — explain ownership boundaries and source handoffs between modules.
    `Which modules own retrieval, rendering, and host context, and where are the handoffs between them?`
-
-## 1. Close the previous test pane, then create a fresh workspace and pane
-
-```bash
-SKILL_CHECKOUT=$(git rev-parse --show-toplevel) || {
-  echo "arena: resolve the invoking skill checkout before starting" >&2
-  exit 1
-}
-SKILL_PATH="$SKILL_CHECKOUT/.agents/skills/arena/SKILL.md"
-SKILL_SHA=$(shasum -a 256 "$SKILL_PATH" | awk '{print $1}') || exit 1
-herdr agent list | jq -r '.result.agents[] | select(.name // "" | startswith("arena")) | .pane_id' | while read p; do herdr pane close "$p"; done
-ROOT=$(mktemp -d /tmp/pi-herdr-arena-XXXX)
-mkdir -p "$ROOT/ws"
-PANE=$(herdr pane split --direction right --cwd "$ROOT/ws" | jq -r '.result.pane.pane_id // .result.pane_id // .pane_id')
-```
-
-Never run the test agent inside this repository: its writes land in
-`$ROOT/ws`, where they can be inspected safely.
-
-## 2. Start pi
-
-Choose a unique `arena<N>` name and set the prompt metadata before starting:
-
-```bash
-RUN=arena<N>
-PROMPT_TYPE=lookup
-PROMPT='What is the maximum rendered byte budget for the prompt-submitted execution brief, and what operation/time limits enforce it?'
-STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-herdr agent start "$RUN" --kind pi --pane "$PANE" --timeout 60000 -- --no-session
-```
-
-To test working-tree extension changes, pass every extension file explicitly;
-`--extension` does not accept a directory:
-
-```bash
-TARGET_REPO="${ARENA_REPO_ROOT:-$SKILL_CHECKOUT}"
-cd "$TARGET_REPO" || {
-  echo "arena: cannot enter target repository: $TARGET_REPO" >&2
-  exit 1
-}
-EXTENSION_ARGS=()
-for f in extensions/*.ts extensions/*/index.ts; do
-  [ -e "$f" ] || continue
-  EXTENSION_ARGS+=(--extension "$PWD/$f")
-done
-herdr agent start "$RUN" --kind pi --pane "$PANE" --timeout 60000 -- --no-session \
-  "${EXTENSION_ARGS[@]}"
-```
-
-## 3. Send the selected prompt
-
-```bash
-herdr agent prompt "$RUN" "$PROMPT"
-```
-
-A timeout or a “continues in background” reply means the prompt was
-submitted; do not resend it.
-
-## 4. Wait for idle, then record the local receipt
-
-```bash
-WAIT_RESULT=""
-if WAIT_RESULT=$(herdr agent wait "$RUN" --until idle --until done --timeout 120000); then
-  WAIT_STATUS=$(printf '%s\n' "$WAIT_RESULT" | jq -r '.result.status // .result.state // .status // .state // "done"')
-else
-  WAIT_STATUS=wait-failed
-fi
-ENDED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-STATS_FILE="${ARENA_STATS_FILE:-$ROOT/arena-runs.jsonl}"
-mkdir -p "$(dirname "$STATS_FILE")"
-jq -nc \
-  --arg run "$RUN" --arg type "$PROMPT_TYPE" --arg prompt "$PROMPT" \
-  --arg root "$ROOT" --arg started "$STARTED_AT" --arg ended "$ENDED_AT" \
-  --arg revision "$(git rev-parse HEAD 2>/dev/null || true)" \
-  --arg skill_sha "$SKILL_SHA" --arg status "$WAIT_STATUS" \
-  '{run_id:$run,prompt_type:$type,prompt:$prompt,workspace:$root,started_at:$started,ended_at:$ended,status:$status,revision:$revision,skill_sha256:$skill_sha,scenario_id:$type,artifacts_path:($root + "/ws")}' \
-  >> "$STATS_FILE"
-```
-
-The default JSONL receipt is local to the scratch run. Set
-`ARENA_STATS_FILE="$PWD/.pixel/arena-runs.jsonl"` (or another private path)
-when you want durable history. Do not store credentials, full transcripts, or
-machine-specific secrets. Useful durable fields are run id, prompt type,
-scenario hash, start/end timestamps, status, changed-file count, test outcome,
-input/output/cache/total tokens, tool and native-command counts, cache
-category, artifact hashes, and the exact skill/revision used. For a full Arena
-experiment, keep raw JSONL transcripts in a gitignored
-`eval/arena-results/<run-id>/` directory and put only a compact redacted
-receipt under version control.
-
-## 5. Leave it running
-
-Leave the current `arena<N>` alive for inspection or more prompts. The next
-arena run closes stale `arena*` panes before creating a fresh one.
