@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! The human-facing exit of an interactive `pixel install`: the summary a
+//! The human-facing exit of an interactive `pixel setup`: the summary a
 //! person at a terminal reads, with the tour of what to visit next.
 //! `--json` and a piped stdout keep the machine-readable report — this
 //! banner is never the contract an agent parses.
@@ -37,7 +37,7 @@ pub const TOUR: &[(&str, &str)] = &[
 const NEXT: &[(&str, &str)] = &[
     ("pixel doctor . --fix", "verify a repository end to end"),
     (
-        "pixel install --repo .",
+        "pixel setup --repo .",
         "add project-local enforcement to a clone",
     ),
 ];
@@ -524,13 +524,22 @@ mod tests {
             .expect("doctor command in {banner}");
         let install = banner
             .lines()
-            .find(|line| line.contains("pixel install --repo ."))
+            .find(|line| line.contains("pixel setup --repo ."))
             .expect("install command in {banner}");
-        // "pixel install --repo ." is 4 characters longer, so its gap is
-        // exactly 3 smaller: both descriptions start on the same column.
-        assert!(doctor.contains("--fix     verify a repository"), "{doctor}");
+        // Both descriptions start on the same column, one gap past the
+        // longest command.
+        let column = |line: &str, description: &str| {
+            line.find(description)
+                .map(|at| line[..at].chars().count())
+                .expect("description in {line}")
+        };
+        assert_eq!(
+            column(doctor, "verify a repository"),
+            column(install, "add project-local"),
+            "{doctor}\n{install}"
+        );
         assert!(
-            install.contains("--repo .   add project-local"),
+            install.contains("pixel setup --repo .   add project-local"),
             "{install}"
         );
     }

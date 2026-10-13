@@ -2220,6 +2220,7 @@ dependencies = [
 name = "pixel-plugin"
 version = "0.7.1"
 dependencies = [
+ "mutants",
  "pixel-git",
  "sha2",
  "tempfile",

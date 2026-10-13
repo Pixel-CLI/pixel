@@ -108,7 +108,7 @@ Use a packaged Codex skill whose `agents/openai.yaml` explicitly sets
 `allow_implicit_invocation: false`. The disposable Pixel snapshot gets a copy
 with that policy enabled; the packaged source is never edited. Raw and Pixel
 use the same pinned Pixel image and graph preparation, but neither runs
-`pixel install` or installs retrieval hooks. Only Pixel receives the candidate
+`pixel setup` or installs retrieval hooks. Only Pixel receives the candidate
 skill. The runner captures discovered skills, skill and policy hashes, hook
 configuration fingerprints, static instructions, and setup time, then checks
 that the candidate skill is the only context difference and that no Pixel

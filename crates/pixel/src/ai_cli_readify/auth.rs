@@ -40,7 +40,7 @@ use super::AgentRow;
 use super::agents::{Agent, FailureClass};
 use super::terminal::{DEFAULT_LAUNCH_BUDGET, ScriptTerminal};
 
-/// The flow `pixel install` writes under `~/.local/share/pixel/flows/` and
+/// The flow `pixel setup` writes under `~/.local/share/pixel/flows/` and
 /// this chain replays. It is installed, never seeded here.
 pub(crate) const CLAUDE_AUTH_FLOW: &str = "claude-code-auth-flow";
 

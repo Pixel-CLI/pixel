@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! `pixel uninstall --wrappers-only`: the flag reaches the library through
+//! `pixel setup --remove --wrappers-only`: the flag reaches the library through
 //! the CLI and limits the run to the one shell-wrapper step, so the fix
 //! `pixel doctor` names for a stray block never takes the install with it.
 
@@ -24,7 +24,7 @@ fn run(home: &Path, args: &[&str]) -> serde_json::Value {
 #[test]
 fn wrappers_only_removes_one_block_and_keeps_the_rest_installed() {
     let home = Scratch::for_test("uninstall-cli", "wrappers-only");
-    run(&home, &["install", "--shell", "zsh", "--json"]);
+    run(&home, &["setup", "--shell", "zsh", "--json"]);
     // The Claude task hooks stand for the rest of the install.
     let settings = home.join(".claude/settings.json");
     let installed = std::fs::read_to_string(&settings).expect("fixture: install wrote settings");
@@ -43,7 +43,14 @@ fn wrappers_only_removes_one_block_and_keeps_the_rest_installed() {
 
     let report = run(
         &home,
-        &["uninstall", "--wrappers-only", "--shell", "zsh", "--json"],
+        &[
+            "setup",
+            "--remove",
+            "--wrappers-only",
+            "--shell",
+            "zsh",
+            "--json",
+        ],
     );
     let steps = report["steps"].as_array().expect("steps");
     assert_eq!(steps.len(), 1, "{report}");
@@ -66,7 +73,8 @@ fn wrappers_only_removes_one_block_and_keeps_the_rest_installed() {
     let full = run(
         &home,
         &[
-            "uninstall",
+            "setup",
+            "--remove",
             "--shell",
             "zsh",
             "--binary-path",
@@ -91,7 +99,7 @@ fn install_cleans_the_profile_of_the_shell_it_is_given() {
     let home = Scratch::for_test("uninstall-cli", "install-shell");
     let block = "export KEEP=1\n# >>> pixel-managed >>>\nclaude() { command claude \"$@\"; }\n# <<< pixel-managed <<<\n";
     std::fs::write(home.join(".zshrc"), block).unwrap();
-    run(&home, &["install", "--shell", "zsh", "--json"]);
+    run(&home, &["setup", "--shell", "zsh", "--json"]);
     assert_eq!(
         std::fs::read_to_string(home.join(".zshrc")).unwrap(),
         "export KEEP=1\n"
@@ -107,7 +115,8 @@ fn uninstall_repo_reports_the_repository_it_was_given() {
     let report = run(
         &home,
         &[
-            "uninstall",
+            "setup",
+            "--remove",
             "--repo",
             repo.to_str().unwrap(),
             "--dry-run",
@@ -147,7 +156,7 @@ fn uninstall_removes_the_binary_that_runs_it() {
     std::fs::copy(env!("CARGO_BIN_EXE_pixel"), &copy).unwrap();
     let out = exec_while_text_busy(|| {
         std::process::Command::new(&copy)
-            .args(["uninstall", "--shell", "zsh", "--json"])
+            .args(["setup", "--remove", "--shell", "zsh", "--json"])
             .env("PIXEL_DAEMON_AUTO_START", "0")
             .env("HOME", &*home)
             .env("CODEX_HOME", home.join(".codex"))

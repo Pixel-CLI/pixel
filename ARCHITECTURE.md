@@ -32,7 +32,7 @@ crates, read [docs/threat-model.md](docs/threat-model.md).
 
 Everything below the CLI is a library crate. Only `crates/pixel` builds a
 binary, and Pixel is deliberately a CLI plus hooks and extensions, not an
-MCP server. `pixel install` registers no MCP server with any agent.
+MCP server. `pixel setup` registers no MCP server with any agent.
 
 ## Crates
 
@@ -54,9 +54,9 @@ MCP server. `pixel install` registers no MCP server with any agent.
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. The core reads them for `ultraflow` and `plan`; `pixel flow …` itself is the `flow` plugin, which links this crate. | none |
-| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: Claude and Codex task lifecycle hooks, cleanup of their retired retrieval hooks and prompts and the `claude()` shell wrapper, removal of the Pi `APPEND_SYSTEM.md` retrieval block, and the explicit Pi `/pixel-impact` package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`) when Pi is present. No prompt is deployed and no other host is wired: the retired OpenCode, Devin, Antigravity, zcode, Cursor and Copilot CLI artifacts and the deployed agent prompts are removed. An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo`: native-default migration for Claude and Codex, and removal of the retired Devin and Pi project guards and `AGENTS.md` retrieval blocks (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `intro` animation (frames only; `pixel` owns the tty) and ends on the `banner` summary. | proto, daemon, index, facts, git |
+| `pixel-install` | Idempotent `pixel setup`, `pixel setup --remove`, `pixel doctor`. Global install: Claude and Codex task lifecycle hooks, cleanup of their retired retrieval hooks and prompts and the `claude()` shell wrapper, removal of the Pi `APPEND_SYSTEM.md` retrieval block, and the explicit Pi `/pixel-impact` package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`) when Pi is present. No prompt is deployed and no other host is wired: the retired OpenCode, Devin, Antigravity, zcode, Cursor and Copilot CLI artifacts and the deployed agent prompts are removed. An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo`: native-default migration for Claude and Codex, and removal of the retired Devin and Pi project guards and `AGENTS.md` retrieval blocks (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `intro` animation (frames only; `pixel` owns the tty) and ends on the `banner` summary. | proto, daemon, index, facts, git |
 | `pixel-ultraflow` | The classify-driven browser loop over saved flows: the observation (`agent-browser snapshot -i` parsed into numbered slots, `elements`), the indexed action space of operation-target pairs (`action`), the decision seam (`decide`), the discovery loop and its single-cycle unit (`discover`), the composition of what worked into a `pixel-flow` document whose `conditional` steps carry the conditions that tell its branches apart (`compose`), and the replay that decides those conditions with `pixel classify` and re-decides a step whose page moved on (`replay`). Drives `pixel-flow`'s browser seam; the engine is a trait, so the whole loop is tested without a model, a network or a page. | flow |
-| `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (a local directory, or a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL), `remove`, `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. Home, repo root and PATH are fields of `Host`, never read from the process. | git |
+| `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`, and an optional `commands` list so one binary serves several `pixel <command>` words, run as `<run> <command> <args…>`; two plugins of a tier answering to one command are an error naming both, in `resolve`, `list` and `install`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (a local directory, a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL, or `github:<owner>/<repo>[@<ref>]`, whose unshipped program is fetched as a release asset with `curl`), `remove`, `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. Home, repo root, PATH and the GitHub base URL are fields of `Host`, never read from the process. | git |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
 
 Dependency rule: `pixel-proto` and `pixel-git` are leaves (so are `pixel-context`, `pixel-flow`, `pixel-ultraflow` (which depends on `pixel-flow` alone) and `pixel-release`; `pixel-session`, `pixel-actionlog` and `pixel-plugin` depend on `pixel-git` only). `pixel-daemon` is
@@ -105,7 +105,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel daemon` | Manage the per-root background daemon |
 | `pixel recall` | Search and browse LLM CLI transcripts (machine-wide corpus) |
 | `pixel list-errors` | One-look error capture: query the sniper error sink |
-| `pixel classify` | Zero-shot decision over a bounded label set. Engines: `remote` (default; an OpenAI-compatible chat completion — `--remote-preset openrouter\|ollama\|local\|deepseek\|opencode-go\|openai\|jev\|clef-ollama\|clef-cloudflare` picks the endpoint and key variable, `--remote-model` the model; probabilities are verbalized, renormalized to sum 1; `openai` instead speaks OpenAI's `/v1/decisions` wire (gpt-6-luna: a choice question built from labels and criteria, `answers[0].probabilities` are renormalized into the distribution); `jev` instead serves TypeSafe's hosted Jev decision model over its `/v1/systemone` wire with native calibrated probabilities, disclosed in `snapshot.basis`; `clef-ollama` and `clef-cloudflare` (`decide_clef.rs`) serve Cloudflare's Clef-flash decision model over the same typed wire — through Ollama's `/v1/systemone` (`http://127.0.0.1:11434`, model `clef-flash`, no key locally, `OLLAMA_API_KEY` for a remote host) or Workers AI's REST `ai/run/@cf/cloudflare/<model>` (`CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_AUTH_TOKEN`, account from `CLOUDFLARE_ACCOUNT_ID` or a stored base ending `/accounts/<id>`), with `snapshot.provider` naming the preset and the basis disclosed) or `ollaya` (`--engine ollaya --ollaya-url …`: a local Ollaya decision daemon's native typed-choice readout, TypeSafe-compatible `/v1/systemone`, with calibrated confidence disclosed in the snapshot). Remote keys resolve in disclosure order: the preset's env var, then `pixel config remote-key <preset>`, then an Infisical project when `INFISICAL_TOKEN` and `PIXEL_INFISICAL_PROJECT_ID` are set (self-hosted via `PIXEL_INFISICAL_URL`; read once per invocation, never stored in the Pixel config). Without `--engine` the stored preference decides (`pixel config classify-engine local\|remote\|jev\|clef-ollama\|clef-cloudflare\|auto`, or `pixel config remote-preset <preset> [--model --base]` for the provider, model and endpoint; `pixel install` proposes Local/Remote/OpenAI/Jev/Clef-flash with each option's accuracy — OpenAI takes the platform key and runs the Decisions wire; Jev takes an OpenCode Go or TypeSafe key and offers that source's model pair; Clef-flash asks for an Ollama or a Cloudflare host), probing the local daemon and falling back to remote. Model-engine output discloses `snapshot.deterministic=false` and `snapshot.provider`; a `--history` accept instead names the verified-history tier with `snapshot.deterministic=true` and no provider, since a verified match is not a model output. `--context` keeps shared framing out of the state. State, context and criteria are capped separately with disclosure. Without `--label`, the local engine answers the default question battery (Ollaya's `triage` preset: `choice`/`score`/`noul` typed answers) instead of a single decision — the remote engine still requires labels. No pixel daemon; `--jsonl` serves one decision per stdin line. `--task-intent` judges the text with the built-in coding-task labels (bugfix, feature, refactor, investigate, question, review, ops) and adds the fitting pixel ops (`next:` / `next_ops`); `--if-warm` answers only from a local engine already listening — never starts it, never falls back to remote — and otherwise exits 1 with empty stdout. `--debug` asks every configured engine (local, the remote chat preset and Jev) the same labeled spec in parallel and reports each one's probabilities or its error row; `--remote-model` and `PIXEL_REMOTE_*` reach only the selected preset's lane, so a Jev lane beside another preset resolves Jev's own key, base and model. The legacy/manual Claude prompt hook asks the same `--task-intent` question itself (local daemon warm, `classify.enabled` on, 300 ms cap) and adds the verdict to the `[PIXEL:TASK_RUNTIME v1]` packet as a classifier claim |
+| `pixel classify` | Zero-shot decision over a bounded label set. Engines: `remote` (default; an OpenAI-compatible chat completion — `--remote-preset openrouter\|ollama\|local\|deepseek\|opencode-go\|openai\|jev\|clef-ollama\|clef-cloudflare` picks the endpoint and key variable, `--remote-model` the model; probabilities are verbalized, renormalized to sum 1; `openai` instead speaks OpenAI's `/v1/decisions` wire (gpt-6-luna: a choice question built from labels and criteria, `answers[0].probabilities` are renormalized into the distribution); `jev` instead serves TypeSafe's hosted Jev decision model over its `/v1/systemone` wire with native calibrated probabilities, disclosed in `snapshot.basis`; `clef-ollama` and `clef-cloudflare` (`decide_clef.rs`) serve Cloudflare's Clef-flash decision model over the same typed wire — through Ollama's `/v1/systemone` (`http://127.0.0.1:11434`, model `clef-flash`, no key locally, `OLLAMA_API_KEY` for a remote host) or Workers AI's REST `ai/run/@cf/cloudflare/<model>` (`CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_AUTH_TOKEN`, account from `CLOUDFLARE_ACCOUNT_ID` or a stored base ending `/accounts/<id>`), with `snapshot.provider` naming the preset and the basis disclosed) or `ollaya` (`--engine ollaya --ollaya-url …`: a local Ollaya decision daemon's native typed-choice readout, TypeSafe-compatible `/v1/systemone`, with calibrated confidence disclosed in the snapshot). Remote keys resolve in disclosure order: the preset's env var, then `pixel config remote-key <preset>`, then an Infisical project when `INFISICAL_TOKEN` and `PIXEL_INFISICAL_PROJECT_ID` are set (self-hosted via `PIXEL_INFISICAL_URL`; read once per invocation, never stored in the Pixel config). Without `--engine` the stored preference decides (`pixel config classify-engine local\|remote\|jev\|clef-ollama\|clef-cloudflare\|auto`, or `pixel config remote-preset <preset> [--model --base]` for the provider, model and endpoint; `pixel setup` proposes Local/Remote/OpenAI/Jev/Clef-flash with each option's accuracy — OpenAI takes the platform key and runs the Decisions wire; Jev takes an OpenCode Go or TypeSafe key and offers that source's model pair; Clef-flash asks for an Ollama or a Cloudflare host), probing the local daemon and falling back to remote. Model-engine output discloses `snapshot.deterministic=false` and `snapshot.provider`; a `--history` accept instead names the verified-history tier with `snapshot.deterministic=true` and no provider, since a verified match is not a model output. `--context` keeps shared framing out of the state. State, context and criteria are capped separately with disclosure. Without `--label`, the local engine answers the default question battery (Ollaya's `triage` preset: `choice`/`score`/`noul` typed answers) instead of a single decision — the remote engine still requires labels. No pixel daemon; `--jsonl` serves one decision per stdin line. `--task-intent` judges the text with the built-in coding-task labels (bugfix, feature, refactor, investigate, question, review, ops) and adds the fitting pixel ops (`next:` / `next_ops`); `--if-warm` answers only from a local engine already listening — never starts it, never falls back to remote — and otherwise exits 1 with empty stdout. `--debug` asks every configured engine (local, the remote chat preset and Jev) the same labeled spec in parallel and reports each one's probabilities or its error row; `--remote-model` and `PIXEL_REMOTE_*` reach only the selected preset's lane, so a Jev lane beside another preset resolves Jev's own key, base and model. The legacy/manual Claude prompt hook asks the same `--task-intent` question itself (local daemon warm, `classify.enabled` on, 300 ms cap) and adds the verdict to the `[PIXEL:TASK_RUNTIME v1]` packet as a classifier claim |
 | `pixel classify-eval` | Offline go/no-go evaluation of the verified-history retrieval tier against frozen baselines. Reports per-label precision/recall, macro scores, confusion matrix, accepted-coverage vs error curves with Wilson confidence intervals, and system metrics (fallback rate, model calls avoided, measured tier and modeled end-to-end latency, storage, error rate). The evaluation never calls a model, so the fallback path is modeled from the `--model-error-rate`/`--model-latency-ms` assumptions and disclosed as such in the report's `epistemics`/`snapshot` envelope. A pre-registered error bound and minimum useful coverage determine the verdict, and a tier that meets those bounds is still held to no-go when the strongest frozen baseline already answers with lower error at equal or better coverage |
 | `pixel classify-history` | Manage the verified-history store: `list`, `add`, `remove`, `correct`, `clear`. Only human/independently verified labels are stored; model predictions cannot self-certify |
 | `pixel web-search` | Deterministic web lookup for terms the index cannot know — the refine step of a gated `pixel plan`. SearXNG alone when `PIXEL_WEB_SEARCH_URL` is set; otherwise DuckDuckGo, then Wikipedia while the hits are fewer than `--limit`. No LLM, no daemon |
@@ -124,8 +124,9 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel file-history` | Engine 2: lifecycle of a path or token |
 | `pixel dig-history` | Engine 2: history-wide discovery (rescue v2) |
 | `pixel sync-branch` | Engine 4: one-call deterministic branch sync |
-| `pixel install` | Idempotently install Claude and Codex task lifecycle hooks, remove retired retrieval registrations and the Claude shell wrapper, install Pi's explicit impact extension when configured, and retain the existing profiles for other configured hosts |
-| `pixel uninstall` | Remove everything `pixel install` wrote: managed blocks from agent-config files, hook entries from all settings files, hook scripts, the pi guard extension, the rule source file, and the pixel binary itself. |
+| `pixel setup` | Idempotently install Claude and Codex task lifecycle hooks, remove retired retrieval registrations and the Claude shell wrapper, install Pi's explicit impact extension when configured, and retain the existing profiles for other configured hosts; `--remove` removes everything it wrote: managed blocks from agent-config files, hook entries from all settings files, hook scripts, the pi guard extension, the rule source file, and the pixel binary itself |
+| `pixel install` | Install a plugin into `~/.pixel/plugins/<name>/` from `github:<owner>/<repo>[@<ref>]` (a shallow clone; a program the repository does not ship comes from the release asset `pixel-<name>-<target-triple>`, checked against `<asset>.sha256` when one is published, else the `cargo install --git` command is printed and the plugin stays not runnable), a git URL or a local directory; `npm:<package>` exits 2 with a "not supported yet" reason |
+| `pixel uninstall` | Delete an installed plugin and forget its source and network opt-in |
 | `pixel check-release` | Check that a release tag is consistent with the tree before anything is built or published: crates/pixel/Cargo.toml carries the version, Cargo.lock is fresh for every workspace member, CHANGELOG.md has the `## [x.y.z]` heading and an empty Unreleased section. |
 | `pixel self-update` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
 | `pixel doctor` | Health check: install state, daemon, index/graph/facts freshness |
@@ -176,8 +177,8 @@ are used only when `pixel_git::repo_path` finds them inside the root.
 
 Machine-wide:
 
-- `~/.pixel/plugins/<name>/`: the user's plugins (`pixel plugin add` copies
-  one here; `remove` deletes it). `~/.pixel/trusted.toml`: one `[[trusted]]`
+- `~/.pixel/plugins/<name>/`: the user's plugins (`pixel install` copies
+  one here; `pixel uninstall` deletes it). `~/.pixel/trusted.toml`: one `[[trusted]]`
   record (`name`, `sha256` of the plugin directory) per trusted repo plugin,
   replaced by `pixel plugin trust`. `~/.pixel/plugins.toml`: `enabled`, the
   network plugins the user allowed, and `[sources]`, where each plugin was
@@ -185,12 +186,12 @@ Machine-wide:
   `pixel-plugin` through a temporary file renamed into place.
 - `~/.local/share/pixel/flows/`: saved flows (`pixel-flow`, `$PIXEL_FLOW_DIR`
   overrides).
-- `~/.local/share/pixel/pi-package/`: the Pi package `pixel install` writes
+- `~/.local/share/pixel/pi-package/`: the Pi package `pixel setup` writes
   (`package.json`, `extensions/pixel-impact.ts`) and declares in the
-  `packages` list of Pi's `settings.json`; `pixel uninstall` removes both.
+  `packages` list of Pi's `settings.json`; `pixel setup --remove` removes both.
 - `~/.local/share/pixel/pi-classify/`: the optional classify tools'
   Pi package, written and declared like the one above only when the
-  classify helpers are accepted; `pixel uninstall` removes both.
+  classify helpers are accepted; `pixel setup --remove` removes both.
 - `~/.local/share/pixel/recall/` and `~/.local/share/pixel/models/`: the
   recall corpus (`$PIXEL_RECALL_DIR` overrides) and the embedding models,
   downloaded once from Hugging Face on `pixel recall setup`.
@@ -337,11 +338,13 @@ plugin, then `pixel-<name>` on PATH) and replaces the process with it
 plugin, a network plugin not enabled, or a `run` that leaves its directory
 stops with exit 1 and the command that fixes it; a name in
 `pixel_plugin::MOVED_COMMANDS` that no plugin provides prints the
-`pixel plugin add` hint and exits 2; any other name keeps clap's error.
-The eight commands that left the core for `Pixel-CLI/pixel-plugins` (#878) are
-`workspace`, `flow`, `plan-rollback`, `coverage`, `token-savings`,
-`index-stats`, `squash-branch` and `fast-forward`; their pre-rename spellings
-(`rescue`, `stats`, `update`, `savings`, `rewrite`, `replay-flow`, from
+`pixel install github:Pixel-CLI/<repo>` hint and exits 2; any other name keeps
+clap's error. That table maps the 30 commands (#878) that live in the plugin
+repositories `pixel-git`, `pixel-flow`, `pixel-recall`, `pixel-telemetry` and
+`pixel-utilities` to their repository. The core still builds most of them in,
+so the hint is reached only for the five it dropped (`flow`, `plan-rollback`,
+`token-savings`, `squash-branch`, `fast-forward`); their pre-rename spellings
+(`rescue`, `update`, `savings`, `rewrite`, `replay-flow`, from
 `RENAMED_COMMANDS`) resolve to the plugin of the current name, with the same
 one-line rename note on stderr. The core keeps what other commands read:
 `workspace.json` for `--workspace`, the flow store for `ultraflow` and `plan`,
@@ -510,7 +513,7 @@ compares only matching, successful, completely observed attempts. The existing
 `eval/score.py` and `eval/gate.py` own quality/turn regression gates; the controlled
 container backend adds isolated three-arm trials, not a replacement arena.
 
-A global `pixel install` deploys no agent prompt and wires no retrieval
+A global `pixel setup` deploys no agent prompt and wires no retrieval
 guard: every agent keeps its native search. It removes the
 `~/.local/share/pixel/agent-prompt.md` and `subagent-prompt.md` copies earlier
 releases deployed, then handles each agent through its own extension point:
@@ -588,7 +591,7 @@ filesystem writes. It never creates, migrates or refreshes graph data.
 Results retain graph truncation markers and an open-world epistemic envelope;
 no callers found does not establish that none exist.
 
-`pixel install --repo <path>` migrates the project integrations to the native
+`pixel setup --repo <path>` migrates the project integrations to the native
 default and adds no guard; each file that names this machine's binary is
 listed in the clone's `info/exclude` so no machine path is committed:
 
@@ -603,7 +606,7 @@ The same run removes two retired project files: Pixel's hooks in
 `.pi/extensions/pixel-guard.ts` (with the older `.pi/agent/` copy).
 `repo.devin-hooks` and `repo.pi-guard` report either one still there.
 
-`doctor` checks them under the `repo.*` ids. `install --repo` and `uninstall
+`doctor` checks them under the `repo.*` ids. `setup --repo` and `setup --remove
 --repo` also remove the MCP server entry releases up to 0.6.1 wrote into
 `.warp/.mcp.json`, and `repo.warp-mcp` reports one still there.
 
@@ -625,7 +628,7 @@ does not parse as strict JSON is skipped, not rewritten.
 remains, and passes when OpenCode is absent.
 
 `pixel run-hook` (alias `hook`) has one live entry point, `task-event`, and it
-is the only hook `pixel install` registers (Claude Code and Codex):
+is the only hook `pixel setup` registers (Claude Code and Codex):
 
 | Hook event | Command | Effect |
 | --- | --- | --- |
@@ -634,8 +637,7 @@ is the only hook `pixel install` registers (Claude Code and Codex):
 The verbs earlier releases registered (`guard`, `composed-guard`,
 `session-start`, `prompt-submit`, `post-compaction`, `post-tool-use`,
 `metrics`) are still accepted and exit 0 with no output, so a registration an
-old install left in an agent's settings cannot block or fail a host. `pixel
-install` and `pixel uninstall` remove those registrations from every agent
+old install left in an agent's settings cannot block or fail a host. `pixel setup` and `pixel setup --remove` remove those registrations from every agent
 file above; `crates/pixel-install/src/routing.rs` recognises them by verb.
 
 The brief (`execution_brief/chain.rs`, `evidence.rs`, `relevance.rs`,
@@ -800,7 +802,7 @@ Every check is listed in `pixel_install::doctor::CHECKS` with a stable id and
 the command that repairs it (`pixel doctor --list`): `--only`/`--skip` select
 by id or by group (`install.*`), and each yellow or red check reports that command as `fix`.
 `install.claude-hooks` is also yellow when complete hooks run another binary than
-the managed one doctoring them (a global `pixel-dev install`, a previous release's
+the managed one doctoring them (a global `pixel-dev setup`, a previous release's
 path); a `pixel-dev` doctor never judges the home install.
 `repo.claude-hooks` checks that retired Pixel retrieval callbacks are absent;
 foreign shell hooks no longer need to make room for a Pixel rewriter.

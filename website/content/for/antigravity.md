@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Antigravity"
-description: "Antigravity keeps its native tools: what pixel install removes from its config, and how pixel doctor checks that nothing of Pixel's is left."
+description: "Antigravity keeps its native tools: what pixel setup removes from its config, and how pixel doctor checks that nothing of Pixel's is left."
 agent: "antigravity"
 ---
 

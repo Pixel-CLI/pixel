@@ -51,11 +51,29 @@ pub struct Manifest {
     pub capabilities: Vec<Capability>,
     /// A plugin that reaches the network needs `pixel plugin enable`.
     pub network: bool,
+    /// The commands one binary serves. Empty: the plugin serves the command
+    /// named like itself and is run as `<run> <args…>`. Non-empty: it serves
+    /// exactly these and is run as `<run> <command> <args…>`.
+    pub commands: Vec<String>,
 }
 
 impl Manifest {
     pub fn has_command(&self) -> bool {
         self.capabilities.contains(&Capability::Command)
+    }
+
+    /// The `pixel <command>` words this plugin answers to.
+    pub fn serves(&self) -> Vec<&str> {
+        if self.commands.is_empty() {
+            vec![self.name.as_str()]
+        } else {
+            self.commands.iter().map(String::as_str).collect()
+        }
+    }
+
+    /// Whether `pixel <command>` runs this plugin.
+    pub fn serves_command(&self, command: &str) -> bool {
+        self.serves().contains(&command)
     }
 }
 
@@ -106,6 +124,7 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             .as_bool()
             .ok_or_else(|| "`network` must be true or false".to_owned())?,
     };
+    let commands = parse_commands(&doc)?;
     Ok(Manifest {
         name,
         version,
@@ -114,7 +133,35 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         run,
         capabilities,
         network,
+        commands,
     })
+}
+
+/// The optional `commands` array: command names, each a valid plugin name
+/// (it is looked up as `pixel <name>`), without repeats.
+fn parse_commands(doc: &DocumentMut) -> Result<Vec<String>, String> {
+    let Some(item) = doc.get("commands") else {
+        return Ok(Vec::new());
+    };
+    let list = item
+        .as_array()
+        .ok_or_else(|| "`commands` must be an array of command names".to_owned())?;
+    let mut out: Vec<String> = Vec::new();
+    for entry in list {
+        let text = entry
+            .as_str()
+            .ok_or_else(|| "`commands` must hold strings only".to_owned())?;
+        if !valid_name(text) {
+            return Err(format!(
+                "`commands` holds \"{text}\", which is not a command name: use lowercase letters, digits, `-` and `_`"
+            ));
+        }
+        if out.iter().any(|seen| seen == text) {
+            return Err(format!("`commands` lists \"{text}\" twice"));
+        }
+        out.push(text.to_owned());
+    }
+    Ok(out)
 }
 
 fn parse_capabilities(doc: &DocumentMut) -> Result<Vec<Capability>, String> {
@@ -214,9 +261,42 @@ network = true
                 run: "bin/pixel-flow".into(),
                 capabilities: vec![Capability::Command],
                 network: true,
+                commands: vec![],
             }
         );
         assert!(m.has_command());
+        assert_eq!(m.serves(), ["flow"]);
+        assert!(m.serves_command("flow") && !m.serves_command("ultraflow"));
+    }
+
+    #[test]
+    fn a_commands_list_replaces_the_plugin_name_as_what_it_serves() {
+        let text = GOOD.replace("network = true", "commands = [\"commit\", \"push\"]");
+        let m = parse(&text).unwrap();
+        assert_eq!(m.commands, ["commit", "push"]);
+        assert_eq!(m.serves(), ["commit", "push"]);
+        assert!(m.serves_command("push"));
+        assert!(
+            !m.serves_command("flow"),
+            "the plugin name is not a command then"
+        );
+    }
+
+    #[test]
+    fn a_malformed_commands_list_is_refused_with_its_reason() {
+        for (value, expect) in [
+            ("\"commit\"", "must be an array"),
+            ("[1]", "strings only"),
+            ("[\"Bad Name\"]", "not a command name"),
+            ("[\"../x\"]", "not a command name"),
+            ("[\"a\", \"a\"]", "twice"),
+        ] {
+            let text = GOOD.replace("network = true", &format!("commands = {value}"));
+            let err = parse(&text).unwrap_err();
+            assert!(err.contains(expect), "{value}: {err}");
+        }
+        let empty = GOOD.replace("network = true", "commands = []");
+        assert_eq!(parse(&empty).unwrap().serves(), ["flow"]);
     }
 
     #[test]

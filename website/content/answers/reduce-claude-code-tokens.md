@@ -14,7 +14,7 @@ Before Claude Code edits anything, it finds out where to work: it searches, open
 
 With Pixel wired in, the agent asks instead of opening: `pixel scope-task` for the files a task touches, `pixel list-signatures` for what a file contains, `pixel who-calls` for the callers of a function. Each answer is fitted to a budget and says whether it is complete. An outline locates definitions; an edit still needs their bodies. File/signature volumes do not establish token or cost savings for a whole session.
 
-`pixel install` wires it into Claude Code (lifecycle hooks in `~/.claude/settings.json`), and `pixel install --repo` adds a guard in the repository that flags untargeted reads of large files. The [Claude Code page](../../for/claude-code/) lists every file it writes and how to remove it.
+`pixel setup` wires it into Claude Code (lifecycle hooks in `~/.claude/settings.json`), and `pixel setup --repo` adds a guard in the repository that flags untargeted reads of large files. The [Claude Code page](../../for/claude-code/) lists every file it writes and how to remove it.
 
 ## Measure it on your sessions
 

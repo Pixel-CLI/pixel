@@ -226,7 +226,7 @@ case "$PROVIDER" in
         [ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
         SUBAGENT_PROMPT="${SUBAGENT_PROMPT:-$HOME/.local/share/pixel/subagent-prompt.md}"
         [ -s "$SUBAGENT_PROMPT" ] || SUBAGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-subagent-prompt.md"
-        [ -s "$AGENT_PROMPT" ] || die "agent prompt missing (run: pixel install)"
+        [ -s "$AGENT_PROMPT" ] || die "agent prompt missing (run: pixel setup)"
         command -v claude >/dev/null 2>&1 || die "claude not on PATH"
         if [ "$INTERACTIVE" -eq 1 ]; then
             RUNNER_CMD="$(q claude --dangerously-skip-permissions \
@@ -258,7 +258,7 @@ case "$PROVIDER" in
         [ -x "$AGY_BIN" ] || AGY_BIN="$(command -v agy 2>/dev/null)" || true
         [ -n "$AGY_BIN" ] && [ -x "$AGY_BIN" ] || die "agy not on PATH"
         # agy (Antigravity) has no system-prompt override flag: pixel reaches
-        # it through pixel install's own wiring (AGENTS.md / hooks), which the
+        # it through pixel setup's own wiring (AGENTS.md / hooks), which the
         # VM already has.
         if [ "$INTERACTIVE" -eq 1 ]; then
             # -i consumes the next token as the prompt: the permission flag

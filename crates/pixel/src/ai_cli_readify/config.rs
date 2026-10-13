@@ -5,7 +5,7 @@
 //!
 //! Each writer merges rather than replaces: an agent's config holds the
 //! user's own settings (Codex's `developer_instructions`, the Claude hooks
-//! `pixel install` writes, Antigravity's workspace trust list), and a
+//! `pixel setup` writes, Antigravity's workspace trust list), and a
 //! readiness run must not be the thing that deletes them. Every write is a
 //! read-modify-write through a parser, to a temp file, then a rename — an
 //! agent may be reading the file while we rewrite it.
@@ -18,7 +18,7 @@ use std::{
 };
 
 // Codex's own config file name, owned by `pixel_install::codex_config`
-// because `pixel install` reads and writes that same file: importing it is
+// because `pixel setup` reads and writes that same file: importing it is
 // the only spelling, so a rename there cannot leave this writer behind.
 use pixel_install::codex_config::CODEX_CONFIG_FILE;
 use serde_json::{Map, Value};
@@ -97,7 +97,7 @@ pub(crate) const DEVIN_CONFIG_FILE: &str = ".config/devin/config.json";
 pub(crate) const CLAUDE_ONBOARDING_FILE: &str = ".claude.json";
 
 /// The Antigravity CLI's own settings, distinct from the IDE's
-/// `~/.gemini/config/config.json` that `pixel install` writes plugins into.
+/// `~/.gemini/config/config.json` that `pixel setup` writes plugins into.
 pub(crate) fn antigravity_settings(home: &Path) -> std::path::PathBuf {
     home.join(".gemini/antigravity-cli/settings.json")
 }
@@ -319,7 +319,7 @@ pub(crate) fn write_codex(path: &Path, provider: Provider) -> Result<String, Str
 }
 
 /// Point Claude Code at the recording gateway. The `env` object is merged
-/// into: whatever the user or `pixel install` put there survives.
+/// into: whatever the user or `pixel setup` put there survives.
 pub(crate) fn write_claude(path: &Path, provider: Provider) -> Result<String, String> {
     let original = read_or(path, "{}")?;
     let mut value: Value = serde_json::from_str(&original)

@@ -1,4 +1,4 @@
-{{- /* The setup sections of a /for/<slug>/ page, as Markdown, from the page's `agent` entry in data/agents.toml: install, what Pixel writes and where, the per-repository cleanup, the plugin or rules file, the check, the removal. Called as {{% agent-setup %}} so the sections reach the table of contents. crates/pixel/tests/cli/docs_drift.rs holds the data's paths and checks to a real `pixel install`. */ -}}
+{{- /* The setup sections of a /for/<slug>/ page, as Markdown, from the page's `agent` entry in data/agents.toml: install, what Pixel writes and where, the per-repository cleanup, the plugin or rules file, the check, the removal. Called as {{% agent-setup %}} so the sections reach the table of contents. crates/pixel/tests/cli/docs_drift.rs holds the data's paths and checks to a real `pixel setup`. */ -}}
 {{- $slug := .Page.Params.agent -}}
 {{- $a := index (where hugo.Data.agents.agent "slug" $slug) 0 -}}
 {{- if not $a }}{{ errorf "%s: no agent %q in data/agents.toml" .Page.File.Path $slug }}{{ end -}}
@@ -15,10 +15,10 @@ curl -fsSL https://github.com/{{ site.Params.repo }}/releases/latest/download/in
 
 [How to read the script before it runs]({{ $docs }}#install). It does not change any agent's configuration.
 {{ if eq $a.wiring "install" }}
-## What pixel install writes
+## What pixel setup writes
 
 ```bash
-pixel install
+pixel setup
 ```
 
 Run it once, from anywhere{{ with $a.when }}; it writes {{ $a.name }}'s files {{ . }}{{ end }}. For {{ $a.name }}:
@@ -28,11 +28,11 @@ Run it once, from anywhere{{ with $a.when }}; it writes {{ $a.name }}'s files {{
 
 {{ strings.TrimSuffix "." $a.wires | strings.FirstUpper }}.
 
-Every `pixel install` also writes {{ range $i, $f := $shared }}{{ if $i }} and {{ end }}`{{ $f }}`{{ end }}. It deploys no prompt and adds no retrieval guard: {{ $a.name }} keeps its native search, and Pixel's commands stay available when you ask for them.
+Every `pixel setup` also writes {{ range $i, $f := $shared }}{{ if $i }} and {{ end }}`{{ $f }}`{{ end }}. It deploys no prompt and adds no retrieval guard: {{ $a.name }} keeps its native search, and Pixel's commands stay available when you ask for them.
 {{ else }}
-## What pixel install writes
+## What pixel setup writes
 
-Nothing for {{ $a.name }}: it keeps its native tools, and `pixel install` only removes what an earlier release wrote for it. `pixel doctor` judges only what `pixel install` manages{{ if not $a.checks }}, so it does not see {{ $a.name }}'s {{ if eq $a.wiring "rules" }}rule{{ else }}plugin{{ end }}{{ else }}: its checks pass once those leftovers are gone{{ end }}.
+Nothing for {{ $a.name }}: it keeps its native tools, and `pixel setup` only removes what an earlier release wrote for it. `pixel doctor` judges only what `pixel setup` manages{{ if not $a.checks }}, so it does not see {{ $a.name }}'s {{ if eq $a.wiring "rules" }}rule{{ else }}plugin{{ end }}{{ else }}: its checks pass once those leftovers are gone{{ end }}.
 {{ end }}
 {{- with $a.note }}
 {{ . }}
@@ -60,7 +60,7 @@ The rule is the protocol: which `pixel` command replaces `grep`, a whole-file re
 ## Per repository
 
 ```bash
-pixel install --repo .
+pixel setup --repo .
 ```
 
 Updates this repository only, and skips every global step. It removes the retrieval guards and prompt blocks an earlier release wrote, keeps task lifecycle hooks, and never adds a guard that steers the agent toward Pixel.
@@ -94,14 +94,14 @@ It checks the binary, the daemon and this repository's index, the parts {{ $a.na
 ## Remove it
 {{ if eq $a.wiring "install" }}
 ```bash
-pixel uninstall
+pixel setup --remove
 ```
 
-It removes everything `pixel install` wrote, for every agent at once, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it.
+It removes everything `pixel setup` wrote, for every agent at once, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it.
 {{- end }}
 {{- with $a.repo }}
 
-`pixel uninstall --repo .` removes only this repository's files.
+`pixel setup --remove --repo .` removes only this repository's files.
 {{- end }}
 {{- if and $a.plugin (ne $a.wiring "install") }}
 
@@ -112,5 +112,5 @@ Remove the plugin with {{ $a.name }}'s own plugin or extension command.
 Delete `{{ . }}`.
 {{- end }}
 {{- if eq $a.wiring "none" }}
-Nothing to remove for {{ $a.name }}. `pixel uninstall` also takes out what an earlier release wrote for it.
+Nothing to remove for {{ $a.name }}. `pixel setup --remove` also takes out what an earlier release wrote for it.
 {{- end }}

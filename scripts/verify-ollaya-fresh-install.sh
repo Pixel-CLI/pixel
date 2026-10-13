@@ -7,7 +7,7 @@
 #
 # Runs the acceptance flow end to end in a contained environment:
 #
-#   clean Pixel environment → pixel install → ollaya setup → model pull
+#   clean Pixel environment → pixel setup → ollaya setup → model pull
 #
 # Everything pixel and ollaya write lands under a throwaway HOME (with its
 # own XDG dirs), so a run touches nothing outside it and can re-run on any
@@ -15,7 +15,7 @@
 # script exits non-zero on the first failure and prints a PASS/FAIL line per
 # step, so a regression is visible without reading the log.
 #
-# The ollaya setup is the classify-engine local install that `pixel install`
+# The ollaya setup is the classify-engine local install that `pixel setup`
 # offers at the end of an interactive global install and that
 # `pixel config setup` runs directly: it downloads the ollaya installer,
 # installs the `ollaya` binary into the pixel-managed prefix
@@ -93,19 +93,19 @@ fail() {
     exit 1
 }
 
-echo "=== issue #407: fresh Pixel environment → pixel install → ollaya setup → model pull ==="
+echo "=== issue #407: fresh Pixel environment → pixel setup → ollaya setup → model pull ==="
 echo "pixel:    $PIXEL_BIN ($("$PIXEL_BIN" --version 2>/dev/null | head -1))"
 echo "home:     $HOME_DIR (contained)"
 echo
 
-# --- [1/5] pixel install -------------------------------------------------------
+# --- [1/5] pixel setup -------------------------------------------------------
 # The global install deploys the agent prompt, hooks and shell wrapper into
 # the fresh HOME. Non-interactive: the classify setup it would offer at the
 # end is driven separately in step 2, where its output can be checked.
-echo "--- [1/5] pixel install ---"
-"$PIXEL_BIN" install --shell sh >"$WORK/install.out" 2>"$WORK/install.err" \
-    || fail "pixel install exited non-zero: $(tail -5 "$WORK/install.err")"
-pass "pixel install"
+echo "--- [1/5] pixel setup ---"
+"$PIXEL_BIN" setup --shell sh >"$WORK/install.out" 2>"$WORK/install.err" \
+    || fail "pixel setup exited non-zero: $(tail -5 "$WORK/install.err")"
+pass "pixel setup"
 
 # --- [2/5] ollaya setup -------------------------------------------------------
 # `pixel config setup` is the guided global setup; choosing the local
@@ -159,5 +159,5 @@ grep -q "ollaya" "$CONFIG_FILE" \
 pass "config: engine=local, ollaya launch recorded"
 
 echo
-echo "ALL GREEN: fresh Pixel environment → pixel install → ollaya setup → model pull"
+echo "ALL GREEN: fresh Pixel environment → pixel setup → ollaya setup → model pull"
 echo "Artifacts: $WORK (removed on exit; set KEEP=1 to inspect)"

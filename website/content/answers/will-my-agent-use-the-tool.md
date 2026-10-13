@@ -12,10 +12,10 @@ An agent is trained on the tools every repository has: search, read, the shell. 
 
 ## What made the difference
 
-Pixel does not wait for the agent to discover it. `pixel install` puts its protocol into every session of the agents it supports, and on Claude Code it does so through lifecycle hooks, so the guidance is there on the first turn of every session. `pixel install --repo` adds a guard to one repository that flags untargeted reads of large files; it advises and never blocks.
+Pixel does not wait for the agent to discover it. `pixel setup` puts its protocol into every session of the agents it supports, and on Claude Code it does so through lifecycle hooks, so the guidance is there on the first turn of every session. `pixel setup --repo` adds a guard to one repository that flags untargeted reads of large files; it advises and never blocks.
 
 Check actual use in your own sessions: the current installation has no quantified adoption rate here, and tool use alone does not establish a time or cost gain.
 
 ## Check it on your machine
 
-`pixel doctor` reports whether the hooks and the protocol are in place for each agent, and `pixel action-log` reads the local log of every Pixel command that ran, so you see whether your agent called it. The [page for your agent](../../for/) lists what `pixel install` writes for it.
+`pixel doctor` reports whether the hooks and the protocol are in place for each agent, and `pixel action-log` reads the local log of every Pixel command that ran, so you see whether your agent called it. The [page for your agent](../../for/) lists what `pixel setup` writes for it.

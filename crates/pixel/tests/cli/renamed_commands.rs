@@ -80,9 +80,10 @@ fn every_old_name_prints_the_help_and_exit_code_of_its_new_name() {
     let dir = Scratch::for_test("pixel-renamed", "help");
     // A command that moved to a plugin has no help of its own here: its
     // aliases are covered by `plugin_cli.rs`.
+    let built_in = crate::support::built_in_commands();
     for (old, new) in RENAMED_COMMANDS
         .iter()
-        .filter(|(_, new)| !pixel_plugin::MOVED_COMMANDS.contains(new))
+        .filter(|(_, new)| built_in.contains(*new))
     {
         let from_old = pixel(&dir, &[old, "--help"], &[]);
         let from_new = pixel(&dir, &[new, "--help"], &[]);
@@ -248,13 +249,13 @@ fn migrate_is_a_hidden_no_op_that_exits_zero() {
     );
 }
 
-/// The agent prompt `pixel install` deployed from v0.2.4, the last release
+/// The agent prompt `pixel setup` deployed from v0.2.4, the last release
 /// before the rename. Frozen here because CI checks out without tags.
 const PROMPT_0_2_4: &str = include_str!("fixtures/agent-prompt-0.2.4.md");
 
 /// No host reads a deployed Pixel prompt any more, so the copy every
 /// pre-rename install left is not judged for its vocabulary: it is a retired
-/// file, red until `pixel install` removes it, and the checks that dry-ran its
+/// file, red until `pixel setup` removes it, and the checks that dry-ran its
 /// commands (`rule.parity`, `rule.scenarios`) are gone with it.
 #[test]
 fn doctor_names_the_agent_prompt_every_pre_rename_install_deployed_as_retired() {
@@ -285,12 +286,12 @@ fn doctor_names_the_agent_prompt_every_pre_rename_install_deployed_as_retired() 
     assert_eq!(
         prompt["reason"],
         format!(
-            "retired Pixel prompt file(s) remain: {} — run `pixel install` to remove them",
+            "retired Pixel prompt file(s) remain: {} — run `pixel setup` to remove them",
             prompts.join("agent-prompt.md").display()
         ),
         "{prompt}"
     );
-    assert_eq!(prompt["fix"], "pixel install --shell fish", "{prompt}");
+    assert_eq!(prompt["fix"], "pixel setup --shell fish", "{prompt}");
     assert_eq!(
         std::fs::read_to_string(prompts.join("agent-prompt.md")).unwrap(),
         PROMPT_0_2_4,

@@ -185,7 +185,7 @@ fn bare_model(model: &str) -> &str {
 }
 
 /// The Workers AI REST root with the account folded in. A base that already
-/// names an account (`…/accounts/{id}`, as `pixel install` stores it) is used
+/// names an account (`…/accounts/{id}`, as `pixel setup` stores it) is used
 /// as is; otherwise `account` — `CLOUDFLARE_ACCOUNT_ID` — is required. The id
 /// becomes a URL path segment, so only an alphanumeric one is accepted.
 pub fn cloudflare_account_base(base: &str, account: Option<&str>) -> Result<String, String> {

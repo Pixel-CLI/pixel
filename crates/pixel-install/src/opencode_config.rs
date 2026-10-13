@@ -4,10 +4,10 @@
 //! Retirement of the OpenCode integration earlier releases wrote under
 //! `~/.config/opencode/`.
 //!
-//! OpenCode keeps its native tools, so `pixel install` writes nothing there.
+//! OpenCode keeps its native tools, so `pixel setup` writes nothing there.
 //! Earlier releases embedded the deployed prompt between the managed markers
 //! of `AGENTS.md` and wrote an enforcing guard plugin to
-//! `plugins/pixel.js`; `pixel install` and `pixel uninstall` still take both
+//! `plugins/pixel.js`; `pixel setup` and `pixel setup --remove` still take both
 //! out, and `pixel doctor` reports a leftover (`install.opencode-agents-md`).
 //!
 //! The plugin is recognised by the managed marker it carried
@@ -54,7 +54,7 @@ const PIXEL_PLUGIN_FILE: &str = "pixel.mjs";
 /// extension and silently ignores a `.mjs` there.
 const PLUGIN_PATH: &str = "plugins/pixel.js";
 
-/// The evidence-brief plugin `pixel install` deploys; the `plugins`
+/// The evidence-brief plugin `pixel setup` deploys; the `plugins`
 /// directory auto-loads it, so no registration entry is needed.
 const BRIEF_PLUGIN_PATH: &str = "plugins/pixel-brief.js";
 
@@ -195,7 +195,7 @@ fn sweep_config(path: &Path, home: &Path, dry_run: bool) -> (usize, usize, Optio
     (removed_instructions, removed_plugins, None)
 }
 
-/// `pixel uninstall` step: take the managed block out of `AGENTS.md` (the
+/// `pixel setup --remove` step: take the managed block out of `AGENTS.md` (the
 /// file goes when nothing else was in it), and drop the earlier mechanism's
 /// `instructions` entries.
 pub(crate) fn remove_opencode(
@@ -344,7 +344,7 @@ pub(crate) fn check_opencode(config_dir: &Path) -> std::result::Result<(String, 
     }
     if !left.is_empty() {
         return Err(format!(
-            "retired Pixel OpenCode integration remains: {} — run `pixel install` to remove it",
+            "retired Pixel OpenCode integration remains: {} — run `pixel setup` to remove it",
             left.join(" and ")
         ));
     }

@@ -1,6 +1,6 @@
 ---
 title: "Pixel for Copilot CLI"
-description: "Pixel reaches GitHub Copilot CLI as a plugin, not through pixel install: how to add it, what pixel doctor checks and how to remove it."
+description: "Pixel reaches GitHub Copilot CLI as a plugin, not through pixel setup: how to add it, what pixel doctor checks and how to remove it."
 agent: "copilot-cli"
 ---
 

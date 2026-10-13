@@ -20,7 +20,7 @@ body:
       label: Steps to reproduce
       description: The smallest sequence that shows the problem, on a public repository if possible.
       placeholder: |
-        1. pixel install
+        1. pixel setup
         2. ...
     validations:
       required: true

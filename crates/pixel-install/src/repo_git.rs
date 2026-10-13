@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! Keeps the machine-local files of `pixel install --repo` out of commits.
+//! Keeps the machine-local files of `pixel setup --repo` out of commits.
 //!
 //! Every repo artifact names this machine's `pixel` binary by absolute path.
 //! Committed, it hands teammates a hook pointing at a path that does not
@@ -65,7 +65,7 @@ pub(crate) fn exclude_locally(
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str("# pixel install --repo: machine-local, names this machine's pixel binary\n");
+    content.push_str("# pixel setup --repo: machine-local, names this machine's pixel binary\n");
     for pattern in &added {
         content.push_str(pattern);
         content.push('\n');

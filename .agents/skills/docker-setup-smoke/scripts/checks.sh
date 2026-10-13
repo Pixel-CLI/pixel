@@ -102,14 +102,14 @@ cp AGENTS.md /evidence/original-AGENTS.md
 git add -A
 git commit -qm init
 cp -R "$HOME/project" "$HOME/doctor-project"
-pixel install --shell bash --json > /evidence/install-1.json
+pixel setup --shell bash --json > /evidence/install-1.json
 report_ok /evidence/install-1.json
 test -s "$HOME/.local/share/pixel/agent-prompt.md"
 cp "$HOME/.local/share/pixel/agent-prompt.md" /evidence/first-prompt.md
 managed_state > /evidence/managed-1.txt
 personal_kept installed
 echo 'PASS global install keeps personal settings, hooks and instructions'
-pixel install --shell bash --json > /evidence/install-2.json
+pixel setup --shell bash --json > /evidence/install-2.json
 report_ok /evidence/install-2.json
 managed_state > /evidence/managed-2.txt
 cmp /evidence/managed-1.txt /evidence/managed-2.txt
@@ -157,10 +157,10 @@ if grep -q 'codex-hook-review' /evidence/doctor-after.txt; then
 fi
 echo 'PASS doctor names a fix for each red check, and --fix repairs them'
 cd "$HOME/project"
-pixel install --repo . --json > /evidence/repo-install.json
+pixel setup --repo . --json > /evidence/repo-install.json
 report_ok /evidence/repo-install.json
 grep -q '^# user instruction$' AGENTS.md
-pixel install --repo . --json > /evidence/repo-install-2.json
+pixel setup --repo . --json > /evidence/repo-install-2.json
 report_ok /evidence/repo-install-2.json
 echo 'PASS project install preserves user instructions, reinstall succeeds'
 # A personal Bash hook holds the Claude guard back: install says what the
@@ -177,7 +177,7 @@ data["hooks"]["PreToolUse"].append(
     {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/local/bin/my-guard"}]})
 json.dump(data, open(path, "w"), indent=2)
 PY
-(cd "$HOME/guard-project" && pixel install --repo . --json > /evidence/guard-install.json)
+(cd "$HOME/guard-project" && pixel setup --repo . --json > /evidence/guard-install.json)
 report_ok /evidence/guard-install.json
 (cd "$HOME/guard-project" && pixel doctor . --only repo.claude-hooks --fail-on red > /evidence/guard-doctor.txt 2>&1)
 python3 - /evidence/guard-install.json /evidence/guard-doctor.txt <<'PY'
@@ -208,13 +208,13 @@ fi
 test ! -s /evidence/classify.out
 grep -q 'classify is disabled' /evidence/classify.err
 echo 'PASS disabled classify refuses without a model'
-pixel uninstall --repo . --json > /evidence/repo-uninstall.json
+pixel setup --remove --repo . --json > /evidence/repo-uninstall.json
 report_ok /evidence/repo-uninstall.json
 cmp /evidence/original-AGENTS.md AGENTS.md
 echo 'PASS project uninstall restores user instructions exactly'
 # Uninstall deletes a binary pixel owns; a copy runs the second check.
 cp "$PIXEL_BIN_DIR/pixel" /tmp/pixel-runner
-pixel uninstall --shell bash --json > /evidence/uninstall-1.json
+pixel setup --remove --shell bash --json > /evidence/uninstall-1.json
 report_ok /evidence/uninstall-1.json
 test ! -e "$HOME/.local/share/pixel/agent-prompt.md"
 personal_kept uninstalled
@@ -224,7 +224,7 @@ if [ "$PIXEL_OWNS_BINARY" = 1 ]; then
 else
     # A package manager's binary stays for that manager to remove.
     test -x "$PIXEL_BIN_DIR/pixel"
-    pixel uninstall --shell bash --json > /evidence/uninstall-2.json
+    pixel setup --remove --shell bash --json > /evidence/uninstall-2.json
     test -x "$PIXEL_BIN_DIR/pixel"
 fi
 report_ok /evidence/uninstall-2.json

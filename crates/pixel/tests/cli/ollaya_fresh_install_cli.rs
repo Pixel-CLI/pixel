@@ -3,7 +3,7 @@
 
 //! The issue #407 reproducer: `scripts/verify-ollaya-fresh-install.sh` must
 //! exist, be executable, and encode the acceptance flow — clean Pixel
-//! environment → `pixel install` → ollaya setup → model pull — so the same
+//! environment → `pixel setup` → ollaya setup → model pull — so the same
 //! flow can re-run on any machine. A regression in the flow is a release
 //! blocker, so the script that reproduces it is pinned here.
 
@@ -55,10 +55,10 @@ fn the_reproducer_script_carries_the_spdx_header() {
 fn the_reproducer_encodes_the_acceptance_flow() {
     let text = std::fs::read_to_string(script_path())
         .unwrap_or_else(|e| panic!("read {}: {e}", script_path().display()));
-    // The flow the issue names: pixel install, then the ollaya setup, then
+    // The flow the issue names: pixel setup, then the ollaya setup, then
     // the model pull — each step the script must run and check.
     for step in [
-        "pixel install",
+        "pixel setup",
         "pixel config setup",
         "ollaya setup",
         "ollaya binary",

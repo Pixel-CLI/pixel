@@ -87,7 +87,7 @@ module is tested across its seam.
 4. **True external (mock).** What pixel does not control: a remote LLM
    provider (`classify --remote-preset`), the web lookup (`web-search`),
    GitHub, the embedding model download, the agent tools whose configs
-   `pixel install` edits. The deepened module takes it as an injected port;
+   `pixel setup` edits. The deepened module takes it as an injected port;
    tests provide a fake (the `docker-setup-smoke` skill's scripted fake model
    is one).
 

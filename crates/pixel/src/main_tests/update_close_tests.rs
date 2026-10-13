@@ -50,7 +50,9 @@ fn read_only_should_accept_retrieval_and_refuse_state_changers() {
     for args in [
         &["push", "origin", "main", "--request-id", "x"][..],
         &["commit", "--request-id", "x", "--message", "m"],
-        &["install"],
+        &["setup"],
+        &["install", "github:acme/tool"],
+        &["uninstall", "tool"],
         &["config", "classify-engine", "local"],
         &["scope-task", "--clear"],
         &["build-index", "."],

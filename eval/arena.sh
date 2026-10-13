@@ -420,12 +420,12 @@ if [ "$REVIEWED_PIXEL_HOOKS" = "1" ]; then
   if ! "$DOCKER_BIN" run --rm \
       -v "$ARENA_DIR/arena/hook_audit.py":/usr/local/lib/arena-hook-audit.py:ro \
       --entrypoint sh "$pixel_image" -c '
-        pixel install >/dev/null 2>&1 || exit 1
+        pixel setup >/dev/null 2>&1 || exit 1
         python3 /usr/local/lib/arena-hook-audit.py audit \
           --arm pixel --codex-home "$HOME/.codex" \
           --repo /tmp/preflight-repo --receipt /tmp/preflight.json
       ' >/dev/null 2>&1; then
-    echo "ERROR: --review-pixel-hooks: the pixel image writes the native-default hook set (task-event only), which the paired audit rejects; this mode needs a pixel install that also writes the Codex prompt-submit and metrics hooks" >&2
+    echo "ERROR: --review-pixel-hooks: the pixel image writes the native-default hook set (task-event only), which the paired audit rejects; this mode needs a pixel setup that also writes the Codex prompt-submit and metrics hooks" >&2
     exit 2
   fi
 fi

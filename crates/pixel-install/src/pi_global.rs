@@ -118,7 +118,7 @@ fn package_manifest() -> String {
     let manifest = json!({
         "name": "pixel-impact",
         "private": true,
-        "description": "Pixel's explicit /pixel-impact command and evidence brief, managed by `pixel install`",
+        "description": "Pixel's explicit /pixel-impact command and evidence brief, managed by `pixel setup`",
         "pi": { "extensions": [format!("./{PACKAGE_EXTENSION}"), format!("./{BRIEF_EXTENSION}")] },
     });
     format!("{manifest:#}\n")
@@ -333,7 +333,7 @@ pub(crate) fn uninstall(paths: &PiPaths, dry_run: bool) -> Result<InstallStep> {
     ))
 }
 
-/// How the installed command compares with what `pixel install` writes for
+/// How the installed command compares with what `pixel setup` writes for
 /// `exe`, as doctor reports it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PiImpactState {
@@ -343,7 +343,7 @@ pub(crate) enum PiImpactState {
     Current,
     /// A user-owned path blocks or shadows the install; never repaired.
     Manual(String),
-    /// `pixel install` would change something.
+    /// `pixel setup` would change something.
     NeedsInstall(String),
 }
 
@@ -411,7 +411,7 @@ fn classify_manifest() -> String {
     let manifest = json!({
         "name": "pixel-classify",
         "private": true,
-        "description": "Pixel's optional classify file tools, written by `pixel install` when accepted",
+        "description": "Pixel's optional classify file tools, written by `pixel setup` when accepted",
         "pi": { "extensions": [format!("./{CLASSIFY_EXTENSION}")] },
     });
     format!("{manifest:#}\n")
@@ -518,7 +518,7 @@ impl ClassifyPiPackage {
     }
 }
 
-/// `pixel uninstall` step: remove the classify package and its `packages`
+/// `pixel setup --remove` step: remove the classify package and its `packages`
 /// entry; other settings, packages and files in the directory stay.
 pub(crate) fn uninstall_classify_package(
     paths: &PiPaths,

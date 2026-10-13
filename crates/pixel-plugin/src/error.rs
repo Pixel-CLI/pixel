@@ -32,10 +32,23 @@ pub enum Error {
         run: String,
         why: String,
     },
-    #[error("plugin `{0}` is already installed: run `pixel plugin remove {0}` first")]
+    #[error("plugin `{0}` is already installed: run `pixel uninstall {0}` first")]
     AlreadyInstalled(String),
+    #[error(
+        "command `{command}` is provided by both plugin `{first}` and plugin `{second}` in {dir}: run `pixel uninstall` for one of them",
+        dir = dir.display()
+    )]
+    Conflict {
+        command: String,
+        first: String,
+        second: String,
+        dir: PathBuf,
+    },
     #[error("{0}")]
     Source(String),
+    /// A source kind pixel knows by name and does not handle yet (`npm:`).
+    #[error("{0}")]
+    Unsupported(String),
     #[error("{context}: {source}")]
     Io {
         context: String,

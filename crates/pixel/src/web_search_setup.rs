@@ -3,7 +3,7 @@
 
 //! The web-search provider install step and configuration.
 //!
-//! `pixel install` (through the interactive global setup) and `pixel config
+//! `pixel setup` (through the interactive global setup) and `pixel config
 //! setup` propose a web-search provider: your own SearXNG instance (queries
 //! stay off public services), a keyed Perplexity account, or a skip that
 //! keeps the free public chain as the fallback — the same picker shape as
