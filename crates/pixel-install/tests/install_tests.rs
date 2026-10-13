@@ -70,7 +70,8 @@ fn task_hook_group_with(exe: &Path, provider: &str, event: &str, flags: &str) ->
         .replace('\'', "'\\''");
     serde_json::json!({"hooks":[{
         "type":"command",
-        "command":format!("'{executable}' run-hook task-event --provider {provider} --event {event}{flags}"),
+        "command":format!("'{executable}' run-hook task-event --provider {provider} --event {event}{flags}{}",
+            if event == "prompt-submit" { " || true" } else { "" }),
         "timeout":if matches!(event, "session-end" | "interrupt") { 3 } else { 10 }
     }]})
 }
@@ -6939,14 +6940,14 @@ fn install_should_write_as_many_brief_parts_as_the_config_says() {
         let stem = "run-hook task-event --provider claude --event prompt-submit";
         if parts == 1 {
             return vec![format!(
-                "'{}' {stem}",
+                "'{}' {stem} || true",
                 exe.canonicalize().unwrap().display()
             )];
         }
         (1..=parts)
             .map(|part| {
                 format!(
-                    "'{}' {stem} --part {part}/{parts}",
+                    "'{}' {stem} --part {part}/{parts} || true",
                     exe.canonicalize().unwrap().display()
                 )
             })
@@ -7102,4 +7103,75 @@ fn doctor_should_flag_a_missing_brief_part_and_a_set_the_config_no_longer_asks_f
     install_claude_in(home, &exe);
     let fixed = run();
     assert_eq!(fixed.status, CheckStatus::Green, "{fixed:?}");
+}
+
+/// Claude Code blocks the user's prompt when a `UserPromptSubmit` hook exits
+/// 2, and a `pixel` older than `--part` exits 2 on the unknown flag: every
+/// prompt command the install writes must exit 0 whatever the binary does.
+/// The binary here is a stand-in that exits 2 with a usage error.
+#[test]
+#[cfg(unix)]
+fn prompt_hook_commands_exit_zero_even_when_the_binary_exits_two() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = home.join("pixel");
+    fs::write(
+        &exe,
+        "#!/bin/sh\necho \"error: unexpected argument '--part' found\" >&2\nexit 2\n",
+    )
+    .unwrap();
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    install_claude_in(home, &exe);
+
+    let mut seen = 0;
+    for file in [".claude/settings.json", ".codex/hooks.json"] {
+        let commands = prompt_submit_commands(&read_json(&home.join(file)));
+        assert_eq!(commands.len(), 3, "{file}");
+        for command in commands {
+            // Both hosts hand the command to a shell; so does this test.
+            let out = std::process::Command::new("sh")
+                .args(["-c", &command])
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(0), "{command}");
+            assert!(out.stdout.is_empty(), "{command}");
+            // The same command without the tail is what blocked the prompt.
+            let bare = command.strip_suffix(" || true").unwrap();
+            let blocked = std::process::Command::new("sh")
+                .args(["-c", bare])
+                .output()
+                .unwrap();
+            assert_eq!(blocked.status.code(), Some(2), "{bare}");
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 6);
+}
+
+/// Entries an earlier install wrote (no tail) are the same hooks to install:
+/// an upgrade replaces them.
+#[test]
+#[cfg(unix)]
+fn install_should_replace_prompt_entries_without_the_fail_open_tail() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    install_claude_in(home, &exe);
+    let path = home.join(".claude/settings.json");
+    let mut old = read_json(&path);
+    let mut group = task_hook_group(&exe, "claude", "prompt-submit");
+    let bare = group["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .strip_suffix(" || true")
+        .unwrap()
+        .to_owned();
+    group["hooks"][0]["command"] = bare.into();
+    old["hooks"]["UserPromptSubmit"] = serde_json::json!([group]);
+    fs::write(&path, old.to_string()).unwrap();
+    install_claude_in(home, &exe);
+    let after = prompt_submit_commands(&read_json(&path));
+    assert_eq!(after.len(), 3, "{after:?}");
+    assert!(after.iter().all(|c| c.ends_with(" || true")), "{after:?}");
 }

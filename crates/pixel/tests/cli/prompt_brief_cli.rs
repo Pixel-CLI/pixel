@@ -857,19 +857,76 @@ fn task_event_files(root: &Path) -> usize {
 }
 
 #[test]
-fn a_part_outside_its_bounds_is_refused_with_the_form_it_expects() {
+fn a_hook_with_arguments_it_cannot_parse_says_so_and_exits_zero() {
+    // Claude Code blocks the prompt when a UserPromptSubmit hook exits 2, the
+    // code clap exits with: a hook fails open whatever it was given.
     let root = fixture("parts-bad");
     for bad in ["0/3", "4/3", "1/9", "2", "x/y"] {
         let output = spawn_part(&root, "claude", bad, &part_payload(&root), &[])
             .join()
             .unwrap();
-        assert!(!output.status.success(), "{bad}");
+        assert_eq!(output.status.code(), Some(0), "{bad}");
+        assert!(output.stdout.is_empty(), "{bad}");
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("K/N"),
             "{bad}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    for args in [
+        &[
+            "run-hook",
+            "task-event",
+            "--provider",
+            "claude",
+            "--event",
+            "prompt-submit",
+            "--future-flag",
+        ][..],
+        &[
+            "hook",
+            "task-event",
+            "--provider",
+            "claude",
+            "--event",
+            "prompt-submit",
+            "--part",
+        ][..],
+        &[
+            "run-hook",
+            "task-event",
+            "--provider",
+            "nobody",
+            "--event",
+            "prompt-submit",
+        ][..],
+        &["run-hook", "task-event"][..],
+    ] {
+        let output = pixel_command()
+            .current_dir(&*root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            !output.stderr.is_empty(),
+            "{args:?}: the reason goes to stderr"
+        );
+    }
+    // Only hooks fail open: another command still exits with clap's code.
+    let output = pixel_command()
+        .args(["status", "--no-such-flag"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    // And asking a hook for help is not an error.
+    let help = pixel_command()
+        .args(["run-hook", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(help.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("task-event"));
 }
 
 #[test]

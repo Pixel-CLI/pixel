@@ -51,11 +51,20 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def settings(binary, arm):
-    """One UserPromptSubmit entry per part (``split``) or one for the whole brief (``single``)."""
+FAIL_OPEN = " || true"  # what `pixel install` ends every prompt-submit command with
+
+
+def settings(binary, arm, old_binary):
+    """One UserPromptSubmit entry per part (``split``) or one for the whole brief (``single``).
+
+    The commands are the ones ``pixel install`` writes, tail included. ``split`` also
+    registers a stand-in for a ``pixel`` older than ``--part``, which exits 2 on the
+    flag: were its failure not swallowed Claude Code would block the prompt.
+    """
     quoted = shlex.quote(str(binary))
-    commands = ([f"{quoted} {HOOK} --part {k}/{PARTS}" for k in range(1, PARTS + 1)]
-                if arm == "split" else [f"{quoted} {HOOK}"])
+    commands = ([f"{quoted} {HOOK} --part {k}/{PARTS}{FAIL_OPEN}" for k in range(1, PARTS + 1)]
+                + [f"{shlex.quote(str(old_binary))} {HOOK} --part 1/{PARTS}{FAIL_OPEN}"]
+                if arm == "split" else [f"{quoted} {HOOK}{FAIL_OPEN}"])
     return {"hooks": {"UserPromptSubmit": [
         {"hooks": [{"type": "command", "command": command, "timeout": 10}]} for command in commands]}}
 
@@ -94,8 +103,15 @@ def read_stream(lines):
         elif kind == "system" and event.get("subtype") == "hook_response":
             hooks.append({"command": event.get("command") or event.get("hook_name"),
                           "exit_code": event.get("exit_code"), "stdout_chars": len(event.get("stdout") or ""),
+                          "part": part_of(event.get("stdout") or ""),
                           "additional_context_chars": context_chars(event.get("stdout") or "")})
     return answer, hooks, usage, tools
+
+
+def part_of(stdout):
+    """Which part a hook printed: the marker its slice ends with."""
+    found = MARKER.findall(stdout)
+    return int(found[-1][0]) if found else None
 
 
 def context_chars(stdout):
@@ -114,12 +130,17 @@ def run_arm(claude, binary, work, arm):
                     ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]):
         subprocess.run(command, cwd=repo, check=True, capture_output=True)
     path = work / f"settings-{arm}.json"
-    path.write_text(json.dumps(settings(binary, arm)))
+    old_binary = work / "old-pixel"
+    old_binary.write_text("#!/bin/sh\necho \"error: unexpected argument '--part' found\" >&2\nexit 2\n")
+    old_binary.chmod(0o755)
+    path.write_text(json.dumps(settings(binary, arm, old_binary)))
     done = subprocess.run(claude_argv(claude, path), cwd=repo, env=agent_env(), input=PROMPT, text=True,
                           capture_output=True, timeout=300, check=False)
     answer, hooks, usage, tools = read_stream(done.stdout.splitlines())
-    seen = sorted({int(k) for k, n in MARKER.findall(answer) if int(n) == PARTS})
+    seen = [int(k) for k, n in MARKER.findall(answer) if int(n) == PARTS]
+    arrival = [hook["part"] for hook in hooks if hook["part"]]
     return {"arm": arm, "exit_code": done.returncode, "tool_calls": tools, "markers_echoed": seen,
+            "hooks_finished_in_order": arrival, "part_1_first": arrival[:1] == [1],
             "answer": answer.strip()[:400], "hooks": hooks, "usage": usage,
             "stderr": done.stderr.strip()[-300:]}
 

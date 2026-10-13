@@ -682,6 +682,13 @@ keep one hook too.
   soon as the brief was stored, Claude Code put them ahead of part 1); a
   part 1 that never marks itself done costs only the rest of the 2 s. They
   run no ledger, so one prompt is one ledger event.
+- **Fails open.** Claude Code blocks the user's prompt when a
+  `UserPromptSubmit` hook exits 2, which is what an older `pixel` does on the
+  unknown `--part`. Every prompt-submit command `pixel install` writes ends in
+  ` || true` (`routing::FAIL_OPEN`; both hosts run hook commands in a shell:
+  Codex as `<shell> -lc`), recognition strips it so entries with and without
+  it are the same hook to install, doctor and uninstall, and `main` exits 0
+  with the clap error on stderr for any `run-hook` argument it cannot parse.
 - **Slicing** (`split`) is deterministic and cuts at line boundaries: a part
   takes whole lines while they fit in 9,800 characters (`PART_CHARS`; for
   Codex also 9,800 bytes, `Limits::BYTES`), and a line longer than a part is
