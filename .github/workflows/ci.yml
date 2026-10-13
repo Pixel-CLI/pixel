@@ -403,7 +403,7 @@ jobs:
       # Prebuilt binary; the profile lives in .config/nextest.toml.
       - name: Install cargo-nextest
         if: ${{ needs.changes.outputs.cargo == 'true' }}
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
           tool: cargo-nextest
 
@@ -525,6 +525,21 @@ jobs:
       - name: Cancel-stale sweep contract (stubbed gh)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-cancel-stale-runs.py
+
+      # The brief-gate bench parses `pixel brief` output and scores it against
+      # eval/brief-gate/prompts.jsonl; the excerpt and span benches score the
+      # answer blocks of confident briefs; the excavation counter reads agent
+      # transcripts; the live A/B driver reads a headless claude stream-json.
+      # Parsers, metrics and the set's schema and privacy lint.
+      - name: Brief-gate bench and excavation counter (self-tests, prompt set)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: |
+          python3 scripts/bench-brief-gate.py --self-test
+          python3 scripts/bench-brief-gate.py --check-set
+          python3 scripts/bench-brief-excerpt.py --self-test
+          python3 scripts/bench-brief-spans.py --self-test
+          python3 scripts/excavation-count.py --self-test
+          python3 scripts/ab-brief-live.py --self-test
 
       # The workflow's own step, run with a stub script: only a pull request
       # number reaches the shoot script.
@@ -734,7 +749,7 @@ jobs:
       # Prebuilt binary, same pinned installer as nextest above and cross in
       # cross-build.yml.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
           tool: cargo-deny
 

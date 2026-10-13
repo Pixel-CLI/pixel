@@ -26,6 +26,7 @@ with no pixel guidance at all.
 - `gate.py --candidate <arm> --baseline baseline` — PASS only if the
   candidate answers every scenario, scores >= baseline everywhere, and burns
   <= 1.5x baseline turns. Any single regression fails.
+- `brief-gate/` — a labelled prompt set for the prompt-submit brief's gate and file recall (`scripts/bench-brief-gate.py`), apart from the arms above; see `brief-gate/README.md`.
 - `fixtures/` — offline stand-ins for `claude`, `codex` and `pixel`;
   `scripts/test-agent-ab-harness.py` drives the whole pipeline with them.
 
