@@ -17,8 +17,31 @@ const DIRECTIVE: &str =
     "Answer from this context. Use a tool only if something you need is not shown above.";
 
 fn fixture(tag: &str) -> Scratch {
+    fixture_with(tag, 0)
+}
+
+/// The fixture, and `callers` more files that each use `MAX_RETRIES` in a
+/// thirty-line function.
+fn fixture_with(tag: &str, callers: usize) -> Scratch {
     let root = Scratch::for_test("region-pack-cli", tag);
     std::fs::create_dir_all(root.join("src")).unwrap();
+    for number in 0..callers {
+        let mut body = vec![format!("pub fn caller_{number}() -> u32 {{")];
+        body.extend((1..=30).map(|step| {
+            if step == 15 {
+                "    let limit = crate::limits::MAX_RETRIES;".to_string()
+            } else {
+                format!("    let step_{step} = {step} * {number}; // padding for the window")
+            }
+        }));
+        body.push("}".to_string());
+        body.push(String::new());
+        std::fs::write(
+            root.join(format!("src/caller_{number}.rs")),
+            body.join("\n"),
+        )
+        .unwrap();
+    }
     std::fs::create_dir_all(root.join("tests")).unwrap();
     std::fs::write(
         root.join("src/limits.rs"),
@@ -195,4 +218,26 @@ fn a_pack_should_grow_with_the_parts_the_host_delivers() {
     assert_eq!(one["pack_parts"], 1);
     assert!(three["pack_bytes"].as_u64() >= one["pack_bytes"].as_u64());
     assert!(three["pack_bytes"].as_u64().unwrap() <= 3 * 9_800);
+}
+
+#[test]
+fn the_brief_command_should_keep_a_pack_under_what_pi_and_opencode_accept() {
+    let root = fixture_with("command-cap", 4);
+    // The `brief` command: the 4 000 bytes the extensions that run it accept.
+    let command = brief(&root, &[]);
+    let command_text = text(&command);
+    assert!(command_text.len() <= 3_900, "{}", command_text.len());
+    assert!(
+        command_text.starts_with("[PIXEL:BRIEF]\nregion pack"),
+        "{command_text}"
+    );
+    assert!(
+        command_text.contains("MAX_RETRIES definition"),
+        "{command_text}"
+    );
+    // A host that says how many parts it takes gets a pack for them.
+    let one = brief(&root, &[("PIXEL_BRIEF_PARTS", "1")]);
+    let one_len = text(&one).len();
+    assert!(one_len > 3_900 && one_len <= 9_800, "{one_len}");
+    assert_eq!(one["pack_parts"], 1);
 }

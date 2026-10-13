@@ -874,7 +874,7 @@ pub(crate) struct Brief {
     /// daemon that did not): the region pack falls back to the text search.
     symbols_failed: bool,
     /// Parts the region pack may fill; `0`: no pack.
-    pack_parts: usize,
+    pack_limit: region_pack::Limit,
     /// The region pack, as complete as the window allowed.
     pack: Option<region_pack::Pack>,
     excluded: Vec<String>,
@@ -1260,7 +1260,7 @@ pub(crate) fn run(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, de
 fn pack_evidence(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, deadline: Instant) {
     let mut brief = edit(state, |brief| brief.clone());
     // History rows answer a rationale question better than regions do.
-    if brief.pack_parts == 0 || Instant::now() >= deadline || !brief.history.is_empty() {
+    if !brief.pack_limit.on() || Instant::now() >= deadline || !brief.history.is_empty() {
         return;
     }
     // A routed kind that reads no ranges of its own (a rationale whose
@@ -1337,7 +1337,7 @@ fn pack_evidence(plan: &Plan, evidence: &dyn Evidence, state: &Mutex<Brief>, dea
             .collect(),
         wants_tests: brief.wants_tests,
         wants_docs: brief.wants_docs,
-        parts: brief.pack_parts,
+        limit: brief.pack_limit,
     };
     let mut publish =
         |pack: &region_pack::Pack| edit(state, |brief| brief.pack = Some(pack.clone()));
@@ -2300,8 +2300,8 @@ pub(crate) struct Around {
     pub(crate) log: Option<PathBuf>,
     /// How a daemon is started for the prompt, when one may be.
     pub(crate) starter: Option<Starter>,
-    /// Parts the region pack may fill; `0` leaves the packet as it was.
-    pub(crate) pack_parts: usize,
+    /// What the region pack may be; the default leaves the packet as it was.
+    pub(crate) pack: region_pack::Limit,
 }
 
 impl Around {
@@ -2311,7 +2311,7 @@ impl Around {
         Self {
             log: Some(path),
             starter: None,
-            pack_parts: 0,
+            pack: region_pack::Limit::default(),
         }
     }
 }
@@ -2428,6 +2428,22 @@ pub(crate) fn start(prompt: &str, root: &Path) -> Option<Pending> {
 
 /// [`start`], saying why it declined.
 pub(crate) fn try_start(prompt: &str, root: &Path) -> Result<Pending, Declined> {
+    try_start_as(prompt, root, false)
+}
+
+/// [`start`] for the `brief` command, which hosts without a prompt hook (Pi,
+/// OpenCode) run and which they drop above 4 000 bytes: a region pack stays
+/// under that unless `PIXEL_BRIEF_PARTS` says the host takes more.
+pub(crate) fn start_for_command(prompt: &str, root: &Path) -> Option<Pending> {
+    try_start_for_command(prompt, root).ok()
+}
+
+/// [`start_for_command`], saying why it declined.
+pub(crate) fn try_start_for_command(prompt: &str, root: &Path) -> Result<Pending, Declined> {
+    try_start_as(prompt, root, true)
+}
+
+fn try_start_as(prompt: &str, root: &Path, command: bool) -> Result<Pending, Declined> {
     let log = decision_log::path_for(root);
     let gate = Gate::read(root);
     let root = root.to_path_buf();
@@ -2442,7 +2458,7 @@ pub(crate) fn try_start(prompt: &str, root: &Path) -> Result<Pending, Declined> 
         Around {
             log,
             starter: Some(Box::new(move || autostart::start_for_prompt(&for_start))),
-            pack_parts: region_pack::parts_from_env(),
+            pack: region_pack::limit_from_env(command),
         },
     )
 }
@@ -2491,11 +2507,7 @@ where
     F: FnOnce(Instant) -> Box<dyn Evidence> + Send + 'static,
     J: Fn(&str, Instant) -> Option<Verdict> + Send + Sync + 'static,
 {
-    let Around {
-        log,
-        starter,
-        pack_parts,
-    } = around;
+    let Around { log, starter, pack } = around;
     if !gate.open() {
         return Err(if gate.enabled {
             Declined::Unindexed
@@ -2520,7 +2532,7 @@ where
     let deadline = started + window;
     let state = Arc::new(Mutex::new(Brief {
         signal: Some(signal),
-        pack_parts,
+        pack_limit: pack,
         ..Brief::default()
     }));
     let (finished, done) = mpsc::channel();
@@ -3048,14 +3060,14 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
     if let Some(pack) = brief
         .pack
         .as_ref()
-        .filter(|pack| brief.pack_parts > 0 && pack.has_evidence())
+        .filter(|pack| brief.pack_limit.on() && pack.has_evidence())
     {
         let text = pack.text();
         let stats = AnswerStats {
             answer: true,
             excerpt_bytes: text.len(),
             pack_bytes: text.len(),
-            pack_parts: region_pack::split_parts(&text, region_pack::PART_CHARS).len(),
+            pack_parts: region_pack::split_parts(&text, brief.pack_limit.chars).len(),
             pack_targets: pack.targets(),
             fallback: pack.fallback(),
             ..AnswerStats::default()
@@ -6614,7 +6626,7 @@ mod tests {
             Around {
                 log,
                 starter: Some(starter),
-                pack_parts: 0,
+                pack: region_pack::Limit::default(),
             },
         )
     }
@@ -7842,7 +7854,7 @@ mod tests {
             no_verdict,
             model_high,
             Around {
-                pack_parts: parts,
+                pack: region_pack::Limit::of(parts),
                 ..Around::default()
             },
         )
@@ -7958,7 +7970,7 @@ mod tests {
         let plan = Plan::from_prompt(PACK_PROMPT).unwrap();
         let brief = |parts| Brief {
             signal: Some(Signal::Strong),
-            pack_parts: parts,
+            pack_limit: region_pack::Limit::of(parts),
             answered: 1,
             searched: true,
             ..Brief::default()

@@ -90,22 +90,58 @@ const MATCH_AFTER: u64 = 14;
 /// Width reserved for the line that opens a continuation part.
 const CONTINUATION_CHARS: usize = 48;
 
-/// The number of parts the pack may fill, `0` when the pack is off. Pure:
-/// the caller reads the two environment values.
-pub(crate) fn parts_budget(pack: Option<&str>, parts: Option<&str>) -> usize {
-    if !decision_log::enabled(pack) {
-        return 0;
-    }
-    parts
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .map_or(DEFAULT_PARTS, |count| count.clamp(1, MAX_PARTS))
+/// Characters of a pack the `pixel brief` command prints when nothing says
+/// otherwise: the Pi and OpenCode extensions that run it drop a brief over
+/// 4 000 bytes.
+pub(crate) const CLI_CHARS: usize = 3_900;
+const _: () = assert!(CLI_CHARS < 4_000);
+
+/// How much a pack may be: `parts` hook parts of at most `chars` characters
+/// each; none at all when the pack is off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Limit {
+    pub(crate) parts: usize,
+    pub(crate) chars: usize,
 }
 
-/// [`parts_budget`] of the process environment.
-pub(crate) fn parts_from_env() -> usize {
-    parts_budget(
+impl Limit {
+    /// `parts` parts of [`PART_CHARS`].
+    pub(crate) const fn of(parts: usize) -> Self {
+        Self {
+            parts,
+            chars: PART_CHARS,
+        }
+    }
+
+    pub(crate) const fn on(self) -> bool {
+        self.parts > 0
+    }
+}
+
+/// The limit the two switches give. Off wins. An explicit part count is the
+/// host saying how many parts it delivers. Without one, a hook gets one part
+/// and the `brief` command (which Pi and OpenCode run) the size they accept.
+/// Pure: the caller reads the two environment values.
+pub(crate) fn limit_for(pack: Option<&str>, parts: Option<&str>, command: bool) -> Limit {
+    if !decision_log::enabled(pack) {
+        return Limit::default();
+    }
+    match parts.and_then(|value| value.trim().parse::<usize>().ok()) {
+        Some(count) => Limit::of(count.clamp(1, MAX_PARTS)),
+        None if command => Limit {
+            parts: 1,
+            chars: CLI_CHARS,
+        },
+        None => Limit::of(DEFAULT_PARTS),
+    }
+}
+
+/// [`limit_for`] of the process environment.
+pub(crate) fn limit_from_env(command: bool) -> Limit {
+    limit_for(
         std::env::var(PACK_ENV).ok().as_deref(),
         std::env::var(PARTS_ENV).ok().as_deref(),
+        command,
     )
 }
 
@@ -288,9 +324,9 @@ pub(crate) fn split_parts(text: &str, max: usize) -> Vec<String> {
 }
 
 /// Whether the text fits `parts` parts.
-fn fits(text: &str, parts: usize) -> bool {
-    let cut = split_parts(text, PART_CHARS);
-    cut.len() <= parts && cut.iter().all(|part| part.len() <= PART_CHARS)
+fn fits(text: &str, limit: Limit) -> bool {
+    let cut = split_parts(text, limit.chars);
+    cut.len() <= limit.parts && cut.iter().all(|part| part.len() <= limit.chars)
 }
 
 // ---------------------------------------------------------------------------
@@ -989,8 +1025,8 @@ pub(crate) struct Input {
     pub(crate) facts: Vec<String>,
     pub(crate) wants_tests: bool,
     pub(crate) wants_docs: bool,
-    /// Parts the host delivers.
-    pub(crate) parts: usize,
+    /// How much the host takes.
+    pub(crate) limit: Limit,
 }
 
 /// A symbol (or a region standing for one) the pack is about.
@@ -1948,7 +1984,7 @@ fn assemble(
         chosen.sort_by_key(|held| held.order);
         pack.blocks = chosen.iter().map(|held| held.block.clone()).collect();
         pack.searched = header(input, targets, &chosen, *found_sites, fallback);
-        if !fits(&pack.text(), input.parts.clamp(1, MAX_PARTS)) {
+        if !fits(&pack.text(), input.limit) {
             chosen.retain(|held| !std::ptr::eq(*held, candidate));
             all = false;
         }
@@ -2053,16 +2089,32 @@ mod tests {
     // ---- parts -----------------------------------------------------------
 
     #[test]
-    fn parts_budget_should_follow_the_switch_and_clamp_the_count() {
-        assert_eq!(parts_budget(None, None), 1);
-        assert_eq!(parts_budget(Some("1"), Some("2")), 2);
-        assert_eq!(parts_budget(None, Some("3")), 3);
-        assert_eq!(parts_budget(None, Some("0")), 1);
-        assert_eq!(parts_budget(None, Some("9")), MAX_PARTS);
-        assert_eq!(parts_budget(None, Some("two")), 1);
+    fn limit_for_should_follow_the_switch_and_clamp_the_count() {
+        assert_eq!(limit_for(None, None, false), Limit::of(1));
+        assert_eq!(limit_for(Some("1"), Some("2"), false), Limit::of(2));
+        assert_eq!(limit_for(None, Some("3"), false), Limit::of(3));
+        assert_eq!(limit_for(None, Some("0"), false), Limit::of(1));
+        assert_eq!(limit_for(None, Some("9"), false), Limit::of(MAX_PARTS));
+        assert_eq!(limit_for(None, Some("two"), false), Limit::of(1));
         for off in ["0", "false", "off"] {
-            assert_eq!(parts_budget(Some(off), Some("3")), 0, "{off}");
+            let limit = limit_for(Some(off), Some("3"), true);
+            assert_eq!(limit, Limit::default(), "{off}");
+            assert!(!limit.on(), "{off}");
         }
+        assert!(Limit::of(1).on());
+    }
+
+    #[test]
+    fn the_brief_command_should_stay_under_the_size_pi_and_opencode_accept() {
+        let command = Limit {
+            parts: 1,
+            chars: CLI_CHARS,
+        };
+        assert_eq!(limit_for(None, None, true), command);
+        assert_eq!(command.chars, 3_900);
+        // An explicit part count is the host saying what it takes.
+        assert_eq!(limit_for(None, Some("2"), true), Limit::of(2));
+        assert_eq!(limit_for(Some("off"), None, true), Limit::default());
     }
 
     #[test]
@@ -2887,7 +2939,7 @@ mod tests {
             facts: Vec::new(),
             wants_tests: false,
             wants_docs: false,
-            parts,
+            limit: Limit::of(parts),
         }
     }
 
@@ -3032,7 +3084,7 @@ mod tests {
         wanted.names = vec!["big".into()];
         wanted.defined = vec![site("src/big.rs", 1, Some(72), "function")];
         for parts in 1..=MAX_PARTS {
-            wanted.parts = parts;
+            wanted.limit = Limit::of(parts);
             let pack = built(&wanted, &big).unwrap();
             let cut = split_parts(&pack.text(), PART_CHARS);
             assert!(cut.len() <= parts, "{parts}: {}", cut.len());
@@ -3042,9 +3094,9 @@ mod tests {
                 "{parts}: the definition always stays"
             );
         }
-        wanted.parts = 1;
+        wanted.limit = Limit::of(1);
         let one = built(&wanted, &big).unwrap().text().len();
-        wanted.parts = 3;
+        wanted.limit = Limit::of(3);
         let three = built(&wanted, &big).unwrap().text().len();
         assert!(one <= PART_CHARS && three > one, "{one} {three}");
     }

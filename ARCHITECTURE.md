@@ -794,8 +794,10 @@ the neighbours of a constant) while every block still fits. The text may
 exceed one hook's 10 000-character cap: `Pack::text` is the whole of it and
 `split_parts` cuts it at block boundaries into parts of `PART_CHARS` (9 800)
 characters, at most `MAX_PARTS` (3). `PIXEL_BRIEF_PARTS` (1 to 3, default 1)
-is how many the host delivers; `PIXEL_BRIEF_PACK=0|false|off` brings the packet
-back. A pack of regions alone, with no symbol or passage behind it, ends on
+is how many the host delivers; the `brief` command, which the Pi and OpenCode
+extensions run and which they drop above 4 000 bytes, prints at most
+`CLI_CHARS` (3 900) unless that variable is set. `PIXEL_BRIEF_PACK=0|false|off`
+brings the packet back. A pack of regions alone, with no symbol or passage behind it, ends on
 a lead ("not a verified answer") instead of the directive, and one the window
 ended before it finished says so. It is built from lines read at HEAD
 (`Evidence::lines_at`, refused for a credential-shaped path) and spends none of
