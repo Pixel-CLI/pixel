@@ -227,6 +227,8 @@ repository file.
 - Model downloads: `minishlab/potion-*` (`pixel_recall::embed::POTION_REPO`)
   and, with the `fastembed` feature, `intfloat/multilingual-e5-small`, from
   Hugging Face into `~/.local/share/pixel/models/`.
+- `pixel index-unpack <path|url>` (`crates/pixel/src/index_cmd.rs`,
+  `FETCH_CAP` 2 GiB).
 - `pixel reference setup`: `git clone`/`git fetch` (through `GitRunner`) from
   each repository URL recorded in `.pixel/reference.json`; the manifest is
   user-authored, so no destination is invented and no URL is guessed.
@@ -313,12 +315,12 @@ manage them. Controls, in the order a lookup applies them:
 - **Environment.** A plugin receives `PIXEL_API`, `PIXEL_REPO_ROOT`,
   `PIXEL_GRAPH_DB` and `PIXEL_BIN`; it inherits the rest of the caller's environment unchanged; Pixel adds no
   secret to it.
-- **Moved commands (#878).** `workspace`, `flow`, `plan-rollback`,
-  `coverage`, `token-savings`, `index-stats`, `squash-branch` and
+- **Moved commands (#878).** `flow`, `plan-rollback`,
+  `token-savings`, `squash-branch` and
   `fast-forward` are plugins of `Pixel-CLI/pixel-plugins`
   (`pixel_plugin::MOVED_COMMANDS`), looked up in the order above like any
   other name. Without one, `pixel <name>` prints the install hint and exits 2;
-  the pre-rename spellings (`rescue`, `stats`, `update`, `savings`,
+  the pre-rename spellings (`rescue`, `update`, `savings`,
   `rewrite`, `replay-flow`) resolve to the plugin of the current name
   (`plugin_cmd::moved_name`). The core binary no longer contains their code, so
   it no longer logs their arguments: the dispatch `exec`s before the action
@@ -408,7 +410,7 @@ boundary it crosses.
   so the first `pixel` command in the clone finds an index, a graph, a
   history database, task manifests or a configuration it did not build.
 - **Mitigation** (0.7.0, GHSA-c9f5-vxc4-wjph): before the index, graph and
-  history stores read anything,
+  history stores read anything, and before `pixel index-unpack` installs,
   `pixel_git::sidecar::check` refuses a `.pixel` that is a symbolic link or
   holds files git tracks, and names the command that removes it. Files under
   `.pixel/` are opened with `O_NOFOLLOW` or created fresh and renamed into
@@ -627,9 +629,18 @@ hold.
 
 ### T19. A packed index is tampered with (T, B6)
 
-- **Status**: Retired. `pixel index-pack` and `pixel index-unpack` were
-  removed (issue #878), so no command installs an index bundle built by
-  someone else. The numbering of the threats after it is unchanged.
+- **Scenario**: `pixel index-unpack https://…` installs a bundle built by
+  someone else.
+- **Mitigation**: each member's xxh3 is checked against the bundle's own
+  manifest; only the files `pixel index pack` writes are accepted as members
+  (since 0.7.0); the target `.pixel/` passes `pixel_git::sidecar::check` and
+  the staging directory is created without following links; a live index is
+  not overwritten without `--force`.
+- **Status**: Partial.
+- **Residual**: the check proves integrity against corruption, not
+  authenticity: a bundle is exactly as trustworthy as whoever produced it and
+  where it was fetched from (`http://` is accepted), and it lands in
+  `.pixel/` with the trust of T6.
 
 ### T20. The update path installs a tampered binary (T, E, B7)
 
@@ -733,7 +744,7 @@ hold.
   privileges and network once allowed; `network` is a declaration gated by
   `enable`, not a sandbox, and the host cannot stop a plugin that declares
   `false` from using the network.
-  The eight moved commands lost the property of being fixed built-ins: a
+  The five moved commands lost the property of being fixed built-ins: a
   `pixel-squash-branch` (force-push with lease), `pixel-fast-forward` or
   `pixel-plan-rollback` (`--apply` rewrites files) earlier on `PATH`, in
   `~/.pixel/plugins/` or in a trusted repo plugin is what `pixel squash-branch`
@@ -745,7 +756,7 @@ hold.
 | Status | Threats |
 | --- | --- |
 | Mitigated | T4, T10, T16, T17 |
-| Partial | T2, T3, T5, T6, T8, T14, T15, T20, T21, T22, T25 |
+| Partial | T2, T3, T5, T6, T8, T14, T15, T19, T20, T21, T22, T25 |
 | Accepted | T1, T7, T9, T12, T18, T23, T24 |
 | Withdrawn | T11, T13 |
 

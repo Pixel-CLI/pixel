@@ -323,12 +323,11 @@ fn add_reports_a_bad_source_and_keeps_the_credentials_of_a_url_out_of_the_log() 
 
 /// The pre-rename spellings that stood for a command now shipped as a
 /// plugin, with the plugin they resolve to.
-const MOVED_ALIASES: [(&str, &str); 6] = [
+const MOVED_ALIASES: [(&str, &str); 5] = [
     ("replay-flow", "flow"),
     ("rescue", "plan-rollback"),
     ("rewrite", "squash-branch"),
     ("savings", "token-savings"),
-    ("stats", "index-stats"),
     ("update", "fast-forward"),
 ];
 
@@ -464,5 +463,8 @@ fn a_plugin_installed_with_plugin_add_serves_the_moved_name() {
         "{by_alias:?}"
     );
     // Another moved command is still only a hint.
-    assert_eq!(stderr(&world.pixel(&["coverage"])), moved_hint("coverage"));
+    assert_eq!(
+        stderr(&world.pixel(&["token-savings"])),
+        moved_hint("token-savings")
+    );
 }

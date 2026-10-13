@@ -326,7 +326,6 @@ mod tests {
     fn a_moved_command_alias_resolves_to_its_plugin_and_nothing_else_does() {
         for (alias, name) in [
             ("rescue", "plan-rollback"),
-            ("stats", "index-stats"),
             ("update", "fast-forward"),
             ("savings", "token-savings"),
             ("rewrite", "squash-branch"),

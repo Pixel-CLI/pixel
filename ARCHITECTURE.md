@@ -98,8 +98,12 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel list-areas` | Functional-area clusters |
 | `pixel what-changed` | Symbols/flows affected by working-tree changes |
 | `pixel rebuild-graph` | Force (re)build of the code graph db |
+| `pixel workspace` | Multi-repo registry (`.pixel/workspace.json` members add/remove/list); `--workspace` fans `impact`/`who-calls` out across registered repos with per-repo provenance |
+| `pixel index-pack` | Freeze the index into one checksummed `.pxpack` bundle — CI builds once, teammates install instead of re-indexing |
+| `pixel index-unpack` | Install a packed index bundle from a path or https:// URL, hash-verified, refusing to overwrite a live index without `--force` |
 | `pixel reference` | Manage version-pinned reference corpora (`.pixel/reference.json`) for multi-repo analysis on top of workspaces and index packs |
 | `pixel status` | Index + graph freshness status |
+| `pixel coverage` | Per-language index coverage: files on disk vs files indexed, with unrecognized extensions surfaced — the "what did the index miss?" answer |
 | `pixel audit` | What an agent reads to learn what the largest source files contain: each whole file against its `list-signatures` outline in tokens (bytes / 4, floored), the total and the per-file median, files changed since indexing or with no signatures left out and counted, then per-language coverage. Builds the graph on a first run only; local, read-only, sends nothing |
 | `pixel prepare-repo` | Make a repository ready for agent work: index, graph, and warm daemon |
 | `pixel daemon` | Manage the per-root background daemon |
@@ -158,7 +162,7 @@ Per repository, under `.pixel/` (git-ignored):
 | `tasks/source-manifests/<content_id>.json`, `tasks/source-cache.json`, `tasks/session-locks/`, `tasks/session-context/`, `tasks/route-locks/`, `tasks/enforced-sessions/` | `pixel-task` and task bridge | Immutable source manifests, metadata digest cache, atomic provider/session task binding, bounded latest prompts for first-edit activation, per-decision classification locks, and one empty marker per provider/session whose task recorded enforced gates: when the ledger cannot answer within the hook deadline, only a marked session or `task.enforcement: enforce` keeps edits and completion denied. |
 | `task-hook-observations.json`, `task-hook-observations.lock` | CLI task bridge | Last real host invocation per provider; doctor reports observed activity separately from installation and trust. |
 | `plan.json` | CLI `plan` | The persisted `pixel plan` checklist, so `--status`/`--done`/`--prune` survive a re-plan. |
-| `workspace.json` | the `workspace` plugin | The registered member repositories. The CLI only reads it, for `--workspace` on `impact` and `who-calls`. |
+| `workspace.json` | CLI `workspace` | The registered member repositories. |
 | `plugins/<name>/` | `pixel-plugin` | Repo plugins: a directory with `pixel-plugin.toml` that someone (or the repository) put there. Read only, and run only after `pixel plugin trust <name>` recorded the digest of its files in `~/.pixel/trusted.toml`. |
 | `config.yaml` (legacy `config.json`) | CLI `config` | Repository-level settings over `~/.pixel/config.yaml`. |
 
@@ -338,15 +342,13 @@ plugin, a network plugin not enabled, or a `run` that leaves its directory
 stops with exit 1 and the command that fixes it; a name in
 `pixel_plugin::MOVED_COMMANDS` that no plugin provides prints the
 `pixel plugin add` hint and exits 2; any other name keeps clap's error.
-The eight commands that left the core for `Pixel-CLI/pixel-plugins` (#878) are
-`workspace`, `flow`, `plan-rollback`, `coverage`, `token-savings`,
-`index-stats`, `squash-branch` and `fast-forward`; their pre-rename spellings
-(`rescue`, `stats`, `update`, `savings`, `rewrite`, `replay-flow`, from
-`RENAMED_COMMANDS`) resolve to the plugin of the current name, with the same
-one-line rename note on stderr. The core keeps what other commands read:
-`workspace.json` for `--workspace`, the flow store for `ultraflow` and `plan`,
-and the library crates (`pixel-ops`, `pixel-flow`, `pixel-facts`, …) the
-plugins link at a pinned revision.
+The five commands that left the core for `Pixel-CLI/pixel-plugins` (#878) are
+`flow`, `plan-rollback`, `token-savings`, `squash-branch` and `fast-forward`;
+their pre-rename spellings (`rescue`, `update`, `savings`, `rewrite`,
+`replay-flow`, from `RENAMED_COMMANDS`) resolve to the plugin of the current
+name, with the same one-line rename note on stderr. The core keeps the flow
+store for `ultraflow` and `plan`, and the library crates (`pixel-ops`,
+`pixel-flow`, `pixel-facts`, …) the plugins link at a pinned revision.
 
 So the CLI's `--json` output is the envelope's `result` with the honesty
 fields merged in, not the raw envelope. Anything that needs the full

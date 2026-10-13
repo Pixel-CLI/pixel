@@ -49,7 +49,6 @@ pub const RENAMED_COMMANDS: &[(&str, &str)] = &[
     ("ship", "commit-and-push"),
     ("skeleton", "list-signatures"),
     ("sniper", "list-errors"),
-    ("stats", "index-stats"),
     ("symbol", "find-symbol"),
     ("sync", "fetch"),
     ("targets", "scope-task"),
@@ -118,7 +117,7 @@ mod tests {
 
     #[test]
     fn lookups_map_between_the_two_spellings() {
-        assert_eq!(RENAMED_COMMANDS.len(), 42);
+        assert_eq!(RENAMED_COMMANDS.len(), 41);
         assert_eq!(renamed_to("ready"), Some("prepare-repo"));
         assert_eq!(renamed_to("hook"), Some("run-hook"));
         assert_eq!(

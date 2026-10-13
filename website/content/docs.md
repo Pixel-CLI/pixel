@@ -120,7 +120,7 @@ Any other agent: paste [`PIXEL.md`](https://github.com/Pixel-CLI/pixel/blob/main
 
 ### Command plugins
 
-Eight commands are plugins, not part of the binary: `workspace`, `flow`, `plan-rollback`, `coverage`, `token-savings`, `index-stats`, `squash-branch` and `fast-forward`. Without one installed, `pixel <name>` prints how to get it and exits 2. Install the command (`pixel plugin add https://github.com/Pixel-CLI/pixel-plugins --name flow`) and its binary (`cargo install --git https://github.com/Pixel-CLI/pixel-plugins pixel-flow`); `pixel plugin list` shows what is installed. The old names (`rescue`, `stats`, `update`, `savings`, `rewrite`, `replay-flow`) run the plugin of the current name.
+Five commands are plugins, not part of the binary: `flow`, `plan-rollback`, `token-savings`, `squash-branch` and `fast-forward`. Without one installed, `pixel <name>` prints how to get it and exits 2. Install the command (`pixel plugin add https://github.com/Pixel-CLI/pixel-plugins --name flow`) and its binary (`cargo install --git https://github.com/Pixel-CLI/pixel-plugins pixel-flow`); `pixel plugin list` shows what is installed. The old names (`rescue`, `update`, `savings`, `rewrite`, `replay-flow`) run the plugin of the current name.
 
 ## The workflow
 

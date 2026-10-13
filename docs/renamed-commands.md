@@ -15,10 +15,13 @@ and never appears in hook responses or `search-like-rg` output. Protocol op
 names and JSON fields did not change. `migrate` was removed: it now exits 0
 with a note and does nothing.
 
-Six of the new names (`flow`, `plan-rollback`, `squash-branch`,
-`token-savings`, `index-stats`, `fast-forward`) are plugins now: `rescue`,
-`rewrite`, `savings`, `stats`, `update` and `replay-flow` run the plugin of the
-new name when it is installed, and otherwise print how to install it (exit 2).
+Five of the new names (`flow`, `plan-rollback`, `squash-branch`,
+`token-savings`, `fast-forward`) are plugins now: `rescue`, `rewrite`,
+`savings`, `update` and `replay-flow` run the plugin of the new name when it
+is installed, and otherwise print how to install it (exit 2).
+
+`index-stats` (old name `stats`) was deleted, not moved: `pixel stats` and
+`pixel index-stats` now fail with an unknown-command error.
 
 | Old name | New name |
 | --- | --- |
@@ -55,7 +58,6 @@ new name when it is installed, and otherwise print how to install it (exit 2).
 | `ship` | `commit-and-push` |
 | `skeleton` | `list-signatures` |
 | `sniper` | `list-errors` |
-| `stats` | `index-stats` |
 | `symbol` | `find-symbol` |
 | `sync` | `fetch` |
 | `targets` | `scope-task` |

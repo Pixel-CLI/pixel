@@ -54,6 +54,7 @@ mod evaluate_cmd;
 mod execution_brief;
 mod hook_input;
 mod impact_read;
+mod index_cmd;
 mod install_intro;
 mod operation_metrics;
 mod overview_intent;
@@ -689,6 +690,35 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Manage the multi-repo workspace (.pixel/workspace.json) that
+    /// `impact --workspace` and `who-calls --workspace` fan out across.
+    Workspace {
+        #[command(subcommand)]
+        cmd: workspace_cmd::WorkspaceCmd,
+    },
+    /// Freeze this repo's index into a single shareable `.pxpack` bundle —
+    /// the file CI builds once and teammates install instead of re-indexing.
+    IndexPack {
+        /// Output file (e.g. index.pxpack).
+        #[arg(long)]
+        out: PathBuf,
+        /// Also pack history.db (the on-demand facts index).
+        #[arg(long)]
+        include_history: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Install a packed index into this repo's `.pixel/` — from a path or
+    /// an https:// URL.
+    IndexUnpack {
+        /// Pack file path or URL.
+        source: String,
+        /// Replace the index while a daemon is running.
+        #[arg(long)]
+        force: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Manage version-pinned reference corpora (.pixel/reference.json) for
     /// multi-repo analysis on top of workspaces and index packs.
     Reference {
@@ -704,6 +734,14 @@ enum Command {
         /// Compact one-line summary for shell prompts / statuslines.
         #[arg(long)]
         statusline: bool,
+    },
+    /// Per-language coverage: files the index policy sees on disk vs files
+    /// the graph actually indexed, with symbol counts per language.
+    Coverage {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
     /// What an agent reads to learn what the largest files contain: each
     /// whole file against its `list-signatures` outline, in tokens, with
@@ -4282,6 +4320,7 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "list-areas",
     "what-changed",
     "status",
+    "coverage",
     "audit",
     "recall",
     "list-errors",
@@ -5385,9 +5424,31 @@ fn run_command(
             print_data(&v, json)?;
             Ok(())
         }
+        Command::Coverage { path, json } => {
+            coverage_cmd::run(coverage_cmd::CoverageOptions { path, json })
+        }
         Command::Audit { path, top, json } => {
             audit_cmd::run(audit_cmd::AuditOptions { path, top, json })
         }
+        Command::Workspace { cmd } => workspace_cmd::run(cmd),
+        Command::IndexPack {
+            out,
+            include_history,
+            path,
+        } => index_cmd::run(index_cmd::IndexCmd::Pack {
+            out,
+            include_history,
+            path,
+        }),
+        Command::IndexUnpack {
+            source,
+            force,
+            path,
+        } => index_cmd::run(index_cmd::IndexCmd::Unpack {
+            source,
+            force,
+            path,
+        }),
         Command::Reference { cmd } => reference_cmd::run(cmd),
         Command::Status {
             path,

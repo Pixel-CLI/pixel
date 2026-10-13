@@ -165,7 +165,7 @@ class Audit:
         assert self.git("--git-dir", str(remote), "rev-parse", "refs/heads/audit") == shipped
         self.call("fetch", ["fetch", "origin", "--json"], json_output=True)
         self.call("sync-branch", ["sync-branch", "--strategy", "report", "--push", "none", "--json"], json_output=True)
-        # fast-forward, squash-branch (and index-stats, plan-rollback,
+        # fast-forward, squash-branch (and plan-rollback,
         # token-savings) are plugins of Pixel-CLI/pixel-plugins: their
         # boundaries are audited there, not through this binary.
 
