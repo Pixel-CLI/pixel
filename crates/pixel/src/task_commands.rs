@@ -105,15 +105,6 @@ pub(crate) enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Reset the existing Claude session packet (does not erase completion evidence).
-    Reset {
-        #[arg(long)]
-        session: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
 }
 
 pub(crate) fn run(command: TaskCmd) -> Result<(), String> {
@@ -284,14 +275,6 @@ pub(crate) fn run(command: TaskCmd) -> Result<(), String> {
             json,
         } => crate::print_data(
             &crate::task_runtime::show(&path, &session)?.unwrap_or(Value::Null),
-            json,
-        ),
-        TaskCmd::Reset {
-            session,
-            path,
-            json,
-        } => crate::print_data(
-            &json!({"session_id":session,"reset":crate::task_runtime::reset(&path, &session)?}),
             json,
         ),
     }

@@ -524,8 +524,11 @@ fn dir_output(
 fn record(cwd: &Path, backend: &str, reason: &str) {
     if let Ok(root) = crate::discover_root(cwd) {
         let mut logger = pixel_actionlog::ActionLog::spawn_for_root(&root);
+        // The command's current name: a row under the pre-rename `search-compat`
+        // is invisible to every reader keyed on `search-like-rg`, so a
+        // successful routed search counted as zero uses of the command.
         logger.log(pixel_actionlog::ActionEvent::new(
-            "search-compat",
+            "search-like-rg",
             format!("backend={backend} reason={reason}"),
         ));
         // `run` exits right after: only a flushed record is observable.

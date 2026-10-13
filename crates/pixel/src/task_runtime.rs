@@ -111,24 +111,6 @@ pub(crate) fn show(path: &Path, session: &str) -> Result<Option<Value>, String> 
         .transpose()
 }
 
-/// Remove exactly one Claude session packet. Unlike hook operations, CLI
-/// callers receive an error when a requested state mutation cannot publish.
-pub(crate) fn reset(path: &Path, session: &str) -> Result<bool, String> {
-    if !valid_session_id(session) {
-        return Err("invalid Claude session id".to_string());
-    }
-    let root = crate::discover_root(path)?;
-    let state_path = store_path(&root);
-    let mut store = load_store(&state_path);
-    let before = store.sessions.len();
-    store.sessions.retain(|packet| packet.session_id != session);
-    if store.sessions.len() == before {
-        return Ok(false);
-    }
-    save_store(&state_path, &store)?;
-    Ok(true)
-}
-
 fn store_path(root: &Path) -> PathBuf {
     root.join(".pixel").join("task-runtime.json")
 }
@@ -139,23 +121,6 @@ fn load_store(path: &Path) -> Store {
         .and_then(|raw| serde_json::from_str::<Store>(&raw).ok())
         .filter(|store| store.version == STORE_VERSION)
         .unwrap_or_default()
-}
-
-fn save_store(path: &Path, store: &Store) -> Result<(), String> {
-    save_json_atomic(path, store)
-}
-
-fn save_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("task runtime path has no parent: {}", path.display()))?;
-    pixel_git::sidecar::private_dir(parent)
-        .map_err(|e| format!("create {}: {e}", parent.display()))?;
-    let body = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-    // A fresh temporary file renamed over the name: a link committed at
-    // either name is replaced, never written through.
-    pixel_git::nofollow::write_replace(path, &body, pixel_git::nofollow::PRIVATE_MODE)
-        .map_err(|e| format!("publish {}: {e}", path.display()))
 }
 
 fn current_head(root: &Path) -> String {
@@ -232,7 +197,9 @@ mod tests {
             version: STORE_VERSION,
             sessions,
         };
-        save_store(&store_path(root), &store).unwrap();
+        let path = store_path(root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
     }
 
     #[test]
@@ -281,30 +248,6 @@ mod tests {
         let loaded = read_claude_packet(&root, "session-1", "abc", 101).unwrap();
         assert_eq!(loaded.task, "fix auth");
         assert_eq!(loaded.intent, None);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn reset_removes_exactly_the_named_session() {
-        let root = root("reset");
-        write_store(
-            &root,
-            vec![
-                packet("session-1", "abc", 100),
-                packet("session-2", "abc", 100),
-            ],
-        );
-        assert_eq!(reset(&root, "session-1"), Ok(true));
-        assert_eq!(reset(&root, "session-1"), Ok(false));
-        let left = load_store(&store_path(&root));
-        assert_eq!(
-            left.sessions
-                .iter()
-                .map(|p| p.session_id.as_str())
-                .collect::<Vec<_>>(),
-            ["session-2"]
-        );
-        assert!(reset(&root, "bad/session").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 

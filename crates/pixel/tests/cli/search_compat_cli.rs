@@ -67,6 +67,11 @@ impl Fixture {
                 log.contains("backend=pixel"),
                 "Pixel backend not observed: {log}"
             );
+            assert!(
+                log.contains(r#""command":"search-like-rg""#)
+                    && !log.contains(r#""command":"search-compat""#),
+                "the row must carry the command's current name: {log}"
+            );
         } else {
             assert!(
                 !self.0.join(".pixel/actions.jsonl").exists(),

@@ -63,7 +63,7 @@ corpus and `~/.local/state/pixel` are never touched by any of them.
 | Script | Run | What |
 | --- | --- | --- |
 | `pixel-smoke-test.sh` | `scripts/pixel-smoke-test.sh` | the installed binary end to end: `--version`, that each retired hook verb (`guard`, `session-start`, `prompt-submit` and the rest) is a silent no-op under both `run-hook` and `hook`, `doctor --json`, the install surface, help of the mandatory workflows, the renamed commands. Read-only. `PIXEL_SHELL=fish` when `doctor` must check another shell's wrapper |
-| `system_audit.py` | `python3 scripts/system_audit.py --pixel target/dev-release/pixel --output /tmp/audit.json` | every CLI leaf against a disposable repo and `$HOME` (retrieval, mutations, env, sniper, hooks, tasks); JSON report, exit 1 on any FAIL. About one minute |
+| `system_audit.py` | `python3 scripts/system_audit.py --pixel target/dev-release/pixel --output /tmp/audit.json` | every CLI leaf against a disposable repo and `$HOME` (retrieval, mutations, sniper, hooks, tasks); JSON report, exit 1 on any FAIL. About one minute |
 | `system_audit_recall.py` | `python3 scripts/system_audit_recall.py target/dev-release/pixel --output /tmp/recall-audit.json` | recall index/search/ask/export, both daemons, install/uninstall/doctor/migrate/upgrade in a disposable `$HOME`; no network, no model download |
 
 Both audits set `PIXEL_DAEMON_AUTO_START=0` and clean up after themselves;

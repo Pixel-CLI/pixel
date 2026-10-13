@@ -18,7 +18,7 @@ gave them.** It breaks down into the security requirements of
 
 | # | Requirement | Threats it answers |
 | --- | --- | --- |
-| R1 | A repository's content cannot make Pixel read, write or run anything outside that repository, beyond what the user's own `git` would run | T5, T6, T7, T8, T9, T19, T23 |
+| R1 | A repository's content cannot make Pixel read, write or run anything outside that repository, beyond what the user's own `git` would run | T5, T6, T7, T8, T9, T23 |
 | R2 | Another local user cannot reach the daemon or read Pixel's state | T2, T15 |
 | R3 | A hook never runs a command from its payload, rewrites or approves a command, or blocks a host through a stale registration | T10 |
 | R4 | Nothing leaves the machine without an explicit command or setting, and a key goes only to the endpoint it was configured for, over TLS | T16, T17, T18 |
