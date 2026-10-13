@@ -479,6 +479,7 @@ impl Evidence for Live {
                     &Request::TargetsFacts {
                         task: task.to_string(),
                         limit: Some(MAX_TARGETS),
+                        relevance_only: false,
                     },
                     deadline,
                 )?;

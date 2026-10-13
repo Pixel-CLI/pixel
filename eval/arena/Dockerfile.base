@@ -1,7 +1,7 @@
 # pixel-arena base: identical footing for every arm — codex + python + git.
 # The tag stays for the reader; the multi-arch index digest is what Docker
 # pulls, and Dependabot (docker, /eval/arena) moves it.
-FROM node:22-trixie@sha256:072889700aecef94c5cee46c6e60107cc2aaad9aa9e418ce05abaa1e85752ee3
+FROM node:22-trixie@sha256:def2655045ff1ee91b28a48cb3ec84feafef6d128bda0ff6903e7847ed0b27b4
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 python3-pip git curl ca-certificates jq \
  && rm -rf /var/lib/apt/lists/* \

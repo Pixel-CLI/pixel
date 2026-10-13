@@ -8,5 +8,6 @@
 
 mod graph_incremental;
 mod regions;
+mod relevance;
 mod targets;
 mod watcher_freshness;
