@@ -1,0 +1,1237 @@
+[
+ {
+  "why": "dev row bg-006: a high-tier question",
+  "prompt": "uh how does the daemon notice files that changed while it was still starting up",
+  "block": {
+   "caps": [
+    "content probe truncated at 1000 matches for keyword 'does'; files beyond the cap carry no content signal",
+    "content probe truncated at 1000 matches for keyword 'daemon'; files beyond the cap carry no content signal",
+    "content probe truncated at 1000 matches for keyword 'still'; files beyond the cap carry no content signal",
+    "co-file list cut: 9 of 353 matching files listed (the 8 heaviest and the 4 heaviest structural ones)"
+   ],
+   "cofiles": [
+    {
+     "keywords": [
+      "does",
+      "daemon",
+      "notice",
+      "changed",
+      "while",
+      "still",
+      "starting"
+     ],
+     "line": 1180,
+     "path": "crates/pixel-daemon/src/daemon.rs",
+     "structural": true,
+     "structural_keywords": [
+      "daemon"
+     ],
+     "text": "/// event that leaves nothing pending (a read) does not start it.",
+     "weight": 10.315
+    },
+    {
+     "keywords": [
+      "does",
+      "daemon",
+      "notice",
+      "changed",
+      "while",
+      "still",
+      "starting"
+     ],
+     "line": 1009,
+     "path": "crates/pixel/src/main.rs",
+     "structural": true,
+     "structural_keywords": [
+      "daemon",
+      "notice",
+      "changed"
+     ],
+     "text": "/// (`--files a --files b`) — a single `--files a b` does NOT work:",
+     "weight": 10.315
+    },
+    {
+     "keywords": [
+      "does",
+      "daemon",
+      "notice",
+      "changed",
+      "while",
+      "still",
+      "starting"
+     ],
+     "line": 181,
+     "path": "CHANGELOG.md",
+     "structural": false,
+     "text": "- **graph:** `pixel pack-context` accepts a bare symbol name the way `impact` does, and a lookup that matches nothing names the recovery: an agent that guessed ",
+     "weight": 10.315
+    },
+    {
+     "keywords": [
+      "daemon",
+      "notice",
+      "starting"
+     ],
+     "line": 155,
+     "path": "crates/pixel-recall/src/ask/contract_tests.rs",
+     "structural": false,
+     "text": "&[(Role::Assistant, \"the watchdog restarts the daemon\")],",
+     "weight": 8.614
+    },
+    {
+     "keywords": [
+      "notice",
+      "changed",
+      "while",
+      "still",
+      "starting"
+     ],
+     "line": 26,
+     "path": "scripts/fixtures/decide-plan-routing.jsonl",
+     "structural": false,
+     "text": "{\"id\": \"BurntSushi--ripgrep-3522::dead-interactive\", \"item\": \"BurntSushi--ripgrep-3522\", \"set\": \"plan-routing\", \"family\": \"BurntSushi/ripgrep:issue-3522-exclude",
+     "weight": 8.184
+    },
+    {
+     "keywords": [
+      "notice",
+      "changed",
+      "while",
+      "still",
+      "starting"
+     ],
+     "line": 7,
+     "path": "scripts/fixtures/plan-routing-real-requests.json",
+     "structural": false,
+     "text": "{\"id\": \"BurntSushi--ripgrep-3522\", \"repository\": \"BurntSushi/ripgrep\", \"commit\": \"3fce3b5bb0236da2df6d99672afb8a719642eca7\", \"snapshot_role\": \"collection contex",
+     "weight": 8.184
+    },
+    {
+     "keywords": [
+      "does",
+      "daemon",
+      "notice",
+      "changed",
+      "while",
+      "still"
+     ],
+     "line": 38,
+     "path": "crates/pixel-daemon/src/recall_service.rs",
+     "structural": true,
+     "structural_keywords": [
+      "daemon"
+     ],
+     "text": "/// is the one the watcher does not report. The sweep is one directory",
+     "weight": 7.335
+    },
+    {
+     "keywords": [
+      "does",
+      "daemon",
+      "notice",
+      "changed",
+      "while",
+      "still"
+     ],
+     "line": 47,
+     "path": ".github/workflows/ci.yml",
+     "structural": false,
+     "text": "# does read are put back below.",
+     "weight": 7.335
+    },
+    {
+     "keywords": [
+      "does",
+      "daemon",
+      "changed",
+      "while",
+      "still",
+      "starting"
+     ],
+     "line": 238,
+     "path": "crates/pixel-facts/src/ingest.rs",
+     "structural": true,
+     "structural_keywords": [
+      "changed"
+     ],
+     "text": "/// canonical variable wins when set, even if it does not parse.",
+     "weight": 6.812
+    }
+   ],
+   "files_considered": 1161,
+   "graph": true,
+   "keywords": [
+    {
+     "common": true,
+     "content_files": 278,
+     "filename_files": 0,
+     "keyword": "does",
+     "symbol_files": 12,
+     "truncated": true
+    },
+    {
+     "content_files": 137,
+     "filename_files": 19,
+     "keyword": "daemon",
+     "symbol_files": 12,
+     "truncated": true
+    },
+    {
+     "content_files": 34,
+     "filename_files": 3,
+     "keyword": "notice",
+     "symbol_files": 5
+    },
+    {
+     "content_files": 211,
+     "filename_files": 2,
+     "keyword": "changed",
+     "symbol_files": 12
+    },
+    {
+     "common": true,
+     "content_files": 286,
+     "filename_files": 0,
+     "keyword": "while",
+     "symbol_files": 1
+    },
+    {
+     "common": true,
+     "content_files": 307,
+     "filename_files": 0,
+     "keyword": "still",
+     "symbol_files": 3,
+     "truncated": true
+    },
+    {
+     "content_files": 58,
+     "filename_files": 0,
+     "keyword": "starting",
+     "symbol_files": 1
+    }
+   ],
+   "structural_files": 49
+  },
+  "expected": {
+   "score": 1.593186562862246,
+   "tier": "high"
+  }
+ },
+ {
+  "why": "dev row bg-087: a low-tier prompt",
+  "prompt": "so how can a team share a prebuilt index instead of everybody building their own",
+  "block": {
+   "caps": [
+    "content probe truncated at 1000 matches for keyword 'index'; files beyond the cap carry no content signal",
+    "content probe truncated at 1000 matches for keyword 'own'; files beyond the cap carry no content signal",
+    "co-file list cut: 8 of 316 matching files listed (the 8 heaviest and the 4 heaviest structural ones)"
+   ],
+   "cofiles": [
+    {
+     "keywords": [
+      "team",
+      "share",
+      "prebuilt",
+      "index",
+      "instead",
+      "building",
+      "their",
+      "own"
+     ],
+     "line": 327,
+     "path": "CHANGELOG.md",
+     "structural": false,
+     "text": "- **docs:** The website gains a `/savings/` estimate: a team's large-file reads times the saving measured on the well-known files, as a range around the median ",
+     "weight": 15.782
+    },
+    {
+     "keywords": [
+      "team",
+      "share",
+      "instead",
+      "building"
+     ],
+     "line": 6,
+     "path": "website/content/about.md",
+     "structural": false,
+     "text": "<!-- The people come from data/team.toml ({{% team %}}), which the home's JSON-LD reads too: change them there, never here. The contact channels restate SECURIT",
+     "weight": 9.319
+    },
+    {
+     "keywords": [
+      "share",
+      "prebuilt",
+      "index",
+      "instead",
+      "their",
+      "own"
+     ],
+     "line": 56,
+     "path": "ARCHITECTURE.md",
+     "structural": false,
+     "text": "| `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.l",
+     "weight": 8.458
+    },
+    {
+     "keywords": [
+      "team",
+      "share",
+      "index",
+      "instead",
+      "their"
+     ],
+     "line": 283,
+     "path": "website/layouts/index.html",
+     "structural": true,
+     "structural_keywords": [
+      "index"
+     ],
+     "text": "{{ range slice (dict \"who\" \"dev\" \"title\" \"From developers\") (dict \"who\" \"team\" \"title\" \"From whoever approves it\") }}",
+     "weight": 8.22
+    },
+    {
+     "keywords": [
+      "share",
+      "index",
+      "instead",
+      "building",
+      "their",
+      "own"
+     ],
+     "line": 141,
+     "path": "crates/pixel-daemon/src/api.rs",
+     "structural": true,
+     "structural_keywords": [
+      "index"
+     ],
+     "text": "/// and CLI share one enum — per PLAN.md A1, this kills the",
+     "weight": 8.019
+    },
+    {
+     "keywords": [
+      "share",
+      "index",
+      "instead",
+      "building",
+      "own"
+     ],
+     "line": 20,
+     "path": "crates/pixel-index/src/cache.rs",
+     "structural": true,
+     "structural_keywords": [
+      "index"
+     ],
+     "text": "/// Tests share the process-global `XDG_CACHE_HOME` env var, so every test",
+     "weight": 8.019
+    },
+    {
+     "keywords": [
+      "share",
+      "index",
+      "instead",
+      "building",
+      "own"
+     ],
+     "line": 158,
+     "path": "crates/pixel-index/src/gitsync.rs",
+     "structural": true,
+     "structural_keywords": [
+      "index"
+     ],
+     "text": "/// `indexset.rs`), and `ls_files`/`status_porcelain` used to share the",
+     "weight": 8.019
+    },
+    {
+     "keywords": [
+      "share",
+      "index",
+      "instead",
+      "building",
+      "their",
+      "own"
+     ],
+     "line": 1292,
+     "path": "crates/pixel-index/src/indexset.rs",
+     "structural": true,
+     "structural_keywords": [
+      "index"
+     ],
+     "text": "/// only the last one makes a shard unfit to share.",
+     "weight": 8.019
+    }
+   ],
+   "files_considered": 1161,
+   "graph": true,
+   "keywords": [
+    {
+     "content_files": 26,
+     "filename_files": 3,
+     "keyword": "team",
+     "symbol_files": 0
+    },
+    {
+     "content_files": 157,
+     "filename_files": 1,
+     "keyword": "share",
+     "symbol_files": 7
+    },
+    {
+     "content_files": 16,
+     "filename_files": 0,
+     "keyword": "prebuilt",
+     "symbol_files": 0
+    },
+    {
+     "content_files": 98,
+     "filename_files": 30,
+     "keyword": "index",
+     "symbol_files": 30,
+     "truncated": true
+    },
+    {
+     "common": true,
+     "content_files": 296,
+     "filename_files": 1,
+     "keyword": "instead",
+     "symbol_files": 4
+    },
+    {
+     "content_files": 0,
+     "filename_files": 0,
+     "keyword": "everybody",
+     "symbol_files": 0
+    },
+    {
+     "content_files": 32,
+     "filename_files": 0,
+     "keyword": "building",
+     "symbol_files": 2
+    },
+    {
+     "common": true,
+     "content_files": 246,
+     "filename_files": 0,
+     "keyword": "their",
+     "symbol_files": 1
+    },
+    {
+     "common": true,
+     "content_files": 244,
+     "filename_files": 0,
+     "keyword": "own",
+     "symbol_files": 5,
+     "truncated": true
+    }
+   ],
+   "structural_files": 68
+  },
+  "expected": {
+   "score": 0.8118989114578987,
+   "tier": "low"
+  }
+ },
+ {
+  "why": "dev row bg-001: on topic, scored off",
+  "prompt": "the metrics line is missing when i run the pie harness can you figure out why",
+  "block": {
+   "caps": [
+    "content probe truncated at 1000 matches for keyword 'line'; files beyond the cap carry no content signal",
+    "content probe truncated at 1000 matches for keyword 'run'; files beyond the cap carry no content signal",
+    "content probe truncated at 1000 matches for keyword 'out'; files beyond the cap carry no content signal",
+    "co-file list cut: 10 of 457 matching files listed (the 8 heaviest and the 4 heaviest structural ones)"
+   ],
+   "cofiles": [
+    {
+     "keywords": [
+      "metrics",
+      "line",
+      "missing",
+      "run",
+      "harness",
+      "you"
+     ],
+     "line": 78,
+     "path": "crates/pixel-install/src/doctor.rs",
+     "structural": true,
+     "structural_keywords": [
+      "line",
+      "run"
+     ],
+     "text": "entry(\"install.codex-metrics-hook\", FIX_INSTALL),",
+     "weight": 9.221
+    },
+    {
+     "keywords": [
+      "metrics",
+      "line",
+      "missing",
+      "run",
+      "harness",
+      "you"
+     ],
+     "line": 124,
+     "path": "crates/pixel/src/main.rs",
+     "structural": true,
+     "structural_keywords": [
+      "metrics",
+      "line",
+      "run"
+     ],
+     "text": "/// Disable live metrics (accounting remains available in the local action log).",
+     "weight": 9.221
+    },
+    {
+     "keywords": [
+      "metrics",
+      "line",
+      "missing",
+      "run",
+      "harness",
+      "you"
+     ],
+     "line": 9,
+     "path": ".agents/skills/agent-session-debugging/SKILL.md",
+     "structural": false,
+     "text": "metrics appear missing, or an installed hook/prompt may behave differently from",
+     "weight": 9.221
+    },
+    {
+     "keywords": [
+      "metrics",
+      "line",
+      "run",
+      "harness",
+      "out"
+     ],
+     "line": 66,
+     "path": ".agents/skills/docker-setup-smoke/SKILL.md",
+     "structural": false,
+     "text": "4. Metrics configuration persists without an env override.",
+     "weight": 9.221
+    },
+    {
+     "keywords": [
+      "metrics",
+      "line",
+      "missing",
+      "run",
+      "harness",
+      "you",
+      "out"
+     ],
+     "line": 24,
+     "path": ".agents/skills/pixel-retro/SKILL.md",
+     "structural": false,
+     "text": "pixel --metrics off doctor . --only install.agent-prompt --only install.pi-prompt",
+     "weight": 9.221
+    },
+    {
+     "keywords": [
+      "metrics",
+      "line",
+      "run",
+      "harness",
+      "figure",
+      "out"
+     ],
+     "line": 271,
+     "path": ".coderabbit.yaml",
+     "structural": false,
+     "text": "crate short name or an area (proto, graph, metrics, install, deps).",
+     "weight": 9.221
+    },
+    {
+     "keywords": [
+      "metrics",
+      "line",
+      "missing",
+      "run",
+      "harness",
+      "you",
+      "out"
+     ],
+     "line": 116,
+     "path": "ARCHITECTURE.md",
+     "structural": false,
+     "text": "| `pixel classify-eval` | Offline go/no-go evaluation of the verified-history retrieval tier against frozen baselines. Reports per-label precision/recall, macro",
+     "weight": 9.221
+    },
+    {
+     "keywords": [
+      "metrics",
+      "line",
+      "missing",
+      "run",
+      "harness",
+      "you",
+      "figure",
+      "out"
+     ],
+     "line": 44,
+     "path": "CHANGELOG.md",
+     "structural": false,
+     "text": "Uninstall's nested-hook markers are provider-qualified: a foreign command that merely mentions `run-hook guard` or `run-hook metrics` survives the sweep.",
+     "weight": 9.221
+    },
+    {
+     "keywords": [
+      "line",
+      "missing",
+      "run",
+      "harness",
+      "out"
+     ],
+     "line": 8,
+     "path": "crates/pixel-daemon/src/api.rs",
+     "structural": true,
+     "structural_keywords": [
+      "line"
+     ],
+     "text": "//! a one-line fix per call site.",
+     "weight": 6.983
+    },
+    {
+     "keywords": [
+      "line",
+      "missing",
+      "run",
+      "harness",
+      "you",
+      "out"
+     ],
+     "line": 195,
+     "path": "crates/pixel-graph/src/plan.rs",
+     "structural": true,
+     "structural_keywords": [
+      "line",
+      "run"
+     ],
+     "text": "pub line: u32,",
+     "weight": 6.983
+    }
+   ],
+   "files_considered": 1161,
+   "graph": true,
+   "keywords": [
+    {
+     "content_files": 123,
+     "filename_files": 4,
+     "keyword": "metrics",
+     "symbol_files": 17
+    },
+    {
+     "content_files": 103,
+     "filename_files": 3,
+     "keyword": "line",
+     "symbol_files": 63,
+     "truncated": true
+    },
+    {
+     "content_files": 300,
+     "filename_files": 0,
+     "keyword": "missing",
+     "symbol_files": 18
+    },
+    {
+     "content_files": 131,
+     "filename_files": 35,
+     "keyword": "run",
+     "symbol_files": 109,
+     "truncated": true
+    },
+    {
+     "content_files": 0,
+     "filename_files": 0,
+     "keyword": "pie",
+     "symbol_files": 0
+    },
+    {
+     "content_files": 105,
+     "filename_files": 12,
+     "keyword": "harness",
+     "symbol_files": 2
+    },
+    {
+     "common": true,
+     "content_files": 120,
+     "filename_files": 0,
+     "keyword": "you",
+     "symbol_files": 0
+    },
+    {
+     "common": true,
+     "content_files": 47,
+     "filename_files": 1,
+     "keyword": "figure",
+     "symbol_files": 1
+    },
+    {
+     "common": true,
+     "content_files": 102,
+     "filename_files": 0,
+     "keyword": "out",
+     "symbol_files": 11,
+     "truncated": true
+    }
+   ],
+   "structural_files": 204
+  },
+  "expected": {
+   "score": 0.2982139852510999,
+   "tier": "off"
+  }
+ },
+ {
+  "why": "dev row bg-024: an operation, ops_share above zero",
+  "prompt": "bump the version and update the changelog",
+  "block": {
+   "caps": [
+    "content probe truncated at 1000 matches for keyword 'version'; files beyond the cap carry no content signal",
+    "co-file list cut: 8 of 204 matching files listed (the 8 heaviest and the 4 heaviest structural ones)"
+   ],
+   "cofiles": [
+    {
+     "keywords": [
+      "bump",
+      "version",
+      "changelog"
+     ],
+     "line": 445,
+     "path": "CHANGELOG.md",
+     "structural": true,
+     "structural_keywords": [
+      "changelog"
+     ],
+     "text": "- `pixel impact`, `pixel who-calls` and `pixel call-path` now see two classes of internal calls that were previously counted only as unresolved lower-bound nois",
+     "weight": 8.698
+    },
+    {
+     "keywords": [
+      "bump",
+      "version",
+      "changelog"
+     ],
+     "line": 76,
+     "path": "crates/pixel-recall/src/code_search.rs",
+     "structural": true,
+     "structural_keywords": [
+      "version"
+     ],
+     "text": "/// of every persisted vector's key ([`crate::code_vectors::Namespace`]): bump",
+     "weight": 8.698
+    },
+    {
+     "keywords": [
+      "bump",
+      "version",
+      "changelog"
+     ],
+     "line": 218,
+     "path": "crates/pixel-release/src/lib.rs",
+     "structural": true,
+     "structural_keywords": [
+      "version",
+      "changelog"
+     ],
+     "text": "\"{name} is {version}, tag says {expected}; bump `version` in crates/pixel/Cargo.toml or tag v{version}\"",
+     "weight": 8.698
+    },
+    {
+     "keywords": [
+      "bump",
+      "version",
+      "changelog"
+     ],
+     "line": 67,
+     "path": "scripts/test-release-prepare-only.py",
+     "structural": true,
+     "structural_keywords": [
+      "bump",
+      "version"
+     ],
+     "text": "def bump(self):",
+     "weight": 8.698
+    },
+    {
+     "keywords": [
+      "bump",
+      "version",
+      "changelog"
+     ],
+     "line": 7,
+     "path": ".agents/rules/release.md",
+     "structural": false,
+     "text": "lockstep version bump + `Cargo.lock` + `check-release`) in a",
+     "weight": 8.698
+    },
+    {
+     "keywords": [
+      "bump",
+      "version",
+      "changelog"
+     ],
+     "line": 96,
+     "path": ".agents/skills/pr/SKILL.md",
+     "structural": false,
+     "text": "- a bump of `EXTRACTOR_VERSION` (every existing graph rebuilds) or of the",
+     "weight": 8.698
+    },
+    {
+     "keywords": [
+      "bump",
+      "version",
+      "changelog"
+     ],
+     "line": 3,
+     "path": ".agents/skills/release/SKILL.md",
+     "structural": false,
+     "text": "description: Cut a pixel release end to end — pick the version, prepare the release commit (changelog cut, lockstep version bump, Cargo.lock, check-release) wit",
+     "weight": 8.698
+    },
+    {
+     "keywords": [
+      "bump",
+      "version",
+      "changelog"
+     ],
+     "line": 625,
+     "path": ".github/workflows/ci.yml",
+     "structural": false,
+     "text": "# (it read 1.85 while the tree needed 1.91). Bump both together.",
+     "weight": 8.698
+    }
+   ],
+   "files_considered": 1161,
+   "graph": true,
+   "keywords": [
+    {
+     "content_files": 39,
+     "filename_files": 0,
+     "keyword": "bump",
+     "symbol_files": 2
+    },
+    {
+     "content_files": 130,
+     "filename_files": 4,
+     "keyword": "version",
+     "symbol_files": 35,
+     "truncated": true
+    },
+    {
+     "content_files": 49,
+     "filename_files": 18,
+     "keyword": "changelog",
+     "symbol_files": 2
+    }
+   ],
+   "structural_files": 58
+  },
+  "expected": {
+   "score": -4.860105063766883,
+   "tier": "off"
+  }
+ },
+ {
+  "why": "a prompt the repository does not talk about",
+  "prompt": "what's the weather going to be like tomorrow",
+  "block": {
+   "cofiles": [
+    {
+     "keywords": [
+      "weather",
+      "going",
+      "like",
+      "tomorrow"
+     ],
+     "line": 100,
+     "path": "eval/intent/task-intent-100.jsonl",
+     "structural": false,
+     "text": "{\"text\": \"what's the weather going to be like tomorrow\", \"context\": \"What kind of coding-agent task is this prompt?\", \"labels\": [\"bugfix\", \"feature\", \"refactor\"",
+     "weight": 4.0
+    }
+   ],
+   "files_considered": 1161,
+   "graph": true,
+   "keywords": [
+    {
+     "content_files": 1,
+     "filename_files": 0,
+     "keyword": "weather",
+     "symbol_files": 0
+    },
+    {
+     "common": true,
+     "content_files": 15,
+     "filename_files": 0,
+     "keyword": "going",
+     "symbol_files": 0
+    },
+    {
+     "common": true,
+     "content_files": 173,
+     "filename_files": 0,
+     "keyword": "like",
+     "symbol_files": 4
+    },
+    {
+     "common": true,
+     "content_files": 2,
+     "filename_files": 0,
+     "keyword": "tomorrow",
+     "symbol_files": 0
+    }
+   ]
+  },
+  "expected": {
+   "score": -2.3487004385511616,
+   "tier": "off"
+  }
+ },
+ {
+  "why": "ends on a question mark, opens with no question word",
+  "prompt": "the daemon starts when exactly?",
+  "block": {
+   "caps": [
+    "content probe truncated at 1000 matches for keyword 'daemon'; files beyond the cap carry no content signal",
+    "co-file list cut: 8 of 249 matching files listed (the 8 heaviest and the 4 heaviest structural ones)"
+   ],
+   "cofiles": [
+    {
+     "keywords": [
+      "daemon",
+      "starts"
+     ],
+     "line": 4,
+     "path": "crates/pixel-actionlog/src/serve.rs",
+     "structural": true,
+     "structural_keywords": [
+      "daemon",
+      "starts"
+     ],
+     "text": "//! How an invocation's requests reached an answer: through a running daemon,",
+     "weight": 4.269
+    },
+    {
+     "keywords": [
+      "daemon",
+      "starts",
+      "exactly"
+     ],
+     "line": 35,
+     "path": "crates/pixel-daemon/src/api.rs",
+     "structural": true,
+     "structural_keywords": [
+      "daemon"
+     ],
+     "text": "/// Increment whenever the daemon request/response contract changes in a way",
+     "weight": 4.269
+    },
+    {
+     "keywords": [
+      "daemon",
+      "starts",
+      "exactly"
+     ],
+     "line": 4,
+     "path": "crates/pixel-daemon/src/daemon.rs",
+     "structural": true,
+     "structural_keywords": [
+      "daemon"
+     ],
+     "text": "//! Unix-socket NDJSON daemon: one JSON `Request` per line, one JSON",
+     "weight": 4.269
+    },
+    {
+     "keywords": [
+      "daemon",
+      "starts",
+      "exactly"
+     ],
+     "line": 9,
+     "path": "crates/pixel-daemon/src/evaluate_tests.rs",
+     "structural": true,
+     "structural_keywords": [
+      "daemon"
+     ],
+     "text": "//! which is private on purpose: widening the daemon's public surface to",
+     "weight": 4.269
+    },
+    {
+     "keywords": [
+      "daemon",
+      "starts",
+      "exactly"
+     ],
+     "line": 333,
+     "path": "crates/pixel-graph/src/extract.rs",
+     "structural": true,
+     "structural_keywords": [
+      "starts"
+     ],
+     "text": "/// `update_files_unsigned` — the incremental path the daemon runs on every",
+     "weight": 4.269
+    },
+    {
+     "keywords": [
+      "daemon",
+      "starts",
+      "exactly"
+     ],
+     "line": 10,
+     "path": "crates/pixel-graph/src/predicate.rs",
+     "structural": true,
+     "structural_keywords": [
+      "starts"
+     ],
+     "text": "//! daemon op and the CLI that wrap it.",
+     "weight": 4.269
+    },
+    {
+     "keywords": [
+      "daemon",
+      "starts",
+      "exactly"
+     ],
+     "line": 4,
+     "path": "crates/pixel-install/src/doctor.rs",
+     "structural": true,
+     "structural_keywords": [
+      "daemon"
+     ],
+     "text": "//! `pixel doctor` — checks install state, binary path, daemon health, and",
+     "weight": 4.269
+    },
+    {
+     "keywords": [
+      "daemon",
+      "starts"
+     ],
+     "line": 7,
+     "path": "crates/pixel/src/classify_setup.rs",
+     "structural": true,
+     "structural_keywords": [
+      "starts"
+     ],
+     "text": "//! daemon on this Mac), remote (a hosted LLM behind a key), Jev",
+     "weight": 4.269
+    }
+   ],
+   "files_considered": 1161,
+   "graph": true,
+   "keywords": [
+    {
+     "content_files": 137,
+     "filename_files": 19,
+     "keyword": "daemon",
+     "symbol_files": 12,
+     "truncated": true
+    },
+    {
+     "content_files": 136,
+     "filename_files": 0,
+     "keyword": "starts",
+     "symbol_files": 29
+    },
+    {
+     "common": true,
+     "content_files": 214,
+     "filename_files": 0,
+     "keyword": "exactly",
+     "symbol_files": 0
+    }
+   ],
+   "structural_files": 55
+  },
+  "expected": {
+   "score": 1.6615415375559284,
+   "tier": "high"
+  }
+ },
+ {
+  "why": "a tagged paste is removed before the question is read and the block is computed",
+  "prompt": "<pasted_content id=\"1\">\nfatal: not a git repository (or any parent up to mount point /)\n</pasted_content id=\"1\">\nwhere do the saved browser flows live on the disk",
+  "block": {
+   "caps": [
+    "content probe truncated at 1000 matches for keyword 'where'; files beyond the cap carry no content signal",
+    "co-file list cut: 8 of 309 matching files listed (the 8 heaviest and the 4 heaviest structural ones)"
+   ],
+   "cofiles": [
+    {
+     "keywords": [
+      "where",
+      "saved",
+      "browser",
+      "flows",
+      "live",
+      "disk"
+     ],
+     "line": 100,
+     "path": "crates/pixel/src/main.rs",
+     "structural": true,
+     "structural_keywords": [
+      "flows"
+     ],
+     "text": "/// `pixel --version` (long form): the crate version plus where the binary",
+     "weight": 13.212
+    },
+    {
+     "keywords": [
+      "where",
+      "saved",
+      "browser",
+      "flows",
+      "live",
+      "disk"
+     ],
+     "line": 10,
+     "path": "crates/pixel/src/ultraflow_cmd.rs",
+     "structural": true,
+     "structural_keywords": [
+      "saved",
+      "flows"
+     ],
+     "text": "//!   `pixel flow` document and saves it under the flow store, where",
+     "weight": 13.212
+    },
+    {
+     "keywords": [
+      "where",
+      "saved",
+      "browser",
+      "flows",
+      "live",
+      "disk"
+     ],
+     "line": 151,
+     "path": "ARCHITECTURE.md",
+     "structural": false,
+     "text": "| `pixel ultraflow` | The classify-driven browser loop over saved flows. `discover --url --goal` asks `pixel classify` one question per cycle whose options are ",
+     "weight": 13.212
+    },
+    {
+     "keywords": [
+      "where",
+      "saved",
+      "browser",
+      "flows",
+      "live",
+      "disk"
+     ],
+     "line": 78,
+     "path": "CHANGELOG.md",
+     "structural": false,
+     "text": "- **graph:** a Ruby method defined inside `class << self` (where `self` is the class, not inside an instance method), or after a bare `module_function` or `modu",
+     "weight": 13.212
+    },
+    {
+     "keywords": [
+      "where",
+      "saved",
+      "browser",
+      "flows",
+      "disk"
+     ],
+     "line": 39,
+     "path": "crates/pixel-flow/src/types.rs",
+     "structural": true,
+     "structural_keywords": [
+      "flows"
+     ],
+     "text": "/// Also carries the argument where that is what the action takes: for",
+     "weight": 11.336
+    },
+    {
+     "keywords": [
+      "saved",
+      "browser",
+      "flows",
+      "disk"
+     ],
+     "line": 82,
+     "path": "docs/design/plan-prereqs.md",
+     "structural": false,
+     "text": "BLOCKED: <file> is auth-gated — no login flow saved; ask the human for a test",
+     "weight": 11.336
+    },
+    {
+     "keywords": [
+      "where",
+      "saved",
+      "browser",
+      "flows",
+      "live"
+     ],
+     "line": 5,
+     "path": "crates/pixel/tests/cli/ultraflow_cli.rs",
+     "structural": true,
+     "structural_keywords": [
+      "flows"
+     ],
+     "text": "//! before it touches a browser or a model, and where a flow comes from.",
+     "weight": 10.718
+    },
+    {
+     "keywords": [
+      "where",
+      "saved",
+      "browser",
+      "flows",
+      "live"
+     ],
+     "line": 221,
+     "path": "crates/pixel/tests/cli/fixtures/agent-prompt-0.2.4.md",
+     "structural": false,
+     "text": "file read and 1 KiB per native command's output where measured volumes are not",
+     "weight": 10.718
+    }
+   ],
+   "files_considered": 1161,
+   "graph": true,
+   "keywords": [
+    {
+     "common": true,
+     "content_files": 251,
+     "filename_files": 0,
+     "keyword": "where",
+     "symbol_files": 1,
+     "truncated": true
+    },
+    {
+     "content_files": 87,
+     "filename_files": 0,
+     "keyword": "saved",
+     "symbol_files": 3
+    },
+    {
+     "content_files": 55,
+     "filename_files": 0,
+     "keyword": "browser",
+     "symbol_files": 3
+    },
+    {
+     "content_files": 45,
+     "filename_files": 19,
+     "keyword": "flows",
+     "symbol_files": 13
+    },
+    {
+     "content_files": 177,
+     "filename_files": 3,
+     "keyword": "live",
+     "symbol_files": 3
+    },
+    {
+     "content_files": 95,
+     "filename_files": 0,
+     "keyword": "disk",
+     "symbol_files": 5
+    }
+   ],
+   "structural_files": 43
+  },
+  "expected": {
+   "score": 1.5162568091336848,
+   "tier": "high"
+  }
+ }
+]
