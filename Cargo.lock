@@ -2046,6 +2046,7 @@ dependencies = [
  "pixel-index",
  "pixel-install",
  "pixel-ops",
+ "pixel-plugin",
  "pixel-proto",
  "pixel-rank",
  "pixel-recall",
@@ -2213,6 +2214,17 @@ dependencies = [
  "tempfile",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "pixel-plugin"
+version = "0.7.1"
+dependencies = [
+ "pixel-git",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml_edit",
 ]
 
 [[package]]
