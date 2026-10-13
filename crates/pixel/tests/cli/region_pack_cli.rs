@@ -8,7 +8,10 @@
 
 use std::path::Path;
 
-use serde_json::Value;
+use std::io::Write;
+use std::process::Stdio;
+
+use serde_json::{Value, json};
 
 use crate::support::{Scratch, git, pixel_command};
 
@@ -240,4 +243,76 @@ fn the_brief_command_should_keep_a_pack_under_what_pi_and_opencode_accept() {
     let one_len = text(&one).len();
     assert!(one_len > 3_900 && one_len <= 9_800, "{one_len}");
     assert_eq!(one["pack_parts"], 1);
+}
+
+/// Run `run-hook task-event` for a prompt-submit, with `--part` when given,
+/// and return the context it prints (empty when it prints none).
+fn hook_context(root: &Path, part: Option<&str>) -> String {
+    let mut command = pixel_command();
+    command
+        .current_dir(root)
+        .env("PIXEL_METRICS", "0")
+        .env_remove("PIXEL_BRIEF")
+        .env_remove("PIXEL_BRIEF_PACK")
+        .env_remove("PIXEL_BRIEF_PARTS")
+        .args(["run-hook", "task-event", "--provider", "claude"])
+        .args(["--event", "prompt-submit"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    if let Some(part) = part {
+        command.args(["--part", part]);
+    }
+    let mut child = command.spawn().unwrap();
+    let payload = json!({
+        "session_id": "pack-session",
+        "prompt": PROMPT,
+        "cwd": root,
+        "hook_event_name": "UserPromptSubmit",
+    });
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    printed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn the_pack_should_fill_as_many_parts_as_the_hooks_that_deliver_it() {
+    let root = fixture_with("hook-parts", 8);
+    // One hook (`brief_parts: 1`, or a host with a single hook): one part.
+    let single = hook_context(&root, None);
+    assert!(single.starts_with("[PIXEL:BRIEF]\nregion pack"), "{single}");
+    assert!(
+        single.chars().count() <= 9_800,
+        "{}",
+        single.chars().count()
+    );
+    // Three hooks: part 1 computes a pack for three, the others print theirs.
+    let (one, two, three) = std::thread::scope(|scope| {
+        let two = scope.spawn(|| hook_context(&root, Some("2/3")));
+        let three = scope.spawn(|| hook_context(&root, Some("3/3")));
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        (
+            hook_context(&root, Some("1/3")),
+            two.join().unwrap(),
+            three.join().unwrap(),
+        )
+    });
+    for (k, part) in [&one, &two].into_iter().enumerate() {
+        assert!(part.chars().count() <= 9_800, "part {}", k + 1);
+        assert!(!part.is_empty(), "part {} prints", k + 1);
+    }
+    assert!(one.starts_with("[PIXEL:BRIEF]\nregion pack"), "{one}");
+    assert!(
+        one.chars().count() + two.chars().count() + three.chars().count() > 9_800,
+        "a pack for three parts is larger than one part"
+    );
 }

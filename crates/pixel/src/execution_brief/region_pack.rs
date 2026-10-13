@@ -31,15 +31,14 @@ use super::decision_log;
 /// Environment kill switch of the pack (`0`, `false` or `off`): the brief is
 /// then the packet it was before the pack existed.
 pub(crate) const PACK_ENV: &str = "PIXEL_BRIEF_PACK";
-/// Environment count of the hook parts the host delivers (`1` to
-/// [`MAX_PARTS`]). One until the installer registers more than one entry.
+/// Environment override of the hook parts the pack may fill (`1` to
+/// [`MAX_PARTS`]). Without it the count is the `brief_parts` setting, the
+/// number of hooks `pixel install` registers.
 pub(crate) const PARTS_ENV: &str = "PIXEL_BRIEF_PARTS";
 /// Characters of one delivered part: under the 10 000 a host caps one hook at.
 pub(crate) const PART_CHARS: usize = 9_800;
-/// Parts a pack may fill.
-pub(crate) const MAX_PARTS: usize = 3;
-/// Parts delivered when [`PARTS_ENV`] says nothing.
-const DEFAULT_PARTS: usize = 1;
+/// Parts a pack may fill: the most hooks `brief_parts` allows.
+pub(crate) const MAX_PARTS: usize = pixel_install::config::BRIEF_PARTS_MAX as usize;
 /// The line the pack ends on.
 pub(crate) const DIRECTIVE: &str =
     "Answer from this context. Use a tool only if something you need is not shown above.";
@@ -118,11 +117,17 @@ impl Limit {
     }
 }
 
-/// The limit the two switches give. Off wins. An explicit part count is the
-/// host saying how many parts it delivers. Without one, a hook gets one part
-/// and the `brief` command (which Pi and OpenCode run) the size they accept.
-/// Pure: the caller reads the two environment values.
-pub(crate) fn limit_for(pack: Option<&str>, parts: Option<&str>, command: bool) -> Limit {
+/// The limit the switches give. Off wins. [`PARTS_ENV`], when set, is the
+/// host's own count. Without it a hook gets the `brief_parts` setting
+/// (`setting`, the hooks `pixel install` registered), and the `brief` command
+/// (which Pi and OpenCode run) the size they accept. Pure: the caller reads
+/// the environment and the setting.
+pub(crate) fn limit_for(
+    pack: Option<&str>,
+    parts: Option<&str>,
+    command: bool,
+    setting: u8,
+) -> Limit {
     if !decision_log::enabled(pack) {
         return Limit::default();
     }
@@ -132,16 +137,18 @@ pub(crate) fn limit_for(pack: Option<&str>, parts: Option<&str>, command: bool) 
             parts: 1,
             chars: CLI_CHARS,
         },
-        None => Limit::of(DEFAULT_PARTS),
+        None => Limit::of(usize::from(setting).clamp(1, MAX_PARTS)),
     }
 }
 
-/// [`limit_for`] of the process environment.
-pub(crate) fn limit_from_env(command: bool) -> Limit {
+/// [`limit_for`] of the process environment; `setting` is the hooks that run
+/// this brief (`--part K/N`: `N`, and 1 for a host with a single hook).
+pub(crate) fn limit_from_env(command: bool, setting: u8) -> Limit {
     limit_for(
         std::env::var(PACK_ENV).ok().as_deref(),
         std::env::var(PARTS_ENV).ok().as_deref(),
         command,
+        setting,
     )
 }
 
@@ -2089,15 +2096,18 @@ mod tests {
     // ---- parts -----------------------------------------------------------
 
     #[test]
-    fn limit_for_should_follow_the_switch_and_clamp_the_count() {
-        assert_eq!(limit_for(None, None, false), Limit::of(1));
-        assert_eq!(limit_for(Some("1"), Some("2"), false), Limit::of(2));
-        assert_eq!(limit_for(None, Some("3"), false), Limit::of(3));
-        assert_eq!(limit_for(None, Some("0"), false), Limit::of(1));
-        assert_eq!(limit_for(None, Some("9"), false), Limit::of(MAX_PARTS));
-        assert_eq!(limit_for(None, Some("two"), false), Limit::of(1));
+    fn limit_for_should_follow_the_switch_the_override_and_the_setting() {
+        assert_eq!(limit_for(None, None, false, 3), Limit::of(3));
+        assert_eq!(limit_for(None, None, false, 1), Limit::of(1));
+        assert_eq!(limit_for(None, None, false, 8), Limit::of(8));
+        assert_eq!(limit_for(None, None, false, 0), Limit::of(1));
+        assert_eq!(limit_for(None, None, false, 200), Limit::of(MAX_PARTS));
+        assert_eq!(limit_for(Some("1"), Some("2"), false, 3), Limit::of(2));
+        assert_eq!(limit_for(None, Some("0"), false, 3), Limit::of(1));
+        assert_eq!(limit_for(None, Some("99"), false, 3), Limit::of(MAX_PARTS));
+        assert_eq!(limit_for(None, Some("two"), false, 3), Limit::of(3));
         for off in ["0", "false", "off"] {
-            let limit = limit_for(Some(off), Some("3"), true);
+            let limit = limit_for(Some(off), Some("3"), true, 3);
             assert_eq!(limit, Limit::default(), "{off}");
             assert!(!limit.on(), "{off}");
         }
@@ -2110,11 +2120,11 @@ mod tests {
             parts: 1,
             chars: CLI_CHARS,
         };
-        assert_eq!(limit_for(None, None, true), command);
+        assert_eq!(limit_for(None, None, true, 3), command);
         assert_eq!(command.chars, 3_900);
         // An explicit part count is the host saying what it takes.
-        assert_eq!(limit_for(None, Some("2"), true), Limit::of(2));
-        assert_eq!(limit_for(Some("off"), None, true), Limit::default());
+        assert_eq!(limit_for(None, Some("2"), true, 3), Limit::of(2));
+        assert_eq!(limit_for(Some("off"), None, true, 3), Limit::default());
     }
 
     #[test]

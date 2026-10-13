@@ -2422,13 +2422,16 @@ impl Pending {
 /// Start the brief for `prompt` in `root`, or decline: a switched-off brief,
 /// a repository without an index and a prompt that asks nothing about code
 /// start no thread and run no lookup.
-pub(crate) fn start(prompt: &str, root: &Path) -> Option<Pending> {
-    try_start(prompt, root).ok()
+///
+/// `parts` is how many hooks deliver the brief (`brief_parts`, or 1 for a host
+/// with one hook): the region pack may fill that many.
+pub(crate) fn start(prompt: &str, root: &Path, parts: u8) -> Option<Pending> {
+    try_start(prompt, root, parts).ok()
 }
 
 /// [`start`], saying why it declined.
-pub(crate) fn try_start(prompt: &str, root: &Path) -> Result<Pending, Declined> {
-    try_start_as(prompt, root, false)
+pub(crate) fn try_start(prompt: &str, root: &Path, parts: u8) -> Result<Pending, Declined> {
+    try_start_as(prompt, root, false, parts)
 }
 
 /// [`start`] for the `brief` command, which hosts without a prompt hook (Pi,
@@ -2440,14 +2443,15 @@ pub(crate) fn start_for_command(prompt: &str, root: &Path) -> Option<Pending> {
 
 /// [`start_for_command`], saying why it declined.
 pub(crate) fn try_start_for_command(prompt: &str, root: &Path) -> Result<Pending, Declined> {
-    try_start_as(prompt, root, true)
+    try_start_as(prompt, root, true, 1)
 }
 
-fn try_start_as(prompt: &str, root: &Path, command: bool) -> Result<Pending, Declined> {
+fn try_start_as(prompt: &str, root: &Path, command: bool, parts: u8) -> Result<Pending, Declined> {
     let log = decision_log::path_for(root);
     let gate = Gate::read(root);
     let root = root.to_path_buf();
     let for_start = root.clone();
+    let pack = region_pack::limit_from_env(command, parts);
     try_start_with(
         prompt,
         gate,
@@ -2458,7 +2462,7 @@ fn try_start_as(prompt: &str, root: &Path, command: bool) -> Result<Pending, Dec
         Around {
             log,
             starter: Some(Box::new(move || autostart::start_for_prompt(&for_start))),
-            pack: region_pack::limit_from_env(command),
+            pack,
         },
     )
 }

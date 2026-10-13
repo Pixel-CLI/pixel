@@ -31,6 +31,8 @@ pub(crate) const DAEMON_AUTO_START_FEATURE: &str = "daemon_auto_start";
 /// Its environment opt-out: `0`, `false` or `off`.
 pub(crate) const DAEMON_AUTO_START_ENV: &str = "PIXEL_DAEMON_AUTO_START";
 
+use pixel_install::config::{BRIEF_PARTS_KEY, BRIEF_PARTS_MAX};
+
 /// The environment overrides and YAML switches exposed in the overview.
 const FEATURES: &[(&str, &str)] = &[
     (DAEMON_AUTO_START_FEATURE, DAEMON_AUTO_START_ENV),
@@ -226,6 +228,15 @@ fn validate(path: &Path) -> Result<(), String> {
             return Err(format!("{}: {key} must be true or false", path.display()));
         }
     }
+    if doc.get(BRIEF_PARTS_KEY).is_some_and(|v| {
+        !v.as_u64()
+            .is_some_and(|parts| (1..=u64::from(BRIEF_PARTS_MAX)).contains(&parts))
+    }) {
+        return Err(format!(
+            "{}: {BRIEF_PARTS_KEY} must be a whole number from 1 to {BRIEF_PARTS_MAX}",
+            path.display()
+        ));
+    }
     if doc
         .get("metrics")
         .is_some_and(|v| !matches!(v.as_str(), Some("on" | "off")))
@@ -283,6 +294,15 @@ fn validate(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// How many `UserPromptSubmit` hooks `pixel install` registers for the prompt
+/// brief: `brief_parts` from the repository layer, then the global one, else 3.
+fn brief_parts(root: Option<&Path>) -> u8 {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    pixel_install::config::brief_parts(&home, root)
+}
+
 /// Print only known public settings; arbitrary configuration can contain secrets.
 pub fn overview(path: &Path) -> Result<(), String> {
     let root = crate::discover_root(path).ok();
@@ -307,6 +327,7 @@ pub fn overview(path: &Path) -> Result<(), String> {
         let (enabled, source) = feature_resolution(root.as_deref(), key, env);
         println!("{key}: {enabled} ({source})");
     }
+    println!("{BRIEF_PARTS_KEY}: {}", brief_parts(root.as_deref()));
     let policy = policy_resolution(root.as_deref());
     println!(
         "policy: {} ({})",

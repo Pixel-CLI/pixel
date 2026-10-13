@@ -17,13 +17,10 @@ pub const PIXEL_API: &str = "1";
 pub const PLUGINS_REPO: &str = "https://github.com/Pixel-CLI/pixel-plugins";
 
 /// Commands that moved out of core into a plugin of the same name.
-pub const MOVED_COMMANDS: [&str; 8] = [
-    "workspace",
+pub const MOVED_COMMANDS: [&str; 5] = [
     "flow",
     "plan-rollback",
-    "coverage",
     "token-savings",
-    "index-stats",
     "squash-branch",
     "fast-forward",
 ];
@@ -92,16 +89,13 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn the_table_is_exactly_the_eight_moved_commands() {
+    fn the_table_is_exactly_the_five_moved_commands() {
         assert_eq!(
             MOVED_COMMANDS,
             [
-                "workspace",
                 "flow",
                 "plan-rollback",
-                "coverage",
                 "token-savings",
-                "index-stats",
                 "squash-branch",
                 "fast-forward"
             ]

@@ -78,7 +78,12 @@ fn stderr_notes(out: &Output) -> Vec<String> {
 #[test]
 fn every_old_name_prints_the_help_and_exit_code_of_its_new_name() {
     let dir = Scratch::for_test("pixel-renamed", "help");
-    for (old, new) in RENAMED_COMMANDS {
+    // A command that moved to a plugin has no help of its own here: its
+    // aliases are covered by `plugin_cli.rs`.
+    for (old, new) in RENAMED_COMMANDS
+        .iter()
+        .filter(|(_, new)| !pixel_plugin::MOVED_COMMANDS.contains(new))
+    {
         let from_old = pixel(&dir, &[old, "--help"], &[]);
         let from_new = pixel(&dir, &[new, "--help"], &[]);
         assert_eq!(

@@ -35,6 +35,33 @@ fn fake_pixel_exe(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn task_hook_group(exe: &Path, provider: &str, event: &str) -> serde_json::Value {
+    task_hook_group_with(exe, provider, event, "")
+}
+
+/// Parts the prompt brief is split over by default, for Claude and Codex.
+const BRIEF_PARTS: usize = 3;
+
+/// The hook entries a global install writes for one task boundary: the
+/// prompt brief is `BRIEF_PARTS` entries (`--part K/N`) for Claude and
+/// Codex, every other boundary one.
+fn task_hook_groups(exe: &Path, provider: &str, event: &str) -> Vec<serde_json::Value> {
+    if event == "prompt-submit" && matches!(provider, "claude" | "codex") {
+        (1..=BRIEF_PARTS)
+            .map(|part| {
+                task_hook_group_with(
+                    exe,
+                    provider,
+                    event,
+                    &format!(" --part {part}/{BRIEF_PARTS}"),
+                )
+            })
+            .collect()
+    } else {
+        vec![task_hook_group(exe, provider, event)]
+    }
+}
+
+fn task_hook_group_with(exe: &Path, provider: &str, event: &str, flags: &str) -> serde_json::Value {
     let executable = exe
         .canonicalize()
         .unwrap()
@@ -43,7 +70,8 @@ fn task_hook_group(exe: &Path, provider: &str, event: &str) -> serde_json::Value
         .replace('\'', "'\\''");
     serde_json::json!({"hooks":[{
         "type":"command",
-        "command":format!("'{executable}' run-hook task-event --provider {provider} --event {event}"),
+        "command":format!("'{executable}' run-hook task-event --provider {provider} --event {event}{flags}{}",
+            if event == "prompt-submit" { " || true" } else { "" }),
         "timeout":if matches!(event, "session-end" | "interrupt") { 3 } else { 10 }
     }]})
 }
@@ -68,14 +96,15 @@ fn without_task_hooks(value: &serde_json::Value, provider: &str, exe: &Path) -> 
         ("SubagentStop", "subagent-stop"),
         extra,
     ] {
-        let expected = task_hook_group(exe, provider, name);
         let groups = remaining["hooks"][event].as_array_mut().unwrap();
-        assert_eq!(
-            groups.iter().filter(|group| **group == expected).count(),
-            1,
-            "{event}: {groups:?}"
-        );
-        groups.retain(|group| group != &expected);
+        for expected in task_hook_groups(exe, provider, name) {
+            assert_eq!(
+                groups.iter().filter(|group| **group == expected).count(),
+                1,
+                "{event}: {groups:?}"
+            );
+            groups.retain(|group| group != &expected);
+        }
         if groups.is_empty() {
             remaining["hooks"].as_object_mut().unwrap().remove(event);
         }
@@ -5139,9 +5168,10 @@ fn task_event_counts(settings: &serde_json::Value) -> Vec<(&'static str, usize)>
     .collect()
 }
 
+/// One suite: every boundary once, the prompt brief in its default parts.
 const ONE_EACH: [(&str, usize); 9] = [
     ("session-start", 1),
-    ("prompt-submit", 1),
+    ("prompt-submit", BRIEF_PARTS),
     ("pre-tool-use", 1),
     ("post-tool-use", 1),
     ("stop", 1),
@@ -5259,7 +5289,7 @@ fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged
             .or_insert_with(|| serde_json::json!([]))
             .as_array_mut()
             .unwrap()
-            .push(task_hook_group(&exe, "claude", name));
+            .extend(task_hook_groups(&exe, "claude", name));
     }
     fs::write(&path, serde_json::to_string_pretty(&stacked).unwrap()).unwrap();
     let doctor_hooks = || {
@@ -6721,7 +6751,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     assert_eq!(
         unreviewed.summary,
         format!(
-            "approval for 9 of the 9 Pixel hook(s) in {} is missing, stale, disabled, or not verifiable (Interrupt #0.0, PostToolUse #0.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0): \
+            "approval for 11 of the 11 Pixel hook(s) in {} is missing, stale, disabled, or not verifiable (Interrupt #0.0, PostToolUse #0.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0, UserPromptSubmit #1.0, UserPromptSubmit #2.0): \
              start `codex` in this directory and inspect `/hooks`",
             hooks.display()
         )
@@ -6806,7 +6836,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
             .as_array()
             .unwrap()
             .len(),
-        9,
+        11,
         "stale hashes must not make the global task hooks green"
     );
 }
@@ -6880,4 +6910,268 @@ fn doctor_reports_unreviewed_project_codex_hooks_and_ignores_foreign_ones() {
         serde_json::json!(["PreToolUse #0.1", "SessionStart #0.0"]),
         "stale hashes must not make a project hook green"
     );
+}
+
+/// The `UserPromptSubmit` commands of a Claude settings file, in order.
+fn prompt_submit_commands(settings: &serde_json::Value) -> Vec<String> {
+    pixel_commands(settings, "UserPromptSubmit")
+}
+
+fn install_claude_in(home: &Path, exe: &Path) {
+    install(&InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(exe.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+}
+
+/// `brief_parts` in the global config decides how many hooks carry the
+/// brief, for both hosts that cap an injected context; reinstalling after a
+/// change replaces the set instead of stacking a second one.
+#[test]
+#[cfg(unix)]
+fn install_should_write_as_many_brief_parts_as_the_config_says() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    let claude = |parts: usize| -> Vec<String> {
+        let stem = "run-hook task-event --provider claude --event prompt-submit";
+        if parts == 1 {
+            return vec![format!(
+                "'{}' {stem} || true",
+                exe.canonicalize().unwrap().display()
+            )];
+        }
+        (1..=parts)
+            .map(|part| {
+                format!(
+                    "'{}' {stem} --part {part}/{parts} || true",
+                    exe.canonicalize().unwrap().display()
+                )
+            })
+            .collect()
+    };
+    let settings = home.join(".claude/settings.json");
+    let codex = home.join(".codex/hooks.json");
+
+    install_claude_in(home, &exe);
+    assert_eq!(prompt_submit_commands(&read_json(&settings)), claude(3));
+    assert_eq!(prompt_submit_commands(&read_json(&codex)).len(), 3);
+
+    for parts in [1usize, 2, 5, 3] {
+        fs::create_dir_all(home.join(".pixel")).unwrap();
+        fs::write(
+            home.join(".pixel/config.yaml"),
+            format!("brief_parts: {parts}\n"),
+        )
+        .unwrap();
+        install_claude_in(home, &exe);
+        let claude_settings = read_json(&settings);
+        assert_eq!(
+            prompt_submit_commands(&claude_settings),
+            claude(parts),
+            "claude, {parts}"
+        );
+        assert_eq!(
+            prompt_submit_commands(&read_json(&codex)).len(),
+            parts,
+            "codex, {parts}"
+        );
+        assert_eq!(
+            task_event_counts(&claude_settings)[1],
+            ("prompt-submit", parts)
+        );
+    }
+}
+
+/// Uninstall takes every part out, whatever their count, and leaves a
+/// foreign `UserPromptSubmit` hook in place.
+#[test]
+#[cfg(unix)]
+fn uninstall_should_remove_every_brief_part_and_keep_a_foreign_prompt_hook() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let foreign = serde_json::json!({"hooks":[{"type":"command","command":"my-prompt-hook"}]});
+    fs::write(
+        home.join(".claude/settings.json"),
+        serde_json::json!({"hooks":{"UserPromptSubmit":[foreign.clone()]}}).to_string(),
+    )
+    .unwrap();
+    let exe = fake_pixel_exe(home);
+    install_claude_in(home, &exe);
+    let before = read_json(&home.join(".claude/settings.json"));
+    assert_eq!(
+        before["hooks"]["UserPromptSubmit"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: Some(exe.clone()),
+        executable_path: Some(exe),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let after = read_json(&home.join(".claude/settings.json"));
+    assert_eq!(
+        after["hooks"]["UserPromptSubmit"],
+        serde_json::json!([foreign])
+    );
+    assert!(
+        !fs::read_to_string(home.join(".codex/hooks.json"))
+            .unwrap_or_default()
+            .contains("--part"),
+        "no Codex part left"
+    );
+}
+
+/// Doctor names the part that went missing from the set, and a set that is
+/// complete but not the size the config asks for is yellow, not red.
+#[test]
+#[cfg(unix)]
+fn doctor_should_flag_a_missing_brief_part_and_a_set_the_config_no_longer_asks_for() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    install_claude_in(home, &exe);
+    let settings = home.join(".claude/settings.json");
+    let run = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
+            shell: Some(TEST_SHELL.into()),
+            only: vec!["install.claude-hooks".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.claude-hooks").clone()
+    };
+    let green = run();
+    assert_eq!(green.status, CheckStatus::Green, "{green:?}");
+
+    let complete = read_json(&settings);
+    let mut gap = complete.clone();
+    gap["hooks"]["UserPromptSubmit"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    fs::write(&settings, gap.to_string()).unwrap();
+    let missing = run();
+    assert_eq!(missing.status, CheckStatus::Red, "{missing:?}");
+    assert!(
+        missing
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("brief part 2/3 missing")),
+        "{missing:?}"
+    );
+
+    let mut last = complete.clone();
+    last["hooks"]["UserPromptSubmit"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    fs::write(&settings, last.to_string()).unwrap();
+    let missing = run();
+    assert_eq!(missing.status, CheckStatus::Red, "{missing:?}");
+    assert!(
+        missing
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("brief part 3/3 missing")),
+        "{missing:?}"
+    );
+
+    // Complete again, but the config now asks for two parts.
+    fs::write(&settings, complete.to_string()).unwrap();
+    fs::create_dir_all(home.join(".pixel")).unwrap();
+    fs::write(home.join(".pixel/config.yaml"), "brief_parts: 2\n").unwrap();
+    let drift = run();
+    assert_eq!(drift.status, CheckStatus::Yellow, "{drift:?}");
+    assert!(
+        drift.summary.contains("registered in 3 hook(s)")
+            && drift.summary.contains("`brief_parts` is 2"),
+        "{drift:?}"
+    );
+    install_claude_in(home, &exe);
+    let fixed = run();
+    assert_eq!(fixed.status, CheckStatus::Green, "{fixed:?}");
+}
+
+/// Claude Code blocks the user's prompt when a `UserPromptSubmit` hook exits
+/// 2, and a `pixel` older than `--part` exits 2 on the unknown flag: every
+/// prompt command the install writes must exit 0 whatever the binary does.
+/// The binary here is a stand-in that exits 2 with a usage error.
+#[test]
+#[cfg(unix)]
+fn prompt_hook_commands_exit_zero_even_when_the_binary_exits_two() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = home.join("pixel");
+    fs::write(
+        &exe,
+        "#!/bin/sh\necho \"error: unexpected argument '--part' found\" >&2\nexit 2\n",
+    )
+    .unwrap();
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    install_claude_in(home, &exe);
+
+    let mut seen = 0;
+    for file in [".claude/settings.json", ".codex/hooks.json"] {
+        let commands = prompt_submit_commands(&read_json(&home.join(file)));
+        assert_eq!(commands.len(), 3, "{file}");
+        for command in commands {
+            // Both hosts hand the command to a shell; so does this test.
+            let out = std::process::Command::new("sh")
+                .args(["-c", &command])
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(0), "{command}");
+            assert!(out.stdout.is_empty(), "{command}");
+            // The same command without the tail is what blocked the prompt.
+            let bare = command.strip_suffix(" || true").unwrap();
+            let blocked = std::process::Command::new("sh")
+                .args(["-c", bare])
+                .output()
+                .unwrap();
+            assert_eq!(blocked.status.code(), Some(2), "{bare}");
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 6);
+}
+
+/// Entries an earlier install wrote (no tail) are the same hooks to install:
+/// an upgrade replaces them.
+#[test]
+#[cfg(unix)]
+fn install_should_replace_prompt_entries_without_the_fail_open_tail() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    install_claude_in(home, &exe);
+    let path = home.join(".claude/settings.json");
+    let mut old = read_json(&path);
+    let mut group = task_hook_group(&exe, "claude", "prompt-submit");
+    let bare = group["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .strip_suffix(" || true")
+        .unwrap()
+        .to_owned();
+    group["hooks"][0]["command"] = bare.into();
+    old["hooks"]["UserPromptSubmit"] = serde_json::json!([group]);
+    fs::write(&path, old.to_string()).unwrap();
+    install_claude_in(home, &exe);
+    let after = prompt_submit_commands(&read_json(&path));
+    assert_eq!(after.len(), 3, "{after:?}");
+    assert!(after.iter().all(|c| c.ends_with(" || true")), "{after:?}");
 }

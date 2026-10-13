@@ -82,6 +82,20 @@ impl Provider {
     }
 }
 
+/// Ends a prompt-submit hook command so that it exits 0 whatever the
+/// binary does. Claude Code blocks the user's prompt when a `UserPromptSubmit`
+/// hook exits 2, and an older `pixel` exits 2 on a flag it does not know
+/// (`--part`), so every command written for that event runs through the shell
+/// (both hosts run hook commands in one) with this tail. Recognition accepts
+/// the command with or without it, so entries of either form are replaced,
+/// counted and removed alike.
+pub(crate) const FAIL_OPEN: &str = " || true";
+
+/// `(executable, verb)` with a trailing [`FAIL_OPEN`] taken off the verb.
+fn without_fail_open<'a>((executable, verb): (&'a str, &'a str)) -> (&'a str, &'a str) {
+    (executable, verb.strip_suffix(FAIL_OPEN).unwrap_or(verb))
+}
+
 pub(crate) fn quoted_executable(exe: &Path) -> String {
     format!("'{}'", exe.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -145,6 +159,7 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
     command
         .rsplit_once(" run-hook ")
         .or_else(|| command.rsplit_once(" hook "))
+        .map(without_fail_open)
         .filter(|(executable, verb)| {
             executable_name(executable).is_some_and(|name| {
                 config::PIXEL_EXECUTABLES.contains(&name.as_str())
@@ -192,6 +207,7 @@ pub(crate) fn pixel_run_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'
     let own = exe.file_name().map(|n| n.to_string_lossy());
     command
         .rsplit_once(" run-hook ")
+        .map(without_fail_open)
         .filter(|(executable, _)| {
             executable_name(executable).is_some_and(|name| {
                 config::PIXEL_EXECUTABLES.contains(&name.as_str())
@@ -220,11 +236,54 @@ pub(crate) const TASK_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SubagentStop", "subagent-stop"),
 ];
 
-fn task_hook_verb(verb: &str) -> bool {
+/// One `task-event` hook verb taken apart: the provider and event words and,
+/// for a split prompt-submit brief, the `--part K/N` it serves.
+struct TaskVerb<'a> {
+    provider: &'a str,
+    event: &'a str,
+    part: Option<(u8, u8)>,
+}
+
+/// `K/N` of a `--part` flag: `1 <= K <= N <= config::BRIEF_PARTS_MAX`, and
+/// `N >= 2` (a single part is spelled without the flag).
+fn parse_part(text: &str) -> Option<(u8, u8)> {
+    let (k, n) = text.split_once('/')?;
+    let (k, n) = (k.parse::<u8>().ok()?, n.parse::<u8>().ok()?);
+    ((2..=config::BRIEF_PARTS_MAX).contains(&n) && (1..=n).contains(&k)).then_some((k, n))
+}
+
+fn parse_task_verb(verb: &str) -> Option<TaskVerb<'_>> {
     let words: Vec<_> = verb.split_whitespace().collect();
-    matches!(words.as_slice(), ["task-event", "--provider", "claude" | "codex" | "pi" | "devin" | "gemini" | "antigravity", "--event", event]
-        if TASK_HOOK_EVENTS.iter().any(|(_, name)| name == event)
-            || matches!(*event, "tool-failure" | "interrupt" | "model-response" | "user-bash"))
+    let (provider, event, part) = match words.as_slice() {
+        ["task-event", "--provider", provider, "--event", event] => (*provider, *event, None),
+        [
+            "task-event",
+            "--provider",
+            provider,
+            "--event",
+            "prompt-submit",
+            "--part",
+            part,
+        ] => (*provider, "prompt-submit", Some(parse_part(part)?)),
+        _ => return None,
+    };
+    (matches!(
+        provider,
+        "claude" | "codex" | "pi" | "devin" | "gemini" | "antigravity"
+    ) && (TASK_HOOK_EVENTS.iter().any(|(_, name)| *name == event)
+        || matches!(
+            event,
+            "tool-failure" | "interrupt" | "model-response" | "user-bash"
+        )))
+    .then_some(TaskVerb {
+        provider,
+        event,
+        part,
+    })
+}
+
+fn task_hook_verb(verb: &str) -> bool {
+    parse_task_verb(verb).is_some()
 }
 
 /// Whether repo-local native cleanup ([`HookScope::NativeCleanup`]) removes
@@ -236,9 +295,11 @@ pub(crate) fn native_cleanup_retires(verb: &str) -> bool {
 }
 
 fn codex_task_hook_verb(verb: &str) -> bool {
-    let words: Vec<_> = verb.split_whitespace().collect();
-    matches!(words.as_slice(), ["task-event", "--provider", "codex", "--event", event]
-        if TASK_HOOK_EVENTS.iter().any(|(_, name)| name == event) || *event == "interrupt")
+    parse_task_verb(verb).is_some_and(|task| {
+        task.provider == "codex"
+            && (TASK_HOOK_EVENTS.iter().any(|(_, name)| *name == task.event)
+                || task.event == "interrupt")
+    })
 }
 
 /// `path` with its longest existing prefix canonicalized and the components
@@ -263,10 +324,16 @@ fn paths_resolve_to_same_file(left: &Path, right: &Path) -> bool {
 }
 
 /// Replace only Pixel task registrations, preserving foreign hooks and trust.
+///
+/// `prompt_parts` is how many `UserPromptSubmit` entries carry the brief for
+/// a host with a per-hook cap on injected context (Claude Code and Codex;
+/// every other provider keeps one): each is the same command with
+/// `--part K/N`, so a brief larger than one hook may inject still arrives.
 pub(crate) fn merge_task_hooks(
     hooks: &mut Map<String, Value>,
     provider: Provider,
     exe: &Path,
+    prompt_parts: u8,
 ) -> Result<(), String> {
     for groups in hooks.values_mut().filter_map(Value::as_array_mut) {
         for group in groups.iter_mut() {
@@ -292,28 +359,112 @@ pub(crate) fn merge_task_hooks(
     } else {
         ("Interrupt", "interrupt")
     };
+    let split = if matches!(provider, Provider::Claude | Provider::Codex) {
+        prompt_parts.clamp(1, config::BRIEF_PARTS_MAX)
+    } else {
+        1
+    };
     for &(event, name) in TASK_HOOK_EVENTS.iter().chain(std::iter::once(&extra)) {
         let groups = hooks
             .entry(event)
             .or_insert_with(|| json!([]))
             .as_array_mut()
             .ok_or_else(|| format!("{event} is not an array"))?;
-        let mut group = hook_group(
-            format!(
-                "{} run-hook task-event --provider {} --event {name}",
-                quoted_executable(exe),
-                provider.name()
-            ),
-            None,
+        let command = format!(
+            "{} run-hook task-event --provider {} --event {name}",
+            quoted_executable(exe),
+            provider.name()
         );
-        group["hooks"][0]["timeout"] = json!(if matches!(event, "SessionEnd" | "Interrupt") {
-            3
+        let commands = if name != "prompt-submit" {
+            vec![command]
+        } else if split > 1 {
+            (1..=split)
+                .map(|part| format!("{command} --part {part}/{split}{FAIL_OPEN}"))
+                .collect()
         } else {
-            10
-        });
-        groups.push(group);
+            vec![format!("{command}{FAIL_OPEN}")]
+        };
+        for command in commands {
+            let mut group = hook_group(command, None);
+            group["hooks"][0]["timeout"] = json!(if matches!(event, "SessionEnd" | "Interrupt") {
+                3
+            } else {
+                10
+            });
+            groups.push(group);
+        }
     }
     Ok(())
+}
+
+/// The verbs of Pixel's hooks for `event` that run on every occurrence of it:
+/// no restricting matcher, a command, synchronous.
+fn eligible_verbs<'a>(value: &'a Value, event: &str, exe: &Path) -> Vec<&'a str> {
+    value
+        .get("hooks")
+        .and_then(|hooks| hooks.get(event))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|group| {
+            group.get("matcher").is_none()
+                || group
+                    .get("matcher")
+                    .and_then(Value::as_str)
+                    .is_some_and(|matcher| matches!(matcher, "" | "*" | ".*"))
+        })
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter(|hook| {
+            hook.get("type").and_then(Value::as_str) == Some("command")
+                && (hook.get("async").is_none()
+                    || hook.get("async").and_then(Value::as_bool) == Some(false))
+        })
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .filter_map(|command| pixel_hook_verb(command, exe))
+        .collect()
+}
+
+/// [`prompt_parts`]' reason when no `UserPromptSubmit` entry carries the brief.
+pub(crate) const NO_PROMPT_HOOK: &str = "no prompt-submit brief hook";
+
+/// How many `UserPromptSubmit` entries carry `provider`'s brief: `1` for the
+/// whole brief in one hook, `N` for a complete set `--part 1/N` .. `N/N`.
+///
+/// # Errors
+///
+/// No entry, whole and split entries mixed, parts of different counts, or a
+/// part of the set missing; the text names which, for `pixel doctor`.
+pub(crate) fn prompt_parts(value: &Value, provider: Provider, exe: &Path) -> Result<u8, String> {
+    let entries: Vec<Option<(u8, u8)>> = eligible_verbs(value, "UserPromptSubmit", exe)
+        .into_iter()
+        .filter_map(parse_task_verb)
+        .filter(|task| task.provider == provider.name() && task.event == "prompt-submit")
+        .map(|task| task.part)
+        .collect();
+    let split: Vec<(u8, u8)> = entries.iter().flatten().copied().collect();
+    if entries.is_empty() {
+        return Err(NO_PROMPT_HOOK.to_owned());
+    }
+    if split.is_empty() {
+        return Ok(1);
+    }
+    if split.len() != entries.len() {
+        return Err("the whole brief and brief parts are both registered".to_owned());
+    }
+    let count = split[0].1;
+    if split.iter().any(|&(_, n)| n != count) {
+        return Err("brief parts of different counts are registered".to_owned());
+    }
+    let missing: Vec<String> = (1..=count)
+        .filter(|part| !split.iter().any(|&(k, _)| k == *part))
+        .map(|part| format!("{part}/{count}"))
+        .collect();
+    if missing.is_empty() {
+        Ok(count)
+    } else {
+        Err(format!("brief part {} missing", missing.join(", ")))
+    }
 }
 
 pub(crate) fn task_hooks_registered(value: &Value, provider: Provider, exe: &Path) -> bool {
@@ -326,36 +477,11 @@ pub(crate) fn task_hooks_registered(value: &Value, provider: Provider, exe: &Pat
         .iter()
         .chain(std::iter::once(&extra))
         .all(|(event, name)| {
+            if *name == "prompt-submit" {
+                return prompt_parts(value, provider, exe).is_ok();
+            }
             let expected = format!("task-event --provider {} --event {name}", provider.name());
-            value
-                .get("hooks")
-                .and_then(|hooks| hooks.get(*event))
-                .and_then(Value::as_array)
-                .is_some_and(|groups| {
-                    groups.iter().any(|group| {
-                        (group.get("matcher").is_none()
-                            || group
-                                .get("matcher")
-                                .and_then(Value::as_str)
-                                .is_some_and(|matcher| matches!(matcher, "" | "*" | ".*")))
-                            && group
-                                .get("hooks")
-                                .and_then(Value::as_array)
-                                .is_some_and(|inner| {
-                                    inner.iter().any(|hook| {
-                                        hook.get("type").and_then(Value::as_str) == Some("command")
-                                            && (hook.get("async").is_none()
-                                                || hook.get("async").and_then(Value::as_bool)
-                                                    == Some(false))
-                                            && hook
-                                                .get("command")
-                                                .and_then(Value::as_str)
-                                                .and_then(|command| pixel_hook_verb(command, exe))
-                                                == Some(expected.as_str())
-                                    })
-                                })
-                    })
-                })
+            eligible_verbs(value, event, exe).contains(&expected.as_str())
         })
 }
 
@@ -715,7 +841,10 @@ pub(crate) enum HookScope {
     LifecycleOnly,
     /// Task-event lifecycle only. Used for native-default global Claude and
     /// installs; retrieval prompts and metrics stay out.
-    TaskEventsOnly,
+    TaskEventsOnly {
+        /// `UserPromptSubmit` entries that carry the brief (see [`merge_task_hooks`]).
+        prompt_parts: u8,
+    },
     /// PreToolUse guard only — no lifecycle events. Retained for Devin's
     /// repo-local routing and legacy migration fixtures.
     GuardOnly,
@@ -874,8 +1003,8 @@ fn configure_scoped(
     if scope == HookScope::GuardOnly {
         return Ok((enabled, adopted));
     }
-    if scope == HookScope::TaskEventsOnly {
-        merge_task_hooks(hooks, provider, exe)?;
+    if let HookScope::TaskEventsOnly { prompt_parts } = scope {
+        merge_task_hooks(hooks, provider, exe, prompt_parts)?;
         return Ok((enabled, adopted));
     }
     if matches!(
@@ -945,7 +1074,7 @@ fn configure_scoped(
             .as_array_mut()
             .ok_or("PostToolUse is not an array")?
             .push(metrics_relay_group(exe, provider));
-        merge_task_hooks(hooks, provider, exe)?;
+        merge_task_hooks(hooks, provider, exe, 1)?;
     }
     Ok((enabled, adopted))
 }
@@ -1184,7 +1313,7 @@ pub(crate) fn install_at_scoped(
                 provider.name()
             )
         }
-        HookScope::TaskEventsOnly => format!(
+        HookScope::TaskEventsOnly { .. } => format!(
             "{} task-event hooks configured (live unverified)",
             provider.name()
         ),
@@ -1467,14 +1596,14 @@ mod tests {
             let foreign =
                 json!({"type":"command","command":"security-check","trusted_hash":"keep"});
             let mut value = json!({"hooks":{"PreToolUse":[{"matcher":"Edit","hooks":[foreign.clone(),{"command":"pixel run-hook task-event --provider claude --event pre-tool-use"}]}]}});
-            merge_task_hooks(value["hooks"].as_object_mut().unwrap(), provider, exe).unwrap();
+            merge_task_hooks(value["hooks"].as_object_mut().unwrap(), provider, exe, 1).unwrap();
             assert_eq!(
                 value["hooks"]["PreToolUse"][0]["hooks"],
                 json!([foreign.clone()])
             );
             assert!(task_hooks_registered(&value, provider, exe));
             let first = value.clone();
-            merge_task_hooks(value["hooks"].as_object_mut().unwrap(), provider, exe).unwrap();
+            merge_task_hooks(value["hooks"].as_object_mut().unwrap(), provider, exe, 1).unwrap();
             assert_eq!(value, first);
             assert!(stacked_pixel_hooks(&value, exe).is_empty());
             let mut restricted = value.clone();
@@ -2472,6 +2601,7 @@ mod tests {
             global["hooks"].as_object_mut().unwrap(),
             Provider::Codex,
             exe,
+            1,
         )
         .unwrap();
         install::write_settings(&global_hooks, &global, false).unwrap();
@@ -2510,7 +2640,12 @@ mod tests {
                 crate::codex_config::hook_event_label(event).unwrap()
             );
             assert_eq!(
-                hook["command"].as_str().unwrap().split("--event ").nth(1),
+                hook["command"]
+                    .as_str()
+                    .unwrap()
+                    .split("--event ")
+                    .nth(1)
+                    .map(|tail| tail.strip_suffix(FAIL_OPEN).unwrap_or(tail)),
                 Some(name)
             );
             trust.push_str(&format!(
@@ -3320,5 +3455,311 @@ mod tests {
                 "{broken}"
             );
         }
+    }
+
+    /// The split brief's entries, in order, as the commands they run.
+    fn prompt_commands(value: &Value) -> Vec<String> {
+        value["hooks"]["UserPromptSubmit"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|group| group["hooks"][0]["command"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn merged(provider: Provider, exe: &Path, parts: u8) -> Value {
+        let mut value = json!({"hooks": {}});
+        merge_task_hooks(
+            value["hooks"].as_object_mut().unwrap(),
+            provider,
+            exe,
+            parts,
+        )
+        .unwrap();
+        value
+    }
+
+    #[test]
+    fn parse_part_should_accept_only_a_proper_split_inside_the_bounds() {
+        assert_eq!(parse_part("1/2"), Some((1, 2)));
+        assert_eq!(parse_part("3/3"), Some((3, 3)));
+        assert_eq!(
+            parse_part(&format!("1/{}", config::BRIEF_PARTS_MAX)),
+            Some((1, config::BRIEF_PARTS_MAX))
+        );
+        for bad in [
+            "1/1", "0/3", "4/3", "1/9", "1/", "/3", "a/3", "1/b", "1-3", "", "1/3/3", "-1/3",
+            "256/300",
+        ] {
+            assert_eq!(parse_part(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn task_verbs_should_carry_a_part_only_on_the_prompt_submit_event() {
+        let verb = parse_task_verb("task-event --provider claude --event prompt-submit --part 2/3")
+            .unwrap();
+        assert_eq!(
+            (verb.provider, verb.event, verb.part),
+            ("claude", "prompt-submit", Some((2, 3)))
+        );
+        let whole = parse_task_verb("task-event --provider codex --event prompt-submit").unwrap();
+        assert_eq!(
+            (whole.provider, whole.event, whole.part),
+            ("codex", "prompt-submit", None)
+        );
+        for bad in [
+            "task-event --provider claude --event stop --part 1/3",
+            "task-event --provider claude --event prompt-submit --part 1/1",
+            "task-event --provider claude --event prompt-submit --part",
+            "task-event --provider claude --event prompt-submit --part 1/3 extra",
+            "task-event --provider nobody --event prompt-submit --part 1/3",
+            "task-event --event prompt-submit --provider claude",
+        ] {
+            assert!(parse_task_verb(bad).is_none(), "{bad}");
+            assert!(!task_hook_verb(bad), "{bad}");
+        }
+        assert!(codex_task_hook_verb(
+            "task-event --provider codex --event prompt-submit --part 3/3"
+        ));
+        assert!(!codex_task_hook_verb(
+            "task-event --provider claude --event prompt-submit --part 3/3"
+        ));
+    }
+
+    /// Pixel's own entries are recognised with a part, so an install after a
+    /// change of `brief_parts` replaces the old set instead of stacking.
+    #[test]
+    fn a_split_prompt_entry_should_read_as_a_pixel_hook_of_either_executable() {
+        for exe in [
+            "'/usr/local/bin/pixel'",
+            "'/Users/dev/.local/bin/pixel-dev'",
+        ] {
+            let command = format!(
+                "{exe} run-hook task-event --provider claude --event prompt-submit --part 2/3"
+            );
+            assert_eq!(
+                pixel_hook_verb(&command, release()),
+                Some("task-event --provider claude --event prompt-submit --part 2/3")
+            );
+        }
+        assert!(!is_pixel_hook(
+            "'/opt/other' run-hook task-event --provider claude --event prompt-submit --part 2/3",
+            release()
+        ));
+    }
+
+    #[test]
+    fn merge_should_write_the_brief_parts_in_order_and_only_for_hosts_with_a_cap() {
+        let exe = Path::new("/tmp/pixel");
+        for provider in [Provider::Claude, Provider::Codex] {
+            let name = provider.name();
+            let value = merged(provider, exe, 3);
+            let base =
+                format!("'/tmp/pixel' run-hook task-event --provider {name} --event prompt-submit");
+            assert_eq!(
+                prompt_commands(&value),
+                vec![
+                    format!("{base} --part 1/3 || true"),
+                    format!("{base} --part 2/3 || true"),
+                    format!("{base} --part 3/3 || true"),
+                ]
+            );
+            for group in value["hooks"]["UserPromptSubmit"].as_array().unwrap() {
+                assert_eq!(group["hooks"].as_array().unwrap().len(), 1);
+                assert_eq!(group["hooks"][0]["timeout"], 10);
+                assert_eq!(group["hooks"][0]["type"], "command");
+            }
+            assert_eq!(
+                prompt_commands(&merged(provider, exe, 1)),
+                vec![format!("{base} || true")]
+            );
+            assert_eq!(
+                prompt_commands(&merged(provider, exe, 0)),
+                vec![format!("{base} || true")]
+            );
+            assert_eq!(
+                prompt_commands(&merged(provider, exe, 200)).len(),
+                usize::from(config::BRIEF_PARTS_MAX),
+                "clamped to the most parts a brief is split over"
+            );
+            // Every other boundary is one entry, whatever the parts.
+            for event in [
+                "SessionStart",
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+                "SubagentStop",
+            ] {
+                assert_eq!(
+                    value["hooks"][event].as_array().unwrap().len(),
+                    1,
+                    "{event}"
+                );
+            }
+        }
+        let devin = merged(Provider::Devin, exe, 3);
+        assert_eq!(
+            prompt_commands(&devin),
+            vec!["'/tmp/pixel' run-hook task-event --provider devin --event prompt-submit || true"],
+            "a host with no known cap keeps one hook"
+        );
+    }
+
+    #[test]
+    fn merge_should_replace_a_previous_split_with_the_new_one() {
+        let exe = Path::new("/tmp/pixel");
+        let mut value = merged(Provider::Claude, exe, 3);
+        for parts in [2, 3, 1, 3] {
+            merge_task_hooks(
+                value["hooks"].as_object_mut().unwrap(),
+                Provider::Claude,
+                exe,
+                parts,
+            )
+            .unwrap();
+            assert_eq!(prompt_commands(&value).len(), usize::from(parts), "{parts}");
+            assert_eq!(prompt_parts(&value, Provider::Claude, exe), Ok(parts));
+        }
+    }
+
+    #[test]
+    fn prompt_parts_should_name_what_is_wrong_with_an_incomplete_set() {
+        let exe = Path::new("/tmp/pixel");
+        let entry = |tail: &str| {
+            json!({"hooks":[{"type":"command","command":format!(
+                "'/tmp/pixel' run-hook task-event --provider claude --event prompt-submit{tail}"
+            )}]})
+        };
+        let with = |entries: Vec<Value>| json!({"hooks":{"UserPromptSubmit": entries}});
+        assert_eq!(
+            prompt_parts(&json!({"hooks":{}}), Provider::Claude, exe),
+            Err(NO_PROMPT_HOOK.to_owned())
+        );
+        assert_eq!(
+            prompt_parts(&with(vec![entry("")]), Provider::Claude, exe),
+            Ok(1)
+        );
+        let full = with(vec![
+            entry(" --part 1/3"),
+            entry(" --part 2/3"),
+            entry(" --part 3/3"),
+        ]);
+        assert_eq!(prompt_parts(&full, Provider::Claude, exe), Ok(3));
+        assert_eq!(
+            prompt_parts(&full, Provider::Codex, exe),
+            Err(NO_PROMPT_HOOK.to_owned()),
+            "another host's entries are not this host's brief"
+        );
+        let gap = with(vec![entry(" --part 1/3"), entry(" --part 3/3")]);
+        assert_eq!(
+            prompt_parts(&gap, Provider::Claude, exe),
+            Err("brief part 2/3 missing".to_owned())
+        );
+        let two_gaps = with(vec![entry(" --part 2/4")]);
+        assert_eq!(
+            prompt_parts(&two_gaps, Provider::Claude, exe),
+            Err("brief part 1/4, 3/4, 4/4 missing".to_owned())
+        );
+        let mixed = with(vec![entry(""), entry(" --part 2/2")]);
+        assert_eq!(
+            prompt_parts(&mixed, Provider::Claude, exe),
+            Err("the whole brief and brief parts are both registered".to_owned())
+        );
+        let counts = with(vec![entry(" --part 1/2"), entry(" --part 2/3")]);
+        assert_eq!(
+            prompt_parts(&counts, Provider::Claude, exe),
+            Err("brief parts of different counts are registered".to_owned())
+        );
+        for incomplete in [&gap, &two_gaps, &mixed, &counts] {
+            let mut all = merged(Provider::Claude, exe, 1);
+            all["hooks"]["UserPromptSubmit"] = incomplete["hooks"]["UserPromptSubmit"].clone();
+            assert!(!task_hooks_registered(&all, Provider::Claude, exe));
+        }
+        let mut whole = merged(Provider::Claude, exe, 3);
+        assert!(task_hooks_registered(&whole, Provider::Claude, exe));
+        whole["hooks"]["UserPromptSubmit"]
+            .as_array_mut()
+            .unwrap()
+            .remove(1);
+        assert!(!task_hooks_registered(&whole, Provider::Claude, exe));
+    }
+
+    /// An asynchronous or matcher-restricted part is not a brief that runs on
+    /// every prompt.
+    #[test]
+    fn prompt_parts_should_ignore_asynchronous_and_restricted_entries() {
+        let exe = Path::new("/tmp/pixel");
+        let mut value = merged(Provider::Claude, exe, 3);
+        value["hooks"]["UserPromptSubmit"][1]["hooks"][0]["async"] = json!(true);
+        assert_eq!(
+            prompt_parts(&value, Provider::Claude, exe),
+            Err("brief part 2/3 missing".to_owned())
+        );
+        let mut value = merged(Provider::Claude, exe, 3);
+        value["hooks"]["UserPromptSubmit"][2]["matcher"] = json!("Bash");
+        assert_eq!(
+            prompt_parts(&value, Provider::Claude, exe),
+            Err("brief part 3/3 missing".to_owned())
+        );
+    }
+
+    /// The tail that makes a prompt hook exit 0 is part of the command, not of
+    /// the verb: entries with and without it are the same hook to install,
+    /// doctor and uninstall, so an upgrade replaces the old form.
+    #[test]
+    fn the_fail_open_tail_is_not_part_of_the_verb() {
+        let with = "'/usr/local/bin/pixel' run-hook task-event --provider claude --event prompt-submit --part 2/3 || true";
+        let without = "'/usr/local/bin/pixel' run-hook task-event --provider claude --event prompt-submit --part 2/3";
+        let expected = "task-event --provider claude --event prompt-submit --part 2/3";
+        for command in [with, without] {
+            assert_eq!(
+                pixel_hook_verb(command, release()),
+                Some(expected),
+                "{command}"
+            );
+            assert_eq!(
+                pixel_run_hook_verb(command, release()),
+                Some(expected),
+                "{command}"
+            );
+            assert!(is_pixel_hook(command, release()), "{command}");
+        }
+        // Only the exact tail, only at the end, and not for a foreign command.
+        for foreign in [
+            "'/opt/other' run-hook task-event --provider claude --event prompt-submit || true",
+            "'/usr/local/bin/pixel' run-hook task-event --provider claude --event prompt-submit || true || true",
+            "'/usr/local/bin/pixel' run-hook task-event --provider claude --event prompt-submit ||true",
+            "'/usr/local/bin/pixel' run-hook task-event --provider claude --event prompt-submit; true",
+        ] {
+            assert!(!is_pixel_hook(foreign, release()), "{foreign}");
+        }
+        // Old whole-brief entries upgrade in place.
+        let mut value = json!({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": "'/usr/local/bin/pixel' run-hook task-event --provider claude --event prompt-submit"}]},
+            {"hooks": [{"type": "command", "command": "'/usr/local/bin/pixel' run-hook task-event --provider claude --event prompt-submit --part 1/2"}]},
+            {"hooks": [{"type": "command", "command": "other-tool"}]},
+        ]}});
+        merge_task_hooks(
+            value["hooks"].as_object_mut().unwrap(),
+            Provider::Claude,
+            release(),
+            3,
+        )
+        .unwrap();
+        let commands = prompt_commands(&value);
+        assert_eq!(commands.len(), 4, "{commands:?}");
+        assert_eq!(commands[0], "other-tool");
+        assert!(
+            commands[1..]
+                .iter()
+                .all(|c| c.ends_with(" --part 1/3 || true")
+                    || c.ends_with(" --part 2/3 || true")
+                    || c.ends_with(" --part 3/3 || true"))
+        );
+        assert_eq!(prompt_parts(&value, Provider::Claude, release()), Ok(3));
+        // Remove takes every form.
+        remove_pixel_hooks(value["hooks"].as_object_mut().unwrap(), release());
+        assert_eq!(prompt_commands(&value), vec!["other-tool"]);
     }
 }

@@ -393,3 +393,30 @@ fn config_remote_key_openai_round_trips_and_clears() {
             .unwrap();
     assert!(doc["remote_keys"].get("openai").is_none());
 }
+
+#[test]
+fn brief_parts_should_show_its_effective_value_and_reject_what_is_not_a_part_count() {
+    let home = Scratch::for_test("config", "brief-parts-home");
+    let repo = Scratch::for_test("config", "brief-parts-repo");
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("brief_parts: 3\n"));
+    fs::create_dir_all(home.join(".pixel")).unwrap();
+    fs::create_dir_all(repo.join(".pixel")).unwrap();
+    fs::write(home.join(".pixel/config.yaml"), "brief_parts: 5\n").unwrap();
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("brief_parts: 5\n"));
+    fs::write(repo.join(".pixel/config.yaml"), "brief_parts: 1\n").unwrap();
+    assert!(stdout(&run(&home, &repo, &["config"])).contains("brief_parts: 1\n"));
+    for bad in ["0", "9", "-1", "2.5", "many", "[2]"] {
+        fs::write(
+            repo.join(".pixel/config.yaml"),
+            format!("brief_parts: {bad}\n"),
+        )
+        .unwrap();
+        let out = run(&home, &repo, &["config"]);
+        assert!(!out.status.success(), "{bad}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("brief_parts must be a whole number from 1 to 8"),
+            "{bad}: {stderr}"
+        );
+    }
+}
