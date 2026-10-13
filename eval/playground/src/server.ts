@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: MIT
 // Entry point: `bun run dev` serves the page and the JSON API on one port.
 import { defaultConfig, handlers, type Config } from "./api";
+import { createCensus } from "./census";
 import index from "../public/index.html";
 
 export const createServer = (cfg: Config, port: number) => {
   const h = handlers(cfg);
+  const census = createCensus();
   return Bun.serve({
     port,
     hostname: "127.0.0.1",
@@ -18,6 +20,9 @@ export const createServer = (cfg: Config, port: number) => {
       "/api/file": { GET: h.file },
       "/api/status": { GET: h.status },
       "/api/refresh": { POST: h.refresh },
+      "/api/census/sessions": { GET: census.sessions },
+      "/api/census/session/:id": { GET: census.session },
+      "/api/census/summary": { GET: census.summary },
       "/api/run": { POST: h.run },
       "/api/abort": { POST: h.abort },
     },

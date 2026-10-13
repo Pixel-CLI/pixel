@@ -86,8 +86,19 @@ without it and the raw text is shown, with no decision record.
 | `POST /api/brief {prompt, bin}` | brief text, parsed ranges, decision record, bytes, latency |
 | `GET /api/status?bin=` | graph/index `ready`/`stale`/`missing` from `status --json` (doctor fallback), cached 10 s |
 | `POST /api/refresh {bin}` | `prepare-repo .` in the fixture, one at a time; state shows in `/api/status` |
+| `GET /api/census/sessions?source=&category=&repo=` | census sessions: strip, counts, explore-before (prompts only for `census`) |
+| `GET /api/census/session/:id` | ordered calls (output cut at 4 KB), final answer and diff (census only) |
+| `GET /api/census/summary?source=` | calls by need/class, histograms, by category |
 | `POST /api/run {cardId, prompt, arm, briefText}` | SSE stream of one Codex run |
 | `POST /api/abort {cardId}` | kill the card's Codex process groups |
 | `GET /api/file?path=&start=&end=` | a range of the fixture (paths outside it are refused) |
 
 The server listens on 127.0.0.1 only.
+
+## Census tab
+
+Reads `/private/tmp/claude-501/census/census.db` read-only (`bun:sqlite`): what
+agents do in a session before they answer. Summary bars for the selected source,
+a session list with a colour strip of its calls by need, and a timeline of each
+session's calls with their output (4 KB). History sources (claude, codex, pi)
+show aggregates and strips; their prompts and final answers stay private.

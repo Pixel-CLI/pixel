@@ -3,6 +3,7 @@
 // Browser side of the brief playground: a strip of test cards, vanilla DOM.
 // All text from the API is inserted with textContent, never as HTML.
 import type { Decision, ParsedBrief, Range } from "../src/brief";
+import { mountCensus } from "./census";
 import { applyEvent, emptyPane, paneStats, type PaneState } from "../src/events";
 
 type Prompt = { id: string; text: string; lang: string; on_topic: boolean | null; kind: string | null };
@@ -417,5 +418,19 @@ const boot = async () => {
   if (!cards.length) cards.push(newCard());
   render();
 };
+
+// Header tabs: the test cards and the census view.
+let censusMounted = false;
+for (const btn of document.querySelectorAll<HTMLButtonElement>("#tabs button")) {
+  btn.addEventListener("click", () => {
+    const tab = btn.dataset.tab;
+    for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b === btn);
+    $("strip").hidden = tab !== "cards";
+    $("census").hidden = tab !== "census";
+    if (tab === "census" && !censusMounted) { censusMounted = true; mountCensus($("census")); }
+    store.set("brief-playground.tab", tab ?? "cards");
+  });
+}
+if (store.get("brief-playground.tab") === "census") document.querySelector<HTMLButtonElement>('#tabs button[data-tab="census"]')?.click();
 
 void boot();
