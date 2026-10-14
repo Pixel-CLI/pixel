@@ -376,8 +376,11 @@ fn strip_setup_blocks(
         .iter()
         .filter_map(|agent| agent.instruction_path(base, scope))
         .collect();
-    // The per-agent rule files, where that feature wrote one.
-    targets.extend(crate::setup::rule_files(base));
+    // The per-agent rule files, where that feature wrote one. Pixel names
+    // them, so one left with nothing but whitespace after the strip is a file
+    // the setup created and is deleted rather than left empty.
+    let rule_files = crate::setup::rule_files(base);
+    targets.extend(rule_files.iter().cloned());
     targets.sort();
     targets.dedup();
 
@@ -398,10 +401,15 @@ fn strip_setup_blocks(
             continue;
         }
         if !dry_run {
-            let bk = config::backup_if_changing(path, cleaned.as_bytes())?;
-            fs::write(path, &cleaned)?;
-            if bk.is_some() {
-                backups.push(path.display().to_string());
+            if cleaned.trim().is_empty() && rule_files.contains(path) {
+                // Only the block was in it, and the setup regenerates it.
+                fs::remove_file(path)?;
+            } else {
+                let bk = config::backup_if_changing(path, cleaned.as_bytes())?;
+                fs::write(path, &cleaned)?;
+                if bk.is_some() {
+                    backups.push(path.display().to_string());
+                }
             }
         }
         stripped += 1;

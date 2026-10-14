@@ -953,6 +953,29 @@ fn strip_setup_blocks_covers_the_rule_files_and_only_the_files_of_that_scope() {
 }
 
 #[test]
+fn strip_setup_blocks_deletes_a_rule_file_that_held_only_the_block() {
+    let home = tempfile::tempdir().unwrap();
+    let only_block = home.path().join(".claude/rules/pixel-setup.md");
+    let with_text = home.path().join(".gemini/rules/pixel-setup.md");
+    let instruction = home.path().join(".claude/CLAUDE.md");
+    write(&only_block, &with_setup_block(""));
+    write(&with_text, &with_setup_block("# mine"));
+    write(&instruction, &with_setup_block(""));
+
+    strip_setup_blocks(home.path(), crate::setup::Scope::Global, false).unwrap();
+
+    assert!(
+        !only_block.exists(),
+        "a rule file the setup created and nothing else is in goes"
+    );
+    assert_eq!(std::fs::read_to_string(&with_text).unwrap(), "# mine\n");
+    assert!(
+        instruction.exists(),
+        "an instruction file may be the user's, so it stays even when emptied"
+    );
+}
+
+#[test]
 fn strip_setup_blocks_writes_nothing_on_a_dry_run() {
     let home = tempfile::tempdir().unwrap();
     let claude = home.path().join(".claude/CLAUDE.md");

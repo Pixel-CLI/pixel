@@ -1224,7 +1224,7 @@ enum Command {
         /// Redirect every write under `tests/setup/` in this repository
         /// instead of a real home or repository, and leave the real global
         /// configuration and hook files alone. Temporary.
-        #[arg(long, hide = true, requires = "selected_agents")]
+        #[arg(long, hide = true, conflicts_with_all = ["remove", "yes", "print"])]
         dummy_apply: bool,
         // TEMPORARY (dev-flags) end.
     },
@@ -6062,15 +6062,37 @@ fn run_command(
             json,
             shell,
             repo,
+            yes,
+            print,
             remove,
             dry_run,
             binary_path,
             wrappers_only,
+            selected_agents,
+            selected_features,
+            dummy_apply,
         } => {
             if remove {
                 setup_remove(json, shell, repo, dry_run, binary_path, wrappers_only)
             } else {
-                setup_install(json, shell, repo)
+                let options = setup_cmd::SetupOptions {
+                    repo,
+                    shell,
+                    print,
+                    // TEMPORARY (dev-flags): this one field, the three args above
+                    // and the three clap args in the `Setup` variant are the
+                    // whole removal in the command surface.
+                    dev: setup_cmd::DevOptions {
+                        selected_agents,
+                        selected_features,
+                        dummy_apply,
+                    },
+                };
+                if print || setup_cmd::is_guided(&options, yes, json) {
+                    setup_cmd::run(options)
+                } else {
+                    setup_install(json, options.shell, options.repo)
+                }
             }
         }
         Command::Install { source, name } => {

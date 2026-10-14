@@ -18,8 +18,8 @@
 //!   idempotently, and refused rather than guessed at when malformed.
 //!
 //! The parts deliberately left out: `but setup` (pixel prepares nothing here —
-//! no index, no workspace mode), the skill-bundle install (pixel ships its
-//! prompt through `pixel install`), and the runtime retired-syntax sweep (the
+//! no index, no workspace mode), the skill-bundle install (pixel ships no
+//! prompt), and the runtime retired-syntax sweep (the
 //! answers are rendered fresh on every run).
 //!
 //! [`but-agent-setup`]: https://docs.gitbutler.com/ai-agents/getting-started
@@ -33,7 +33,7 @@ mod render;
 
 pub use agent::{AgentTarget, Scope};
 pub use detect::{Agent, ENVIRONMENT_VARIABLES, ParseAgentError, detect, detect_with};
-pub use feature::{ConfigValue, Feature, Writes};
+pub use feature::{ConfigValue, Feature, HookGroup, Writes};
 pub use files::{BLOCK_END, BLOCK_START, strip};
 pub use plan::{ConfigWrite, InstructionWrite, RuleWrite, SetupPlan, rule_files};
 
@@ -45,7 +45,7 @@ pub fn preview(features: &[Feature]) -> String {
 }
 
 /// Remove the block `pixel setup` owns from `text`, keeping the user's own
-/// lines. Used by `pixel uninstall`.
+/// lines. Used by `pixel setup --remove`.
 pub fn strip_block(text: &str) -> String {
     files::strip(text)
 }

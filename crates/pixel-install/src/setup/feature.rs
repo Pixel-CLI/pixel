@@ -14,13 +14,12 @@
 //!   agent's instruction file;
 //! - [`Writes::Config`] — a key in the global `~/.pixel/config.yaml`;
 //! - [`Writes::Rules`] — a per-agent rule file, for the harnesses that load one;
-//! - [`Writes::Note`] — nothing to write, because `pixel install` or
-//!   `pixel config setup` already owns that artifact and the setup says so
-//!   rather than writing a second copy of it.
+//! - [`Writes::Hooks`] — a group of hook registrations, deployed by
+//!   [`crate::install::install`] for the selected agents.
 //!
-//! The wizard never writes a hook entry itself. `pixel install` owns the hook
-//! files, and a second writer of one settings file is how a user's own hooks
-//! get lost.
+//! `pixel setup` owns the hook files. The review prints each hook step (from a
+//! dry run of the same code that applies it) next to the instruction files, so
+//! nothing is written that the confirmation did not show.
 
 /// Where a feature's effect lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,8 +33,21 @@ pub enum Writes {
     /// A per-agent rule file under the harness's rules directory, when it has
     /// one: the same steering, in the file that harness loads per tool.
     Rules,
-    /// Nothing to write: another command owns it, and the wizard names it.
-    Note(&'static str),
+    /// A group of hook registrations, applied by the installer for the
+    /// selected agents rather than rendered by this crate.
+    Hooks(HookGroup),
+}
+
+/// A group of hook registrations a feature switches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookGroup {
+    /// The task-event hooks of Claude Code, Devin, Gemini CLI, Antigravity and
+    /// OpenCode.
+    Task,
+    /// Codex's task hooks under `~/.codex`.
+    Codex,
+    /// The pi impact extension under `~/.pi/agent`.
+    Pi,
 }
 
 /// A value the wizard stores in the global configuration.
@@ -66,8 +78,8 @@ pub enum Feature {
     Prompt,
     /// Per-prompt brief.
     Brief,
-    /// Guard destructive git commands.
-    Guard,
+    /// Task lifecycle hooks.
+    TaskHooks,
     /// Command timing and savings.
     Metrics,
     /// Background daemon on demand.
@@ -94,7 +106,7 @@ impl Feature {
     pub const ALL: [Self; 12] = [
         Self::Prompt,
         Self::Brief,
-        Self::Guard,
+        Self::TaskHooks,
         Self::Metrics,
         Self::Daemon,
         Self::Semantic,
@@ -120,7 +132,7 @@ impl Feature {
         match self {
             Self::Prompt => "prompt",
             Self::Brief => "brief",
-            Self::Guard => "guard",
+            Self::TaskHooks => "task-hooks",
             Self::Metrics => "metrics",
             Self::Daemon => "daemon",
             Self::Semantic => "semantic",
@@ -138,7 +150,7 @@ impl Feature {
         match self {
             Self::Prompt => "Retrieval-first workflow",
             Self::Brief => "Answer each prompt with a scoped brief",
-            Self::Guard => "Guard destructive git commands",
+            Self::TaskHooks => "Task hooks (gate edits, deliver the brief)",
             Self::Metrics => "Show command timing and savings",
             Self::Daemon => "Start the background daemon on demand",
             Self::Semantic => "Prefer semantic search",
@@ -160,8 +172,8 @@ impl Feature {
             Self::Brief => {
                 "Print a bounded evidence brief for each project-related prompt (pixel config: brief)."
             }
-            Self::Guard => {
-                "Name the hook that blocks a destructive git command. `pixel install` writes it; the setup never edits a settings file."
+            Self::TaskHooks => {
+                "Register `pixel run-hook task-event` for the selected agents that run it (Claude Code, Devin, Gemini CLI, Antigravity, OpenCode): bind each task, gate edits and deliver the per-prompt brief."
             }
             Self::Metrics => {
                 "Show timing and estimated savings after each command (pixel config: metrics)."
@@ -182,10 +194,10 @@ impl Feature {
                 "Also write the steering into the per-tool rule file the harness loads (rules/ directory)."
             }
             Self::PiExtension => {
-                "The pi impact extension `pixel install` deploys under ~/.pi/agent."
+                "Install the pi impact extension under ~/.pi/agent, when pi is selected and configured."
             }
             Self::CodexConfig => {
-                "The codex config and hooks `pixel install` writes under ~/.codex."
+                "Register Codex's task hooks under ~/.codex and retire the developer instructions earlier releases wrote, when Codex is selected."
             }
             Self::Land => {
                 "Publish work by landing on the target branch instead of opening a pull request. Single repository only: the rule must not reach your global configuration."
@@ -200,33 +212,35 @@ impl Feature {
         match self {
             Self::Prompt => Writes::Steering(PROMPT_STEERING),
             Self::Brief => Writes::Config(&["brief"], ConfigValue::Bool(true)),
-            Self::Guard => Writes::Note(
-                "the guard hook is written by `pixel install`; this setup does not edit hook settings",
-            ),
+            Self::TaskHooks => Writes::Hooks(HookGroup::Task),
             Self::Metrics => Writes::Config(&["metrics"], ConfigValue::Text("on")),
             Self::Daemon => Writes::Config(&["daemon_auto_start"], ConfigValue::Bool(true)),
             Self::Semantic => Writes::Steering(SEMANTIC_STEERING),
             Self::Classify => Writes::Config(&["classify", "enabled"], ConfigValue::Bool(true)),
             Self::WebSearch => Writes::Steering(WEB_SEARCH_STEERING),
             Self::Rules => Writes::Rules,
-            Self::PiExtension => Writes::Note(
-                "the pi impact extension is written by `pixel install` under ~/.pi/agent",
-            ),
-            Self::CodexConfig => Writes::Note(
-                "the codex config and hooks are written by `pixel install` under ~/.codex",
-            ),
+            Self::PiExtension => Writes::Hooks(HookGroup::Pi),
+            Self::CodexConfig => Writes::Hooks(HookGroup::Codex),
             Self::Land => Writes::Steering(LAND_STEERING),
         }
     }
 
-    /// Whether the wizard pre-checks this feature. The five defaults are the
-    /// ones that cost nothing, need no credential and change no git history;
-    /// anything that spends money, needs a key, or changes how a branch is
-    /// published is opt-in.
+    /// Whether the wizard pre-checks this feature. The defaults are the ones
+    /// that cost nothing, need no credential and change no git history, plus
+    /// the three hook groups: an unattended `pixel setup` deploys them for
+    /// every configured host, so the guided run must start from the same
+    /// place and let the user take them away. Anything that spends money,
+    /// needs a key, or changes how a branch is published is opt-in.
     pub fn default_selected(self) -> bool {
         matches!(
             self,
-            Self::Prompt | Self::Brief | Self::Guard | Self::Metrics | Self::Daemon
+            Self::Prompt
+                | Self::Brief
+                | Self::TaskHooks
+                | Self::Metrics
+                | Self::Daemon
+                | Self::PiExtension
+                | Self::CodexConfig
         )
     }
 
@@ -283,7 +297,7 @@ pub(crate) fn steering_title(feature: Feature) -> &'static str {
         Feature::WebSearch => "Web search",
         Feature::Land => "Publishing",
         Feature::Brief
-        | Feature::Guard
+        | Feature::TaskHooks
         | Feature::Metrics
         | Feature::Daemon
         | Feature::Classify
@@ -324,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_five_free_features_are_pre_checked() {
+    fn the_free_features_and_the_hook_groups_are_pre_checked() {
         let selected: Vec<&str> = Feature::ALL
             .iter()
             .filter(|f| f.default_selected())
@@ -332,7 +346,15 @@ mod tests {
             .collect();
         assert_eq!(
             selected,
-            vec!["prompt", "brief", "guard", "metrics", "daemon"]
+            vec![
+                "prompt",
+                "brief",
+                "task-hooks",
+                "metrics",
+                "daemon",
+                "pi-extension",
+                "codex-config"
+            ]
         );
     }
 
@@ -385,16 +407,22 @@ mod tests {
     }
 
     #[test]
-    fn a_note_names_the_command_that_owns_the_artifact() {
-        for feature in Feature::ALL {
-            if let Writes::Note(note) = feature.writes() {
-                assert!(
-                    note.contains("pixel install"),
-                    "{} must name the command that writes it",
-                    feature.id()
-                );
-            }
-        }
+    fn the_hook_features_are_the_three_groups_the_installer_deploys() {
+        let groups: Vec<(&str, HookGroup)> = Feature::ALL
+            .iter()
+            .filter_map(|f| match f.writes() {
+                Writes::Hooks(group) => Some((f.id(), group)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            groups,
+            vec![
+                ("task-hooks", HookGroup::Task),
+                ("pi-extension", HookGroup::Pi),
+                ("codex-config", HookGroup::Codex),
+            ]
+        );
     }
 
     #[test]

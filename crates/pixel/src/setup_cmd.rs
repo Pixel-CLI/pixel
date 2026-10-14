@@ -12,15 +12,21 @@
 //! to a plan, print exactly what the plan would write, and only then apply.
 //! Cancelling at any point writes nothing and says so.
 //!
+//! The guided setup is `pixel setup` at a terminal. The same command run
+//! unattended (no terminal, `CI`, `--yes`, `--json`) is the installer in
+//! `main.rs::setup_install`, unchanged. The guided run owns the hook files
+//! too, through the one installer (`pixel_install::install::install`), not a
+//! second writer: the review prints that installer's dry run for the agents
+//! and hook groups picked, the confirmation covers it, and the apply runs the
+//! same call for real.
+//!
 //! What is deliberately absent: repository preparation (no index, no
-//! `prepare-repo`), skill-bundle installation, and any hook write. `pixel
-//! install` owns the hook files, and a second writer of one settings file is
-//! how a user's own hooks get lost; a feature that implies one says which
-//! command deploys it instead.
+//! `prepare-repo`) and skill-bundle installation.
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use pixel_install::install::{InstallOptions, InstallReport, InstallStep};
 use pixel_install::setup::{AgentTarget, Feature, Scope, SetupPlan};
 
 use crate::config_cmd;
@@ -30,6 +36,9 @@ pub struct SetupOptions {
     /// A repository to set up instead of the machine. Its root becomes the
     /// detection base and the write base.
     pub repo: Option<PathBuf>,
+    /// The shell whose profile is swept for the retired `claude()` wrapper,
+    /// as `pixel setup --shell` takes it.
+    pub shell: Option<String>,
     /// Print the block the default answers produce and change nothing.
     pub print: bool,
     /// The development-only switches. `TEMPORARY (dev-flags)`, see `dev`.
@@ -39,7 +48,39 @@ pub struct SetupOptions {
 // TEMPORARY (dev-flags): the public name `main.rs` fills in.
 pub use dev::Options as DevOptions;
 
-/// Run the wizard.
+/// Whether `pixel setup` runs the guided setup rather than the unattended
+/// installer.
+///
+/// Guided means a person is there to answer: stdin and stdout are terminals,
+/// `CI` is not set, and neither `--yes` nor `--json` asked for no questions.
+/// Both selection flags answer the questions themselves, so they run the
+/// guided path without a terminal (they are development-only, see `dev`).
+pub fn is_guided(options: &SetupOptions, yes: bool, json: bool) -> bool {
+    use std::io::IsTerminal;
+    guided_for(
+        yes,
+        json,
+        // TEMPORARY (dev-flags): `dev::scripted` is `dev`'s; without it the
+        // argument is `false`.
+        dev::scripted(&options.dev),
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        std::env::var_os("CI").as_deref(),
+    )
+}
+
+/// The decision behind [`is_guided`], with the environment passed in.
+fn guided_for(
+    yes: bool,
+    json: bool,
+    scripted: bool,
+    terminal: bool,
+    ci: Option<&std::ffi::OsStr>,
+) -> bool {
+    let in_ci = ci.is_some_and(|value| !matches!(value.to_str(), Some("" | "0" | "false")));
+    scripted || (terminal && !in_ci && !yes && !json)
+}
+
+/// Run the guided setup (or `--print`).
 pub fn run(options: SetupOptions) -> Result<(), String> {
     let base = base_for(&options)?;
     let scope = if options.repo.is_some() {
@@ -60,16 +101,9 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
         return Ok(());
     }
 
-    // TEMPORARY (dev-flags): `scripted` is `dev`'s; without it the line is
-    // `if !std::io::stdin().is_terminal()`.
+    // TEMPORARY (dev-flags): `scripted` is `dev`'s; without it the value is
+    // `false`: `is_guided` has already required a terminal.
     let scripted = dev::scripted(&options.dev);
-    if !scripted && !std::io::stdin().is_terminal() {
-        return Err(
-            "setup needs a terminal. Use --print for the default block, or answer both \
-             --selected-agents and --selected-features to run without one."
-                .into(),
-        );
-    }
     let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stderr().lock();
@@ -86,21 +120,49 @@ pub fn run(options: SetupOptions) -> Result<(), String> {
 
     let plan = SetupPlan::new(&base, scope, &answers.agents, &answers.features)
         .map_err(|e| e.to_string())?;
-    write_review(&mut output, &plan, color)?;
+    let install = install_options(&options, &base, &plan);
+    let selection = plan.install_selection();
+    // The hooks are shown from a dry run of the very call that applies them,
+    // so the review cannot promise a write the apply does not make.
+    let hook_preview = pixel_install::install::install_selected(
+        &InstallOptions {
+            dry_run: true,
+            ..install.clone()
+        },
+        Some(&selection),
+    )
+    .map_err(|e| e.to_string())?;
+    write_review(&mut output, &plan, &hook_preview.steps, color)?;
     if !scripted && !confirm(&mut input, &mut output, color)? {
         writeln!(output, "Cancelled. Nothing was written.").map_err(io)?;
         return Ok(());
     }
 
     let written = plan.apply().map_err(|e| e.to_string())?;
-    // TEMPORARY (dev-flags): the `if` is `dev`'s; without it the loop below runs
-    // unconditionally, which is what a normal run does.
+    let hooks = pixel_install::install::install_selected(&install, Some(&selection))
+        .map_err(|e| e.to_string())?;
+    // TEMPORARY (dev-flags): the `if` is `dev`'s; without it the block below
+    // runs unconditionally, which is what a normal run does.
     if !dev::skips_config(&options.dev) {
+        config_cmd::ensure_template(options.repo.as_deref())?;
         for key in &plan.config_writes {
             config_cmd::set_global_key(key.key, key.value.to_json())?;
         }
     }
-    report(&mut output, &plan, &written, scripted)
+    report(&mut output, &plan, &written, &hooks, scripted)
+}
+
+/// The installer options for a plan, in the plan's scope. Under `--dummy-apply` the home directory is the dummy root
+/// too, so no hook file outside it is touched.
+fn install_options(options: &SetupOptions, base: &Path, plan: &SetupPlan) -> InstallOptions {
+    // TEMPORARY (dev-flags): `dummy` is `dev`'s; without it the value is `false`.
+    let dummy = options.dev.dummy_apply;
+    InstallOptions {
+        shell: options.shell.clone(),
+        home: dummy.then(|| base.to_path_buf()),
+        repo: (plan.scope == Scope::Repository).then(|| base.to_path_buf()),
+        ..InstallOptions::default()
+    }
 }
 
 /// The directory every path of this run is resolved under.
@@ -211,6 +273,12 @@ fn write_intro(
     writeln!(
         output,
         "  {} Write a managed pixel block into each agent's instruction file",
+        paint(color, "2", "•")
+    )
+    .map_err(io)?;
+    writeln!(
+        output,
+        "  {} Register the hooks of the agents and features you pick",
         paint(color, "2", "•")
     )
     .map_err(io)?;
@@ -424,7 +492,12 @@ fn parse_indices(answer: &str, total: usize) -> Result<Option<Vec<usize>>, Strin
 
 /// The review: every path, every configuration key, every note, and the exact
 /// text, before anything is written.
-fn write_review(output: &mut impl Write, plan: &SetupPlan, color: bool) -> Result<(), String> {
+fn write_review(
+    output: &mut impl Write,
+    plan: &SetupPlan,
+    hooks: &[InstallStep],
+    color: bool,
+) -> Result<(), String> {
     writeln!(output).map_err(io)?;
     writeln!(
         output,
@@ -468,6 +541,26 @@ fn write_review(output: &mut impl Write, plan: &SetupPlan, color: bool) -> Resul
             .map_err(io)?;
         }
     }
+    if !hooks.is_empty() {
+        writeln!(
+            output,
+            "Hooks and agent configuration (what the installer will do, from its dry run):"
+        )
+        .map_err(io)?;
+        for step in hooks {
+            writeln!(
+                output,
+                "  {} {}: {}",
+                paint(color, "2", "•"),
+                step.id,
+                step.summary
+            )
+            .map_err(io)?;
+            if let Some(detail) = &step.detail {
+                writeln!(output, "      {}", paint(color, "2", detail)).map_err(io)?;
+            }
+        }
+    }
     if !plan.config_writes.is_empty() {
         writeln!(output, "Global settings (~/.pixel/config.yaml):").map_err(io)?;
         for key in &plan.config_writes {
@@ -483,7 +576,7 @@ fn write_review(output: &mut impl Write, plan: &SetupPlan, color: bool) -> Resul
     }
     if !plan.notes.is_empty() {
         writeln!(output).map_err(io)?;
-        writeln!(output, "Not written here:").map_err(io)?;
+        writeln!(output, "Not written:").map_err(io)?;
         for note in &plan.notes {
             writeln!(output, "  {} {note}", paint(color, "2", "•")).map_err(io)?;
         }
@@ -520,15 +613,19 @@ fn report(
     output: &mut impl Write,
     plan: &SetupPlan,
     written: &[PathBuf],
+    hooks: &InstallReport,
     scripted: bool,
 ) -> Result<(), String> {
     writeln!(output).map_err(io)?;
-    if written.is_empty() && plan.config_writes.is_empty() {
+    if written.is_empty() && plan.config_writes.is_empty() && hooks.steps.is_empty() {
         writeln!(output, "pixel setup wrote nothing.").map_err(io)?;
     } else {
         writeln!(output, "pixel setup complete:").map_err(io)?;
         for path in written {
             writeln!(output, "  updated {}", path.display()).map_err(io)?;
+        }
+        for step in &hooks.steps {
+            writeln!(output, "  {}: {}", step.id, step.summary).map_err(io)?;
         }
         for key in &plan.config_writes {
             writeln!(
@@ -791,10 +888,17 @@ mod tests {
             &scratch,
             Scope::Global,
             &[AgentTarget::ClaudeCode, AgentTarget::Cursor],
-            &[Feature::Prompt, Feature::Metrics, Feature::Land],
+            &[
+                Feature::Prompt,
+                Feature::Metrics,
+                Feature::Land,
+                Feature::TaskHooks,
+            ],
         )
         .unwrap();
-        let (rendered, written) = with_input("", |_, output| write_review(output, &plan, true));
+        let hooks = [step("hooks.claude", "would register the task-event hooks")];
+        let (rendered, written) =
+            with_input("", |_, output| write_review(output, &plan, &hooks, true));
         rendered.unwrap();
 
         assert!(written.contains(".claude/CLAUDE.md"), "{written}");
@@ -814,6 +918,150 @@ mod tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
+    fn step(id: &str, summary: &str) -> InstallStep {
+        InstallStep {
+            id: id.into(),
+            status: pixel_install::install::CheckStatus::Green,
+            summary: summary.into(),
+            detail: Some("/home/someone/.claude/settings.json".into()),
+        }
+    }
+
+    fn install_report(steps: Vec<InstallStep>) -> InstallReport {
+        InstallReport {
+            version: "v1".into(),
+            ok: true,
+            executable_path: "pixel".into(),
+            home: "home".into(),
+            dry_run: false,
+            steps,
+            summary: pixel_install::install::InstallSummary {
+                green: 0,
+                yellow: 0,
+                red: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn the_review_lists_each_hook_step_with_its_file_before_the_confirmation() {
+        let scratch = scratch_dir("review-hooks");
+        let plan = SetupPlan::new(
+            &scratch,
+            Scope::Global,
+            &[AgentTarget::ClaudeCode],
+            &[Feature::Prompt, Feature::TaskHooks],
+        )
+        .unwrap();
+        let hooks = [
+            step("hooks.claude", "would register the task-event hooks"),
+            step("hooks.codex", "would register codex hooks"),
+        ];
+        let (rendered, written) =
+            with_input("", |_, output| write_review(output, &plan, &hooks, false));
+        rendered.unwrap();
+
+        assert!(
+            written.contains("Hooks and agent configuration"),
+            "{written}"
+        );
+        assert!(
+            written.contains("hooks.claude: would register the task-event hooks"),
+            "{written}"
+        );
+        assert!(
+            written.contains("/home/someone/.claude/settings.json"),
+            "the file a hook step writes is named: {written}"
+        );
+        assert!(
+            written.find("hooks.claude").unwrap() < written.find("The exact text:").unwrap(),
+            "the hooks are part of the review, not an afterthought"
+        );
+
+        let (none, plain) = with_input("", |_, output| write_review(output, &plan, &[], false));
+        none.unwrap();
+        assert!(
+            !plain.contains("Hooks and agent configuration"),
+            "no heading over an empty list: {plain}"
+        );
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn the_install_options_carry_the_scope_the_shell_and_the_dummy_home() {
+        let base = PathBuf::from("/tmp/pixel-setup-install-options");
+        let global_plan = SetupPlan::new(
+            &base,
+            Scope::Global,
+            &[AgentTarget::Codex],
+            &[Feature::CodexConfig],
+        )
+        .unwrap();
+        let options = SetupOptions {
+            repo: None,
+            shell: Some("fish".into()),
+            print: false,
+            dev: DevOptions::default(),
+        };
+        let global = install_options(&options, &base, &global_plan);
+        assert_eq!(global.shell.as_deref(), Some("fish"));
+        assert_eq!(global.repo, None, "a machine-wide run is not repo-local");
+        assert_eq!(global.home, None, "a real run installs under the real home");
+
+        let repo_plan = SetupPlan::new(
+            &base,
+            Scope::Repository,
+            &[AgentTarget::ClaudeCode],
+            &[Feature::TaskHooks],
+        )
+        .unwrap();
+        let repo = install_options(&options, &base, &repo_plan);
+        assert_eq!(repo.repo.as_deref(), Some(base.as_path()));
+        assert_eq!(repo.home, None);
+
+        let dummy = SetupOptions {
+            dev: DevOptions {
+                dummy_apply: true,
+                ..DevOptions::default()
+            },
+            ..options
+        };
+        let redirected = install_options(&dummy, &base, &global_plan);
+        assert_eq!(
+            redirected.home.as_deref(),
+            Some(base.as_path()),
+            "--dummy-apply keeps the hook files under its own root too"
+        );
+    }
+
+    #[test]
+    fn the_guided_setup_needs_a_person_and_nothing_that_asks_for_no_questions() {
+        let none = None;
+        // A terminal, no CI, no flag: guided.
+        assert!(guided_for(false, false, false, true, none));
+        // No terminal on stdin or stdout: unattended.
+        assert!(!guided_for(false, false, false, false, none));
+        // `--yes`, `--json` and CI each turn the questions off.
+        assert!(!guided_for(true, false, false, true, none));
+        assert!(!guided_for(false, true, false, true, none));
+        assert!(!guided_for(
+            false,
+            false,
+            false,
+            true,
+            Some(std::ffi::OsStr::new("true"))
+        ));
+        // CI set to an empty or false-looking value is not CI.
+        for off in ["", "0", "false"] {
+            assert!(
+                guided_for(false, false, false, true, Some(std::ffi::OsStr::new(off))),
+                "CI={off:?}"
+            );
+        }
+        // Both answers on the command line need neither a terminal nor a person.
+        assert!(guided_for(false, false, true, false, none));
+    }
+
     #[test]
     fn the_report_names_each_file_it_wrote_and_says_when_it_wrote_none() {
         let scratch = scratch_dir("report");
@@ -824,13 +1072,26 @@ mod tests {
             &[Feature::Prompt],
         )
         .unwrap();
+        let hooks = install_report(vec![step("hooks.claude", "registered the hooks")]);
         let (_, written) = with_input("", |_, output| {
-            report(output, &plan, &[scratch.join(".claude/CLAUDE.md")], false)
+            report(
+                output,
+                &plan,
+                &[scratch.join(".claude/CLAUDE.md")],
+                &hooks,
+                false,
+            )
         });
         assert!(written.contains("updated"), "{written}");
+        assert!(
+            written.contains("hooks.claude: registered the hooks"),
+            "{written}"
+        );
         assert!(written.contains("pixel doctor"), "{written}");
 
-        let (_, empty) = with_input("", |_, output| report(output, &plan, &[], true));
+        let (_, empty) = with_input("", |_, output| {
+            report(output, &plan, &[], &install_report(Vec::new()), true)
+        });
         assert!(empty.contains("wrote nothing"), "{empty}");
         assert!(
             !empty.contains("pixel doctor"),
@@ -857,7 +1118,7 @@ mod tests {
 
     #[test]
     fn the_defaults_are_the_catalog_defaults_and_the_markers_on_disk() {
-        assert_eq!(default_features(Scope::Global).len(), 5);
+        assert_eq!(default_features(Scope::Global).len(), 7);
         assert!(
             !default_features(Scope::Global).contains(&Feature::Land),
             "a repository-only feature is never the machine default"

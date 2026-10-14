@@ -12,10 +12,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::install::InstallSelection;
 use crate::{InstallError, Result};
 
 use super::agent::{AgentTarget, Scope, join};
-use super::feature::{ConfigValue, Feature, Writes};
+use super::feature::{ConfigValue, Feature, HookGroup, Writes};
 use super::render::render_block;
 
 /// The rule file `pixel setup` writes inside a harness's rules directory,
@@ -88,7 +89,7 @@ pub struct SetupPlan {
     /// The configuration keys to store, applied by the caller: this crate does
     /// not own the global YAML document.
     pub config_writes: Vec<ConfigWrite>,
-    /// What the user has to do by hand, and what another pixel command owns.
+    /// What the user has to do by hand.
     pub notes: Vec<String>,
 }
 
@@ -141,11 +142,6 @@ impl SetupPlan {
                 _ => None,
             })
             .collect();
-        for feature in &features {
-            if let Writes::Note(note) = feature.writes() {
-                notes.push(format!("{}: {note}", feature.label()));
-            }
-        }
 
         Ok(Self {
             base: base.to_path_buf(),
@@ -187,9 +183,28 @@ impl SetupPlan {
         Ok(written)
     }
 
-    /// Whether the plan writes anything at all. A setup whose every answer was
-    /// a note has nothing to do, and saying so is better than reporting a
-    /// success that changed nothing.
+    /// What the installer is asked to deploy for this plan: the selected
+    /// agents, and the hook groups the selected features switch on. The hook
+    /// files are not rendered here; the installer owns them, and the review
+    /// prints its dry run next to the instruction files.
+    pub fn install_selection(&self) -> InstallSelection {
+        let has = |group| {
+            self.features
+                .iter()
+                .any(|feature| feature.writes() == Writes::Hooks(group))
+        };
+        InstallSelection {
+            agents: self.agents.clone(),
+            task_hooks: has(HookGroup::Task),
+            codex_hooks: has(HookGroup::Codex),
+            pi_extension: has(HookGroup::Pi),
+        }
+    }
+
+    /// Whether the plan writes any instruction or rule file. A setup whose
+    /// every answer was a note has no file to write, and saying so is better
+    /// than reporting a success that changed nothing; the hook steps and the
+    /// configuration keys are counted separately by the caller.
     pub fn is_empty(&self) -> bool {
         self.instruction_writes.is_empty() && self.rule_writes.is_empty()
     }
@@ -306,18 +321,36 @@ mod tests {
     }
 
     #[test]
-    fn a_feature_that_another_command_owns_becomes_a_note_and_writes_nothing() {
+    fn a_hook_feature_writes_no_file_here_and_selects_what_the_installer_deploys() {
         let plan = plan(
             Scope::Repository,
-            &[AgentTarget::ClaudeCode],
-            &[Feature::Guard, Feature::Prompt],
+            &[AgentTarget::ClaudeCode, AgentTarget::Pi],
+            &[Feature::TaskHooks, Feature::PiExtension, Feature::Prompt],
         );
+        assert_eq!(plan.instruction_writes.len(), 2);
+        assert_eq!(
+            plan.install_selection(),
+            InstallSelection {
+                agents: vec![AgentTarget::ClaudeCode, AgentTarget::Pi],
+                task_hooks: true,
+                codex_hooks: false,
+                pi_extension: true,
+            },
+            "only the hook groups the features name, for the agents picked"
+        );
+
+        let none = super::SetupPlan::new(
+            &base(),
+            Scope::Global,
+            &[AgentTarget::Codex],
+            &[Feature::Prompt],
+        )
+        .unwrap()
+        .install_selection();
         assert!(
-            plan.notes.iter().any(|note| note.contains("pixel install")),
-            "got {:?}",
-            plan.notes
+            !none.task_hooks && !none.codex_hooks && !none.pi_extension,
+            "a feature left off installs nothing: {none:?}"
         );
-        assert_eq!(plan.instruction_writes.len(), 1);
     }
 
     #[test]

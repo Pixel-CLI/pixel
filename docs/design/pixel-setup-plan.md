@@ -10,8 +10,11 @@ wizard does, read in their tree at `5cbe33d` and PR #14425).
    own env markers, `$HOME`/repo config markers, instruction file and artifacts,
    plus a generic `AGENTS.md` target for a detected agent that maps nowhere.
 2. **Feature list** — the twelve in the table below.
-3. **Feature semantics** — see "What a feature writes" below; still open with the
-   maintainer whether a feature that implies a hook deploys it or reports it.
+3. **Feature semantics** — see "What a feature writes" below. Decided with the
+   maintainer (2026-10-14, #878): a feature that implies a hook deploys it.
+   `pixel install` became the plugin installer and `pixel setup` owns the hook
+   files; the guided run and the unattended run call the one installer
+   (`install::install_selected`), so there is no second writer.
 4. **Scope** — `--repo <path>`, defaulting to the machine. In repo scope both the
    detection base and the write targets are the repository, not `$HOME`.
 5. **`pixel config setup`** — separate command, untouched. No absorption, no
@@ -23,8 +26,8 @@ wizard does, read in their tree at `5cbe33d` and PR #14425).
    malformed-block cases are contract tests next to the code, not goldens.
 7. **Managed block** — `but` style, own markers, own hardening:
    `<!-- pixel:setup:start -->` / `<!-- pixel:setup:end -->`, line-anchored, CRLF
-   preserving, duplicate-converging, refusing a partial block. `pixel uninstall`
-   learns to strip it.
+   preserving, duplicate-converging, refusing a partial block. `pixel setup
+   --remove` strips it.
 8. **Temporary flags** — kebab-case, temporary, documented below. They do not
    ship: the release-prep task deletes them and re-points the golden test at the
    in-process renderer.
@@ -40,24 +43,53 @@ A feature writes exactly one of four things (`Feature::writes()` in
 - `Config` — a key in the global `~/.pixel/config.yaml`;
 - `Rules` — a per-agent rule file, for the three harnesses that load a plain
   Markdown one;
-- `Note` — nothing here, because another pixel command owns that artifact. The
-  wizard never writes a hook entry: `pixel install` owns the hook files, and a
-  second writer of one settings file is how a user's own hooks get lost.
+- `Hooks` — a group of hook registrations the installer deploys for the
+  selected agents: `Task` (the `run-hook task-event` hooks of Claude Code,
+  Devin, Gemini CLI, Antigravity and OpenCode), `Codex` (Codex's task hooks)
+  and `Pi` (the impact extension). The plan resolves them to an
+  `InstallSelection`; the review prints the installer's own dry run, so the hook
+  files are in front of the user before the confirmation, and the apply runs
+  the same call for real. An agent that was not picked is not touched, and a
+  hook group left off is not written for a picked one.
 
 | # | id | label | default | writes |
 |---|---|---|---|---|
 | 1 | `prompt` | Retrieval-first workflow | on | `Steering`: the `## Pixel` baseline |
 | 2 | `brief` | Per-prompt brief | on | `Config`: `brief: true` |
-| 3 | `guard` | Guard destructive git commands | on | `Note`: `pixel install` writes the hook |
+| 3 | `task-hooks` | Task hooks (gate edits, deliver the brief) | on | `Hooks(Task)` |
 | 4 | `metrics` | Command timing and savings | on | `Config`: `metrics: "on"` |
 | 5 | `daemon` | Background daemon on demand | on | `Config`: `daemon_auto_start: true` |
 | 6 | `semantic` | Semantic search first | off | `Steering`: `### Search` |
 | 7 | `classify` | AI classification | off | `Config`: `classify.enabled: true` |
 | 8 | `web-search` | Private web-search provider | off | `Steering`: `### Web search` |
 | 9 | `rules` | Per-agent rule files | off | `Rules`: `<rules dir>/pixel-setup.md` |
-| 10 | `pi-extension` | pi impact extension | off | `Note`: `pixel install` writes it |
-| 11 | `codex-config` | Codex config and hooks | off | `Note`: `pixel install` writes them |
+| 10 | `pi-extension` | pi impact extension | on | `Hooks(Pi)` |
+| 11 | `codex-config` | Codex config and hooks | on | `Hooks(Codex)` |
 | 12 | `land` | Land on the target branch | off, repo-only | `Steering`: `### Publishing` |
+
+The three hook rows are pre-checked because an unattended `pixel setup` deploys
+them for every configured host: the guided run starts from the same place and
+lets the user take them away. Feature 3 was `guard` ("Guard destructive git
+commands") in the first version of this PR; no destructive-git guard is
+registered by the installer any more (`HookScope::TaskEventsOnly`), so the row
+now says what the hook does.
+
+## Guided and unattended
+
+`pixel setup` is one command with two ways to run (#878):
+
+| condition | run |
+|---|---|
+| stdin and stdout are terminals, `CI` unset (or empty/`0`/`false`), none of `--yes`, `--json`, `--print` | guided: collect, plan, review, confirm, apply |
+| no terminal, `CI`, `--yes` or `--json` | unattended: the installer, output unchanged (`setup_install` in `main.rs`) |
+| `--print` | renders the default block, changes nothing |
+| both `--selected-*` flags (development-only) | guided without a terminal or a confirmation |
+| `--remove` | removes what either run wrote |
+
+The guided apply order is: instruction files and rule files
+(`SetupPlan::apply`), then the hook steps (`install_selected`), then the config
+template and the global keys. A failure stops there; every step is idempotent, so
+a re-run finishes the job.
 
 ## Temporary development flags (do not ship)
 
@@ -71,8 +103,14 @@ They exist for this development loop only.
 | `--selected-features 2,4,12` | answer the feature question with those 1-based indices into the feature list |
 | `--dummy-apply` | redirect every write root to `tests/setup/`, so nothing outside the repository is touched |
 
-An index outside the list is an error naming the valid range. `--dummy-apply`
-changes no behaviour but the write root.
+An index outside the list is an error naming the valid range. The two selection
+flags need each other and run the guided path without a terminal or a
+confirmation; clap refuses them with `--yes`, `--print` and `--remove`.
+`--dummy-apply` changes no behaviour but the write root: instruction files, hook
+files (the installer's home is the dummy root) and the global configuration,
+which it leaves alone. They stay hidden development flags as planned, and fold
+into nothing: the unattended path needs no flag to select agents, it deploys for
+every configured host as `pixel install` did.
 
 **Removal gate (before the release PR):** delete the three flags from
 `crates/pixel/src/main.rs` and re-point the golden test at the in-process
@@ -146,7 +184,7 @@ repository state is touched by `pixel setup`.
 - [x] Paths derived from `AgentTarget` alone, with no second copy of a path in
       the wizard. A test asserts every target names a repository instruction
       file and that the four global ones are the only targets claiming one
-      (no cross-check against `pixel install`'s own file list exists; a
+      (no cross-check against the installer's own file list exists; a
       repository-scoped setup writes `CLAUDE.md`/`AGENTS.md`, which that list
       does not name).
 - [x] Review screen prints every path (`~` collapsed) and the exact text, then a
@@ -180,8 +218,9 @@ repository state is touched by `pixel setup`.
 - [x] `--dummy-apply`: resolves the write root to `<repo>/tests/setup/` and
       leaves the real global configuration alone, so a development run changes
       nothing outside the checkout; no other behaviour differs.
-- [x] Errors: no TTY without `--print` → exit 1 pointing at `--print`, or at
-      the two flags that answer without a terminal.
+- [x] No TTY (or `CI`, `--yes`, `--json`) → the unattended installer, not an
+      error: the command is `pixel install` renamed (#878), and scripts that ran
+      it keep working. `--print` and `--remove` are unaffected.
 
 ### 7. Tests
 
@@ -189,7 +228,9 @@ repository state is touched by `pixel setup`.
       modification the setup makes for that agent, plus `config.yaml` for the
       global config the selected features wrote.
 - [x] The CLI tests in `crates/pixel/tests/cli/setup_cli.rs` cover `--print`
-      (byte-identical to what a run writes), the no-terminal refusal, a
+      (byte-identical to what a run writes), the unattended path without a
+      terminal (and `--yes`), the hooks following the agents and hook features
+      picked, `--remove` taking out the block, the rule file and the hooks, a
       repository run writing the repository files only, an out-of-range index,
       a second run being byte-identical with both exit statuses asserted, a
       machine `pixel config setup` already configured, and `--dummy-apply`
@@ -216,7 +257,7 @@ repository state is touched by `pixel setup`.
 ### 9. Docs and gates
 
 - [x] `ARCHITECTURE.md` command table (a `pixel setup` row, and the
-      `pixel uninstall` row now that uninstall strips the block), which is what
+      `pixel setup` row, which `--remove` makes the owner of the block's removal), which is what
       `docs_drift` requires; `docs/manual-setup.md` got the guided path.
       `crates/pixel-install/assets/pixel-agent-prompt.md` is deliberately
       unchanged: it is the retrieval protocol, and the setup block is
@@ -233,8 +274,8 @@ repository state is touched by `pixel setup`.
 
 ## Risks
 
-- `pixel install` already owns the agent artifacts. Two writers of the same
-  managed block must converge; a divergence here is a data-loss bug for the
+- The unattended installer and the guided run write overlapping artifacts. They
+  share one installer and a block the installer never touches; a divergence here is a data-loss bug for the
   user's own `AGENTS.md` text.
 - Adding a top-level `pixel setup` next to `pixel config setup` invites confusion
   and touches the agent prompt and `docs_drift` in both directions.

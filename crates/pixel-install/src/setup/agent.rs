@@ -91,8 +91,8 @@ impl AgentTarget {
     pub fn help(self) -> &'static str {
         match self {
             Self::ClaudeCode => "Write the pixel steering block into CLAUDE.md.",
-            // The wizard writes the block and nothing else for Codex: the
-            // codex config is `CodexConfig`'s note, deployed by `pixel install`.
+            // The instruction file is the block; Codex's hooks are the
+            // `CodexConfig` feature's, deployed by the installer.
             Self::Codex => "Write the pixel steering block into the AGENTS.md Codex reads.",
             Self::Devin => {
                 "Write the pixel steering block into the repository AGENTS.md Devin reads."

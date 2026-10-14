@@ -54,7 +54,7 @@ MCP server. `pixel setup` registers no MCP server with any agent.
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. The core reads them for `ultraflow` and `plan`; `pixel flow …` itself is the `flow` plugin, which links this crate. | none |
-| `pixel-install` | Idempotent `pixel setup`, `pixel setup --remove`, `pixel doctor`. Global install: Claude and Codex task lifecycle hooks, cleanup of their retired retrieval hooks and prompts and the `claude()` shell wrapper, removal of the Pi `APPEND_SYSTEM.md` retrieval block, and the explicit Pi `/pixel-impact` package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`) when Pi is present. No prompt is deployed and no other host is wired: the retired OpenCode, Devin, Antigravity, zcode, Cursor and Copilot CLI artifacts and the deployed agent prompts are removed. An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo`: native-default migration for Claude and Codex, and removal of the retired Devin and Pi project guards and `AGENTS.md` retrieval blocks (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `intro` animation (frames only; `pixel` owns the tty) and ends on the `banner` summary. | proto, daemon, index, facts, git |
+| `pixel-install` | Idempotent `pixel setup`, `pixel setup --remove`, `pixel doctor`. The guided run at a terminal is the `setup/` module (agent detection and targets, the 12-feature catalog, the plan, the managed block and its upsert) in front of the same installer, which `install_selected` limits to the agents and hook groups the plan picked. Global install: Claude and Codex task lifecycle hooks, cleanup of their retired retrieval hooks and prompts and the `claude()` shell wrapper, removal of the Pi `APPEND_SYSTEM.md` retrieval block, and the explicit Pi `/pixel-impact` package (`~/.local/share/pixel/pi-package/`, declared in Pi's `settings.json`) when Pi is present. No prompt is deployed and no other host is wired: the retired OpenCode, Devin, Antigravity, zcode, Cursor and Copilot CLI artifacts and the deployed agent prompts are removed. An accepted classify engine (interactive install or `pixel config setup`) proposes the optional helpers: the `pixel-classify` skill into every configured harness's skills dir (`skills/pixel-classify/` under `~/.claude`, `~/.codex`, `~/.cursor`, `~/.devin`, `~/.gemini`, `~/.pi/agent`, `~/.config/opencode`) and, when Pi is present, the `pixel-classify-files` tools as a second local Pi package (`~/.local/share/pixel/pi-classify/`, declared in Pi's `settings.json`). `--repo`: native-default migration for Claude and Codex, and removal of the retired Devin and Pi project guards and `AGENTS.md` retrieval blocks (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups (a user's `skills/pixel-classify/` is renamed to `<harness root>/pixel-classify.pixel-bak.<nanos>-<seq>`, outside `skills/` so the harness stops loading it) and ends on a `backups` step listing them with the quoted `rm --` (`rm -rf --` for directories) command that drops them. A run at a terminal opens with the `intro` animation (frames only; `pixel` owns the tty) and ends on the `banner` summary. | proto, daemon, index, facts, git |
 | `pixel-ultraflow` | The classify-driven browser loop over saved flows: the observation (`agent-browser snapshot -i` parsed into numbered slots, `elements`), the indexed action space of operation-target pairs (`action`), the decision seam (`decide`), the discovery loop and its single-cycle unit (`discover`), the composition of what worked into a `pixel-flow` document whose `conditional` steps carry the conditions that tell its branches apart (`compose`), and the replay that decides those conditions with `pixel classify` and re-decides a step whose page moved on (`replay`). Drives `pixel-flow`'s browser seam; the engine is a trait, so the whole loop is tested without a model, a network or a page. | flow |
 | `pixel-plugin` | The plugin host, API 1 (`command` capability only). `pixel-plugin.toml` manifests (`name`, `version`, `api = 1`, `description`, `run`, `capabilities`, `network`, and an optional `commands` list so one binary serves several `pixel <command>` words, run as `<run> <command> <args…>`; two plugins of a tier answering to one command are an error naming both, in `resolve`, `list` and `install`), lookup in order trusted repo plugin (`<repo>/.pixel/plugins/<name>/`), user plugin (`~/.pixel/plugins/<name>/`), `pixel-<name>` on PATH (an implicit manifest-less plugin), the trust store (`~/.pixel/trusted.toml`: name plus a SHA-256 over every file of the directory, so any change revokes) with `run` canonicalised and required to stay inside the directory, the network opt-in list and install sources (`~/.pixel/plugins.toml`), `add` (a local directory, a shallow `git clone` through `GitRunner` of an `https://`, `ssh://`, `file://` or `git@` URL, or `github:<owner>/<repo>[@<ref>]`, whose unshipped program is fetched as a release asset with `curl`), `remove`, `list`, and the argv and environment (`PIXEL_API`, `PIXEL_REPO_ROOT`, `PIXEL_GRAPH_DB`, `PIXEL_BIN`) a plugin runs with. Home, repo root, PATH and the GitHub base URL are fields of `Host`, never read from the process. | git |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
@@ -189,6 +189,16 @@ Machine-wide:
 - `~/.local/share/pixel/pi-package/`: the Pi package `pixel setup` writes
   (`package.json`, `extensions/pixel-impact.ts`) and declares in the
   `packages` list of Pi's `settings.json`; `pixel setup --remove` removes both.
+- Agent instruction files and rule files, from the guided `pixel setup` only:
+  a managed block between `<!-- pixel:setup:start -->` and
+  `<!-- pixel:setup:end -->` (`BLOCK_START`, `BLOCK_END` in
+  `pixel-install::setup`) in each selected agent's instruction file
+  (`AgentTarget::instruction_path`: `~/.claude/CLAUDE.md`,
+  `~/.gemini/GEMINI.md`, `~/.codex/AGENTS.md`, … or the repository's `CLAUDE.md`
+  and `AGENTS.md` under `--repo`), and `pixel-setup.md` in `.claude/rules`,
+  `.gemini/rules` and `.devin/rules` when the `rules` feature is on. The text
+  around the block is the user's and survives; `pixel setup --remove` strips the
+  block and deletes a rule file left empty.
 - `~/.local/share/pixel/pi-classify/`: the optional classify tools'
   Pi package, written and declared like the one above only when the
   classify helpers are accepted; `pixel setup --remove` removes both.
@@ -471,6 +481,23 @@ envelope talks to the daemon socket directly.
   block.
 
 ## Agent integration
+
+`pixel setup` has two ways to run, and one installer behind both. At a terminal
+(stdin and stdout, `CI` unset, no `--yes`, `--json` or `--print`) it is the
+guided setup of `pixel-install::setup`: it detects the agent CLIs by their
+environment markers and configuration directories, asks which to write for and
+which of the 12 features to switch on, resolves the answers to a `SetupPlan`
+with no I/O, prints the plan (instruction files, rule files, the installer's
+dry-run steps, configuration keys, notes, the exact block), and writes nothing
+until one confirmation. The apply writes the block into each instruction file
+(`SetupPlan::apply`), then runs `install::install_selected` for the picked
+agents and the hook groups the features name (`Task`, `Codex`, `Pi`), then the
+configuration keys. An agent that was not picked is not touched, retirement
+sweeps included. Without a terminal, in CI or with `--yes`/`--json` the same
+command is the unattended installer (`install::install`), which deploys for
+every configured host and writes no block. `pixel setup --remove` takes out
+what either run wrote. The block never holds a hook or a setting: those stay
+in the installer's hands, so the two paths cannot disagree on a file.
 
 The provider-neutral task layer lives above retrieval. `run-hook task-event`
 normalizes Claude, Codex and Pi events into `task_bridge`; it never changes

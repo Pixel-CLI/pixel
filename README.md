@@ -105,7 +105,8 @@ These are benchmark accuracy scores, not per-decision probabilities.
 
 ```bash
 curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
-pixel setup      # once: wires Claude Code, Codex, Pi, OpenCode and Antigravity
+pixel setup      # once: guided at a terminal (pick agents and features, review, confirm);
+                 # wires Claude Code, Codex, Pi, OpenCode and Antigravity
 pixel doctor .     # optional health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```

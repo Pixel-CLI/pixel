@@ -112,7 +112,12 @@ fn tmp_path(path: &Path) -> PathBuf {
 
 fn write_and_rename(path: &Path, read_content: &str, content: &str, tmp: &Path) -> Result<()> {
     let mode = std::fs::metadata(path).ok().map(|meta| meta.permissions());
-    let mut file = std::fs::File::create(tmp)
+    // `create_new` is O_EXCL: an entry already at the temporary name, a symlink
+    // included, is refused instead of followed and truncated.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)
         .map_err(|err| InstallError::Setup(format!("create {}: {err}", tmp.display())))?;
     file.write_all(content.as_bytes())
         .map_err(|err| InstallError::Setup(format!("write {}: {err}", tmp.display())))?;
@@ -494,6 +499,28 @@ mod tests {
             0o640,
             "a temporary file is owner-only; the original mode has to be restored"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_entry_at_the_temporary_name_is_refused_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let victim = dir.path().join("victim.txt");
+        let tmp = dir.path().join(".AGENTS.md.1.0.tmp");
+        std::fs::write(&path, "keep\n").unwrap();
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+
+        let err = write_and_rename(&path, "keep\n", "keep\nnew\n", &tmp).unwrap_err();
+
+        assert!(format!("{err}").contains("create"), "got {err}");
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "precious\n",
+            "the file the planted symlink points at is not truncated"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep\n");
     }
 
     #[test]
