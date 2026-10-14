@@ -74,6 +74,50 @@ commands") in the first version of this PR; no destructive-git guard is
 registered by the installer any more (`HookScope::TaskEventsOnly`), so the row
 now says what the hook does.
 
+## AI classification journey
+
+Picking the `classify` feature opens the engine journey as its own setup step
+(after Review + Apply). The menu is always offered — a stored engine is
+pre-highlighted (`· current`), so Enter keeps it — and every branch ends by
+offering the helpers, which deploy the `pixel-classify` skill into every
+configured harness's skills dir (and the `pixel-classify-files` Pi package
+when Pi is selected):
+
+```text
+pixel setup → Classify engine
+│
+├─ not a TTY → print suggestion, done
+│
+└─ pick:
+   ├─ Local (Ollaya)
+   │   └─ install ollaya + pull model → engine: local
+   │
+   ├─ Remote (hosted LLM)
+   │   ├─ provider: openrouter / ollama / deepseek / openai …
+   │   └─ API key (blank = configure later) → engine: remote
+   │
+   ├─ OpenAI (Decisions API)
+   │   └─ OPENAI_API_KEY → engine: remote (openai)
+   │
+   ├─ Jev (TypeSafe decision model)
+   │   ├─ key source: OpenCode Go (OPENCODE_API_KEY)
+   │   │              or TypeSafe direct (TYPESAFE_API_KEY)
+   │   └─ model per source → engine: remote (jev)
+   │
+   └─ Clef-flash (Cloudflare)
+       ├─ host: Ollama (keyless local / OLLAMA_API_KEY remote)
+       │      or Workers AI (account id + CF token)
+       └─ engine: remote (clef-ollama | clef-cloudflare)
+            │
+            ▼
+   helpers? → pixel-classify skill into harness dirs (+ Pi package)
+```
+
+The implementation lives in `classify_setup.rs` (`install_step`); the engine
+rows and their accuracy labels are `ENGINE_ROWS`, and each branch's writes are
+the `pixel config classify-engine` / `remote-preset` keys `ARCHITECTURE.md`
+documents for `pixel classify`.
+
 ## Guided and unattended
 
 `pixel setup` is one command with two ways to run (#878):

@@ -124,6 +124,27 @@ fn without_task_hooks(value: &serde_json::Value, provider: &str, exe: &Path) -> 
             remaining["hooks"].as_object_mut().unwrap().remove(event);
         }
     }
+    // The PostToolUse metrics relay is installed beside the task hooks.
+    if let Some(groups) = remaining["hooks"]
+        .get_mut("PostToolUse")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        groups.retain(|group| {
+            !group["hooks"].as_array().is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook["command"]
+                        .as_str()
+                        .is_some_and(|command| command.contains("run-hook metrics"))
+                })
+            })
+        });
+        if groups.is_empty() {
+            remaining["hooks"]
+                .as_object_mut()
+                .unwrap()
+                .remove("PostToolUse");
+        }
+    }
     remaining
 }
 
