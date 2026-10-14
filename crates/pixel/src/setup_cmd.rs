@@ -1115,9 +1115,11 @@ fn ask_confirm_keys(
             // would look like a dropped keypress.
             ListKey::None => return Ok(Some(false)),
             // Space and `a`: nothing this question uses, so nothing is
-            // repainted; the rewind leaves the next key writing in place.
+            // repainted. The rewind erases anyway, because the next key can be
+            // an arrow, and the help of the other choice can be shorter than
+            // the one on screen: a bare rewind would leave its tail behind.
             ListKey::Space | ListKey::All => {
-                write!(output, "\x1b[{drawn}A").map_err(io)?;
+                rewind_block(output, drawn)?;
                 drawn = 0;
             }
         }
@@ -1486,6 +1488,25 @@ mod tests {
         assert_eq!(
             list_keys_hint(&KeyReader::forced(false)),
             "Type numbers (1,3), `all` or `none` · enter keeps the shown defaults · q cancels"
+        );
+    }
+
+    #[test]
+    fn no_repaint_rewinds_by_hand_instead_of_through_rewind_block() {
+        // A bare rewind only overwrites, so the tail of a longer line stays on
+        // screen — twice in this file's history, once in each loop. The erase
+        // lives in `rewind_block`; this is what keeps every rewind going
+        // through it. The needle is assembled so the assertion cannot match
+        // itself.
+        let source = include_str!("setup_cmd.rs");
+        let bare = concat!("\\x1b[", "{drawn}A\"");
+        assert!(
+            !source.contains(bare),
+            "a hand-written rewind reappeared: call `rewind_block` instead"
+        );
+        assert!(
+            source.contains("fn rewind_block"),
+            "and the primitive it should call still exists"
         );
     }
 
