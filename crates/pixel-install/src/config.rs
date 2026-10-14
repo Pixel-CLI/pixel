@@ -97,6 +97,49 @@ pub fn brief_parts(home: &Path, repo: Option<&Path>) -> u8 {
         })
 }
 
+/// Settings key of the time one prompt brief may take.
+pub const BRIEF_WINDOW_KEY: &str = "brief_window_ms";
+/// Environment override of [`BRIEF_WINDOW_KEY`], in milliseconds; it wins over both config layers.
+pub const BRIEF_WINDOW_ENV: &str = "PIXEL_BRIEF_WINDOW_MS";
+/// Milliseconds a prompt-submit hook gives the brief: a loaded machine (a dozen agent sessions on one laptop)
+/// slows every lookup at once, and a brief cut to nothing by a 750 ms window answered nothing at all. The hook
+/// is killed by its host after [`HOOK_TIMEOUT`] seconds; this stays well under it.
+pub const BRIEF_WINDOW_HOOK_DEFAULT_MS: u64 = 3_000;
+/// Milliseconds the `pixel brief` command gives the brief: Pi's extension kills the command after 1.2 s.
+pub const BRIEF_WINDOW_COMMAND_DEFAULT_MS: u64 = 750;
+/// Shortest window a setting may ask for.
+pub const BRIEF_WINDOW_MIN_MS: u64 = 250;
+/// Longest window a setting may ask for: the hook decision is abandoned after six seconds
+/// (`DECISION_TIMEOUT` in `task_hook.rs`), itself under the [`HOOK_TIMEOUT`] the host enforces, and the window
+/// stays 1.5 s below that so the brief can still be printed.
+pub const BRIEF_WINDOW_MAX_MS: u64 = 4_500;
+const _: () = assert!(BRIEF_WINDOW_MAX_MS + 1_500 + 4_000 <= HOOK_TIMEOUT * 1_000);
+const _: () = assert!(BRIEF_WINDOW_MIN_MS <= BRIEF_WINDOW_COMMAND_DEFAULT_MS);
+const _: () = assert!(BRIEF_WINDOW_HOOK_DEFAULT_MS <= BRIEF_WINDOW_MAX_MS);
+
+/// How many milliseconds the brief may take: `env` (the value of [`BRIEF_WINDOW_ENV`]) when it is a whole number,
+/// else `brief_window_ms` in the repository's `.pixel/config.yaml` when `repo` is given and sets it, else the
+/// global one, else `default_ms`. The result is clamped into [`BRIEF_WINDOW_MIN_MS`]..=[`BRIEF_WINDOW_MAX_MS`]
+/// so no setting can outlast the hook that runs the brief; what is not a whole number counts as unset.
+pub fn brief_window_ms(
+    home: &Path,
+    repo: Option<&Path>,
+    env: Option<&str>,
+    default_ms: u64,
+) -> u64 {
+    env.and_then(|text| text.trim().parse::<u64>().ok())
+        .or_else(|| {
+            repo.into_iter().chain([home]).find_map(|dir| {
+                crate::doctor::load_pixel_config(dir)
+                    .ok()?
+                    .get(BRIEF_WINDOW_KEY)?
+                    .as_u64()
+            })
+        })
+        .unwrap_or(default_ms)
+        .clamp(BRIEF_WINDOW_MIN_MS, BRIEF_WINDOW_MAX_MS)
+}
+
 /// The canonical pixel usage-rule file (relative to home). This is the real,
 /// full rule text (the five mandatory scenarios, the doctrine, the git-op
 /// table) that `pixel setup` embeds into the managed CLAUDE.md/AGENTS.md
@@ -984,6 +1027,70 @@ mod tests {
             write_config(home.path(), text);
             assert_eq!(brief_parts(home.path(), None), expected, "{text:?}");
         }
+    }
+
+    #[test]
+    fn brief_window_ms_should_prefer_env_then_repo_then_global_then_the_default_and_clamp() {
+        let home = tempfile::TempDir::new().unwrap();
+        let repo = tempfile::TempDir::new().unwrap();
+        let ask = |env: Option<&str>| brief_window_ms(home.path(), Some(repo.path()), env, 3_000);
+        assert_eq!(ask(None), 3_000);
+        write_config(home.path(), "brief_window_ms: 2000\n");
+        assert_eq!(ask(None), 2_000);
+        assert_eq!(brief_window_ms(home.path(), None, None, 3_000), 2_000);
+        write_config(repo.path(), "brief_window_ms: 1500\n");
+        assert_eq!(ask(None), 1_500);
+        assert_eq!(
+            brief_window_ms(home.path(), None, None, 3_000),
+            2_000,
+            "a repository layer is for a repository only"
+        );
+        assert_eq!(
+            ask(Some("900")),
+            900,
+            "the environment wins over both layers"
+        );
+        assert_eq!(ask(Some(" 4000 ")), 4_000);
+        assert_eq!(
+            ask(Some("soon")),
+            1_500,
+            "a value that is not a number counts as unset"
+        );
+        assert_eq!(ask(Some("-5")), 1_500);
+        write_config(repo.path(), "metrics: \"on\"\n");
+        assert_eq!(
+            ask(None),
+            2_000,
+            "a layer that does not set it defers to the next"
+        );
+    }
+
+    #[test]
+    fn brief_window_ms_should_never_outlast_the_hook_that_runs_the_brief() {
+        let home = tempfile::TempDir::new().unwrap();
+        for (env, expected) in [
+            ("0", BRIEF_WINDOW_MIN_MS),
+            ("100", BRIEF_WINDOW_MIN_MS),
+            ("250", 250),
+            ("4500", BRIEF_WINDOW_MAX_MS),
+            ("4501", BRIEF_WINDOW_MAX_MS),
+            ("600000", BRIEF_WINDOW_MAX_MS),
+        ] {
+            assert_eq!(
+                brief_window_ms(home.path(), None, Some(env), 3_000),
+                expected,
+                "{env}"
+            );
+        }
+        write_config(home.path(), "brief_window_ms: 99999\n");
+        assert_eq!(
+            brief_window_ms(home.path(), None, None, 3_000),
+            BRIEF_WINDOW_MAX_MS
+        );
+        assert_eq!(
+            brief_window_ms(home.path(), None, None, 90_000),
+            BRIEF_WINDOW_MAX_MS.min(99_999)
+        );
     }
 }
 

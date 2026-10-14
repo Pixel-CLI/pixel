@@ -417,7 +417,7 @@ fn with_pack(command: &mut std::process::Command) {
 }
 
 /// The blocks of the pack `ask` gets, asked again while a loaded machine ends
-/// the brief's 750 ms window before the pack has any (nothing was sent then, so
+/// the brief's window before the pack has any (nothing was sent then, so
 /// asking again sends the same pack).
 fn blocks_eventually(ask: &dyn Fn() -> Value) -> usize {
     (0..5)

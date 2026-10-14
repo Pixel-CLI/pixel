@@ -56,9 +56,33 @@ pub(crate) const BRIEF_TAG: &str = "[PIXEL:BRIEF]";
 pub(crate) const BRIEF_FEATURE: &str = "brief";
 /// Environment opt-out: `0`, `false` or `off` silences the brief.
 pub(crate) const BRIEF_ENV: &str = "PIXEL_BRIEF";
-/// One window shared by every operation of one brief, measured from the
-/// moment the hook receives the prompt.
-pub(crate) const BRIEF_WINDOW: Duration = Duration::from_millis(750);
+/// The one window shared by every operation of one brief, measured from the
+/// moment the hook receives the prompt, for a brief started in `root`: three
+/// seconds by default, because a machine running a dozen agent sessions slows
+/// every lookup at once and a window that ends first leaves the agent no
+/// brief at all. The environment (`PIXEL_BRIEF_WINDOW_MS`), then the
+/// repository's and the global `brief_window_ms`, then the default of the
+/// caller (the hook's, or the `brief` command's, which Pi cuts off sooner),
+/// clamped to what the hook that runs the brief can wait for.
+pub(crate) fn window_for(root: &Path, command: bool) -> Duration {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let default = if command {
+        pixel_install::config::BRIEF_WINDOW_COMMAND_DEFAULT_MS
+    } else {
+        pixel_install::config::BRIEF_WINDOW_HOOK_DEFAULT_MS
+    };
+    Duration::from_millis(pixel_install::config::brief_window_ms(
+        &home,
+        Some(root),
+        std::env::var(pixel_install::config::BRIEF_WINDOW_ENV)
+            .ok()
+            .as_deref(),
+        default,
+    ))
+}
+
 /// Operations one brief may start, whatever they answer. A kind route may
 /// use the headroom (search, concept, symbols, impact, context, one
 /// kind op); the shared deadline, not this count, is the invariant.
@@ -2573,10 +2597,15 @@ impl Pending {
 
     /// [`Pending::finish`], and the decision it recorded.
     pub(crate) fn finish_with_record(self) -> Finished {
-        let _ = self
-            .done
-            .recv_timeout(self.deadline.saturating_duration_since(Instant::now()));
-        let brief = edit(&self.state, |brief| brief.clone());
+        let timed_out = matches!(
+            self.done
+                .recv_timeout(self.deadline.saturating_duration_since(Instant::now())),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        let mut brief = edit(&self.state, |brief| brief.clone());
+        // The window ended before the worker did: what is rendered is what
+        // had arrived, and `fit` says so instead of staying silent.
+        brief.cut |= timed_out;
         let (text, stats) = match fit(&brief) {
             Some((text, stats)) => (Some(text), stats),
             None => (None, AnswerStats::default()),
@@ -2706,10 +2735,11 @@ fn try_start_as(
             })
         });
     let pack = region_pack::limit_from_env(command, parts);
+    let window = window_for(&root, command);
     try_start_with(
         prompt,
         gate,
-        BRIEF_WINDOW,
+        window,
         move |deadline| super::evidence::open(&root, deadline),
         super::intent::judge,
         relevance::judge,
@@ -3548,9 +3578,16 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
         return render_low(brief).map(|text| (text, AnswerStats::default()));
     }
     // Admitted for its kind, not for the evidence of the packet: without the
-    // kind's own pack there is nothing to say.
+    // kind's own pack there is nothing to say, unless the window ended first.
+    // Then the question was judged about this repository and the pack was
+    // simply not ready: the best files it had found are a lead, which is
+    // better than the agent hearing nothing.
     if matches!(brief.admission, Admission::Kind(_)) {
-        return None;
+        return if brief.cut {
+            render_low(brief).map(|text| (text, AnswerStats::default()))
+        } else {
+            None
+        };
     }
     let receipt = !brief.receipt_lines().is_empty();
     let cap = byte_cap(
@@ -8855,6 +8892,40 @@ mod tests {
         assert!(
             fit(&brief).is_none(),
             "the packet of a kind admission says nothing"
+        );
+    }
+
+    #[test]
+    fn a_kind_admission_whose_window_ended_before_its_pack_should_render_its_best_files_as_a_lead()
+    {
+        let ended = Brief {
+            signal: Some(Signal::Prose),
+            admission: Admission::Kind(QuestionKind::History),
+            answered: 1,
+            cut: true,
+            files: vec![RichHit {
+                path: "src/a.rs".into(),
+                line: 7,
+                text: None,
+            }],
+            ..Brief::default()
+        };
+        let (text, stats) = fit(&ended).expect("the window ended: a lead, not silence");
+        assert!(text.starts_with(BRIEF_TAG), "{text}");
+        assert!(text.contains("files: src/a.rs:7"), "{text}");
+        assert_eq!(stats, AnswerStats::default());
+        let no_files = Brief {
+            files: Vec::new(),
+            ..ended.clone()
+        };
+        assert!(fit(&no_files).is_none(), "nothing arrived, nothing to say");
+        let in_time = Brief {
+            cut: false,
+            ..ended
+        };
+        assert!(
+            fit(&in_time).is_none(),
+            "a finished brief without its pack stays silent"
         );
     }
 

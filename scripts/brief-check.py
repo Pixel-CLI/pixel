@@ -55,6 +55,7 @@ NON_CALL_ITEMS = frozenset({"agent_message", "reasoning", "error", "todo_list", 
 LINE_THRESHOLD = 0.8     # share of a call's lines the brief must quote for the call to be covered
 DIFF_THRESHOLD = 0.7     # share of a diff's changed lines the brief must carry
 HISTORY_BUDGET_S = 420
+PROTOTYPE_RUNS = ("proto-", "hyp-")
 
 
 def load_module(name, directory):
@@ -112,6 +113,8 @@ def recorded_traces(root, qid):
     were named (``<id>.stream.jsonl``) is a brief-arm trace."""
     found = {}
     for run in sorted((Path(root) / "zero-calls").glob("*/raw"), key=lambda p: p.stat().st_mtime):
+        if run.parent.name.startswith(PROTOTYPE_RUNS):
+            continue  # a prototype's own run is evidence for that prototype, not a recording of the brief's gaps
         for arm in ("brief", "nobrief"):
             for name in (f"{qid}.{arm}.stream.jsonl", f"{qid}.stream.jsonl" if arm == "brief" else None):
                 path = run / name if name else None
@@ -126,6 +129,8 @@ def live_calls(root, qid):
     """Calls of the brief arm in the newest report that has it: ``(run id, n_calls)`` or ``None``."""
     best = None
     for report in sorted((Path(root) / "zero-calls").glob("*/report.json"), key=lambda p: p.stat().st_mtime):
+        if report.parent.name.startswith(PROTOTYPE_RUNS):
+            continue
         try:
             rows = json.loads(report.read_text())["rows"]
         except (OSError, ValueError, KeyError):
@@ -241,10 +246,10 @@ def question_ids(root):
     return [r[0] for r in rows]
 
 
-def checked_clone(root, binary, repo, sha):
+def checked_clone(root, binary, repo, sha, history=True):
     """A clone of the census repository at ``sha`` that stays between runs: indexed (graph, history, meaning vectors)
     the first time, and only given a daemon of the binary under test afterwards."""
-    dest = Path(root) / "score" / "check" / f"{repo}-{sha[:8]}"
+    dest = Path(root) / "score" / "check" / f"{repo}-{sha[:8]}{'' if history else '-nohist'}"
     marker = dest / ".pixel" / "brief-check.json"
     digest = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
     env = env_for_brief()
@@ -264,7 +269,7 @@ def checked_clone(root, binary, repo, sha):
     sh([binary, "prepare-repo", "."], cwd=dest, timeout=1800, env=env)
     if first:
         promisor = "promisor" in (dest / ".git" / "config").read_text(errors="replace")
-        if not promisor:
+        if history and not promisor:
             try:
                 sh([binary, "build-index", "--history", "."], cwd=dest, timeout=HISTORY_BUDGET_S, env=env)
             except subprocess.TimeoutExpired:
@@ -299,6 +304,9 @@ def run_brief(binary, clone, prompt, tries=5):
             text, meta = "", {"error": (proc.stdout + proc.stderr)[-300:]}
         if text or attempt == tries - 1:
             return text, meta, ms
+        if attempt == 1:
+            # Two empty briefs: the daemon may be one that was left half-warm; start a fresh one.
+            sh([binary, "daemon", "stop", "."], cwd=clone, timeout=60, env=env_for_brief())
         time.sleep(1)
 
 
@@ -313,10 +321,25 @@ def build(binary_dir, no_build):
         raise SystemExit("build failed:\n" + proc.stderr[-2000:])
 
 
+def prepare(root, sb, qid, binary, history=True):
+    """The pinned question and its reused clone: ``(repo name, prompt, clone)``."""
+    _id, repo_name, sha, prompt = question(root, qid)
+    return repo_name, prompt, checked_clone(root, binary, repo_name, sha, history)
+
+
+def score(root, sb, qid, repo_name, clone, text, ms=0, meta=None):
+    """The row of one brief ``text``: quoted share, bytes and the replay of the recorded calls."""
+    repo = sb.Repo(clone)
+    regions = sb.parse_brief(text, repo)
+    traces = recorded_traces(root, qid)
+    return {"id": qid, "repo": repo_name, "kind": (meta or {}).get("kind"), "bytes": len(text.encode()), "ms": ms,
+            "nb_quoted": quoted_share(sb, repo, regions, traces.get("nobrief")),
+            "live": live_calls(root, qid), "replay": replay(sb, repo, regions, text, traces), "text": text}
+
+
 def check(args, sb, qid, binary):
     root = Path(args.root)
-    _id, repo_name, sha, prompt = question(root, qid)
-    clone = checked_clone(root, binary, repo_name, sha)
+    repo_name, prompt, clone = prepare(root, sb, qid, binary)
     if args.brief_file:
         text, meta, ms = Path(args.brief_file).read_text(), {}, 0
     else:
@@ -326,14 +349,18 @@ def check(args, sb, qid, binary):
         brief_file.write_text(text)
         extra = sh(shlex.split(args.extra_cmd), cwd=clone, env=dict(os.environ, QID=qid, CLONE=str(clone), PROMPT=prompt,
                                                                     BRIEF_FILE=str(brief_file)), timeout=120)
-        text = text.rstrip("\n") + "\n" + extra.stdout
-    repo = sb.Repo(clone)
-    regions = sb.parse_brief(text, repo)
-    traces = recorded_traces(root, qid)
-    result = replay(sb, repo, regions, text, traces)
-    return {"id": qid, "repo": repo_name, "kind": meta.get("kind"), "bytes": len(text.encode()), "ms": ms,
-            "nb_quoted": quoted_share(sb, repo, regions, traces.get("nobrief")),
-            "live": live_calls(root, qid), "replay": result, "text": text}
+        text = apply_extra(text, extra.stdout)
+    return score(root, sb, qid, repo_name, clone, text, ms, meta)
+
+
+REPLACE_MARK = "@@REPLACE@@"
+
+
+def apply_extra(text, extra):
+    """What a prototype script printed, applied to the brief: appended, or replacing it after ``@@REPLACE@@``."""
+    if extra.startswith(REPLACE_MARK):
+        return extra[len(REPLACE_MARK):].lstrip("\n")
+    return text.rstrip("\n") + "\n" + extra if extra.strip() else text
 
 
 def residual_of(row):

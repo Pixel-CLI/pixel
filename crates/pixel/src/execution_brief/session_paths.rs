@@ -29,7 +29,7 @@ use serde_json::Value;
 use super::feedback;
 
 /// How long the session's files may take to collect, from the start of the
-/// brief (whose whole window is 750 ms).
+/// brief (whose whole window is 3 s by default).
 pub(crate) const CONTEXT_WINDOW: Duration = Duration::from_millis(150);
 /// How much of the end of the transcript is read.
 pub(crate) const TRANSCRIPT_TAIL_BYTES: u64 = 64 * 1024;

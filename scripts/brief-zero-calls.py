@@ -401,7 +401,7 @@ def render(rows, label, claude_census=None):
     if any(v is not None for v in latency):
         lines.append(f"Brief latency over {sum(v is not None for v in latency)} sessions: "
                      f"p50 {percentile(latency, 0.5)} ms, p95 {percentile(latency, 0.95)} ms, "
-                     f"max {max(v for v in latency if v is not None)} ms (window 750 ms).")
+                     f"max {max(v for v in latency if v is not None)} ms (window 3000 ms).")
     if claude_census:
         lines.append(f"Census (vanilla Claude Code): {sum(claude_census.get(q, 0) for q in by)} tool calls over these "
                      f"{len(by)} questions.")

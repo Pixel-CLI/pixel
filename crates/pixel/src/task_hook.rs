@@ -20,6 +20,10 @@ pub(crate) const MAX_INPUT: u64 = crate::hook_input::MAX_HOOK_INPUT;
 // Return a decision before the managed native hooks' ten-second host deadline
 // and Pi's eight-second subprocess deadline; a stalled worker dies with run().
 const DECISION_TIMEOUT: Duration = Duration::from_secs(6);
+// The brief's longest window plus the time to print it stays inside that decision.
+const _: () = assert!(
+    pixel_install::config::BRIEF_WINDOW_MAX_MS + 1_500 <= DECISION_TIMEOUT.as_millis() as u64
+);
 const UNAVAILABLE: &str = "Pixel task state is unavailable. Reads and recovery remain available; edits and completion require a working task ledger.";
 
 /// Hosts with a verified task lifecycle adapter.
@@ -1324,6 +1328,18 @@ fn publish_first_part(
         .filter(|slice| !slice.is_empty())
 }
 
+/// How long a part after the first waits for the first part's brief: the
+/// window the first part gives the brief, for this repository, and one second
+/// to store and release it. The first part and the others start together.
+fn follow_bound(raw: &str) -> Duration {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|payload| crate::discover_root(&payload_cwd(&payload)).ok())
+        .map_or(brief_parts::WAIT, |root| {
+            crate::execution_brief::chain::window_for(&root, false) + brief_parts::WAIT_SLACK
+        })
+}
+
 /// A part after the first: print the slice of the brief part 1 stores,
 /// waiting at most `bound` for it. `None` (print nothing) when the payload
 /// names no prompt or repository or the brief does not arrive in time; `{}`
@@ -1530,7 +1546,7 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
         if let Some(part) = later {
             // Nothing to say is nothing printed: a hook that cannot get its
             // slice in time never holds the prompt.
-            follow(provider, raw, part, brief_parts::WAIT)
+            follow(provider, raw, part, follow_bound(raw))
         } else {
             let input = raw.clone();
             Some(bounded_decision(

@@ -523,7 +523,7 @@ stays so references to the later threats hold.
 - **Mitigation**: the one thing an install delivers to an agent unasked is
   the `[PIXEL:BRIEF]` block of `task-event` on `prompt-submit`: it quotes file
   paths, symbol names and a definition from the repository as evidence, capped
-  at 2 KiB (`BRIEF_BYTES`), with a 750 ms deadline, off with `PIXEL_BRIEF=0`.
+  at 2 KiB (`BRIEF_BYTES`), with a 3 s deadline (`brief_window_ms`, at most 4.5 s), off with `PIXEL_BRIEF=0`.
   A prompt in plain language gets one only when the repository's own
   vocabulary covers it (`execution_brief::relevance`), and its first files
   come from the daemon's `facts.relevance` and `meaning` ops: the same
