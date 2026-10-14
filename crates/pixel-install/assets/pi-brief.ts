@@ -18,7 +18,7 @@ const TIMEOUT_MS = 1_200;
 
 export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
-    const prompt = event.prompt.trim();
+    const prompt = (event.prompt ?? "").trim();
     if (!prompt || prompt.length > 8_000) return;
     try {
       const result = await pi.exec(PIXEL_BIN, [
