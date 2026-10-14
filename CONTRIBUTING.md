@@ -240,6 +240,34 @@ when the business rule is deleted is not a test. Prefer asserting on the
 observable contract (JSON fields, exit codes, epistemics markers) over
 implementation details.
 
+## Write a probe
+
+A probe is a script that adds evidence to the prompt-submit brief so that an agent makes fewer tool calls: a
+git history block, a ranked call trace, a configuration registry, a documentation section. It lives in
+`probes/<name>/` and is judged by a harness, so a PR holds one directory and the numbers.
+
+```bash
+cp -R probes/_template probes/my-probe        # then edit pixel-plugin.toml and probe
+python3 -I scripts/probe-test.py my-probe     # contract, budget, determinism x2, read-only, no question worse
+python3 -I scripts/probe-test.py my-probe --live   # opt-in: the agent with and without it (1 run, --live-reps 3 to be sure)
+```
+
+- **Contract.** `pixel-plugin.toml` (the plugin host's manifest) with `capabilities = ["brief-probe"]` and a
+  `[brief-probe]` table: `owner`, `when_kinds` / `skip_kinds` / `when_prompt` (when it runs), `budget_ms` (at most
+  1000), `mode` (`lead` puts its blocks before the brief's, `append` after). The executable named by `run` reads
+  `{prompt, repo_root, brief, kind, session_files}` as JSON on stdin and prints brief blocks (`### path:lo-hi —
+  label`, then numbered lines `N| text`), and optionally `drop: <regex>` / `first: <regex>` lines that remove or
+  promote blocks of the brief by header.
+- **Rules.** Read-only, no network, deterministic (sort what you list), generic (derive every word, path and symbol
+  from the prompt and the repository when it runs: `probe-test.py --guard "<prompt>"` refuses code that spells out
+  those of one prompt), `.env*` only when git tracks it with secret-looking values masked. A probe that overruns
+  its budget, fails or prints nonsense is skipped, never fatal.
+- **Evidence.** `scripts/probe-translate.py <id>` shows what a session without a brief fetched and whether the brief
+  or a probe covers it; `scripts/probe-loop.py --prompt "<question>"` runs the whole loop on a plain prompt. The
+  public bench is `eval/brief-bench/` (`scripts/brief-bench.py check`). The PR states the `PROBE ... | KEEP`
+  line `probe-test` prints and `report.md`.
+- Status: the scripts judge probes; the brief does not run them yet (see ARCHITECTURE.md, "Agent integration").
+
 ## Mutation testing
 
 Line coverage says where the tests went; mutation testing says whether they

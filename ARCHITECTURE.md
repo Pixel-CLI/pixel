@@ -1131,6 +1131,18 @@ no native automatic chat transport; mock-wrapper tests prove prompt delivery and
 stream/exit preservation, not actual model adherence or live-host duplicate
 suppression. Chat relay remains a host-supported, separately verifiable boundary.
 
+
+### Brief probes
+
+`probes/<name>/` holds scripts that add blocks to the prompt-submit brief (contract: `CONTRIBUTING.md`, "Write a
+probe"). Each is a plugin directory (`pixel-plugin.toml`, capability `brief-probe`, the plugin host's manifest)
+plus an executable that reads `{prompt, repo_root, brief, kind, session_files}` on stdin and prints blocks and
+`drop:` / `first:` directives. `scripts/probe-test.py` is the specification of the merge (drops, then firsts, lead
+blocks before the brief's and append blocks after, one block per header, 3 x 9,800 characters with append blocks
+shed first, the closing directive kept last) and of the checks (budget, determinism, read-only, neighbours);
+`scripts/probe-loop.py`, `probe-translate.py` and `brief-bench.py` (bench: `eval/brief-bench/`) feed it. The binary
+does not run probes yet: the plugin host has one capability, `command`, and the merge exists in Python only.
+
 ## Testing and gates
 
 - The public `.github/actions/setup-pixel` composite action installs a checksum-verified
