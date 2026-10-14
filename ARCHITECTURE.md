@@ -42,7 +42,7 @@ MCP server. `pixel setup` registers no MCP server with any agent.
 | `pixel-proto` | The shared contract crate: `Envelope`, `PixelError` and `ErrorCode`, `Epistemics`, `SnapshotInfo`, `Budget`, `Warning`, the `Op` request enum, and `commands::RENAMED_COMMANDS`, the old-to-new CLI subcommand names the CLI accepts as hidden aliases until 1.0. No I/O, no business logic. Every other crate that speaks the wire format depends on it, and it depends on nothing internal. | none |
 | `pixel-daemon` | Transport-agnostic `Service` (`api.rs`) and the Unix-socket NDJSON daemon with filesystem watching (`daemon.rs`). Dispatches each `Op` to the right library, attaches snapshot and epistemics metadata, and is the one place a retrieval envelope is built. Also hosts the recall daemon service. | index, graph, context, rank, proto, ops, facts, session, recall, git |
 | `pixel-index` | Sparse n-gram (trigram) text index: gram extraction, window weighting, posting-list algebra, git-anchored base and delta shards, working-tree overlay, query planner, verification, and the `gitsync` helpers that read HEAD, branch, and porcelain status. | git |
-| `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. `mvp_adapter` reads the vendored pixel-mvp index (`refresh` brings it up to date under a state directory, through git) and returns what its rules decide at each Rust site in this graph's rows: proven calls as `exact` edges, references as `probable`, the rest as `unresolved_calls` rows, and each Rust import's resolved file, on this graph's own symbols (rows with no symbol here, Rust test code, are dropped and counted); the Rust source switch writes them in ("Indexes and freshness"). `shadow` builds this graph and the adapter's rows in a scratch directory and counts what each links alone (`pixel graph-shadow`). | git, index, mvp-index, mvp-model, mvp-store |
+| `pixel-graph` | Code graph: tree-sitter extraction of symbols, imports, and call sites per file; import resolution; tiered call resolution with an epistemic envelope; and the analyses `impact`, `trace`, `process`, `cluster`, `changes`, `targets`. `store` owns the SQLite schema. `mvp_adapter` reads the vendored pixel-mvp index (`refresh` brings it up to date under a state directory, through git) and returns what its rules decide at each Rust site in this graph's rows: proven calls as `exact` edges, references as `probable`, the rest as `unresolved_calls` rows, and each Rust import's resolved file, on this graph's own symbols (rows with no symbol here, Rust test code, are dropped and counted); the Rust source switch, on by default for a Cargo crate, writes them in ("Indexes and freshness"). `shadow` builds this graph and the adapter's rows in a scratch directory and counts what each links alone (`pixel graph-shadow`). | git, index, mvp-index, mvp-model, mvp-store |
 | `pixel-facts` | History-wide fact and diff ingest, search, lifecycle, and rescue discovery. Owns `history.db`: commit metadata, diff text, and contentless FTS5 trigram indexes over the diffs and paths. Demand-driven: the daemon never ingests at startup, and `status` and `doctor` never create the db — the first history query runs a bounded catch-up (`PIXEL_FACTS_QUERY_BUDGET_MS`, default 3 s) and spawns the low-priority keep-fresh loop that never blocks queries. The daemon `history`, `dig-history` and `lifecycle` ops take `read_only: true` (protocol 15), under which an absent db answers `unavailable` and a stale one answers from existing rows — ingest and catch-up are skipped; the prompt hook sends only this form. Bounded: diff text is kept for the last 365 days (`PIXEL_HISTORY_WINDOW_DAYS`, `0` for all) within 256 MiB of used pages (`PIXEL_HISTORY_BUDGET_MB`), newest first; older diffs are evicted, metadata never is. `build-index --history` remains the explicit full build. Backs `excavate`, `lifecycle`, `history-search` and `rescue` discovery (`resolve` is the graph's concept index). | git |
 | `pixel-rank` | Fusion core for `targets` and ranked `search`: task text and signal inputs in, closed prioritized P0/P1/P2 file list out. The scoring is pure; `compute_signals` gathers the activity channel itself (git log churn when facts have none, and a failed or capped scan is reported as unavailable rather than as an empty map) and takes the session and error-sink channels from its caller — the daemon feeds neither of those. Also hosts `regions`: the pure symbol-level regions analysis for `scope-task --regions` (P0 symbols + call/import edges in, regions manifest out — line ranges, conservative conflict pairs, merge-order layers, shared files). | graph, git, session |
 | `pixel-context` | Semantic compression of code-context items: layered renderings that fit a token budget instead of raw source dumps. | none |
@@ -134,7 +134,7 @@ Per repository, under `.pixel/` (git-ignored):
 | --- | --- | --- |
 | `base.shard`, `delta.shard`, `state.json`, `build.lock` | `pixel-index` | Base shard for all tracked files at a pinned commit, delta shard for files changed between that commit and HEAD, and `state.json` as the delta-layer sidecar (tombstones for superseded base paths). The dirty working-tree overlay is in memory only. First process to hold `build.lock` builds; others wait. |
 | `graph.v2.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. The name moves with the schema (`pixel_daemon::api::GRAPH_DB_FILE`); user-facing messages still say `graph.db`. |
-| `.pixel-mvp/` (`graph.db` + journals, `index.lock`, `.gitignore`, `checked`) | `mvp-store`, through `pixel-graph`'s `mvp_adapter` | pixel-mvp's index of the Rust and Ruby files, written only while the Rust source switch is on (`PIXEL_GRAPH_SOURCE_RUST=mvp`, see "Indexes and freshness") and refreshed by every graph build and update; rebuildable, one writer at a time behind `index.lock`, a damaged or foreign `graph.db` rebuilt. Opened only after `pixel_git::sidecar::check`. |
+| `.pixel-mvp/` (`graph.db` + journals, `index.lock`, `.gitignore`, `checked`) | `mvp-store`, through `pixel-graph`'s `mvp_adapter` | pixel-mvp's index of the Rust and Ruby files, written when the graph's root holds a `Cargo.toml` and the Rust source switch is not `PIXEL_GRAPH_SOURCE_RUST=v1` (see "Indexes and freshness"), and refreshed by every graph build and update; rebuildable, one writer at a time behind `index.lock`, a damaged or foreign `graph.db` rebuilt. Opened only after `pixel_git::sidecar::check`. |
 | `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
@@ -380,26 +380,48 @@ envelope talks to the daemon socket directly.
   graph.db on first use`, or `rebuilt graph.db: <reason>` (the file on disk
   is `graph.v2.db`). Call edges carry a resolution tier, and
   analyses report a lower bound when same-name call sites stay unresolved.
-- The Rust source switch, `PIXEL_GRAPH_SOURCE_RUST` (`mvp` on, anything
-  else off; `pixel_graph::mvp_adapter::RustSource`), read by the process
-  that builds the graph (the daemon, or the CLI without one). With it on,
-  the full build and every incremental update (`write_rows`, so
+- The Rust source switch, `PIXEL_GRAPH_SOURCE_RUST` (`v1` off; unset or
+  anything else on, the default; `pixel_graph::mvp_adapter::RustSource`),
+  read by the process that builds the graph (the daemon, or the CLI
+  without one). With it on and a `Cargo.toml` at the graph's root, the
+  full build and every incremental update (`write_rows`, so
   `update_files` and `apply_tree_delta`) refresh pixel-mvp's index in
   `.pixel/.pixel-mvp/` and replace the Rust rows with its answer
-  (`mvp_adapter::switch_rust`): every `calls` and `references` edge from a
-  Rust symbol, every `unresolved_calls` row of a Rust file, every Rust
-  import's target. This resolver then decides no Rust site (the batch's
-  Rust calls are not resolved, `resolve_affected`'s retry skips their
-  rows) and `ResolveIndex` offers no Rust symbol to a caller of another
-  language. The graph records its Rust source in the `graph_source` meta
-  key (`rust=mvp <commit> <extractor>`; absent with the switch off, so that
-  graph is the one built before the switch existed), and a graph whose
-  source differs from the switch's, or from the vendored commit and
-  extractor, is not current: the next read rebuilds it whole. Where
-  pixel-mvp cannot index (the root is not the top level of a git work
-  tree), the graph keeps this resolver's Rust edges and records
-  `rust=v1, pixel-mvp unavailable`, which counts as current while the
-  switch is on.
+  (`mvp_adapter::switch_rust`): every `calls` edge from a Rust symbol
+  (all `exact`: pixel-mvp links a site only where Rust's rules prove the
+  target), every `references` edge (`probable`), every `unresolved_calls`
+  row of a Rust file, every Rust import's target. This resolver then
+  decides no Rust site (the batch's Rust calls are not resolved,
+  `resolve_affected`'s retry skips their rows) and `ResolveIndex` offers
+  no Rust symbol to a caller of another language. The graph records its
+  Rust source in the `graph_source` meta key (`rust=mvp <commit>
+  <extractor>`; absent with `v1`, so that graph is the one built before
+  the switch existed), and a graph whose source differs from the
+  switch's, or from the vendored commit and extractor, is not current: the
+  next read rebuilds it whole. Where pixel-mvp cannot index (no
+  `Cargo.toml` at the root, the root is not the top level of a git work
+  tree, a tracked `.pixel/`), the graph keeps this resolver's Rust edges
+  and records `rust=v1, pixel-mvp unavailable`, which counts as current
+  while the switch is on. Ruby and every other language keep this
+  resolver. Known limits of the Rust source, kept here until pixel-mvp
+  fixes them:
+  - Rust test code (`#[test]` functions, `#[cfg(test)]` modules) has no
+    symbols in this graph, so its calls are dropped (`pixel graph-shadow`
+    counts them);
+  - a local typed only by what a function returns is not followed beyond
+    `T::f(…)?`, `.unwrap()` and `.expect(…)` on std's `Result` or `Option`
+    of `T`: such method calls stay unresolved, counted in the lower bound;
+  - a macro invoked in a block may write a method or an impl the rules do
+    not see; a dependency's attribute macro is read as inert and its
+    derive may write beside its type; a dependency's own macro named
+    `lazy_static` or `thread_local` is taken for the standard one; cfg-like
+    forms outside `#[cfg]` are not read;
+  - pixel-mvp's index spawns `git` without `GitRunner`'s timeout and output
+    cap;
+  - an incremental update rewrites every Rust row: on this repository
+    (`b2d22eee`, `dev-release` build) the first graph command after a
+    one-file edit takes about 0.85 s instead of 0.22 s, and `.pixel/` holds
+    about 44 MB more.
 - Ruby constant receivers are resolved in `pixel-graph/src/resolve/ruby.rs`
   against class/module scopes, preserving the difference between nested
   declarations and `class A::B`. Unique class and constructor targets are

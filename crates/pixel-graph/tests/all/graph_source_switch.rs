@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: The Pixel contributors
 // SPDX-License-Identifier: MIT
 
-//! The Rust source switch (`PIXEL_GRAPH_SOURCE_RUST=mvp`): on the adapter's
+//! The Rust source switch (`PIXEL_GRAPH_SOURCE_RUST`, pixel-mvp unless
+//! `v1`): on the adapter's
 //! fixture (`mvp_adapter.rs`), what the graph holds with it on and off,
 //! through the full build and through each incremental route that writes
 //! rows (`update_file`, `apply_tree_delta`).
@@ -168,18 +169,12 @@ fn with_the_switch_on_no_call_crosses_between_rust_and_another_language() {
 
 #[test]
 fn with_the_switch_off_the_graph_is_this_resolvers_alone() {
-    // `build_graph` with the switch unset is `RustSource::V1`: no source
-    // recorded, no pixel-mvp state, and every decision equal to an explicit
-    // V1 build's, the name-only edges included.
+    // `PIXEL_GRAPH_SOURCE_RUST=v1`: no source recorded, no pixel-mvp
+    // state, the name-only edges included.
     let (_dir, root, db) = built(RustSource::V1);
     let store = GraphStore::open(&db).unwrap();
     assert_eq!(store.meta_get(GRAPH_SOURCE_KEY).unwrap(), None);
     assert!(!root.join(".pixel/.pixel-mvp").exists());
-    if std::env::var_os("PIXEL_GRAPH_SOURCE_RUST").is_none() {
-        let again = root.join(".pixel/again.db");
-        build_graph(&root, &again).unwrap();
-        assert_eq!(decisions(&again), decisions(&db));
-    }
     let run = id(&store, "src/lib.rs", "run");
     let join = id(&store, "src/paths.rs", "join");
     assert!(
@@ -189,6 +184,33 @@ fn with_the_switch_off_the_graph_is_this_resolvers_alone() {
             .iter()
             .any(|e| e.dst_id == join && e.tier == Tier::Probable)
     );
+}
+
+#[test]
+fn with_the_switch_unset_a_rust_crate_takes_pixel_mvps_edges() {
+    if std::env::var_os("PIXEL_GRAPH_SOURCE_RUST").is_some() {
+        return;
+    }
+    let (_dir, root, db) = built(RustSource::Mvp);
+    let unset = root.join(".pixel/unset.db");
+    build_graph(&root, &unset).unwrap();
+    assert_eq!(decisions(&unset), decisions(&db));
+    assert_eq!(
+        GraphStore::open(&unset)
+            .unwrap()
+            .meta_get(GRAPH_SOURCE_KEY)
+            .unwrap(),
+        Some(mvp_source())
+    );
+}
+
+#[test]
+fn the_switch_reads_v1_as_off_and_anything_else_as_on() {
+    assert_eq!(RustSource::parse(Some("v1")), RustSource::V1);
+    assert_eq!(RustSource::parse(Some(" v1\n")), RustSource::V1);
+    assert_eq!(RustSource::parse(None), RustSource::Mvp);
+    assert_eq!(RustSource::parse(Some("mvp")), RustSource::Mvp);
+    assert_eq!(RustSource::parse(Some("V1")), RustSource::Mvp);
 }
 
 #[test]
@@ -216,14 +238,24 @@ fn an_incremental_update_with_the_switch_on_stores_what_a_full_build_stores() {
     for rel in ["src/lib.rs", "scripts/env.py"] {
         update_file(&root, &db, rel).unwrap();
     }
-    // The third through the daemon's route: a tree delta.
-    let delta = tree_delta(&root, &db).unwrap();
-    if std::env::var_os("PIXEL_GRAPH_SOURCE_RUST").is_none() {
-        // With the switch unset in this process, a graph built from
-        // pixel-mvp is not current: the next read rebuilds it whole.
-        assert!(delta.is_none());
+    // The third through the daemon's route, a tree delta, where this
+    // process's switch is the default; `update_file` otherwise.
+    match tree_delta(&root, &db).unwrap() {
+        Some(delta) if std::env::var_os("PIXEL_GRAPH_SOURCE_RUST").is_none() => {
+            assert_eq!(
+                delta
+                    .changed
+                    .iter()
+                    .map(|(rel, _)| rel.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["src/paths.rs"]
+            );
+            apply_tree_delta(&root, &db, &delta).unwrap();
+        }
+        _ => {
+            update_file(&root, &db, "src/paths.rs").unwrap();
+        }
     }
-    update_file(&root, &db, "src/paths.rs").unwrap();
 
     let reference = root.join(".pixel/reference.db");
     build_graph_from(&root, &reference, RustSource::Mvp).unwrap();
@@ -245,32 +277,16 @@ fn an_incremental_update_with_the_switch_on_stores_what_a_full_build_stores() {
 }
 
 #[test]
-fn a_tree_delta_with_the_switch_on_keeps_pixel_mvps_rows() {
+fn a_graph_built_from_the_other_source_is_rebuilt_whole() {
     if std::env::var_os("PIXEL_GRAPH_SOURCE_RUST").is_some() {
         return;
     }
-    // `apply_tree_delta` is the daemon's route; with the switch unset here
-    // the delta is withheld (above), so it is driven by hand.
+    // The switch unset is pixel-mvp: a graph of this resolver's is not
+    // current, and no delta is offered for it.
+    let (_dir, root, db) = built(RustSource::V1);
+    assert!(tree_delta(&root, &db).unwrap().is_none());
     let (_dir, root, db) = built(RustSource::Mvp);
-    let store = GraphStore::open(&db).unwrap();
-    let before = decisions(&db);
-    drop(store);
-    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
-    fs::write(root.join("src/lib.rs"), format!("{lib}\n")).unwrap();
-    let hash = xxhash(&fs::read(root.join("src/lib.rs")).unwrap());
-    let delta = pixel_graph::build::TreeDelta {
-        fresh: false,
-        changed: vec![("src/lib.rs".to_string(), hash)],
-        removed: Vec::new(),
-        indexed_files: 0,
-        signature: "test".to_string(),
-    };
-    apply_tree_delta(&root, &db, &delta).unwrap();
-    assert_eq!(decisions(&db), before);
-}
-
-fn xxhash(bytes: &[u8]) -> u64 {
-    u64::from_str_radix(&pixel_graph::build::content_oid(bytes), 16).unwrap()
+    assert!(tree_delta(&root, &db).unwrap().is_some_and(|d| d.fresh));
 }
 
 #[test]

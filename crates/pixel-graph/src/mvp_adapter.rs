@@ -23,7 +23,7 @@
 //! not extract (`rust_is_test_container`).
 //!
 //! [`rust_rows`] only reads this graph. The switch writes the rows in:
-//! with `PIXEL_GRAPH_SOURCE_RUST=mvp` ([`RustSource`]), the full build and
+//! unless `PIXEL_GRAPH_SOURCE_RUST=v1` ([`RustSource`]), the full build and
 //! every incremental update replace the Rust rows with pixel-mvp's
 //! ([`switch_rust`]), the graph records where its Rust edges come from
 //! ([`GRAPH_SOURCE_KEY`]), and the resolver no longer offers a Rust symbol
@@ -51,8 +51,8 @@ pub const MVP_COMMIT: &str = "d5c7cf7";
 /// the graph built before the switch existed.
 pub const GRAPH_SOURCE_KEY: &str = "graph_source";
 
-/// The switch: `mvp` takes Rust calls, references and imports from
-/// pixel-mvp's index, `v1` from this graph's resolver.
+/// The switch: `v1` takes Rust calls, references and imports from this
+/// graph's resolver; unset, or anything else, from pixel-mvp's index.
 pub const RUST_SOURCE_ENV: &str = "PIXEL_GRAPH_SOURCE_RUST";
 
 /// The [`GRAPH_SOURCE_KEY`] value of a graph the switch asked to take from
@@ -77,12 +77,12 @@ impl RustSource {
         Self::parse(std::env::var(RUST_SOURCE_ENV).ok().as_deref())
     }
 
-    /// `mvp` is [`RustSource::Mvp`]; anything else, or nothing, is the
-    /// default, [`RustSource::V1`].
+    /// `v1` is [`RustSource::V1`]; anything else, or nothing, is the
+    /// default, [`RustSource::Mvp`].
     pub fn parse(value: Option<&str>) -> Self {
         match value.map(str::trim) {
-            Some("mvp") => RustSource::Mvp,
-            _ => RustSource::V1,
+            Some("v1") => RustSource::V1,
+            _ => RustSource::Mvp,
         }
     }
 }
