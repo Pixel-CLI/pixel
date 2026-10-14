@@ -1160,19 +1160,149 @@ fn forced_oversize(_: TaskProvider, text: Option<String>) -> Option<String> {
 }
 
 /// The brief text of `event`, once the worker has answered or the window is
-/// out; `None` when the event carries no brief or nothing answered.
+/// out; `None` when the event carries no brief or nothing answered. A prompt
+/// the brief saw is written to the read-feedback log either way.
 fn finish_brief(
     provider: TaskProvider,
     event: TaskHookEvent,
     payload: &Value,
     brief: Option<crate::execution_brief::chain::Pending>,
 ) -> Option<String> {
-    let text = brief.and_then(crate::execution_brief::chain::Pending::finish);
-    if brief_prompt(provider, event, payload).is_some() {
-        forced_oversize(provider, text)
-    } else {
-        text
+    let finished = brief.map(crate::execution_brief::chain::Pending::finish_with_record);
+    let Some(prompt) = brief_prompt(provider, event, payload) else {
+        return finished.and_then(|finished| finished.text);
+    };
+    let text = forced_oversize(provider, finished.as_ref().and_then(|f| f.text.clone()));
+    note_prompt(
+        provider,
+        payload,
+        &prompt,
+        text.as_deref(),
+        finished.as_ref(),
+    );
+    text
+}
+
+/// Write the `prompt` line of the read-feedback log: what the brief handed
+/// this prompt, joined to the decision log by the typed text's hash. Best
+/// effort, and nothing without a session id to join the later tool calls by.
+fn note_prompt(
+    provider: TaskProvider,
+    payload: &Value,
+    prompt: &str,
+    text: Option<&str>,
+    finished: Option<&crate::execution_brief::chain::Finished>,
+) {
+    use crate::execution_brief::{decision_log, feedback};
+    let Some(session) = string(payload, &["session_id", "sessionId"]) else {
+        return;
+    };
+    let Some(path) = crate::discover_root(&payload_cwd(payload))
+        .ok()
+        .and_then(|root| feedback::path_for(&root))
+    else {
+        return;
+    };
+    let digest = decision_log::sha256_hex(prompt);
+    let no_paths: &[String] = &[];
+    let line = feedback::prompt_line(
+        pixel_task::now_ms(),
+        &feedback::Prompt {
+            session,
+            provider: provider.as_str(),
+            prompt: &digest,
+            decision: finished.map(|finished| finished.record.sha256.as_str()),
+            gate: finished.map_or("none", |finished| finished.record.gate),
+            kind: finished.and_then(|finished| finished.record.kind),
+            injected: finished.map_or(no_paths, |finished| finished.paths.as_slice()),
+            bytes: text.map_or(0, str::len),
+        },
+    );
+    let _ = decision_log::append(&path, &line, feedback::MAX_LINES);
+}
+
+/// The bytes of additional context a hook response carries.
+fn context_bytes(output: &Value) -> usize {
+    output["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .map_or(0, str::len)
+}
+
+/// Write the read-feedback line of a hook that has already answered the host:
+/// what a prompt-submit part printed (`output`, `None` when it printed nothing
+/// because the brief did not arrive), a tool call and the repository files it
+/// named, or the stop that closes a turn. Best effort: nothing here can reach
+/// the host.
+fn note_event(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    part: Option<BriefPart>,
+    raw: Option<&str>,
+    output: Option<&Value>,
+) {
+    use crate::execution_brief::{decision_log, feedback};
+    if !matches!(
+        event,
+        TaskHookEvent::PromptSubmit
+            | TaskHookEvent::PostToolUse
+            | TaskHookEvent::ToolFailure
+            | TaskHookEvent::Stop
+    ) {
+        return;
     }
+    let Some(payload) = raw.and_then(|raw| serde_json::from_str::<Value>(raw).ok()) else {
+        return;
+    };
+    let Some(session) = string(&payload, &["session_id", "sessionId"]) else {
+        return;
+    };
+    let cwd = payload_cwd(&payload);
+    let Ok(root) = crate::discover_root(&cwd) else {
+        return;
+    };
+    let Some(path) = feedback::path_for(&root) else {
+        return;
+    };
+    let ts = pixel_task::now_ms();
+    let provider_name = provider.as_str();
+    let _ = match event {
+        TaskHookEvent::PromptSubmit => {
+            let Some(prompt) = brief_prompt(provider, event, &payload) else {
+                return;
+            };
+            let (index, count) = part.map_or((1, 1), |part| (part.index, part.count));
+            let line = feedback::part_line(
+                ts,
+                session,
+                provider_name,
+                &decision_log::sha256_hex(&prompt),
+                (index, count),
+                (output.map_or(0, context_bytes), output.is_none()),
+            );
+            decision_log::append(&path, &line, feedback::MAX_LINES)
+        }
+        TaskHookEvent::PostToolUse | TaskHookEvent::ToolFailure => {
+            let tool = string(&payload, &["tool_name", "toolName"])
+                .and_then(tool_label)
+                .unwrap_or("");
+            let input = payload
+                .get("tool_input")
+                .or_else(|| payload.get("input"))
+                .unwrap_or(&Value::Null);
+            let line = feedback::tool_line(
+                ts,
+                session,
+                provider_name,
+                tool,
+                mutation(tool, input),
+                &feedback::tool_targets(&root, &cwd, input),
+            );
+            decision_log::append(&path, &line, feedback::MAX_LINES)
+        }
+        _ => decision_log::append_with(&path, feedback::MAX_LINES, |existing| {
+            feedback::stop_lines(existing, ts, session, provider_name)
+        }),
+    };
 }
 
 /// Part 1 of a split brief: finish the brief, store it whole for the other
@@ -1389,7 +1519,7 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
         Some(envelope(provider, event, &unavailable(event, None, true)))
     };
     // Flush the only response before exit terminates any stalled evaluator.
-    if let Some(output) = output {
+    if let Some(output) = &output {
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{output}");
         let _ = stdout.flush();
@@ -1399,11 +1529,14 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
         part.index == 1 && part.count > 1 && event == TaskHookEvent::PromptSubmit
     });
     if first_of_many
-        && let Some(payload) = raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        && let Some(payload) = raw
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
         && let Some(path) = part_path(provider, &payload)
     {
         brief_parts::mark_done(&path);
     }
+    note_event(provider, event, part, raw.as_deref(), output.as_ref());
     std::process::exit(0);
 }
 

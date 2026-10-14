@@ -226,16 +226,28 @@ pub(crate) fn path_for(root: &Path) -> Option<PathBuf> {
 }
 
 /// `existing` with `line` added, keeping the last `cap` lines.
+#[cfg(test)]
 fn with_line(existing: &str, line: &str, cap: usize) -> String {
+    with_lines(existing, &[line.to_string()], cap)
+}
+
+/// `existing` with `added` appended in order, keeping the last `cap` lines.
+fn with_lines(existing: &str, added: &[String], cap: usize) -> String {
     let kept: Vec<&str> = existing.lines().collect();
-    let skip = (kept.len() + 1).saturating_sub(cap);
-    let mut out = String::with_capacity(existing.len() + line.len() + 1);
+    let skip = (kept.len() + added.len()).saturating_sub(cap);
+    let mut out = String::with_capacity(
+        existing.len() + added.iter().map(|line| line.len() + 1).sum::<usize>(),
+    );
     for old in kept.iter().skip(skip) {
         out.push_str(old);
         out.push('\n');
     }
-    out.push_str(line);
-    out.push('\n');
+    // A batch larger than the cap keeps its own tail.
+    let from = skip.saturating_sub(kept.len());
+    for line in added.iter().skip(from) {
+        out.push_str(line);
+        out.push('\n');
+    }
     out
 }
 
@@ -259,14 +271,27 @@ fn refuse_linked_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Add `line` to the log at `path`, keeping its last `cap` lines. Takes an
-/// exclusive lock so two hooks never interleave a trim, never creates the
-/// directory (a repository without `.pixel` is not one the brief ran in), and
-/// never follows a link at the file or its directory: the file holds what the
-/// user typed, and a planted link would send it, and the trim, elsewhere. An
-/// existing file is brought to the owner-only mode through its descriptor; a
-/// file that cannot be (another user's, writable by this one) takes no line.
+/// Add `line` to the log at `path`, keeping its last `cap` lines. See
+/// [`append_with`] for how the file is opened and locked.
 pub(crate) fn append(path: &Path, line: &str, cap: usize) -> io::Result<()> {
+    append_with(path, cap, |_| vec![line.to_string()])
+}
+
+/// Add the lines `derive` returns to the log at `path`, keeping its last `cap`
+/// lines. `derive` reads the log as it stands under the lock, so a line that
+/// summarises the lines before it (a turn's reads, joined to its brief) is
+/// computed and written without another hook in between. Takes an exclusive
+/// lock so two hooks never interleave a trim, never creates the directory (a
+/// repository without `.pixel` is not one the brief ran in), and never follows
+/// a link at the file or its directory: the file holds what the user typed, and
+/// a planted link would send it, and the trim, elsewhere. An existing file is
+/// brought to the owner-only mode through its descriptor; a file that cannot be
+/// (another user's, writable by this one) takes no line.
+pub(crate) fn append_with(
+    path: &Path,
+    cap: usize,
+    derive: impl FnOnce(&str) -> Vec<String>,
+) -> io::Result<()> {
     refuse_linked_dir(path)?;
     let mut file = pixel_git::nofollow::open_lock(path)?;
     file.lock_exclusive()?;
@@ -274,7 +299,7 @@ pub(crate) fn append(path: &Path, line: &str, cap: usize) -> io::Result<()> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     let existing = String::from_utf8_lossy(&bytes);
-    let next = with_line(&existing, line, cap);
+    let next = with_lines(&existing, &derive(&existing), cap);
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(next.as_bytes())

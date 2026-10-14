@@ -241,6 +241,17 @@ impl Pack {
             || self.blocks.iter().any(|b| b.head.contains(" usage"))
     }
 
+    /// The files the blocks show a range of, in order and without repeats.
+    pub(crate) fn paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        for (path, _, _) in self.blocks.iter().filter_map(block_range) {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        paths
+    }
+
     /// Symbols the pack is about.
     pub(crate) const fn targets(&self) -> usize {
         self.targets
@@ -1482,7 +1493,7 @@ fn unseen_tests(tests: Vec<Candidate>) -> Vec<Candidate> {
 }
 
 /// The path and line range a block shows, from its head line.
-fn block_range(block: &Block) -> Option<(String, u64, u64)> {
+pub(crate) fn block_range(block: &Block) -> Option<(String, u64, u64)> {
     let place = block.head.split(" — ").next()?;
     let (path, range) = place.rsplit_once(':')?;
     let (first, last) = range.split_once('-')?;

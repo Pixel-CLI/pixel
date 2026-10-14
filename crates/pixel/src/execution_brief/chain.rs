@@ -40,6 +40,7 @@ use regex::Regex;
 use super::answer::{self, Excerpt, Hop, Receipt};
 use super::autostart;
 use super::decision_log::{self, Record};
+use super::feedback;
 use super::intent::Verdict;
 use super::kinds::{self, ChangeScope, Changes, FlowNode, KindInput, RepoMap};
 use super::region_pack;
@@ -1090,6 +1091,37 @@ impl Brief {
 
     fn has_excerpts(&self) -> bool {
         self.excerpt_counts().iter().any(|count| *count > 0)
+    }
+
+    /// The repository files the rendered block names, best first and without
+    /// repeats: the region pack's blocks when the block is one, else the
+    /// files, ranges, excerpts, definitions, tests and targets the lines list.
+    fn injected_paths(&self, packed: bool) -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        let mut add = |path: &str| {
+            if !path.is_empty()
+                && paths.len() < feedback::MAX_PATHS
+                && !paths.iter().any(|held| held == path)
+            {
+                paths.push(path.to_string());
+            }
+        };
+        if packed {
+            if let Some(pack) = &self.pack {
+                pack.paths().iter().for_each(|path| add(path));
+            }
+            return paths;
+        }
+        self.reads.iter().for_each(|read| add(&read.path));
+        self.excerpts.iter().for_each(|excerpt| add(&excerpt.path));
+        self.defined.iter().for_each(|hit| add(&hit.path));
+        self.files
+            .iter()
+            .take(MAX_FILES)
+            .for_each(|hit| add(&hit.path));
+        self.tests.iter().for_each(|path| add(path));
+        self.targets.iter().for_each(|path| add(path));
+        paths
     }
 
     fn excerpt_counts(&self) -> [usize; EXCERPT_FILES] {
@@ -2475,6 +2507,9 @@ pub(crate) struct Pending {
 pub(crate) struct Finished {
     pub(crate) text: Option<String>,
     pub(crate) record: Record,
+    /// The repository files the block names, best first: what the agent was
+    /// handed to read, for `feedback`. Empty when there is no block.
+    pub(crate) paths: Vec<String>,
 }
 
 /// Whether the gate's verdict decided if the brief was shown: always for
@@ -2556,7 +2591,16 @@ impl Pending {
             // Best effort: a log that cannot be written never costs the prompt.
             let _ = decision_log::append(path, &record.line(), decision_log::MAX_LINES);
         }
-        Finished { text, record }
+        let paths = if text.is_some() {
+            brief.injected_paths(stats.pack_bytes > 0)
+        } else {
+            Vec::new()
+        };
+        Finished {
+            text,
+            record,
+            paths,
+        }
     }
 }
 

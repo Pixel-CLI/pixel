@@ -12,6 +12,7 @@ pub(crate) mod autostart;
 pub(crate) mod chain;
 pub(crate) mod decision_log;
 mod evidence;
+pub(crate) mod feedback;
 mod gate_model;
 mod git_changes;
 mod graph_reads;
