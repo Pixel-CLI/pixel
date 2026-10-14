@@ -1713,6 +1713,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
 
 [[package]]
+name = "mvp-index"
+version = "0.7.1"
+dependencies = [
+ "mvp-model",
+ "proptest",
+ "tempfile",
+ "tree-sitter",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+]
+
+[[package]]
 name = "mvp-model"
 version = "0.7.1"
 
