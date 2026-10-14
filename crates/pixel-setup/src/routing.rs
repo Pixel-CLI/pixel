@@ -1091,7 +1091,7 @@ fn configure_scoped(
             matcher,
         ));
     }
-    if provider == Provider::Claude {
+    if matches!(provider, Provider::Claude | Provider::Devin) {
         hooks
             .entry("PostToolUse")
             .or_insert_with(|| json!([]))

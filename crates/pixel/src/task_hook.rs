@@ -767,7 +767,7 @@ fn substitution_writes(chars: &mut Peekable<Chars<'_>>) -> bool {
 const IMPORTED_CLAUDE_CONFIG_MARKERS: &[&str] = &["DEVIN_PROJECT_DIR"];
 
 /// The imported-config marker set in this process, if any.
-fn imported_config_host() -> Option<&'static str> {
+pub(crate) fn imported_config_host() -> Option<&'static str> {
     IMPORTED_CLAUDE_CONFIG_MARKERS
         .iter()
         .copied()

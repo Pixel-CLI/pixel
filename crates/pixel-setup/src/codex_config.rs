@@ -194,12 +194,29 @@ fn write_hooks(path: &Path, value: &serde_json::Value) -> Result<()> {
 }
 
 fn is_retired_codex_hook(command: &str, exe: &Path) -> bool {
-    crate::routing::pixel_hook_verb(command, exe)
-        .is_some_and(|verb| !verb.starts_with("task-event --provider codex --event "))
+    crate::routing::pixel_hook_verb(command, exe).is_some_and(|verb| {
+        !verb.starts_with("task-event --provider codex --event ")
+            && verb != "metrics --provider codex"
+    })
 }
 
-/// `pixel setup` step: keep Codex's task-event lifecycle hooks installed,
-/// removing the retired automatic metrics and retrieval guidance hooks.
+/// The PostToolUse entry `pixel setup` merges into `hooks.json`: Codex runs
+/// it after every tool call; `pixel run-hook metrics` self-filters to shell
+/// calls that invoked `pixel` and re-emits the finalized 🟩 line — the relay
+/// Codex's stderr-less tool results cannot show.
+fn metrics_hook_entry(exe: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": format!("{} run-hook metrics --provider codex", crate::routing::quoted_executable(exe)),
+            "timeout": 10,
+        }]
+    })
+}
+
+/// `pixel setup` step: keep Codex's task-event lifecycle hooks and the
+/// PostToolUse metrics relay installed, removing the retired retrieval
+/// guidance hooks.
 pub(crate) fn install_task_hooks(
     codex_home: &Path,
     exe: &Path,
@@ -208,7 +225,7 @@ pub(crate) fn install_task_hooks(
 ) -> Result<InstallStep> {
     let path = codex_home.join(HOOKS_FILE);
     let detail = Some(format!(
-        "path={} task-event lifecycle hooks; automatic metrics and retrieval hooks disabled",
+        "path={} task-event lifecycle hooks and the metrics relay; retrieval hooks disabled",
         path.display()
     ));
     let step = |status, summary: String| InstallStep {
@@ -241,6 +258,12 @@ pub(crate) fn install_task_hooks(
     {
         return Ok(step(CheckStatus::Red, format!("{error} — not touched")));
     }
+    let metrics = crate::config::merge_hook_entry(
+        hooks.get("PostToolUse"),
+        METRICS_HOOK_MARKER,
+        metrics_hook_entry(exe),
+    );
+    hooks.insert("PostToolUse".to_string(), metrics);
     if *hooks == before {
         return Ok(step(
             CheckStatus::Green,
@@ -263,8 +286,8 @@ pub(crate) fn install_task_hooks(
     Ok(step(CheckStatus::Green, summary))
 }
 
-/// `pixel doctor` check: task-event hooks are registered without automatic
-/// retrieval or metrics hooks.
+/// `pixel doctor` check: task-event hooks and the metrics relay are
+/// registered without the retired retrieval hooks.
 pub(crate) fn check_task_hooks(
     codex_home: &Path,
     exe: &Path,
@@ -276,7 +299,8 @@ pub(crate) fn check_task_hooks(
             "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
             "Stop", "SessionEnd", "SubagentStart", "SubagentStop", "Interrupt"
         ],
-        "retired_markers": [METRICS_HOOK_MARKER, PROMPT_SUBMIT_HOOK_MARKER],
+        "metrics_marker": METRICS_HOOK_MARKER,
+        "retired_markers": [PROMPT_SUBMIT_HOOK_MARKER],
     });
     let value = read_hooks(&path)?;
     let mut has_retired_pixel_hook = false;
@@ -319,9 +343,27 @@ pub(crate) fn check_task_hooks(
             path.display()
         ));
     }
+    // The metrics relay is part of the install: an entry naming its marker
+    // must sit under PostToolUse.
+    let metrics_registered = value
+        .get("hooks")
+        .and_then(|hooks| hooks.get("PostToolUse"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(serde_json::Value::as_str))
+        .any(|command| command.contains(METRICS_HOOK_MARKER));
+    if !metrics_registered {
+        return Err(format!(
+            "metrics PostToolUse relay missing in {} — run `pixel setup`",
+            path.display()
+        ));
+    }
     Ok((
         format!(
-            "task-event hooks registered; automatic retrieval and metrics hooks absent in {}",
+            "task-event hooks and metrics relay registered; retrieval hooks absent in {}",
             path.display()
         ),
         detail,
@@ -1487,26 +1529,29 @@ mod tests {
         assert_eq!(
             post_tool_use.len(),
             3,
-            "foreign groups and lifecycle survive"
+            "foreign group, lifecycle and the metrics relay survive"
         );
         assert!(
             post_tool_use
                 .iter()
                 .any(|entry| { entry["hooks"][0]["command"] == "cmux-feed" })
         );
-        let mixed = post_tool_use
-            .iter()
-            .find(|entry| entry.get("matcher").is_some())
-            .expect("foreign hook's group remains");
-        assert_eq!(mixed["matcher"], "Bash");
-        assert_eq!(mixed["timeout"], 9);
+        // The relay merge dedupes on the `run-hook metrics` marker: the
+        // foreign proxy group naming it in a label and the stale pixel entry
+        // are both replaced by the fresh one.
         assert_eq!(
-            mixed["hooks"],
-            serde_json::json!([{
-                "type": "command",
-                "command": "metrics-proxy --label 'run-hook metrics --provider codex'"
-            }]),
-            "foreign marker mention survives beside removed Pixel callback"
+            post_tool_use
+                .iter()
+                .filter(|entry| {
+                    entry["hooks"].as_array().unwrap().iter().any(|hook| {
+                        hook["command"]
+                            .as_str()
+                            .is_some_and(|command| command.contains(METRICS_HOOK_MARKER))
+                    })
+                })
+                .count(),
+            1,
+            "exactly one metrics relay entry"
         );
         assert!(post_tool_use.iter().any(|entry| {
             entry["hooks"][0]["command"]
@@ -1565,7 +1610,7 @@ mod tests {
             .push(serde_json::json!({
                 "hooks": [{
                     "type": "command",
-                    "command": "/opt/pixel run-hook metrics --provider codex"
+                    "command": "/opt/pixel run-hook prompt-submit --provider codex"
                 }]
             }));
         fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
@@ -1704,11 +1749,20 @@ mod tests {
         install_task_hooks(&home, exe, 1, false).unwrap();
         let hooks = hook_events(&home);
         let post = hooks["PostToolUse"].as_array().unwrap();
-        assert_eq!(post.len(), 1, "renamed Pixel callback is removed");
+        assert_eq!(
+            post.len(),
+            2,
+            "renamed Pixel callback is refreshed, the lifecycle hook kept"
+        );
         assert_eq!(
             post[0]["hooks"][0]["command"],
             "'/opt/pixel custom/pixel-next' run-hook task-event --provider codex --event post-tool-use",
             "task lifecycle command is preserved"
+        );
+        assert_eq!(
+            post[1]["hooks"][0]["command"],
+            "'/opt/pixel custom/pixel-next' run-hook metrics --provider codex",
+            "the metrics relay is re-merged under the current executable"
         );
         assert!(check_task_hooks(&home, exe).is_ok());
         let _ = fs::remove_dir_all(&home);

@@ -51,6 +51,7 @@ mod evaluate_cmd;
 mod execution_brief;
 mod graph_shadow_cmd;
 mod hook_input;
+mod hook_metrics;
 mod impact_read;
 mod index_cmd;
 
@@ -1194,6 +1195,14 @@ enum HookCmd {
         #[arg(long, value_name = "K/N")]
         part: Option<brief_parts::BriefPart>,
     },
+    /// PostToolUse relay for hosts whose tool results drop stderr: re-emits
+    /// the finalized invocation's 🟩 metrics line as the provider's
+    /// additional-context envelope. Honors `pixel config metrics`.
+    Metrics {
+        /// Provider whose hook-response contract to emit under.
+        #[arg(long, value_enum)]
+        provider: Option<hook_metrics::Provider>,
+    },
     #[command(flatten)]
     Retired(RetiredHookCmd),
 }
@@ -1221,9 +1230,6 @@ enum RetiredHookCmd {
     /// Retired: the blast-radius note after an edit.
     #[command(hide = true)]
     PostToolUse(RetiredHook),
-    /// Retired: the hook relay of the metrics line.
-    #[command(hide = true)]
-    Metrics(RetiredHook),
 }
 
 /// The arguments of a retired hook verb: whatever an older release wrote into
@@ -5688,6 +5694,12 @@ fn run_command(
                 event,
                 part,
             } => task_hook::run(provider, event, part),
+            HookCmd::Metrics { provider } => {
+                // PostToolUse relay for hosts whose tool results drop stderr
+                // (Codex): re-emits the finalized invocation's 🟩 line as
+                // additionalContext. Never returns.
+                hook_metrics::run_metrics_hook(provider);
+            }
             // Retired verbs: drain the payload the host wrote, answer nothing.
             HookCmd::Retired(_) => {
                 let _ = hook_input::read_hook_payload();
