@@ -37,6 +37,13 @@ pub(crate) enum QuestionKind {
     Bugfix,
     /// New behaviour to place: `targets_facts` from the daemon.
     Feature,
+    /// How the repository is organised: a tour, the lay of the land, what
+    /// each crate or module is for. The evidence is the repository itself
+    /// (its map, the head of its architecture document), not a symbol.
+    Overview,
+    /// A review of a change: the latest commit, a diff, a branch, the
+    /// working tree. The evidence is the change and the code around it.
+    Review,
 }
 
 /// `find-code`-style words that ask how one symbol reaches another.
@@ -102,6 +109,132 @@ const RATIONALE_WORDS: &[&str] = &[
     "removed",
     "removes",
 ];
+/// Phrases that ask how the whole is put together; they need a noun for the
+/// whole (see [`WHOLE_WORDS`]), since `how is the config structured` is
+/// about a part.
+const OVERVIEW_HOW: &[&str] = &[
+    "organised",
+    "organized",
+    "structured",
+    "laid out",
+    "architecture",
+];
+/// Phrases that ask for a tour of something; any noun of [`SCOPE_WORDS`]
+/// will do.
+const OVERVIEW_CUES: &[&str] = &[
+    "tour",
+    "overview",
+    "high level",
+    "big picture",
+    "main modules",
+    "main crates",
+    "main packages",
+    "main components",
+    "main directories",
+    "main folders",
+    "each crate",
+    "each package",
+    "each module",
+    "each directory",
+    "each folder",
+    "new to this",
+    "onboard",
+];
+/// Phrases that are a request for the whole picture whatever else is said.
+const OVERVIEW_WHOLE: &[&str] = &["lay of the land", "fit together"];
+/// Nouns for the whole repository.
+const WHOLE_WORDS: &[&str] = &[
+    "repo",
+    "repository",
+    "codebase",
+    "code base",
+    "project",
+    "monorepo",
+];
+/// Nouns for the whole or for its parts: what a tour is about.
+const SCOPE_WORDS: &[&str] = &[
+    "repo",
+    "repository",
+    "codebase",
+    "code base",
+    "project",
+    "monorepo",
+    "crate",
+    "crates",
+    "package",
+    "packages",
+    "module",
+    "modules",
+    "app",
+    "library",
+];
+/// Words that ask for a review.
+const REVIEW_CUES: &[&str] = &[
+    "review",
+    "reviews",
+    "audit",
+    "critique",
+    "sanity check",
+    "look over",
+    "look at",
+    "check over",
+    "risky",
+    "check",
+    "regression",
+    "regressions",
+    "missing tests",
+    "anything wrong",
+    "anything off",
+    "what could break",
+    "safe to merge",
+];
+/// Phrases that name a change: a commit, a diff, a branch, the working tree.
+const CHANGE_NOUNS: &[&str] = &[
+    "latest commit",
+    "last commit",
+    "most recent commit",
+    "previous commit",
+    "recent commit",
+    "this commit",
+    "the commit",
+    "my commit",
+    "my changes",
+    "these changes",
+    "the changes",
+    "this change",
+    "the diff",
+    "my diff",
+    "this diff",
+    "this pr",
+    "pull request",
+    "this branch",
+    "my branch",
+    "uncommitted",
+    "unstaged",
+    "staged",
+    "working tree",
+    "what i changed",
+    "my work",
+    "my patch",
+    "head~1",
+];
+/// Phrases that ask to be walked through what happens, whatever the
+/// symbols involved.
+const WALKTHROUGH: &[&str] = &[
+    "walk me through",
+    "walk through",
+    "what happens when",
+    "what happens if",
+    "what happens after",
+    "what happens from",
+    "end to end",
+    "end-to-end",
+    "step by step",
+    "life cycle",
+    "lifecycle",
+    "life of a",
+    "journey of",
+];
 /// Words that report a defect: a strong prompt names its symbol, so a
 /// bugfix brief can come from the heuristic too, not only from a verdict.
 const BUGFIX_WORDS: &[&str] = &[
@@ -166,8 +299,17 @@ impl QuestionKind {
         // A question that names no symbol still asks for a flow when it says
         // so in plain words; the chain then borrows the anchor from the
         // meaning search's best chunk.
-        let flow = (asks(FLOW_WORDS)
-            && (symbol_anchors >= 2 || (symbol_anchors == 1 && !asks(BUGFIX_WORDS))))
+        if asks_overview(typed) && symbol_anchors == 0 && anchors.paths().is_empty() {
+            return Self::Overview;
+        }
+        if asks_review(typed) {
+            return Self::Review;
+        }
+        let walkthrough =
+            asks_phrase(typed, WALKTHROUGH) && !asks(TEST_WORDS) && !asks(BUGFIX_WORDS);
+        let flow = walkthrough
+            || (asks(FLOW_WORDS)
+                && (symbol_anchors >= 2 || (symbol_anchors == 1 && !asks(BUGFIX_WORDS))))
             || (symbol_anchors == 0
                 && asks(PROSE_FLOW_WORDS)
                 && !asks(TEST_WORDS)
@@ -197,8 +339,59 @@ impl QuestionKind {
             Self::Rationale => "rationale",
             Self::Bugfix => "bugfix",
             Self::Feature => "feature",
+            Self::Overview => "overview",
+            Self::Review => "review",
         }
     }
+}
+
+/// `typed` in lower case with its quotes and runs of spaces plain: what the
+/// phrase lists are matched against.
+pub(crate) fn plain(typed: &str) -> String {
+    let text: String = typed
+        .to_lowercase()
+        .chars()
+        .map(|ch| match ch {
+            '\u{2019}' | '\u{2018}' | '`' => '\'',
+            ch if ch.is_whitespace() || ch == ',' || ch == ';' => ' ',
+            ch => ch,
+        })
+        .collect();
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether the lower-cased text holds `phrase` as whole words.
+pub(crate) fn has_phrase(text: &str, phrase: &str) -> bool {
+    text.match_indices(phrase).any(|(at, found)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + found.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// Whether `typed` holds any of `phrases` as whole words.
+fn asks_phrase(typed: &str, phrases: &[&str]) -> bool {
+    let text = plain(typed);
+    phrases.iter().any(|phrase| has_phrase(&text, phrase))
+}
+
+/// Whether `typed` asks how the repository is organised: a cue of a tour with
+/// a noun for the whole or its parts beside it, a question of how it is put
+/// together about the whole, or a request for the whole picture.
+pub(crate) fn asks_overview(typed: &str) -> bool {
+    let text = plain(typed);
+    let any = |list: &[&str]| list.iter().any(|phrase| has_phrase(&text, phrase));
+    any(OVERVIEW_WHOLE)
+        || (any(OVERVIEW_CUES) && any(SCOPE_WORDS))
+        || (any(OVERVIEW_HOW) && any(WHOLE_WORDS))
+}
+
+/// Whether `typed` asks for a review of a change: a cue of review beside a
+/// noun for the change, or a change noun beside a worry about it.
+pub(crate) fn asks_review(typed: &str) -> bool {
+    let text = plain(typed);
+    let any = |list: &[&str]| list.iter().any(|phrase| has_phrase(&text, phrase));
+    any(CHANGE_NOUNS) && any(REVIEW_CUES)
 }
 
 /// Whether `word` is a flow word (exact match): the chain uses it to
@@ -361,6 +554,81 @@ mod tests {
     }
 
     #[test]
+    fn heuristic_should_route_a_tour_of_the_repository_to_overview() {
+        for prompt in [
+            "I'm new to this repo. give me a quick tour of how it's organised and what each crate is for",
+            "give me the lay of the land here, what are the main modules and how do they fit together",
+            "what is the overall architecture of this codebase",
+            "how is this project structured",
+            "can you give me an overview of the repo",
+            "what are the main crates in this monorepo",
+        ] {
+            assert_eq!(kind_of(prompt), QuestionKind::Overview, "{prompt}");
+        }
+        // A tour of something else, a part of the repository, or a question
+        // that names a symbol or a path is not a tour of the whole.
+        for prompt in [
+            "give me a tour of Paris",
+            "how is the config structured",
+            "overview of `retry_loop` and what it does",
+            "give me an overview of crates/pixel-graph/src/store.rs",
+            "how is the file organised",
+        ] {
+            assert_ne!(kind_of(prompt), QuestionKind::Overview, "{prompt}");
+        }
+    }
+
+    #[test]
+    fn heuristic_should_route_a_review_of_a_change_to_review() {
+        for prompt in [
+            "review the latest commit and tell me if anything looks risky or is missing tests",
+            "can you review my changes",
+            "look over the diff before I push",
+            "is this PR safe to merge",
+            "check the uncommitted changes for regressions",
+            "audit the last commit",
+        ] {
+            assert_eq!(kind_of(prompt), QuestionKind::Review, "{prompt}");
+        }
+        // A review needs a change to look at, and a change needs a worry.
+        for prompt in [
+            "review the parser design",
+            "write the commit message for my changes",
+            "commit my changes and push",
+            "what changed in the parser",
+        ] {
+            assert_ne!(kind_of(prompt), QuestionKind::Review, "{prompt}");
+        }
+        // Whole words only: `staged` is not in `stage`.
+        assert_ne!(
+            kind_of("review the stage of the pipeline that last commits"),
+            QuestionKind::Review
+        );
+    }
+
+    #[test]
+    fn heuristic_should_route_a_walkthrough_to_flow_with_or_without_a_symbol() {
+        for prompt in [
+            "walk me through what happens when someone drops an image file onto the canvas, from the drop event until the image is rendered",
+            "what happens when a prompt is submitted",
+            "walk me through the login",
+            "explain the lifecycle of a request step by step",
+            "what happens after `submit_prompt` returns",
+        ] {
+            assert_eq!(kind_of(prompt), QuestionKind::Flow, "{prompt}");
+        }
+        // Tests and defects keep their own routes.
+        assert_eq!(
+            kind_of("which tests walk through what happens when the cache expires"),
+            QuestionKind::Tests
+        );
+        assert_ne!(
+            kind_of("walk me through why it crashes when the cache expires"),
+            QuestionKind::Flow
+        );
+    }
+
+    #[test]
     fn as_str_should_name_every_kind() {
         let names: Vec<&str> = [
             QuestionKind::Lookup,
@@ -370,6 +638,8 @@ mod tests {
             QuestionKind::Rationale,
             QuestionKind::Bugfix,
             QuestionKind::Feature,
+            QuestionKind::Overview,
+            QuestionKind::Review,
         ]
         .into_iter()
         .map(QuestionKind::as_str)
@@ -383,7 +653,9 @@ mod tests {
                 "config",
                 "rationale",
                 "bugfix",
-                "feature"
+                "feature",
+                "overview",
+                "review"
             ]
         );
     }

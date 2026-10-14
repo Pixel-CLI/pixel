@@ -34,6 +34,9 @@ use super::chain::{
     CONCEPT_ROWS, CallerHit, Evidence, Flow, Found, HistoryHit, MAX_TARGETS, MeaningHit,
     RelevanceAnswer, RichFound, RichHit, SEARCH_ROWS, SYMBOL_ROWS, StatusProbe, SymbolHit,
 };
+use super::git_changes;
+use super::graph_reads;
+use super::kinds::{ChangeScope, Changes, FlowNode, RepoMap};
 use super::relevance::{CoFileStat, KeywordStat, RelevanceInput};
 
 /// The path search's bound: the daemon's `evaluate` default and its
@@ -641,6 +644,42 @@ impl Evidence for Live {
             })?,
         };
         caller_hits(&data)
+    }
+
+    fn repo_map(&self, deadline: Instant) -> Result<RepoMap, String> {
+        if Instant::now() >= deadline {
+            return Err("out of time".to_string());
+        }
+        self.with_graph(graph_reads::read_repo_map)
+    }
+
+    fn changes(&self, scope: ChangeScope, deadline: Instant) -> Result<Changes, String> {
+        git_changes::changes(&self.root, scope, deadline)
+    }
+
+    fn find_symbols(
+        &self,
+        terms: &[String],
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<Vec<SymbolHit>, String> {
+        if Instant::now() >= deadline {
+            return Err("out of time".to_string());
+        }
+        self.with_graph(|store| graph_reads::read_symbols_like(store, terms, limit))
+    }
+
+    fn flow_tree(
+        &self,
+        uid: &str,
+        depth: usize,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<Vec<FlowNode>, String> {
+        if Instant::now() >= deadline {
+            return Err("out of time".to_string());
+        }
+        self.with_graph(|store| graph_reads::read_callee_tree(store, uid, depth, limit))
     }
 
     fn lines_at(
@@ -2327,5 +2366,91 @@ mod tests {
         for tier in ["high", "low", "off"] {
             assert!(tiers.contains(&tier), "{tier} missing from {tiers:?}");
         }
+    }
+
+    #[test]
+    fn the_graph_reads_should_answer_on_both_routes_from_the_published_graph() {
+        use pixel_graph::store::{EdgeRow, SymbolKind, Tier};
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let a = store.replace_file("src/a.ts", "oid", "ts").unwrap();
+        let b = store.replace_file("src/b.ts", "oid", "ts").unwrap();
+        let on_drop = store
+            .insert_symbol(
+                a,
+                "src/a.ts#onDrop#function",
+                "onDrop",
+                "onDrop",
+                SymbolKind::Function,
+                1,
+                9,
+                "function onDrop()",
+            )
+            .unwrap();
+        let insert = store
+            .insert_symbol(
+                b,
+                "src/b.ts#insertImage#function",
+                "insertImage",
+                "insertImage",
+                SymbolKind::Function,
+                1,
+                5,
+                "function insertImage()",
+            )
+            .unwrap();
+        store
+            .insert_edge(&pixel_graph::EdgeRow {
+                src_id: on_drop,
+                dst_id: insert,
+                kind: pixel_graph::EdgeKind::Calls,
+                tier: Tier::Exact,
+                site_line: 4,
+                receiver: None,
+                callee: None,
+            })
+            .unwrap();
+        let _ = EdgeRow::clone;
+        for route in [Route::Local, Route::Daemon] {
+            let live = Live::new(Path::new("/nowhere"), route);
+            *live.graph.lock().unwrap() = Some(Ok(GraphStore::open_in_memory().unwrap()));
+            assert!(
+                live.repo_map(Instant::now() + WINDOW)
+                    .unwrap()
+                    .files
+                    .is_empty()
+            );
+        }
+        let live = Live::new(Path::new("/nowhere"), Route::Local);
+        *live.graph.lock().unwrap() = Some(Ok(store));
+        let deadline = Instant::now() + WINDOW;
+        let map = live.repo_map(deadline).unwrap();
+        assert_eq!(map.files.len(), 2);
+        assert_eq!(map.symbols, 2);
+        let found = live
+            .find_symbols(&["drop".to_string()], 10, deadline)
+            .unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|hit| hit.name.as_str())
+                .collect::<Vec<_>>(),
+            ["onDrop"]
+        );
+        let tree = live.flow_tree("onDrop", 2, 10, deadline).unwrap();
+        assert_eq!(
+            tree.iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            ["onDrop", "insertImage"]
+        );
+        // A window that is over asks nothing of the graph.
+        let late = Instant::now().checked_sub(WINDOW).unwrap();
+        assert!(live.repo_map(late).is_err());
+        assert!(live.find_symbols(&["drop".to_string()], 10, late).is_err());
+        assert!(live.flow_tree("onDrop", 2, 10, late).is_err());
+        // A graph that is not current fails the read instead of answering.
+        let stale = Live::new(Path::new("/nowhere"), Route::Local);
+        *stale.graph.lock().unwrap() = Some(Err("graph is stale".into()));
+        assert_eq!(stale.repo_map(deadline).unwrap_err(), "graph is stale");
     }
 }

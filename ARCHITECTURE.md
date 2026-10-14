@@ -920,6 +920,40 @@ masked, and a credential-shaped path never reaches the searches' rows
 lives inside its own 300 ms (`LOCATOR_WINDOW`) and the brief's window, and a
 search that fails leaves the pack as it was.
 
+**Question kinds without a symbol** (`execution_brief/kinds.rs`, asked by
+`pack_evidence` beside the locators). `routes::QuestionKind` gained `Overview`
+(a tour: "quick tour", "lay of the land", "what each crate is for"; a
+cue of how the whole is put together needs a noun for the whole) and `Review`
+(a review cue beside a change noun: "review the latest commit", "is this PR
+safe to merge"), read from the words, with no model, and ahead of a judge's
+verdict; the walkthrough phrases ("walk me through", "what happens when",
+"end to end") route to `Flow` with or without a symbol. The relevance gate
+closes these prompts because they are not phrased in the repository's words,
+so `admitted_by_kind` lets a tour and a review through (`Admission::Kind`, logged
+as gate `open` with reason `kind: overview`) and a walkthrough only when it
+shares two words with a file the graph knows by its symbols. Their packs are
+the evidence itself, built from three reads added to `Evidence`:
+`repo_map` (the indexed files, their top-level declarations and `main`
+functions, read from the published graph in `graph_reads.rs`: areas are
+directories split while an area holds more than 60 files, an area is shown by
+its four best declarations as `path:line kind name`, tests, documentation and
+scripts are one line, and a repository of 60 files or fewer is listed file by
+file), `changes` (one `pixel_git::GitRunner` call bounded by what is left of
+the window, `git show`, `git diff HEAD` or the diff against the merge base,
+cut into files, line counts and the new-side range of each hunk in
+`git_changes.rs`) and `flow_tree` with `find_symbols` (the calls out of a
+function in the order the source makes them, from `edges`). An overview
+carries the map, the first 70 lines of `ARCHITECTURE.md` and its outline, the
+head of the manifest and of the README; a review the change summary (counts,
+and the source files no changed test file is about), the declaration around
+each hunk (code before tests, at most ten regions of sixty lines), the
+touched declarations and the callers of the functions among them; a walkthrough
+the call trace and the body of each call, from the symbol the prompt names,
+the call path the chain found, or the function whose name carries the rare
+words of the prompt and from which most of the others are reached
+(`entry_score`). The regions closest to a few words are left out of the pack of
+a tour and of a review. The reads add no brief operation and fail open.
+
 **Keeping a daemon behind the brief.** Without a daemon the brief has no
 `meaning` leads, and a daemon exits after thirty minutes idle or becomes
 unusable when the protocol moves, so the hooks bring one back

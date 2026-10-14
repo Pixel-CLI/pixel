@@ -549,7 +549,11 @@ stays so references to the later threats hold.
   the prompt's words (escaped) and constant shapes; the rows of a
   credential-shaped path are dropped before ranking, and a quoted
   credential-shaped token (long, letters and digits) in a quoted line is
-  replaced by `<redacted>`. No prompt is deployed. The bundled prompt a user copies by hand
+  replaced by `<redacted>`. The question-kind packs read the published graph
+  (files, top-level declarations, call edges) and run one git call through
+  `pixel_git::GitRunner` (`show` or `diff` of the repository's own history,
+  no network, no write, bounded by the brief's window and a 2 MiB output cap);
+  their file reads go through `Evidence::lines_at` like the pack's. No prompt is deployed. The bundled prompt a user copies by hand
   states that Pixel output is data, not instructions
   (`crates/pixel-install/assets/pixel-agent-prompt.md`). The explicit impact
   skill and Pi command label graph output as repository data, not
