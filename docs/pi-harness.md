@@ -27,10 +27,6 @@ removed, so Pi does not register the name twice; a file there that Pixel did
 not write is left and reported. The install also removes Pixel's retired block
 from `APPEND_SYSTEM.md`, keeping any text of yours.
 
-Installing the npm package as well (`pi install git:github.com/Pixel-CLI/pixel`)
-registers the same command a second time, and Pi then lists `pixel-impact:1`
-and `pixel-impact:2`: use one install path per machine.
-
 `pixel doctor` reports the package as `install.pi-impact`: red when it is
 missing from `packages` or bound to another binary, green when it is current or
 Pi is absent. `pixel setup --remove` removes the package and its `packages` entry.

@@ -18,11 +18,7 @@
 //!    release runner, after the tests already passed;
 //! 3. `CHANGELOG.md` has no `## [x.y.z]` heading, or the release notes are
 //!    still filed under `## [Unreleased]`, so the GitHub release body is a
-//!    fallback link;
-//! 4. a plugin manifest (`.claude-plugin/plugin.json`, `package.json`, …)
-//!    still names the previous version: Claude Code and Codex only deliver a
-//!    plugin update when its version changes, so every plugin user keeps the
-//!    old protocol and hook.
+//!    fallback link.
 //!
 //! Every check is a pure function over file contents so it is unit-tested
 //! without a filesystem; `run` only reads the files and assembles the report.
@@ -301,59 +297,6 @@ pub fn check_changelog(changelog: &str, version: &str) -> Check {
     }
 }
 
-/// Every plugin manifest that carries a version, relative to the repository
-/// root. `.agents/skills/release/prepare.sh` bumps the same list.
-pub const PLUGIN_MANIFESTS: &[&str] = &[
-    ".claude-plugin/plugin.json",
-    ".codex-plugin/plugin.json",
-    ".devin-plugin/plugin.json",
-    ".qoder-plugin/plugin.json",
-    "gemini-extension.json",
-    "package.json",
-    "plugin.yaml",
-];
-
-/// The version a plugin manifest declares: the top-level `"version"` of a
-/// JSON manifest, the `version:` line of a YAML one.
-pub fn manifest_version(rel: &str, content: &str) -> Option<String> {
-    if rel.ends_with(".yaml") {
-        return content
-            .lines()
-            .find_map(|line| line.strip_prefix("version:"))
-            .map(|v| v.trim().trim_matches('"').to_string());
-    }
-    let doc: Value = serde_json::from_str(content).ok()?;
-    doc.get("version")?.as_str().map(str::to_string)
-}
-
-/// Every plugin manifest present must declare the release version.
-/// `manifests` is `(relative path, content)`; an absent manifest is not
-/// listed by the caller.
-pub fn check_plugin_versions(manifests: &[(&str, String)], version: &str) -> Check {
-    let stale: Vec<String> = manifests
-        .iter()
-        .filter_map(|(rel, content)| match manifest_version(rel, content) {
-            Some(v) if v == version => None,
-            Some(v) => Some(format!("{rel} is {v}")),
-            None => Some(format!("{rel} declares no version")),
-        })
-        .collect();
-    if stale.is_empty() {
-        Check::pass(
-            "plugin-versions",
-            format!("{} plugin manifests at {version}", manifests.len()),
-        )
-    } else {
-        Check::fail(
-            "plugin-versions",
-            format!(
-                "{}; run .agents/skills/release/prepare.sh or set them to {version}",
-                stale.join(", ")
-            ),
-        )
-    }
-}
-
 fn read(repo: &Path, rel: &str) -> Result<String, String> {
     std::fs::read_to_string(repo.join(rel)).map_err(|e| format!("{rel}: {e}"))
 }
@@ -375,18 +318,11 @@ pub fn run(repo: &Path, version_input: &str) -> Result<Report, String> {
             .ok_or_else(|| format!("{member}/Cargo.toml: no [package] name/version"))?;
         members.push((name, version));
     }
-    let mut plugin_manifests = Vec::new();
-    for rel in PLUGIN_MANIFESTS {
-        if repo.join(rel).is_file() {
-            plugin_manifests.push((*rel, read(repo, rel)?));
-        }
-    }
     Ok(Report {
         checks: vec![
             check_cli_version(&cli_manifest, &version),
             check_lock(&lock, &members),
             check_changelog(&changelog, &version),
-            check_plugin_versions(&plugin_manifests, &version),
         ],
         version,
     })
@@ -569,86 +505,13 @@ mod tests {
         assert!(report.ok(), "{}", report.render());
         assert_eq!(report.version, "0.2.3");
         assert!(report.render().contains("2 workspace members"));
-        assert!(report.render().contains("0 plugin manifests at 0.2.3"));
         assert!(!run(&dir, "0.2.4").unwrap().ok());
-
-        // A present plugin manifest is checked; an absent one is not required.
-        std::fs::write(dir.join("package.json"), r#"{"version": "0.2.2"}"#).unwrap();
-        let stale = run(&dir, "0.2.3").unwrap();
-        assert!(!stale.ok());
-        assert!(
-            stale.render().contains("package.json is 0.2.2"),
-            "{}",
-            stale.render()
-        );
-        std::fs::write(dir.join("package.json"), r#"{"version": "0.2.3"}"#).unwrap();
-        assert!(run(&dir, "0.2.3").unwrap().ok());
 
         std::fs::remove_file(dir.join("CHANGELOG.md")).unwrap();
         let err = run(&dir, "0.2.3").unwrap_err();
         assert!(err.starts_with("CHANGELOG.md: "), "{err}");
         assert!(run(&dir, "nope").unwrap_err().contains("not a version"));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn manifest_version_reads_json_and_yaml_manifests() {
-        assert_eq!(
-            manifest_version("package.json", r#"{"name": "p", "version": "0.2.4"}"#).as_deref(),
-            Some("0.2.4")
-        );
-        assert_eq!(manifest_version("plugin.json", r#"{"name": "p"}"#), None);
-        assert_eq!(manifest_version("plugin.json", r#"{"version": 2}"#), None);
-        assert_eq!(manifest_version("plugin.json", "not json"), None);
-        assert_eq!(
-            manifest_version("plugin.yaml", "name: pixel\nversion: 0.2.4\n").as_deref(),
-            Some("0.2.4")
-        );
-        assert_eq!(
-            manifest_version("plugin.yaml", "version: \"1.0.0\"\n").as_deref(),
-            Some("1.0.0")
-        );
-        assert_eq!(manifest_version("plugin.yaml", "name: pixel\n"), None);
-    }
-
-    #[test]
-    fn plugin_versions_must_all_equal_the_release() {
-        let manifests = vec![
-            ("package.json", r#"{"version": "0.2.4"}"#.to_string()),
-            ("plugin.yaml", "version: 0.2.3\n".to_string()),
-            ("gemini-extension.json", "{}".to_string()),
-        ];
-        let check = check_plugin_versions(&manifests, "0.2.4");
-        assert!(!check.ok);
-        assert_eq!(check.name, "plugin-versions");
-        assert_eq!(
-            check.detail,
-            "plugin.yaml is 0.2.3, gemini-extension.json declares no version; run .agents/skills/release/prepare.sh or set them to 0.2.4"
-        );
-        let check = check_plugin_versions(&manifests[..1], "0.2.4");
-        assert!(check.ok);
-        assert_eq!(check.detail, "1 plugin manifests at 0.2.4");
-    }
-
-    /// The manifests in this repository follow the workspace version between
-    /// releases too, and prepare.sh bumps exactly the checked list: a
-    /// manifest added to one and not the other fails here, not on a tag.
-    #[test]
-    fn repository_plugin_manifests_match_the_workspace_and_prepare_bumps_them() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let cli = std::fs::read_to_string(repo.join("crates/pixel/Cargo.toml")).unwrap();
-        let (_, version) = package_name_version(&cli).unwrap();
-        let manifests: Vec<(&str, String)> = PLUGIN_MANIFESTS
-            .iter()
-            .map(|rel| (*rel, std::fs::read_to_string(repo.join(rel)).unwrap()))
-            .collect();
-        let check = check_plugin_versions(&manifests, &version);
-        assert!(check.ok, "{}", check.detail);
-        let prepare =
-            std::fs::read_to_string(repo.join(".agents/skills/release/prepare.sh")).unwrap();
-        for rel in PLUGIN_MANIFESTS {
-            assert!(prepare.contains(rel), "prepare.sh does not bump {rel}");
-        }
     }
 
     #[test]

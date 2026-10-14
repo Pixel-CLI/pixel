@@ -20,14 +20,6 @@ import tempfile
 import unittest
 
 PREPARE = Path(__file__).resolve().parent.parent / ".agents/skills/release/prepare.sh"
-MANIFESTS = [
-    ".claude-plugin/plugin.json",
-    ".codex-plugin/plugin.json",
-    ".devin-plugin/plugin.json",
-    ".qoder-plugin/plugin.json",
-    "gemini-extension.json",
-    "package.json",
-]
 
 GH = """#!/usr/bin/env python3
 import json, os, subprocess, sys
@@ -87,10 +79,6 @@ class PrepareContract(unittest.TestCase):
         }
         self.write("Cargo.toml", '[workspace]\nmembers = ["crates/a"]\n')
         self.write("crates/a/Cargo.toml", '[package]\nname = "a"\nversion = "0.1.0"\n')
-        for manifest in MANIFESTS:
-            self.write(manifest, '{\n  "name": "a",\n  "version": "0.1.0"\n}\n')
-        self.write("plugin.yaml", "name: a\nversion: 0.1.0\n")
-        self.write("scripts/gen-plugin-assets.sh", "#!/bin/sh\n")
         self.write("CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n")
         self.write("changelog.d/.gitkeep", "")
         self.git("init", "-q", "-b", "main")

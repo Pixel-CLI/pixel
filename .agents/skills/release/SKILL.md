@@ -224,10 +224,7 @@ already exists, `changelog.d/` holds no fragment, or `## [Unreleased]` still
 carries a bullet of its own. Otherwise it:
 
 1. sets `[package] version` to `x.y.z` in **every** workspace member
-   (lockstep, as 0.2.4 did), and `version` in every plugin manifest
-   (`pixel_release::PLUGIN_MANIFESTS`), then regenerates the plugin prompt
-   surfaces with `scripts/gen-plugin-assets.sh`: Claude Code and Codex deliver
-   a plugin update only when its version changes;
+   (lockstep, as 0.2.4 did);
 2. folds the fragments into a new `## [x.y.z] - DATE` under a kept, now empty
    `## [Unreleased]`, led by `_highlights.md` when there is one and then
    grouped by section in the order the headings have always used, and deletes

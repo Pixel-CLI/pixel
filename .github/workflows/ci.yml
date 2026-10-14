@@ -25,11 +25,8 @@ on:
     #   - changelog.d/**: the fragments scripts/test-prepare.py validates
     #     against the release script's contract, in the repository itself and
     #     not only in its fixtures;
-    #   - the generated plugin surfaces, which install_tests.rs compares
-    #     against the prompts (scripts/gen-plugin-assets.sh --check),
-    #     .agents/skills/pixel/ among them;
     #   - .agents/skills/release/: prepare.sh, which scripts/test-prepare.py
-    #     and pixel-release's tests run or read;
+    #     runs;
     #   - .agents/skills/pixel-retro/: lead_time.py and its contract test.
     # Every other skill is excluded: no test reads it.
     # Add a path here when a test starts reading one. Pushes to main stay
@@ -66,15 +63,6 @@ on:
       # test_lead_time.py, test_adherence.py:
       - ".agents/skills/pixel-retro/**"
       - "scripts/README.md"
-      # gen-plugin-assets.sh --check:
-      - "PIXEL.md"
-      - "PIXEL-SUBAGENT.md"
-      - ".agents/skills/pixel/**"
-      - ".openclaw/**"
-      - ".clinerules/**"
-      - ".kiro/**"
-      - ".qoder/**"
-      - ".windsurf/**"
 
 # A release-prepare pull request into main (`release-x.y.z` branch whose
 # diff the `scope` job verifies) skips every job, as it skips Cross-build:
@@ -216,13 +204,11 @@ jobs:
           ^\.config/
           ^deny\.toml$
           ^rust-toolchain
-          ^(README|ARCHITECTURE|CONTRIBUTING|AGENTS|CHANGELOG|PIXEL|PIXEL-SUBAGENT)\.md$
+          ^(README|ARCHITECTURE|CONTRIBUTING|AGENTS|CHANGELOG)\.md$
           ^docs/manual-setup\.md$
           ^website/
-          ^\.agents/(rules|skills/(rust-guidelines|release|pixel))/
+          ^\.agents/(rules|skills/(rust-guidelines|release))/
           ^probes/
-          ^\.(openclaw|clinerules|kiro|qoder|windsurf)/
-          ^scripts/gen-plugin-assets\.sh$
           ^\.github/workflows/ci\.yml$
           EOF
 
@@ -246,8 +232,8 @@ jobs:
 
           # The contract tests' own inputs: their scripts, the fixtures and
           # shells they exercise, the workflows verify-action-pins parses,
-          # the fragments test-prepare validates, prepare.sh under the
-          # release skill, and the pi extension test-pi-impact.mjs imports.
+          # the fragments test-prepare validates, and prepare.sh under the
+          # release skill.
           cat > scripts.re <<'EOF'
           ^scripts/
           ^probes/
@@ -582,14 +568,6 @@ jobs:
       - name: Clean contract (disposable repo with a second worktree)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-clean.py
-
-      - name: Install Bun
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
-      - name: Pi impact command contract
-        if: ${{ needs.changes.outputs.scripts == 'true' }}
-        run: bun scripts/test-pi-impact.mjs
 
   # Clippy and the reduced feature lanes, beside the Test job instead of
   # after it: they read no test result and took 35 s of its critical path

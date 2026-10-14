@@ -4,8 +4,7 @@
 # (layouts/shortcodes/agents.html). One entry per agent; its mark is
 # assets/logos/<logo>.svg.
 #
-# Every fact here restates crates/pixel-install, the plugin manifests at the
-# repository root or the rule files under .cursor/. A pull
+# Every fact here restates crates/pixel-install. A pull
 # request that changes what `pixel setup` writes changes this file too:
 # crates/pixel/tests/cli/docs_drift.rs runs a real `pixel setup` and
 # `pixel setup --repo` into empty directories and fails when the files
@@ -15,10 +14,6 @@
 #
 #   wiring  how Pixel reaches the agent:
 #             install  `pixel setup` writes the agent's own config
-#             plugin   the agent's plugin or extension mechanism loads it;
-#                      `pixel setup` writes nothing for it
-#             rules    a rules file the repository ships, copied into the
-#                      project by hand
 #             none     nothing: the agent keeps its native tools, and
 #                      `pixel setup` only removes what an earlier release
 #                      wrote for it
@@ -29,8 +24,6 @@
 #   note    Markdown: one more paragraph under "What pixel setup writes"
 #   repo    files `pixel setup --repo` writes for it, from the repository
 #   repo_note  Markdown: one more paragraph under "Per repository"
-#   plugin  Markdown: the plugin command, when the agent has one
-#   rules   the rules file to copy, from the repository root
 #   checks  the `pixel doctor` check ids that judge this agent's wiring
 #   lede    Markdown: the /for/<slug>/ page's opening line
 #
@@ -60,11 +53,10 @@ slug = "claude-code"
 name = "Claude Code"
 logo = "claude"
 wiring = "install"
-lede = "`pixel setup` preserves task lifecycle hooks while removing automatic retrieval prompts and advice. Each code prompt gets a bounded evidence brief; ordinary searches remain native. The optional plugin ships no skill or hook."
+lede = "`pixel setup` preserves task lifecycle hooks while removing automatic retrieval prompts and advice. Each code prompt gets a bounded evidence brief; ordinary searches remain native."
 global = ["~/.claude/settings.json"]
 wires = "task lifecycle hooks in `~/.claude/settings.json`; retired Pixel retrieval hooks are removed and foreign hooks are preserved"
 repo = [".claude/settings.local.json", ".claude/pixel-rtk-hooks.json"]
-plugin = "`/plugin marketplace add Pixel-CLI/pixel`, then `/plugin install pixel@pixel`: ships no skill or hook; `pixel setup` wires the per-prompt brief"
 checks = ["install.claude-hooks", "repo.claude-hooks"]
 
 [[agent]]
@@ -72,13 +64,12 @@ slug = "codex"
 name = "Codex"
 logo = "codex"
 wiring = "install"
-lede = "`pixel setup` removes retired Pixel prompt and metrics hooks while retaining task lifecycle controls. Each code prompt gets a bounded evidence brief; ordinary searches remain native. The optional plugin ships no skill or hook."
+lede = "`pixel setup` removes retired Pixel prompt and metrics hooks while retaining task lifecycle controls. Each code prompt gets a bounded evidence brief; ordinary searches remain native."
 global = ["~/.codex/config.toml", "~/.codex/hooks.json"]
 when = "in `$CODEX_HOME` instead of `~/.codex` when that variable is set"
 wires = "task lifecycle hooks in `hooks.json`; removes Pixel's retired `developer_instructions` block while preserving foreign instructions"
 repo = [".codex/config.toml", ".codex/hooks.json", ".codex/pixel-composed-guard-backup.json"]
 repo_note = "Codex has no personal project file, so repository hook updates are skipped when Git tracks `.codex/hooks.json`: they would carry this machine's path into every clone. Existing owned composed hooks are migrated back to their original registrations."
-plugin = "`codex plugin marketplace add Pixel-CLI/pixel`, then `codex plugin add pixel@pixel`"
 checks = ["install.codex-config", "install.codex-metrics-hook", "install.codex-hook-review", "repo.codex-config", "repo.codex-hooks", "repo.codex-hook-review"]
 
 [[agent]]
@@ -90,26 +81,23 @@ lede = "`pixel setup` adds a local Pi package with the explicit `/pixel-impact <
 global = ["~/.local/share/pixel/pi-package/package.json", "~/.local/share/pixel/pi-package/extensions/pixel-impact.ts", "~/.local/share/pixel/pi-package/extensions/pixel-brief.ts", "~/.pi/agent/settings.json"]
 when = "when Pi's agent directory (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) exists or `pi` is on PATH"
 wires = "the local package provides `/pixel-impact` and a `before_agent_start` hook that runs `pixel brief` on the submitted prompt and prepends its bounded evidence brief; Pi's native tools remain unchanged"
-note = "Your other Pi settings and packages stay: Pixel adds only its package path to `packages`, and `pixel setup --remove` takes it out again. A copy of the command an earlier release put in `extensions/` is removed, so Pi does not list it twice. Installing the npm package with `pi install` as well registers the command a second time: use one or the other."
+note = "Your other Pi settings and packages stay: Pixel adds only its package path to `packages`, and `pixel setup --remove` takes it out again. A copy of the command an earlier release put in `extensions/` is removed, so Pi does not list it twice."
 repo_note = "`pixel setup --repo .` writes nothing for Pi: it removes the `.pi/extensions/pixel-guard.ts` an earlier release wrote."
-plugin = "`pi install git:github.com/Pixel-CLI/pixel`"
 checks = ["install.pi-prompt", "install.pi-impact", "repo.pi-guard"]
 
 [[agent]]
 slug = "cursor"
 name = "Cursor"
 logo = "cursor"
-wiring = "rules"
-lede = "`pixel setup` writes nothing for Cursor; it removes the hooks an earlier release put in `~/.cursor/hooks.json`. The repository ships an optional Cursor rule you can copy into a project."
-rules = ".cursor/rules/pixel.mdc"
+wiring = "none"
+lede = "`pixel setup` writes nothing for Cursor; it removes the hooks an earlier release put in `~/.cursor/hooks.json`."
 
 [[agent]]
 slug = "copilot-cli"
 name = "Copilot CLI"
 logo = "copilot"
-wiring = "plugin"
-lede = "`pixel setup` writes nothing for Copilot CLI; it removes the `~/.copilot/hooks/pixel.json` an earlier release wrote. Pixel is available as an optional plugin, from the same manifest as Claude Code's (`.claude-plugin/plugin.json`)."
-plugin = "`copilot plugin marketplace add Pixel-CLI/pixel`, then `copilot plugin install pixel@pixel`"
+wiring = "none"
+lede = "`pixel setup` writes nothing for Copilot CLI; it removes the `~/.copilot/hooks/pixel.json` an earlier release wrote."
 
 [[agent]]
 slug = "opencode"
@@ -126,11 +114,10 @@ checks = ["install.opencode-agents-md"]
 slug = "devin"
 name = "Devin"
 logo = "devin"
-wiring = "plugin"
+wiring = "install"
 lede = "Devin keeps its native tools; `pixel setup` adds a bounded evidence brief to each prompt and removes retired lifecycle hooks from `~/.config/devin/config.json`; `pixel setup --repo` removes the repository guard from `.devin/config.local.json`."
 global = ["~/.config/devin/config.json"]
 wires = "a per-prompt evidence brief through Devin's `UserPromptSubmit` hook; native tools stay unchanged"
-plugin = "add `github.com/Pixel-CLI/pixel` as a Devin plugin"
 checks = ["install.devin-hooks", "repo.devin-hooks"]
 
 [[agent]]

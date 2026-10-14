@@ -11,8 +11,7 @@ pull request is one: any code change pushed on a `release-` branch would
 skip every gate. This script checks the diff itself, so a skip needs both.
 
 Allowed, and nothing else:
-- the version line of each `crates/*/Cargo.toml`, of `Cargo.lock` and of
-  the plugin manifests (`pixel_release::PLUGIN_MANIFESTS`);
+- the version line of each `crates/*/Cargo.toml` and of `Cargo.lock`;
 - `CHANGELOG.md`, any line;
 - the deletion of a `changelog.d/*.md` fragment.
 
@@ -29,10 +28,7 @@ import re
 import subprocess
 import sys
 
-VERSIONED = re.compile(
-    r"crates/[^/]+/Cargo\.toml|Cargo\.lock|plugin\.yaml|package\.json"
-    r"|gemini-extension\.json|\.(claude|codex|devin|qoder)-plugin/plugin\.json"
-)
+VERSIONED = re.compile(r"crates/[^/]+/Cargo\.toml|Cargo\.lock")
 VERSION_LINE = re.compile(r'\s*"?version"?\s*[=:]\s*"?\d+\.\d+\.\d+"?,?\s*')
 FRAGMENT = re.compile(r"changelog\.d/[^/]+\.md")
 

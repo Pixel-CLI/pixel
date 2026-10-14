@@ -17,4 +17,4 @@ The example below uses illustrative routing labels. Its scores are from one loca
 
 ## Further reading
 
-[Source, sample and scoring](/benchmarks/#coding-decisions) · [Jev comparison](/vs/jev/) · [Agent protocol](https://github.com/Pixel-CLI/pixel/blob/main/PIXEL.md)
+[Source, sample and scoring](/benchmarks/#coding-decisions) · [Jev comparison](/vs/jev/) · [Agent integration](/docs/)

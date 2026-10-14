@@ -1,6 +1,0 @@
-{
-  "name": "pixel",
-  "version": "0.7.1",
-  "description": "Deterministic code retrieval layer: indexed search, concept resolve, impact analysis, task targets, plan generation, and git archaeology via the pixel CLI.",
-  "contextFileName": "PIXEL.md"
-}

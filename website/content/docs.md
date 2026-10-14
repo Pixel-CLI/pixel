@@ -101,24 +101,7 @@ pixel doctor . --fix   # runs each repair a flagged check names, then re-checks
 
 `pixel doctor .` reports the wiring as stale until you do, with the command that repairs each finding, and exits 1 while a check is red.
 
-## Plugins
-
-The Codex and Claude plugins ship no skill and no retrieval hooks; the per-prompt evidence brief comes from `pixel setup`. Pi's package provides `/pixel-impact <symbol>`. The binary must be installed separately. The Pi command makes one bounded query against an existing fresh graph; missing binaries, unsupported versions or stale indexes fall back to native tools. Other agent packages retain their existing protocol integration.
-
-| Tool | Install |
-| --- | --- |
-| Claude Code | `/plugin marketplace add Pixel-CLI/pixel`, then `/plugin install pixel@pixel` |
-| Codex | `codex plugin marketplace add Pixel-CLI/pixel`, then `codex plugin add pixel@pixel` |
-| Copilot CLI | `copilot plugin marketplace add Pixel-CLI/pixel`, then `copilot plugin install pixel@pixel` |
-| Devin | add `github.com/Pixel-CLI/pixel` as a Devin plugin |
-| Pi | `pi install git:github.com/Pixel-CLI/pixel` |
-| Cursor, Kiro, Cline, Qoder | rules ship under `.cursor/rules/`, `.kiro/steering/`, `.clinerules/` and `.qoder/rules/`: copy them into your project |
-
-OpenCode has no Pixel plugin package published yet, so it is not in the table: `pixel setup` puts the protocol in its global `AGENTS.md` instead ([Pixel for OpenCode](../for/opencode/)).
-
-Any other agent: paste [`PIXEL.md`](https://github.com/Pixel-CLI/pixel/blob/main/PIXEL.md), the plain-Markdown protocol, into whatever instruction surface it offers. [Manual setup](https://github.com/Pixel-CLI/pixel/blob/main/docs/manual-setup.md) covers wiring the full prompt by hand.
-
-### Command plugins
+## Command plugins
 
 Commands move out of the binary into plugins, one repository each under `Pixel-CLI`: `pixel-git` (`commit`, `push`, `plan-rollback`, `squash-branch`, `fast-forward` and the other git commands), `pixel-flow` (`flow`, `ultraflow`), `pixel-recall` (`recall`), `pixel-telemetry` (`token-savings`, `action-log`, `list-errors`, `record-event`, `space`) and `pixel-utilities` (`web-search`, `check-release`, `ai-cli-readify`). The binary builds in none of these except `check-release`, which stays (the release workflow runs it before any plugin could be installed): without the plugin installed, `pixel <name>` prints how to get it (`pixel install github:Pixel-CLI/pixel-flow`) and exits 2. The rules `pixel setup` writes and the suggestions pixel prints name a plugin command only where that plugin runs, and `pixel doctor` (`plugins.references`) flags an instruction file that names a command no installed plugin provides. A plugin that declares network access (`pixel-git` does, for `push`, `fetch` and `sync-branch`) runs after `pixel plugin enable git`. Every plugin run is written to the action log like a core command. `pixel install <source>` takes `github:<owner>/<repo>[@<ref>]`, a git URL or a local directory; a program the repository does not ship comes from the release asset `pixel-<name>-<target-triple>` (checked against its `.sha256` when published), otherwise `pixel install` prints the `cargo install --git` command to build it and the plugin stays not runnable until it is. `npm:<package>` is not supported yet. `pixel plugin list` shows what is installed, `pixel uninstall <plugin>` removes one. The old names (`rescue`, `update`, `savings`, `rewrite`, `replay-flow`) run the plugin of the current name.
 

@@ -389,16 +389,6 @@ for m in $MEMBERS; do
     perl -0pi -e 's/^version = "[^"]*"/version = "'"$VERSION"'"/m' "$m/Cargo.toml"
 done
 
-# Plugin manifests carry the version too: Claude Code and Codex deliver a
-# plugin update only when it changes. Same list as
-# pixel_release::PLUGIN_MANIFESTS (a test fails if they drift).
-for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json .devin-plugin/plugin.json \
-    .qoder-plugin/plugin.json gemini-extension.json package.json; do
-    perl -0pi -e 's/^  "version": "[^"]*"/  "version": "'"$VERSION"'"/m' "$manifest"
-done
-perl -0pi -e 's/^version: .*$/version: '"$VERSION"'/m' plugin.yaml
-sh scripts/gen-plugin-assets.sh >/dev/null
-
 SECTION_FILE="$(mktemp)"
 trap 'rm -f "$SECTION_FILE"' EXIT
 {

@@ -42,8 +42,6 @@ New installs use the script; re-running the same `curl … | sh` line updates an
 ## Start here
 
 - [README](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/README.md): what Pixel is, install, and the step-by-step "For AI agents" setup
-- [Agent protocol](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/PIXEL.md): the full text `pixel setup` deploys; which `pixel` command replaces `grep`, `git log`, `git blame` and whole-file reads, and when a native tool is still right
-- [Sub-agent protocol](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/PIXEL-SUBAGENT.md): the short version for sub-agents
 
 ## Docs
 
@@ -56,16 +54,16 @@ New installs use the script; re-running the same `curl … | sh` line updates an
 
 ## For your agent
 
-One page per agent: what `pixel setup` writes for it and where, the plugin or rules file where it writes nothing, the `pixel doctor` check and the removal. These are HTML pages; the facts behind them are in [agents.toml](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/website/data/agents.toml), which a test holds to what `pixel setup` really writes.
+One page per agent: what `pixel setup` writes for it and where, the `pixel doctor` check and the removal. These are HTML pages; the facts behind them are in [agents.toml](https://raw.githubusercontent.com/Pixel-CLI/pixel/main/website/data/agents.toml), which a test holds to what `pixel setup` really writes.
 
 - [For your agent](https://pixel-cli.dev/for/): every agent, grouped by how Pixel reaches it
-- [Claude Code](https://pixel-cli.dev/for/claude-code/): `pixel setup` (task lifecycle hooks in `~/.claude/settings.json`; retired retrieval hooks removed), or the plugin
-- [Codex](https://pixel-cli.dev/for/codex/): `pixel setup` (task lifecycle hooks in `~/.codex/hooks.json`; retired `developer_instructions` removed), or the plugin
-- [Pi](https://pixel-cli.dev/for/pi/): `pixel setup` (the explicit `/pixel-impact` command as a Pi package declared in `~/.pi/agent/settings.json`), or the npm Pi package
-- [Cursor](https://pixel-cli.dev/for/cursor/): nothing written by `pixel setup`; a rules file copied into the project
-- [Copilot CLI](https://pixel-cli.dev/for/copilot-cli/): nothing written by `pixel setup`; a plugin
+- [Claude Code](https://pixel-cli.dev/for/claude-code/): `pixel setup` (task lifecycle hooks in `~/.claude/settings.json`; retired retrieval hooks removed)
+- [Codex](https://pixel-cli.dev/for/codex/): `pixel setup` (task lifecycle hooks in `~/.codex/hooks.json`; retired `developer_instructions` removed)
+- [Pi](https://pixel-cli.dev/for/pi/): `pixel setup` (the explicit `/pixel-impact` command as a Pi package declared in `~/.pi/agent/settings.json`)
+- [Cursor](https://pixel-cli.dev/for/cursor/): nothing written by `pixel setup`; it only removes the hooks an earlier release wrote
+- [Copilot CLI](https://pixel-cli.dev/for/copilot-cli/): nothing written by `pixel setup`; it only removes the hooks an earlier release wrote
 - [OpenCode](https://pixel-cli.dev/for/opencode/): native tools; `pixel setup` only removes what earlier releases wrote
-- [Devin](https://pixel-cli.dev/for/devin/): a plugin; `pixel setup` only removes the hooks earlier releases wrote
+- [Devin](https://pixel-cli.dev/for/devin/): `pixel setup` (a per-prompt evidence brief through Devin's hook; retired lifecycle hooks removed)
 - [Antigravity](https://pixel-cli.dev/for/antigravity/): native tools; `pixel setup` only removes the plugin and hooks earlier releases wrote
 
 ## Answers

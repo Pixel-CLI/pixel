@@ -1,9 +1,8 @@
-{{- /* The setup sections of a /for/<slug>/ page, as Markdown, from the page's `agent` entry in data/agents.toml: install, what Pixel writes and where, the per-repository cleanup, the plugin or rules file, the check, the removal. Called as {{% agent-setup %}} so the sections reach the table of contents. crates/pixel/tests/cli/docs_drift.rs holds the data's paths and checks to a real `pixel setup`. */ -}}
+{{- /* The setup sections of a /for/<slug>/ page, as Markdown, from the page's `agent` entry in data/agents.toml: install, what Pixel writes and where, the per-repository cleanup, the check, the removal. Called as {{% agent-setup %}} so the sections reach the table of contents. crates/pixel/tests/cli/docs_drift.rs holds the data's paths and checks to a real `pixel setup`. */ -}}
 {{- $slug := .Page.Params.agent -}}
 {{- $a := index (where hugo.Data.agents.agent "slug" $slug) 0 -}}
 {{- if not $a }}{{ errorf "%s: no agent %q in data/agents.toml" .Page.File.Path $slug }}{{ end -}}
 {{- $docs := "docs/" | relURL -}}
-{{- $raw := printf "https://raw.githubusercontent.com/%s/main" site.Params.repo -}}
 {{- $shared := hugo.Data.agents.shared -}}
 ## Install Pixel
 
@@ -32,29 +31,10 @@ Every `pixel setup` also writes {{ range $i, $f := $shared }}{{ if $i }} and {{ 
 {{ else }}
 ## What pixel setup writes
 
-Nothing for {{ $a.name }}: it keeps its native tools, and `pixel setup` only removes what an earlier release wrote for it. `pixel doctor` judges only what `pixel setup` manages{{ if not $a.checks }}, so it does not see {{ $a.name }}'s {{ if eq $a.wiring "rules" }}rule{{ else }}plugin{{ end }}{{ else }}: its checks pass once those leftovers are gone{{ end }}.
+Nothing for {{ $a.name }}: it keeps its native tools, and `pixel setup` only removes what an earlier release wrote for it.{{ if $a.checks }} `pixel doctor` reports its checks as passing once those leftovers are gone.{{ end }}
 {{ end }}
 {{- with $a.note }}
 {{ . }}
-{{ end }}
-{{- with $a.plugin }}
-## {{ if eq $a.wiring "plugin" }}Install the plugin{{ else }}Or as a plugin{{ end }}
-
-{{ . | strings.FirstUpper }}.
-
-The plugin never installs the `pixel` binary. The protocol it loads starts by checking for it (`command -v pixel`) and tells the agent to work without Pixel's commands when it is missing.
-{{ end }}
-{{- with $a.rules }}
-## Add the rule
-
-Copy the rule the repository ships into your project:
-
-```bash
-mkdir -p {{ path.Dir . }}
-curl -fsSL {{ $raw }}/{{ . }} -o {{ . }}
-```
-
-The rule is the protocol: which `pixel` command replaces `grep`, a whole-file read or `git log`, and when a native tool is still right. It starts by checking for the binary (`command -v pixel`).
 {{ end }}
 {{- if or $a.repo $a.repo_note }}
 ## Per repository
@@ -88,7 +68,7 @@ pixel doctor .
 pixel doctor .{{ range . }} --only {{ . }}{{ end }}
 ```
 {{- else -}}
-It checks the binary, the daemon and this repository's index, the parts {{ $a.name }} relies on once the {{ if eq $a.wiring "rules" }}rule{{ else }}plugin{{ end }} is in place.
+It checks the binary, the daemon and this repository's index, the parts {{ $a.name }} relies on.
 {{- end }}
 
 ## Remove it
@@ -102,14 +82,6 @@ It removes everything `pixel setup` wrote, for every agent at once, and the bina
 {{- with $a.repo }}
 
 `pixel setup --remove --repo .` removes only this repository's files.
-{{- end }}
-{{- if and $a.plugin (ne $a.wiring "install") }}
-
-Remove the plugin with {{ $a.name }}'s own plugin or extension command.
-{{- end }}
-{{- with $a.rules }}
-
-Delete `{{ . }}`.
 {{- end }}
 {{- if eq $a.wiring "none" }}
 Nothing to remove for {{ $a.name }}. `pixel setup --remove` also takes out what an earlier release wrote for it.

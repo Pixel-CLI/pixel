@@ -6,8 +6,7 @@ The Hugo site published at <https://pixel-cli.dev/> by
 the JSON-LD states).
 
 The domain lives in three places that change together (and is spelled as
-the homepage in `package.json`, `.claude-plugin/plugin.json` and the
-Homebrew formula `release.yml` writes): `baseURL` in
+the homepage in the Homebrew formula `release.yml` writes): `baseURL` in
 `hugo.toml`, the custom domain in the repository's Pages settings (the
 workflow deploys an artifact, so a `static/CNAME` file would be ignored),
 and the DNS records at Cloudflare: four `A` and four `AAAA` records to
@@ -214,9 +213,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   wiring changes. Its "What pixel setup wires" table is the
   `agents-install` shortcode, from `data/agents.toml`.
 - `data/agents.toml`: the agents the site names, in the home's order, and
-  what Pixel does for each: `wiring` (`install`, `plugin`, `rules` or `none`), the
-  files `pixel setup` and `pixel setup --repo` write, the plugin command
-  or rules file, the `pixel doctor` checks. The hero, the Compatibility
+  what Pixel does for each: `wiring` (`install` or `none`), the
+  files `pixel setup` and `pixel setup --repo` write, the `pixel doctor` checks. The hero, the Compatibility
   grid, the `/docs/` wiring table and the `/for/` section all read it.
   `crates/pixel/tests/cli/docs_drift.rs` runs a real `pixel setup` and
   `pixel setup --repo` into empty directories and fails when the files
@@ -227,8 +225,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 - `content/for/`: one page per agent (`/for/<slug>/`), each a front matter
   naming its `agent` and the `{{% agent-setup %}}` shortcode
   (`layouts/shortcodes/agent-setup.html`), which writes the setup sections
-  from the data: install, what `pixel setup` writes, the plugin or rules
-  file, the per-repository cleanup, the check, the removal.
+  from the data: install, what `pixel setup` writes, the per-repository
+  cleanup, the check, the removal.
   `layouts/for/single.html` adds the breadcrumb (visible and as
   `BreadcrumbList` JSON-LD) and the other agents; `layouts/for/list.html`
   groups `/for/` by wiring, and the build fails on an agent with no page or

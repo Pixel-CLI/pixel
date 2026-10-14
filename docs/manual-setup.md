@@ -15,10 +15,6 @@ wire (Cursor, Copilot, ...)? You don't need `pixel setup`.
    prompts, guard hooks and plugins. It wires none of them, and every agent
    keeps its native tools.
 
-The Codex and Claude plugins ship no skill and register no hooks; the
-per-prompt evidence brief comes from the task hook `pixel setup` writes.
-The CLI and the plugins are separate installations.
-
 ## 1. Install the binary
 
 ```bash
@@ -78,8 +74,7 @@ not under `~/.local/share/pixel/`: `pixel setup` deletes the
 To assess callers or the impact of a known symbol, run `pixel impact
 <symbol> --no-refresh` yourself; the per-prompt brief already runs it for a
 prompt that names a symbol and asks to change it or find its callers.
-Ordinary work keeps the usual tools. The native Pixel plugin ships no skill,
-injects no session prompt and registers no retrieval hooks.
+Ordinary work keeps the usual tools.
 
 `pixel setup` removes its retired retrieval, post-edit advice, compaction
 and metrics registrations from Claude's user settings. Independent task-event
@@ -93,8 +88,7 @@ different profile with additional context.
 ### Codex
 
 For a known symbol whose callers or change impact matter, run `pixel impact
-<symbol> --no-refresh`; the per-prompt brief covers the common case. The
-native plugin ships no skill, and its manifest registers no retrieval hooks.
+<symbol> --no-refresh`; the per-prompt brief covers the common case.
 
 Global installation removes Pixel's old retrieval `UserPromptSubmit` and
 metrics hooks and retains the independent task-event suite. The previous
@@ -112,9 +106,8 @@ Existing sessions retain previously received context until a fresh session.
 Pi uses a package. The explicit
 `/pixel-impact <symbol>` command requests bounded graph evidence. It does
 not query Pixel at startup, classify every prompt, or replace native tools.
-By hand, add the package path to `packages` in Pi's `settings.json`, or
-install the repository as a Pi package (`pi install git:github.com/Pixel-CLI/pixel`),
-not both. See [Pi integration](pi-harness.md) for the files.
+By hand, add the package path to `packages` in Pi's `settings.json`.
+See [Pi integration](pi-harness.md) for the files.
 
 `pixel setup` removes its managed and recognized historical automatic
 instructions from `~/.pi/agent/APPEND_SYSTEM.md`, preserving user text.
@@ -148,7 +141,7 @@ look beyond the returned list when task correctness requires it.
 
 `pixel setup` wires only the agents above; the website's
 [per-agent pages](https://pixel-cli.dev/for/) list what it writes or removes
-for each, and the plugins or rules files for the others. To give any tool the
+for each. To give any tool the
 full protocol, put the text of the bundled
 `crates/pixel-install/assets/pixel-agent-prompt.md` wherever that tool reads
 always-on instructions: a rules file (`.cursor/rules`, `GEMINI.md`,

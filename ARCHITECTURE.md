@@ -1237,8 +1237,7 @@ and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `
     config, action pins, advisory ignores, SPDX headers, clean, cancel-stale sweep, harness-grid dispatch input,
     reproducible release build environment, the brief-gate bench, excavation counter and live brief A/B driver self-tests with the `eval/brief-gate/` prompt set's schema check, the `eval/` agent A/B harness against fixture CLIs), the
     pixel-retro lead-time and adherence contracts
-    (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`)
-    and the Bun Pi impact-command contract (`scripts/test-pi-impact.mjs`);
+    (`.agents/skills/pixel-retro/test_lead_time.py`, `test_adherence.py`);
   - **Lint**: `cargo clippy --all-targets` with warnings denied, then
     `cargo check` of the two reduced feature lanes (`--no-default-features`,
     `model2vec` only);

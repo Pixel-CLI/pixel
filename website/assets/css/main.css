@@ -698,12 +698,10 @@ main { counter-reset: chapter; }
 /* ---------- agents ----------
    Each vendor's mark in its own colours (assets/logos/), its name beside it;
    a monochrome mark takes currentColor, white on this ground. */
-/* The home's Compatibility: one group per way in (install wide, plugin and rules side by side), each tile a logo, the name and what Pixel writes. */
+/* The home's Compatibility: one group per way in, each tile a logo, the name and what Pixel writes. */
 .ways { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; text-align: left; }
 .ways__group { min-width: 0; display: grid; align-content: start; gap: 10px; padding: clamp(18px, 2.2vw, 26px); border-top: 2px solid var(--green); border-radius: 0 0 8px 8px; background: color-mix(in srgb, var(--panel) 40%, transparent); }
 .ways__group--install { grid-column: 1 / -1; }
-.ways__group--plugin { border-top-color: color-mix(in srgb, var(--green) 55%, var(--line)); }
-.ways__group--rules { border-top-color: var(--line); }
 .ways__group--none { grid-column: 1 / -1; border-top-color: var(--line); }
 .ways__group h3 { margin: 0; font: 700 1.6rem/1.05 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; }
 .ways__group > p { margin: 0 0 6px; color: var(--ink-soft); font-size: 0.98rem; }

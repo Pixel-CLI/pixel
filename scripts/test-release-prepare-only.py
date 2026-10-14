@@ -42,8 +42,6 @@ class ReleasePrepareOnly(unittest.TestCase):
         self.write({
             "crates/pixel/Cargo.toml": '[package]\nname = "pixel"\nversion = "0.5.1"\n\n[dependencies]\nserde = "1"\n',
             "Cargo.lock": '[[package]]\nname = "pixel"\nversion = "0.5.1"\n\n[[package]]\nname = "serde"\nversion = "1.0.0"\nchecksum = "aaa"\n',
-            ".claude-plugin/plugin.json": '{\n  "name": "pixel",\n  "version": "0.5.1",\n  "x": 1\n}\n',
-            "plugin.yaml": "name: pixel\nversion: 0.5.1\n",
             "CHANGELOG.md": "## [Unreleased]\n",
             "changelog.d/1-a.fixed.md": "fix\n",
             "crates/pixel/src/lib.rs": "pub fn f() {}\n",
@@ -65,7 +63,7 @@ class ReleasePrepareOnly(unittest.TestCase):
         return git(self.repo, "rev-parse", "HEAD")
 
     def bump(self):
-        for path in ["crates/pixel/Cargo.toml", "Cargo.lock", ".claude-plugin/plugin.json", "plugin.yaml"]:
+        for path in ["crates/pixel/Cargo.toml", "Cargo.lock"]:
             p = Path(self.repo, path)
             p.write_text(p.read_text().replace("0.5.1", "0.5.2"))
         self.write({"CHANGELOG.md": "## [Unreleased]\n\n## [0.5.2]\n- fix\n"})
@@ -104,21 +102,10 @@ class ReleasePrepareOnly(unittest.TestCase):
         p.write_text(p.read_text().replace('"1.0.0"', '"1.0.1"').replace('"aaa"', '"bbb"'))
         self.assertTrue(any(r.startswith("Cargo.lock: changes a line other than its version") for r in self.reasons()))
 
-    def test_a_manifest_field_other_than_version_is_refused(self):
-        self.bump()
-        p = Path(self.repo, ".claude-plugin/plugin.json")
-        p.write_text(p.read_text().replace('"x": 1', '"x": 2'))
-        self.assertTrue(any(r.startswith(".claude-plugin/plugin.json: changes a line") for r in self.reasons()))
-
     def test_an_added_fragment_is_refused(self):
         self.bump()
         self.write({"changelog.d/2-b.added.md": "new\n"})
         self.assertEqual(self.reasons(), ["changelog.d/2-b.added.md: a fragment may only be deleted (A)"])
-
-    def test_a_deleted_manifest_is_refused(self):
-        self.bump()
-        Path(self.repo, "plugin.yaml").unlink()
-        self.assertEqual(self.reasons(), ["plugin.yaml: prepare.sh only edits it (D)"])
 
     def worktree_reasons(self):
         cwd = os.getcwd()
