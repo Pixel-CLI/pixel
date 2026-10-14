@@ -7,9 +7,11 @@ use std::io::Write;
 use std::iter::Peekable;
 use std::path::Path;
 use std::str::Chars;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
+
+use crate::brief_parts::{self, BriefPart, Limits};
 
 /// Hook payloads are bounded independently of the host's output limits (1 MiB).
 /// One spelling shared with every other hook entry point, so the cap a host
@@ -1059,10 +1061,24 @@ fn enforcement_applies(provider: TaskProvider, payload: Option<&Value>) -> bool 
         })
 }
 
-fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
+fn process(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    raw: &str,
+    part: Option<BriefPart>,
+) -> Value {
     let Ok(payload) = serde_json::from_str::<Value>(raw) else {
         return envelope(provider, event, &unavailable(event, None, true));
     };
+    // The first of several parts owns the brief: it forgets the last prompt's
+    // before the other parts look for this one's.
+    let first_of_many = part
+        .filter(|part| part.index == 1 && part.count > 1 && event == TaskHookEvent::PromptSubmit);
+    if first_of_many.is_some() {
+        part_path(provider, &payload)
+            .iter()
+            .for_each(|path| brief_parts::forget(path));
+    }
     // The brief runs beside the ledger: it needs neither, and a slow ledger
     // must not use up its window.
     let brief = start_brief(provider, event, &payload);
@@ -1070,15 +1086,128 @@ fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
         // A start is a nicety: whatever it came to, the hook goes on.
         let _ = crate::execution_brief::autostart::warm(&root);
     }
-    let decision =
+    let ledger = || {
         handle_at(&payload_cwd(&payload), provider, event, &payload).unwrap_or_else(|_| {
             unavailable(
                 event,
                 Some(&payload),
                 enforcement_applies(provider, Some(&payload)),
             )
-        });
-    envelope(provider, event, &with_brief(decision, brief))
+        })
+    };
+    let (decision, text) = if let Some(part) = first_of_many {
+        // The other parts are waiting for the brief: publish it as soon as it
+        // is finished, not after the ledger has answered too.
+        std::thread::scope(|scope| {
+            let published = scope.spawn(|| publish_first_part(provider, &payload, brief, part));
+            let decision = ledger();
+            (decision, published.join().unwrap_or(None))
+        })
+    } else {
+        let decision = ledger();
+        (decision, finish_brief(provider, event, &payload, brief))
+    };
+    envelope(provider, event, &with_context(decision, text))
+}
+
+/// Where the first part stores the brief of this prompt and the others read
+/// it, when the payload names a prompt and a repository.
+fn part_path(provider: TaskProvider, payload: &Value) -> Option<std::path::PathBuf> {
+    let prompt = brief_prompt(provider, TaskHookEvent::PromptSubmit, payload)?;
+    let root = crate::discover_root(&payload_cwd(payload)).ok()?;
+    Some(brief_parts::cache_path(
+        &root,
+        string(payload, &["session_id", "sessionId"]),
+        &prompt,
+    ))
+}
+
+/// What one part of a split brief may carry on `provider`: Codex measures an
+/// injected context in bytes, the others in characters.
+fn part_limits(provider: TaskProvider) -> Limits {
+    if provider == TaskProvider::Codex {
+        Limits::BYTES
+    } else {
+        Limits::CHARS
+    }
+}
+
+/// The finished brief of a prompt-submit, grown to the size
+/// `PIXEL_BRIEF_TEST_PAD_PARTS` asks for in a debug build.
+#[cfg(debug_assertions)]
+fn forced_oversize(provider: TaskProvider, text: Option<String>) -> Option<String> {
+    let parts = std::env::var(brief_parts::TEST_PAD_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .filter(|parts| (1..=pixel_install::config::BRIEF_PARTS_MAX).contains(parts));
+    match parts {
+        Some(parts) => Some(brief_parts::pad_to_parts(
+            &text.unwrap_or_default(),
+            parts,
+            part_limits(provider),
+        )),
+        None => text,
+    }
+}
+
+/// A release build has no such variable.
+#[cfg(not(debug_assertions))]
+fn forced_oversize(_: TaskProvider, text: Option<String>) -> Option<String> {
+    text
+}
+
+/// The brief text of `event`, once the worker has answered or the window is
+/// out; `None` when the event carries no brief or nothing answered.
+fn finish_brief(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    payload: &Value,
+    brief: Option<crate::execution_brief::chain::Pending>,
+) -> Option<String> {
+    let text = brief.and_then(crate::execution_brief::chain::Pending::finish);
+    if brief_prompt(provider, event, payload).is_some() {
+        forced_oversize(provider, text)
+    } else {
+        text
+    }
+}
+
+/// Part 1 of a split brief: finish the brief, store it whole for the other
+/// parts (an empty one too, so they do not wait for nothing) and return the
+/// first slice for this hook to print.
+fn publish_first_part(
+    provider: TaskProvider,
+    payload: &Value,
+    brief: Option<crate::execution_brief::chain::Pending>,
+    part: BriefPart,
+) -> Option<String> {
+    let text = finish_brief(provider, TaskHookEvent::PromptSubmit, payload, brief);
+    if let Some(path) = part_path(provider, payload) {
+        // Best effort: parts that find nothing print nothing.
+        let _ = brief_parts::store(&path, text.as_deref().unwrap_or(""), SystemTime::now());
+    }
+    text.map(|text| brief_parts::slice(&text, part, part_limits(provider)).to_owned())
+        .filter(|slice| !slice.is_empty())
+}
+
+/// A part after the first: print the slice of the brief part 1 stores,
+/// waiting at most `bound` for it. `None` (print nothing) when the payload
+/// names no prompt or repository or the brief does not arrive in time; `{}`
+/// when it arrives and has nothing for this part.
+fn follow(provider: TaskProvider, raw: &str, part: BriefPart, bound: Duration) -> Option<Value> {
+    let payload = serde_json::from_str::<Value>(raw).ok()?;
+    let path = part_path(provider, &payload)?;
+    let text = brief_parts::wait_for(&path, bound, brief_parts::POLL)?;
+    let slice = brief_parts::slice(&text, part, part_limits(provider));
+    Some(if slice.is_empty() {
+        json!({})
+    } else {
+        envelope(
+            provider,
+            TaskHookEvent::PromptSubmit,
+            &json!({"decision": "observe", "context": slice}),
+        )
+    })
 }
 
 fn brief_prompt(provider: TaskProvider, event: TaskHookEvent, payload: &Value) -> Option<String> {
@@ -1162,9 +1291,21 @@ fn antigravity_prompt(payload: &Value) -> Option<String> {
 /// `decision` with the brief as its `context`, which the envelope delivers as
 /// the host's additional context. A decision that already carries a context
 /// keeps it.
-fn with_brief(mut decision: Value, brief: Option<crate::execution_brief::chain::Pending>) -> Value {
+#[cfg(test)]
+fn with_brief(decision: Value, brief: Option<crate::execution_brief::chain::Pending>) -> Value {
+    if decision.get("context").is_some() {
+        return decision;
+    }
+    with_context(
+        decision,
+        brief.and_then(crate::execution_brief::chain::Pending::finish),
+    )
+}
+
+/// `decision` with `text` as its `context` unless it carries one already.
+fn with_context(mut decision: Value, text: Option<String>) -> Value {
     if decision.get("context").is_none()
-        && let Some(text) = brief.and_then(crate::execution_brief::chain::Pending::finish)
+        && let Some(text) = text
     {
         decision["context"] = Value::String(text);
     }
@@ -1215,28 +1356,50 @@ fn bounded_decision(
 }
 
 /// Read one bounded host event, dispatch it, and emit only the host's schema.
-pub fn run(provider: TaskProvider, event: TaskHookEvent) -> ! {
+///
+/// `part` is the slice of a split prompt-submit brief this hook serves (see
+/// [`brief_parts`]); on another event it means nothing and is ignored.
+pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>) -> ! {
     if provider == TaskProvider::Claude && imported_config_host().is_some() {
         std::process::exit(0);
     }
-    let output =
-        if let Some(raw) = crate::hook_input::read_bounded(&mut std::io::stdin(), MAX_INPUT) {
+    let raw = crate::hook_input::read_bounded(&mut std::io::stdin(), MAX_INPUT);
+    let output = if let Some(raw) = &raw {
+        let later = part.filter(|part| part.index > 1 && event == TaskHookEvent::PromptSubmit);
+        if let Some(part) = later {
+            // Nothing to say is nothing printed: a hook that cannot get its
+            // slice in time never holds the prompt.
+            follow(provider, raw, part, brief_parts::WAIT)
+        } else {
             let input = raw.clone();
-            bounded_decision(
+            Some(bounded_decision(
                 provider,
                 event,
-                &raw,
+                raw,
                 DECISION_TIMEOUT,
-                move || process(provider, event, &input),
+                move || process(provider, event, &input, part),
                 |payload| enforcement_applies(provider, payload),
-            )
-        } else {
-            envelope(provider, event, &unavailable(event, None, true))
-        };
+            ))
+        }
+    } else {
+        Some(envelope(provider, event, &unavailable(event, None, true)))
+    };
     // Flush the only response before exit terminates any stalled evaluator.
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "{output}");
-    let _ = stdout.flush();
+    if let Some(output) = output {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{output}");
+        let _ = stdout.flush();
+    }
+    // The first of several parts has said its piece: the others may now.
+    let first_of_many = part.is_some_and(|part| {
+        part.index == 1 && part.count > 1 && event == TaskHookEvent::PromptSubmit
+    });
+    if first_of_many
+        && let Some(payload) = raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        && let Some(path) = part_path(provider, &payload)
+    {
+        brief_parts::mark_done(&path);
+    }
     std::process::exit(0);
 }
 
@@ -2064,15 +2227,16 @@ mod tests {
     fn malformed_input_should_not_open_the_mutation_or_completion_gate() {
         for provider in [TaskProvider::Claude, TaskProvider::Codex] {
             assert_eq!(
-                process(provider, TaskHookEvent::PreToolUse, "not json")["hookSpecificOutput"]["permissionDecision"],
+                process(provider, TaskHookEvent::PreToolUse, "not json", None)["hookSpecificOutput"]
+                    ["permissionDecision"],
                 "deny"
             );
             assert_eq!(
-                process(provider, TaskHookEvent::Stop, "not json")["continue"],
+                process(provider, TaskHookEvent::Stop, "not json", None)["continue"],
                 false
             );
             assert_eq!(
-                process(provider, TaskHookEvent::PostToolUse, "not json"),
+                process(provider, TaskHookEvent::PostToolUse, "not json", None),
                 json!({})
             );
         }
@@ -2350,5 +2514,369 @@ mod tests {
             ),
             json!({"injectSteps":[{"ephemeralMessage":"[PIXEL:BRIEF]\nfiles: src/a.ts:2"}]})
         );
+    }
+
+    /// A repository (a `.git` directory is enough to be discovered) and the
+    /// prompt-submit payload a host would send from it.
+    fn parts_repo(tag: &str) -> (std::path::PathBuf, String) {
+        let root = std::env::temp_dir().join(format!(
+            "pixel-task-hook-parts-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let raw = json!({
+            "session_id": "session-9",
+            "prompt": "where is `fetchUser` used",
+            "cwd": root,
+            "hook_event_name": "UserPromptSubmit",
+        })
+        .to_string();
+        (root, raw)
+    }
+
+    fn part(index: u8, count: u8) -> BriefPart {
+        BriefPart { index, count }
+    }
+
+    fn brief_path(root: &Path, raw: &str) -> std::path::PathBuf {
+        let payload: Value = serde_json::from_str(raw).unwrap();
+        part_path(TaskProvider::Claude, &payload).unwrap_or_else(|| root.join("no-path"))
+    }
+
+    /// A brief of `lines` lines of 100 characters, line 1 `[PIXEL:BRIEF]`.
+    fn big_brief(lines: usize) -> String {
+        let mut text = String::from("[PIXEL:BRIEF]\n");
+        for n in 1..lines {
+            text.push_str(&format!("{n:04} {}\n", "z".repeat(94)));
+        }
+        text
+    }
+
+    fn context_of(output: &Value) -> &str {
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_later_part_prints_its_slice_in_the_hook_envelope() {
+        let (root, raw) = parts_repo("slice");
+        let brief = big_brief(250);
+        brief_parts::store(&brief_path(&root, &raw), &brief, SystemTime::now()).unwrap();
+        let mut joined = String::new();
+        for index in 1..=3 {
+            let output =
+                follow(TaskProvider::Claude, &raw, part(index, 3), Duration::ZERO).unwrap();
+            assert_eq!(
+                output["hookSpecificOutput"]["hookEventName"],
+                "UserPromptSubmit"
+            );
+            assert_eq!(output.as_object().unwrap().len(), 1, "{output}");
+            assert!(context_of(&output).chars().count() <= 9_800);
+            joined.push_str(context_of(&output));
+        }
+        assert_eq!(joined, brief, "the parts together are the brief");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_later_part_waits_for_the_first_and_prints_what_arrives() {
+        let (root, raw) = parts_repo("waits");
+        let path = brief_path(&root, &raw);
+        let brief = big_brief(150);
+        let writer = {
+            let (path, brief) = (path, brief.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                brief_parts::store(&path, &brief, SystemTime::now()).unwrap();
+                brief_parts::mark_done(&path);
+            })
+        };
+        let started = std::time::Instant::now();
+        let output = follow(
+            TaskProvider::Claude,
+            &raw,
+            part(2, 3),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            context_of(&output),
+            brief_parts::slice(&brief, part(2, 3), Limits::CHARS)
+        );
+        writer.join().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_later_part_that_times_out_prints_nothing() {
+        let (root, raw) = parts_repo("timeout");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            follow(
+                TaskProvider::Claude,
+                &raw,
+                part(2, 3),
+                Duration::from_millis(100)
+            ),
+            None
+        );
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_later_part_with_no_slice_prints_an_empty_object_and_with_no_prompt_nothing() {
+        let (root, raw) = parts_repo("empty");
+        let path = brief_path(&root, &raw);
+        // The brief is one piece long: parts 2 and 3 have nothing.
+        brief_parts::store(&path, "[PIXEL:BRIEF]\nshort\n", SystemTime::now()).unwrap();
+        for index in [2, 3] {
+            assert_eq!(
+                follow(TaskProvider::Claude, &raw, part(index, 3), Duration::ZERO),
+                Some(json!({}))
+            );
+        }
+        // No brief at all (stored empty): the same, and without waiting.
+        brief_parts::store(&path, "", SystemTime::now()).unwrap();
+        brief_parts::mark_done(&path);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            follow(
+                TaskProvider::Claude,
+                &raw,
+                part(2, 3),
+                Duration::from_secs(30)
+            ),
+            Some(json!({}))
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // A payload that names no prompt, no repository or no JSON waits for nothing.
+        let started = std::time::Instant::now();
+        for bad in [
+            "not json".to_owned(),
+            json!({"session_id": "s", "cwd": root}).to_string(),
+            json!({"session_id": "s", "prompt": "p", "cwd": root.join("absent")}).to_string(),
+        ] {
+            assert_eq!(
+                follow(
+                    TaskProvider::Claude,
+                    &bad,
+                    part(2, 3),
+                    Duration::from_secs(30)
+                ),
+                None,
+                "{bad}"
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Another session, another prompt or another repository never reads the
+    /// stored brief of this one.
+    #[test]
+    fn the_parts_of_one_prompt_never_read_the_brief_of_another() {
+        let (root, raw) = parts_repo("keyed");
+        brief_parts::store(&brief_path(&root, &raw), &big_brief(150), SystemTime::now()).unwrap();
+        let mut other_session: Value = serde_json::from_str(&raw).unwrap();
+        other_session["session_id"] = json!("session-10");
+        let mut other_prompt: Value = serde_json::from_str(&raw).unwrap();
+        other_prompt["prompt"] = json!("where is `fetchOrder` used");
+        for payload in [other_session, other_prompt] {
+            assert_eq!(
+                follow(
+                    TaskProvider::Claude,
+                    &payload.to_string(),
+                    part(2, 3),
+                    Duration::ZERO
+                ),
+                None,
+                "{payload}"
+            );
+        }
+        assert!(follow(TaskProvider::Claude, &raw, part(2, 3), Duration::ZERO).is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_parts_are_cut_by_bytes_and_the_others_by_characters() {
+        let (root, raw) = parts_repo("codex");
+        // Four lines of 9,001 characters, 18,002 bytes each.
+        let brief = format!("{}\n", "é".repeat(9_000)).repeat(4);
+        brief_parts::store(&brief_path(&root, &raw), &brief, SystemTime::now()).unwrap();
+        let printed = |provider, count: u8| -> Vec<String> {
+            (1..=count)
+                .map(|index| {
+                    follow(provider, &raw, part(index, count), Duration::ZERO)
+                        .map(|output| context_of(&output).to_owned())
+                        .unwrap()
+                })
+                .collect()
+        };
+        let by_chars = printed(TaskProvider::Claude, 4);
+        assert!(
+            by_chars
+                .iter()
+                .all(|slice| slice == &format!("{}\n", "é".repeat(9_000)))
+        );
+        // Codex counts bytes: 4,900 characters fill a part, so a line is two.
+        let by_bytes = printed(TaskProvider::Codex, 8);
+        assert_eq!(by_bytes.concat(), brief);
+        assert!(
+            by_bytes.iter().all(|slice| slice.len() <= 9_800),
+            "{:?}",
+            by_bytes.iter().map(String::len).collect::<Vec<_>>()
+        );
+        assert_eq!(by_bytes[0].chars().count(), 4_900);
+        assert_eq!(part_limits(TaskProvider::Codex), Limits::BYTES);
+        for provider in [
+            TaskProvider::Claude,
+            TaskProvider::Gemini,
+            TaskProvider::Antigravity,
+            TaskProvider::Devin,
+            TaskProvider::Pi,
+        ] {
+            assert_eq!(part_limits(provider), Limits::CHARS, "{provider:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_first_part_stores_the_whole_brief_and_prints_its_own_slice() {
+        // finish_brief reads the debug-only pad variable another test sets.
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let (root, raw) = parts_repo("first");
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        let path = brief_path(&root, &raw);
+        let printed = publish_first_part(
+            TaskProvider::Claude,
+            &payload,
+            Some(pending_brief()),
+            part(1, 3),
+        );
+        let stored = brief_parts::wait_for(&path, Duration::ZERO, brief_parts::POLL).unwrap();
+        assert!(stored.starts_with("[PIXEL:BRIEF]"), "{stored}");
+        assert_eq!(
+            printed.as_deref(),
+            Some(stored.as_str()),
+            "a short brief is all in part 1"
+        );
+        for index in [2, 3] {
+            assert_eq!(
+                follow(TaskProvider::Claude, &raw, part(index, 3), Duration::ZERO),
+                Some(json!({}))
+            );
+        }
+
+        // No brief for this prompt: part 1 stores an empty one so the others
+        // do not wait, and prints nothing.
+        brief_parts::forget(&path);
+        assert_eq!(
+            publish_first_part(TaskProvider::Claude, &payload, None, part(1, 3)),
+            None
+        );
+        assert_eq!(
+            brief_parts::wait_for(&path, Duration::ZERO, brief_parts::POLL).as_deref(),
+            Some("")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_first_part_outside_a_repository_prints_and_stores_nothing() {
+        // finish_brief reads the debug-only pad variable another test sets.
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let payload = json!({"session_id": "s", "prompt": "where is `fetchUser` used", "cwd": "/nonexistent-dir-for-pixel"});
+        assert!(part_path(TaskProvider::Claude, &payload).is_none());
+        assert_eq!(
+            publish_first_part(
+                TaskProvider::Claude,
+                &payload,
+                Some(pending_brief()),
+                part(1, 3)
+            )
+            .map(|slice| slice.starts_with("[PIXEL:BRIEF]")),
+            Some(true)
+        );
+    }
+
+    /// The debug-only variable grows a brief to the parts it asks for; absent
+    /// or out of range it leaves the brief alone.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn the_test_pad_variable_makes_the_brief_exactly_as_many_parts_as_asked() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os(brief_parts::TEST_PAD_ENV);
+        let set = |value: Option<&str>| match value {
+            // SAFETY: the variable is only changed under ENV_LOCK.
+            Some(value) => unsafe { std::env::set_var(brief_parts::TEST_PAD_ENV, value) },
+            // SAFETY: same lock as above.
+            None => unsafe { std::env::remove_var(brief_parts::TEST_PAD_ENV) },
+        };
+        set(None);
+        assert_eq!(forced_oversize(TaskProvider::Claude, None), None);
+        assert_eq!(
+            forced_oversize(TaskProvider::Claude, Some("brief".into())),
+            Some("brief".into())
+        );
+        for ignored in ["0", "9", "-1", "many", ""] {
+            set(Some(ignored));
+            assert_eq!(
+                forced_oversize(TaskProvider::Claude, None),
+                None,
+                "{ignored:?}"
+            );
+        }
+        for provider in [TaskProvider::Claude, TaskProvider::Codex] {
+            set(Some("3"));
+            let padded = forced_oversize(provider, Some("[PIXEL:BRIEF]\nsmall\n".into())).unwrap();
+            let pieces = brief_parts::split(&padded, part_limits(provider));
+            assert_eq!(pieces.len(), 3, "{provider:?}");
+            assert!(pieces[0].starts_with("[PIXEL:BRIEF]\nsmall\n"));
+            for (k, piece) in (1..=3).zip(&pieces) {
+                assert!(piece.ends_with(&brief_parts::marker(k, 3)), "{piece:?}");
+            }
+            // Even a prompt with no brief gets an oversized one.
+            assert_eq!(
+                brief_parts::split(
+                    &forced_oversize(provider, None).unwrap(),
+                    part_limits(provider)
+                )
+                .len(),
+                3
+            );
+        }
+        match saved {
+            // SAFETY: same lock as above.
+            Some(value) => unsafe { std::env::set_var(brief_parts::TEST_PAD_ENV, value) },
+            // SAFETY: same lock as above.
+            None => unsafe { std::env::remove_var(brief_parts::TEST_PAD_ENV) },
+        }
+    }
+
+    #[test]
+    fn a_brief_is_added_to_a_decision_unless_it_has_a_context() {
+        let plain = json!({"decision": "observe"});
+        assert_eq!(
+            with_context(plain.clone(), Some("brief".into())),
+            json!({"decision": "observe", "context": "brief"})
+        );
+        assert_eq!(with_context(plain.clone(), None), plain);
+        let own = json!({"decision": "observe", "context": "own"});
+        assert_eq!(with_context(own.clone(), Some("brief".into())), own);
     }
 }

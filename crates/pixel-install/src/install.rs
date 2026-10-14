@@ -211,6 +211,8 @@ pub fn install_selected(
     if let Some(repo) = &options.repo {
         return install_project(repo, &home, &codex_home, &exe, dry_run, wants);
     }
+    // How many hooks carry the prompt brief: a host caps what each injects.
+    let prompt_parts = crate::config::brief_parts(&home, None);
     // Prompts are no longer deployed for any host: retire earlier copies
     // and the automatic block in Pi's APPEND_SYSTEM.md.
     let mut steps = vec![crate::uninstall::remove_agent_prompt(&home, dry_run)?];
@@ -231,7 +233,7 @@ pub fn install_selected(
             &crate::routing::Provider::Claude.path(&home),
             &exe,
             crate::routing::Provider::Claude,
-            crate::routing::HookScope::TaskEventsOnly,
+            crate::routing::HookScope::TaskEventsOnly { prompt_parts },
             &[],
             dry_run,
         )?);
@@ -255,6 +257,7 @@ pub fn install_selected(
         steps.push(crate::codex_config::install_task_hooks(
             &codex_home,
             &exe,
+            prompt_parts,
             dry_run,
         )?);
     }
@@ -302,7 +305,7 @@ pub fn install_selected(
                 &crate::routing::Provider::Devin.path(&home),
                 &exe,
                 crate::routing::Provider::Devin,
-                crate::routing::HookScope::TaskEventsOnly,
+                crate::routing::HookScope::TaskEventsOnly { prompt_parts: 1 },
                 &[],
                 dry_run,
             )?);

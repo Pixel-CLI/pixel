@@ -14,6 +14,7 @@ mod audit_prompt;
 mod classify_cli;
 mod classify_eval_cli;
 mod config_cli;
+mod core_commands_cli;
 mod cycles_cli;
 mod docs_drift;
 mod doctor_cli;

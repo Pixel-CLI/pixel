@@ -567,7 +567,6 @@ pixel 0.5.0 makes the call graph answer questions with proof, reach beyond one r
 | `ship` | `commit-and-push` |
 | `skeleton` | `list-signatures` |
 | `sniper` | `list-errors` |
-| `stats` | `index-stats` |
 | `symbol` | `find-symbol` |
 | `sync` | `fetch` |
 | `targets` | `scope-task` |

@@ -35,6 +35,7 @@ macro_rules! eprint {
 #[cfg(feature = "readify")]
 mod ai_cli_readify;
 mod audit_cmd;
+mod brief_parts;
 mod call_guard;
 mod classify;
 mod classify_eval;
@@ -54,6 +55,7 @@ mod evaluate_cmd;
 mod execution_brief;
 mod hook_input;
 mod impact_read;
+mod index_cmd;
 mod install_intro;
 mod operation_metrics;
 mod overview_intent;
@@ -690,6 +692,35 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Manage the multi-repo workspace (.pixel/workspace.json) that
+    /// `impact --workspace` and `who-calls --workspace` fan out across.
+    Workspace {
+        #[command(subcommand)]
+        cmd: workspace_cmd::WorkspaceCmd,
+    },
+    /// Freeze this repo's index into a single shareable `.pxpack` bundle —
+    /// the file CI builds once and teammates install instead of re-indexing.
+    IndexPack {
+        /// Output file (e.g. index.pxpack).
+        #[arg(long)]
+        out: PathBuf,
+        /// Also pack history.db (the on-demand facts index).
+        #[arg(long)]
+        include_history: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Install a packed index into this repo's `.pixel/` — from a path or
+    /// an https:// URL.
+    IndexUnpack {
+        /// Pack file path or URL.
+        source: String,
+        /// Replace the index while a daemon is running.
+        #[arg(long)]
+        force: bool,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Manage version-pinned reference corpora (.pixel/reference.json) for
     /// multi-repo analysis on top of workspaces and index packs.
     Reference {
@@ -705,6 +736,14 @@ enum Command {
         /// Compact one-line summary for shell prompts / statuslines.
         #[arg(long)]
         statusline: bool,
+    },
+    /// Per-language coverage: files the index policy sees on disk vs files
+    /// the graph actually indexed, with symbol counts per language.
+    Coverage {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
     /// What an agent reads to learn what the largest files contain: each
     /// whole file against its `list-signatures` outline, in tokens, with
@@ -1552,6 +1591,12 @@ enum HookCmd {
         provider: task_hook::TaskProvider,
         #[arg(long, value_enum)]
         event: task_hook::TaskHookEvent,
+        /// Serve slice K of N of the prompt-submit brief (`--part 2/3`), for a
+        /// host that caps what one hook may inject. Part 1 computes the brief
+        /// and stores it; the others print their slice of it. Without the
+        /// flag the one hook prints the whole brief.
+        #[arg(long, value_name = "K/N")]
+        part: Option<brief_parts::BriefPart>,
     },
     #[command(flatten)]
     Retired(RetiredHookCmd),
@@ -4382,6 +4427,7 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "list-areas",
     "what-changed",
     "status",
+    "coverage",
     "audit",
     "recall",
     "list-errors",
@@ -4488,6 +4534,14 @@ fn run() -> Result<(), String> {
     let started = std::time::Instant::now();
     let argv: Vec<String> = std::env::args().collect();
     let matches = Cli::command().try_get_matches().unwrap_or_else(|error| {
+        // A hook the host cannot parse the arguments of (a newer install's
+        // flag given to this older binary, or the reverse) says so on stderr
+        // and exits 0: Claude Code blocks the prompt on exit 2, which is
+        // what clap exits with.
+        if fails_open(&argv, &error) {
+            eprintln!("{error}");
+            std::process::exit(0);
+        }
         // An unknown subcommand may be a plugin; its exit code is the
         // plugin's own, or 1/2 for a refusal or a moved-command hint.
         if let Some(code) = plugin_cmd::dispatch(&error, &argv) {
@@ -5549,9 +5603,31 @@ fn run_command(
             print_data(&v, json)?;
             Ok(())
         }
+        Command::Coverage { path, json } => {
+            coverage_cmd::run(coverage_cmd::CoverageOptions { path, json })
+        }
         Command::Audit { path, top, json } => {
             audit_cmd::run(audit_cmd::AuditOptions { path, top, json })
         }
+        Command::Workspace { cmd } => workspace_cmd::run(cmd),
+        Command::IndexPack {
+            out,
+            include_history,
+            path,
+        } => index_cmd::run(index_cmd::IndexCmd::Pack {
+            out,
+            include_history,
+            path,
+        }),
+        Command::IndexUnpack {
+            source,
+            force,
+            path,
+        } => index_cmd::run(index_cmd::IndexCmd::Unpack {
+            source,
+            force,
+            path,
+        }),
         Command::Reference { cmd } => reference_cmd::run(cmd),
         Command::Status {
             path,
@@ -6358,7 +6434,11 @@ fn run_command(
             Ok(())
         }
         Command::RunHook { cmd } => match cmd {
-            HookCmd::TaskEvent { provider, event } => task_hook::run(provider, event),
+            HookCmd::TaskEvent {
+                provider,
+                event,
+                part,
+            } => task_hook::run(provider, event, part),
             // Retired verbs: drain the payload the host wrote, answer nothing.
             HookCmd::Retired(_) => {
                 let _ = hook_input::read_hook_payload();
@@ -7015,6 +7095,13 @@ fn relative_time(ts_ms: i64, now_ms: i64) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
+}
+
+/// Whether a parse error belongs to a `run-hook` invocation and is a real
+/// error (help and version requests are not): a host hook never fails with
+/// clap's exit code 2.
+fn fails_open(argv: &[String], error: &clap::Error) -> bool {
+    matches!(argv.get(1).map(String::as_str), Some("run-hook" | "hook")) && error.use_stderr()
 }
 
 fn main() -> ExitCode {
