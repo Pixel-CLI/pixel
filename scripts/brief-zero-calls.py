@@ -4,10 +4,12 @@
 
 """Zero-call test of the prompt-submit brief (issue #906).
 
-The tool census (#905) ran 20 prompts as vanilla Claude Code sessions; 13 of them are
-answer-only questions (no edit), and the census oracle experiment showed they need no tool
-call when the context the agent would have read is injected. This script runs those 13 questions
-LIVE with Pixel's own brief instead of the oracle and counts the tool calls of each:
+The questions are answer-only (no edit), and the census oracle experiment (#905) showed that such a question needs
+no tool call when the context the agent would have read is injected. This script runs them LIVE with Pixel's own
+brief instead of the oracle and counts the tool calls of each. The default questions are the public bench
+(``eval/brief-bench/questions.jsonl``: 56 questions on 7 pinned public repositories, with the plain-Codex baseline
+call counts of ``baselines.jsonl``); ``--census-db`` runs the 13 answer-only questions of the private census instead,
+compared with their vanilla Claude Code sessions:
 
     pass                    0 calls: the brief carried everything the answer needed
     fell back to tool calls >= 1 call: something was missing from the brief
@@ -17,7 +19,7 @@ LIVE with Pixel's own brief instead of the oracle and counts the tool calls of e
 ``(arm, question)`` pair: ``--arm brief`` registers the hooks, ``--arm nobrief`` is the same
 question with no Pixel hook at all (the fair baseline), ``--arm both`` runs the two.
 
-Per session it makes a pinned clone of the census repository. A brief session indexes the clone with
+Per session it makes a pinned clone of the question's repository. A brief session indexes the clone with
 the binary under test (``prepare-repo``, one ``search-meaning``, throwaway briefs until the output
 settles, as ``score_brief.py`` does) and registers the hooks the way ``pixel setup`` writes them:
 
@@ -36,16 +38,16 @@ PATH, so the only Pixel it sees is the brief. What each hook part printed to the
 back from the clone's ``.pixel/brief-feedback.jsonl`` (written by the hooks themselves).
 
     brief-zero-calls.py --brief-bin <pixel> [--agent codex|claude] [--arm brief|nobrief|both]
-                        [--only id,id] [--parts 3] [--jobs 26]
+                        [--only id,id] [--parts 3] [--jobs 26] [--questions Q.jsonl | --census-db DB]
     brief-zero-calls.py --self-test
 
-The questions, the answers and the transcripts are private: the questions are read from
-``census.db`` at run time, the raw streams stay under ``<root>/zero-calls/``, and the printed
-and recorded report holds aggregates only (counts, tool names, bytes, seconds).
+The answers and the transcripts are private: the raw streams stay under ``<root>/zero-calls/``, and the printed
+and recorded report holds aggregates only (counts, tool names, bytes, seconds). Census prompts are read from
+``census.db`` at run time and never written anywhere.
 
-The census runner (``run.py``: pinned clone cache, env whitelist, shim, launch, quota guard) lives
-with the census (``scripts/tool-census``); point ``--census-dir`` at it, or set
-``PIXEL_CENSUS_DIR``. Standard library only; run with ``python3 -I``.
+The runner (``scripts/tool-census/run.py``: clone copies, env whitelist, shim, launch, quota guard) and the
+question sources (``question_source.py``) live in ``scripts/tool-census``; ``--census-dir`` or
+``PIXEL_CENSUS_DIR`` point elsewhere. Standard library only; run with ``python3 -I``.
 """
 
 import argparse
@@ -56,7 +58,6 @@ import json
 import os
 import shlex
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -66,12 +67,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_ROOT = Path("/private/tmp/claude-501/census")
-CENSUS_DIRS = (
-    Path(os.environ.get("PIXEL_CENSUS_DIR", "/nonexistent")),
-    HERE / "tool-census",
-    Path("/Users/livio/Documents/pixel-wt/census/scripts/tool-census"),
-)
+CENSUS_DIRS = tuple(Path(p) for p in (os.environ.get("PIXEL_CENSUS_DIR"), HERE / "tool-census") if p)
 CODEX = Path(os.environ.get("CODEX_BIN") or (Path.home() / ".local" / "bin" / "codex"))
 CODEX_AUTH = Path.home() / ".codex" / "auth.json"
 # The campaign defaults of eval/run.sh.
@@ -91,7 +87,7 @@ LIFECYCLE = (("SessionStart", "session-start"), ("PostToolUse", "post-tool-use")
 
 
 def load_census(directory):
-    """The census runner module (``run.py``), from ``directory`` or the first known place."""
+    """The census runner module (``run.py``), from ``directory`` or ``scripts/tool-census``."""
     candidates = [Path(directory)] if directory else list(CENSUS_DIRS)
     for candidate in candidates:
         path = candidate / "run.py"
@@ -101,7 +97,22 @@ def load_census(directory):
             sys.modules["census_run"] = module
             spec.loader.exec_module(module)
             return module
-    raise SystemExit("census runner (scripts/tool-census/run.py) not found: pass --census-dir or set PIXEL_CENSUS_DIR")
+    raise SystemExit("runner (scripts/tool-census/run.py) not found: pass --census-dir or set PIXEL_CENSUS_DIR")
+
+
+def load_sources(directory=None):
+    """``question_source.py``, the bench and census question sources."""
+    if "question_source" in sys.modules:
+        return sys.modules["question_source"]
+    for candidate in ([Path(directory)] if directory else list(CENSUS_DIRS)):
+        path = candidate / "question_source.py"
+        if path.exists():
+            spec = importlib.util.spec_from_file_location("question_source", path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["question_source"] = module
+            spec.loader.exec_module(module)
+            return module
+    raise SystemExit("question_source.py (scripts/tool-census) not found: pass --census-dir or set PIXEL_CENSUS_DIR")
 
 
 def sh(argv, cwd=None, timeout=900, env=None):
@@ -114,23 +125,6 @@ def clean_env():
     env.pop("PIXEL_BRIEF", None)        # the kill switch must not blank the brief under test
     env.pop("PIXEL_BRIEF_LOG", None)    # the feedback log is how delivery is read back
     return env
-
-
-def answer_sessions(db_path, only=None):
-    """``(id, repo, sha, prompt)`` of every successful answer-only census session."""
-    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    rows = db.execute("SELECT id, repo, sha, prompt FROM sessions WHERE source='census' AND mode='answer' AND ok=1 "
-                      "ORDER BY id").fetchall()
-    db.close()
-    return [r for r in rows if not only or r[0] in only]
-
-
-def census_calls(db_path):
-    """Tool calls of each census session: the vanilla Claude Code count to compare with."""
-    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    rows = db.execute("SELECT session, COUNT(*) FROM calls GROUP BY session").fetchall()
-    db.close()
-    return dict(rows)
 
 
 def task_event_command(binary, provider, event, part=None, parts=1):
@@ -358,9 +352,13 @@ def short(row):
     return f"{row['n_calls']} ({row['verdict']})" if row else "-"
 
 
-def render(rows, label, claude_census=None):
-    """The report: aggregates only. With both arms, one line per question compares them."""
+def render(rows, label, claude_census=None, source_kind="census"):
+    """The report: aggregates only. With both arms, one line per question compares them. ``claude_census`` maps a
+    question id to the calls of its reference session: the vanilla Claude Code session of the census, or the
+    recorded plain-Codex baseline of a bench question (``source_kind``)."""
     claude_census = claude_census or {}
+    column, reference = (("census Claude calls", "the vanilla Claude Code session of #905") if source_kind == "census"
+                         else ("bench baseline calls", "the plain Codex session recorded in the bench baselines"))
     by = {}
     for row in rows:
         by.setdefault(row["id"], {})[row.get("arm", "brief")] = row
@@ -368,9 +366,9 @@ def render(rows, label, claude_census=None):
     agent = rows[0].get("agent", "claude") if rows else "?"
     lines = [f"# Zero-call test: {label}", ""]
     if both:
-        lines += [f"Live agent: {agent}. Calls per question, without the brief and with it; the census column is the "
-                  "vanilla Claude Code session of #905.", "",
-                  "| question | repo | census Claude calls | no brief calls | brief calls | brief bytes | result |",
+        lines += [f"Live agent: {agent}. Calls per question, without the brief and with it; the {column} column is "
+                  f"{reference}.", "",
+                  f"| question | repo | {column} | no brief calls | brief calls | brief bytes | result |",
                   "|---|---|---:|---:|---:|---:|---|"]
         for qid in sorted(by):
             base, brief = by[qid].get("nobrief"), by[qid].get("brief")
@@ -403,8 +401,8 @@ def render(rows, label, claude_census=None):
                      f"p50 {percentile(latency, 0.5)} ms, p95 {percentile(latency, 0.95)} ms, "
                      f"max {max(v for v in latency if v is not None)} ms (window 3000 ms).")
     if claude_census:
-        lines.append(f"Census (vanilla Claude Code): {sum(claude_census.get(q, 0) for q in by)} tool calls over these "
-                     f"{len(by)} questions.")
+        lines.append(f"{'Census (vanilla Claude Code)' if source_kind == 'census' else 'Bench baseline (plain Codex)'}: "
+                     f"{sum(claude_census.get(q, 0) for q in by)} tool calls over these {len(by)} questions.")
     return "\n".join(lines) + "\n"
 
 
@@ -508,8 +506,8 @@ def main(argv=None):
     parser.add_argument("--agent", choices=("codex", "claude"), default="codex", help="the live agent (default codex)")
     parser.add_argument("--arm", choices=("brief", "nobrief", "both"), default="brief",
                         help="brief: hooks registered; nobrief: the same question with no Pixel hook")
-    parser.add_argument("--census-dir", default=None, help="scripts/tool-census of the census (default: PIXEL_CENSUS_DIR or known places)")
-    parser.add_argument("--root", default=str(DEFAULT_ROOT), help="census root (cache/, census.db)")
+    parser.add_argument("--census-dir", default=None, help="scripts/tool-census (default: PIXEL_CENSUS_DIR, else beside this script)")
+    load_sources().add_arguments(parser)
     parser.add_argument("--run-id", default=time.strftime("zc-%Y%m%d-%H%M%S"))
     parser.add_argument("--only", default=None, help="comma-separated question ids")
     parser.add_argument("--parts", type=int, default=3, help="UserPromptSubmit hooks (brief_parts)")
@@ -533,18 +531,17 @@ def main(argv=None):
         parser.error("--brief-bin is required")
     args.brief_bin = str(Path(args.brief_bin).resolve())
     census = load_census(args.census_dir)
+    source = load_sources().open_source(args)
     root = Path(args.root)
-    sessions = answer_sessions(root / "census.db", set(args.only.split(",")) if args.only else None)
+    only = set(args.only.split(",")) if args.only else None
+    sessions = source.sessions(only)
     if not sessions:
-        raise SystemExit("no answer-only census session selected")
+        raise SystemExit(f"no answer-only {source.kind} session selected")
     arms = ("brief", "nobrief") if args.arm == "both" else (args.arm,)
-    units = [(sid, repo, sha, prompt, arm) for sid, repo, sha, prompt in sessions for arm in arms]
-    # prepare_cache checks the shared cache clones out: two runs starting together collide on git's index.lock.
-    import fcntl
+    units = [(s["id"], s["repo"], s["sha"], s["prompt"], arm) for s in sessions for arm in arms]
+    # Two runs starting together collide on git's index.lock: the source prepares the shared cache under a lock.
     (root / "cache").mkdir(parents=True, exist_ok=True)
-    with open(root / "cache" / ".prepare.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        census.prepare_cache(root)
+    source.prepare(root, only)
     (root / "work").mkdir(parents=True, exist_ok=True)
     run = Run(args, census)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
@@ -557,7 +554,7 @@ def main(argv=None):
     model = f"{args.codex_model}/{args.codex_effort}" if args.agent == "codex" else (args.model or "default")
     label = (f"{args.agent} ({model}), {Path(args.brief_bin).name} ({version}, sha256 {digest}), "
              f"{args.parts} hook part(s)")
-    report = render(rows, label, census_calls(root / "census.db"))
+    report = render(rows, label, source.reference_calls(), source.kind)
     run.out.mkdir(parents=True, exist_ok=True)
     (run.out / "report.md").write_text(report, encoding="utf-8")
     (run.out / "report.json").write_text(json.dumps({"binary": label, "rows": rows}, indent=1), encoding="utf-8")
@@ -721,22 +718,23 @@ class SelfTest(unittest.TestCase):
                  "brief_bytes": 90, "verdict": FELL_BACK}]
         self.assertIn("| a-2 | a | 2 | sh:rg x1, sh:sed x1 | 90 | fell back to tool calls |", render(rows, "t"))
 
-    def test_answer_sessions_reads_only_ok_answer_rows(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "census.db"
-            db = sqlite3.connect(path)
-            db.execute("CREATE TABLE sessions(id TEXT, source TEXT, repo TEXT, sha TEXT, mode TEXT, prompt TEXT, ok INT)")
-            db.execute("CREATE TABLE calls(session TEXT, seq INT)")
-            db.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?,?)", [
-                ("a-1", "census", "a", "s1", "answer", "q1", 1), ("a-2", "census", "a", "s2", "edit", "q2", 1),
-                ("a-3", "census", "a", "s3", "answer", "q3", 0), ("a-4", "history", "a", "s4", "answer", "q4", 1),
-                ("a-5", "census", "b", "s5", "answer", "q5", 1)])
-            db.executemany("INSERT INTO calls VALUES (?,?)", [("a-1", 1), ("a-1", 2), ("a-5", 1)])
-            db.commit()
-            db.close()
-            self.assertEqual([r[0] for r in answer_sessions(path)], ["a-1", "a-5"])
-            self.assertEqual([r[0] for r in answer_sessions(path, {"a-5"})], ["a-5"])
-            self.assertEqual(census_calls(path), {"a-1": 2, "a-5": 1})
+    def test_the_bench_report_names_the_baseline_column_and_the_census_one_the_census(self):
+        rows = [{"id": "b-1", "repo": "o__r", "agent": "codex", "arm": arm, "n_calls": n, "tools": {},
+                 "brief_bytes": 5, "verdict": v} for arm, n, v in (("nobrief", 6, BASELINE), ("brief", 0, PASS))]
+        bench = render(rows, "t", {"b-1": 5}, "bench")
+        self.assertIn("| question | repo | bench baseline calls | no brief calls |", bench)
+        self.assertIn("| b-1 | o__r | 5 | 6 | 0 | 5 | pass |", bench)
+        self.assertIn("Bench baseline (plain Codex): 5 tool calls over these 1 questions.", bench)
+        self.assertIn("census Claude calls", render(rows, "t", {"b-1": 5}))
+
+    def test_the_default_source_is_the_public_bench_and_needs_no_census(self):
+        parser = argparse.ArgumentParser()
+        load_sources().add_arguments(parser)
+        args = parser.parse_args([])
+        source = load_sources().open_source(args)
+        self.assertEqual(source.kind, "bench")
+        self.assertGreaterEqual(len(source.sessions()), 50)
+        self.assertEqual(len(source.sessions({"pixel-01"})), 1)
 
     def test_a_blobless_clone_is_recognised_by_its_promisor_remote(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -93,6 +93,30 @@ Both audits set `PIXEL_DAEMON_AUTO_START=0` and clean up after themselves;
 | `codex-pixel-ab.sh` | `scripts/codex-pixel-ab.sh --prompt 'Does Pixel help with this repository question?' [--pixel-policy advisory\|enforce\|classify]` | opens an unattended tmux A/B run in two isolated worktrees at one committed SHA: raw Codex (`--ignore-user-config`, rules and hooks off) beside Codex with a project-local candidate Pixel install. `enforce` recreates the historical PreToolUse guard experiment only in the Pixel arm; `classify` saves a three-way routing decision and enables enforcement only when Pixel wins its `--classify-min-confidence` threshold (default 0.60), otherwise runs a clean control-equivalent arm. The panes end on `report.md`, which records policy, classifier evidence, exits, wall time, transcript Pixel retrieval commands, prompt/base hashes and answer files. Requires `codex` already authenticated, tmux and a candidate `pixel`; local source changes are excluded with a visible warning and live model use may edit only disposable worktrees. |
 | `test-codex-pixel-ab.ts` | `bun scripts/test-codex-pixel-ab.ts` | wiring contract of `codex-pixel-ab.sh` with stub tmux/Codex/Pixel and a temporary committed git repository; asserts a paired report is produced without a live model. |
 
+## Zero-call loop: the brief bench and the probes
+
+Every tool below reads its questions through `scripts/tool-census/question_source.py`. The default source is the
+public bench, `eval/brief-bench/` (56 answer-only questions on 7 pinned public repositories, with the oracle lines
+of each and the plain-Codex baselines of `baselines.jsonl`): `--questions <file.jsonl>` names another file, and
+`--census-db <census.db>` swaps in the private census (local only, its 20 prompts are never committed). State
+(`cache/`, `ws/`, `score/`, `zero-calls/`) lives under `--root`, default `$PIXEL_CENSUS_ROOT`, else
+`$TMPDIR/pixel-tool-census`. No tool needs the census, a particular home directory or a scratch path of one account.
+
+| Script | Run | What |
+| --- | --- | --- |
+| `brief-bench.py` | `python3 -I scripts/brief-bench.py check` | lints the bench (CI): count, ids, pins, fields, baselines, no census prompt. `prepare` clones the pinned repositories, `baseline` records plain-Codex aggregates |
+| `brief-check.py` | `python3 -I scripts/brief-check.py <id> --bin <pixel>` / `--all` | no LLM, seconds per question: `pixel brief` in a reused indexed clone, then the recorded calls replayed against it (covered or residual); bench baselines when no stream was recorded, `no recorded trace` otherwise |
+| `brief-zero-calls.py` | `python3 -I scripts/brief-zero-calls.py --brief-bin <pixel> --arm both --only <id>` | the live test: Codex or Claude on each question with and without the hooks, tool calls counted from the event stream, compared with the baseline column |
+| `probe-test.py` | `python3 -I scripts/probe-test.py <probe> [--live]` | judges a probe (`probes/<name>/`): contract, determinism, coverage before and after, neighbours; `--check-all` runs in CI |
+| `probe-translate.py` | `python3 -I scripts/probe-translate.py <id> --bin <pixel>` | what each call of a no-brief session needed, whether the brief or a probe covers it |
+| `probe-loop.py` | `python3 -I scripts/probe-loop.py --prompt "<question>" --repo <path>` | the whole probe loop on a plain prompt (adhoc question, git-ignored) |
+| `probe-equivalence.py` | `python3 -I scripts/probe-equivalence.py --bin <pixel> --home <fake home>` | the native brief with probes equals the Python reference chain (`probe-chain.py`) |
+| `tool-census/score_brief.py` | `python3 -I scripts/tool-census/score_brief.py --bin <pixel>` | offline scorer: how much of each question's oracle lines a brief quotes; `compare A.json B.json` |
+| `tool-census/run.py`, `oracle.py`, `extract.py`, `classify.py` | `python3 -I scripts/tool-census/run.py --self-test` | the private census (#905): vanilla Claude Code runs, the oracle experiment, the transcript extractor and its classifier. `run.py` also carries the agent launch (env whitelist, `pixel` shim, quota guard) the live tools reuse; `manifest.json` stays local |
+
+`--self-test` of each runs in CI; `brief-check.py` and `probe-test.py` carry an end-to-end test on a throwaway pinned
+repository and a fake binary, so the bench path is exercised with no network and no agent.
+
 The pixel arm of the `claude -p` benches is given the deployed agent prompt
 (`~/.local/share/pixel/agent-prompt.md`, the bundled
 `crates/pixel-install/assets/pixel-agent-prompt.md` when nothing is

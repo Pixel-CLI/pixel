@@ -47,8 +47,13 @@ the Claude quota, so pass `--agent codex` for heavy loops. Both streams are norm
 7. **Hand back** a report: calls before -> after, the probe diff, the bench delta. With the user's ok, commit the
    probe on the current branch; a KEEP becomes a PR (`Refs #906`), a DROP is reported and not merged.
 
-For a question already in a recorded set (a census id or the public bench) use the same harness directly:
-`brief-check.py --all`, `probe-translate.py <id>`, `probe-test.py <name> [--live]`.
+For a question already in a recorded set use the same harness directly: `brief-check.py --all`,
+`probe-translate.py <id>`, `probe-test.py <name> [--live]`. The default set is the **public bench**
+(`eval/brief-bench/questions.jsonl`, ids like `express-07`, with oracle lines and plain-Codex baselines): it works on a
+clean checkout, the scripts clone the 7 pinned repositories on demand under `$PIXEL_CENSUS_ROOT` (default
+`$TMPDIR/pixel-tool-census`), and a question with no recorded run replays its bench baseline. `--questions <file>`
+names another file; `--census-db <census.db>` is the maintainer's private census (ids like `pixel-4`, local only:
+never commit or quote its prompts). Examples in this skill that name a census id need that option.
 
 ## Traps (each cost a run)
 
@@ -62,8 +67,8 @@ For a question already in a recorded set (a census id or the public bench) use t
 
 - **A single run can be lucky** (the same empty brief took 8 calls once and 11 the next time). Re-run with
   `--live-reps 3` before claiming a 0 on a borderline result, and say min-max.
-- **Parallel live runs collided on the census cache's `index.lock`.** `brief-zero-calls.py` now locks around
-  `prepare_cache`; the harness keeps one clone per session. Do not run your own `git` in a shared cache.
+- **Parallel live runs collided on the shared cache's `index.lock`.** `brief-zero-calls.py` now locks around the
+  source's `prepare` (the pinned clones under `<root>/cache`); the harness keeps one clone per session. Do not run your own `git` in a shared cache.
 - **A confidently wrong brief is worse than none.** The strict config registry answered 3000 when the dev port was
   3001 because it had not read the tracked `.env.development`. Say what you could not see.
 - **Gate every probe on intent.** The ungated config registry injected noise into nine prompts. Use `when_kinds`,

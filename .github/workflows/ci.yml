@@ -552,6 +552,13 @@ jobs:
           python3 scripts/extract-probes.py --self-test
           python3 scripts/brief-bench.py --self-test
           python3 scripts/brief-bench.py check
+          python3 scripts/brief-zero-calls.py --self-test
+          python3 scripts/tool-census/question_source.py
+          python3 scripts/tool-census/score_brief.py --self-test
+          python3 scripts/tool-census/run.py --self-test
+          python3 scripts/tool-census/oracle.py --self-test
+          python3 scripts/tool-census/test_classify.py
+          python3 scripts/tool-census/test_extract.py
 
       # The workflow's own step, run with a stub script: only a pull request
       # number reaches the shoot script.

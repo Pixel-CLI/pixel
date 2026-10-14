@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: The Pixel contributors
 # SPDX-License-Identifier: MIT
 
-"""Is the brief that runs probes itself the brief the Python reference chain makes? (issue #906, local only)
+"""Is the brief that runs probes itself the brief the Python reference chain makes? (issue #906)
 
-For each census question, in its pinned clone: the native binary's brief with probes OFF (PIXEL_BRIEF_PROBES=0) is the
+For each question (the public bench by default, ``--census-db`` for the private census), in its pinned clone: the native binary's brief with probes OFF (PIXEL_BRIEF_PROBES=0) is the
 input; ``scripts/probe-chain.py``'s chain (the reference merge of ``probe-test.py``) runs the same probes on it; the
 native binary's brief with probes ON must equal that, byte for byte. The brief is what the three prompt-submit hook parts deliver. The probes are found under ``--home``
-(``pixel setup`` wrote them there; the real HOME is never touched). Prompts are read from census.db and never printed.
+(``pixel setup`` wrote them there; the real HOME is never touched). Census prompts are read from census.db and never
+printed.
 
-    probe-equivalence.py --bin <native pixel> --home <fake home> [--ids a,b]
+    probe-equivalence.py --bin <native pixel> --home <fake home> [--ids a,b] [--questions Q.jsonl | --census-db DB]
 """
 
 import argparse
@@ -68,18 +69,20 @@ def main(argv=None):
     parser.add_argument("--bin", required=True)
     parser.add_argument("--home", required=True)
     parser.add_argument("--ids", default=None)
-    parser.add_argument("--root", default="/private/tmp/claude-501/census")
-    parser.add_argument("--census-dir", default=None)
+    parser.add_argument("--census-dir", default=None, help="scripts/tool-census (default: PIXEL_CENSUS_DIR, else beside this script)")
+    load("brief_check", "brief-check.py").sources(None).add_arguments(parser)
     args = parser.parse_args(argv)
     bc, chain = load("brief_check", "brief-check.py"), load("probe_chain", "probe-chain.py")
     pt = chain.load_probe_test()
     sb = bc.load_module("score_brief", args.census_dir)
+    source = bc.sources(args.census_dir).open_source(args)
+    sb.add_workspace_root(args.root)
     binary = str(Path(args.bin).resolve())
-    ids = args.ids.split(",") if args.ids else bc.question_ids(args.root)
+    ids = args.ids.split(",") if args.ids else source.ids()
     probes_dir = Path(args.home) / ".pixel" / "plugins"
     equal = 0
     for qid in ids:
-        _name, prompt, clone = bc.prepare(Path(args.root), sb, qid, binary)
+        _name, prompt, clone = bc.prepare(source, Path(args.root), qid, binary)
         for _ in range(3):   # a daemon that has just started answers empty first
             base, meta0 = native(binary, clone, prompt, args.home, False)
             if base:

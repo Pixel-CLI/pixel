@@ -17,8 +17,8 @@ files may be read only when git tracks them, with secret-looking values masked. 
 blocks before the brief's, ``"append"`` after; ``budget_ms`` (at most 2500) is the wall time it gets, and a
 probe that overruns, fails or prints nonsense is skipped.
 
-    probe-test.py <probe-dir-or-name> [--set census|bench] [--bin PIXEL] [--ids a,b] [--report-dir D]
-                  [--live] [--live-jobs 4]
+    probe-test.py <probe-dir-or-name> [--questions Q.jsonl | --census-db DB] [--bin PIXEL] [--ids a,b]
+                  [--report-dir D] [--live] [--live-jobs 4]
     probe-test.py --self-test
 
 Offline (seconds): schema, budget, determinism (twice), read-only, bytes, oracle coverage before -> after, the
@@ -252,24 +252,24 @@ def merge(brief, outputs, cap=PART_CHARS * PARTS):
 # --------------------------------------------------------------------------- question sets
 
 class CensusSet:
-    """The private census questions, from ``census.db`` and the recorded runs (local only)."""
+    """The private census questions, from ``census.db`` and the recorded runs (``--census-db``, local only)."""
     name = "census"
 
-    def __init__(self, bc, sb, args, binary):
-        self.bc, self.sb, self.root, self.binary = bc, sb, Path(args.root), binary
+    def __init__(self, bc, sb, args, binary, source):
+        self.bc, self.sb, self.root, self.binary, self.source = bc, sb, Path(args.root), binary, source
         self.history = not args.no_history
 
     def ids(self):
-        return self.bc.question_ids(self.root)
+        return self.source.ids()
 
     def open(self, qid):
-        repo_name, prompt, clone = self.bc.prepare(self.root, self.sb, qid, self.binary, history=self.history)
+        repo_name, prompt, clone = self.bc.prepare(self.source, self.root, qid, self.binary, history=self.history)
         text, meta, ms = self.bc.run_brief(self.binary, clone, prompt, tries=3)
         return {"id": qid, "repo": repo_name, "prompt": prompt, "clone": str(clone), "text": text, "meta": meta,
                 "ms": ms, "kind": meta.get("kind")}
 
     def score(self, q, text):
-        row = self.bc.score(self.root, self.sb, q["id"], q["repo"], q["clone"], text, q["ms"], q["meta"])
+        row = self.bc.score(self.source, self.root, self.sb, q["id"], q["clone"], text, q["ms"], q["meta"])
         return {"calls": self.bc.residual_of(row), "quoted": row["nb_quoted"], "bytes": row["bytes"]}
 
 
@@ -335,14 +335,9 @@ class BenchSet:
     def score(self, q, text):
         repo = self.sb.Repo(q["clone"])
         regions = self.sb.parse_brief(text, repo)
-        oracle = {(p, n) for p, lo, hi in q["row"].get("oracle", []) for n in range(lo, hi + 1)}
-        quoted = sum(1 for key in oracle if key in regions.inline) / len(oracle) if oracle else 0.0
-        residual = 0
-        for call in (self.baselines.get(q["id"]) or {}).get("calls", []):
-            lines = {(p, n) for p, lo, hi in call.get("reads", []) for n in range(lo, hi + 1)}
-            ok = (not lines or sum(1 for k in lines if k in regions.inline) >= 0.8 * len(lines)) and all(
-                any(h.startswith(c) for h in regions.hex) for c in call.get("commits", []))
-            residual += 0 if ok and (lines or call.get("commits")) else 1
+        quoted = self.bc.quoted_share(self.sb, repo, regions, None, q["row"].get("oracle"))
+        residual = sum(1 for call in (self.baselines.get(q["id"]) or {}).get("calls", [])
+                       if self.bc.judge_summary(regions, call)[0] != "covered")
         return {"calls": residual, "quoted": quoted, "bytes": len(text.encode())}
 
 
@@ -625,7 +620,7 @@ def live_run(probe, qset, pixel_bin, ids, args, report_dir):
         run_id = f"probe-{probe.name}-{arm}{rep}-{stamp}"
         cmd = ["python3", "-I", str(HERE / "brief-zero-calls.py"), "--brief-bin", str(binary), "--agent", args.agent,
                "--arm", "brief", "--only", ",".join(ids), "--jobs", str(args.live_jobs), "--run-id", run_id,
-               "--root", args.root]
+               "--root", args.root, "--census-db", args.census_db]
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         subprocess.run(cmd, capture_output=True, text=True, env=env)
         report = Path(args.root) / "zero-calls" / run_id / "report.json"
@@ -717,10 +712,15 @@ def check_all(probes_dir=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("probe", nargs="?")
-    parser.add_argument("--set", choices=("census", "bench"), default=None)
+    parser.add_argument("--questions", default=None, metavar="JSONL",
+                        help="question file, with baselines.jsonl beside it (default: eval/brief-bench/questions.jsonl)")
+    parser.add_argument("--census-db", default=None, metavar="DB",
+                        help="the private census instead of the public bench: its census.db (local only)")
+    parser.add_argument("--set", choices=("census", "bench"), default=None, help=argparse.SUPPRESS)  # the old spelling
     parser.add_argument("--bin", default=os.environ.get("PIXEL_BIN") or str(WORKTREE / "target/dev-release/pixel"))
-    parser.add_argument("--root", default="/private/tmp/claude-501/census")
-    parser.add_argument("--bench", default=str(WORKTREE / "eval" / "brief-bench"))
+    parser.add_argument("--root", default=None, help="state directory of the census source (default: the directory of "
+                        "--census-db, else $PIXEL_CENSUS_ROOT, else $TMPDIR/pixel-tool-census)")
+    parser.add_argument("--bench", default=None, help=argparse.SUPPRESS)  # a bench directory; --questions names its file
     parser.add_argument("--cache", default=str(Path.home() / ".cache" / "pixel-brief-bench"))
     parser.add_argument("--census-dir", default=None)
     parser.add_argument("--ids", default=None, help="only these question ids")
@@ -757,8 +757,18 @@ def main(argv=None):
     binary = str(Path(args.bin).resolve())
     bc = load_bc()
     sb = bc.load_module("score_brief", args.census_dir)
-    which = args.set or ("bench" if (Path(args.bench) / "questions.jsonl").exists() else "census")
-    qset = (BenchSet if which == "bench" else CensusSet)(bc, sb, args, binary)
+    qs = bc.sources(args.census_dir)
+    if args.set == "census" and not args.census_db:
+        args.census_db = str(qs.resolve_root(args) / "census.db")
+    if args.bench and not args.questions:
+        args.questions = str(Path(args.bench) / "questions.jsonl")
+    source = qs.open_source(args)
+    sb.add_workspace_root(args.root)
+    if source.kind == "census":
+        qset = CensusSet(bc, sb, args, binary, source)
+    else:
+        args.bench = str(source.path.parent)
+        qset = BenchSet(bc, sb, args, binary)
     ids = args.ids.split(",") if args.ids else qset.ids()
     home = tempfile.mkdtemp(prefix="probe-home-")
     rows = evaluate(probe, qset, binary, ids, home) if not probe.problems else []
@@ -998,6 +1008,46 @@ class SelfTest(unittest.TestCase):
             rows, base = load_bench(tmp)
             self.assertEqual(rows[0]["oracle"], [["a.py", 1, 4]])
             self.assertEqual(len(base["q"]["calls"]), 2)
+
+    def test_the_bench_score_replays_the_baseline_with_the_judge_of_brief_check(self):
+        bc = load_bc()
+        sb = bc.load_module("score_brief", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            questions, _sha = bc.sources().fixture_bench(tmp)
+            qset = object.__new__(BenchSet)
+            qset.bc, qset.sb = bc, sb
+            qset.rows, qset.baselines = load_bench(questions.parent)
+            q = {"id": "t-01", "clone": str(Path(tmp) / "origin"), "row": qset.rows[0]}
+            brief = "[PIXEL:BRIEF]\n### src/lib.py:5-9 — lines\n" + "".join(f"{n}| line_{n} = {n}\n" for n in range(5, 10))
+            self.assertEqual(qset.score(q, brief), {"calls": 1, "quoted": 1.0, "bytes": len(brief.encode())})
+            self.assertEqual(qset.score(q, "[PIXEL:BRIEF]\n")["calls"], 2)
+            self.assertEqual(qset.score(q, "[PIXEL:BRIEF]\n")["quoted"], 0.0)
+
+    def test_a_probe_is_judged_offline_on_the_public_bench_with_no_census(self):
+        """The whole offline path on one bench question: pinned clone from the question's url, the fake binary's
+        brief, the probe merged, both briefs scored against the recorded baseline. No census, network or agent."""
+        import contextlib
+        import io
+        bc = load_bc()
+        with tempfile.TemporaryDirectory() as tmp:
+            questions, _sha = bc.sources().fixture_bench(tmp)
+            brief = "[PIXEL:BRIEF]\n### src/lib.py:1-2 — head\n1| line_1 = 1\n2| line_2 = 2\n"
+            fake = Path(tmp) / "pixel-fake"
+            fake.write_text("#!/usr/bin/env python3\nimport json, sys\na = sys.argv[1:]\nif a[:1] == ['brief']:\n"
+                            f"    print(json.dumps({{'brief': {brief!r}, 'kind': 'lookup', 'gate': 'open'}}))\n")
+            fake.chmod(0o755)
+            probe = self.write_probe(tmp, "adds-lines", body="#!/bin/sh\ncat >/dev/null\n"
+                                     "printf '### src/lib.py:5-9 — lines\\n5| line_5 = 5\\n6| line_6 = 6\\n7| line_7 = 7\\n"
+                                     "8| line_8 = 8\\n9| line_9 = 9\\n'\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = main([str(probe), "--bin", str(fake), "--questions", str(questions), "--cache", str(Path(tmp) / "cache"),
+                             "--report-dir", str(Path(tmp) / "report")])
+            line = out.getvalue().splitlines()[0]
+            self.assertEqual(code, 0, out.getvalue())
+            self.assertTrue(line.startswith("PROBE adds-lines | t-01 | predicted calls 2 -> 1 |"), line)
+            self.assertTrue(line.endswith("| OK"), line)   # KEEP needs a live run
+            self.assertTrue((Path(tmp) / "report" / "report.json").exists())
 
     def test_a_probe_that_spells_out_the_prompts_words_or_evidence_paths_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

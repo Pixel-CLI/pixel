@@ -4,10 +4,13 @@
 
 """Fast per-change loop for the prompt-submit brief (issue #906): no LLM, a few seconds per question.
 
-For one answer-only census question it runs ``pixel brief`` (the
-path of the prompt-submit hook, 3 parts) in a pinned clone that is indexed once and then reused, and
-REPLAYS the tool calls Codex made on that question in the recorded live runs (the brief arm and the
-no-brief arm, from the saved ``codex exec --json`` event logs) against the brief:
+For one answer-only question it runs ``pixel brief`` (the path of the prompt-submit hook, 3 parts) in a pinned
+clone that is indexed once and then reused, and REPLAYS the tool calls an agent made on that question against the
+brief. The questions are the public bench (``eval/brief-bench/questions.jsonl``, default) or, with
+``--census-db``, the private census; the calls come from the recorded live runs (the brief arm and the no-brief
+arm, from the saved ``codex exec --json`` event logs under ``<root>/zero-calls``) and, when a question has no
+recorded no-brief run, from its bench baseline (``baselines.jsonl``: the lines and commits each call fetched,
+nothing else). A question with neither says ``no recorded trace``. Verdicts:
 
     COVERED   the brief already holds what the call fetched: the quoted lines of a file range or of
               the matching lines of a search, the commits of a ``git log``, the changed lines of a
@@ -15,15 +18,15 @@ no-brief arm, from the saved ``codex exec --json`` event logs) against the brief
     residual  anything else: the call a session would still make. ``predicted residual calls`` is
               their number, and the uncovered targets are listed.
 
-    brief-check.py <question-id> [--bin <pixel>] [--no-build] [--extra-cmd CMD] [--brief-file F]
+    brief-check.py <question-id> [--bin <pixel>] [--questions Q.jsonl | --census-db DB] [--extra-cmd CMD] [--brief-file F]
     brief-check.py --all [--jobs 4]       one line per question, with the last live run's calls
     brief-check.py --self-test
 
 ``--extra-cmd`` runs a throwaway prototype (env ``QID``, ``CLONE``, ``PROMPT``, ``BRIEF_FILE``) and
 appends its stdout to the brief, so a hypothesis can be replayed before any Rust is written.
-``--brief-file`` replays a brief you wrote. The questions, the commands and the outputs are private:
-only counts, paths and line ranges are printed. The census runner and scorer (``scripts/tool-census``)
-are found like ``brief-zero-calls.py`` finds them. Standard library only; run with ``python3 -I``.
+``--brief-file`` replays a brief you wrote. Recorded commands and outputs are private: only counts, paths and line
+ranges are printed. The question source, the runner and the scorer live in ``scripts/tool-census`` (override with
+``--census-dir`` or ``PIXEL_CENSUS_DIR``). Standard library only; run with ``python3 -I``.
 """
 
 import argparse
@@ -45,12 +48,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 WORKTREE = HERE.parent
-DEFAULT_ROOT = Path("/private/tmp/claude-501/census")
-CENSUS_DIRS = (
-    Path(os.environ.get("PIXEL_CENSUS_DIR", "/nonexistent")),
-    HERE / "tool-census",
-    Path("/Users/livio/Documents/pixel-wt/census/scripts/tool-census"),
-)
+CENSUS_DIRS = tuple(Path(p) for p in (os.environ.get("PIXEL_CENSUS_DIR"), HERE / "tool-census") if p)
 NON_CALL_ITEMS = frozenset({"agent_message", "reasoning", "error", "todo_list", "user_message", "plan"})
 LINE_THRESHOLD = 0.8     # share of a call's lines the brief must quote for the call to be covered
 DIFF_THRESHOLD = 0.7     # share of a diff's changed lines the brief must carry
@@ -68,6 +66,11 @@ def load_module(name, directory):
             spec.loader.exec_module(module)
             return module
     raise SystemExit(f"{name}.py not found: pass --census-dir or set PIXEL_CENSUS_DIR")
+
+
+def sources(directory=None):
+    """``question_source.py``: the bench and census question sources, the same module for every tool."""
+    return sys.modules.get("question_source") or load_module("question_source", directory)
 
 
 def env_for_brief():
@@ -142,7 +145,7 @@ def claude_calls(lines):
 
 def call_command(call):
     """The shell-like text of a call of either agent, for the classifier: Codex's command, Claude's Bash command,
-    ``rg <pattern>`` for its Grep tool, the empty string for a Read or a Glob."""
+    ``rg <pattern>`` for its Grep tool, the empty string for a Read, a Glob or a bench baseline call."""
     if "cmd" in call:
         return call["cmd"]
     inp = call.get("input") or {}
@@ -159,6 +162,17 @@ def call_oracle(sb, repo, call):
     if "cmd" in call:
         oracle = sb.Oracle(repo)
         sb.bash_oracle(oracle, call["cmd"], call["out"])
+        return oracle
+    if "reads" in call:
+        # A bench baseline call keeps the lines and commits it fetched, nothing else: a span was a read, a single
+        # line a search hit.
+        oracle = sb.Oracle(repo)
+        for path, lo, hi in call["reads"]:
+            if hi - lo >= 2:
+                oracle.add_range(path, lo, hi, "read", "read")
+            else:
+                oracle.add_hit(path, lo, "use")
+        oracle.commits |= set(call.get("commits") or [])
         return oracle
     return sb.build_oracle(repo, [call])
 
@@ -254,18 +268,61 @@ def judge_call(sb, repo, regions, brief_text, call):
     return "opaque", [shorten(call["cmd"])]
 
 
+def judge_summary(regions, call):
+    """``(verdict, targets)`` of a bench baseline call ``{reads: [[path, lo, hi]], commits: [sha7]}``: the same
+    thresholds as ``judge_call``. A call that fetched no line and no commit (a test run, a listing) is ``opaque``."""
+    spans = [(path, lo, hi) for path, lo, hi in call.get("reads") or []]
+    lines = {(path, n) for path, lo, hi in spans for n in range(lo, hi + 1)}
+    commits = list(call.get("commits") or [])
+    ok, targets = True, []
+    if lines and sum(1 for key in lines if key in regions.inline) < LINE_THRESHOLD * len(lines):
+        ok = False
+        missed = []
+        for path, lo, hi in spans:
+            total = hi - lo + 1
+            got = sum(1 for n in range(lo, hi + 1) if (path, n) in regions.inline)
+            if got < total * LINE_THRESHOLD:
+                missed.append((path, lo, hi, got, total))
+        ranges = sorted((m for m in missed if m[4] > 1), key=lambda m: -m[4])
+        targets += [f"{path}:{lo}-{hi} ({got}/{total} quoted)" for path, lo, hi, got, total in ranges[:4]]
+        hits = [m for m in missed if m[4] == 1]
+        if hits:
+            targets.append(f"{len(hits)} search-hit line(s), e.g. {hits[0][0]}:{hits[0][1]}")
+    for commit in commits:
+        if not any(h.startswith(commit) or commit.startswith(h[:7]) for h in regions.hex):
+            ok = False
+            targets.append(f"commit {commit} not in the brief")
+    if not lines and not commits:
+        return "opaque", ["a baseline call that fetched no recorded line or commit"]
+    return ("covered" if ok else "uncovered"), targets
+
+
+def judge_recorded(sb, repo, regions, brief_text, call):
+    """``judge_call`` for a recorded Codex call, ``judge_summary`` for a bench baseline call."""
+    if "reads" in call and "cmd" not in call:
+        return judge_summary(regions, call)
+    return judge_call(sb, repo, regions, brief_text, call)
+
+
 def shorten(text, width=90):
     text = " ".join(text.split())
     return text if len(text) <= width else text[:width] + "..."
 
 
-def quoted_share(sb, repo, regions, trace):
-    """Share of the lines a session without a brief read that the brief quotes (0 when there is no such trace)."""
+def quoted_share(sb, repo, regions, trace, oracle_ranges=None):
+    """Share of the lines a session without a brief read that the brief quotes (0 when there is no such trace).
+    ``oracle_ranges``: the ``[path, lo, hi]`` lines a bench question recorded, used instead of a trace."""
+    if oracle_ranges:
+        keys = {(p, n) for p, lo, hi in oracle_ranges for n in range(lo, hi + 1)}
+        return sum(1 for key in keys if key in regions.inline) / len(keys)
     if not trace:
         return 0.0
     oracle = sb.Oracle(repo)
     for call in trace[1]:
-        sb.bash_oracle(oracle, call["cmd"], call["out"])
+        if "cmd" in call:
+            sb.bash_oracle(oracle, call["cmd"], call["out"])
+        else:
+            oracle.lines.update(call_oracle(sb, repo, call).lines)
     return sum(1 for key in oracle.lines if key in regions.inline) / len(oracle.lines) if oracle.lines else 0.0
 
 
@@ -273,7 +330,7 @@ def replay(sb, repo, regions, brief_text, traces):
     """Per arm: counts and uncovered targets of the recorded calls against the brief."""
     result = {}
     for arm, (run, calls) in traces.items():
-        verdicts = [judge_call(sb, repo, regions, brief_text, call) for call in calls]
+        verdicts = [judge_recorded(sb, repo, regions, brief_text, call) for call in calls]
         counted = [v for v in verdicts if v[0] != "external"]
         result[arm] = {"run": run, "recorded": len(calls),
                        "residual": sum(1 for v in counted if v[0] != "covered"),
@@ -283,23 +340,6 @@ def replay(sb, repo, regions, brief_text, traces):
 
 
 # --------------------------------------------------------------------------- clones and brief
-
-def question(root, qid):
-    db = sqlite3.connect(f"file:{Path(root) / 'census.db'}?mode=ro", uri=True)
-    row = db.execute("SELECT id, repo, sha, prompt FROM sessions WHERE source='census' AND mode='answer' AND ok=1 AND id=?",
-                     (qid,)).fetchone()
-    db.close()
-    if not row:
-        raise SystemExit(f"no answer-only census question {qid}")
-    return row
-
-
-def question_ids(root):
-    db = sqlite3.connect(f"file:{Path(root) / 'census.db'}?mode=ro", uri=True)
-    rows = db.execute("SELECT id FROM sessions WHERE source='census' AND mode='answer' AND ok=1 ORDER BY id").fetchall()
-    db.close()
-    return [r[0] for r in rows]
-
 
 def clone_is_sound(dest, sha):
     """The clone holds the repository at ``sha`` at its top level: HEAD is the sha and no tracked file is missing.
@@ -313,7 +353,7 @@ def clone_is_sound(dest, sha):
 
 
 def checked_clone(root, binary, repo, sha, history=True):
-    """A clone of the census repository at ``sha`` that stays between runs: indexed (graph, history, meaning vectors)
+    """A clone of the pinned repository ``repo`` (its ``<root>/cache/`` name) at ``sha`` that stays between runs: indexed (graph, history, meaning vectors)
     the first time, and only given a daemon of the binary under test afterwards. Creation is serialised by a file
     lock, because several questions of one repository (and several processes) ask for the same clone at once."""
     import fcntl
@@ -327,7 +367,7 @@ def checked_clone(root, binary, repo, sha, history=True):
         first = not marker.exists() or not clone_is_sound(dest, sha)
         if first:
             shutil.rmtree(dest, ignore_errors=True)
-            sh(["cp", "-c", "-R", Path(root) / "cache" / repo, dest], timeout=600)
+            sources().copy_tree(Path(root) / "cache" / repo, dest)
             shutil.rmtree(dest / ".pixel", ignore_errors=True)
             if not clone_is_sound(dest, sha):
                 raise SystemExit(f"{dest}: the clone of {repo} is not at {sha[:8]} with its files at the top level")
@@ -393,25 +433,41 @@ def build(binary_dir, no_build):
         raise SystemExit("build failed:\n" + proc.stderr[-2000:])
 
 
-def prepare(root, sb, qid, binary, history=True):
-    """The pinned question and its reused clone: ``(repo name, prompt, clone)``."""
-    _id, repo_name, sha, prompt = question(root, qid)
-    return repo_name, prompt, checked_clone(root, binary, repo_name, sha, history)
+def prepare(source, root, qid, binary, history=True):
+    """The pinned question and its reused clone: ``(repo label, prompt, clone)``. The pinned clone under
+    ``<root>/cache/`` is made first when it is missing (the public bench clones its repositories on demand)."""
+    session = source.get(qid)
+    if not (Path(root) / "cache" / session["repo"] / ".git").exists():
+        source.prepare(root, {qid})
+    return session["label"], session["prompt"], checked_clone(root, binary, session["repo"], session["sha"], history)
 
 
-def score(root, sb, qid, repo_name, clone, text, ms=0, meta=None):
+def traces_for(source, root, qid):
+    """``{arm: (run, calls)}``: the recorded streams of ``qid``, and for a question with no recorded no-brief run
+    its bench baseline (aggregates: the lines and commits each call fetched)."""
+    traces = recorded_traces(root, qid)
+    if "nobrief" not in traces:
+        baseline = source.baseline_trace(qid)
+        if baseline:
+            traces["nobrief"] = baseline
+    return traces
+
+
+def score(source, root, sb, qid, clone, text, ms=0, meta=None):
     """The row of one brief ``text``: quoted share, bytes and the replay of the recorded calls."""
+    session = source.get(qid)
     repo = sb.Repo(clone)
     regions = sb.parse_brief(text, repo)
-    traces = recorded_traces(root, qid)
-    return {"id": qid, "repo": repo_name, "kind": (meta or {}).get("kind"), "bytes": len(text.encode()), "ms": ms,
-            "nb_quoted": quoted_share(sb, repo, regions, traces.get("nobrief")),
+    traces = traces_for(source, root, qid)
+    return {"id": qid, "repo": session["label"], "kind": (meta or {}).get("kind") or session.get("kind"),
+            "bytes": len(text.encode()), "ms": ms,
+            "nb_quoted": quoted_share(sb, repo, regions, traces.get("nobrief"), session.get("oracle")),
             "live": live_calls(root, qid), "replay": replay(sb, repo, regions, text, traces), "text": text}
 
 
-def check(args, sb, qid, binary):
+def check(args, source, sb, qid, binary):
     root = Path(args.root)
-    repo_name, prompt, clone = prepare(root, sb, qid, binary)
+    repo_name, prompt, clone = prepare(source, root, qid, binary)
     if args.brief_file:
         text, meta, ms = Path(args.brief_file).read_text(), {}, 0
     else:
@@ -422,7 +478,7 @@ def check(args, sb, qid, binary):
         extra = sh(shlex.split(args.extra_cmd), cwd=clone, env=dict(os.environ, QID=qid, CLONE=str(clone), PROMPT=prompt,
                                                                     BRIEF_FILE=str(brief_file)), timeout=120)
         text = apply_extra(text, extra.stdout)
-    return score(root, sb, qid, repo_name, clone, text, ms, meta)
+    return score(source, root, sb, qid, clone, text, ms, meta)
 
 
 REPLACE_MARK = "@@REPLACE@@"
@@ -440,7 +496,7 @@ def residual_of(row):
     made on top of a brief), else of the no-brief trace."""
     replay = row["replay"]
     pick = replay.get("brief") or replay.get("nobrief")
-    return pick["residual"] if pick else None
+    return pick["residual"] if pick else None   # None: no recorded trace and no bench baseline
 
 
 def summary(row):
@@ -471,7 +527,10 @@ def render_one(row):
     for arm, v in sorted(row["replay"].items()):
         lines.append(f"  {arm:<8} recorded {v['recorded']} calls ({v['run']}, {v['external']} external) -> "
                      f"residual {v['residual']}")
-    lines.append(f"predicted residual calls = {residual_of(row)}   (live brief arm: "
+    if not row["replay"]:
+        lines.append("  no recorded trace: no stream under <root>/zero-calls and no bench baseline for this question "
+                     "(brief-zero-calls.py --arm nobrief records one)")
+    lines.append(f"predicted residual calls = {'-' if residual_of(row) is None else residual_of(row)}   (live brief arm: "
                  f"{'-' if not row['live'] else row['live'][1]})")
     for arm, v in sorted(row["replay"].items()):
         for index, verdict, targets in v["uncovered"]:
@@ -490,7 +549,8 @@ def render_table(rows):
         live = row["live"][1] if row["live"] else None
         out.append(f"| {row['id']} | {row['kind']} | {row['bytes']} | {row['ms']} | {row['nb_quoted']:.0%} | "
                    f"{'-' if nb is None else nb} | "
-                   f"{'-' if br is None else br} | {residual_of(row)} | {'-' if live is None else live} |")
+                   f"{'-' if br is None else br} | {'-' if residual_of(row) is None else residual_of(row)} | "
+                   f"{'-' if live is None else live} |")
         if live is not None and residual_of(row) is not None:
             pairs.append((residual_of(row), live))
     if pairs:
@@ -507,8 +567,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("question", nargs="?")
     parser.add_argument("--bin", default=str(WORKTREE / "target" / "dev-release" / "pixel"))
-    parser.add_argument("--root", default=str(DEFAULT_ROOT))
-    parser.add_argument("--census-dir", default=None)
+    parser.add_argument("--census-dir", default=None, help="scripts/tool-census (default: PIXEL_CENSUS_DIR, else beside this script)")
+    sources(None).add_arguments(parser)
     parser.add_argument("--build", action="store_true", help="rebuild with cargo first (default: use --bin as it is)")
     parser.add_argument("--no-build", action="store_true", help=argparse.SUPPRESS)  # the default now; kept for old callers
     parser.add_argument("--all", action="store_true")
@@ -525,12 +585,14 @@ def main(argv=None):
     if not args.question and not args.all:
         parser.error("a question id or --all")
     sb = load_module("score_brief", args.census_dir)
+    source = sources().open_source(args)
+    sb.add_workspace_root(args.root)
     build(args.bin, not args.build)
     binary = str(Path(args.bin).resolve())
-    ids = question_ids(args.root) if args.all else [args.question]
+    ids = source.ids() if args.all else [args.question]
     if args.all:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-            rows = list(pool.map(lambda q: check(args, sb, q, binary), ids))
+            rows = list(pool.map(lambda q: check(args, source, sb, q, binary), ids))
         print(render_table(rows))
         if args.save_baseline:
             Path(args.save_baseline).write_text(json.dumps({r["id"]: summary(r) for r in rows}, indent=1) + "\n")
@@ -541,7 +603,7 @@ def main(argv=None):
                 print("  " + line)
             return 1 if worse else 0
     else:
-        row = check(args, sb, ids[0], binary)
+        row = check(args, source, sb, ids[0], binary)
         print(row["text"] if args.show_brief else render_one(row))
         if args.show_brief:
             print(render_one(row), file=sys.stderr)
@@ -667,6 +729,100 @@ class SelfTest(unittest.TestCase):
             self.assertFalse(clone_is_sound(nested, sha))
             (repo / "a.txt").unlink()
             self.assertFalse(clone_is_sound(repo, sha), "a tracked file missing")
+
+    # -- the public bench as the default source
+
+    class Regions:
+        def __init__(self, inline=(), hex_=()):
+            self.inline, self.hex = set(inline), set(hex_)
+
+    def test_a_baseline_call_is_covered_when_the_brief_quotes_its_lines_and_has_its_commits(self):
+        quoted = [("a.rs", n) for n in range(1, 11)]
+        call = {"tool": "sh", "reads": [["a.rs", 1, 10]], "commits": ["abc1234"]}
+        self.assertEqual(judge_summary(self.Regions(quoted, {"abc1234ffff"}), call), ("covered", []))
+        verdict, targets = judge_summary(self.Regions(quoted[:5], set()), call)
+        self.assertEqual(verdict, "uncovered")
+        self.assertEqual(targets, ["a.rs:1-10 (5/10 quoted)", "commit abc1234 not in the brief"])
+        hit = {"tool": "sh", "reads": [["b.rs", 7, 7]], "commits": []}
+        self.assertEqual(judge_summary(self.Regions(), hit), ("uncovered", ["1 search-hit line(s), e.g. b.rs:7"]))
+        self.assertEqual(judge_summary(self.Regions(), {"tool": "sh", "reads": [], "commits": []})[0], "opaque")
+
+    def test_replay_counts_a_baseline_call_that_fetched_nothing_as_a_residual_call(self):
+        traces = {"nobrief": ("bench baseline (1 run)", [
+            {"tool": "sh", "reads": [["a.rs", 1, 3]], "commits": []}, {"tool": "sh", "reads": [], "commits": []}])}
+        out = replay(None, None, self.Regions([("a.rs", n) for n in (1, 2, 3)]), "", traces)
+        self.assertEqual((out["nobrief"]["recorded"], out["nobrief"]["residual"]), (2, 1))
+        self.assertEqual(out["nobrief"]["uncovered"][0][:2], (2, "opaque"))
+
+    def test_a_question_with_no_recorded_stream_falls_back_to_its_bench_baseline_or_says_so(self):
+        class Source:
+            def __init__(self, baseline):
+                self.baseline = baseline
+
+            def baseline_trace(self, _qid):
+                return self.baseline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = ("bench baseline (1 run)", [{"tool": "sh", "reads": [], "commits": []}])
+            self.assertEqual(traces_for(Source(baseline), tmp, "q-1")["nobrief"], baseline)
+            self.assertEqual(traces_for(Source(None), tmp, "q-1"), {})
+            row = {"id": "q-1", "kind": "k", "bytes": 1, "ms": 2, "live": None, "nb_quoted": 0.0, "replay": {}}
+            self.assertIsNone(residual_of(row))
+            self.assertIn("no recorded trace", render_one(row))
+            self.assertIn("predicted residual calls = -", render_one(row))
+            self.assertIn("| q-1 | k | 1 | 2 | 0% | - | - | - | - |", render_table([row]))
+            self.assertIn("predicted zero-call questions: 0 of 1", render_table([row]))
+
+    def test_an_aggregate_call_becomes_an_oracle_of_reads_and_search_hits(self):
+        class Repo:
+            def nlines(self, _rel):
+                return 100
+
+        sb = load_module("score_brief", None)
+        oracle = call_oracle(sb, Repo(), {"tool": "sh", "reads": [["a.rs", 5, 9], ["b.rs", 3, 3]], "commits": ["abc1234"]})
+        self.assertEqual({k for k in oracle.lines if k[0] == "a.rs"}, {("a.rs", n) for n in range(5, 10)})
+        self.assertEqual(oracle.files, {"a.rs": {"read"}, "b.rs": {"search"}})
+        self.assertEqual(oracle.commits, {"abc1234"})
+
+    def test_the_bench_runs_offline_on_a_pinned_clone_with_a_fake_binary(self):
+        """brief-check on one bench question with no census, no network and no agent: the question is cloned from
+        its pinned url, the fake binary prints a brief, and the recorded baseline is replayed against it."""
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            qs = sources()
+            questions, sha = qs.fixture_bench(tmp)
+            brief = "[PIXEL:BRIEF]\n### src/lib.py:5-9 — lines\n" + "".join(
+                f"{n}| line_{n} = {n}\n" for n in range(5, 10))
+            fake = Path(tmp) / "pixel-fake"
+            fake.write_text("#!/usr/bin/env python3\nimport json, sys\na = sys.argv[1:]\n"
+                            "if a[:1] == ['brief']:\n"
+                            f"    print(json.dumps({{'brief': {brief!r}, 'kind': 'lookup', 'gate': 'open'}}))\n")
+            fake.chmod(0o755)
+            root = Path(tmp) / "root"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = main(["t-01", "--bin", str(fake), "--questions", str(questions), "--root", str(root)])
+            self.assertEqual(code, 0)
+            text = out.getvalue()
+            self.assertIn("t-01  kind=lookup", text)
+            self.assertIn("quotes 100% of the lines a no-brief session read", text)
+            self.assertIn("nobrief  recorded 2 calls (bench baseline (1 run), 0 external) -> residual 1", text)
+            self.assertIn("predicted residual calls = 1", text)
+            self.assertTrue((root / "cache" / "o__t" / ".git").exists())
+            self.assertTrue((root / "score" / "check" / f"o__t-{sha[:8]}" / "src" / "lib.py").exists())
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown):   # a second run reuses the indexed clone and prints the brief
+                self.assertEqual(main(["t-01", "--bin", str(fake), "--questions", str(questions), "--root", str(root),
+                                       "--show-brief"]), 0)
+            self.assertIn("5| line_5 = 5", shown.getvalue())
+
+    def test_no_census_is_needed_and_two_sources_are_refused(self):
+        with self.assertRaises(SystemExit):
+            main(["q", "--questions", "a.jsonl", "--census-db", "b.db"])
+        with self.assertRaises(SystemExit) as caught:
+            main(["q", "--census-db", "/nonexistent/census.db"])
+        self.assertIn("public bench", str(caught.exception))
 
 
 if __name__ == "__main__":

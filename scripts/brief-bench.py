@@ -16,9 +16,11 @@ union of those lines, the evidence a session needed. Nothing else of a session i
                                                run plain Codex on each question, record baselines and oracles
     brief-bench.py --self-test
 
-``baseline`` needs the census runner and scorer (``scripts/tool-census``, found like ``brief-zero-calls.py`` finds
-them) and a Codex login (copied to a disposable CODEX_HOME per session, never printed). ``scripts/probe-test.py``
-reads the bench through ``--set bench``. Standard library only; run with ``python3 -I``.
+``baseline`` needs the runner and scorer (``scripts/tool-census``, in this repository) and a Codex login (copied to a
+disposable CODEX_HOME per session, never printed). The bench is the default question source of every zero-call
+tool (``scripts/tool-census/question_source.py``); ``check`` also refuses a question whose prompt is in a local
+census (``--census-db``, else ``<root>/census.db`` when it exists). The clones live in ``$PIXEL_BENCH_CACHE``
+(default ``~/.cache/pixel-brief-bench``). Standard library only; run with ``python3 -I``.
 """
 
 import argparse
@@ -38,7 +40,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 WORKTREE = HERE.parent
 BENCH = WORKTREE / "eval" / "brief-bench"
-CACHE = Path.home() / ".cache" / "pixel-brief-bench"
+CACHE = Path(os.environ.get("PIXEL_BENCH_CACHE") or Path.home() / ".cache" / "pixel-brief-bench")
 MIN_QUESTIONS = 50
 KINDS = ("overview", "lookup", "config", "flow", "history", "tests", "error-origin", "impact", "diagnosis")
 FIELDS = ("id", "repo", "url", "sha", "prompt", "kind", "oracle", "oracle_lines")
@@ -322,8 +324,9 @@ def main(argv=None):
     parser.add_argument("--effort", default="medium")
     parser.add_argument("--claude-model", default=None)
     parser.add_argument("--claude-effort", default=None)
-    parser.add_argument("--root", default="/private/tmp/claude-501/census")
-    parser.add_argument("--census-dir", default=None)
+    parser.add_argument("--root", default=None, help="state directory (default: $PIXEL_CENSUS_ROOT, else $TMPDIR/pixel-tool-census)")
+    parser.add_argument("--census-db", default=None, help="check: a local census.db whose prompts the bench must not contain")
+    parser.add_argument("--census-dir", default=None, help="scripts/tool-census (default: PIXEL_CENSUS_DIR, else beside this script)")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
@@ -331,6 +334,7 @@ def main(argv=None):
             unittest.defaultTestLoader.loadTestsFromTestCase(SelfTest)).wasSuccessful() else 1
     if not args.command:
         parser.error("a command")
+    args.root = args.root or str(bc_module().sources(args.census_dir).default_root())
     questions = read_jsonl(BENCH / "questions.jsonl")
     if args.only:
         wanted = set(args.only.split(","))
@@ -339,7 +343,7 @@ def main(argv=None):
         selected = questions
     if args.command == "check":
         census = set()
-        db = Path(args.root) / "census.db"
+        db = Path(args.census_db) if args.census_db else Path(args.root) / "census.db"
         if db.exists():
             import sqlite3
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)

@@ -17,12 +17,14 @@ This prints, per call: its translation, whether the current brief already carrie
 partly / no) and which probe of ``probes/`` would (run and merged for the question), or "no probe: candidate".
 That table is step 2 of the probe skill (``.agents/skills/probe``) and how new generic probes are found.
 
-    probe-translate.py <question-id> [--bin PIXEL] [--fresh N] [--root ROOT]
+    probe-translate.py <question-id> [--bin PIXEL] [--fresh N] [--questions Q.jsonl | --census-db DB] [--root ROOT]
     probe-translate.py --self-test
 
-The calls come from the recorded no-brief streams of the census (``brief-check.py``'s ``recorded_traces``);
-``--fresh N`` first runs plain Codex N more times (``brief-zero-calls.py --arm nobrief``). Only counts, paths
-and line ranges are printed: the commands and outputs are private. Standard library only; ``python3 -I``.
+The question is one of the public bench (``eval/brief-bench``, default) or of a local census (``--census-db``). The
+calls come from the newest recorded no-brief stream under ``<root>/zero-calls`` (``brief-check.py``'s
+``recorded_traces``) and, when there is none, from the question's bench baseline (the lines and commits each call
+fetched); ``--fresh N`` first runs plain Codex N more times (``brief-zero-calls.py --arm nobrief``). Only counts,
+paths and line ranges are printed: recorded commands and outputs are private. Standard library only; ``python3 -I``.
 """
 
 import argparse
@@ -139,17 +141,22 @@ def fresh_runs(args, bc, qid, count):
     """Run plain Codex ``count`` more times with no hook; the streams land in ``hyp-translate-*`` run directories."""
     stamp = int(time.time())
     for i in range(count):
+        source_args = (["--census-db", args.census_db] if args.census_db else
+                       ["--questions", args.questions] if args.questions else [])
         subprocess.run([sys.executable, "-I", str(HERE / "brief-zero-calls.py"), "--brief-bin", args.bin, "--agent",
                         args.agent, "--arm", "nobrief", "--only", qid, "--jobs", "1", "--root", args.root, "--run-id",
-                        f"hyp-translate-{stamp}-{i}"], capture_output=True, text=True)
+                        f"hyp-translate-{stamp}-{i}", *source_args], capture_output=True, text=True)
 
 
-def traces_of(args, bc, qid):
-    """``[(label, calls)]``: the newest recorded no-brief stream plus every fresh ``hyp-translate-*`` one."""
+def traces_of(args, bc, qid, source=None):
+    """``[(label, calls)]``: the newest recorded no-brief stream (else the question's bench baseline) plus every
+    fresh ``hyp-translate-*`` one."""
     out = []
     recorded = bc.recorded_traces(args.root, qid).get("nobrief")
     if recorded:
         out.append((f"recorded {recorded[0]}", recorded[1]))
+    elif source is not None and source.baseline_trace(qid):
+        out.append(source.baseline_trace(qid))
     for path in sorted((Path(args.root) / "zero-calls").glob(f"hyp-translate-*/raw/{qid}.nobrief.stream.jsonl")):
         text = path.read_text(encoding="utf-8", errors="replace")
         if '"turn.completed"' in text:
@@ -197,8 +204,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("question", nargs="?")
     parser.add_argument("--bin", default=str(WORKTREE / "target/dev-release/pixel"))
-    parser.add_argument("--root", default="/private/tmp/claude-501/census")
-    parser.add_argument("--census-dir", default=None)
+    parser.add_argument("--census-dir", default=None, help="scripts/tool-census (default: PIXEL_CENSUS_DIR, else beside this script)")
+    load("brief_check", "brief-check.py").sources(None).add_arguments(parser)
     parser.add_argument("--fresh", type=int, default=0, help="run the agent with no hook this many more times first")
     parser.add_argument("--agent", choices=("codex", "claude"), default=None,
                         help="the agent of --fresh runs (default: claude under Claude Code, else codex)")
@@ -212,13 +219,20 @@ def main(argv=None):
     bc = load("brief_check", "brief-check.py")
     pt = load("probe_test", "probe-test.py")
     sb = bc.load_module("score_brief", args.census_dir)
+    source = bc.sources(args.census_dir).open_source(args)
+    sb.add_workspace_root(args.root)
     args.bin = str(Path(args.bin).resolve())
     args.agent = args.agent or bc.default_agent()
     if args.fresh:
         fresh_runs(args, bc, args.question, args.fresh)
-    repo_name, prompt, clone = bc.prepare(Path(args.root), sb, args.question, args.bin)
+    repo_name, prompt, clone = bc.prepare(source, Path(args.root), args.question, args.bin)
     text, meta, _ = bc.run_brief(args.bin, clone, prompt)
-    rows = translate(bc, sb, pt, sb.Repo(clone), clone, prompt, text, meta, traces_of(args, bc, args.question), args.bin)
+    traces = traces_of(args, bc, args.question, source)
+    if not traces:
+        print(f"# {args.question}: no recorded trace (no stream under {args.root}/zero-calls, no bench baseline); "
+              "run `brief-zero-calls.py --arm nobrief` or pass --fresh N")
+        return 1
+    rows = translate(bc, sb, pt, sb.Repo(clone), clone, prompt, text, meta, traces, args.bin)
     print(f"# {args.question} ({meta.get('kind')}): brief {len(text.encode())} B, {len(rows)} no-brief call(s) translated\n")
     print(table(rows))
     print("\n" + summary_line(rows))
@@ -270,6 +284,23 @@ class SelfTest(unittest.TestCase):
         self.assertIn("a documentation section | no | no probe: candidate", text)
         self.assertIn("| no | history-fallback |", text)
         self.assertIn("| yes | - |", text)
+
+    def test_a_bench_baseline_trace_is_translated_without_any_recorded_stream(self):
+        bc, pt = load("brief_check", "brief-check.py"), load("probe_test", "probe-test.py")
+        sb = bc.load_module("score_brief", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            questions, _sha = bc.sources().fixture_bench(tmp)
+            source = bc.sources().BenchSource(questions)
+            args = type("Args", (), {"root": tmp, "census_db": None, "questions": None})()
+            traces = traces_of(args, bc, "t-01", source)
+            self.assertEqual([label for label, _ in traces], ["bench baseline (1 run)"])
+            clone = Path(tmp) / "origin"
+            brief = "[PIXEL:BRIEF]\n### src/lib.py:5-9 — lines\n" + "".join(f"{n}| line_{n} = {n}\n" for n in range(5, 10))
+            rows = translate(bc, sb, pt, sb.Repo(clone), clone, "where is line_7", brief, {"gate": "closed"}, traces, "pixel")
+            self.assertEqual([(r["kind"], r["target"], r["status"]) for r in rows],
+                             [("region", "src/lib.py:5-9", "yes"), ("other", "-", "no")])
+            self.assertTrue(rows[1]["status"] != "yes" and rows[1]["probes"] == [])
+            self.assertEqual(traces_of(type("Args", (), {"root": tmp})(), bc, "t-02", source), [])
 
 
 if __name__ == "__main__":

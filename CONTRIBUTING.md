@@ -264,8 +264,12 @@ python3 -I scripts/probe-test.py my-probe --live   # opt-in: the agent with and 
   its budget, fails or prints nonsense is skipped, never fatal.
 - **Evidence.** `scripts/probe-translate.py <id>` shows what a session without a brief fetched and whether the brief
   or a probe covers it; `scripts/probe-loop.py --prompt "<question>"` runs the whole loop on a plain prompt. The
-  public bench is `eval/brief-bench/` (`scripts/brief-bench.py check`). The PR states the `PROBE ... | KEEP`
-  line `probe-test` prints and `report.md`.
+  questions are the public bench, `eval/brief-bench/` (56 questions on 7 pinned public repositories, with oracle
+  lines and plain-Codex baselines; `scripts/brief-bench.py check`): it is the default source of `probe-test.py`,
+  `probe-translate.py`, `brief-check.py` and `brief-zero-calls.py` (`--questions <file>` for another one), so a
+  contributor needs no private data. A maintainer's local census is an optional second source, `--census-db
+  <census.db>`; its prompts are never committed. The PR states the `PROBE ... | KEEP` line `probe-test` prints and
+  `report.md`.
 - Shipping: a probe merged under `probes/` is embedded in the binary and installed by `pixel setup` into
   `~/.pixel/plugins/<name>/`; the prompt-submit brief runs it (see ARCHITECTURE.md, "Agent integration").
   `pixel plugin disable <name>` switches one off, `enable` back on. CI runs `probe-test.py --check-all` on every
