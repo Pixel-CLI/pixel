@@ -140,7 +140,7 @@ def fresh_runs(args, bc, qid, count):
     stamp = int(time.time())
     for i in range(count):
         subprocess.run([sys.executable, "-I", str(HERE / "brief-zero-calls.py"), "--brief-bin", args.bin, "--agent",
-                        "codex", "--arm", "nobrief", "--only", qid, "--jobs", "1", "--root", args.root, "--run-id",
+                        args.agent, "--arm", "nobrief", "--only", qid, "--jobs", "1", "--root", args.root, "--run-id",
                         f"hyp-translate-{stamp}-{i}"], capture_output=True, text=True)
 
 
@@ -157,13 +157,51 @@ def traces_of(args, bc, qid):
     return out
 
 
+def translate(bc, sb, pt, repo, clone, prompt, text, meta, traces, binary):
+    """Rows of the table for ``traces`` (``[(label, calls)]``) against the brief ``text`` of ``prompt`` in ``clone``:
+    the probes of ``probes/`` are run and merged for the question to say which one covers a call."""
+    regions = sb.parse_brief(text, repo)
+    gate_open = (meta.get("gate") or "open") == "open"
+    merged = []
+    home = tempfile.mkdtemp(prefix="translate-home-")
+    for directory in sorted(d for d in (WORKTREE / "probes").glob("*/") if not d.name.startswith(("_", "."))):
+        probe = pt.Probe(directory)
+        if probe.problems or not gate_open or not probe.applies(meta.get("kind"), prompt):
+            continue
+        request = {"prompt": prompt, "repo_root": str(clone), "brief": text or "[PIXEL:BRIEF]\n",
+                   "kind": meta.get("kind"), "session_files": []}
+        stdout, _, error = pt.run_probe(probe, request, binary, home)
+        if not error and stdout.strip():
+            merged.append((probe, pt.merge(text or "[PIXEL:BRIEF]\n", [(probe.name, probe.mode, stdout)])))
+    rows = []
+    for label, calls in traces:
+        for n, call in enumerate(calls, 1):
+            oracle = bc.call_oracle(sb, repo, call)
+            kind = kind_of(oracle, bc.call_command(call))
+            status = status_of(oracle, regions, text, kind)
+            rows.append({"n": n, "arm": label, "kind": kind, "target": target_of(oracle, kind), "status": status,
+                         "probes": [] if status == "yes" else covering_probes(sb, repo, pt, merged, None, oracle, kind,
+                                                                             binary)})
+    return rows
+
+
+def summary_line(rows):
+    open_rows = [r for r in rows if r["status"] != "yes" and not r["probes"]]
+    return (f"{sum(1 for r in rows if r['status'] == 'yes')} already in the brief, "
+            f"{sum(1 for r in rows if r['status'] != 'yes' and r['probes'])} covered by a probe, "
+            f"{len(open_rows)} with no probe: "
+            + (", ".join(f"{r['arm'].split()[0]}#{r['n']} {r['kind']}" for r in open_rows) or "-"))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("question", nargs="?")
     parser.add_argument("--bin", default=str(WORKTREE / "target/dev-release/pixel"))
     parser.add_argument("--root", default="/private/tmp/claude-501/census")
     parser.add_argument("--census-dir", default=None)
-    parser.add_argument("--fresh", type=int, default=0, help="run plain Codex this many more times first")
+    parser.add_argument("--fresh", type=int, default=0, help="run the agent with no hook this many more times first")
+    parser.add_argument("--agent", choices=("codex", "claude"), default=None,
+                        help="the agent of --fresh runs (default: claude under Claude Code, else codex)")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
@@ -175,41 +213,15 @@ def main(argv=None):
     pt = load("probe_test", "probe-test.py")
     sb = bc.load_module("score_brief", args.census_dir)
     args.bin = str(Path(args.bin).resolve())
+    args.agent = args.agent or bc.default_agent()
     if args.fresh:
         fresh_runs(args, bc, args.question, args.fresh)
-    root = Path(args.root)
-    repo_name, prompt, clone = bc.prepare(root, sb, args.question, args.bin)
+    repo_name, prompt, clone = bc.prepare(Path(args.root), sb, args.question, args.bin)
     text, meta, _ = bc.run_brief(args.bin, clone, prompt)
-    repo = sb.Repo(clone)
-    regions = sb.parse_brief(text, repo)
-    gate_open = (meta.get("gate") or "open") == "open"
-    merged = []
-    home = tempfile.mkdtemp(prefix="translate-home-")
-    for directory in sorted((WORKTREE / "probes").glob("*/")):
-        probe = pt.Probe(directory)
-        if probe.problems or not gate_open or not probe.applies(meta.get("kind"), prompt):
-            continue
-        request = {"prompt": prompt, "repo_root": str(clone), "brief": text or "[PIXEL:BRIEF]\n",
-                   "kind": meta.get("kind"), "session_files": []}
-        stdout, _, error = pt.run_probe(probe, request, args.bin, home)
-        if not error and stdout.strip():
-            merged.append((probe, pt.merge(text or "[PIXEL:BRIEF]\n", [(probe.name, probe.mode, stdout)])))
-    rows = []
-    for label, calls in traces_of(args, bc, args.question):
-        for n, call in enumerate(calls, 1):
-            oracle = sb.Oracle(repo)
-            sb.bash_oracle(oracle, call["cmd"], call["out"])
-            kind = kind_of(oracle, call["cmd"])
-            status = status_of(oracle, regions, text, kind)
-            rows.append({"n": n, "arm": label, "kind": kind, "target": target_of(oracle, kind), "status": status,
-                         "probes": [] if status == "yes" else covering_probes(sb, repo, pt, merged, args.question,
-                                                                             oracle, kind, args.bin)})
+    rows = translate(bc, sb, pt, sb.Repo(clone), clone, prompt, text, meta, traces_of(args, bc, args.question), args.bin)
     print(f"# {args.question} ({meta.get('kind')}): brief {len(text.encode())} B, {len(rows)} no-brief call(s) translated\n")
     print(table(rows))
-    open_rows = [r for r in rows if r["status"] != "yes" and not r["probes"]]
-    print(f"\n{sum(1 for r in rows if r['status'] == 'yes')} already in the brief, "
-          f"{sum(1 for r in rows if r['status'] != 'yes' and r['probes'])} covered by a probe, "
-          f"{len(open_rows)} with no probe: " + (", ".join(f"{r['arm'].split()[0]}#{r['n']} {r['kind']}" for r in open_rows) or "-"))
+    print("\n" + summary_line(rows))
     return 0
 
 

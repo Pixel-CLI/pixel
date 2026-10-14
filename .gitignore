@@ -39,3 +39,6 @@ stacklit.json
 stacklit.html
 DEPENDENCIES.md
 run-artifacts/
+
+# Ad-hoc probe-loop questions, traces and answers stay local.
+eval/brief-bench/adhoc/

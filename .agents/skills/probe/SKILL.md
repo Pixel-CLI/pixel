@@ -1,65 +1,75 @@
 ---
 name: probe
-description: "Create or refine a brief probe, make a question zero-call, or run /probe: diagnose what a session still looks up after the prompt-submit brief, write a probes/<name>/ script, prove it with scripts/probe-test.py offline and live (median of several Codex runs), and open a PR for a KEEP."
+description: "Create or refine a brief probe, make a question zero-call, or run /probe \"<question>\" [--repo path]: run the question with the current Pixel brief, stop if it is already zero-call, otherwise translate the calls the agent still made into evidence, write a generic probes/<name>/ script, prove it offline and live, and hand back a report and a commit."
 ---
 
 # Make a question zero-call with a probe
 
-A probe is a script in `probes/<name>/` that adds evidence to the prompt-submit brief (see CONTRIBUTING.md,
-"Write a probe", for the contract). This is the loop that produced the first five. Prototype in a script first
-(`.agents/rules/prototype-first.md`); Rust is for the brief's integration, never for one probe's idea.
+A probe is a script in `probes/<name>/` that adds evidence to the prompt-submit brief (contract: CONTRIBUTING.md,
+"Write a probe"). `/probe "<question>" [--repo <path>]` does the whole job from a plain prompt. Prototype in a
+script first (`.agents/rules/prototype-first.md`); Rust is for the brief's integration, never for one probe's idea.
+Use the frozen `pixel` (`--bin`), never a rebuild.
 
-## Procedure
+**Agent.** The scripts take `--agent codex|claude` (default: the agent this runs under, `claude` inside Claude Code;
+`PIXEL_PROBE_AGENT` overrides). Claude runs use `claude -p --output-format stream-json` with a per-run settings
+file (the prompt-submit hooks, or none for the vanilla arm), your OAuth login and no `ANTHROPIC_API_KEY`; they draw on
+the Claude quota, so pass `--agent codex` for heavy loops. Both streams are normalised into the same call shape
+(Codex commands and Claude Read/Grep/Glob/Bash) before translation.
 
-1. **Pick a question still above 0 calls.** `python3 -I scripts/brief-check.py --all` (the last live run's calls
-   beside the replay), or read `.pixel/brief-feedback.jsonl` of a real session. The frozen binary, never a rebuild:
-   `--bin <pixel>`; `--build` is opt-in.
-2. **Diagnose: translate the vanilla trace.** `python3 -I scripts/probe-translate.py <id> --bin <frozen pixel>`
-   (`--fresh 2` first for two new plain-Codex runs with no hook) turns each tool call of a session without a brief
-   into the deterministic evidence that would have made it unnecessary (a `sed -n a,bp` is that region, an `rg` the
-   matching lines by file, a README read a documentation section, `git log/show` a history block, `--help` the CLI
-   definition region) and says whether the current brief already has it (yes / buried at line N / partly / no)
-   and which probe of `probes/` covers it, or "no probe: candidate". Then `brief-check.py <id> --show-brief`
-   to read the brief itself. Classify each open row:
-   - **missing**: not in the brief at all (a file the words never name, a git diff, a registry, a doc section);
-   - **buried**: in the brief, but far from the top or among noise (pixel-4's answer sat at line 145);
-   - **wrong**: the brief points at the wrong code (excalidraw-5's trace and its truncated body).
-   Only missing needs a lookup; buried needs `drop:`/`first:`; wrong needs `drop:` plus a better block.
-3. **One-line hypothesis**, e.g. "ripgrep-5 loses its calls if the brief carries the answering commit's patch".
-4. **Copy the template**: `cp -R probes/name-files probes/<new-name>`, edit `pixel-plugin.toml` (`name` equals the
-   directory, `when_kinds`/`skip_kinds`/`when_prompt`, `budget_ms` at most 1000, `mode`) and the `probe` script.
-5. **Offline**: `python3 -I scripts/probe-test.py <new-name> --bin <frozen pixel>`. Expect `OK`: contract,
-   budget, deterministic twice, read-only, no stray lines, no touched question worse. Add `--no-history` for a
-   history probe's real state, `--ids a,b` to focus. The replay credits only ranges the brief now quotes, so an
-   offline `OK` with no gain is normal; it is the live run that decides.
-6. **Live** (the verdict): `probe-test.py <name> --live --bin <frozen pixel>` runs Codex on the target questions
-   with and without the probe, `--live-reps` (default 3) times per arm, and reads the median with min-max. KEEP
-   needs the median of a target to drop and none to rise. Re-confirm any single-run 0.
-7. **Log and ship.** Write the line `PROBE <name> | questions | predicted a -> b | coverage x -> y | live m -> n |
-   KEEP` in the PR, with the `report.md`. A KEEP becomes a PR (`Refs #906`); a DROP is reported with the same
-   numbers and not merged.
+## The flow (what `scripts/probe-loop.py` does, and what you decide)
 
-## Traps (each cost a run today)
+1. **Register** the question: the prompt on `--repo` (default: the current repository) pinned at HEAD, stored in
+   the git-ignored `eval/brief-bench/adhoc/`.
+2. **Run the current Pixel brief live, 1 run.** This is both the zero check and the baseline call count; there
+   is no separate baseline run. If it makes 0 calls, STOP: report "already zero-call" with the answer and the
+   brief size. Nothing else runs.
+3. **Only above 0:** run the agent without Pixel (no hook, 1 run) for its calls and final answer. Each question
+   costs at most two live runs before any probe work. The `path:line` the
+   answer cites become the question's oracle lines.
+4. **Translate.** First the brief-arm calls (exactly what the agent still needed on top of the brief), then the
+   vanilla calls (coverage): each tool call becomes the deterministic evidence that would have removed it (a
+   `sed -n a,bp` is that region, an `rg` the matching lines by file, a README read a documentation section,
+   `git log/show` a history block, `--help` the CLI definition region), with: already in the brief (yes / buried at
+   line N / partly / no) and which probe of `probes/` covers it, or "no probe: candidate". Classify each open row:
+   **missing** (not in the brief), **buried** (in it, far from the top or among noise; pixel-4's answer sat at line
+   145), **wrong** (it points at the wrong code; excalidraw-5's truncated body and noisy trace).
+5. **Fix (you decide).** If an existing probe almost covers it, refine that probe (gating, ranking, context). Else
+   `cp -R probes/_template probes/<name>` and write a **generic rule**. State a one-line hypothesis first, e.g.
+   "ripgrep-5 loses its calls if the brief carries the answering commit's patch".
+   **Overfitting guard.** The probe must derive every word, path and symbol from the prompt and the repository at
+   run time. Code that spells out words, paths or symbols of this one prompt is refused: `probe-test.py --guard
+   "<prompt>" --guard-paths <oracle paths>` (and the loop runs it) fails it with the literals it found.
+6. **Validate.** `python3 -I scripts/probe-loop.py --prompt "<question>" --repo <path> --probe <name>
+   --hypothesis "<one line>"`: the guard, offline `probe-test` on the question and on every bench question (no
+   regression), then live with and without the probe (`--live-reps 1` by default). KEEP when the calls drop,
+   ideally to 0. If not, translate the new remaining calls and loop: at most ~3 iterations (`--max-iter`), each
+   logged as hypothesis -> predicted -> live -> kept/dropped.
+7. **Hand back** a report: calls before -> after, the probe diff, the bench delta. With the user's ok, commit the
+   probe on the current branch; a KEEP becomes a PR (`Refs #906`), a DROP is reported and not merged.
 
-- **Codex varies a lot.** The same empty brief took 8 calls once and 11 the next time. One run proves nothing: use
-  the medians of at least 3 per arm, and say min-max.
+For a question already in a recorded set (a census id or the public bench) use the same harness directly:
+`brief-check.py --all`, `probe-translate.py <id>`, `probe-test.py <name> [--live]`.
+
+## Traps (each cost a run)
+
+- **A single run can be lucky** (the same empty brief took 8 calls once and 11 the next time). Re-run with
+  `--live-reps 3` before claiming a 0 on a borderline result, and say min-max.
 - **Parallel live runs collided on the census cache's `index.lock`.** `brief-zero-calls.py` now locks around
-  `prepare_cache`; keep one clone per session (the harness does) and do not run your own `git` in the cache.
+  `prepare_cache`; the harness keeps one clone per session. Do not run your own `git` in a shared cache.
 - **A confidently wrong brief is worse than none.** The strict config registry answered 3000 when the dev port was
   3001 because it had not read the tracked `.env.development`. Say what you could not see.
 - **Gate every probe on intent.** The ungated config registry injected noise into nine prompts. Use `when_kinds`,
   `skip_kinds` (the brief's `kind` is null for a weak, low-tier brief) and `when_prompt`.
-- **Generic words match everything.** "file", "for", "keep", "element", "scene" made false matches; keep a
-  generic-word list and weigh those words down.
+- **Generic words match everything.** "file", "for", "keep", "element", "scene" made false matches: keep a
+  generic-word list and weigh those words down; rank by how few sections or names carry a word (IDF).
 - **A hook carries about 9.5 KB.** The brief is split over 3 parts; a bigger probe output is cut by the merge, the
   append blocks first. Keep blocks small and put the answer first.
-- **Only git-tracked `.env*`, with secret-looking values masked.** Never read an untracked one; the probe is
-  read-only and uses no network.
+- **Only git-tracked `.env*`, with secret-looking values masked.** The probe is read-only and uses no network.
 - **A nested clone corrupted the pixel results.** `cp -R` into an existing directory nests the repository one
   level down; `brief-check.py` now locks and verifies the clone (f50510f2). If paths in a brief start with the
   repository name, suspect the clone first.
 - **Replay cannot credit broad `rg`/`sed` ranges**, nor predict a gain from ranges the old brief never named
-  (excalidraw-5 replayed 9 -> 9 and went to 0 live). Live is the arbiter, the replay only the guard.
+  (excalidraw-5 replayed 9 -> 9 and went to 0 live). Live is the arbiter; the replay only guards.
 - **A buried answer is a ranking problem**, not a missing one: reorder (`first:`), drop the noise, give the
   constant 12 lines of context and its uses.
-- **Determinism**: `rg` and `git` outputs must be sorted (`--sort path -j 1`); the harness runs the probe twice.
+- **Determinism.** `rg` and `git` outputs must be sorted (`--sort path -j 1`); the harness runs the probe twice.

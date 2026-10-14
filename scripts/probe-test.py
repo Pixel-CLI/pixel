@@ -342,6 +342,49 @@ class BenchSet:
         return {"calls": residual, "quoted": quoted, "bytes": len(text.encode())}
 
 
+# --------------------------------------------------------------------------- the overfitting guard
+
+COMMON = set("""about above after again against also another because been before being below between both could does
+doing down during each from further have having here into just keep keeps more most much once only other over same
+should some such than that their them then there these they this those through under until very want what when
+where which while will with would your how why who its are and the for not you can any all but was has our""".split())
+
+
+def literals_of_prompt(prompt, oracle_paths=()):
+    """What a probe written for ONE question would hard-code: its content words (five letters or more) and the
+    paths, file names and stems of the evidence that question needed."""
+    words = {w.lower() for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{4,}", prompt)} - COMMON
+    lits = set(words)
+    for path in oracle_paths:
+        path = str(path)
+        lits.add(path)
+        base = path.rsplit("/", 1)[-1]
+        lits.add(base)
+        stem = base.rsplit(".", 1)[0]
+        if len(stem) >= 4:
+            lits.add(stem)
+    return {x for x in lits if x}
+
+
+def overfit(probe_dir, prompt, oracle_paths=(), others=None):
+    """Literals of ``prompt`` (and of its evidence) that the probe's code spells out, sorted. A word the other
+    probes of ``probes/`` already use is vocabulary of the contract (``config``, ``history``) and is allowed; a
+    probe must derive the rest from the prompt and the repository when it runs."""
+    probe_dir = Path(probe_dir)
+    source = "\n".join(p.read_text(errors="replace") for p in sorted(probe_dir.iterdir())
+                       if p.is_file() and p.suffix != ".toml" and not p.name.startswith("."))
+    vocabulary = ""
+    for other in sorted((others or probe_dir.parent).glob("*/probe")):
+        if other.parent.resolve() != probe_dir.resolve():
+            vocabulary += other.read_text(errors="replace").lower() + "\n"
+    found = []
+    for lit in sorted(literals_of_prompt(prompt, oracle_paths)):
+        pattern = rf"(?<![A-Za-z0-9_]){re.escape(lit)}(?![A-Za-z0-9_])"
+        if re.search(pattern, source, re.I) and not (len(lit) < 20 and "/" not in lit and re.search(pattern, vocabulary)):
+            found.append(lit)
+    return found
+
+
 # --------------------------------------------------------------------------- the offline evaluation
 
 def snapshot(clone):
@@ -550,17 +593,17 @@ def median(values):
 
 
 def live_run(probe, qset, pixel_bin, ids, args, report_dir):
-    """Codex on each target question ``--live-reps`` times through the shim (with the probe) and the plain binary
+    """The agent (``--agent``) on each target question ``--live-reps`` times through the shim (with the probe) and the plain binary
     (without), every run in parallel: one agent run varies a lot (the same empty brief took 8 and 11 calls). The
     result per question is the median and the min-max of each arm; the verdict reads the medians."""
-    zero = HERE / "brief-zero-calls.py"
     shim = make_shim(Path(report_dir) / "live", probe, pixel_bin)
     stamp = int(time.time())
 
-    def one(arm, rep, binary):
+    def one_census(arm, rep, binary):
         run_id = f"probe-{probe.name}-{arm}{rep}-{stamp}"
-        cmd = ["python3", "-I", str(zero), "--brief-bin", str(binary), "--agent", "codex", "--arm", "brief",
-               "--only", ",".join(ids), "--jobs", str(args.live_jobs), "--run-id", run_id, "--root", args.root]
+        cmd = ["python3", "-I", str(HERE / "brief-zero-calls.py"), "--brief-bin", str(binary), "--agent", args.agent,
+               "--arm", "brief", "--only", ",".join(ids), "--jobs", str(args.live_jobs), "--run-id", run_id,
+               "--root", args.root]
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         subprocess.run(cmd, capture_output=True, text=True, env=env)
         report = Path(args.root) / "zero-calls" / run_id / "report.json"
@@ -568,6 +611,16 @@ def live_run(probe, qset, pixel_bin, ids, args, report_dir):
         # The shim replaces what parts 2 and 3 print, so the harness's own "hooks ran 1/3" is not a failure here.
         return arm, {r["id"]: r["n_calls"] for r in rows if r["n_calls"] >= 0}
 
+    def one_bench(arm, rep, binary):
+        bb = load_module("brief_bench", "brief-bench.py")
+        rows = [r for r in qset.rows if r["id"] in ids]
+        ns = argparse.Namespace(jobs=args.live_jobs, timeout=900, model="gpt-5.6-terra", effort="medium",
+                                root=args.root, census_dir=args.census_dir, agent=args.agent,
+                                claude_model=None, claude_effort=None)
+        done = bb.run_codex(ns, rows, 1, binary=str(binary), src=lambda q: qset.clone(q), tag=f"probe-{arm}{rep}")
+        return arm, {qid: rec["n_calls"] for qid, _r, rec in done if rec}
+
+    one = one_census if qset.name == "census" else one_bench
     runs = {"with": [], "without": []}
     with concurrent.futures.ThreadPoolExecutor(max_workers=2 * args.live_reps) as pool:
         futures = [pool.submit(one, arm, rep, shim if arm == "with" else pixel_bin)
@@ -584,6 +637,14 @@ def live_run(probe, qset, pixel_bin, ids, args, report_dir):
             row[arm + "_runs"] = values
         out.append(row)
     return out
+
+
+def load_module(name, filename):
+    spec = importlib.util.spec_from_file_location(name, HERE / filename)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 # --------------------------------------------------------------------------- main
@@ -605,12 +666,18 @@ def main(argv=None):
     parser.add_argument("--ids", default=None, help="only these question ids")
     parser.add_argument("--no-history", action="store_true", help="census clones without the history index (the state a history fallback is for)")
     parser.add_argument("--report-dir", default=None)
+    parser.add_argument("--guard", default=None, metavar="PROMPT",
+                        help="refuse a probe whose code spells out words or paths of this one prompt")
+    parser.add_argument("--guard-paths", default="", help="comma-separated evidence paths of that prompt")
     parser.add_argument("--live", action="store_true")
+    parser.add_argument("--agent", choices=("codex", "claude"), default=None,
+                        help="the live agent (default: claude under Claude Code, else codex; codex for heavy loops)")
     parser.add_argument("--live-jobs", type=int, default=4)
-    parser.add_argument("--live-reps", type=int, default=3, help="Codex runs per arm; the verdict reads the medians")
+    parser.add_argument("--live-reps", type=int, default=1, help="Codex runs per arm (default 1; use 3 before claiming a 0 on a borderline result); the verdict reads the medians")
     parser.add_argument("--hook-shim", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--self-test", action="store_true")
     args, rest = parser.parse_known_args(argv)
+    args.agent = args.agent or load_bc().default_agent()
     if args.self_test:
         return 0 if unittest.TextTestRunner(verbosity=2).run(
             unittest.defaultTestLoader.loadTestsFromTestCase(SelfTest)).wasSuccessful() else 1
@@ -632,6 +699,11 @@ def main(argv=None):
         targets = [r["id"] for r in rows if r["ran"]]
         live = live_run(probe, qset, binary, targets, args, args.report_dir or tempfile.mkdtemp(prefix="probe-live-"))
     verdict, reasons = verdict_of(probe, rows, live)
+    if args.guard:
+        hard = overfit(probe.dir, args.guard, [p for p in args.guard_paths.split(",") if p])
+        if hard:
+            reasons.append("overfitted to the prompt: the code spells out " + ", ".join(f"`{h}`" for h in hard))
+            verdict = "FAIL" if live is None else "DROP"
     report_dir = args.report_dir or str(WORKTREE / "target" / "probe-reports" / probe.name)
     write_report(report_dir, probe, rows, verdict, reasons, live)
     print(verdict_line(probe, rows, verdict, live))
@@ -788,6 +860,31 @@ class SelfTest(unittest.TestCase):
             rows, base = load_bench(tmp)
             self.assertEqual(rows[0]["oracle"], [["a.py", 1, 4]])
             self.assertEqual(len(base["q"]["calls"]), 2)
+
+    def test_a_probe_that_spells_out_the_prompts_words_or_evidence_paths_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            good = Path(self.write_probe(tmp, "good", body="#!/bin/sh\nrg --files | head\n"))
+            prompt = "where does pixel decide how many hook parts a brief is split into"
+            self.assertEqual(overfit(good, prompt, ["crates/pixel-install/src/config.rs"]), [])
+            bad = Path(self.write_probe(tmp, "bad", body="#!/bin/sh\ncat crates/pixel-install/src/config.rs\n"
+                                                         "grep brief_parts src; echo hook parts\n"))
+            found = overfit(bad, prompt, ["crates/pixel-install/src/config.rs"])
+            self.assertIn("crates/pixel-install/src/config.rs", found)
+            self.assertIn("parts", found)
+            self.assertIn("config", found)
+            self.assertNotIn("how", found)
+            # vocabulary another probe already uses is allowed
+            other = Path(self.write_probe(tmp, "other", body="#!/bin/sh\n# decide parts\n"))
+            self.assertTrue((other / "probe").exists())
+            self.assertNotIn("parts", overfit(bad, prompt, [], others=Path(tmp)))
+
+    def test_the_literals_of_a_prompt_are_its_content_words_and_its_paths(self):
+        lits = literals_of_prompt("where does pixel decide how many hook parts", ["a/b/config.rs"])
+        self.assertIn("decide", lits)
+        self.assertIn("a/b/config.rs", lits)
+        self.assertIn("config.rs", lits)
+        self.assertIn("config", lits)
+        self.assertNotIn("where", lits)
 
 
 if __name__ == "__main__":

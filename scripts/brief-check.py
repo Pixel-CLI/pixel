@@ -108,6 +108,61 @@ def codex_calls(lines):
     return calls
 
 
+def default_agent():
+    """The agent the harness drives: ``PIXEL_PROBE_AGENT``, else Claude when this runs under Claude Code (it sets
+    ``CLAUDECODE``), else Codex. Claude runs draw on the user's Claude quota; Codex is the unlimited choice for
+    heavy loops: pass ``--agent codex``."""
+    return os.environ.get("PIXEL_PROBE_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else "codex")
+
+
+def claude_calls(lines):
+    """``[{tool, input, output, is_error}]`` of a ``claude -p --output-format stream-json`` stream: the tool_use
+    blocks of the top-level agent paired with their tool_result by id. The shape the census scorer reads."""
+    uses, order, results = {}, [], {}
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        content = (rec.get("message") or {}).get("content")
+        if not isinstance(content, list) or rec.get("parent_tool_use_id"):
+            continue
+        for part in content:
+            if rec.get("type") == "assistant" and part.get("type") == "tool_use" and part.get("id") not in uses:
+                uses[part["id"]] = {"tool": part.get("name", "?"), "input": part.get("input") or {}}
+                order.append(part["id"])
+            elif rec.get("type") == "user" and part.get("type") == "tool_result":
+                body = part.get("content")
+                if isinstance(body, list):
+                    body = "".join(b.get("text", "") for b in body if isinstance(b, dict))
+                results[part.get("tool_use_id")] = (str(body or ""), bool(part.get("is_error")))
+    return [{**uses[i], "output": results.get(i, ("", False))[0], "is_error": results.get(i, ("", False))[1]}
+            for i in order]
+
+
+def call_command(call):
+    """The shell-like text of a call of either agent, for the classifier: Codex's command, Claude's Bash command,
+    ``rg <pattern>`` for its Grep tool, the empty string for a Read or a Glob."""
+    if "cmd" in call:
+        return call["cmd"]
+    inp = call.get("input") or {}
+    if call.get("tool") == "Bash":
+        return str(inp.get("command") or "")
+    if call.get("tool") == "Grep":
+        return "rg " + str(inp.get("pattern") or "")
+    return ""
+
+
+def call_oracle(sb, repo, call):
+    """The scorer's oracle of one call, whichever agent made it: a Codex ``{cmd, out}`` or a Claude
+    ``{tool, input, output}`` (Read / Grep / Glob / Bash)."""
+    if "cmd" in call:
+        oracle = sb.Oracle(repo)
+        sb.bash_oracle(oracle, call["cmd"], call["out"])
+        return oracle
+    return sb.build_oracle(repo, [call])
+
+
 def recorded_traces(root, qid):
     """``{arm: (run id, calls)}``: the newest recorded stream of each arm of ``qid``. A stream from before the arms
     were named (``<id>.stream.jsonl``) is a brief-arm trace."""
@@ -551,6 +606,42 @@ class SelfTest(unittest.TestCase):
         worse = {"a": {"bytes": 700, "residual": 2, "nb_quoted": 0.3}, "c": {"bytes": 1, "residual": 9, "nb_quoted": 0.0}}
         self.assertEqual(regressions(old, worse), ["a: brief 1000 -> 700 B", "a: residual calls 0 -> 2",
                                                    "a: no-brief reads quoted 50% -> 30%"])
+
+    def test_claude_calls_pair_tool_use_with_result_and_ignore_subagents(self):
+        def line(**rec):
+            return json.dumps(rec)
+        lines = [
+            line(type="assistant", message={"content": [{"type": "tool_use", "id": "a", "name": "Read",
+                                                           "input": {"file_path": "/r/a.py", "offset": 3}}]}),
+            line(type="user", message={"content": [{"type": "tool_result", "tool_use_id": "a", "content": "x"}]}),
+            line(type="assistant", message={"content": [{"type": "tool_use", "id": "b", "name": "Grep",
+                                                           "input": {"pattern": "foo"}}]}),
+            line(type="user", message={"content": [{"type": "tool_result", "tool_use_id": "b",
+                                                      "content": [{"type": "text", "text": "a.py:3:foo"}]}]}),
+            line(type="assistant", parent_tool_use_id="z",
+                 message={"content": [{"type": "tool_use", "id": "c", "name": "Bash", "input": {}}]}),
+            "not json"]
+        calls = claude_calls(lines)
+        self.assertEqual([c["tool"] for c in calls], ["Read", "Grep"])
+        self.assertEqual(calls[1]["output"], "a.py:3:foo")
+        self.assertEqual(call_command(calls[1]), "rg foo")
+        self.assertEqual(call_command({"cmd": "git log"}), "git log")
+        self.assertEqual(call_command({"tool": "Bash", "input": {"command": "ls"}}), "ls")
+        self.assertEqual(call_command(calls[0]), "")
+
+    def test_the_default_agent_follows_the_host_unless_overridden(self):
+        saved = {k: os.environ.pop(k, None) for k in ("PIXEL_PROBE_AGENT", "CLAUDECODE")}
+        try:
+            self.assertEqual(default_agent(), "codex")
+            os.environ["CLAUDECODE"] = "1"
+            self.assertEqual(default_agent(), "claude")
+            os.environ["PIXEL_PROBE_AGENT"] = "codex"
+            self.assertEqual(default_agent(), "codex")
+        finally:
+            for key in ("PIXEL_PROBE_AGENT", "CLAUDECODE"):
+                os.environ.pop(key, None)
+                if saved[key] is not None:
+                    os.environ[key] = saved[key]
 
     def test_a_clone_nested_one_level_down_by_cp_is_not_sound(self):
         def git(cwd, *args):
