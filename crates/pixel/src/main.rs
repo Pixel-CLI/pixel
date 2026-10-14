@@ -49,6 +49,7 @@ mod decide_ollaya;
 mod decide_remote;
 mod evaluate_cmd;
 mod execution_brief;
+mod graph_shadow_cmd;
 mod hook_input;
 mod impact_read;
 mod index_cmd;
@@ -612,6 +613,16 @@ enum Command {
     RebuildGraph {
         #[arg(default_value = ".")]
         path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare this graph's Rust edges with pixel-mvp's index (both built in a scratch directory).
+    GraphShadow {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// How many edges each graph alone holds to show as examples.
+        #[arg(long, default_value_t = 5)]
+        examples: usize,
         #[arg(long)]
         json: bool,
     },
@@ -5101,6 +5112,11 @@ fn run_command(
             print_data(&v, json)?;
             Ok(())
         }
+        Command::GraphShadow {
+            path,
+            examples,
+            json,
+        } => graph_shadow_cmd::run(&path, examples, json),
         Command::Coverage { path, json } => {
             coverage_cmd::run(coverage_cmd::CoverageOptions { path, json })
         }

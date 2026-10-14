@@ -13,7 +13,7 @@ use pixel_graph::build::build_graph;
 use pixel_graph::mvp_adapter::{Unresolved, refresh, rust_rows};
 use pixel_graph::{EdgeKind, GraphStore, Tier};
 
-fn git(dir: &Path, args: &[&str]) {
+pub(crate) fn git(dir: &Path, args: &[&str]) {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -29,9 +29,10 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 /// A crate with a `join` of its own in `paths.rs`, `Path::join` called in
-/// `lib.rs`, an imported `open`, a glob import, a Python `unwrap`, and a
-/// test module calling `helper`. Line numbers are the assertions'.
-fn fixture(root: &Path) {
+/// `lib.rs`, an imported `open`, a glob import, a Python `unwrap` and a
+/// Python `count` calling `helper` by name, and a test module calling
+/// `helper`. Line numbers are the assertions'.
+pub(crate) fn fixture(root: &Path) {
     let files = [
         (
             "src/lib.rs",
@@ -96,7 +97,8 @@ fn fixture(root: &Path) {
         ),
         (
             "scripts/env.py",
-            "def unwrap(value):\n    return value\n".to_string(),
+            "def unwrap(value):\n    return value\n\n\ndef count():\n    return helper()\n"
+                .to_string(),
         ),
     ];
     for (path, body) in files {

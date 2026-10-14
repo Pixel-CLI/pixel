@@ -12,6 +12,7 @@ mod concept_engine1_audit;
 mod concept_tests;
 mod crux_lines;
 mod env_read_concepts;
+mod graph_shadow;
 mod import_resolution;
 mod mvp_adapter;
 mod rails_routes;
