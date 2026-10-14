@@ -540,6 +540,7 @@ jobs:
           python3 scripts/bench-brief-spans.py --self-test
           python3 scripts/excavation-count.py --self-test
           python3 scripts/ab-brief-live.py --self-test
+          python3 scripts/brief-check.py --self-test
 
       # The workflow's own step, run with a stub script: only a pull request
       # number reaches the shoot script.
