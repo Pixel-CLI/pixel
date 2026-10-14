@@ -51,7 +51,7 @@ def pieces(text):
 
 
 if part > 1:
-    deadline = time.time() + 8
+    deadline = time.time() + 8.5
     while time.time() < deadline and not os.path.exists(done):
         time.sleep(0.05)
     try:
@@ -94,8 +94,11 @@ try:
         with tempfile.NamedTemporaryFile("w", delete=False) as handle:
             handle.write(ctx)
         env = dict(os.environ, CLONE=os.getcwd(), PROMPT=prompt, BRIEF_FILE=handle.name, PIXEL_REAL=REAL)
-        extra = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=30, env=env).stdout
-        os.unlink(handle.name)
+        try:
+            # Each command gets a few seconds: part 1 as a whole must stay inside what the later parts wait for.
+            extra = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=5, env=env).stdout
+        finally:
+            os.unlink(handle.name)
         if extra.startswith(MARK):
             ctx = extra[len(MARK):].lstrip("\n")
         elif extra.strip():

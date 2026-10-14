@@ -73,14 +73,25 @@ pub(crate) fn window_for(root: &Path, command: bool) -> Duration {
     } else {
         pixel_install::config::BRIEF_WINDOW_HOOK_DEFAULT_MS
     };
-    Duration::from_millis(pixel_install::config::brief_window_ms(
-        &home,
-        Some(root),
-        std::env::var(pixel_install::config::BRIEF_WINDOW_ENV)
-            .ok()
-            .as_deref(),
-        default,
-    ))
+    window_of(
+        pixel_install::config::brief_window_ms(
+            &home,
+            Some(root),
+            std::env::var(pixel_install::config::BRIEF_WINDOW_ENV)
+                .ok()
+                .as_deref(),
+            default,
+        ),
+        command,
+    )
+}
+
+/// The window for a configured `ms`: the `brief` command is cut off by Pi
+/// after 1.2 s, so a setting tuned for the hook never lets it run past
+/// [`pixel_install::config::BRIEF_WINDOW_COMMAND_MAX_MS`].
+fn window_of(ms: u64, command: bool) -> Duration {
+    let cap = pixel_install::config::BRIEF_WINDOW_COMMAND_MAX_MS;
+    Duration::from_millis(if command { ms.min(cap) } else { ms })
 }
 
 /// Operations one brief may start, whatever they answer. A kind route may
@@ -3584,7 +3595,11 @@ pub(crate) fn fit(brief: &Brief) -> Option<(String, AnswerStats)> {
     // better than the agent hearing nothing.
     if matches!(brief.admission, Admission::Kind(_)) {
         return if brief.cut {
-            render_low(brief).map(|text| (text, AnswerStats::default()))
+            // Whatever the relevance probe had to say, this is a lead and says so.
+            let mut lead = brief.clone();
+            lead.confidence
+                .get_or_insert_with(|| relevance::LOW_CONFIDENCE_LINE.to_string());
+            render_low(&lead).map(|text| (text, AnswerStats::default()))
         } else {
             None
         };
@@ -8896,6 +8911,16 @@ mod tests {
     }
 
     #[test]
+    fn the_brief_command_never_runs_past_pis_cutoff_whatever_the_hook_setting() {
+        assert_eq!(window_of(3_000, false), Duration::from_millis(3_000));
+        assert_eq!(
+            window_of(3_000, true),
+            Duration::from_millis(pixel_install::config::BRIEF_WINDOW_COMMAND_MAX_MS)
+        );
+        assert_eq!(window_of(400, true), Duration::from_millis(400));
+    }
+
+    #[test]
     fn a_kind_admission_whose_window_ended_before_its_pack_should_render_its_best_files_as_a_lead()
     {
         let ended = Brief {
@@ -8912,6 +8937,7 @@ mod tests {
         };
         let (text, stats) = fit(&ended).expect("the window ended: a lead, not silence");
         assert!(text.starts_with(BRIEF_TAG), "{text}");
+        assert!(text.contains("confidence: low"), "{text}");
         assert!(text.contains("files: src/a.rs:7"), "{text}");
         assert_eq!(stats, AnswerStats::default());
         let no_files = Brief {

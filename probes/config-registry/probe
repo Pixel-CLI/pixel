@@ -164,7 +164,8 @@ def block(clone, path, n, ctx_before=0, ctx_after=0):
 
 
 def mask(key, val):
-    return "<masked>" if val and SECRETISH.search(key) and len(val) > 24 else val
+    """A value of a key whose name looks like a secret is never printed, whatever its length."""
+    return "<masked>" if val and SECRETISH.search(key) else val
 
 
 INTENT = re.compile(r"\b(config\w*|settings?|env(ironment)?(\s+var\w*)?|variables?|flags?|options?|defaults?|ports?|overrid\w+|where do i set|set (that|this|it))\b", re.I)
@@ -199,7 +200,7 @@ def emit(clone, prompt, brief):
             if (d[0], d[1]) not in seen:
                 seen.add((d[0], d[1])); b = block(clone, d[0], d[1], min(span, 3), 0)
                 if k == "dev-server port": b = block(clone, d[0], d[1], 1, 1)
-                if os.path.basename(d[0]).startswith(".env"): b = [re.sub(r"=(.{30}).*", lambda m: "=<masked>" if SECRETISH.search(k) else m.group(0), x) for x in b]
+                if os.path.basename(d[0]).startswith(".env"): b = [re.sub(r"=(.*)$", lambda m: "=<masked>" if SECRETISH.search(x.split("=")[0].split("|")[-1]) or SECRETISH.search(k) else m.group(0), x) for x in b]
                 blocks += b
         for r in e["reads"][:2]:
             if (r[0], r[1]) not in seen:

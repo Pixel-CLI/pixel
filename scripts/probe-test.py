@@ -311,7 +311,10 @@ class BenchSet:
             if not (dest / ".git").exists():
                 url = row.get("url") or f"https://github.com/{row['repo']}.git"
                 subprocess.run(["git", "clone", "-q", url, str(dest)], check=True, capture_output=True)
-                subprocess.run(["git", "checkout", "-q", row["sha"]], cwd=dest, check=True, capture_output=True)
+            # Pinned at the question's commit before anything is indexed, whatever state an earlier run left.
+            head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=dest, capture_output=True, text=True).stdout.strip()
+            if head != row["sha"]:
+                subprocess.run(["git", "checkout", "-q", "--detach", row["sha"]], cwd=dest, check=True, capture_output=True)
             env = self.bc.env_for_brief()
             for argv in (["daemon", "stop", "."], ["prepare-repo", "."], ["build-index", "--history", "."]):
                 subprocess.run([self.binary, *argv], cwd=dest, capture_output=True, env=env, timeout=1800)
@@ -446,6 +449,10 @@ def verdict_of(probe, rows, live=None):
         reasons.append("the probe added nothing to any question")
     if live is None:
         return ("FAIL" if reasons else "OK"), reasons
+    failed = [l for l in live if l["with"] < 0 or l["without"] < 0]
+    reasons += [f"{l['id']}: a live arm did not complete (with {l['with_runs']}, without {l['without_runs']})"
+                for l in failed]
+    live = [l for l in live if l not in failed]
     bad = [l for l in live if l["with"] > l["without"]]
     reasons += [f"{l['id']}: live median {l['without']} -> {l['with']} calls" for l in bad]
     if live and not any(l["with"] < l["without"] for l in live) and not bad:
@@ -847,6 +854,15 @@ class SelfTest(unittest.TestCase):
             reasons = " ".join(verdict_of(probe, slow)[1])
             self.assertIn("not deterministic", reasons)
             self.assertIn("modified the repository", reasons)
+
+    def test_a_live_arm_that_never_completed_is_a_failure_not_a_drop_in_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Probe(self.write_probe(tmp))
+            rows = [self.row("a", True, {"calls": 3, "quoted": 0.1, "bytes": 1}, {"calls": 1, "quoted": 0.4, "bytes": 2})]
+            verdict, reasons = verdict_of(probe, rows, [{"id": "a", "without": 4, "with": -1, "without_runs": [4],
+                                                         "with_runs": []}])
+            self.assertEqual(verdict, "DROP")
+            self.assertTrue(any("did not complete" in r for r in reasons), reasons)
 
     def test_a_live_run_that_costs_calls_drops_the_probe(self):
         with tempfile.TemporaryDirectory() as tmp:

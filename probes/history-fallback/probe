@@ -25,6 +25,8 @@ def main():
     if re.search(r"^### history", brief, re.M):
         return
     words = [w for w in dict.fromkeys(re.findall(r"[a-z]{5,}", prompt.lower())) if w not in STOP]
+    if not words:
+        return
     shown = []
     for k in (3, 2, 1):
         args = ["log", "-i", "--all-match", "-n", "6", "--format=%h %as %s"] + [f"--grep={w}" for w in words[:k]]

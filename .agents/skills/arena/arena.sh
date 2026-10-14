@@ -461,9 +461,16 @@ set_base() { # $1 repo, $2 source dir, $3 sha, $4 binary, $5 binary hash
     rm -rf "$SET_BASE"
     cow_clone "$2" "$SET_BASE/pixel/ws" "$3"
     cow_clone "$2" "$SET_BASE/no-pixel/ws" "$3"
-    ( cd "$SET_BASE/pixel/ws" && "$4" prepare-repo . >"$SET_BASE/prepare.log" 2>&1 \
-        && { "$4" build-index --history . >>"$SET_BASE/prepare.log" 2>&1 & hp=$!; ( sleep 420; kill "$hp" 2>/dev/null ) & wait "$hp" 2>/dev/null; true; } \
-        && "$4" search-meaning 'how does this code work' . >>"$SET_BASE/prepare.log" 2>&1 ) || die "indexing failed; see $SET_BASE/prepare.log"
+    ( cd "$SET_BASE/pixel/ws" && "$4" prepare-repo . >"$SET_BASE/prepare.log" 2>&1 ) || die "prepare-repo failed; see $SET_BASE/prepare.log"
+    # The history index is optional (a blobless clone can take longer than the watchdog allows) but a build that
+    # fails by itself is not: only the watchdog's own kill is tolerated, and it is logged.
+    ( cd "$SET_BASE/pixel/ws"
+      "$4" build-index --history . >>"$SET_BASE/prepare.log" 2>&1 & hp=$!
+      ( sleep 420; if kill -0 "$hp" 2>/dev/null; then echo 'build-index watchdog fired after 420 seconds' >>"$SET_BASE/prepare.log"; kill "$hp" 2>/dev/null || true; fi ) & wp=$!
+      if wait "$hp"; then rc=0; else rc=$?; fi
+      kill "$wp" 2>/dev/null || true; wait "$wp" 2>/dev/null || true
+      if [ "$rc" -ne 0 ] && ! grep -q 'watchdog fired' "$SET_BASE/prepare.log"; then exit "$rc"; fi ) || die "build-index failed; see $SET_BASE/prepare.log"
+    ( cd "$SET_BASE/pixel/ws" && "$4" search-meaning 'how does this code work' . >>"$SET_BASE/prepare.log" 2>&1 ) || die "search-meaning failed; see $SET_BASE/prepare.log"
     touch "$SET_BASE/indexed"
   fi
 }
@@ -555,7 +562,7 @@ cmd_run_set() {
   [ -n "$bin" ] || bin=$(command -v pixel) || die 'no pixel binary: pass --pixel-bin'
   [ -x "$bin" ] || die "not executable: $bin"
   [ -x "$CODEX_BIN" ] || die "no Codex binary at $CODEX_BIN"
-  command -v sqlite3 >/dev/null || die 'sqlite3 is required for the census source'
+  [ "$source" != census ] || command -v sqlite3 >/dev/null || die 'sqlite3 is required for the census source'
   [ -n "$baseline_file" ] || { [ "$source" != census ] || baseline_file=${ARENA_BASELINE:-$SCRATCH/baseline-final-live.jsonl}; }
   local bin_hash; bin_hash=$(sha256_of "$bin")
   SET_OUT="$SCRATCH/sets/$source-$(date -u +%Y%m%dT%H%M%SZ)"

@@ -776,8 +776,8 @@ missing.
 
 The chain runs at most six ops under one deadline, 3 s for a hook (`brief_window_ms` in
 `.pixel/config.yaml` or `PIXEL_BRIEF_WINDOW_MS`, clamped to 250 ms to 4.5 s so it ends before the 6 s hook
-decision and the host's 10 s kill; 750 ms for the `brief` command, which Pi cuts off at 1.2 s). Parts 2 to N
-wait for part 1 for that window plus a second. A kind-admitted brief whose window ended before its pack
+decision and the host's 10 s kill; 750 ms for the `brief` command, never more than 1 s since Pi cuts it off at 1.2 s). Parts 2 to N
+wait for part 1 as long as part 1 may take (the 6 s hook decision bound). A kind-admitted brief whose window ended before its pack
 renders the best files as a `confidence: low` lead instead of nothing. The ops are the two probes of
 a Weak or Prose prompt, `search-content -F -l` on the first anchor,
 `find-symbol` to resolve a uid, `impact <uid>` only

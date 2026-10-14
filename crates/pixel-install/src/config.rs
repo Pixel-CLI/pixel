@@ -107,6 +107,8 @@ pub const BRIEF_WINDOW_ENV: &str = "PIXEL_BRIEF_WINDOW_MS";
 pub const BRIEF_WINDOW_HOOK_DEFAULT_MS: u64 = 3_000;
 /// Milliseconds the `pixel brief` command gives the brief: Pi's extension kills the command after 1.2 s.
 pub const BRIEF_WINDOW_COMMAND_DEFAULT_MS: u64 = 750;
+/// Longest window the `brief` command gets whatever the setting says: Pi kills the command after 1.2 s.
+pub const BRIEF_WINDOW_COMMAND_MAX_MS: u64 = 1_000;
 /// Shortest window a setting may ask for.
 pub const BRIEF_WINDOW_MIN_MS: u64 = 250;
 /// Longest window a setting may ask for: the hook decision is abandoned after six seconds

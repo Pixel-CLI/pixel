@@ -198,6 +198,14 @@ def run_codex(args, questions, runs, binary=None, src=None, tag="bench"):
     out, lock = [], threading.Lock()
 
     def one(question, run):
+        try:
+            return one_session(question, run)
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            # One failed session (a copy, an index, a login) is one missing record, not a lost baseline.
+            print(f"{question['id']} run {run}: {type(error).__name__}", flush=True)
+            return question["id"], run, None
+
+    def one_session(question, run):
         ws = Path(tempfile.mkdtemp(prefix=f"{tag}-{question['id']}-{run}-", dir=str(work)))
         shutil.rmtree(ws)
         subprocess.run(["cp", "-c", "-R", str(src(question)), str(ws)], check=True)

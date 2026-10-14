@@ -61,7 +61,10 @@ def main():
     if not m or "### call trace" not in brief:
         return
     name, path, lo, hi = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
-    found = json.loads(pixel(root, "find-symbol", "--metrics", "off", "--json", name, ".") or "{}")
+    try:
+        found = json.loads(pixel(root, "find-symbol", "--metrics", "off", "--json", name, ".") or "{}")
+    except ValueError:
+        return
     rows = found.get("symbols") or found.get("hits") or []
     uid = next((s["uid"] for s in rows if s.get("path") == path and s.get("start_line") == lo), None)
     if uid is None:

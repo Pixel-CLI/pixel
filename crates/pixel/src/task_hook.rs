@@ -1329,15 +1329,11 @@ fn publish_first_part(
 }
 
 /// How long a part after the first waits for the first part's brief: the
-/// window the first part gives the brief, for this repository, and one second
-/// to store and release it. The first part and the others start together.
-fn follow_bound(raw: &str) -> Duration {
-    serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|payload| crate::discover_root(&payload_cwd(&payload)).ok())
-        .map_or(brief_parts::WAIT, |root| {
-            crate::execution_brief::chain::window_for(&root, false) + brief_parts::WAIT_SLACK
-        })
+/// bound part 1 itself is given ([`DECISION_TIMEOUT`]) and a little more to
+/// store and release it, so a part never prints before part 1 has finished or
+/// given up. It stays under the ten seconds the host allows a hook.
+fn follow_bound() -> Duration {
+    DECISION_TIMEOUT + brief_parts::WAIT_SLACK / 2
 }
 
 /// A part after the first: print the slice of the brief part 1 stores,
@@ -1546,7 +1542,7 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent, part: Option<BriefPart>
         if let Some(part) = later {
             // Nothing to say is nothing printed: a hook that cannot get its
             // slice in time never holds the prompt.
-            follow(provider, raw, part, follow_bound(raw))
+            follow(provider, raw, part, follow_bound())
         } else {
             let input = raw.clone();
             Some(bounded_decision(
