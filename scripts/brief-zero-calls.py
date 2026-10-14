@@ -134,6 +134,14 @@ def verdict(n_calls):
     return PASS if n_calls == 0 else FELL_BACK
 
 
+def is_promisor_clone(ws):
+    """A blobless (partial) clone: it fetches the blobs it diffs from the network."""
+    try:
+        return "promisor" in (Path(ws) / ".git" / "config").read_text(errors="replace")
+    except OSError:
+        return False
+
+
 def activate(binary, ws, env, history=True):
     """Index ``ws`` with the binary under test and settle the daemon, as ``score_brief.py`` does.
 
@@ -141,7 +149,7 @@ def activate(binary, ws, env, history=True):
     when or by whom something changed is answered from; a user who asks such a question has it
     built, a fresh clone does not."""
     sh([binary, "prepare-repo", "."], cwd=ws, timeout=1800, env=env)
-    if history:
+    if history and not is_promisor_clone(ws):
         # A blobless clone fetches every blob it diffs from the network: bounded, and
         # a question of history in such a repository is simply not answerable.
         try:
@@ -322,6 +330,17 @@ class SelfTest(unittest.TestCase):
             db.close()
             self.assertEqual([r[0] for r in answer_sessions(path)], ["a-1", "a-5"])
             self.assertEqual([r[0] for r in answer_sessions(path, {"a-5"})], ["a-5"])
+
+    def test_a_blobless_clone_is_recognised_by_its_promisor_remote(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            git = Path(tmp) / ".git"
+            git.mkdir()
+            self.assertFalse(is_promisor_clone(tmp))
+            (git / "config").write_text("[core]\n\tbare = false\n")
+            self.assertFalse(is_promisor_clone(tmp))
+            (git / "config").write_text("[remote \"origin\"]\n\tpromisor = true\n\tpartialclonefilter = blob:none\n")
+            self.assertTrue(is_promisor_clone(tmp))
 
     def test_the_api_key_never_reaches_a_child(self):
         os.environ["ANTHROPIC_API_KEY"] = "x"
