@@ -52,6 +52,14 @@ For a question already in a recorded set (a census id or the public bench) use t
 
 ## Traps (each cost a run)
 
+- **Probes interact, so a combination needs a full-set run.** The first chain of every prototype on every question
+  fixed excalidraw-3, ripgrep-3 and ripgrep-5 and regressed requests-3 (0 -> 4), requests-4 (0 -> 10), requests-5
+  (0 -> 4) and excalidraw-4 (7 -> 13): the reordering and the extra blocks made Codex explore more. Gate each probe
+  (`skip_kinds`, `when_*`), and before any combined claim run the whole set
+  (`arena.sh run-set census --brief-extra "python3 scripts/probe-chain.py"`) and keep every zero-call question at 0.
+- **A probe must see the whole brief.** The first wrapper fed probes only part 1's slice, and a replacing probe
+  then dropped parts 2 and 3. The shims now join all parts before probing and split the result again.
+
 - **A single run can be lucky** (the same empty brief took 8 calls once and 11 the next time). Re-run with
   `--live-reps 3` before claiming a 0 on a borderline result, and say min-max.
 - **Parallel live runs collided on the census cache's `index.lock`.** `brief-zero-calls.py` now locks around

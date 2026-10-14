@@ -54,6 +54,32 @@ $S abort [lookup]                         # interrupt, close the panes
    (pixel arm saw the brief, no-pixel arm did not). A short side-by-side
    summary is printed.
 
+## A set in a row: `run-set`
+
+```bash
+$S run-set census --pixel-bin /path/to/pixel --brief-extra "python3 -I scripts/probe-chain.py"
+$S run-set <catalog|census|bench> [--only id,id] [--parts 3] [--timeout S] [--sha C] [--baseline FILE]
+$S abort                       # stops both panes AND the loop
+```
+
+One command runs every question of a source in a row, in the two panes `arena:<case>:pixel` and
+`arena:<case>:no-pixel` of a tab that is opened and closed per case: `catalog` is the eight prompts above, `bench`
+is `eval/brief-bench/questions.jsonl`, `census` reads the 13 private answer-only prompts from
+`/private/tmp/claude-501/census/census.db` at run time (they reach the panes and nothing else: no log, no
+`run.json`, no table). Per case, sequentially: a copy-on-write clone of the repository at its pinned commit (the
+repository, commit and binary are indexed once, with history), a fresh `CODEX_HOME` per arm with the same login
+copy, the same prompt sent to both, a wait until both settle or `--timeout` passes, and the tool calls counted from
+each Codex rollout (parsed events, not the screen). The pixel arm registers `--parts` (default 3) prompt-submit
+hooks the way `pixel setup` does. `--brief-extra CMD` puts `hook-wrap.py` between the hooks and the pinned binary:
+it joins the brief of all parts, runs `CMD` (environment `CLONE`, `PROMPT`, `BRIEF_FILE`; a leading `@@REPLACE@@`
+replaces the brief), and splits the result over the parts again; `scripts/probe-chain.py` is the chain of gated
+`probes/` until the brief runs probes itself. The end prints and saves (`$SCRATCH/sets/<source>-<utc>/table.md`)
+`case | no-pixel calls | pixel calls | brief bytes | pixel 0?` with totals, flags "0 but NO BRIEF delivered", and
+marks any case above its previous pixel baseline (`--baseline`; for `census` the last recorded live run).
+
+Probes interact: the first combined chain (every prototype on every question) fixed three questions and
+regressed four that were at zero. A combination is claimed only after a full-set run keeps every zero.
+
 Both panes stay open for inspection and for follow-up prompts. `abort`
 sends Ctrl-C twice to each arena agent, closes only panes titled `arena:*`
 (`abort <case>` only that case) and stops the per-home Codex app-server daemons and deletes the copied logins

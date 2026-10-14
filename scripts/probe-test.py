@@ -544,10 +544,23 @@ def hook_shim(config_path, args):
     done.unlink(missing_ok=True)
     proc = subprocess.run([real, *args], input=stdin, capture_output=True, text=True)
     out, state = proc.stdout, {"mode": "pass"}
+
+    def context_of(text):
+        try:
+            return json.loads(text)["hookSpecificOutput"].get("additionalContext", "") if text.strip() else ""
+        except (ValueError, KeyError, TypeError):
+            return ""
+
     try:
         body = json.loads(out) if out.strip() else {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                                                             "additionalContext": ""}}
+        # The probe reads the WHOLE brief: the real parts 2..N are joined to part 1's slice (a probe that saw only
+        # part 1 and replaced it dropped the other parts), then the merge is split over the parts again.
+        count = int(args[args.index("--part") + 1].split("/")[1]) if "--part" in args else 1
         context = body["hookSpecificOutput"].get("additionalContext", "")
+        for k in range(2, count + 1):
+            later = [f"{k}/{count}" if a == args[args.index("--part") + 1] else a for a in args]
+            context += context_of(subprocess.run([real, *later], input=stdin, capture_output=True, text=True).stdout)
         kind, gate = last_decision(Path.cwd())
         if gate == "open" and probe.applies(kind, prompt):
             request = {"prompt": prompt, "repo_root": str(Path.cwd()), "brief": context or "[PIXEL:BRIEF]\n",
@@ -555,10 +568,11 @@ def hook_shim(config_path, args):
             stdout, _, error = run_probe(probe, request, real, os.environ.get("HOME", "/"))
             if not error and stdout.strip():
                 merged = merge(context or "[PIXEL:BRIEF]\n", [(probe.name, probe.mode, stdout)])
-                pieces = split_pieces(merged)
-                state = {"mode": "pieces", "pieces": pieces}
-                body["hookSpecificOutput"]["additionalContext"] = pieces[0] if pieces else ""
-                out = json.dumps(body)
+                if merged != context:
+                    pieces = split_pieces(merged)
+                    state = {"mode": "pieces", "pieces": pieces}
+                    body["hookSpecificOutput"]["additionalContext"] = pieces[0] if pieces else ""
+                    out = json.dumps(body)
     except (KeyError, ValueError):
         pass
     cache.parent.mkdir(parents=True, exist_ok=True)

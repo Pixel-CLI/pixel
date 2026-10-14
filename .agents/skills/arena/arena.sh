@@ -25,6 +25,9 @@ Usage: arena.sh <command> [args]
       --sha COMMIT                  commit both arms are cloned at (default: origin/main)
       --timeout SECONDS             idle wait per arm (default: 600)
       --focus                       focus the arena tab when it opens
+  run-set <source> [options]        run a whole set of questions in a row in the two panes
+      source: catalog | census | bench   (census prompts are read from census.db at run time)
+      --pixel-bin PATH   --brief-extra CMD   --parts N   --only id,id   --timeout SECONDS   --sha COMMIT
   status                            arena panes and their agent state
   receipt <run>                     rebuild and print a run's receipt
   abort [<case>]                    interrupt the agents, close the arena panes,
@@ -376,6 +379,11 @@ cmd_status() {
 
 cmd_abort() {
   local case_name=${1:-} match="$PREFIX:" pane tab label tabs=''
+  if [ -z "$case_name" ] && [ -f "$SET_PID_FILE" ] && kill -0 "$(cat "$SET_PID_FILE")" 2>/dev/null; then
+    say "stopping the running set (pid $(cat "$SET_PID_FILE"))"
+    kill -TERM "$(cat "$SET_PID_FILE")" 2>/dev/null || true
+    sleep 2
+  fi
   [ -z "$case_name" ] || match="$PREFIX:$case_name:"
   while IFS=$'\t' read -r pane tab label; do
     [ -n "$pane" ] || continue
@@ -406,11 +414,249 @@ cmd_abort() {
   say 'abort complete'
 }
 
+
+# ---------------------------------------------------------------- run-set
+
+CENSUS_ROOT=${ARENA_CENSUS_ROOT:-/private/tmp/claude-501/census}
+BENCH_SRC=${ARENA_BENCH_SRC:-$HOME/.cache/pixel-brief-bench/src}
+SET_PID_FILE="$SCRATCH/set.pid"
+
+# TSV rows: id, repo, source directory, sha, prompt. Census prompts are read
+# here and go to the panes and nowhere else (no log, no echo).
+set_cases() {
+  local source=$1 sha_arg=$2 root full
+  case "$source" in
+    catalog)
+      root=$(git -C "$SELF_DIR" rev-parse --git-common-dir) || die 'run from a pixel checkout'
+      root=$(cd "$SELF_DIR" && cd "$root" && pwd)
+      [ -n "$sha_arg" ] || { git -C "$root" fetch -q origin main || true; sha_arg=origin/main; }
+      full=$(git -C "$root" rev-parse --verify "$sha_arg^{commit}") || die "unknown commit: $sha_arg"
+      catalog | awk -F'\t' -v sha="$full" -v src="$root" '{ printf "%s\tpixel\t%s\t%s\t%s\n", $2, src, sha, $3 }' ;;
+    census)
+      [ -f "$CENSUS_ROOT/census.db" ] || die "no census database at $CENSUS_ROOT/census.db"
+      sqlite3 -json "file:$CENSUS_ROOT/census.db?mode=ro" \
+        "SELECT id, repo, sha, prompt FROM sessions WHERE source='census' AND mode='answer' AND ok=1 ORDER BY id" \
+        | jq -r --arg root "$CENSUS_ROOT/cache" '.[] | [.id, .repo, ($root + "/" + .repo), .sha, .prompt] | @tsv' ;;
+    bench)
+      jq -r --arg root "$BENCH_SRC" '[.id, (.repo | split("/") | last), ($root + "/" + (.repo | gsub("/"; "_"))), .sha, .prompt] | @tsv' \
+        "$SELF_DIR/../../../eval/brief-bench/questions.jsonl" ;;
+    *) die "unknown source: $source (catalog, census or bench)" ;;
+  esac
+}
+
+# Copy-on-write copy of a clone, at its pinned commit and without Pixel state.
+cow_clone() { # $1 source dir, $2 dest, $3 sha
+  rm -rf "$2"; mkdir -p "$(dirname "$2")"
+  cp -c -R "$1" "$2"
+  if [ "$(git -C "$2" rev-parse HEAD)" != "$3" ]; then git -C "$2" checkout -q --detach "$3" || die "cannot check out $3 in $2"; fi
+  rm -rf "$2/.pixel"
+}
+
+# Index one repository at one commit with one binary, once; sets SET_BASE.
+set_base() { # $1 repo, $2 source dir, $3 sha, $4 binary, $5 binary hash
+  local key="$1-${3:0:12}-${5:0:12}"
+  SET_BASE="$SCRATCH/setws/$key"
+  if [ ! -f "$SET_BASE/indexed" ]; then
+    say "indexing $1 at ${3:0:12} (once per repository, commit and binary)"
+    rm -rf "$SET_BASE"
+    cow_clone "$2" "$SET_BASE/pixel/ws" "$3"
+    cow_clone "$2" "$SET_BASE/no-pixel/ws" "$3"
+    ( cd "$SET_BASE/pixel/ws" && "$4" prepare-repo . >"$SET_BASE/prepare.log" 2>&1 \
+        && { "$4" build-index --history . >>"$SET_BASE/prepare.log" 2>&1 & hp=$!; ( sleep 420; kill "$hp" 2>/dev/null ) & wait "$hp" 2>/dev/null; true; } \
+        && "$4" search-meaning 'how does this code work' . >>"$SET_BASE/prepare.log" 2>&1 ) || die "indexing failed; see $SET_BASE/prepare.log"
+    touch "$SET_BASE/indexed"
+  fi
+}
+
+# A daemon that has just started answers the first briefs empty: ask until the
+# same text comes back three times.
+settle_daemon() { # $1 binary, $2 workspace
+  local last='' same=0 out i=0
+  while [ "$i" -lt 10 ]; do
+    out=$(cd "$2" && "$1" brief --metrics off 'where is the main entry point of this program defined' . 2>/dev/null || true)
+    if [ "$out" = "$last" ]; then same=$((same + 1)); else same=1; fi
+    last=$out
+    [ "$same" -ge 3 ] && return 0
+    sleep 1; i=$((i + 1))
+  done
+}
+
+# hooks.json with $3 UserPromptSubmit hooks (parts), the way pixel setup writes them.
+write_part_hooks() { # $1 home, $2 hook binary, $3 parts
+  jq -n --arg bin "$2" --argjson n "$3" '
+    {hooks: {UserPromptSubmit: [range(1; $n + 1) as $k
+      | {hooks: [{type: "command",
+                  command: ("'"'"'" + $bin + "'"'"' run-hook task-event --provider codex --event prompt-submit"
+                            + (if $n > 1 then " --part \($k)/\($n)" else "" end) + " || true"),
+                  timeout: 10}]}]}}' >"$1/hooks.json"
+}
+
+# Bytes the pixel arm's hooks printed, from the clone's own feedback log.
+brief_bytes_of() {
+  local w=$1/.pixel/hook-wrap.jsonl f=$1/.pixel/brief-feedback.jsonl
+  # A hydrated brief: what the wrapper delivered (the hooks' own log holds the unprobed brief).
+  if [ -f "$w" ]; then jq -s '[.[] | select(.t == "wrapped") | .bytes] | last // 0' "$w"; return; fi
+  [ -f "$f" ] || { echo 0; return; }
+  jq -s '[.[] | select(.t == "part") | .bytes] | add // 0' "$f" 2>/dev/null || echo 0
+}
+
+close_case_tab() { # $1 case name: close the arena panes and tab of a finished case
+  local pane tab label
+  while IFS=$'\t' read -r pane tab label; do
+    case "$label" in "$PREFIX:$1:"*) hd pane close "$pane" >/dev/null 2>&1 || true ;; esac
+  done < <(arena_panes)
+}
+
+set_abort() {
+  say 'abort: interrupting the set'
+  [ -z "${SET_PIDS:-}" ] || kill $SET_PIDS 2>/dev/null || true
+  [ -z "${SET_CASE:-}" ] || cmd_abort "$SET_CASE" >/dev/null 2>&1 || true
+  rm -f "$SET_PID_FILE"
+  [ -z "${SET_OUT:-}" ] || set_table "$SET_OUT" || true
+  exit 130
+}
+
+# The table: case | no-pixel calls | pixel calls | brief bytes | pixel 0? and totals.
+set_table() { # $1 set dir
+  local f=$1/results.jsonl
+  [ -s "$f" ] || { say 'no case finished'; return 0; }
+  jq -rs '
+    def zero: if .pixel_calls == 0 and .brief_bytes > 0 then "yes"
+              elif .pixel_calls == 0 then "0 but NO BRIEF delivered" else "no" end;
+    def flag: if (.pixel_calls > (.baseline // 1e9)) then "  <- above its pixel baseline (\(.baseline))" else "" end;
+    ["| case | no-pixel calls | pixel calls | brief bytes | pixel 0? |", "|---|---:|---:|---:|---|"]
+    + [ .[] | "| \(.id) | \(.no_pixel_calls) | \(.pixel_calls) | \(.brief_bytes) | \(zero)\(flag) |" ]
+    + ["",
+       "totals: no-pixel \([.[].no_pixel_calls] | add) calls, pixel \([.[].pixel_calls] | add) calls over \(length) cases; "
+       + "pixel at 0 in \([.[] | select(.pixel_calls == 0 and .brief_bytes > 0)] | length), "
+       + "no brief delivered in \([.[] | select(.brief_bytes == 0)] | length)",
+       (if ([.[] | select(.pixel_calls > (.baseline // 1e9))] | length) > 0 then
+          "REGRESSION: " + ([.[] | select(.pixel_calls > (.baseline // 1e9)) | .id] | join(", ")) + " made more calls than their previous pixel baseline"
+        else "no case above its previous pixel baseline" end)]
+    | .[]' "$f" | tee "$1/table.md"
+  say "table: $1/table.md"
+}
+
+cmd_run_set() {
+  local source=${1:-}; [ -n "$source" ] || die 'run-set needs a source: catalog, census or bench'; shift
+  local bin='' sha='' timeout=600 extra='' parts=3 only='' baseline_file=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --pixel-bin) bin=${2:?--pixel-bin needs a path}; shift 2 ;;
+      --brief-extra) extra=${2:?--brief-extra needs a command}; shift 2 ;;
+      --parts) parts=${2:?--parts needs a number}; shift 2 ;;
+      --only) only=${2:?--only needs ids}; shift 2 ;;
+      --timeout) timeout=${2:?--timeout needs seconds}; shift 2 ;;
+      --sha) sha=${2:?--sha needs a commit}; shift 2 ;;
+      --baseline) baseline_file=${2:?--baseline needs a results file}; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [ -n "$bin" ] || bin=$(command -v pixel) || die 'no pixel binary: pass --pixel-bin'
+  [ -x "$bin" ] || die "not executable: $bin"
+  [ -x "$CODEX_BIN" ] || die "no Codex binary at $CODEX_BIN"
+  command -v sqlite3 >/dev/null || die 'sqlite3 is required for the census source'
+  [ -n "$baseline_file" ] || { [ "$source" != census ] || baseline_file=${ARENA_BASELINE:-$SCRATCH/baseline-final-live.jsonl}; }
+  local bin_hash; bin_hash=$(sha256_of "$bin")
+  SET_OUT="$SCRATCH/sets/$source-$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "$SET_OUT"
+  : >"$SET_OUT/results.jsonl"
+  echo $$ >"$SET_PID_FILE"
+  trap set_abort INT TERM
+  SET_CASE=''; SET_PIDS=''
+  local cases; cases=$(set_cases "$source" "$sha")
+  [ -n "$cases" ] || die "the source $source has no cases"
+  local id repo srcdir csha prompt n=0 total
+  total=$(printf '%s\n' "$cases" | awk -F'\t' -v o="$only" 'BEGIN{split(o,a,","); for(i in a) w[a[i]]=1} o=="" || ($1 in w) {c++} END{print c+0}')
+  say "set $source: $total case(s), pixel binary ${bin_hash:0:12}${extra:+, brief extra: $extra}; output $SET_OUT"
+  while IFS=$'\t' read -r id repo srcdir csha prompt <&3; do
+    [ -n "$id" ] || continue
+    if [ -n "$only" ] && ! printf ',%s,' "$only" | grep -q ",$id,"; then continue; fi
+    n=$((n + 1)); SET_CASE=$id
+    say "[$n/$total] $id"
+    [ -d "$srcdir/.git" ] || die "no source clone for $id: $srcdir (bench: scripts/brief-bench.py prepare)"
+    set_base "$repo" "$srcdir" "$csha" "$bin" "$bin_hash"
+    local runid run_dir pws nws ph nh hookbin
+    runid="$id-$(date -u +%Y%m%dT%H%M%SZ)"; run_dir="$SCRATCH/runs/$runid"
+    pws="$run_dir/pixel/ws"; nws="$run_dir/no-pixel/ws"; ph="$run_dir/pixel/codex-home"; nh="$run_dir/no-pixel/codex-home"
+    mkdir -p "$run_dir/pixel" "$run_dir/no-pixel"
+    # Fresh copy-on-write clones per case: the indexed one for the pixel arm, a bare one for the other.
+    rm -rf "$pws" "$nws"
+    cp -c -R "$SET_BASE/pixel/ws" "$pws"; cp -c -R "$SET_BASE/no-pixel/ws" "$nws"
+    (cd "$pws" && "$bin" prepare-repo . >/dev/null 2>&1) || true
+    settle_daemon "$bin" "$pws"
+    # The hook binary: the pinned one, or the wrapper that hydrates the brief with $extra.
+    hookbin=$bin
+    if [ -n "$extra" ]; then
+      mkdir -p "$run_dir/pixel/hookwrap"
+      cp "$SELF_DIR/hook-wrap.py" "$run_dir/pixel/hookwrap/pixel"; chmod +x "$run_dir/pixel/hookwrap/pixel"
+      jq -n --arg real "$bin" --arg cmd "$extra" '{real:$real, extra:[$cmd]}' >"$run_dir/pixel/hookwrap/hook-wrap.json"
+      hookbin="$run_dir/pixel/hookwrap/pixel"
+    fi
+    make_codex_home "$ph" "$pws" ""; write_part_hooks "$ph" "$hookbin" "$parts"
+    make_codex_home "$nh" "$nws" ""
+    mkdir -p "$run_dir/pixel/shim" "$run_dir/no-pixel/shim"
+    printf '#!/bin/sh\nexec %s "$@"\n' "'$bin'" >"$run_dir/pixel/shim/pixel"
+    printf '#!/bin/sh\necho "pixel: command not found" >&2\nexit 127\n' >"$run_dir/no-pixel/shim/pixel"
+    chmod +x "$run_dir/pixel/shim/pixel" "$run_dir/no-pixel/shim/pixel"
+    local W tab_json tab_id p_pane n_pane
+    W=$(focused_workspace)
+    tab_json=$(hd tab create --workspace "$W" --cwd "$pws" --label "$PREFIX:$id" --no-focus)
+    tab_id=$(jq -r '.result.tab.tab_id' <<<"$tab_json")
+    p_pane=$(jq -r '.result.root_pane.pane_id' <<<"$tab_json")
+    n_pane=$(hd pane split "$p_pane" --direction right --ratio 0.5 --cwd "$nws" --no-focus | jq -r '.result.pane.pane_id')
+    [ -n "$p_pane" ] && [ -n "$n_pane" ] || die 'could not create the two panes'
+    titles "$p_pane" "$n_pane" "$id"
+    # run.json keeps a digest of the prompt, never the prompt (census prompts are private).
+    jq -n --arg id "$runid" --arg tab "$tab_id" --arg pp "$p_pane" --arg np "$n_pane" --arg ph "$ph" --arg nh "$nh" \
+      --arg name "$id" --arg digest "$(printf '%s' "$prompt" | shasum -a 256 | cut -c1-16)" --arg sha "$csha" --arg bh "$bin_hash" \
+      '{run:$id,tab:$tab,pixel_pane:$pp,no_pixel_pane:$np,pixel_home:$ph,no_pixel_home:$nh,case:0,name:$name,prompt:("sha256:"+$digest),commit:$sha,pixel_binary_sha256:$bh}' >"$run_dir/run.json"
+    sleep 2
+    local safe_path="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.local/bin"
+    hd pane run "$p_pane" "cd '$pws' && env CODEX_HOME='$ph' PATH='$run_dir/pixel/shim':$safe_path '$CODEX_BIN'" >/dev/null
+    hd pane run "$n_pane" "cd '$nws' && env CODEX_HOME='$nh' PIXEL_BRIEF=0 PATH='$run_dir/no-pixel/shim':$safe_path '$CODEX_BIN'" >/dev/null
+    wait_ready "$p_pane" || die "pixel arm never became ready (pane $p_pane)"
+    wait_ready "$n_pane" || die "no-pixel arm never became ready (pane $n_pane)"
+    review_hooks_if_asked "$p_pane"
+    wait_ready "$p_pane" || die "pixel arm not ready after hook review"
+    hd agent rename "$p_pane" "$PREFIX-$id-pixel" >/dev/null 2>&1 || true
+    hd agent rename "$n_pane" "$PREFIX-$id-no-pixel" >/dev/null 2>&1 || true
+    titles "$p_pane" "$n_pane" "$id"
+    local t0 t1 rc_p=0 rc_n=0
+    t0=$(date +%s)
+    hd agent prompt "$p_pane" "$prompt" --wait --timeout $((timeout * 1000)) >"$run_dir/pixel/prompt.json" 2>&1 & local pid_p=$!
+    hd agent prompt "$n_pane" "$prompt" --wait --timeout $((timeout * 1000)) >"$run_dir/no-pixel/prompt.json" 2>&1 & local pid_n=$!
+    SET_PIDS="$pid_p $pid_n"
+    wait "$pid_p" || rc_p=$?
+    wait "$pid_n" || rc_n=$?
+    SET_PIDS=''
+    t1=$(date +%s)
+    titles "$p_pane" "$n_pane" "$id"
+    collect_receipt "$run_dir" "$rc_p" "$rc_n" "$((t1 - t0))"
+    local bytes pc nc base=null
+    bytes=$(brief_bytes_of "$pws")
+    pc=$(jq '.arms.pixel.tool_calls | length' "$run_dir/receipt.json")
+    nc=$(jq '.arms["no-pixel"].tool_calls | length' "$run_dir/receipt.json")
+    if [ -n "$baseline_file" ] && [ -f "$baseline_file" ]; then
+      base=$(jq -s --arg id "$id" '[.[] | select(.id == $id) | .pixel_calls] | first // null' "$baseline_file")
+    fi
+    jq -nc --arg id "$id" --argjson pc "$pc" --argjson nc "$nc" --argjson b "$bytes" --argjson base "$base" --arg run "$runid" \
+      '{id:$id, pixel_calls:$pc, no_pixel_calls:$nc, brief_bytes:$b, baseline:$base, run:$run}' >>"$SET_OUT/results.jsonl"
+    say "$id: no-pixel $nc calls, pixel $pc calls, brief $bytes bytes"
+    close_case_tab "$id"
+    SET_CASE=''
+  done 3<<<"$cases"
+  rm -f "$SET_PID_FILE"
+  trap - INT TERM
+  set_table "$SET_OUT"
+}
+
 # ---------------------------------------------------------------- main
 
 case "${1:-}" in
   list) cmd_list ;;
   run) shift; cmd_run "$@" ;;
+  run-set) shift; cmd_run_set "$@" ;;
   status) cmd_status ;;
   receipt) shift; cmd_receipt "$@" ;;
   abort) shift; cmd_abort "$@" ;;
