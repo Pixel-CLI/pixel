@@ -22,7 +22,14 @@
 //! dropped and counted: today that is Rust test code, which this graph does
 //! not extract (`rust_is_test_container`).
 //!
-//! Nothing here writes this graph; [`rust_rows`] only reads it.
+//! [`rust_rows`] only reads this graph. The switch writes the rows in:
+//! with `PIXEL_GRAPH_SOURCE_RUST=mvp` ([`RustSource`]), the full build and
+//! every incremental update replace the Rust rows with pixel-mvp's
+//! ([`switch_rust`]), the graph records where its Rust edges come from
+//! ([`GRAPH_SOURCE_KEY`]), and the resolver no longer offers a Rust symbol
+//! to a caller of another language ([`rust_is_walled`]): a name-only match
+//! across languages is what the comparison found wrong (1 116 Rust calls
+//! into Python and TypeScript on pixel's repository, 1 302 the other way).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -30,7 +37,7 @@ use std::time::Duration;
 
 use mvp_model::{Graph, Lang};
 
-use crate::store::{EdgeKind, EdgeRow, GraphStore, Tier};
+use crate::store::{EdgeKind, EdgeRow, ExecCached, GraphStore, StoreError, Tier};
 
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
@@ -38,6 +45,156 @@ type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 /// equal to the one `crates/mvp-index/VENDORED.md` names, so a sync that
 /// forgets it fails.
 pub const MVP_COMMIT: &str = "d5c7cf7";
+
+/// Meta key: where the graph's Rust edges come from. Absent when they are
+/// this graph's own resolver's, so a graph built with the switch off is
+/// the graph built before the switch existed.
+pub const GRAPH_SOURCE_KEY: &str = "graph_source";
+
+/// The switch: `mvp` takes Rust calls, references and imports from
+/// pixel-mvp's index, `v1` from this graph's resolver.
+pub const RUST_SOURCE_ENV: &str = "PIXEL_GRAPH_SOURCE_RUST";
+
+/// The [`GRAPH_SOURCE_KEY`] value of a graph the switch asked to take from
+/// pixel-mvp where pixel-mvp could not index it ([`crate_root`]): its Rust
+/// edges are this graph's resolver's. Accepted as current while the switch
+/// is on, so such a tree is not rebuilt on every read; the next full build
+/// tries pixel-mvp again.
+pub const MVP_UNAVAILABLE: &str = "rust=v1, pixel-mvp unavailable";
+
+/// Where a graph takes its Rust edges from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RustSource {
+    /// This graph's own resolver.
+    V1,
+    /// pixel-mvp's index, through this adapter.
+    Mvp,
+}
+
+impl RustSource {
+    /// [`RUST_SOURCE_ENV`] as the process sees it ([`RustSource::parse`]).
+    pub fn from_env() -> Self {
+        Self::parse(std::env::var(RUST_SOURCE_ENV).ok().as_deref())
+    }
+
+    /// `mvp` is [`RustSource::Mvp`]; anything else, or nothing, is the
+    /// default, [`RustSource::V1`].
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some("mvp") => RustSource::Mvp,
+            _ => RustSource::V1,
+        }
+    }
+}
+
+/// The [`GRAPH_SOURCE_KEY`] value of a graph whose Rust edges are
+/// pixel-mvp's: the vendored commit and its extractor versions, so that a
+/// sync that changes either makes every such graph stale.
+pub fn mvp_source() -> String {
+    format!("rust=mvp {MVP_COMMIT} {}", mvp_index::extractor())
+}
+
+/// Whether a graph that recorded `stored` under [`GRAPH_SOURCE_KEY`] was
+/// built from what `wanted` asks for.
+pub fn source_is_current(stored: Option<&str>, wanted: RustSource) -> bool {
+    match wanted {
+        RustSource::V1 => stored.is_none(),
+        RustSource::Mvp => {
+            stored == Some(MVP_UNAVAILABLE) || stored.is_some_and(|s| s == mvp_source())
+        }
+    }
+}
+
+/// Records where the graph's Rust edges come from: `None` removes the key.
+pub(crate) fn record_source(store: &GraphStore, source: Option<&str>) -> Result<(), StoreError> {
+    match source {
+        Some(value) => store.meta_set(GRAPH_SOURCE_KEY, value),
+        None => {
+            store.conn().exec_cached(
+                "DELETE FROM meta WHERE key = ?1",
+                rusqlite::params![GRAPH_SOURCE_KEY],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+/// Whether the graph's Rust edges are pixel-mvp's: then this graph's
+/// resolver decides no Rust site, and offers no Rust symbol to a caller of
+/// another language.
+pub fn rust_is_walled(store: &GraphStore) -> Result<bool, StoreError> {
+    Ok(store
+        .meta_get(GRAPH_SOURCE_KEY)?
+        .is_some_and(|value| value.starts_with("rust=mvp ")))
+}
+
+/// Replaces the Rust rows of `store` with `rows`: every `calls` and
+/// `references` edge from a Rust symbol, every `unresolved_calls` row of a
+/// Rust file, and the target of every Rust import.
+pub fn apply(store: &GraphStore, rows: &RustRows) -> Result<(), StoreError> {
+    let conn = store.conn();
+    conn.exec_cached(
+        "DELETE FROM edges WHERE kind IN ('calls', 'references') AND src_id IN
+           (SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.lang = 'rust')",
+        [],
+    )?;
+    conn.exec_cached(
+        "DELETE FROM unresolved_calls WHERE file_id IN (SELECT id FROM files WHERE lang = 'rust')",
+        [],
+    )?;
+    for edge in rows.calls.iter().chain(&rows.references) {
+        store.insert_edge(edge)?;
+    }
+    for u in &rows.unresolved {
+        store.insert_unresolved_call(
+            u.file_id,
+            &u.name,
+            u.enclosing,
+            u.site_line,
+            u.receiver.as_deref(),
+            u.kind,
+        )?;
+    }
+    for (import, target) in &rows.imports {
+        conn.exec_cached(
+            "UPDATE imports SET resolved_file_id = ?2 WHERE id = ?1",
+            rusqlite::params![import, target],
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether the switch can take `root`'s Rust edges from pixel-mvp: `root`
+/// holds a `Cargo.toml`. pixel-mvp's Rust rules resolve a module path from
+/// a Cargo crate root, so in a tree without one (a bare `src/` of `.rs`
+/// files, or no Rust at all) they prove nearly nothing, and pixel-mvp's
+/// index is not built there. A Rust crate kept below the root (`rust/`,
+/// `backend/`) is left to this graph's resolver too.
+pub fn crate_root(root: &Path) -> bool {
+    root.join("Cargo.toml").is_file()
+}
+
+/// [`refresh`] where [`crate_root`] holds, an error elsewhere.
+pub fn refresh_crate(root: &Path, state: &Path) -> Result<mvp_store::Store, BoxErr> {
+    if !crate_root(root) {
+        return Err(format!(
+            "{} has no Cargo.toml: pixel-mvp resolves Rust paths from a crate root",
+            root.display()
+        )
+        .into());
+    }
+    refresh(root, state)
+}
+
+/// The switch at work: refreshes pixel-mvp's index of `root` under `state`
+/// ([`refresh_crate`]) and replaces the Rust rows of `store` with its
+/// answer ([`apply`]).
+pub fn switch_rust(root: &Path, store: &GraphStore, state: &Path) -> Result<(), BoxErr> {
+    let mvp = refresh_crate(root, state)?;
+    let rows = rust_rows(store, &mvp)?;
+    apply(store, &rows)?;
+    Ok(())
+}
 
 /// How long a refresh waits for another process writing pixel-mvp's index
 /// (pixel-mvp's own reader waits as long): past it the index is taken as
@@ -86,9 +243,24 @@ pub struct Dropped {
 /// Brings pixel-mvp's index of the work tree around `repo` up to date and
 /// opens it. The index lives in `state/.pixel-mvp/` (`state` is created if
 /// missing); a repeated refresh re-reads only the files that changed. Fails
-/// outside a git work tree: pixel-mvp lists files through git.
+/// unless `repo` is the top level of a git work tree: pixel-mvp lists files
+/// through git, and its paths are relative to that top level, which must be
+/// this graph's root for the two to name the same files.
+///
+/// The repository's `.pixel/` is checked first (`pixel_git::sidecar::check`):
+/// one that is a link or that git tracks is refused, as the other stores
+/// refuse it, before anything under it is read.
 pub fn refresh(repo: &Path, state: &Path) -> Result<mvp_store::Store, BoxErr> {
+    pixel_git::sidecar::check(repo)?;
     let root = mvp_index::root(repo)?;
+    if root.canonicalize()? != repo.canonicalize()? {
+        return Err(format!(
+            "{} is inside the git work tree {}, not its top level",
+            repo.display(),
+            root.display()
+        )
+        .into());
+    }
     std::fs::create_dir_all(state)?;
     let mut writer = mvp_store::Writer::open(state, Some(WAIT))?;
     let tree = mvp_index::scan(&root)?;

@@ -9,8 +9,8 @@
 use std::fs;
 use std::path::Path;
 
-use pixel_graph::build::build_graph;
-use pixel_graph::mvp_adapter::{Unresolved, refresh, rust_rows};
+use pixel_graph::build::build_graph_from;
+use pixel_graph::mvp_adapter::{RustSource, Unresolved, refresh, rust_rows};
 use pixel_graph::{EdgeKind, GraphStore, Tier};
 
 pub(crate) fn git(dir: &Path, args: &[&str]) {
@@ -111,7 +111,8 @@ pub(crate) fn fixture(root: &Path) {
     git(root, &["commit", "-qm", "fixture"]);
 }
 
-/// The fixture's graph, built by this graph's own resolver, and what
+/// The fixture's graph, built by this graph's own resolver whatever the
+/// switch says, and what
 /// pixel-mvp's index decides at its Rust sites.
 fn built() -> (
     tempfile::TempDir,
@@ -123,7 +124,7 @@ fn built() -> (
     fixture(&root);
     let db = root.join(".pixel/graph.db");
     fs::create_dir_all(db.parent().unwrap()).unwrap();
-    build_graph(&root, &db).unwrap();
+    build_graph_from(&root, &db, RustSource::V1).unwrap();
     let store = GraphStore::open(&db).unwrap();
     let mvp = refresh(&root, &root.join(".pixel")).unwrap();
     let rows = rust_rows(&store, &mvp).unwrap();
@@ -308,7 +309,7 @@ fn a_refresh_after_an_edit_reads_the_new_file() {
     fixture(&root);
     let db = root.join(".pixel/graph.db");
     fs::create_dir_all(db.parent().unwrap()).unwrap();
-    build_graph(&root, &db).unwrap();
+    build_graph_from(&root, &db, RustSource::V1).unwrap();
     refresh(&root, &root.join(".pixel")).unwrap();
     // `first` now calls `helper` (through the glob import) as well.
     let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
@@ -317,7 +318,7 @@ fn a_refresh_after_an_edit_reads_the_new_file() {
         lib.replace("    v.unwrap()", "    v.unwrap() + helper() as u8"),
     )
     .unwrap();
-    build_graph(&root, &db).unwrap();
+    build_graph_from(&root, &db, RustSource::V1).unwrap();
     let store = GraphStore::open(&db).unwrap();
     let rows = rust_rows(&store, &refresh(&root, &root.join(".pixel")).unwrap()).unwrap();
     let first = id(&store, "src/lib.rs", "first");

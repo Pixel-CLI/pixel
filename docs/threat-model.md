@@ -144,6 +144,14 @@ refuse such a directory before reading it (`pixel_git::sidecar::check`), files
 under it are written without following links (`pixel_git::nofollow`,
 `SQLITE_OPEN_NOFOLLOW`), and a path read from a shard or the graph is used only
 inside the repository (`pixel_git::repo_path::confine`); see T6.
+With the Rust source switch on (`PIXEL_GRAPH_SOURCE_RUST=mvp`), the
+vendored pixel-mvp store keeps its own index in `.pixel/.pixel-mvp/`:
+`pixel_graph::mvp_adapter::refresh` runs `sidecar::check` before reading
+it, the store refuses a `.pixel-mvp` that is a link or not a directory,
+treats a link, directory or special file at `graph.db` or its journals as
+damage and rebuilds the file, and opens its lock and state files without
+following links. Its `tree.rs` runs `git` itself, outside `GitRunner`:
+without its timeout or output cap.
 
 The reference manifest (`.pixel/reference.json`, `reference_cmd`) is read back
 the same way, but its entries carry revisions that become git argv in
