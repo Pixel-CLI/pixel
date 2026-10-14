@@ -29,9 +29,15 @@ $S abort [lookup]                         # interrupt, close the panes
    `no-pixel/ws` has no `.pixel/` at all. A run reuses both. The binary is
    copied next to them, so rebuilding the original does not change a run.
 2. **A new tab `arena:<case>`** in the focused Herdr workspace (or
-   `$HERDR_WORKSPACE_ID`) with two panes titled `arena:<case>:pixel` and
-   `arena:<case>:no-pixel`. The user's own panes are never touched; focus
-   stays where it was unless `--focus` is given.
+   `$HERDR_WORKSPACE_ID`) with two panes titled `arena:<case>:with-pixel` and
+   `arena:<case>:without-pixel`. The user's own panes are never touched; focus
+   stays where it was unless `--focus` is given. With `--here` the two panes
+   are split to the right of the pane that launched the command instead, so
+   caller and both arms sit side by side in the current tab, equalized to
+   thirds (Herdr only nests binary splits; the script probes the layout with
+   `pane resize --amount 0` and drags each boundary to i/3 of the width). A
+   same-case pair left by an earlier run is closed first — never hand-close,
+   never leave two generations side by side.
 3. **Codex in each pane**, one `CODEX_HOME` per arm per run
    (`/private/tmp/claude-501/arena/runs/<case>-<utc>/<arm>/codex-home`). The
    login `auth.json` is copied (never printed); `config.toml` copies the
@@ -39,11 +45,17 @@ $S abort [lookup]                         # interrupt, close the panes
    hooks, MCP servers, plugins, notify). The pixel arm's `hooks.json` holds
    one hook, the `UserPromptSubmit` entry `pixel setup` writes for Codex
    (`run-hook task-event --provider codex --event prompt-submit`) at the
-   pinned binary; it is a global-home hook, so no repo review is needed (Codex
-   still asks for the one-time hook trust in that private home; the script
-   answers it). The no-pixel arm has no hook and `PIXEL_BRIEF=0`. `pixel` on
-   `PATH` is a shim: the pinned binary in the pixel arm, "command not found"
-   in the no-pixel arm.
+   pinned binary; it is a global-home hook, so no repo review is needed. Codex
+   still asks to review the hook in that private home — the dialog is either
+   the modal `Hooks need review` (key `2` trusts) or the `/hooks` panel
+   `N hooks need review` (`t` trusts all, `esc` closes the panel); it can
+   appear when the first prompt-submit actually runs the hooks, well after the
+   composer looked ready. If it goes unanswered the prompt returns `done`
+   instantly and the arm produces no rollout and no brief — the tell is
+   `brief 0 bytes` with zero pixel calls. The script answers both variants;
+   `codex --dangerously-bypass-hook-trust` skips the review entirely. The
+   no-pixel arm has no hook and `PIXEL_BRIEF=0`. `pixel` on `PATH` is a shim:
+   the pinned binary in the pixel arm, "command not found" in the no-pixel arm.
 4. **Preflight without a model**: the hook must return `[PIXEL:BRIEF]` and
    `PIXEL_BRIEF=0` must return nothing, else the run stops.
 5. The case prompt goes to both agents at once (`herdr agent prompt --wait`);
@@ -62,8 +74,10 @@ $S run-set <catalog|census|bench> [--only id,id] [--parts 3] [--timeout S] [--sh
 $S abort                       # stops both panes AND the loop
 ```
 
-One command runs every question of a source in a row, in the two panes `arena:<case>:pixel` and
-`arena:<case>:no-pixel` of a tab that is opened and closed per case: `catalog` is the eight prompts above, `bench`
+One command runs every question of a source in a row, in the two panes `arena:<case>:with-pixel` and
+`arena:<case>:without-pixel` of a tab that is opened and closed per case. With `--here` the panes live
+in the caller's tab instead: a finished case's pair closes when the next case opens its own, and the
+last case's pair stays open for inspection — so the whole set is watchable without switching tabs: `catalog` is the eight prompts above, `bench`
 is `eval/brief-bench/questions.jsonl`, `census` reads the 13 private answer-only prompts from
 `/private/tmp/claude-501/census/census.db` at run time (they reach the panes and nothing else: no log, no
 `run.json`, no table). Per case, sequentially: a copy-on-write clone of the repository at its pinned commit (the

@@ -24,10 +24,15 @@ Usage: arena.sh <command> [args]
       --pixel-bin PATH              Pixel binary for the pixel arm (default: pixel on PATH)
       --sha COMMIT                  commit both arms are cloned at (default: origin/main)
       --timeout SECONDS             idle wait per arm (default: 600)
+      --here                        split the two panes in the current tab
+                                    instead of opening a new arena tab
       --focus                       focus the arena tab when it opens
   run-set <source> [options]        run a whole set of questions in a row in the two panes
       source: catalog | census | bench   (census prompts are read from census.db at run time)
       --pixel-bin PATH   --brief-extra CMD   --parts N   --only id,id   --timeout SECONDS   --sha COMMIT
+      --here                        panes live in the current tab: the finished case's
+                                    pair closes when the next case starts, the last
+                                    pair stays open
   status                            arena panes and their agent state
   receipt <run>                     rebuild and print a run's receipt
   abort [<case>]                    interrupt the agents, close the arena panes,
@@ -175,8 +180,50 @@ arena_panes() {
 }
 
 titles() { # $1 pixel pane, $2 no-pixel pane, $3 case
-  hd pane rename "$1" "$PREFIX:$3:pixel" >/dev/null 2>&1 || true
-  hd pane rename "$2" "$PREFIX:$3:no-pixel" >/dev/null 2>&1 || true
+  hd pane rename "$1" "$PREFIX:$3:with-pixel" >/dev/null 2>&1 || true
+  hd pane rename "$2" "$PREFIX:$3:without-pixel" >/dev/null 2>&1 || true
+}
+
+# Drag column boundaries until every pane in the tab is ~1/N of the row width
+# (herdr only nests binary splits). A zero-delta resize returns the layout.
+equalize_columns() { # $1 any pane in the tab
+  local want=$2 k actual target delta dir moved lay ids xs
+  for _ in $(seq $((want * 3))); do
+    lay=$(hd pane resize --pane "$1" --direction left --amount 0 | jq -c '.result.resize.layout' 2>/dev/null) || { sleep 1; continue; }
+    [ "$(jq '.panes | length' <<<"$lay")" = "$want" ] || { sleep 1; continue; }
+    xs=$(jq '[.panes | sort_by(.rect.x) | .[].rect.x] | join(" ")' -r <<<"$lay")
+    ids=$(jq '[.panes | sort_by(.rect.x) | .[].pane_id] | join(" ")' -r <<<"$lay")
+    local w; w=$(jq '.area.width' <<<"$lay")
+    moved=0
+    set -- $ids; local -a P=("$@"); set -- $xs; local -a X=("$@")
+    for ((k = 1; k < want; k++)); do
+      target=$((w * k / want)); actual=${X[$k]}; delta=$((actual - target))
+      [ ${delta#-} -le 1 ] && continue
+      if [ "$delta" -gt 0 ]; then dir=left; else dir=right; delta=$((-delta)); fi
+      hd pane resize --pane "${P[$k]}" --direction "$dir" --amount "$(awk -v d="$delta" -v w="$w" 'BEGIN{printf "%.3f", d/w}')" >/dev/null 2>&1 || true
+      moved=1; break  # one drag per probe: geometry shifts under nested splits
+    done
+    [ "$moved" = 1 ] || return 0
+  done
+}
+
+# Open the two panes of a case: a new arena tab, or with $4=1 two splits in the
+# current tab beside the caller, columns equalized. Sets TAB_ID ("" in --here),
+# P_PANE, N_PANE.
+make_panes() { # $1 label, $2 pixel cwd, $3 no-pixel cwd, $4 here, $5 focus flag
+  if [ "$4" = "1" ]; then
+    TAB_ID=''
+    P_PANE=$(hd pane split --current --direction right --cwd "$2" --no-focus | jq -r '.result.pane.pane_id')
+    N_PANE=$(hd pane split "$P_PANE" --direction right --cwd "$3" --no-focus | jq -r '.result.pane.pane_id')
+    equalize_columns "$P_PANE" 3
+    return
+  fi
+  local W tj
+  W=$(focused_workspace)
+  tj=$(hd tab create --workspace "$W" --cwd "$2" --label "$PREFIX:$1" "$5")
+  TAB_ID=$(jq -r '.result.tab.tab_id' <<<"$tj")
+  P_PANE=$(jq -r '.result.root_pane.pane_id' <<<"$tj")
+  N_PANE=$(hd pane split "$P_PANE" --direction right --ratio 0.5 --cwd "$3" --no-focus | jq -r '.result.pane.pane_id')
 }
 
 agent_state() { hd agent get "$1" 2>/dev/null | jq -r '.result.agent.agent_status // "?"' 2>/dev/null || echo '?'; }
@@ -192,8 +239,11 @@ wait_ready() {
   return 1
 }
 
-# Codex asks a human to review hooks it did not write. The arena wrote this
-# one, so trust it in this run's own CODEX_HOME.
+# Codex asks a human to review hooks it did not write, either as the modal
+# "Hooks need review" (key 2 trusts) or as the /hooks panel "N hooks need
+# review" (t trusts all, esc closes it). The arena wrote this hook, so it is
+# trusted in this run's own CODEX_HOME; the panel appears when the first
+# prompt-submit actually runs the hooks, not necessarily at session start.
 review_hooks_if_asked() {
   local pane=$1 screen
   screen=$(hd agent read "$pane" --source visible 2>/dev/null || true)
@@ -203,6 +253,12 @@ review_hooks_if_asked() {
       hd agent send-keys "$pane" 2 >/dev/null
       hd agent send-keys "$pane" enter >/dev/null
       sleep 2 ;;
+    *"need review"*)
+      say "$pane: trusting the arena-written hook"
+      hd agent send-keys "$pane" t >/dev/null
+      sleep 1
+      hd agent send-keys "$pane" esc >/dev/null
+      sleep 2 ;;
   esac
 }
 
@@ -210,12 +266,13 @@ review_hooks_if_asked() {
 
 cmd_run() {
   local sel=${1:-}; [ -n "$sel" ] || die 'run needs a case number or name'; shift
-  local bin='' sha='' timeout=600 focus=--no-focus
+  local bin='' sha='' timeout=600 focus=--no-focus here=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --pixel-bin) bin=${2:?--pixel-bin needs a path}; shift 2 ;;
       --sha) sha=${2:?--sha needs a commit}; shift 2 ;;
       --timeout) timeout=${2:?--timeout needs seconds}; shift 2 ;;
+      --here) here=1; shift ;;
       --focus) focus=--focus; shift ;;
       *) die "unknown option: $1" ;;
     esac
@@ -230,7 +287,8 @@ cmd_run() {
   IFS=$'\t' read -r n name prompt <<<"$row"
 
   if arena_panes | awk -F'\t' -v c="$PREFIX:$name:" 'index($3, c) == 1 { f = 1 } END { exit !f }'; then
-    die "case $name already has arena panes; run: arena.sh abort $name"
+    say "closing the stale arena panes of case $name"
+    close_case_tab "$name"
   fi
 
   prepare "$bin" "$sha"
@@ -252,12 +310,9 @@ cmd_run() {
   case "$pre_off" in *'[PIXEL:BRIEF]'*) die 'preflight: PIXEL_BRIEF=0 still produced a brief' ;; esac
   [ ! -e "$nh/hooks.json" ] || die 'preflight: no-pixel home has a hooks.json'
 
-  local W tab_json tab_id p_pane n_pane
-  W=$(focused_workspace)
-  tab_json=$(hd tab create --workspace "$W" --cwd "$PIXEL_WS" --label "$PREFIX:$name" "$focus")
-  tab_id=$(jq -r '.result.tab.tab_id' <<<"$tab_json")
-  p_pane=$(jq -r '.result.root_pane.pane_id' <<<"$tab_json")
-  n_pane=$(hd pane split "$p_pane" --direction right --ratio 0.5 --cwd "$NOPIXEL_WS" --no-focus | jq -r '.result.pane.pane_id')
+  local tab_id p_pane n_pane
+  make_panes "$name" "$PIXEL_WS" "$NOPIXEL_WS" "$here" "$focus"
+  p_pane=$P_PANE; n_pane=$N_PANE; tab_id=$TAB_ID
   [ -n "$p_pane" ] && [ -n "$n_pane" ] || die 'could not create the two panes'
   titles "$p_pane" "$n_pane" "$name"
   jq -n --arg id "$runid" --arg tab "$tab_id" --arg pp "$p_pane" --arg np "$n_pane" --arg ph "$ph" --arg nh "$nh" \
@@ -282,8 +337,11 @@ cmd_run() {
   t0=$(date +%s)
   hd agent prompt "$p_pane" "$prompt" --wait --timeout $((timeout * 1000)) >"$run_dir/pixel/prompt.json" 2>&1 & local pid_p=$!
   hd agent prompt "$n_pane" "$prompt" --wait --timeout $((timeout * 1000)) >"$run_dir/no-pixel/prompt.json" 2>&1 & local pid_n=$!
+  # The review panel opens when the prompt actually runs the hooks: patrol.
+  ( for _ in $(seq 60); do review_hooks_if_asked "$p_pane"; sleep 3; done ) & local pid_t=$!
   wait "$pid_p" || rc_p=$?
   wait "$pid_n" || rc_n=$?
+  kill "$pid_t" 2>/dev/null || true; wait "$pid_t" 2>/dev/null || true
   t1=$(date +%s)
 
   titles "$p_pane" "$n_pane" "$name"
@@ -546,7 +604,7 @@ set_table() { # $1 set dir
 
 cmd_run_set() {
   local source=${1:-}; [ -n "$source" ] || die 'run-set needs a source: catalog, census or bench'; shift
-  local bin='' sha='' timeout=600 extra='' parts=3 only='' baseline_file=''
+  local bin='' sha='' timeout=600 extra='' parts=3 only='' baseline_file='' here=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --pixel-bin) bin=${2:?--pixel-bin needs a path}; shift 2 ;;
@@ -556,6 +614,7 @@ cmd_run_set() {
       --timeout) timeout=${2:?--timeout needs seconds}; shift 2 ;;
       --sha) sha=${2:?--sha needs a commit}; shift 2 ;;
       --baseline) baseline_file=${2:?--baseline needs a results file}; shift 2 ;;
+      --here) here=1; shift ;;
       *) die "unknown option: $1" ;;
     esac
   done
@@ -573,13 +632,20 @@ cmd_run_set() {
   SET_CASE=''; SET_PIDS=''
   local cases; cases=$(set_cases "$source" "$sha")
   [ -n "$cases" ] || die "the source $source has no cases"
-  local id repo srcdir csha prompt n=0 total
+  local id repo srcdir csha prompt n=0 total prev_case=''
   total=$(printf '%s\n' "$cases" | awk -F'\t' -v o="$only" 'BEGIN{split(o,a,","); for(i in a) w[a[i]]=1} o=="" || ($1 in w) {c++} END{print c+0}')
   say "set $source: $total case(s), pixel binary ${bin_hash:0:12}${extra:+, brief extra: $extra}; output $SET_OUT"
   while IFS=$'\t' read -r id repo srcdir csha prompt <&3; do
     [ -n "$id" ] || continue
     if [ -n "$only" ] && ! printf ',%s,' "$only" | grep -q ",$id,"; then continue; fi
     n=$((n + 1)); SET_CASE=$id
+    # --here keeps the finished case's panes until the next one opens its pair;
+    # a pair for this same case left by an earlier run is always stale.
+    if [ "$here" = 1 ]; then
+      [ -z "$prev_case" ] || close_case_tab "$prev_case"
+      close_case_tab "$id"
+    fi
+    prev_case=$id
     say "[$n/$total] $id"
     [ -d "$srcdir/.git" ] || die "no source clone for $id: $srcdir (bench: scripts/brief-bench.py prepare)"
     set_base "$repo" "$srcdir" "$csha" "$bin" "$bin_hash"
@@ -606,12 +672,9 @@ cmd_run_set() {
     printf '#!/bin/sh\nexec %s "$@"\n' "'$bin'" >"$run_dir/pixel/shim/pixel"
     printf '#!/bin/sh\necho "pixel: command not found" >&2\nexit 127\n' >"$run_dir/no-pixel/shim/pixel"
     chmod +x "$run_dir/pixel/shim/pixel" "$run_dir/no-pixel/shim/pixel"
-    local W tab_json tab_id p_pane n_pane
-    W=$(focused_workspace)
-    tab_json=$(hd tab create --workspace "$W" --cwd "$pws" --label "$PREFIX:$id" --no-focus)
-    tab_id=$(jq -r '.result.tab.tab_id' <<<"$tab_json")
-    p_pane=$(jq -r '.result.root_pane.pane_id' <<<"$tab_json")
-    n_pane=$(hd pane split "$p_pane" --direction right --ratio 0.5 --cwd "$nws" --no-focus | jq -r '.result.pane.pane_id')
+    local tab_id p_pane n_pane
+    make_panes "$id" "$pws" "$nws" "$here" --no-focus
+    p_pane=$P_PANE; n_pane=$N_PANE; tab_id=$TAB_ID
     [ -n "$p_pane" ] && [ -n "$n_pane" ] || die 'could not create the two panes'
     titles "$p_pane" "$n_pane" "$id"
     # run.json keeps a digest of the prompt, never the prompt (census prompts are private).
@@ -633,9 +696,12 @@ cmd_run_set() {
     t0=$(date +%s)
     hd agent prompt "$p_pane" "$prompt" --wait --timeout $((timeout * 1000)) >"$run_dir/pixel/prompt.json" 2>&1 & local pid_p=$!
     hd agent prompt "$n_pane" "$prompt" --wait --timeout $((timeout * 1000)) >"$run_dir/no-pixel/prompt.json" 2>&1 & local pid_n=$!
-    SET_PIDS="$pid_p $pid_n"
+    # The review panel opens when the prompt actually runs the hooks: patrol.
+    ( for _ in $(seq 60); do review_hooks_if_asked "$p_pane"; sleep 3; done ) & local pid_t=$!
+    SET_PIDS="$pid_p $pid_n $pid_t"
     wait "$pid_p" || rc_p=$?
     wait "$pid_n" || rc_n=$?
+    kill "$pid_t" 2>/dev/null || true; wait "$pid_t" 2>/dev/null || true
     SET_PIDS=''
     t1=$(date +%s)
     titles "$p_pane" "$n_pane" "$id"
@@ -650,7 +716,9 @@ cmd_run_set() {
     jq -nc --arg id "$id" --argjson pc "$pc" --argjson nc "$nc" --argjson b "$bytes" --argjson base "$base" --arg run "$runid" \
       '{id:$id, pixel_calls:$pc, no_pixel_calls:$nc, brief_bytes:$b, baseline:$base, run:$run}' >>"$SET_OUT/results.jsonl"
     say "$id: no-pixel $nc calls, pixel $pc calls, brief $bytes bytes"
-    close_case_tab "$id"
+    # --here leaves the pair open; the next case's opening closes it, and the
+    # last case's pair stays for inspection.
+    [ "$here" = 1 ] || close_case_tab "$id"
     SET_CASE=''
   done 3<<<"$cases"
   rm -f "$SET_PID_FILE"
