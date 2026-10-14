@@ -60,3 +60,4 @@ xxhash-rust = { workspace = true }
 # Tests read `website/data/agents.toml` and the workspace `Cargo.toml`
 # (tests/cli/docs_drift.rs).
 toml_edit = "0.25.15"
+tempfile = "3"

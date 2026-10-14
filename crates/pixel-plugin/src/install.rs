@@ -391,14 +391,32 @@ pub enum Enabled {
     NotNeeded,
 }
 
-/// Allow the network plugin `name`. Looks in the repo, then the user tier.
+/// Allow the network plugin `name`, or switch the brief probe `name` back on.
+/// Looks in the repo, then the user tier.
 pub fn enable(host: &Host, name: &str) -> Result<Enabled, Error> {
     let found = locate_installed(host, name)?;
+    if found.manifest.is_probe() {
+        Config::at(host.config_file()).undisable(name)?;
+        return Ok(Enabled::Yes);
+    }
     if !found.manifest.network {
         return Ok(Enabled::NotNeeded);
     }
     Config::at(host.config_file()).enable(name)?;
     Ok(Enabled::Yes)
+}
+
+/// Switch the brief probe `name` off: the brief stops running it, the files
+/// stay. Only a probe can be switched off; a command plugin is removed with
+/// `pixel uninstall`.
+pub fn disable(host: &Host, name: &str) -> Result<(), Error> {
+    let found = locate_installed(host, name)?;
+    if !found.manifest.is_probe() {
+        return Err(Error::State(format!(
+            "`{name}` is not a brief probe: only probes can be disabled (remove a command plugin with `pixel uninstall {name}`)"
+        )));
+    }
+    Config::at(host.config_file()).disable(name)
 }
 
 /// Record the digest of the repo plugin `name` as it is on disk now.

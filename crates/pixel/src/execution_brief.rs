@@ -19,6 +19,7 @@ mod graph_reads;
 pub(crate) mod intent;
 mod kinds;
 mod locator;
+pub(crate) mod probes;
 pub(crate) mod region_pack;
 pub(crate) mod relevance;
 pub(crate) mod routes;

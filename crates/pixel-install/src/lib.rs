@@ -18,6 +18,7 @@ use thiserror::Error;
 
 pub mod antigravity;
 pub mod banner;
+pub mod bundled_probes;
 pub mod codex_config;
 pub mod config;
 pub mod copilot_config;

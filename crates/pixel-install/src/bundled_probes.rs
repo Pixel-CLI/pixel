@@ -1,0 +1,255 @@
+// SPDX-FileCopyrightText: The Pixel contributors
+// SPDX-License-Identifier: MIT
+
+//! The first-party brief probes (`probes/` at the repository root), embedded in
+//! the binary and written to `~/.pixel/plugins/<name>/` by `pixel setup`, so
+//! the prompt-submit brief runs them with nothing else installed. They are user
+//! plugins, trusted as first-party: the user tier is not trust-gated. Each
+//! directory carries a marker so setup updates its own copies, `--remove`
+//! deletes only them, and a plugin of the same name the user wrote is never
+//! overwritten. `pixel plugin disable <name>` switches one off without
+//! deleting it.
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+
+use crate::Result;
+use crate::install::{CheckStatus, InstallStep, dry_run_summary};
+
+/// The file that says the directory is Pixel\'s own copy.
+const MARKER: &str = ".pixel-bundled";
+/// Where the user plugins live, under the home directory.
+const PLUGINS_REL: &str = ".pixel/plugins";
+
+/// `(name, pixel-plugin.toml, probe)` of each first-party probe.
+const BUNDLED: &[(&str, &str, &str)] = &[
+    (
+        "config-registry",
+        include_str!("../../../probes/config-registry/pixel-plugin.toml"),
+        include_str!("../../../probes/config-registry/probe"),
+    ),
+    (
+        "doc-sections",
+        include_str!("../../../probes/doc-sections/pixel-plugin.toml"),
+        include_str!("../../../probes/doc-sections/probe"),
+    ),
+    (
+        "flow-rank",
+        include_str!("../../../probes/flow-rank/pixel-plugin.toml"),
+        include_str!("../../../probes/flow-rank/probe"),
+    ),
+    (
+        "history-fallback",
+        include_str!("../../../probes/history-fallback/pixel-plugin.toml"),
+        include_str!("../../../probes/history-fallback/probe"),
+    ),
+    (
+        "name-files",
+        include_str!("../../../probes/name-files/pixel-plugin.toml"),
+        include_str!("../../../probes/name-files/probe"),
+    ),
+    (
+        "rank-blocks",
+        include_str!("../../../probes/rank-blocks/pixel-plugin.toml"),
+        include_str!("../../../probes/rank-blocks/probe"),
+    ),
+];
+
+/// The names of the bundled probes.
+pub fn names() -> Vec<&'static str> {
+    BUNDLED.iter().map(|(name, _, _)| *name).collect()
+}
+
+fn write_if_changed(path: &Path, content: &str, mode: u32) -> Result<bool> {
+    if fs::read_to_string(path).is_ok_and(|have| have == content)
+        && fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o777 == mode)
+    {
+        return Ok(false);
+    }
+    let staged = path.with_extension("pixel-tmp");
+    fs::write(&staged, content)?;
+    fs::set_permissions(&staged, fs::Permissions::from_mode(mode))?;
+    fs::rename(&staged, path)?;
+    Ok(true)
+}
+
+/// Write (or update) the bundled probes under `home`.
+pub(crate) fn install(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let plugins = home.join(PLUGINS_REL);
+    let (mut changed, mut kept, mut foreign) = (0usize, 0usize, Vec::new());
+    for (name, manifest, program) in BUNDLED {
+        let dir = plugins.join(name);
+        if dir.exists() && !dir.join(MARKER).is_file() {
+            foreign.push(*name);
+            continue;
+        }
+        if dry_run {
+            changed += usize::from(!dir.join(MARKER).is_file());
+            continue;
+        }
+        fs::create_dir_all(&dir)?;
+        let mut touched = write_if_changed(&dir.join("pixel-plugin.toml"), manifest, 0o644)?;
+        touched |= write_if_changed(&dir.join("probe"), program, 0o755)?;
+        touched |= write_if_changed(
+            &dir.join(MARKER),
+            "first-party probe shipped with pixel; `pixel setup` keeps it current\n",
+            0o644,
+        )?;
+        if touched {
+            changed += 1;
+        } else {
+            kept += 1;
+        }
+    }
+    let mut summary = format!(
+        "{} first-party brief probes in ~/.pixel/plugins ({changed} written, {kept} current)",
+        BUNDLED.len() - foreign.len()
+    );
+    if !foreign.is_empty() {
+        summary.push_str(&format!(
+            "; left alone, a plugin of your own has the name: {}",
+            foreign.join(", ")
+        ));
+    }
+    Ok(InstallStep {
+        id: "brief-probes".into(),
+        status: CheckStatus::Green,
+        summary: dry_run_summary(dry_run, &summary),
+        detail: None,
+    })
+}
+
+/// Delete the copies `install` wrote; a directory without the marker is the user\'s.
+pub(crate) fn remove(home: &Path, dry_run: bool) -> Result<InstallStep> {
+    let plugins = home.join(PLUGINS_REL);
+    let mut removed = 0usize;
+    for (name, _, _) in BUNDLED {
+        let dir = plugins.join(name);
+        if dir.join(MARKER).is_file() {
+            if !dry_run {
+                fs::remove_dir_all(&dir)?;
+            }
+            removed += 1;
+        }
+    }
+    Ok(InstallStep {
+        id: "brief-probes".into(),
+        status: CheckStatus::Green,
+        summary: dry_run_summary(
+            dry_run,
+            &format!("{removed} first-party brief probes removed from ~/.pixel/plugins"),
+        ),
+        detail: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_bundled_probe_has_a_valid_probe_manifest_and_an_executable_program() {
+        let home = tempfile::tempdir().unwrap();
+        install(home.path(), false).unwrap();
+        let host = pixel_plugin::Host {
+            home: home.path().to_path_buf(),
+            repo_root: None,
+            path: std::ffi::OsString::new(),
+            github_base: None,
+        };
+        let set = pixel_plugin::probes(&host).unwrap();
+        assert!(set.skipped.is_empty(), "{:?}", set.skipped);
+        let found: Vec<&str> = set.probes.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(found, names());
+        assert!(
+            set.probes
+                .iter()
+                .all(|p| p.spec.budget_ms <= pixel_plugin::MAX_PROBE_BUDGET_MS)
+        );
+        assert_eq!(
+            BUNDLED.len(),
+            fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../probes"))
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('_'))
+                .count(),
+            "every directory of probes/ is bundled"
+        );
+    }
+
+    #[test]
+    fn install_is_idempotent_updates_its_own_copies_and_never_overwrites_a_users_plugin() {
+        let home = tempfile::tempdir().unwrap();
+        let first = install(home.path(), false).unwrap();
+        assert!(
+            first.summary.contains("6 first-party brief probes"),
+            "{}",
+            first.summary
+        );
+        assert!(
+            first.summary.contains("6 written, 0 current"),
+            "{}",
+            first.summary
+        );
+        let again = install(home.path(), false).unwrap();
+        assert!(
+            again.summary.contains("0 written, 6 current"),
+            "{}",
+            again.summary
+        );
+        let probe = home.path().join(PLUGINS_REL).join("flow-rank/probe");
+        fs::write(&probe, "tampered").unwrap();
+        assert!(
+            install(home.path(), false)
+                .unwrap()
+                .summary
+                .contains("1 written")
+        );
+        assert_eq!(fs::read_to_string(&probe).unwrap(), BUNDLED[2].2);
+        assert_eq!(
+            fs::metadata(&probe).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        // A plugin of the user\'s own under a bundled name is left alone.
+        let own = home.path().join(PLUGINS_REL).join("name-files");
+        fs::remove_dir_all(&own).unwrap();
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("pixel-plugin.toml"), "mine").unwrap();
+        let step = install(home.path(), false).unwrap();
+        assert!(
+            step.summary.contains("left alone") && step.summary.contains("name-files"),
+            "{}",
+            step.summary
+        );
+        assert_eq!(
+            fs::read_to_string(own.join("pixel-plugin.toml")).unwrap(),
+            "mine"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_writes_nothing_and_remove_deletes_only_what_install_wrote() {
+        let home = tempfile::tempdir().unwrap();
+        install(home.path(), true).unwrap();
+        assert!(!home.path().join(PLUGINS_REL).exists());
+        install(home.path(), false).unwrap();
+        let own = home.path().join(PLUGINS_REL).join("mine");
+        fs::create_dir_all(&own).unwrap();
+        fs::remove_file(
+            home.path()
+                .join(PLUGINS_REL)
+                .join("doc-sections")
+                .join(MARKER),
+        )
+        .unwrap();
+        let step = remove(home.path(), false).unwrap();
+        assert!(step.summary.contains("5 first-party"), "{}", step.summary);
+        assert!(own.is_dir());
+        assert!(
+            home.path().join(PLUGINS_REL).join("doc-sections").is_dir(),
+            "no marker: not ours"
+        );
+        assert!(!home.path().join(PLUGINS_REL).join("flow-rank").exists());
+    }
+}

@@ -43,6 +43,7 @@ use super::decision_log::{self, Record};
 use super::feedback;
 use super::intent::Verdict;
 use super::kinds::{self, ChangeScope, Changes, FlowNode, KindInput, RepoMap};
+use super::probes;
 use super::region_pack;
 use super::relevance::{self, Basis, GateInput, RelevanceInput, Tier};
 use super::routes::QuestionKind;
@@ -2506,6 +2507,7 @@ pub(crate) fn declined_record(declined: Declined, prompt: &str) -> Record {
         elapsed_ms: 0,
         route: None,
         daemon: None,
+        probes: Vec::new(),
         typed: decision_log::logged_typed(typed),
         sha256: decision_log::sha256_hex(typed),
     }
@@ -2548,6 +2550,19 @@ pub(crate) struct Around {
     /// Where the ranges this pack sends are remembered: the repository and
     /// the session.
     pub(crate) sent: Option<(PathBuf, String)>,
+    /// Where the brief's probes are looked up and run, when they may be.
+    pub(crate) probes: Option<ProbeSetup>,
+}
+
+/// The repository whose brief is probed and the plugin host that offers the
+/// probes (the user's own plus the repository's trusted ones).
+pub(crate) struct ProbeSetup {
+    pub(crate) host: pixel_plugin::Host,
+    pub(crate) root: PathBuf,
+    /// Characters the merged brief may hold: the hook parts the host takes,
+    /// whatever the tier shrank the region pack to (a maybe's pack is one
+    /// part, but a probe that answers it may fill all of them).
+    pub(crate) cap: usize,
 }
 
 impl Around {
@@ -2577,6 +2592,8 @@ pub(crate) struct Pending {
     signal: Signal,
     /// Where the ranges the pack sends are remembered for the session.
     sent: Option<(PathBuf, String)>,
+    /// Where the probes are run, when they are.
+    probes: Option<ProbeSetup>,
 }
 
 /// A finished brief: the block, when there is one, and what was decided.
@@ -2606,6 +2623,36 @@ impl Pending {
         self.finish_with_record().text
     }
 
+    /// The probes' turn: when the gate let this prompt through, every
+    /// probe that fits its question runs inside what is left of the window and
+    /// the blocks they print are merged into `text` (or into an empty brief,
+    /// for a prompt the gate opened that the chain had nothing to say to).
+    fn probe_stage(
+        &self,
+        brief: &Brief,
+        text: Option<String>,
+    ) -> (Option<String>, Vec<probes::ProbeRun>) {
+        let Some(setup) = &self.probes else {
+            return (text, Vec::new());
+        };
+        if brief.admission.label() != "open" || brief.silenced {
+            return (text, Vec::new());
+        }
+        let kind = brief.kind.map(QuestionKind::as_str);
+        let stage = probes::Stage {
+            host: &setup.host,
+            root: &setup.root,
+            prompt: &self.task,
+            kind,
+            deadline: self.deadline,
+            cap: setup.cap,
+        };
+        match probes::apply(&stage, text.as_deref().unwrap_or("")) {
+            (Some(merged), runs) => (Some(merged), runs),
+            (None, runs) => (text, runs),
+        }
+    }
+
     /// [`Pending::finish`], and the decision it recorded.
     pub(crate) fn finish_with_record(self) -> Finished {
         let timed_out = matches!(
@@ -2621,6 +2668,7 @@ impl Pending {
             Some((text, stats)) => (Some(text), stats),
             None => (None, AnswerStats::default()),
         };
+        let (text, probe_runs) = self.probe_stage(&brief, text);
         let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         // The daemon start has had the whole brief to launch; a hook about to
         // exit sees it through, for at most the hook bound.
@@ -2665,6 +2713,7 @@ impl Pending {
             elapsed_ms,
             route: brief.route,
             daemon,
+            probes: probe_runs,
             typed: decision_log::logged_typed(&self.task),
             sha256: decision_log::sha256_hex(&self.task),
         };
@@ -2747,6 +2796,14 @@ fn try_start_as(
         });
     let pack = region_pack::limit_from_env(command, parts);
     let window = window_for(&root, command);
+    let probes_setup = probes::enabled(std::env::var(probes::PROBES_ENV).ok().as_deref())
+        .then(|| crate::plugin_cmd::brief_host(&root))
+        .flatten()
+        .map(|host| ProbeSetup {
+            host,
+            root: root.clone(),
+            cap: pack.parts.max(1) * pack.chars,
+        });
     try_start_with(
         prompt,
         gate,
@@ -2761,6 +2818,7 @@ fn try_start_as(
             context,
             seen,
             sent: sent_to,
+            probes: probes_setup,
         },
     )
 }
@@ -2816,6 +2874,7 @@ where
         context,
         seen,
         sent,
+        probes,
     } = around;
     if !gate.open() {
         return Err(if gate.enabled {
@@ -2888,6 +2947,7 @@ where
         task,
         signal,
         sent,
+        probes,
     })
 }
 

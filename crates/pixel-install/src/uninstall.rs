@@ -167,6 +167,8 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
             &home,
             dry_run,
         )?,
+        // 7e. Remove the first-party brief probes setup wrote.
+        crate::bundled_probes::remove(&home, dry_run)?,
         // 8. Remove the pixel binary.
         remove_binary(&target, dry_run)?,
         // 9. Name the backups install and uninstall kept, and how to drop them.

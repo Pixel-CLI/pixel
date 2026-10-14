@@ -8,5 +8,5 @@ capabilities = ["brief-probe"]
 [brief-probe]
 owner = "pixel"
 skip_kinds = ["review", "history"]
-budget_ms = 500
+budget_ms = 800
 mode = "append"

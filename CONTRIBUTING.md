@@ -266,7 +266,10 @@ python3 -I scripts/probe-test.py my-probe --live   # opt-in: the agent with and 
   or a probe covers it; `scripts/probe-loop.py --prompt "<question>"` runs the whole loop on a plain prompt. The
   public bench is `eval/brief-bench/` (`scripts/brief-bench.py check`). The PR states the `PROBE ... | KEEP`
   line `probe-test` prints and `report.md`.
-- Status: the scripts judge probes; the brief does not run them yet (see ARCHITECTURE.md, "Agent integration").
+- Shipping: a probe merged under `probes/` is embedded in the binary and installed by `pixel setup` into
+  `~/.pixel/plugins/<name>/`; the prompt-submit brief runs it (see ARCHITECTURE.md, "Agent integration").
+  `pixel plugin disable <name>` switches one off, `enable` back on. CI runs `probe-test.py --check-all` on every
+  directory of `probes/`.
 
 ## Mutation testing
 

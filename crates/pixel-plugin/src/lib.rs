@@ -27,6 +27,7 @@ mod hash;
 mod install;
 mod invoke;
 mod manifest;
+mod probe;
 mod source;
 mod state;
 
@@ -41,14 +42,18 @@ pub use error::Error;
 pub use fetch::{Downloaded, asset_name, release_target};
 pub use hash::dir_digest;
 pub use install::{
-    Added, Binary, Enabled, add, cargo_install_command, enable, looks_like_git_url, redact_source,
-    remove, trust,
+    Added, Binary, Enabled, add, cargo_install_command, disable, enable, looks_like_git_url,
+    redact_source, remove, trust,
 };
 pub use invoke::{
     Env, HINT_EXIT, MOVED_COMMANDS, PIXEL_API, PLUGINS_ORG, command, command_word, is_moved,
     moved_hint, os_args,
 };
-pub use manifest::{API_VERSION, Capability, MANIFEST_FILE, Manifest, valid_name};
+pub use manifest::{
+    API_VERSION, Capability, MANIFEST_FILE, MAX_PROBE_BUDGET_MS, Manifest, ProbeMode, ProbeSpec,
+    valid_name,
+};
+pub use probe::{Probe, ProbeSet, probes};
 pub use source::{DEFAULT_GITHUB_BASE, GITHUB_PREFIX, GitHubSource, NPM_PREFIX};
 pub use state::{CONFIG_FILE, Config, TRUST_FILE, TrustStore};
 

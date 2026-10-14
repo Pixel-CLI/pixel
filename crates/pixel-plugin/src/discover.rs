@@ -376,7 +376,10 @@ fn dir_rows(host: &Host, place: Place, plugins: &Path) -> Result<Vec<Row>, Error
 
 fn manifest_row(host: &Host, place: Place, found: &Found) -> Result<Row, Error> {
     let m = &found.manifest;
-    let enabled = if m.network {
+    // The opt-in of a network plugin, or whether a brief probe is switched on.
+    let enabled = if m.is_probe() {
+        Some(!Config::at(host.config_file()).is_disabled(&m.name)?)
+    } else if m.network {
         Some(Config::at(host.config_file()).is_enabled(&m.name)?)
     } else {
         None

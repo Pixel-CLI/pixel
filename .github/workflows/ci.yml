@@ -220,6 +220,7 @@ jobs:
           ^docs/manual-setup\.md$
           ^website/
           ^\.agents/(rules|skills/(rust-guidelines|release|pixel))/
+          ^probes/
           ^\.(openclaw|clinerules|kiro|qoder|windsurf)/
           ^scripts/gen-plugin-assets\.sh$
           ^\.github/workflows/ci\.yml$
@@ -235,6 +236,7 @@ jobs:
           # `deps`); .config/ shapes the nextest run the Test lane owns.
           cat > rust-source.re <<'EOF'
           ^crates/.*\.rs$
+          ^probes/
           ^crates/.*/Cargo\.(toml|lock)$
           ^Cargo\.(toml|lock)$
           ^\.cargo/
@@ -248,6 +250,7 @@ jobs:
           # release skill, and the pi extension test-pi-impact.mjs imports.
           cat > scripts.re <<'EOF'
           ^scripts/
+          ^probes/
           ^\.githooks/
           ^changelog\.d/
           ^\.github/workflows/
@@ -542,6 +545,7 @@ jobs:
           python3 scripts/ab-brief-live.py --self-test
           python3 scripts/brief-check.py --self-test
           python3 scripts/probe-test.py --self-test
+          python3 scripts/probe-test.py --check-all
           python3 scripts/probe-translate.py --self-test
           python3 scripts/probe-loop.py --self-test
           python3 scripts/probe-chain.py --self-test

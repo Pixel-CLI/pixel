@@ -34,7 +34,7 @@ def words(text):
 
 
 def rg(root, *args):
-    return subprocess.run(["rg", "--sort", "path", "-j", "1", *args], cwd=root, capture_output=True, text=True, timeout=10).stdout.splitlines()
+    return subprocess.run(["rg", "--sort", "path", "-j", "1", "--glob", "!.pixel", *args], cwd=root, capture_output=True, text=True, timeout=10).stdout.splitlines()
 
 
 def body(path, lo, count):

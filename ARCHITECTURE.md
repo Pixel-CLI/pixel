@@ -1135,13 +1135,28 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
 ### Brief probes
 
 `probes/<name>/` holds scripts that add blocks to the prompt-submit brief (contract: `CONTRIBUTING.md`, "Write a
-probe"). Each is a plugin directory (`pixel-plugin.toml`, capability `brief-probe`, the plugin host's manifest)
-plus an executable that reads `{prompt, repo_root, brief, kind, session_files}` on stdin and prints blocks and
-`drop:` / `first:` directives. `scripts/probe-test.py` is the specification of the merge (drops, then firsts, lead
-blocks before the brief's and append blocks after, one block per header, 3 x 9,800 characters with append blocks
-shed first, the closing directive kept last) and of the checks (budget, determinism, read-only, neighbours);
-`scripts/probe-loop.py`, `probe-translate.py` and `brief-bench.py` (bench: `eval/brief-bench/`) feed it. The binary
-does not run probes yet: the plugin host has one capability, `command`, and the merge exists in Python only.
+probe"). A probe is a plugin of the host (`pixel-plugin`): a `pixel-plugin.toml` with `capabilities =
+["brief-probe"]` and a `[brief-probe]` table (`owner`, `when_kinds` / `skip_kinds` / `when_prompt`, `budget_ms` at
+most 1000, `mode` lead or append) beside an executable named by `run`. `pixel_plugin::probes` lists the probes that
+may run: the user tier (`~/.pixel/plugins/<name>/`, first-party and the user's own) as installed, the repo tier
+(`<repo>/.pixel/plugins/<name>/`) only at the digest `pixel plugin trust` recorded, minus the ones
+`pixel plugin disable` switched off (`disabled` in `~/.pixel/plugins.toml`; `enable` undoes it).
+
+`pixel setup` writes the six first-party probes (embedded from `probes/` by `pixel-install::bundled_probes`, each
+directory marked so setup updates only its own copies and `--remove` deletes only them) next to the Claude or Codex
+brief hook; `PIXEL_BRIEF_PROBES=0` runs none. In `execution_brief::chain::Pending::finish_with_record`, once `fit`
+has rendered the brief and only when the gate is open, `execution_brief::probes::apply` starts every probe whose
+`when` fits the question in parallel, each with `{prompt, repo_root, brief, kind, session_files}` as JSON on
+stdin, in an emptied environment (`PATH`, `HOME`, `LANG`, `PIXEL_BIN`), inside `min(budget_ms, what is left of the
+window)`. A probe that overruns is killed; one that fails, prints nothing or is not due is skipped: fail open.
+`probes::merge` folds what they print into the brief: `drop: <regex>` removes the brief's blocks whose header
+matches, `first: <regex>` moves them to the front, lead blocks go before the brief's and append blocks after, one
+block per header, the whole within the hook parts the host takes (3 x 9,800 characters) with append blocks shed
+first and the closing directive kept last. The merge is pinned by the golden cases of
+`crates/pixel/tests/fixtures/probe-merge.json`, which `scripts/probe-test.py` (the specification and the harness)
+and the Rust test both run. Each run (name, milliseconds, bytes, outcome) is a `probes` entry of the prompt's line in
+`.pixel/brief-decisions.jsonl`. `scripts/probe-equivalence.py` checks the native brief against the reference chain
+`scripts/probe-chain.py` on the census questions.
 
 ## Testing and gates
 

@@ -1,0 +1,162 @@
+[
+ {
+  "name": "lead drop first append",
+  "brief": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n",
+  "outputs": [
+   {
+    "name": "a-lead",
+    "mode": "lead",
+    "stdout": "### z.rs:1-1 — lead\n1| z\ndrop: beta\nfirst: gamma\n"
+   },
+   {
+    "name": "b-tail",
+    "mode": "append",
+    "stdout": "### y.rs:1-1 — tail\n1| y\n"
+   }
+  ],
+  "cap": 29400,
+  "expected": "[PIXEL:BRIEF]\nregion pack — x\n### z.rs:1-1 — lead\n1| z\n### c.rs:1-1 — gamma\n1| d\n### a.rs:1-2 — alpha\n1| a\n2| b\n### y.rs:1-1 — tail\n1| y\nAnswer from this context. Use a tool only if something you need is not shown above.\n"
+ },
+ {
+  "name": "dedupe by header and probe order",
+  "brief": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n",
+  "outputs": [
+   {
+    "name": "p",
+    "mode": "append",
+    "stdout": "### a.rs:1-2 — alpha\n1| other\n### n.rs:1-1 — new\n1| n\n"
+   },
+   {
+    "name": "o",
+    "mode": "append",
+    "stdout": "### n.rs:1-1 — new\n1| second\n"
+   }
+  ],
+  "cap": 29400,
+  "expected": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\n### n.rs:1-1 — new\n1| second\nAnswer from this context. Use a tool only if something you need is not shown above.\n"
+ },
+ {
+  "name": "a probe drops everything and keeps its own",
+  "brief": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n",
+  "outputs": [
+   {
+    "name": "p",
+    "mode": "append",
+    "stdout": "### a.rs:1-2 — alpha\n1| other\n### n.rs:1-1 — new\n1| n\ndrop: .\n"
+   }
+  ],
+  "cap": 29400,
+  "expected": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| other\n### n.rs:1-1 — new\n1| n\nAnswer from this context. Use a tool only if something you need is not shown above.\n"
+ },
+ {
+  "name": "append blocks shed first",
+  "brief": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n",
+  "outputs": [
+   {
+    "name": "p",
+    "mode": "append",
+    "stdout": "### big.rs:1-1 — big\n0| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n1| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n2| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n3| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n4| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n5| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n6| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n7| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n8| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n9| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n10| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n11| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n12| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n13| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n14| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n15| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n16| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n17| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n18| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n19| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n20| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n21| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n22| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n23| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n24| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n25| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n26| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n27| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n28| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n29| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n30| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n31| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n32| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n33| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n34| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n35| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n36| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n37| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n38| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n39| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+   }
+  ],
+  "cap": 400,
+  "expected": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n"
+ },
+ {
+  "name": "brief blocks shed after appends, footer stays",
+  "brief": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n",
+  "outputs": [
+   {
+    "name": "p",
+    "mode": "append",
+    "stdout": "### big.rs:1-1 — big\n0| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n1| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n2| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n3| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n4| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n5| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n6| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n7| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n8| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n9| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n10| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n11| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n12| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n13| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n14| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n15| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n16| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n17| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n18| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n19| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n20| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n21| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n22| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n23| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n24| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n25| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n26| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n27| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n28| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n29| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n30| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n31| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n32| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n33| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n34| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n35| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n36| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n37| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n38| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n39| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+   }
+  ],
+  "cap": 130,
+  "expected": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\nAnswer from this context. Use a tool only if something you need is not shown above.\n"
+ },
+ {
+  "name": "lead blocks shed last",
+  "brief": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n",
+  "outputs": [
+   {
+    "name": "p",
+    "mode": "lead",
+    "stdout": "### big.rs:1-1 — big\n0| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n1| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n2| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n3| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n4| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n5| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n6| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n7| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n8| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n9| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n10| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n11| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n12| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n13| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n14| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n15| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n16| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n17| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n18| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n19| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n20| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n21| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n22| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n23| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n24| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n25| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n26| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n27| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n28| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n29| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n30| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n31| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n32| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n33| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n34| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n35| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n36| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n37| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n38| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n39| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+   }
+  ],
+  "cap": 200,
+  "expected": "[PIXEL:BRIEF]\nregion pack — x\n### big.rs:1-1 — big\n0| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nAnswer from this context. Use a tool only if something you need is not shown above.\n"
+ },
+ {
+  "name": "empty brief gets the tag",
+  "brief": "",
+  "outputs": [
+   {
+    "name": "p",
+    "mode": "lead",
+    "stdout": "### a — b\nline\n"
+   }
+  ],
+  "cap": 29400,
+  "expected": "[PIXEL:BRIEF]\n### a — b\nline\n"
+ },
+ {
+  "name": "stray lines and a bad regex are ignored",
+  "brief": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n",
+  "outputs": [
+   {
+    "name": "p",
+    "mode": "append",
+    "stdout": "noise\n### s.rs:1-1 — s\n1| s\ndrop: (\nfirst: [\n"
+   }
+  ],
+  "cap": 29400,
+  "expected": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\n### s.rs:1-1 — s\n1| s\nAnswer from this context. Use a tool only if something you need is not shown above.\n"
+ },
+ {
+  "name": "cap counts characters not bytes",
+  "brief": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n",
+  "outputs": [
+   {
+    "name": "p",
+    "mode": "append",
+    "stdout": "### u.rs:1-1 — ünï\n0| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n1| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n2| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n3| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n4| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n5| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n6| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n7| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n8| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n9| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n10| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n11| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n12| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n13| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n14| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n15| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n16| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n17| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n18| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n19| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n20| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n21| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n22| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n23| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n24| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n25| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n26| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n27| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n28| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n29| éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\n"
+   }
+  ],
+  "cap": 600,
+  "expected": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n"
+ },
+ {
+  "name": "a single oversized block is cut at a line",
+  "brief": "[PIXEL:BRIEF]\n",
+  "outputs": [
+   {
+    "name": "p",
+    "mode": "lead",
+    "stdout": "### big.rs:1-1 — big\n0| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n1| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n2| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n3| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n4| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n5| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n6| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n7| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n8| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n9| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n10| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n11| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n12| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n13| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n14| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n15| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n16| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n17| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n18| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n19| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n20| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n21| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n22| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n23| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n24| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n25| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n26| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n27| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n28| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n29| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n30| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n31| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n32| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n33| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n34| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n35| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n36| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n37| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n38| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n39| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+   }
+  ],
+  "cap": 300,
+  "expected": "[PIXEL:BRIEF]\n### big.rs:1-1 — big\n0| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n1| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n2| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n3| xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+ },
+ {
+  "name": "two firsts keep directive order",
+  "brief": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n",
+  "outputs": [
+   {
+    "name": "p",
+    "mode": "append",
+    "stdout": "first: beta\nfirst: gamma\n"
+   }
+  ],
+  "cap": 29400,
+  "expected": "[PIXEL:BRIEF]\nregion pack — x\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\n### a.rs:1-2 — alpha\n1| a\n2| b\nAnswer from this context. Use a tool only if something you need is not shown above.\n"
+ },
+ {
+  "name": "no output changes nothing",
+  "brief": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n",
+  "outputs": [],
+  "cap": 29400,
+  "expected": "[PIXEL:BRIEF]\nregion pack — x\n### a.rs:1-2 — alpha\n1| a\n2| b\n### b.rs:1-1 — beta\n1| c\n### c.rs:1-1 — gamma\n1| d\nAnswer from this context. Use a tool only if something you need is not shown above.\n"
+ }
+]

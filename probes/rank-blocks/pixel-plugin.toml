@@ -8,5 +8,5 @@ capabilities = ["brief-probe"]
 [brief-probe]
 owner = "pixel"
 skip_kinds = ["overview", "review", "flow", "history"]
-budget_ms = 300
+budget_ms = 600
 mode = "lead"

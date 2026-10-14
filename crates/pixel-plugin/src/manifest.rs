@@ -18,25 +18,76 @@ pub const API_VERSION: i64 = 1;
 /// Longest plugin name; it becomes a directory name and a `pixel-<name>` binary.
 const MAX_NAME_LEN: usize = 64;
 
-/// What a plugin can be asked to do. API 1 knows one capability.
+/// What a plugin can be asked to do. API 1 knows two capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     /// `pixel <name> [args…]` runs the plugin.
     Command,
+    /// The prompt-submit brief runs the plugin and merges the blocks it
+    /// prints into the brief (the `[brief-probe]` table says when).
+    BriefProbe,
 }
 
 impl Capability {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Command => "command",
+            Self::BriefProbe => "brief-probe",
         }
     }
 
     fn parse(text: &str) -> Option<Self> {
         match text {
             "command" => Some(Self::Command),
+            "brief-probe" => Some(Self::BriefProbe),
             _ => None,
         }
+    }
+}
+
+/// Longest wall time a probe may ask for.
+pub const MAX_PROBE_BUDGET_MS: u64 = 1_000;
+
+/// Where a probe's blocks go relative to the brief's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeMode {
+    /// Before the brief's blocks.
+    Lead,
+    /// After them.
+    Append,
+}
+
+/// The `[brief-probe]` table: when a probe runs and how long it gets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeSpec {
+    pub owner: String,
+    /// Run for these question kinds; with `when_prompt`, either is enough.
+    pub when_kinds: Vec<String>,
+    /// Never run for these kinds.
+    pub skip_kinds: Vec<String>,
+    /// Run when the prompt matches this regex (searched, not anchored).
+    pub when_prompt: Option<String>,
+    pub budget_ms: u64,
+    pub mode: ProbeMode,
+}
+
+impl ProbeSpec {
+    /// Whether the probe runs for a brief of `kind` (`None`: the brief did
+    /// not settle on one) asked `prompt`. A kind in `skip_kinds` never runs
+    /// it; with neither `when_kinds` nor `when_prompt` it always runs.
+    pub fn applies(&self, kind: Option<&str>, prompt: &str) -> bool {
+        if kind.is_some_and(|k| self.skip_kinds.iter().any(|s| s == k)) {
+            return false;
+        }
+        if self.when_kinds.is_empty() && self.when_prompt.is_none() {
+            return true;
+        }
+        kind.is_some_and(|k| self.when_kinds.iter().any(|w| w == k))
+            || self
+                .when_prompt
+                .as_deref()
+                .and_then(|pattern| regex::Regex::new(pattern).ok())
+                .is_some_and(|re| re.is_match(prompt))
     }
 }
 
@@ -55,11 +106,18 @@ pub struct Manifest {
     /// named like itself and is run as `<run> <args…>`. Non-empty: it serves
     /// exactly these and is run as `<run> <command> <args…>`.
     pub commands: Vec<String>,
+    /// The `[brief-probe]` table, present exactly when the plugin has the
+    /// `brief-probe` capability.
+    pub probe: Option<ProbeSpec>,
 }
 
 impl Manifest {
     pub fn has_command(&self) -> bool {
         self.capabilities.contains(&Capability::Command)
+    }
+
+    pub fn is_probe(&self) -> bool {
+        self.capabilities.contains(&Capability::BriefProbe)
     }
 
     /// The `pixel <command>` words this plugin answers to.
@@ -125,6 +183,13 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
             .ok_or_else(|| "`network` must be true or false".to_owned())?,
     };
     let commands = parse_commands(&doc)?;
+    let probe = if capabilities.contains(&Capability::BriefProbe) {
+        Some(parse_probe(&doc)?)
+    } else if doc.get("brief-probe").is_some() {
+        return Err("a `[brief-probe]` table needs the \"brief-probe\" capability".to_owned());
+    } else {
+        None
+    };
     Ok(Manifest {
         name,
         version,
@@ -134,6 +199,86 @@ pub fn parse(text: &str) -> Result<Manifest, String> {
         capabilities,
         network,
         commands,
+        probe,
+    })
+}
+
+/// The `[brief-probe]` table of a plugin with the `brief-probe` capability.
+fn parse_probe(doc: &DocumentMut) -> Result<ProbeSpec, String> {
+    let table = doc
+        .get("brief-probe")
+        .and_then(Item::as_table)
+        .ok_or_else(|| "the \"brief-probe\" capability needs a `[brief-probe]` table".to_owned())?;
+    for (key, _) in table.iter() {
+        if ![
+            "owner",
+            "when_kinds",
+            "skip_kinds",
+            "when_prompt",
+            "budget_ms",
+            "mode",
+        ]
+        .contains(&key)
+        {
+            return Err(format!("[brief-probe] has an unknown key `{key}`"));
+        }
+    }
+    let owner = table
+        .get("owner")
+        .and_then(Item::as_str)
+        .filter(|owner| !owner.trim().is_empty())
+        .ok_or_else(|| "[brief-probe] `owner` is required and must be a string".to_owned())?
+        .to_owned();
+    let list = |key: &str| -> Result<Vec<String>, String> {
+        let Some(item) = table.get(key) else {
+            return Ok(Vec::new());
+        };
+        item.as_array()
+            .and_then(|array| {
+                array
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .ok_or_else(|| format!("[brief-probe] `{key}` must be an array of strings"))
+    };
+    let when_prompt = match table.get("when_prompt") {
+        None => None,
+        Some(item) => {
+            let pattern = item
+                .as_str()
+                .ok_or_else(|| "[brief-probe] `when_prompt` must be a string".to_owned())?;
+            regex::Regex::new(pattern)
+                .map_err(|e| format!("[brief-probe] `when_prompt` is not a regex: {e}"))?;
+            Some(pattern.to_owned())
+        }
+    };
+    let budget_ms = table
+        .get("budget_ms")
+        .and_then(Item::as_integer)
+        .and_then(|ms| u64::try_from(ms).ok())
+        .filter(|ms| (1..=MAX_PROBE_BUDGET_MS).contains(ms))
+        .ok_or_else(|| {
+            format!(
+                "[brief-probe] `budget_ms` is required, an integer from 1 to {MAX_PROBE_BUDGET_MS}"
+            )
+        })?;
+    let mode = match table.get("mode").and_then(Item::as_str) {
+        Some("lead") => ProbeMode::Lead,
+        Some("append") | None => ProbeMode::Append,
+        Some(other) => {
+            return Err(format!(
+                "[brief-probe] `mode` must be \"lead\" or \"append\", not \"{other}\""
+            ));
+        }
+    };
+    Ok(ProbeSpec {
+        owner,
+        when_kinds: list("when_kinds")?,
+        skip_kinds: list("skip_kinds")?,
+        when_prompt,
+        budget_ms,
+        mode,
     })
 }
 
@@ -175,7 +320,9 @@ fn parse_capabilities(doc: &DocumentMut) -> Result<Vec<Capability>, String> {
             .as_str()
             .ok_or_else(|| "`capabilities` must hold strings only".to_owned())?;
         let capability = Capability::parse(text).ok_or_else(|| {
-            format!("unknown capability \"{text}\": plugin API 1 knows only \"command\"")
+            format!(
+                "unknown capability \"{text}\": plugin API 1 knows \"command\" and \"brief-probe\""
+            )
         })?;
         if !out.contains(&capability) {
             out.push(capability);
@@ -262,11 +409,102 @@ network = true
                 capabilities: vec![Capability::Command],
                 network: true,
                 commands: vec![],
+                probe: None,
             }
         );
         assert!(m.has_command());
         assert_eq!(m.serves(), ["flow"]);
         assert!(m.serves_command("flow") && !m.serves_command("ultraflow"));
+    }
+
+    const PROBE: &str = r#"
+name = "history-fallback"
+version = "0.1.0"
+api = 1
+description = "d"
+run = "probe"
+capabilities = ["brief-probe"]
+
+[brief-probe]
+owner = "pixel"
+when_kinds = ["history"]
+skip_kinds = ["overview"]
+when_prompt = "(?i)\\bwhen\\b"
+budget_ms = 800
+mode = "lead"
+"#;
+
+    #[test]
+    fn a_brief_probe_manifest_parses_its_table_and_decides_when_it_runs() {
+        let m = parse(PROBE).unwrap();
+        assert!(m.is_probe() && !m.has_command());
+        let spec = m.probe.unwrap();
+        assert_eq!(
+            (spec.owner.as_str(), spec.budget_ms, spec.mode),
+            ("pixel", 800, ProbeMode::Lead)
+        );
+        assert!(spec.applies(Some("history"), "anything"));
+        assert!(
+            spec.applies(Some("lookup"), "so WHEN did it land"),
+            "the prompt regex is enough"
+        );
+        assert!(!spec.applies(Some("lookup"), "where is it"));
+        assert!(
+            !spec.applies(Some("overview"), "when"),
+            "a skipped kind never runs it"
+        );
+        assert!(
+            !spec.applies(None, "where is it"),
+            "no kind: only the regex can run it"
+        );
+        let always = parse(
+            &PROBE
+                .replace("when_kinds = [\"history\"]\n", "")
+                .replace("when_prompt = \"(?i)\\\\bwhen\\\\b\"\n", ""),
+        )
+        .unwrap();
+        assert!(always.probe.unwrap().applies(None, "x"));
+    }
+
+    #[test]
+    fn a_broken_probe_table_is_refused_with_its_reason() {
+        for (from, to, expect) in [
+            ("budget_ms = 800", "budget_ms = 5000", "budget_ms"),
+            ("budget_ms = 800", "budget_ms = 0", "budget_ms"),
+            ("budget_ms = 800\n", "", "budget_ms"),
+            ("owner = \"pixel\"\n", "", "owner"),
+            ("mode = \"lead\"", "mode = \"middle\"", "mode"),
+            (
+                "when_kinds = [\"history\"]",
+                "when_kinds = \"history\"",
+                "when_kinds",
+            ),
+            (
+                "budget_ms = 800",
+                "budget_ms = 800\nnetwork = true",
+                "unknown key",
+            ),
+            (
+                "when_prompt = \"(?i)\\\\bwhen\\\\b\"",
+                "when_prompt = \"(\"",
+                "not a regex",
+            ),
+        ] {
+            let err = parse(&PROBE.replace(from, to)).unwrap_err();
+            assert!(err.contains(expect), "{from} -> {to}: {err}");
+        }
+        let no_table = PROBE.split("[brief-probe]").next().unwrap();
+        assert!(
+            parse(no_table)
+                .unwrap_err()
+                .contains("needs a `[brief-probe]` table")
+        );
+        let stray = GOOD.to_owned() + "\n[brief-probe]\nowner = \"x\"\nbudget_ms = 1\n";
+        assert!(
+            parse(&stray)
+                .unwrap_err()
+                .contains("needs the \"brief-probe\" capability")
+        );
     }
 
     #[test]

@@ -135,6 +135,46 @@ impl Config {
         save(&self.path, &doc)
     }
 
+    /// The brief probes the user switched off (`pixel plugin disable`).
+    pub fn disabled(&self) -> Result<Vec<String>, Error> {
+        let doc = load(&self.path)?;
+        Ok(doc
+            .get("disabled")
+            .and_then(Item::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    pub fn is_disabled(&self, name: &str) -> Result<bool, Error> {
+        Ok(self.disabled()?.iter().any(|n| n == name))
+    }
+
+    /// Switch the probe `name` off (idempotent).
+    pub fn disable(&self, name: &str) -> Result<(), Error> {
+        let mut doc = load(&self.path)?;
+        let mut names = self.disabled()?;
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_owned());
+        }
+        doc["disabled"] = value(names.into_iter().collect::<Array>());
+        save(&self.path, &doc)
+    }
+
+    /// Switch the probe `name` back on (idempotent).
+    pub fn undisable(&self, name: &str) -> Result<(), Error> {
+        let mut doc = load(&self.path)?;
+        if doc.get("disabled").is_some() {
+            let kept: Vec<String> = self.disabled()?.into_iter().filter(|n| n != name).collect();
+            doc["disabled"] = value(kept.into_iter().collect::<Array>());
+            save(&self.path, &doc)?;
+        }
+        Ok(())
+    }
+
     /// Where `name` was installed from, as recorded by `add`.
     pub fn source(&self, name: &str) -> Result<Option<String>, Error> {
         let doc = load(&self.path)?;
@@ -161,6 +201,10 @@ impl Config {
         let kept: Vec<String> = self.enabled()?.into_iter().filter(|n| n != name).collect();
         if doc.get("enabled").is_some() {
             doc["enabled"] = value(kept.into_iter().collect::<Array>());
+        }
+        if doc.get("disabled").is_some() {
+            let off: Vec<String> = self.disabled()?.into_iter().filter(|n| n != name).collect();
+            doc["disabled"] = value(off.into_iter().collect::<Array>());
         }
         if let Some(sources) = doc.get_mut("sources").and_then(Item::as_table_mut) {
             sources.remove(name);
@@ -227,6 +271,28 @@ mod tests {
         assert_eq!(config.enabled().unwrap(), ["a", "b"]);
         assert!(config.is_enabled("a").unwrap());
         assert!(!config.is_enabled("c").unwrap());
+    }
+
+    #[test]
+    fn disabling_a_probe_is_per_name_idempotent_reversible_and_separate_from_enabling() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::at(dir.path().join(CONFIG_FILE));
+        assert!(!config.is_disabled("p").unwrap());
+        config.disable("p").unwrap();
+        config.disable("q").unwrap();
+        config.disable("p").unwrap();
+        assert_eq!(config.disabled().unwrap(), ["p", "q"]);
+        config.enable("net").unwrap();
+        assert!(
+            !config.is_enabled("p").unwrap(),
+            "the network list is another list"
+        );
+        config.undisable("p").unwrap();
+        config.undisable("never-disabled").unwrap();
+        assert_eq!(config.disabled().unwrap(), ["q"]);
+        config.forget("q").unwrap();
+        assert!(config.disabled().unwrap().is_empty());
+        assert_eq!(config.enabled().unwrap(), ["net"]);
     }
 
     #[test]

@@ -2060,6 +2060,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "tempfile",
  "toml_edit",
  "ureq 3.4.2",
  "xxhash-rust",
@@ -2222,6 +2223,7 @@ version = "0.7.1"
 dependencies = [
  "mutants",
  "pixel-git",
+ "regex",
  "sha2",
  "tempfile",
  "thiserror",

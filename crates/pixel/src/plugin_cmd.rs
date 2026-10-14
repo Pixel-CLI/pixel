@@ -21,8 +21,10 @@ use pixel_plugin::{Binary, Env, Error, Host, MOVED_COMMANDS};
 pub enum PluginCmd {
     /// List the plugins visible here: the repo's, your own, and `pixel-<name>` on PATH.
     List,
-    /// Allow a plugin that declares `network = true` to run.
+    /// Allow a plugin that declares `network = true` to run, or switch a brief probe back on.
     Enable { name: String },
+    /// Switch a brief probe off: the prompt-submit brief stops running it (its files stay).
+    Disable { name: String },
     /// Allow a repo plugin (`<repo>/.pixel/plugins/<name>/`) as it is on disk now; any later change revokes it.
     Trust { name: String },
 }
@@ -50,6 +52,20 @@ fn host() -> Result<Host, String> {
         github_base: std::env::var(GITHUB_BASE_ENV)
             .ok()
             .filter(|base| !base.is_empty()),
+    })
+}
+
+/// The host the prompt-submit brief reads its probes from: the repository
+/// being briefed as the repo tier, this user's `~/.pixel/plugins`, no PATH.
+pub fn brief_host(root: &Path) -> Option<Host> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|h| !h.as_os_str().is_empty())?;
+    Some(Host {
+        repo_root: Some(root.to_path_buf()),
+        home,
+        path: std::ffi::OsString::new(),
+        github_base: None,
     })
 }
 
@@ -151,6 +167,10 @@ pub fn run(cmd: PluginCmd) -> Result<(), String> {
                     println!("plugin {name} declares no network access: nothing to enable");
                 }
             }
+        }
+        PluginCmd::Disable { name } => {
+            pixel_plugin::disable(&host, &name).map_err(|e| e.to_string())?;
+            println!("disabled brief probe {name}");
         }
         PluginCmd::Trust { name } => {
             let digest = pixel_plugin::trust(&host, &name).map_err(|e| e.to_string())?;
@@ -507,6 +527,7 @@ mod tests {
                 capabilities: vec![pixel_plugin::Capability::Command],
                 network: false,
                 commands: vec![],
+                probe: None,
             },
             binary,
         }

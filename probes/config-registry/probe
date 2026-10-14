@@ -52,7 +52,7 @@ def tracked(clone, rel):
 
 def scan(clone):
     """[(path, line, text)] of every line that may define or read a config key; .env* admitted only as templates."""
-    cmd = ["rg", "-n", "--no-heading", "--no-messages", "--max-columns", "300", "--hidden", "-g", "!.git", "--max-filesize", "400K"]
+    cmd = ["rg", "-n", "--no-heading", "--no-messages", "--max-columns", "300", "--hidden", "-g", "!.git", "-g", "!.pixel", "--max-filesize", "400K"]
     for g in RG_EXCL: cmd += ["-g", g]
     for p in PATTERNS: cmd += ["-e", p]
     out = subprocess.run(cmd + ["."], cwd=clone, capture_output=True, text=True, timeout=60).stdout

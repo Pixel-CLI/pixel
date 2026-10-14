@@ -89,6 +89,9 @@ pub(crate) struct Record {
     /// What the daemon start the prompt gave came to, when it gave one and
     /// the hook saw the outcome (`launched`, `running`, `skipped: …`).
     pub(crate) daemon: Option<&'static str>,
+    /// The brief probes that ran for this prompt: name, milliseconds, bytes
+    /// printed and how it ended.
+    pub(crate) probes: Vec<super::probes::ProbeRun>,
     /// The typed text, masked and bounded.
     pub(crate) typed: String,
     /// SHA-256 of the whole typed text, lowercase hex.
@@ -161,7 +164,7 @@ pub(crate) fn logged_typed(typed: &str) -> String {
 
 impl Record {
     pub(crate) fn to_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "ts": self.ts_ms,
             "signal": self.signal,
             "gate": self.gate,
@@ -203,8 +206,16 @@ impl Record {
             "route": self.route,
             "daemon": self.daemon,
             "typed": self.typed,
-            "sha256": self.sha256,
-        })
+            "sha256": self.sha256,});
+        // Only a prompt a probe ran for carries the key: the log keeps its shape for every other.
+        if !self.probes.is_empty() {
+            value["probes"] = json!(self
+                .probes
+                .iter()
+                .map(|run| json!({"name": run.name, "ms": run.ms, "bytes": run.bytes, "outcome": run.outcome}))
+                .collect::<Vec<_>>());
+        }
+        value
     }
 
     /// The record as one line, without its newline.
@@ -356,6 +367,7 @@ mod tests {
             elapsed_ms: 188,
             route: Some("daemon"),
             daemon: Some("running"),
+            probes: Vec::new(),
             typed: "how does the daemon start".into(),
             sha256: sha256_hex("how does the daemon start"),
         }
@@ -368,6 +380,22 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(sha256_hex("abc").len(), 64);
+    }
+
+    #[test]
+    fn to_json_should_carry_the_probe_runs_only_when_a_probe_ran() {
+        let mut rec = record();
+        assert!(rec.to_json().get("probes").is_none());
+        rec.probes = vec![super::super::probes::ProbeRun {
+            name: "flow-rank".into(),
+            ms: 312,
+            bytes: 9_400,
+            outcome: "ok",
+        }];
+        assert_eq!(
+            rec.to_json()["probes"],
+            json!([{"name": "flow-rank", "ms": 312, "bytes": 9_400, "outcome": "ok"}])
+        );
     }
 
     #[test]

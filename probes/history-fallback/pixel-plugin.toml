@@ -8,5 +8,5 @@ capabilities = ["brief-probe"]
 [brief-probe]
 owner = "pixel"
 when_kinds = ["history"]
-budget_ms = 800
+budget_ms = 900
 mode = "append"
